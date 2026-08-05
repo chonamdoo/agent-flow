@@ -318,7 +318,6 @@ function installProject(requestedRoot) {
   }
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "agents"), path.join(root, ".Codex", "agents"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".claude", "agents"), path.join(root, ".claude", "agents"), forceManaged);
-  installOmpAgents(root);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "context"), path.join(root, ".Codex", "context"), forceManaged);
   removeCodexBroadTrustState(root);
@@ -1180,7 +1179,6 @@ function assertInstalled(root) {
     path.join(root, ".agent-flow", "bootstrap", "CLAUDE.md"),
     path.join(root, ".Codex", "agents", "code-reviewer.md"),
     path.join(root, ".claude", "agents", "code-reviewer.md"),
-    path.join(root, ".omp", "agents", "code-reviewer.md"),
   ];
   const missing = required.filter((pathName) => !fs.existsSync(pathName));
   if (missing.length > 0) {
@@ -1189,22 +1187,10 @@ function assertInstalled(root) {
   for (const codeReviewer of [
     path.join(root, ".Codex", "agents", "code-reviewer.md"),
     path.join(root, ".claude", "agents", "code-reviewer.md"),
-    path.join(root, ".omp", "agents", "code-reviewer.md"),
   ]) {
     if (!fs.readFileSync(codeReviewer, "utf8").trim()) {
       throw new Error(`agent-flow is not installed correctly: ${path.relative(root, codeReviewer)} is empty`);
     }
-  }
-  // 존재와 비어있지 않음만 보면 옛 사본이 그대로 통과한다. 이 회귀의 실체가 정확히
-  // 그 상태다 — 재설치하지 않은 프로젝트에서 OMP host만 옛 reviewer를 로드한 채
-  // push-watch가 돈다. `.omp`는 `.claude`를 그대로 미러링하므로 바이트로 대조한다.
-  const claudeReviewer = fs.readFileSync(path.join(root, ".claude", "agents", "code-reviewer.md"), "utf8");
-  const ompReviewer = fs.readFileSync(path.join(root, ".omp", "agents", "code-reviewer.md"), "utf8");
-  if (claudeReviewer !== ompReviewer) {
-    throw new Error(
-      "agent-flow is not installed correctly: .omp/agents/code-reviewer.md does not match"
-        + " .claude/agents/code-reviewer.md. run: agent-flow-kit install",
-    );
   }
 }
 
@@ -2391,38 +2377,6 @@ function upgradeManagedHooks(root, src, dest) {
 
 
 
-
-// omp는 `.claude/agents/*.md`를 subagent로 더 이상 읽지 않는다(oh-my-pi #2209).
-// `.omp` agent root에 같은 파일이 없으면 OMP host의 multi-review는 kit이 만들지
-// 않은 파일을 reviewer로 띄운다. 본문 source는 `.claude/agents` 한 벌뿐이다 —
-// kit에 세 번째 사본을 두면 셋을 맞추는 검사가 또 필요해진다.
-//
-// source는 kit이 아니라 **설치된** `.claude/agents`다. kit을 읽으면 사용자가
-// `.claude/agents`를 고친 프로젝트에서 Claude host는 사용자본, OMP host는 번들본을
-// 보게 된다 — 같은 프로젝트에서 host마다 리뷰 기준이 갈리는 것이 이 버그의 실체다.
-//
-// `copyBundledDirIfMissingOrSame`을 쓰지 않는다. 이 파일은 통째로 생성된 내용이라
-// "내용이 다르면 덮지 않는다"를 걸면 업그레이드가 정의상 내용이 다른 경우라
-// 영구히 고착된다 — installOmpHooks와 같은 이유, 같은 처리다.
-function installOmpAgents(root) {
-  const source = path.join(root, ".claude", "agents");
-  if (!fs.existsSync(source)) {
-    return false;
-  }
-  const dest = path.join(root, ".omp", "agents");
-  fs.mkdirSync(dest, { recursive: true });
-  let wrote = false;
-  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
-    if (!entry.isFile()) {
-      continue;
-    }
-    const content = fs.readFileSync(path.join(source, entry.name), "utf8");
-    const target = path.join(dest, entry.name);
-    backupIfDifferent(root, target, content);
-    wrote = writeManagedFileIfMissingOrSame(target, content, true) || wrote;
-  }
-  return wrote;
-}
 
 function installOmpHooks(root) {
   // 다른 host의 hook 설정은 병합이라 업그레이드가 저절로 되지만, 이 확장은
