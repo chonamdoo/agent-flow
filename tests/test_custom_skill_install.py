@@ -1698,11 +1698,14 @@ def test_install_without_a_receipt_updates_the_block_but_keeps_a_copy(
     assert "kept (user-modified): AGENTS.md" not in result.stdout
     assert "손으로 넣은 줄" not in (project / "AGENTS.md").read_text(encoding="utf-8")
     backup = next(
-        line.removeprefix("  ~ backup: ").strip()
+        line.removeprefix("  ~ backup: ").split(" (")[0].strip()
         for line in result.stdout.splitlines()
         if line.startswith("  ~ backup: ") and "AGENTS.md" in line
     )
     assert "손으로 넣은 줄" in (project / backup).read_text(encoding="utf-8")
+    # 아무것도 편집하지 않은 프로젝트도 이 경로를 지난다. 사유가 없으면 그 사본이
+    # "네 편집을 보관했다"로 읽힌다.
+    assert "no receipt" in result.stdout
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -1744,6 +1747,27 @@ def test_install_leaves_the_git_workspace_clean(tmp_path: Path, binary: str) -> 
         for line in (project / ".gitignore").read_text(encoding="utf-8").splitlines()
     ]
     assert "AGENTS.md" not in gitignore and "CLAUDE.md" not in gitignore
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_adds_no_exclude_entry_a_project_already_carries(
+    tmp_path: Path, binary: str
+) -> None:
+    """예전 install이 프로젝트의 tracked `.gitignore`에 남긴 항목은 그대로 둔다.
+
+    반증: 같은 뜻을 exclude에 또 적으면 규칙이 두 벌이 되고, 프로젝트가 `.gitignore`에서
+    그 줄을 지워도 보이지 않는 사본이 계속 파일을 가린다.
+    """
+    project = tmp_path / f"legacy-ignore-{binary}"
+    project.mkdir()
+    subprocess.run(("git", "init", "-q"), cwd=project, check=True)
+    (project / ".gitignore").write_text("AGENTS.md\nCLAUDE.md\n", encoding="utf-8")
+    assert _install_with(binary, project).returncode == 0
+
+    exclude_path = project / ".git" / "info" / "exclude"
+    exclude = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+    assert "AGENTS.md" not in exclude
+    assert "CLAUDE.md" not in exclude
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
