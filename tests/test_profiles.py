@@ -130,7 +130,6 @@ def test_phase_filter_applies_across_a_profile_union():
 
 
 CANONICAL_BOOTSTRAP_TEMPLATE = KIT_ROOT / "bootstrap" / "AGENTS.md.template"
-POINTER_BOOTSTRAP_TEMPLATE = KIT_ROOT / "bootstrap" / "CLAUDE.md.template"
 
 
 def test_bootstrap_names_the_profile_as_the_branching_source_of_truth():
@@ -141,22 +140,27 @@ def test_bootstrap_names_the_profile_as_the_branching_source_of_truth():
     assert "`git branch -D`로 대체하지 않는다" in text
 
 
-def test_claude_bootstrap_points_at_agents_instead_of_copying_it():
+def test_bootstrap_block_has_exactly_one_template_for_both_root_files():
     """불변: 블록 본문은 한 벌이다.
 
-    반증: 예전에는 두 템플릿의 바이트 동일성을 요구했다. 그건 같은 본문을 두 벌
-    유지하라는 요구였고, 두 벌은 곧 둘이 갈라졌는지 보는 검사를 또 요구했다.
+    반증: 처음에는 두 템플릿의 바이트 동일성을 요구했다(같은 본문을 두 벌 유지하라는
+    요구). 다음에는 `CLAUDE.md.template`을 `@AGENTS.md` **포인터만** 담은 파일로
+    바꿨고, 그러면 Claude는 계약을 import로 받고 Codex/OMP는 직접 읽어 host마다
+    로드되는 텍스트가 갈렸다. 파일이 한 벌이면 사본이 갈라질 자리가 없다.
+
+    import는 이제 템플릿이 아니라 `rootBootstrapBlock`이 CLAUDE.md에만 붙인다 —
+    템플릿에 두면 `AGENTS.md`가 자기 자신을 import한다.
     """
-    pointer = POINTER_BOOTSTRAP_TEMPLATE.read_text(encoding="utf-8")
-    assert "`AGENTS.md`를 먼저 읽고" in pointer
-    assert "canonical instruction file" in pointer
-    # 마커는 남아야 재설치가 멱등하고 기존 설치본이 포인터로 수렴한다.
-    assert "<!-- agent-flow:start -->" in pointer
-    assert "<!-- agent-flow:end -->" in pointer
-    # 본문 중복 없음은 블록의 구조 표지로 본다.
-    assert "### Workflow Contract" not in pointer
-    assert "### Context Economy" not in pointer
-    assert "<!-- agent-flow:skills:start -->" not in pointer
+    assert CANONICAL_BOOTSTRAP_TEMPLATE.is_file()
+    assert sorted(p.name for p in (KIT_ROOT / "bootstrap").glob("*.template")) == [
+        "AGENTS.md.template"
+    ]
+    # 마커는 남아야 재설치가 멱등하다.
+    text = CANONICAL_BOOTSTRAP_TEMPLATE.read_text(encoding="utf-8")
+    assert "<!-- agent-flow:start -->" in text
+    assert "<!-- agent-flow:end -->" in text
+    assert "<!-- agent-flow:skills:start -->" in text
+    assert "@AGENTS.md" not in text
 
 
 @pytest.mark.parametrize("profile_id", _profile_ids())

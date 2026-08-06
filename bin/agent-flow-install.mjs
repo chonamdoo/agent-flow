@@ -26,6 +26,7 @@ import {
   arrayValue,
   assertInstallRootIsFinal,
   backupIfDifferent,
+  BOOTSTRAP_TEMPLATE_FILE,
   claudeHooksSettings,
   codexConfigPath,
   codexHooksSettings,
@@ -75,6 +76,7 @@ import {
   requestedInstallRootOption,
   resolveManagedWorktreeRoot,
   resolveLinkedWorktreeLeader,
+  rootBootstrapBlock,
   resolveInstallRoot,
   retiredHookScripts,
   safeSkillName,
@@ -194,14 +196,17 @@ function ensureDir(p) {
 // 시점에는 아직 목록이 확정되지 않아, 거기서 채우면 한 install 안에서 곧바로
 // 낡는다. 그래서 블록에는 자리만 두고 여기서 그 자리만 바꾼다.
 
-// 정본은 `bootstrap/<label>.template` 한 벌이고, `agent-flow-kit.mjs`의
-// `upsertBootstrapBlock`도 같은 파일을 읽는다. 못 읽으면 던진다 — 조용히 건너뛰면
-// "블록을 안 쓴 것"이 정상 결과가 되고, 이전 install이 남긴 낡은 블록이 그대로 방치된다.
+// 정본은 `bootstrap/AGENTS.md.template` 한 벌이고, `agent-flow-kit.mjs`의
+// `upsertBootstrapBlock`도 같은 파일을 읽는다. label이 고르는 것은 어느 루트 파일에
+// 쓰는지와 `rootBootstrapBlock`이 CLAUDE.md에만 더하는 `@AGENTS.md` import 한 줄뿐이다.
+// 본문은 고르지 않는다 — 두 루트 파일이 같은 블록을 받아야 host에 따라 로드되는 계약이
+// 갈리지 않는다. 못 읽으면 던진다 — 조용히 건너뛰면 "블록을 안 쓴 것"이 정상 결과가
+// 되고, 이전 install이 남긴 낡은 블록이 그대로 방치된다.
 function bootstrapMarkdown(label) {
-  const tmplPath = path.join(KIT_ROOT, "bootstrap", `${label}.template`);
+  const tmplPath = path.join(KIT_ROOT, "bootstrap", BOOTSTRAP_TEMPLATE_FILE);
   let block;
   try {
-    block = fs.readFileSync(tmplPath, "utf8");
+    block = rootBootstrapBlock(label, fs.readFileSync(tmplPath, "utf8"));
   } catch (error) {
     throw new Error(`bootstrap template unreadable: ${tmplPath} (${error?.message || error})`);
   }

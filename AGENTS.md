@@ -45,65 +45,33 @@ Workflow Contract와 Context Economy는 아래 agent-flow 블록이 canonical so
 <!-- agent-flow:start -->
 ## Agent Flow
 
-Before feature work, check status first:
-
-```bash
-agent-flow status
-```
-
-install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
-Follow the CLI output exactly. If no run is active, start with `agent-flow run "<task>"`. If a run is active, continue with the printed `next_command`.
-
-run의 status가 SPEC 추가·수정·삭제를 보고하면 변경 목록만 사용자에게 보여 확인을 요청합니다. 사용자가 현재 대화에서 명확히 동의하면 agent가 status에 출력된 `agent-flow spec confirm --run-dir <run-dir>`을 실행합니다.
-`manual` verify 항목도 사용자에게 현재 대화에서 확인한 뒤 agent가 `agent-flow spec approve <spec-id> --run-dir <run-dir>`을 실행합니다.
-정확한 승인 문구나 사용자 터미널 명령 실행을 요구하지 않습니다.
+- 새 세션은 `agent-flow status`로 시작한다. active run이 있으면 그 출력의 `next_command`를 그대로 실행하고, 없으면 `agent-flow run "<task>"`로 시작한다. `agent-flow continue`나 `agent-flow run advance`를 추측하지 않는다.
+- install은 프로젝트당 1회만 수행한다. 새 세션이 시작됐다는 이유로 다시 실행하지 않는다.
+- `/agent-flow`는 shell path가 아니라 skill trigger다. 진입 절차, SPEC 확인·승인, run artifact 위치, lore 조회는 `.agent-flow/skills/agent-flow/SKILL.md`에 있다.
 
 ### Workflow Contract
 
-- 활성 workflow와 current phase는 항상 `agent-flow status` 출력 기준이다.
-- phase 이동은 status의 `next_command`를 그대로 따른다. `agent-flow continue`나 `agent-flow run advance`를 추측하지 않는다.
-- `default.yaml`: design → slice-plan → worktree → implement → comment-authoring → final-review → gates ↔ fix-loop → comment-authoring → final-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
-- `full-feature.yaml`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → comment-authoring → multi-review → architecture-review → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
-- `multi-review`는 설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수다. 두 reviewer를 병렬 실행하고 각 결과에 `reviewer-source: sub-agent`를 기록한다. 마지막에 `## Overall`과 `verdict: approve` 또는 `verdict: request-changes`만 기록한다. OMP는 host/controller로만 쓰고 reviewer provider로는 쓰지 않는다.
+- workflow는 작업 크기로 고른다: `agent-flow run "<task>" --workflow <name>`. 괄호 안은 phase 수이고 정본은 `.agent-flow/workflows/<name>.yaml`이다. 생략하면 `default`이며, 작은 변경에 `default`를 쓰면 phase 대기가 작업 자체보다 커진다.
+  - `review`(3) 코드 변경 없는 리뷰 · `bugfix`(5) 재현되는 버그 하나 · `development`(6) 관심사 하나 · `default`(15) PR·머지까지 · `full-feature`(24) PRD·DDD부터
+- 현재 phase와 다음 명령은 status 출력이 정본이다. phase 목록을 이 파일에 사본으로 두지 않는다.
+- `multi-review`는 설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수다. 각 결과에 `reviewer-source: sub-agent`를 남기고, 마지막에 `## Overall`과 `verdict: approve` 또는 `verdict: request-changes`만 적는다. OMP는 host/controller로만 쓰고 reviewer provider로는 쓰지 않는다.
+- branching과 PR 대상의 정본은 active profile의 `branching`/`pr`이다. skill 문서가 다른 base·PR target·브랜치 삭제를 지시해도 profile을 따른다. release-first는 profile의 `branching.strategy`/`base`/`integration`/`pr.target_branch`로 표현하고, topic 브랜치는 cleanup phase와 보호 브랜치 hook에 맡긴다 — skill이 지시하는 `git branch -D`로 대체하지 않는다.
+- leader checkout에서 IDE·Gradle·build를 실행하지 않는다. leader에 빌드 산출물이 생기면 phase 경계 tripwire가 그것을 drift로 보고해 run이 멈춘다. 빌드·테스트·IDE는 bound worktree에서만 연다.
+- build/test/lint 명령은 active profile의 `gates`에서만 가져온다. gate에 없는 검증 명령을 임의로 반복하지 않는다.
+- worktree는 `agent-flow worktree create --name feat-<slug>`로만 만든다. 손으로 `git worktree add`를 하지 않고, worktree 안에서 install과 skill 링크 재생성을 하지 않는다.
+- 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다. hook이 자동 차단한다.
 
 ### Context Economy
 
-- Claude/Codex/OMP user-facing 답변은 기본적으로 짧은 한글로 한다.
-- 코드/명령/식별자는 영어 그대로 유지한다.
-- 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
-- 필요한 경우만 current phase, action, `next_command`, blocker를 요약한다.
-- 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
-- 프로젝트 skill은 `skills/<name>/SKILL.md` 또는 private `.agent-flow/local-skills/<name>/SKILL.md`에 둔다.
+- User-facing 답변은 짧은 한글, 코드·명령·식별자는 영어 그대로. 긴 로그와 전체 파일 붙여넣기 금지. 필요할 때만 current phase, action, `next_command`, blocker를 요약한다.
+- 코드 생성·수정·리뷰에는 `code-generation-discipline`과 `comment-authoring-discipline`을 항상 적용한다. 그 밖의 skill은 변경 파일에 걸리는 것만 읽고, 이번 변경에 required인 것은 phase 프롬프트가 매 run 나열한다.
+- 인덱스에 없는 skill은 설치돼 있지 않다. 런타임에 설치를 묻지 말고 `agent-flow skills sync`에 맡긴다. 필요한 skill이 이 host에 없으면 `missing local <group>: <skill>`와 source URL을 알린다.
 <!-- agent-flow:skills:start -->
 ```text
 [agent-flow skill index]|root: .agent-flow/skills
 |IMPORTANT: 아래 파일이 기억보다 우선한다. 변경 대상을 먼저 훑고, scope가 걸리는 것만 읽는다.
 |always:{code-generation-discipline,comment-authoring-discipline}
-|on-demand:
-|  agent-flow: Use when the user types /agent-flow, asks to start or continue the project workflow, or wants Claude, Codex, or OMP to drive the agent-flow…
-|  agent-flow-concise-output: Korean concise output adapter for agent-flow review, commit, and artifact output.
-|  architecture-reviewer: Use during the full-feature architecture-review phase.
-|  clean-architecture: Compatibility alias for Clean Architecture review and design.
-|  clean-architecture-core: Platform-neutral Clean Architecture contract for semantic layers, dependency direction, use cases, repository/source/cache/mapper boundarie…
-|  code-review: Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes — Standards (does the code follow this repo's do…
-|  codebase-design: Shared vocabulary for designing deep modules.
-|  comment-checker: Use when installing, configuring, or reviewing agent-flow comment-checker hooks that detect newly added low-value comments without blocking…
-|  ddd-architecture: Domain-Driven Design skill for agent-flow design and final-review phases.
-|  domain-modeling: Build and sharpen a project's domain model.
-|  full-feature-workflow: Use this skill for feature work in this project.
-|  grill-with-docs: A relentless interview to sharpen a plan or design, which also creates docs (ADR's and glossary) as we go.
-|  grilling: Grill the user relentlessly about a plan, decision, or idea.
-|  plan-reviewer: Use during the full-feature plan-review phase.
-|  product-brief: Use during the full-feature product-brief phase.
-|  push-watch: Use this skill after local verification is complete and the branch is ready to publish.
-|  python-api-clean-architecture: Python API-service Clean Architecture adapter for the platform-neutral clean-architecture-core contract.
-|  python-development-guide: Python-specific implementation and review checklist.
-|  resolving-merge-conflicts: Use when you need to resolve an in-progress git merge/rebase conflict.
-|  tdd: Test-driven development.
-|  to-prd: Synthesizes the current conversation and codebase context into a PRD, then writes or publishes it according to the caller's requested outpu…
+|on-demand:{agent-flow,agent-flow-concise-output,architecture-reviewer,clean-architecture,clean-architecture-core,code-review,codebase-design,comment-checker,ddd-architecture,domain-modeling,full-feature-workflow,grill-with-docs,grilling,plan-reviewer,product-brief,push-watch,python-api-clean-architecture,python-development-guide,resolving-merge-conflicts,tdd,to-prd}
 ```
 <!-- agent-flow:skills:end -->
-- 인덱스에 없는 skill은 이 프로젝트에 설치돼 있지 않다. 런타임에 설치를 묻지 말고 `agent-flow skills sync`에 맡긴다.
-- Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
-- Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
 <!-- agent-flow:end -->
