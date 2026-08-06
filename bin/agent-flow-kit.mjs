@@ -76,11 +76,13 @@ import {
   resolveLinkedWorktreeLeader,
   resolveInstallRoot,
   resolveGitCommonWorktreeRoot,
+  ROOT_CONTEXT_FILES,
   rootBootstrapBlock,
   retiredHookScripts,
   safeSkillName,
   samePath,
   shellQuote,
+  reportRootBootstrapBlocks,
   SKILL_INDEX_END,
   SKILL_INDEX_START,
   skillIndexBlock,
@@ -88,9 +90,11 @@ import {
   tomlBasicString,
   uniqueStrings,
   unquoteShellWord,
+  upsertGitExclude,
   upgradeBundledSkills,
   upsertGitignore,
   upsertSkillIndexBlock,
+  upsertRootBootstrapBlock,
   validateSkillDependencies,
   writeKitAssetRecord,
   writePruneBackup,
@@ -355,8 +359,10 @@ function installProject(requestedRoot) {
     ".Codex/",
     ".claude/",
     ".omp/",
-    "AGENTS.md",
-    "CLAUDE.md",
+    // 루트 `AGENTS.md`/`CLAUDE.md`는 여기 올리지 않는다. 무엇을 커밋할지는 프로젝트가
+    // 정하고, 툴이 ignore로 밀어 넣으면 그 파일은 clone과 linked worktree에서 사라져
+    // 그쪽 세션이 계약을 못 받는다. 이미 적혀 있는 항목은 지우지 않는다 — 그건
+    // 프로젝트가 내린 결정이고, 되돌리는 것도 프로젝트 몫이다.
     "AGENTS/",
     "CLAUDE/",
     "agent-flow/",
@@ -367,9 +373,18 @@ function installProject(requestedRoot) {
     "graphify-out/manifest.json",
     "graphify-out/cost.json",
   ]);
+  upsertGitExclude(root, ROOT_CONTEXT_FILES);
   removeLegacyProjectSkillCopies(root, "graphify");
-  upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md");
-  upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md");
+  // 순서는 `ROOT_CONTEXT_FILES`와 같아야 보고가 어긋나지 않는다. receipt는 각 쓰기가
+  // 스스로 남기므로 여기서 따로 모으지 않는다.
+  const bootstrapTemplateText = readBootstrapTemplate().text;
+  const bootstrapStatuses = ROOT_CONTEXT_FILES.map((label) => upsertRootBootstrapBlock(
+    root,
+    label,
+    rootBootstrapBlock(label, bootstrapTemplateText),
+    { force: forceManaged },
+  ));
+  reportRootBootstrapBlocks(bootstrapStatuses);
   upsertSkillIndexBlock(root);
   pruneRetiredHookScripts(root, hooksDisabled);
   pruneRetiredManagedScripts(root);
@@ -2097,24 +2112,6 @@ function readBootstrapTemplate() {
   }
 }
 
-function upsertBootstrapBlock(pathName, label) {
-  const start = "<!-- agent-flow:start -->";
-  const end = "<!-- agent-flow:end -->";
-  const template = readBootstrapTemplate();
-  const block = rootBootstrapBlock(label, template.text);
-  if (!block.includes(start) || !block.includes(end)) {
-    throw new Error(`bootstrap template has no ${start} / ${end} markers: ${template.path}`);
-  }
-  const current = fs.existsSync(pathName) ? fs.readFileSync(pathName, "utf8") : "";
-  if (current.includes(start) && current.includes(end)) {
-    const before = current.slice(0, current.indexOf(start));
-    const after = current.slice(current.indexOf(end) + end.length);
-    fs.writeFileSync(pathName, `${before}${block}${after.replace(/^\n/, "")}`, "utf8");
-    return;
-  }
-  const prefix = current.trim() ? `${current.trimEnd()}\n\n` : `# ${label}\n\n`;
-  fs.writeFileSync(pathName, `${prefix}${block}`, "utf8");
-}
 
 
 
@@ -2132,9 +2129,9 @@ function upsertBootstrapBlock(pathName, label) {
 // 사본에는 없었다. parity의 needle 루프는 템플릿만 보므로 그 드리프트를 잡지도 못했다.
 // 그래서 이제 짓지 않고 파생시킨다: 제목 한 줄 + 마커를 뗀 정본 본문.
 //
-// 본문은 label과 무관하게 늘 `bootstrap/AGENTS.md.template`에서 온다. label은 어느
-// 파일에 쓰는지와 사본의 제목 한 줄만 고른다. 두 label의 사본이 제목만 다른 이유가
-// 이것이고, parity가 그 동일성을 단언한다.
+// 본문은 `rootBootstrapBlock`이 그 label에 대해 내는 것과 같아야 한다. 사본이 루트에
+// 실제로 심긴 것과 다르면 "원래 무엇이었나"를 확인하러 온 사람에게 거짓을 말한다 —
+// `AGENTS.md`는 계약 본문, `CLAUDE.md`는 `@AGENTS.md` 포인터다.
 
 // 마커는 루트 파일 **안에서** 블록의 경계를 표시하는 장치라 독립 사본에는 뜻이 없다.
 // 리터럴 대신 패턴으로 잡는다: parity가 두 installer 소스에 마커 리터럴이 다시
@@ -2144,7 +2141,7 @@ const BOOTSTRAP_MARKER_LINE = /^<!--\s*agent-flow:([a-z:]*)\s*-->$/;
 
 function managedBootstrapMarkdown(label) {
   const template = readBootstrapTemplate();
-  const lines = template.text.split(/\r?\n/);
+  const lines = rootBootstrapBlock(label, template.text).split(/\r?\n/);
   const body = [];
   let insideSkillIndex = false;
   for (const line of lines) {

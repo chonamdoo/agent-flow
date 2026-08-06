@@ -122,16 +122,6 @@ function assertSame(a, b) {
   }
 }
 
-function assertSameBodyAfterTitle(a, b) {
-  const aText = readIfExists(a);
-  const bText = readIfExists(b);
-  if (aText === null || bText === null) return;
-  const body = (text) => text.split(/\r?\n/).slice(1).join("\n");
-  if (body(aText) !== body(bText)) {
-    failures.push(`${a} body differs from ${b}`);
-  }
-}
-
 function stripFrontmatter(text) {
   if (!text.startsWith("---\n")) {
     return text;
@@ -674,16 +664,14 @@ for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]
 }
 
 if (CHECK_INSTALLED_COPY) {
-  // `.agent-flow/bootstrap/*`는 루트 블록이 아니라 관리 사본 생성기의 산출물이다.
-  // 두 label이 제목만 다른 한 벌이라서 여기서는 동일성이 그대로 성립한다.
-  assertSameBodyAfterTitle(".agent-flow/bootstrap/AGENTS.md", ".agent-flow/bootstrap/CLAUDE.md");
+  // 두 사본은 이제 제목만 다른 한 벌이 아니다. `CLAUDE.md` 사본은 루트에 실제로 심기는
+  // 것과 같아야 하고, 그것은 계약 본문이 아니라 `@AGENTS.md` 포인터다.
+  assertContains(".agent-flow/bootstrap/CLAUDE.md", "@AGENTS.md");
+  assertNotContains(".agent-flow/bootstrap/CLAUDE.md", "### Workflow Contract");
 }
 for (const rel of [
   "bootstrap/AGENTS.md.template",
-  ...(CHECK_INSTALLED_COPY ? [
-    ".agent-flow/bootstrap/AGENTS.md",
-    ".agent-flow/bootstrap/CLAUDE.md",
-  ] : []),
+  ...(CHECK_INSTALLED_COPY ? [".agent-flow/bootstrap/AGENTS.md"] : []),
 ]) {
   assertFile(rel);
   assertContains(rel, 'agent-flow run "<task>"');
@@ -1228,52 +1216,62 @@ function assertInstalledBootstrapDerivesFromTemplate(label, tempRoot) {
     body.push(line);
   }
   const derived = body.join("\n").trim();
-  for (const managedLabel of ["AGENTS.md", "CLAUDE.md"]) {
-    const managedPath = path.join(tempRoot, ".agent-flow", "bootstrap", managedLabel);
-    if (!fs.existsSync(managedPath)) {
-      failures.push(`${label} install missing .agent-flow/bootstrap/${managedLabel}`);
-      continue;
+  // `AGENTS.md` 사본은 계약 본문, `CLAUDE.md` 사본은 그 본문을 가리키는 포인터다.
+  // 사본이 루트에 실제로 심긴 것과 다르면 "원래 무엇이었나"를 확인하러 온 사람에게
+  // 거짓을 말한다.
+  const managedPath = path.join(tempRoot, ".agent-flow", "bootstrap", "AGENTS.md");
+  if (!fs.existsSync(managedPath)) {
+    failures.push(`${label} install missing .agent-flow/bootstrap/AGENTS.md`);
+  } else if (fs.readFileSync(managedPath, "utf8") !== `# AGENTS.md Agent Flow Bootstrap\n\n${derived}\n`) {
+    failures.push(`${label} .agent-flow/bootstrap/AGENTS.md is not derived from bootstrap/AGENTS.md.template`);
+  }
+  const managedClaude = path.join(tempRoot, ".agent-flow", "bootstrap", "CLAUDE.md");
+  if (!fs.existsSync(managedClaude)) {
+    failures.push(`${label} install missing .agent-flow/bootstrap/CLAUDE.md`);
+  } else {
+    const claudeCopy = fs.readFileSync(managedClaude, "utf8");
+    if (!claudeCopy.startsWith("# CLAUDE.md Agent Flow Bootstrap\n\n") || !claudeCopy.includes("@AGENTS.md")) {
+      failures.push(`${label} .agent-flow/bootstrap/CLAUDE.md is not the CLAUDE.md pointer`);
     }
-    const expected = `# ${managedLabel} Agent Flow Bootstrap\n\n${derived}\n`;
-    if (fs.readFileSync(managedPath, "utf8") !== expected) {
-      failures.push(`${label} .agent-flow/bootstrap/${managedLabel} is not derived from bootstrap/AGENTS.md.template`);
+    if (claudeCopy.includes("### Workflow Contract")) {
+      failures.push(`${label} .agent-flow/bootstrap/CLAUDE.md duplicates the contract instead of pointing at it`);
     }
   }
-  // 루트 파일은 블록을 그대로 받는다. 사본 쪽과 달리 마커가 살아 있어야 재설치가
-  // 멱등하다 — 마커가 없으면 다음 install이 블록을 찾지 못하고 뒤에 또 붙인다.
-  //
-  // 두 루트 파일이 같은 블록을 받는지도 여기서 본다. host마다 읽는 파일이 다르므로
-  // (Claude는 `CLAUDE.md`, Codex/OMP는 `AGENTS.md`) 한쪽만 계약을 받으면 같은
-  // 프로젝트에서 host에 따라 다른 규칙이 로드된다.
-  //
-  // 차이는 단 한 곳, `CLAUDE.md`의 `@AGENTS.md` import다. 블록 **밖**은 프로젝트 소유
-  // 산문이고 Claude CLI는 루트 `CLAUDE.md`만 자동 로드하므로, 그 줄이 없으면 프로젝트가
-  // 블록 밖에 적은 규칙이 Claude와 Claude reviewer에게만 조용히 사라진다. `AGENTS.md`
-  // 쪽에는 없어야 한다 — 자기 자신을 import하는 줄이다.
-  //
-  // 그리고 skill 인덱스 자리: install이 skill 링크를 다 만든 **뒤에** 그 자리만 실제
-  // 목록으로 바꾼다. 그래서 마커 바깥 조각만 원문과 대조한다.
-  for (const rootLabel of ["AGENTS.md", "CLAUDE.md"]) {
-    const rootPath = path.join(tempRoot, rootLabel);
-    if (!fs.existsSync(rootPath)) {
-      failures.push(`${label} install missing root ${rootLabel}`);
-      continue;
-    }
-    const rootText = fs.readFileSync(rootPath, "utf8");
-    const [head, tail] = blockSegmentsOutsideSkillIndex(template);
-    const expected = rootLabel === "CLAUDE.md"
-      // CLAUDE.md는 end 마커 직전에 import가 들어가 tail이 한 조각으로 남지 않는다.
-      // 템플릿 tail에 있는 것은 두 마커뿐이므로 조각으로 나눠 봐도 덮는 범위는 같다.
-      ? [head, "<!-- agent-flow:skills:end -->", "@AGENTS.md", "<!-- agent-flow:end -->"]
-      : [head, tail];
-    for (const segment of expected) {
-      if (!rootText.includes(segment)) {
-        failures.push(`${label} root ${rootLabel} does not carry bootstrap/AGENTS.md.template verbatim`);
+  // 루트 `AGENTS.md`가 계약을 그대로 받는다. 마커가 살아 있어야 재설치가 멱등하다 —
+  // 마커가 없으면 다음 install이 블록을 찾지 못하고 뒤에 또 붙인다. skill 인덱스 자리는
+  // install이 링크를 다 만든 **뒤에** 채우므로 마커 바깥 조각만 원문과 대조한다.
+  const agentsPath = path.join(tempRoot, "AGENTS.md");
+  if (!fs.existsSync(agentsPath)) {
+    failures.push(`${label} install missing root AGENTS.md`);
+  } else {
+    const agentsText = fs.readFileSync(agentsPath, "utf8");
+    for (const segment of blockSegmentsOutsideSkillIndex(template)) {
+      if (!agentsText.includes(segment)) {
+        failures.push(`${label} root AGENTS.md does not carry bootstrap/AGENTS.md.template verbatim`);
         break;
       }
     }
-    if (rootLabel === "AGENTS.md" && rootText.includes("@AGENTS.md")) {
+    // 자기 자신을 import하는 줄이고, Claude 외 host에서는 뜻 없는 텍스트다.
+    if (agentsText.includes("@AGENTS.md")) {
       failures.push(`${label} root AGENTS.md must not import itself`);
+    }
+  }
+  // 루트 `CLAUDE.md`는 포인터 하나다. 계약 본문을 여기 또 심으면 Claude가 같은 규칙을
+  // 두 번 받는다 — `@AGENTS.md`가 이미 파일 전체를 끌어오기 때문이다.
+  const claudePath = path.join(tempRoot, "CLAUDE.md");
+  if (!fs.existsSync(claudePath)) {
+    failures.push(`${label} install missing root CLAUDE.md`);
+  } else {
+    const claudeText = fs.readFileSync(claudePath, "utf8");
+    for (const segment of ["<!-- agent-flow:start -->", "@AGENTS.md", "<!-- agent-flow:end -->"]) {
+      if (!claudeText.includes(segment)) {
+        failures.push(`${label} root CLAUDE.md is missing ${segment}`);
+      }
+    }
+    for (const duplicated of ["### Workflow Contract", "### Context Economy", "[agent-flow skill index]"]) {
+      if (claudeText.includes(duplicated)) {
+        failures.push(`${label} root CLAUDE.md duplicates ${duplicated}; it must point at AGENTS.md instead`);
+      }
     }
   }
 }
@@ -1582,10 +1580,9 @@ function assertSkillIndexBlockMatchesInstall(label, tempRoot) {
   const expectedPassive = new Set(
     index.skills.filter((skill) => skill.delivery === "passive").map((skill) => String(skill.name)),
   );
-  // 인덱스는 루트 두 파일 모두에 심는다. host마다 자동 로드하는 파일이 달라서
-  // (Claude는 `CLAUDE.md`, Codex/OMP는 `AGENTS.md`) 한 곳만 채우면 나머지 host는
-  // 설치된 skill 목록을 못 본다. 두 곳을 같은 생성기가 쓰므로 갈라질 자리는 없다.
-  for (const fileName of ["AGENTS.md", "CLAUDE.md"]) {
+  // 인덱스는 `AGENTS.md` 한 곳에만 심는다. Claude는 루트 `CLAUDE.md`의 `@AGENTS.md`
+  // import로 같은 목록을 받으므로, 두 곳에 심으면 Claude만 목록을 두 번 받는다.
+  for (const fileName of ["AGENTS.md"]) {
     const target = path.join(tempRoot, fileName);
     if (!fs.existsSync(target)) {
       failures.push(`${label} ${fileName} missing after install`);

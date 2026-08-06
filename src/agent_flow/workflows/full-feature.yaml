@@ -16,7 +16,7 @@ phases:
   - id: domain-grill
     skills:
       required: [grill-with-docs, grilling, domain-modeling]
-    description: Interview one question at a time until the domain problem is clear.
+    description: Interview the user in rounds until the domain problem is clear.
     cite_lore: true
     required_markers:
       - "domain-grill: complete"
