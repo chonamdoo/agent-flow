@@ -19,6 +19,7 @@ import {
   arrayValue,
   assertInstallRootIsFinal,
   backupIfDifferent,
+  BOOTSTRAP_TEMPLATE_FILE,
   claudeHooksSettings,
   canonicalPath,
   cliOptionValue,
@@ -2086,8 +2087,8 @@ function hasGateEvidence(result) {
 //
 // 템플릿을 못 읽으면 던진다. 조용히 지나가면 "블록을 안 쓴 것"이 정상 결과가 되고,
 // 리터럴 시절 내용이 남은 파일이 그대로 방치돼 드리프트가 되살아난다.
-function readBootstrapTemplate(label) {
-  const templatePath = path.join(KIT_ROOT, "bootstrap", `${label}.template`);
+function readBootstrapTemplate() {
+  const templatePath = path.join(KIT_ROOT, "bootstrap", BOOTSTRAP_TEMPLATE_FILE);
   try {
     return { path: templatePath, text: fs.readFileSync(templatePath, "utf8") };
   } catch (error) {
@@ -2098,7 +2099,7 @@ function readBootstrapTemplate(label) {
 function upsertBootstrapBlock(pathName, label) {
   const start = "<!-- agent-flow:start -->";
   const end = "<!-- agent-flow:end -->";
-  const template = readBootstrapTemplate(label);
+  const template = readBootstrapTemplate();
   const block = template.text;
   if (!block.includes(start) || !block.includes(end)) {
     throw new Error(`bootstrap template has no ${start} / ${end} markers: ${template.path}`);
@@ -2130,10 +2131,9 @@ function upsertBootstrapBlock(pathName, label) {
 // 사본에는 없었다. parity의 needle 루프는 템플릿만 보므로 그 드리프트를 잡지도 못했다.
 // 그래서 이제 짓지 않고 파생시킨다: 제목 한 줄 + 마커를 뗀 정본 본문.
 //
-// 본문은 label과 무관하게 늘 `AGENTS.md.template`에서 온다. `CLAUDE.md.template`은
-// 루트용 포인터(본문 대신 `AGENTS.md` import 한 줄)라 사본의 몸통이 될 수 없다.
-// 두 label의 사본이 제목만 다른 이유가 이것이고, parity가 그 동일성을 단언한다.
-const CANONICAL_BOOTSTRAP_LABEL = "AGENTS.md";
+// 본문은 label과 무관하게 늘 `bootstrap/AGENTS.md.template`에서 온다. label은 어느
+// 파일에 쓰는지와 사본의 제목 한 줄만 고른다. 두 label의 사본이 제목만 다른 이유가
+// 이것이고, parity가 그 동일성을 단언한다.
 
 // 마커는 루트 파일 **안에서** 블록의 경계를 표시하는 장치라 독립 사본에는 뜻이 없다.
 // 리터럴 대신 패턴으로 잡는다: parity가 두 installer 소스에 마커 리터럴이 다시
@@ -2142,7 +2142,7 @@ const CANONICAL_BOOTSTRAP_LABEL = "AGENTS.md";
 const BOOTSTRAP_MARKER_LINE = /^<!--\s*agent-flow:([a-z:]*)\s*-->$/;
 
 function managedBootstrapMarkdown(label) {
-  const template = readBootstrapTemplate(CANONICAL_BOOTSTRAP_LABEL);
+  const template = readBootstrapTemplate();
   const lines = template.text.split(/\r?\n/);
   const body = [];
   let insideSkillIndex = false;

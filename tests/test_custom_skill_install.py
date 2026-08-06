@@ -1098,27 +1098,20 @@ def test_installer_outputs_use_explicit_spec_confirmation_contract(
     result = _install_with(binary, project)
     assert result.returncode == 0, result.stderr
 
-    # 루트 `CLAUDE.md`는 이 목록에 없다. 그건 `AGENTS.md`를 가리키는 포인터라
-    # 규약 문장을 사본으로 들고 있지 않다. `.agent-flow/bootstrap/*`는 루트 블록이
-    # 아니라 관리 사본 생성기의 산출물이라 두 label이 모두 본문을 담는다.
+    # SPEC 확인 규약의 정본은 `skills/agent-flow/SKILL.md`다. 루트 블록은 그 파일을
+    # 가리키기만 한다 — 같은 문장을 두 곳에 두면 둘을 맞추는 검사가 또 필요해진다.
+    # 설치 산출물에서는 예전 규약(정확한 승인 문구, user-prompt hook)이 되살아나지
+    # 않았는지와 포인터가 살아 있는지를 본다.
     for relative_path in (
         "AGENTS.md",
+        "CLAUDE.md",
         ".agent-flow/bootstrap/AGENTS.md",
         ".agent-flow/bootstrap/CLAUDE.md",
     ):
         installed = (project / relative_path).read_text(encoding="utf-8")
-        assert "`agent-flow spec confirm --run-dir <run-dir>`" in installed
-        assert (
-            "`manual` verify 항목도 사용자에게 현재 대화에서 확인한 뒤 agent가 "
-            "`agent-flow spec approve <spec-id> --run-dir <run-dir>`"
-        ) in installed
+        assert "`.agent-flow/skills/agent-flow/SKILL.md`" in installed
         assert "현재 대화의 새 turn으로 정확히 `승인`" not in installed
         assert "user-prompt hook" not in installed
-        assert "사용자 터미널 명령 실행을 요구하지 않습니다" in installed
-
-    pointer = (project / "CLAUDE.md").read_text(encoding="utf-8")
-    assert "`AGENTS.md`를 먼저 읽고" in pointer
-    assert "### Workflow Contract" not in pointer
 
     canonical_skill = (
         KIT_ROOT / "skills" / "agent-flow" / "SKILL.md"
@@ -1528,34 +1521,22 @@ def _skill_index_block(project: Path, file_name: str = "AGENTS.md") -> str:
 
 
 def _indexed_names(block: str, group: str) -> set[str]:
-    """`always`는 이름만 있는 한 줄, `on-demand`는 요약을 단 여러 줄이다."""
+    """두 그룹 모두 이름만 있는 한 줄이다: `|always:{...}` / `|on-demand:{...}`."""
     match = re.search(rf"\|{group}:\{{([^}}]*)\}}", block)
-    if match:
-        return {name.strip() for name in match.group(1).split(",") if name.strip()}
-    if f"|{group}:" not in block:
+    if not match:
         return set()
-    return set(_group_entries(block, group))
-def _group_entries(block: str, group: str) -> dict[str, str]:
-    entries: dict[str, str] = {}
-    collecting = False
-    for line in block.splitlines():
-        if line.startswith(f"|{group}:"):
-            collecting = True
-            continue
-        if collecting:
-            if not line.startswith("|  "):
-                break
-            name, _, summary = line[3:].partition(":")
-            entries[name.strip()] = summary.strip()
-    return entries
+    return {name.strip() for name in match.group(1).split(",") if name.strip()}
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_install_writes_the_skill_index_into_agents_md(tmp_path: Path, binary: str) -> None:
-    """설치된 skill을 AGENTS.md 안에서 바로 보여야 한다.
+def test_install_writes_the_skill_index_into_both_root_files(tmp_path: Path, binary: str) -> None:
+    """설치된 skill을 루트 instruction file 안에서 바로 보여야 한다.
 
     `index.json`을 읽으라고 안내만 하면 그건 판단 지점이고, agent는 그 판단을
     자주 건너뛴다. 목록이 문서 안에 있으면 건너뛸 판단 자체가 없다.
+
+    두 파일 모두에 심는다: host마다 자동 로드하는 파일이 달라서(Claude는 `CLAUDE.md`,
+    Codex/OMP는 `AGENTS.md`) 한 곳만 채우면 나머지 host는 목록을 못 본다.
     """
     project = tmp_path / f"index-{binary}"
     project.mkdir()
@@ -1567,16 +1548,11 @@ def test_install_writes_the_skill_index_into_agents_md(tmp_path: Path, binary: s
         if entry.is_dir() and (entry / "SKILL.md").is_file()
     }
     assert installed
-    # 인덱스는 canonical instruction file 한 곳에만 심는다. 루트 `CLAUDE.md`는
-    # `AGENTS.md`를 가리키는 포인터라 인덱스 자리가 없고, 두 곳에 심으면 둘이 같은지
-    # 보는 검사가 또 필요해진다.
-    block = _skill_index_block(project, "AGENTS.md")
-    assert "[agent-flow skill index]" in block, "AGENTS.md 인덱스가 채워지지 않았다"
-    listed = _indexed_names(block, "always") | _indexed_names(block, "on-demand")
-    assert listed == installed, f"AGENTS.md: {installed ^ listed}"
-    assert "<!-- agent-flow:skills:start -->" not in (
-        project / "CLAUDE.md"
-    ).read_text(encoding="utf-8")
+    for file_name in ("AGENTS.md", "CLAUDE.md"):
+        block = _skill_index_block(project, file_name)
+        assert "[agent-flow skill index]" in block, f"{file_name} 인덱스가 채워지지 않았다"
+        listed = _indexed_names(block, "always") | _indexed_names(block, "on-demand")
+        assert listed == installed, f"{file_name}: {installed ^ listed}"
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -2286,49 +2262,22 @@ def test_an_unusable_git_reports_one_line_not_a_stack_trace(tmp_path: Path, bina
         assert help_result.returncode == 0, help_result.stderr
 
 
-def _on_demand_summaries(block: str) -> dict[str, str]:
-    return _group_entries(block, "on-demand")
-
-
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_skill_index_on_demand_carries_summary(tmp_path: Path, binary: str) -> None:
-    """반증: 이름만 주면 "scope 걸리는 것만 읽어라"를 판단할 재료가 없다."""
-    project = tmp_path / f"summary-{binary}"
-    project.mkdir()
-    assert _install_with(binary, project).returncode == 0
+def test_skill_index_stays_name_only(tmp_path: Path, binary: str) -> None:
+    """반증: 요약을 다시 달면 설치된 skill 하나마다 한 줄이 모든 세션에 상시 부과된다.
 
-    summaries = _on_demand_summaries(_skill_index_block(project))
-    assert summaries, "on-demand 요약이 하나도 없다"
-    assert all(summaries.values()), [name for name, text in summaries.items() if not text]
-    assert "tdd" in summaries
-
-
-@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_skill_index_summary_matches_python_rule(tmp_path: Path, binary: str) -> None:
-    """반증: JS가 자기 자르기 규칙을 새로 만들면 같은 skill이 index와 프롬프트에서 달라진다."""
-    sys.path.insert(0, str(KIT_ROOT / "src"))
-    from agent_flow.core.skill_resolver import skill_summary
-
-    project = tmp_path / f"summary-rule-{binary}"
-    project.mkdir()
-    assert _install_with(binary, project).returncode == 0
-
-    summaries = _on_demand_summaries(_skill_index_block(project))
-    mismatches = {
-        name: (text, skill_summary(project / ".agent-flow" / "skills" / name / "SKILL.md"))
-        for name, text in summaries.items()
-        if text != skill_summary(project / ".agent-flow" / "skills" / name / "SKILL.md")
-    }
-    assert mismatches == {}
-
-
-@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_skill_index_always_line_stays_name_only(tmp_path: Path, binary: str) -> None:
-    """반증: always 목록까지 요약을 붙이면 상시 컨텍스트 비용이 커진다."""
-    project = tmp_path / f"always-{binary}"
+    요약은 각 SKILL.md frontmatter 첫 문장의 사본이었다. "scope가 걸리는가"의 판단
+    재료는 phase 프롬프트가 준다 — required는 경로와 함께, 범위에 걸린 것은 이름으로.
+    이 인덱스의 일은 "무엇이 설치돼 있나" 하나다.
+    """
+    project = tmp_path / f"name-only-{binary}"
     project.mkdir()
     assert _install_with(binary, project).returncode == 0
 
     block = _skill_index_block(project)
-    always_line = next(line for line in block.splitlines() if line.startswith("|always:"))
-    assert ":" not in always_line[len("|always:"):]
+    for group in ("always", "on-demand"):
+        line = next(line for line in block.splitlines() if line.startswith(f"|{group}:"))
+        payload = line[len(f"|{group}:") :]
+        assert payload.startswith("{") and payload.endswith("}"), line
+        assert ":" not in payload, line
+    assert "tdd" in _indexed_names(block, "on-demand")

@@ -336,8 +336,11 @@ _ANDROID_SELF_REPORT_MARKERS = (
 )
 
 _SCANNED_SUFFIXES = frozenset({".json", ".md", ".mjs", ".py", ".sh", ".template", ".yaml", ".yml"})
+# `.omp`는 install 산출물만 있는 자리다(tracked 파일 0). 되돌린 설치가 남긴 사본이
+# 여기 남아 있으면 kit **소스** 검사가 그 사본을 위반으로 보고한다 — `.agent-flow`를
+# 건너뛰는 것과 같은 이유다. `.Codex`/`.claude`는 tracked 소스를 함께 담고 있어 뺀다.
 _SKIPPED_DIRS = frozenset(
-    {".agent-flow", ".git", ".pytest_cache", ".venv", "__pycache__", "dist", "node_modules"}
+    {".agent-flow", ".git", ".omp", ".pytest_cache", ".venv", "__pycache__", "dist", "node_modules"}
 )
 # `chrisbanes-skills`는 vendor 설치 디렉터리명으로도 쓰인다. 그 단정은 마커 계약이
 # 아니라 설치 경로 계약이라 이 검사 대상이 아니다. 이 파일 자신은 마커 이름을

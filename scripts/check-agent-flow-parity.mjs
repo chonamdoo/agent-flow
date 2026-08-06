@@ -74,6 +74,13 @@ function assertFile(rel) {
   }
 }
 
+// 되살아나면 안 되는 파일을 이름으로 못 박는다. 존재 검사와 대칭이라 같은 자리에 둔다.
+function assertMissing(rel) {
+  if (fs.existsSync(absPath(rel))) {
+    failures.push(`file must not exist: ${rel}`);
+  }
+}
+
 function absPath(rel) {
   return path.join(rootFor(rel), rel);
 }
@@ -484,7 +491,6 @@ if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/prompts/multi-review.md", "verdict: request-changes");
   assertNotContains(`${PACKAGED_WORKFLOWS}/full-feature.yaml`, "Gemini sub-agent");
   assertNotContains("bootstrap/AGENTS.md.template", "Gemini sub-agent");
-  assertNotContains("bootstrap/CLAUDE.md.template", "Gemini sub-agent");
 }
 
 // skill source와 설치본이 달라지면 다른 프로젝트로 전파될 때 기준이 갈린다.
@@ -634,24 +640,14 @@ function externalDomainsWithoutTerms(text) {
 
 // bootstrap은 반복 install 대신 기존 설치된 CLI로 worktree run을 시작해야 한다.
 //
-// 블록의 정본은 `bootstrap/AGENTS.md.template` 한 벌이다. 예전에는 이 자리가 두 템플릿의
-// 바이트 동일성을 요구했고, 그건 "같은 본문을 두 벌 유지하라"는 요구였다. 두 벌이면
-// 갈라졌는지 보는 검사가 또 필요해진다. 그래서 루트 `CLAUDE.md`는 `AGENTS.md`를 가리키는
-// 포인터이고, 여기서는 그 포인터가 다시 사본으로 자라지 않았는지를 본다.
-assertContains("bootstrap/CLAUDE.md.template", "`AGENTS.md`를 먼저 읽고");
-assertContains("bootstrap/CLAUDE.md.template", "canonical instruction file");
-// 마커는 유지돼야 재설치가 멱등하고 기존 설치본이 포인터로 수렴한다.
-assertContains("bootstrap/CLAUDE.md.template", "<!-- agent-flow:start -->");
-assertContains("bootstrap/CLAUDE.md.template", "<!-- agent-flow:end -->");
-// 본문 중복 없음은 블록의 구조 표지로 본다. 문구는 바뀌어도 섹션 골격은 남는다.
-assertNotContains("bootstrap/CLAUDE.md.template", "### Workflow Contract");
-assertNotContains("bootstrap/CLAUDE.md.template", "### Context Economy");
-assertNotContains("bootstrap/CLAUDE.md.template", "<!-- agent-flow:skills:start -->");
-// 포인터가 산문으로만 남으면 Claude CLI에서는 계약이 로드되지 않는다: Claude CLI는 루트
-// `CLAUDE.md`를 자동 로드하지만 루트 `AGENTS.md`는 로드하지 않는다. `multi-review`가 띄우는
-// Claude reviewer가 정확히 그 경로로 들어온다. import 한 줄이 사본 없이 정본을 끌어오므로
-// 위의 "중복 없음" 단언과 충돌하지 않는다 — 참조는 사본이 아니다.
-assertContains("bootstrap/CLAUDE.md.template", "@AGENTS.md");
+// 블록의 정본은 `bootstrap/AGENTS.md.template` 한 벌이고, 루트 `AGENTS.md`와
+// `CLAUDE.md`는 그 한 벌을 그대로 받는다. 예전에는 label마다 템플릿이 따로 있었다:
+// 처음에는 두 벌의 바이트 동일성을 요구했고(같은 본문을 두 벌 유지하라는 요구),
+// 다음에는 `CLAUDE.md.template`을 `@AGENTS.md` 포인터로 바꿨다. 포인터는 Claude CLI
+// 하나만 고쳤다 — Codex와 OMP는 루트 `AGENTS.md`를 직접 읽으므로 그 import 줄이
+// 아무 일도 하지 않았고, host마다 로드되는 계약이 달라졌다. 파일이 한 벌이면 사본이
+// 갈라질 자리가 없다. 그래서 여기서는 label별 템플릿이 되살아나지 않았는지를 본다.
+assertMissing("bootstrap/CLAUDE.md.template");
 
 // 두 installer 모두 그 한 벌을 읽는다. 예전에 `agent-flow-kit.mjs`는 같은 텍스트를
 // 리터럴로 또 들고 있었고, 신규 install은 템플릿을 쓰고 이후 kit install은 리터럴을 써서
@@ -662,7 +658,8 @@ assertContains("bootstrap/CLAUDE.md.template", "@AGENTS.md");
 // 섹션 제목까지 금지할 수 있다: 예전에는 사본 생성기가 그 제목을 정당하게 리터럴로
 // 들고 있어 제목이 오라클이 못 됐고, 정확히 그 자리에서 사본이 갈라졌다.
 for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
-  assertContains(installer, 'path.join(KIT_ROOT, "bootstrap", `${label}.template`)');
+  assertContains(installer, 'path.join(KIT_ROOT, "bootstrap", BOOTSTRAP_TEMPLATE_FILE)');
+  assertNotContains(installer, "`${label}.template`");
   assertNotContains(installer, "<!-- agent-flow:skills:start -->");
   assertNotContains(installer, "## Agent Flow");
   assertNotContains(installer, "### Workflow Contract");
@@ -1210,8 +1207,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
 // 잘못된 규칙을 스스로 승인하게 된다.
 function assertInstalledBootstrapDerivesFromTemplate(label, tempRoot) {
   const template = readIfExists("bootstrap/AGENTS.md.template");
-  const pointer = readIfExists("bootstrap/CLAUDE.md.template");
-  if (template === null || pointer === null) return;
+  if (template === null) return;
   const body = [];
   let insideSkillIndex = false;
   for (const line of template.split(/\r?\n/)) {
@@ -1239,18 +1235,22 @@ function assertInstalledBootstrapDerivesFromTemplate(label, tempRoot) {
   // 루트 파일은 블록을 그대로 받는다. 사본 쪽과 달리 마커가 살아 있어야 재설치가
   // 멱등하다 — 마커가 없으면 다음 install이 블록을 찾지 못하고 뒤에 또 붙인다.
   //
+  // 두 루트 파일이 같은 블록을 받는지도 여기서 본다. host마다 읽는 파일이 다르므로
+  // (Claude는 `CLAUDE.md`, Codex/OMP는 `AGENTS.md`) 한쪽만 계약을 받으면 같은
+  // 프로젝트에서 host에 따라 다른 규칙이 로드된다.
+  //
   // 단 하나의 예외가 skill 인덱스 자리다: install이 skill 링크를 다 만든 **뒤에**
   // 그 자리만 실제 목록으로 바꾼다. 그래서 마커 바깥 두 조각만 원문과 대조한다.
-  for (const [rootLabel, expectedBlock] of [["AGENTS.md", template], ["CLAUDE.md", pointer]]) {
+  for (const rootLabel of ["AGENTS.md", "CLAUDE.md"]) {
     const rootPath = path.join(tempRoot, rootLabel);
     if (!fs.existsSync(rootPath)) {
       failures.push(`${label} install missing root ${rootLabel}`);
       continue;
     }
     const rootText = fs.readFileSync(rootPath, "utf8");
-    for (const segment of blockSegmentsOutsideSkillIndex(expectedBlock)) {
+    for (const segment of blockSegmentsOutsideSkillIndex(template)) {
       if (!rootText.includes(segment)) {
-        failures.push(`${label} root ${rootLabel} does not carry bootstrap/${rootLabel}.template verbatim`);
+        failures.push(`${label} root ${rootLabel} does not carry bootstrap/AGENTS.md.template verbatim`);
         break;
       }
     }
@@ -1451,10 +1451,10 @@ function assertInstalledHookParity(label, tempRoot) {
     failures.push(`${label} omp extension must not inject model context as a visible user message`);
   }
   // 예전에는 이 자리가 "루트 AGENTS.md ↔ CLAUDE.md 전체 파일 미러가 있다"를 못 박았다.
-  // 지금은 그 반대를 못 박는다: `CLAUDE.md`는 `AGENTS.md`를 가리키는 포인터이고, 미러가
-  // 살아 있으면 그 포인터가 첫 write에서 AGENTS.md 전문 사본으로 되돌아간다. OMP는 루트
-  // `CLAUDE.md`를 읽지도 않는다(`claude` provider는 `.claude/CLAUDE.md`만 본다), 그래서
-  // 미러는 포인터를 깨는 값만 있고 얻는 것이 없었다.
+  // 지금은 그 반대를 못 박는다: 루트 두 파일의 agent-flow 블록은 install이 같은 템플릿
+  // 한 벌로 관리하고, 블록 **밖**은 프로젝트 소유 산문이다. 전체 파일 미러는 그 산문까지
+  // 한쪽으로 덮어써서 install이 보존하는 경계를 깬다. OMP는 루트 `CLAUDE.md`를 읽지도
+  // 않는다(`claude` provider는 `.claude/CLAUDE.md`만 본다), 그래서 미러는 얻는 것이 없다.
   // 이 단언은 문자열 `CLAUDE.md` 자체를 금지한다. 그래서 "왜 미러가 없는지"를 생성되는
   // extension **안**의 주석으로는 적을 수 없다 — 그 주석이 곧 위반이 된다. 그 설명이
   // 여기에만 있는 이유이고, 이 제약을 모르면 extension 쪽에 주석을 넣었다가 이 검사가
@@ -1561,10 +1561,10 @@ function assertSkillIndexBlockMatchesInstall(label, tempRoot) {
   const expectedPassive = new Set(
     index.skills.filter((skill) => skill.delivery === "passive").map((skill) => String(skill.name)),
   );
-  // 인덱스는 canonical instruction file 한 곳에만 심는다. 루트 `CLAUDE.md`는
-  // `AGENTS.md`를 가리키는 포인터라 인덱스 자리를 두지 않는다 — 두 곳에 심으면
-  // 둘이 같은지 보는 검사가 또 필요해진다.
-  for (const fileName of ["AGENTS.md"]) {
+  // 인덱스는 루트 두 파일 모두에 심는다. host마다 자동 로드하는 파일이 달라서
+  // (Claude는 `CLAUDE.md`, Codex/OMP는 `AGENTS.md`) 한 곳만 채우면 나머지 host는
+  // 설치된 skill 목록을 못 본다. 두 곳을 같은 생성기가 쓰므로 갈라질 자리는 없다.
+  for (const fileName of ["AGENTS.md", "CLAUDE.md"]) {
     const target = path.join(tempRoot, fileName);
     if (!fs.existsSync(target)) {
       failures.push(`${label} ${fileName} missing after install`);
@@ -1582,14 +1582,13 @@ function assertSkillIndexBlockMatchesInstall(label, tempRoot) {
       failures.push(`${label} ${fileName} skill index block was never filled`);
       continue;
     }
-    // `always`는 이름만 있는 한 줄, `on-demand`는 요약을 단 여러 줄이다.
-    const listed = new Set([
-      ...[...block.matchAll(/\|always:\{([^}]*)\}/g)]
+    // 두 그룹 모두 이름만 있는 한 줄이다: `|always:{...}` / `|on-demand:{...}`.
+    const listed = new Set(
+      [...block.matchAll(/\|(?:always|on-demand):\{([^}]*)\}/g)]
         .flatMap((match) => match[1].split(","))
         .map((name) => name.trim())
         .filter(Boolean),
-      ...[...block.matchAll(/^\|\s{2}([^:\n]+):/gm)].map((match) => match[1].trim()),
-    ]);
+    );
     for (const name of expected) {
       if (!listed.has(name)) {
         failures.push(`${label} ${fileName} skill index omits installed skill: ${name}`);

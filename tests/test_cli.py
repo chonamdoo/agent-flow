@@ -1934,8 +1934,8 @@ class CliTest(unittest.TestCase):
             self.assertNotIn("modelSpecificProjectContext", omp_extension_text)
             self.assertNotIn("contextMessage(", omp_extension_text)
             self.assertNotIn("content.trimEnd()", omp_extension_text)
-            # 루트 CLAUDE.md는 AGENTS.md의 포인터다. 전체 파일 미러가 살아 있으면
-            # 그 포인터가 첫 write에서 AGENTS.md 전문 사본으로 되돌아간다.
+            # 루트 두 파일의 블록은 install이 같은 템플릿으로 관리하고 블록 밖은
+            # 프로젝트 소유 산문이다. 전체 파일 미러는 그 산문까지 덮어쓴다.
             self.assertNotIn("syncRootContextFiles", omp_extension_text)
             self.assertNotIn("CLAUDE.md", omp_extension_text)
             self.assertNotIn(str(Path(__file__).resolve().parents[1]), omp_extension_text)
@@ -1990,9 +1990,12 @@ class CliTest(unittest.TestCase):
                 'agent-flow run "<task>"',
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
-            claude_pointer = (project_root / "CLAUDE.md").read_text(encoding="utf-8")
-            self.assertIn("`AGENTS.md`를 먼저 읽고", claude_pointer)
-            self.assertNotIn("### Workflow Contract", claude_pointer)
+            claude_root = (project_root / "CLAUDE.md").read_text(encoding="utf-8")
+            # 두 루트 파일은 같은 블록을 받는다. Claude CLI는 루트 `CLAUDE.md`만,
+            # Codex/OMP는 `AGENTS.md`를 읽으므로 한쪽만 계약을 받으면 host마다 다르다.
+            self.assertIn("### Workflow Contract", claude_root)
+            self.assertIn("설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수", claude_root)
+            self.assertIn("[agent-flow skill index]", claude_root)
             self.assertIn(
                 'agent-flow run "<task>"',
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
@@ -4081,12 +4084,13 @@ if (codexContext !== undefined) {
             self.assertNotIn("예: Claude/Gemini", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", claude_bootstrap.read_text(encoding="utf-8"))
-            parallel_contract = (
-                "두 reviewer를 검증된 worktree에 바인딩한 별도 OS sandbox subprocess로 "
-                "병렬 실행하고"
-            )
-            self.assertIn(parallel_contract, bootstrap.read_text(encoding="utf-8"))
-            self.assertIn(parallel_contract, claude_bootstrap.read_text(encoding="utf-8"))
+            # reviewer 실행 방식(별 subprocess, 병렬)은 phase 프롬프트가 쥔다. 블록은
+            # 그 phase에만 쓰이는 절차를 사본으로 들지 않는다 — 두 벌이면 갈라진다.
+            multi_review_prompt = (
+                project_root / ".agent-flow" / "prompts" / "multi-review.md"
+            ).read_text(encoding="utf-8")
+            self.assertIn("confined subprocesses", multi_review_prompt)
+            self.assertIn("Do not launch reviewer CLIs yourself", multi_review_prompt)
             self.assertIn("## Overall", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("## Overall", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("verdict: approve", bootstrap.read_text(encoding="utf-8"))
