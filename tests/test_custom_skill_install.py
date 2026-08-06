@@ -1709,6 +1709,31 @@ def test_install_without_a_receipt_updates_the_block_but_keeps_a_copy(
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_a_corrupt_receipt_stops_the_overwrite(tmp_path: Path, binary: str) -> None:
+    """반증: 잘린 `blocks.json`을 "기록 없음"과 같게 다루면 파일 하나가 소유 판정을 끈다.
+
+    기록이 **없는** 것은 "이 기능 이전에 깔렸다"이고 덮는 것이 맞다. 읽을 수 없는 것은
+    "있었는데 깨졌다"이고, 그 상태로 덮으면 살아 있는 프로젝트 규칙이 예고 없이 바뀐다.
+    """
+    project = tmp_path / f"corrupt-receipt-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    _hand_edit_bootstrap_block(project)
+    (project / ".agent-flow" / "bootstrap" / "blocks.json").write_text(
+        '{"blocks": {"AGENTS.md"', encoding="utf-8"
+    )
+
+    result = _install_with(binary, project)
+    assert result.returncode == 0, result.stderr
+    assert "blocks.json is unreadable" in result.stdout
+    assert "손으로 넣은 줄" in (project / "AGENTS.md").read_text(encoding="utf-8")
+
+    forced = _install_with(binary, project, "--force-managed")
+    assert forced.returncode == 0, forced.stderr
+    assert "손으로 넣은 줄" not in (project / "AGENTS.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_install_leaves_the_git_workspace_clean(tmp_path: Path, binary: str) -> None:
     """반증: 두 파일이 untracked로 남으면 워크스페이스가 dirty가 되고, 그 즉시
     `agent-flow worktree create`가 막힌다 — install 직후 첫 명령이 실패한다.
