@@ -183,30 +183,136 @@ def test_multi_profile_union_still_declares_its_copies():
     `review_angles`/`gates`/`skills`/`architecture`만 합친다. 최상위 `branching`만
     보면 android+react-native 프로젝트에서 `local.properties`가 영영 복사되지 않는다.
     """
-    from agent_flow.cli import _declared_worktree_copies
+    from agent_flow.cli import ROOT_CONTEXT_FILES, _declared_worktree_copies
 
     android = {"branching": {"worktree_setup": {"copy": ["local.properties"]}}}
     react_native = {"branching": {"worktree_setup": {"copy": [".env"]}}}
     union = {"id": "multi-profile", "profiles": [android, react_native]}
 
-    assert _declared_worktree_copies(union) == ["local.properties", ".env"]
+    assert _declared_worktree_copies(union) == [
+        *ROOT_CONTEXT_FILES,
+        "local.properties",
+        ".env",
+    ]
 
 
 def test_single_profile_declaration_still_works():
     """불변: 합성본을 지원하느라 단일 profile 경로를 잃으면 안 된다."""
-    from agent_flow.cli import _declared_worktree_copies
+    from agent_flow.cli import ROOT_CONTEXT_FILES, _declared_worktree_copies
 
     single = {"branching": {"worktree_setup": {"copy": ["local.properties"]}}}
-    assert _declared_worktree_copies(single) == ["local.properties"]
+    assert _declared_worktree_copies(single) == [*ROOT_CONTEXT_FILES, "local.properties"]
 
 
 def test_duplicate_declarations_are_collapsed():
     """불변: 두 profile이 같은 파일을 선언해도 한 번만 다룬다."""
-    from agent_flow.cli import _declared_worktree_copies
+    from agent_flow.cli import ROOT_CONTEXT_FILES, _declared_worktree_copies
 
     same = {"branching": {"worktree_setup": {"copy": ["local.properties"]}}}
     union = {"profiles": [same, dict(same)]}
-    assert _declared_worktree_copies(union) == ["local.properties"]
+    assert _declared_worktree_copies(union) == [*ROOT_CONTEXT_FILES, "local.properties"]
+
+
+def _stub_profile(monkeypatch, tmp_path: Path, profile: dict) -> None:
+    from agent_flow import cli as CLI
+
+    monkeypatch.setattr(CLI, "_find_kit_root", lambda: tmp_path)
+    monkeypatch.setattr(CLI, "_load_profile", lambda kit_root, root: ("p", profile))
+    # hook provision은 이 테스트의 대상이 아니다. leader에 등록 파일을 심는 것까지
+    # 요구하면 복사 계약이 hook 설치 상태에 얽힌다.
+    monkeypatch.setattr(CLI, "_provision_host_hooks", lambda **_kwargs: None)
+
+
+def test_root_context_files_reach_a_new_checkout(tmp_path: Path, monkeypatch, capsys):
+    """반증: 안 가져오면 worktree에서 연 host 세션이 agent-flow 계약 없이 돈다.
+
+    두 파일은 프로젝트가 커밋할 수도, 로컬에서 ignore할 수도 있다. 추적하지 않는 쪽이면
+    `git worktree add`가 가져올 것도, worktree 안 install(= no-op)이 만들 것도 없다.
+    leader에서 복사하는 것이 유일한 경로다.
+    """
+    from agent_flow import cli as CLI
+
+    leader, checkout = tmp_path / "leader", tmp_path / "wt"
+    _repo(leader)
+    checkout.mkdir()
+    (leader / "AGENTS.md").write_text("leader contract\n", encoding="utf-8")
+    (leader / "CLAUDE.md").write_text("leader claude\n", encoding="utf-8")
+    # 이미 있는 것은 덮지 않는다 — worktree에서 고친 계약이 조용히 사라지면 사고다.
+    (checkout / "CLAUDE.md").write_text("mine\n", encoding="utf-8")
+    (leader / "local.properties").write_text("sdk.dir=/opt/android\n", encoding="utf-8")
+    _stub_profile(
+        monkeypatch,
+        tmp_path,
+        {"branching": {"worktree_setup": {"copy": ["local.properties"]}}},
+    )
+
+    CLI._apply_worktree_setup(root=leader, checkout=checkout)
+
+    assert (checkout / "AGENTS.md").read_text(encoding="utf-8") == "leader contract\n"
+    assert (checkout / "CLAUDE.md").read_text(encoding="utf-8") == "mine\n"
+    assert (
+        checkout / "local.properties"
+    ).read_text(encoding="utf-8") == "sdk.dir=/opt/android\n"
+    captured = capsys.readouterr()
+    assert "AGENTS.md" in captured.out, "무엇이 깔렸는지 말해야 한다"
+    assert "did not copy" not in captured.err, (
+        "이미 있거나 leader에 없는 컨텍스트 파일은 정상이다 — 매번 경고로 찍으면 "
+        "진짜 경고가 묻힌다"
+    )
+
+
+def test_missing_profile_declaration_still_warns(tmp_path: Path, monkeypatch, capsys):
+    """불변: 컨텍스트 파일을 경고에서 빼느라 `local.properties` 누락을 놓치면 안 된다.
+
+    그 경고가 사라지면 worktree에서 Gradle이 SDK를 못 찾는 이유를 아무도 못 짚는다.
+    """
+    from agent_flow import cli as CLI
+
+    leader, checkout = tmp_path / "leader", tmp_path / "wt"
+    _repo(leader)
+    checkout.mkdir()
+    _stub_profile(
+        monkeypatch,
+        tmp_path,
+        {"branching": {"worktree_setup": {"copy": ["local.properties"]}}},
+    )
+
+    CLI._apply_worktree_setup(root=leader, checkout=checkout)
+
+    err = capsys.readouterr().err
+    assert "did not copy local.properties" in err
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        assert name not in err
+
+
+def test_root_context_files_survive_a_broken_profile(tmp_path: Path, monkeypatch, capsys):
+    """반증: profile 해석 뒤에 복사하면 profile 하나가 깨졌다는 이유로 계약이 통째로 빠진다.
+
+    그렇게 만들어진 checkout에서 host 세션이 그대로 일한다 — worktree는 살아 있고
+    안내만 없다. profile 선언 복사와 달리 이 둘은 profile과 무관하다.
+    """
+    from agent_flow import cli as CLI
+
+    leader, checkout = tmp_path / "leader", tmp_path / "wt"
+    _repo(leader)
+    checkout.mkdir()
+    (leader / "AGENTS.md").write_text("leader contract\n", encoding="utf-8")
+    (leader / "CLAUDE.md").write_text("leader claude\n", encoding="utf-8")
+
+    def _explode(_kit_root, _root):
+        raise RuntimeError("profile is broken")
+
+    monkeypatch.setattr(CLI, "_find_kit_root", lambda: tmp_path)
+    monkeypatch.setattr(CLI, "_load_profile", _explode)
+    monkeypatch.setattr(CLI, "_provision_host_hooks", lambda **_kwargs: None)
+
+    CLI._apply_worktree_setup(root=leader, checkout=checkout)
+
+    assert (checkout / "AGENTS.md").read_text(encoding="utf-8") == "leader contract\n"
+    assert (checkout / "CLAUDE.md").read_text(encoding="utf-8") == "leader claude\n"
+    captured = capsys.readouterr()
+    assert "skipped worktree setup" in captured.err, "profile이 깨졌다는 사실은 계속 알려야 한다"
+    assert "AGENTS.md" in captured.out, "무엇이 깔렸는지 말해야 한다"
 
 
 def _hook_command(leader: Path, script: str) -> str:

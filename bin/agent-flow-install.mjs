@@ -62,6 +62,7 @@ import {
   pruneRetiredHooks,
   pruneRetiredHookScripts,
   pruneRetiredManagedScripts,
+  BOOTSTRAP_KEPT_NOTICE_PREFIX,
   pruneUninstalledProfiles,
   pushWatchSkillMarkdown,
   READ_TOOL_MATCHER,
@@ -76,10 +77,12 @@ import {
   requestedInstallRootOption,
   resolveManagedWorktreeRoot,
   resolveLinkedWorktreeLeader,
+  ROOT_CONTEXT_FILES,
   rootBootstrapBlock,
   resolveInstallRoot,
   retiredHookScripts,
   safeSkillName,
+  reportRootBootstrapBlocks,
   samePath,
   shellQuote,
   SKILL_INDEX_END,
@@ -91,8 +94,10 @@ import {
   uniqueStrings,
   unquoteShellWord,
   upgradeBundledSkills,
+  upsertGitExclude,
   upsertGitignore,
   upsertSkillIndexBlock,
+  upsertRootBootstrapBlock,
   validateSkillDependencies,
   writeKitAssetRecord,
   withoutInstallRootOption,
@@ -196,34 +201,26 @@ function ensureDir(p) {
 // 시점에는 아직 목록이 확정되지 않아, 거기서 채우면 한 install 안에서 곧바로
 // 낡는다. 그래서 블록에는 자리만 두고 여기서 그 자리만 바꾼다.
 
-// 정본은 `bootstrap/AGENTS.md.template` 한 벌이고, `agent-flow-kit.mjs`의
-// `upsertBootstrapBlock`도 같은 파일을 읽는다. label이 고르는 것은 어느 루트 파일에
-// 쓰는지와 `rootBootstrapBlock`이 CLAUDE.md에만 더하는 `@AGENTS.md` import 한 줄뿐이다.
-// 본문은 고르지 않는다 — 두 루트 파일이 같은 블록을 받아야 host에 따라 로드되는 계약이
-// 갈리지 않는다. 못 읽으면 던진다 — 조용히 건너뛰면 "블록을 안 쓴 것"이 정상 결과가
-// 되고, 이전 install이 남긴 낡은 블록이 그대로 방치된다.
+// 정본은 `bootstrap/AGENTS.md.template` 한 벌이고, `agent-flow-kit.mjs`도 같은 파일을 읽는다.
+// label이 고르는 것은 어느 루트 파일에 쓰는지와, `rootBootstrapBlock`이 CLAUDE.md에는 계약
+// 본문 대신 `@AGENTS.md` 포인터를 낸다는 것뿐이다. 못 읽으면 던진다 — 조용히 건너뛰면
+// "블록을 안 쓴 것"이 정상 결과가 되고, 이전 install이 남긴 낡은 블록이 그대로 방치된다.
+//
+// 쓰기와 소유권 판정은 `upsertRootBootstrapBlock` 한 벌이다. 두 진입점이 각자 판정하면
+// 어느 CLI로 깔았는지에 따라 사용자 편집이 보존되기도 하고 지워지기도 한다.
 function bootstrapMarkdown(label) {
   const tmplPath = path.join(KIT_ROOT, "bootstrap", BOOTSTRAP_TEMPLATE_FILE);
-  let block;
+  let template;
   try {
-    block = rootBootstrapBlock(label, fs.readFileSync(tmplPath, "utf8"));
+    template = fs.readFileSync(tmplPath, "utf8");
   } catch (error) {
     throw new Error(`bootstrap template unreadable: ${tmplPath} (${error?.message || error})`);
   }
-  const targetPath = path.join(PROJECT, label);
-  const start = "<!-- agent-flow:start -->";
-  const end = "<!-- agent-flow:end -->";
-  const current = fs.existsSync(targetPath)
-    ? fs.readFileSync(targetPath, "utf8")
-    : "";
-  if (current.includes(start) && current.includes(end)) {
-    const before = current.slice(0, current.indexOf(start));
-    const after = current.slice(current.indexOf(end) + end.length);
-    fs.writeFileSync(targetPath, before + block + after.replace(/^\n/, ""));
-    return;
-  }
-  const prefix = current.trim() ? current.trimEnd() + "\n\n" : `# ${label}\n\n`;
-  fs.writeFileSync(targetPath, prefix + block);
+  // `rootBootstrapBlock`은 try 밖이다. 마커가 없다는 진단이 "읽을 수 없다"로 바뀌면
+  // 고칠 곳을 찾는 사람이 파일 권한을 보러 간다.
+  return upsertRootBootstrapBlock(PROJECT, label, rootBootstrapBlock(label, template), {
+    force: FORCE_MANAGED,
+  });
 }
 
 function bootstrapLocalSkillName(skillPath, fallback) {
@@ -976,6 +973,7 @@ function runKitInstall() {
       || line.startsWith(SKILL_UPGRADE_NOTICE_PREFIX)
       || line.startsWith(ASSET_UPGRADE_NOTICE_PREFIX)
       || line.startsWith(ASSET_BACKUP_NOTICE_PREFIX)
+      || line.startsWith(BOOTSTRAP_KEPT_NOTICE_PREFIX)
     ) {
       console.log(line);
     }
@@ -1035,8 +1033,13 @@ function install() {
   let installSelection = resolveInstallSelection({ args: INSTALL_ARGS, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: PROJECT });
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, PROJECT);
 
-  bootstrapMarkdown("CLAUDE.md");
-  bootstrapMarkdown("AGENTS.md");
+  // 자식 kit install이 이미 두 루트 파일을 썼고 receipt까지 남겼다. 여기서 한 번 더
+  // 쓰면 방금 관측한 내용이 곧 "우리가 쓴 것"으로 기록돼, 사용자가 손댔는지 가르는
+  // 오라클이 사라진다 — 실제로 그 두 번째 쓰기가 `--force-managed` 없이도 편집을
+  // 덮었다. 자식이 실패했을 때만(= kit 자산이 안 깔린 degraded 설치) 직접 쓴다.
+  if (!delegatedKitInstalled) {
+    reportRootBootstrapBlocks(ROOT_CONTEXT_FILES.map((label) => bootstrapMarkdown(label)));
+  }
   const gitignorePath = path.join(PROJECT, ".gitignore");
   upsertGitignore(gitignorePath, [
     ".agent-flow/",
@@ -1045,8 +1048,10 @@ function install() {
     ".Codex/",
     ".claude/",
     ".omp/",
-    "AGENTS.md",
-    "CLAUDE.md",
+    // 루트 `AGENTS.md`/`CLAUDE.md`는 여기 올리지 않는다. 무엇을 커밋할지는 프로젝트가
+    // 정하고, 툴이 ignore로 밀어 넣으면 그 파일은 clone과 linked worktree에서 사라져
+    // 그쪽 세션이 계약을 못 받는다. 이미 적혀 있는 항목은 지우지 않는다 — 그건
+    // 프로젝트가 내린 결정이고, 되돌리는 것도 프로젝트 몫이다.
     "AGENTS/",
     "CLAUDE/",
     "agent-flow/",
@@ -1057,6 +1062,7 @@ function install() {
     "graphify-out/manifest.json",
     "graphify-out/cost.json",
   ]);
+  upsertGitExclude(PROJECT, ROOT_CONTEXT_FILES);
   removeLegacyProjectSkillCopies(PROJECT, "graphify");
   writeManagedFile(
     path.join(AF_DIR, "workflows", "full-feature.yaml"),

@@ -1991,15 +1991,18 @@ class CliTest(unittest.TestCase):
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
             claude_root = (project_root / "CLAUDE.md").read_text(encoding="utf-8")
-            # 두 루트 파일은 같은 블록을 받는다. Claude CLI는 루트 `CLAUDE.md`만,
-            # Codex/OMP는 `AGENTS.md`를 읽으므로 한쪽만 계약을 받으면 host마다 다르다.
-            self.assertIn("### Workflow Contract", claude_root)
-            self.assertIn("설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수", claude_root)
-            self.assertIn("[agent-flow skill index]", claude_root)
-            # 블록 밖 프로젝트 산문은 이 import로만 Claude에게 간다. `AGENTS.md`에는
-            # 없어야 한다 — 자기 자신을 import하는 줄이다.
+            # 계약은 `AGENTS.md` 한 벌이고 `CLAUDE.md`는 그것을 가리킨다. Claude CLI는
+            # 루트 `CLAUDE.md`만 자동 로드하므로 이 import가 유일한 전달 경로다.
+            # 본문까지 여기 심으면 `@path`가 파일 전체를 끌어오므로 두 번 받는다.
             self.assertIn("@AGENTS.md", claude_root)
+            self.assertNotIn("### Workflow Contract", claude_root)
+            self.assertNotIn("[agent-flow skill index]", claude_root)
+            # `AGENTS.md`에는 없어야 한다 — 자기 자신을 import하는 줄이다.
             self.assertNotIn("@AGENTS.md", (project_root / "AGENTS.md").read_text(encoding="utf-8"))
+            self.assertIn(
+                "설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수",
+                (project_root / "AGENTS.md").read_text(encoding="utf-8"),
+            )
             self.assertIn(
                 'agent-flow run "<task>"',
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
@@ -4079,15 +4082,14 @@ if (codexContext !== undefined) {
                 (project_root / ".agent-flow" / "prompts" / "multi-review.md").read_text(encoding="utf-8"),
             )
             self.assertIn('agent-flow run "<task>"', bootstrap.read_text(encoding="utf-8"))
-            self.assertIn('agent-flow run "<task>"', claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("OMP는 host/controller로만 쓰고 reviewer provider로는 쓰지 않는다", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("OMP는 host/controller로만 쓰고 reviewer provider로는 쓰지 않는다", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertNotIn("예: Claude/Gemini", bootstrap.read_text(encoding="utf-8"))
-            self.assertNotIn("예: Claude/Gemini", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("reviewer-source: sub-agent", claude_bootstrap.read_text(encoding="utf-8"))
+            # `CLAUDE.md` 사본은 루트에 실제로 심긴 것과 같아야 한다: 계약 본문이 아니라
+            # 그것을 가리키는 포인터다. 여기에 본문을 담으면 루트와 사본이 갈라진다.
+            self.assertIn("@AGENTS.md", claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertNotIn("### Workflow Contract", claude_bootstrap.read_text(encoding="utf-8"))
             # reviewer 실행 방식(별 subprocess, 병렬)은 phase 프롬프트가 쥔다. 블록은
             # 그 phase에만 쓰이는 절차를 사본으로 들지 않는다 — 두 벌이면 갈라진다.
             multi_review_prompt = (
@@ -4096,11 +4098,8 @@ if (codexContext !== undefined) {
             self.assertIn("confined subprocesses", multi_review_prompt)
             self.assertIn("Do not launch reviewer CLIs yourself", multi_review_prompt)
             self.assertIn("## Overall", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("## Overall", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("verdict: approve", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("verdict: approve", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("verdict: request-changes", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("verdict: request-changes", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("Full Feature Workflow", skill.read_text(encoding="utf-8"))
             self.assertIn("Workflow Contract", rules.read_text(encoding="utf-8"))
             self.assertIn("two independent Claude/Codex reviewer subprocesses", rules.read_text(encoding="utf-8"))

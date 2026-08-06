@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2604,8 +2605,15 @@ def _keep_failed_worktree() -> bool:
     return os.environ.get(KEEP_FAILED_WORKTREE_ENV, "").strip().lower() in _TRUTHY_ENV
 
 
+# 두 파일은 프로젝트가 커밋할 수도, gitignore할 수도 있다(예전 install이 넣어 둔 항목이
+# 그대로 남아 있는 프로젝트도 많다). 추적하지 않는 쪽이면 `git worktree add`가 가져올
+# 것도, worktree 안 install(= no-op)이 만들 것도 없어서 그 checkout에서 연 host 세션은
+# agent-flow 계약을 한 글자도 받지 못한다. leader에서 복사해 그 공백을 닫는다.
+ROOT_CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md")
+
+
 def _declared_worktree_copies(profile: dict) -> list[str]:
-    """단일 profile과 multi-profile 합성본 양쪽에서 선언을 모은다.
+    """새 checkout이 받아야 할 이름: 루트 컨텍스트 파일 + 단일/합성 profile 선언.
 
     `_load_profile_union`이 만드는 합성 dict에는 최상위 `branching`이 없다 —
     개별 profile은 `profiles` 아래에 들어가고 최상위에는 `review_angles`/`gates`/
@@ -2617,7 +2625,7 @@ def _declared_worktree_copies(profile: dict) -> list[str]:
     nested = profile.get("profiles")
     if isinstance(nested, list):
         sources.extend(item for item in nested if isinstance(item, dict))
-    names: list[str] = []
+    names: list[str] = list(ROOT_CONTEXT_FILES)
     for source in sources:
         branching = source.get("branching")
         if not isinstance(branching, dict):
@@ -2657,41 +2665,55 @@ def _provision_host_hooks(*, root: Path, checkout: Path) -> None:
 
 
 def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
-    """새 checkout을 쓸 수 있게 만든다: host hook 등록 표면 + profile 선언 설정.
+    """새 checkout을 쓸 수 있게 만든다: host hook 등록 표면 + 루트 컨텍스트 파일 +
+    profile 선언 설정.
 
     실패해도 worktree 생성을 되돌리지 않는다. 설정이 없어서 빌드가 한 번 실패하는 것과
     방금 만든 checkout이 통째로 사라지는 것은 무게가 다르다. 대신 무엇이 빠졌는지 알린다.
     """
     _provision_host_hooks(root=root, checkout=checkout)
+    # 루트 컨텍스트 파일은 profile 해석 **앞**에 옮긴다. profile이 깨졌다는 이유로 이
+    # 복사까지 건너뛰면, 계약을 못 받는 checkout이 만들어진 뒤 그 안에서 일하게 된다.
+    copied = list(_copy_worktree_files(root=root, checkout=checkout, names=ROOT_CONTEXT_FILES))
     try:
         _profile_id, profile = _load_profile(_find_kit_root(), root)
-        declared = _declared_worktree_copies(profile)
+        declared = [str(name) for name in _declared_worktree_copies(profile)]
     except Exception as exc:  # profile 해석 실패가 worktree 생성을 막을 이유는 없다
         print(f"warning: skipped worktree setup: {_format_cli_error(exc)}", file=sys.stderr)
+        if copied:
+            print(f"worktree setup copied: {', '.join(copied)}")
         return
     # 복사와 동작은 서로 독립이다. 한쪽이 실패했다고 다른 쪽을 건너뛰면 선언한
     # 동작이 조용히 빠진다.
-    if declared:
-        try:
-            copied = copy_declared_worktree_files(
-                leader=root, checkout=checkout, names=[str(name) for name in declared]
-            )
-        except (ValueError, OSError) as exc:
-            print(
-                f"warning: worktree setup failed: {_format_cli_error(exc)}",
-                file=sys.stderr,
-            )
-            copied = ()
-        missing = [str(name) for name in declared if str(name) not in copied]
-        if copied:
-            print(f"worktree setup copied: {', '.join(copied)}")
-        if missing:
-            print(
-                f"warning: worktree setup did not copy {', '.join(missing)} "
-                f"(absent in {root}, already present, or a symlink)",
-                file=sys.stderr,
-            )
+    profile_names = [name for name in declared if name not in ROOT_CONTEXT_FILES]
+    profile_copied = _copy_worktree_files(root=root, checkout=checkout, names=profile_names)
+    copied.extend(profile_copied)
+    if copied:
+        print(f"worktree setup copied: {', '.join(copied)}")
+    # 루트 컨텍스트 파일은 복사되지 않는 것이 정상이다 — git이 추적하면 checkout에 이미
+    # 있고, 추적하지 않는 프로젝트의 leader에는 아예 없다. 그 둘을 매번 경고로 찍으면
+    # `local.properties` 누락 같은 진짜 경고가 묻히므로 profile 선언만 경고한다.
+    missing = [name for name in profile_names if name not in profile_copied]
+    if missing:
+        print(
+            f"warning: worktree setup did not copy {', '.join(missing)} "
+            f"(absent in {root}, already present, or a symlink)",
+            file=sys.stderr,
+        )
     _run_worktree_setup_actions(root=root, checkout=checkout, profile=profile)
+
+
+def _copy_worktree_files(
+    *, root: Path, checkout: Path, names: Sequence[str]
+) -> tuple[str, ...]:
+    """실패는 알리고 넘어간다 — 설정 하나 때문에 방금 만든 checkout을 되돌릴 이유가 없다."""
+    if not names:
+        return ()
+    try:
+        return copy_declared_worktree_files(leader=root, checkout=checkout, names=list(names))
+    except (ValueError, OSError) as exc:
+        print(f"warning: worktree setup failed: {_format_cli_error(exc)}", file=sys.stderr)
+        return ()
 
 
 def _sync_declared_worktree_files(
@@ -2722,8 +2744,6 @@ def _sync_declared_worktree_files(
             f"warning: skipped worktree config sync: {_format_cli_error(exc)}",
             file=sys.stderr,
         )
-        return
-    if not declared:
         return
     for checkout in checkouts:
         try:

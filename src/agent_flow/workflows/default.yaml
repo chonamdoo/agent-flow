@@ -53,10 +53,11 @@ phases:
       Produce the unified design document. Sections in order:
 
       ## 1. Interview (grill-with-docs + domain-modeling)
-      Interview the user one question at a time. Walk every branch of the
-      decision tree. Provide your recommended answer for each question. If
-      the codebase can answer a question, search the codebase rather than
-      asking. Challenge terms against CONTEXT.md and ADRs, cross-check user
+      Interview the user in rounds, as the `grilling` skill defines: ask every
+      question whose prerequisites are already settled in one numbered round,
+      each with your recommended answer, then wait. Walk every branch of the
+      decision tree. If the codebase can answer a question, search the codebase
+      rather than asking. Challenge terms against CONTEXT.md and ADRs, cross-check user
       claims against code, and update docs inline when terms are resolved.
       Continue until you reach shared understanding of: scope, acceptance
       criteria, edge cases, non-goals, dependencies, constraints. Trivial tasks

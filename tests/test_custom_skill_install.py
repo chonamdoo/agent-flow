@@ -1102,11 +1102,12 @@ def test_installer_outputs_use_explicit_spec_confirmation_contract(
     # 가리키기만 한다 — 같은 문장을 두 곳에 두면 둘을 맞추는 검사가 또 필요해진다.
     # 설치 산출물에서는 예전 규약(정확한 승인 문구, user-prompt hook)이 되살아나지
     # 않았는지와 포인터가 살아 있는지를 본다.
+    #
+    # `CLAUDE.md`는 계약을 담지 않고 `@AGENTS.md`로 끌어오므로 여기서 제외한다. 그
+    # 파일에 대한 단언은 `test_root_claude_md_is_a_pointer_to_agents_md`에 있다.
     for relative_path in (
         "AGENTS.md",
-        "CLAUDE.md",
         ".agent-flow/bootstrap/AGENTS.md",
-        ".agent-flow/bootstrap/CLAUDE.md",
     ):
         installed = (project / relative_path).read_text(encoding="utf-8")
         assert "`.agent-flow/skills/agent-flow/SKILL.md`" in installed
@@ -1529,14 +1530,14 @@ def _indexed_names(block: str, group: str) -> set[str]:
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_install_writes_the_skill_index_into_both_root_files(tmp_path: Path, binary: str) -> None:
+def test_install_writes_the_skill_index_into_agents_md(tmp_path: Path, binary: str) -> None:
     """설치된 skill을 루트 instruction file 안에서 바로 보여야 한다.
 
     `index.json`을 읽으라고 안내만 하면 그건 판단 지점이고, agent는 그 판단을
     자주 건너뛴다. 목록이 문서 안에 있으면 건너뛸 판단 자체가 없다.
 
-    두 파일 모두에 심는다: host마다 자동 로드하는 파일이 달라서(Claude는 `CLAUDE.md`,
-    Codex/OMP는 `AGENTS.md`) 한 곳만 채우면 나머지 host는 목록을 못 본다.
+    자리는 `AGENTS.md` 하나다. Claude는 루트 `CLAUDE.md`의 `@AGENTS.md` import로 같은
+    목록을 받으므로, 두 곳에 심으면 Claude만 목록을 두 번 받는다.
     """
     project = tmp_path / f"index-{binary}"
     project.mkdir()
@@ -1548,22 +1549,23 @@ def test_install_writes_the_skill_index_into_both_root_files(tmp_path: Path, bin
         if entry.is_dir() and (entry / "SKILL.md").is_file()
     }
     assert installed
-    for file_name in ("AGENTS.md", "CLAUDE.md"):
-        block = _skill_index_block(project, file_name)
-        assert "[agent-flow skill index]" in block, f"{file_name} 인덱스가 채워지지 않았다"
-        listed = _indexed_names(block, "always") | _indexed_names(block, "on-demand")
-        assert listed == installed, f"{file_name}: {installed ^ listed}"
+    block = _skill_index_block(project, "AGENTS.md")
+    assert "[agent-flow skill index]" in block, "AGENTS.md 인덱스가 채워지지 않았다"
+    listed = _indexed_names(block, "always") | _indexed_names(block, "on-demand")
+    assert listed == installed, f"AGENTS.md: {installed ^ listed}"
+    assert "[agent-flow skill index]" not in (project / "CLAUDE.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_claude_root_imports_agents_md_for_the_prose_outside_the_block(
-    tmp_path: Path, binary: str
-) -> None:
-    """반증: 두 루트 파일이 블록만 같으면 블록 **밖** 프로젝트 규칙이 Claude에게만 사라진다.
+def test_root_claude_md_is_a_pointer_to_agents_md(tmp_path: Path, binary: str) -> None:
+    """반증 1: 블록만 두면 블록 **밖** 프로젝트 규칙이 Claude에게만 사라진다.
 
     Claude CLI는 루트 `CLAUDE.md`만 자동 로드한다. 프로젝트가 블록 밖에 적은 규칙이
     Claude와 `multi-review`의 Claude reviewer에게 닿는 경로는 이 import 한 줄뿐이다.
     `AGENTS.md`에는 없어야 한다 — 자기 자신을 import하는 줄이다.
+
+    반증 2: 계약 본문까지 함께 심으면 Claude가 같은 규칙을 두 번 받는다. `@path`는
+    파일 전체를 끌어오므로 import 하나로 이미 본문이 온다.
     """
     project = tmp_path / f"claude-import-{binary}"
     project.mkdir()
@@ -1575,11 +1577,245 @@ def test_claude_root_imports_agents_md_for_the_prose_outside_the_block(
     agents = (project / "AGENTS.md").read_text(encoding="utf-8")
     claude = (project / "CLAUDE.md").read_text(encoding="utf-8")
     assert "블록 밖 프로젝트 규칙." in agents
+    assert "### Workflow Contract" in agents
     assert "@AGENTS.md" in claude
     assert "@AGENTS.md" not in agents
     # import는 블록 안에 있어야 install이 그것을 유지·복구한다.
     block = claude[claude.index("<!-- agent-flow:start -->") : claude.index("<!-- agent-flow:end -->")]
     assert "@AGENTS.md" in block
+    for duplicated in ("### Workflow Contract", "### Context Economy"):
+        assert duplicated not in claude, f"CLAUDE.md가 {duplicated}를 중복으로 담았다"
+
+
+def _hand_edit_bootstrap_block(project: Path) -> None:
+    target = project / "AGENTS.md"
+    text = target.read_text(encoding="utf-8")
+    assert "## Agent Flow" in text
+    target.write_text(
+        text.replace("## Agent Flow", "## Agent Flow\n\n- 우리 팀이 손으로 넣은 줄.", 1),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_hand_edited_bootstrap_block_survives_reinstall(tmp_path: Path, binary: str) -> None:
+    """반증: 마커가 있다는 것은 우리가 썼다는 증거가 아니다.
+
+    예전에는 마커만 보고 그 사이를 통째로 덮었고, 그래서 블록 안에 적은 프로젝트 규칙이
+    다음 install에서 말없이 사라졌다. 판정은 install이 마지막으로 쓴 블록의 해시로 한다.
+
+    두 번째 재설치도 같은 판정을 내야 한다. 지켜 준 내용을 receipt에 기록해 버리면
+    그 다음 install이 그것을 자기 것으로 보고 덮는다.
+    """
+    project = tmp_path / f"kept-block-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    _hand_edit_bootstrap_block(project)
+
+    for _ in range(2):
+        result = _install_with(binary, project)
+        assert result.returncode == 0, result.stderr
+        assert "! kept (user-modified): AGENTS.md" in result.stdout
+        assert "손으로 넣은 줄" in (project / "AGENTS.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_force_managed_restores_the_bootstrap_block_and_keeps_a_backup(
+    tmp_path: Path, binary: str
+) -> None:
+    """되찾는 경로가 없으면 지키는 판정이 곧 영구 고착이 된다.
+
+    되찾을 때는 사본을 남긴다. `.agent-flow/`는 gitignore라 `git status`에도 안 뜨므로,
+    사본이 없으면 사용자가 쓴 내용에 도달할 경로가 하나도 없다.
+    """
+    project = tmp_path / f"forced-block-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    _hand_edit_bootstrap_block(project)
+    assert _install_with(binary, project).returncode == 0
+
+    result = _install_with(binary, project, "--force-managed")
+    assert result.returncode == 0, result.stderr
+    assert "~ upgraded: AGENTS.md (agent-flow block)" in result.stdout
+    assert "손으로 넣은 줄" not in (project / "AGENTS.md").read_text(encoding="utf-8")
+    backup = project / ".agent-flow" / "bootstrap" / "AGENTS.md.removed"
+    assert "손으로 넣은 줄" in backup.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_repeated_force_keeps_every_distinct_bootstrap_backup(
+    tmp_path: Path, binary: str
+) -> None:
+    """반증: 두 번째 force가 같은 이름에 덮어쓰면 첫 사본이 지키던 내용이 사라진다.
+
+    prune 백업과 같은 규칙을 쓴다 — 내용이 다르면 digest를 붙여 따로 남기고, 알림은
+    실제로 쓴 경로를 부른다. 존재하지 않는 경로를 알리면 사본이 없는 것과 같다.
+    """
+    project = tmp_path / f"repeat-force-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+
+    reported = []
+    for marker in ("HAND-EDIT-ONE", "HAND-EDIT-TWO"):
+        target = project / "AGENTS.md"
+        target.write_text(
+            target.read_text(encoding="utf-8").replace(
+                "## Agent Flow", f"## Agent Flow\n\n{marker}", 1
+            ),
+            encoding="utf-8",
+        )
+        result = _install_with(binary, project, "--force-managed")
+        assert result.returncode == 0, result.stderr
+        line = next(
+            line for line in result.stdout.splitlines() if line.startswith("  ~ backup: ")
+        )
+        reported.append(line.removeprefix("  ~ backup: ").strip())
+
+    assert reported[0] != reported[1], "두 사본이 같은 경로를 가리키면 하나가 지워진 것이다"
+    assert "HAND-EDIT-ONE" in (project / reported[0]).read_text(encoding="utf-8")
+    assert "HAND-EDIT-TWO" in (project / reported[1]).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_without_a_receipt_updates_the_block_but_keeps_a_copy(
+    tmp_path: Path, binary: str
+) -> None:
+    """이 기능 이전에 깔린 설치본에는 기록이 없다. 소유를 증명할 방법이 없으므로 예전처럼
+    덮는다 — 여기서 멈추면 낡은 계약이 영구히 남고 갱신 경로가 사라진다.
+
+    반증: 그렇다고 조용히 덮으면 안 된다. 배포 중인 모든 설치본이 이 경로를 한 번씩
+    지나고, 루트 파일은 `.git/info/exclude`에 올라 git 히스토리로도 돌아올 수 없다.
+    증명하지 못할 때는 사본을 남기고 그 자리를 알린다.
+    """
+    project = tmp_path / f"no-receipt-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    _hand_edit_bootstrap_block(project)
+    (project / ".agent-flow" / "bootstrap" / "blocks.json").unlink()
+
+    result = _install_with(binary, project)
+    assert result.returncode == 0, result.stderr
+    assert "kept (user-modified): AGENTS.md" not in result.stdout
+    assert "손으로 넣은 줄" not in (project / "AGENTS.md").read_text(encoding="utf-8")
+    backup = next(
+        line.removeprefix("  ~ backup: ").split(" (")[0].strip()
+        for line in result.stdout.splitlines()
+        if line.startswith("  ~ backup: ") and "AGENTS.md" in line
+    )
+    assert "손으로 넣은 줄" in (project / backup).read_text(encoding="utf-8")
+    # 아무것도 편집하지 않은 프로젝트도 이 경로를 지난다. 사유가 없으면 그 사본이
+    # "네 편집을 보관했다"로 읽힌다.
+    assert "no receipt" in result.stdout
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_a_corrupt_receipt_stops_the_overwrite(tmp_path: Path, binary: str) -> None:
+    """반증: 잘린 `blocks.json`을 "기록 없음"과 같게 다루면 파일 하나가 소유 판정을 끈다.
+
+    기록이 **없는** 것은 "이 기능 이전에 깔렸다"이고 덮는 것이 맞다. 읽을 수 없는 것은
+    "있었는데 깨졌다"이고, 그 상태로 덮으면 살아 있는 프로젝트 규칙이 예고 없이 바뀐다.
+    """
+    project = tmp_path / f"corrupt-receipt-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    _hand_edit_bootstrap_block(project)
+    (project / ".agent-flow" / "bootstrap" / "blocks.json").write_text(
+        '{"blocks": {"AGENTS.md"', encoding="utf-8"
+    )
+
+    result = _install_with(binary, project)
+    assert result.returncode == 0, result.stderr
+    assert "blocks.json is unreadable" in result.stdout
+    assert "손으로 넣은 줄" in (project / "AGENTS.md").read_text(encoding="utf-8")
+
+    forced = _install_with(binary, project, "--force-managed")
+    assert forced.returncode == 0, forced.stderr
+    assert "손으로 넣은 줄" not in (project / "AGENTS.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_leaves_the_git_workspace_clean(tmp_path: Path, binary: str) -> None:
+    """반증: 두 파일이 untracked로 남으면 워크스페이스가 dirty가 되고, 그 즉시
+    `agent-flow worktree create`가 막힌다 — install 직후 첫 명령이 실패한다.
+
+    그렇다고 tracked `.gitignore`에 적으면 툴이 프로젝트 대신 "커밋하지 않는다"를
+    결정하고 그 결정이 커밋된다. 그래서 커밋되지 않는 `.git/info/exclude`에 적는다.
+    """
+    project = tmp_path / f"clean-tree-{binary}"
+    project.mkdir()
+    subprocess.run(("git", "init", "-q"), cwd=project, check=True)
+    assert _install_with(binary, project).returncode == 0
+
+    status = subprocess.run(
+        ("git", "status", "--porcelain"), cwd=project, text=True, capture_output=True, check=True
+    )
+    dirty = [line for line in status.stdout.splitlines() if "AGENTS.md" in line or "CLAUDE.md" in line]
+    assert dirty == [], status.stdout
+    # 계약은 "git이 무시한다"이지 "어느 파일에 무슨 줄이 적혔다"가 아니다. git에게 묻는다.
+    ignored = subprocess.run(
+        ("git", "check-ignore", "AGENTS.md", "CLAUDE.md"),
+        cwd=project, text=True, capture_output=True, check=False,
+    )
+    assert ignored.stdout.split() == ["AGENTS.md", "CLAUDE.md"], ignored.stderr
+    # 루트에만 걸려야 한다. 하위 디렉터리의 같은 이름까지 가리면 패키지마다 컨텍스트
+    # 파일을 두는 저장소에서 새 문서가 조용히 커밋에서 빠진다.
+    nested = project / "packages" / "api"
+    nested.mkdir(parents=True)
+    (nested / "AGENTS.md").write_text("package contract\n", encoding="utf-8")
+    nested_ignored = subprocess.run(
+        ("git", "check-ignore", "-q", "packages/api/AGENTS.md"), cwd=project, check=False
+    )
+    assert nested_ignored.returncode != 0
+    # tracked `.gitignore`에는 여전히 적지 않는다.
+    gitignore = [
+        line.strip()
+        for line in (project / ".gitignore").read_text(encoding="utf-8").splitlines()
+    ]
+    assert "AGENTS.md" not in gitignore and "CLAUDE.md" not in gitignore
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_adds_no_exclude_entry_a_project_already_carries(
+    tmp_path: Path, binary: str
+) -> None:
+    """예전 install이 프로젝트의 tracked `.gitignore`에 남긴 항목은 그대로 둔다.
+
+    반증: 같은 뜻을 exclude에 또 적으면 규칙이 두 벌이 되고, 프로젝트가 `.gitignore`에서
+    그 줄을 지워도 보이지 않는 사본이 계속 파일을 가린다.
+    """
+    project = tmp_path / f"legacy-ignore-{binary}"
+    project.mkdir()
+    subprocess.run(("git", "init", "-q"), cwd=project, check=True)
+    (project / ".gitignore").write_text("AGENTS.md\nCLAUDE.md\n", encoding="utf-8")
+    assert _install_with(binary, project).returncode == 0
+
+    exclude_path = project / ".git" / "info" / "exclude"
+    exclude = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+    assert "AGENTS.md" not in exclude
+    assert "CLAUDE.md" not in exclude
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_does_not_decide_whether_root_context_files_are_tracked(
+    tmp_path: Path, binary: str
+) -> None:
+    """반증: 툴이 두 파일을 tracked `.gitignore`에 밀어 넣으면 그 결정이 커밋된다.
+
+    이미 적어 둔 항목은 프로젝트가 내린 결정이므로 지우지도 않는다.
+    """
+    project = tmp_path / f"gitignore-{binary}"
+    project.mkdir()
+    (project / ".gitignore").write_text("CLAUDE.md\n", encoding="utf-8")
+    assert _install_with(binary, project).returncode == 0
+
+    entries = [
+        line.strip()
+        for line in (project / ".gitignore").read_text(encoding="utf-8").splitlines()
+    ]
+    assert "AGENTS.md" not in entries
+    assert entries.count("CLAUDE.md") == 1
+    assert ".agent-flow/" in entries
+
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_passive_delivery_lands_on_the_always_line(tmp_path: Path, binary: str) -> None:
