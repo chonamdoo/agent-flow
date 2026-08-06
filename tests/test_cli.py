@@ -1996,6 +1996,10 @@ class CliTest(unittest.TestCase):
             self.assertIn("### Workflow Contract", claude_root)
             self.assertIn("설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수", claude_root)
             self.assertIn("[agent-flow skill index]", claude_root)
+            # 블록 밖 프로젝트 산문은 이 import로만 Claude에게 간다. `AGENTS.md`에는
+            # 없어야 한다 — 자기 자신을 import하는 줄이다.
+            self.assertIn("@AGENTS.md", claude_root)
+            self.assertNotIn("@AGENTS.md", (project_root / "AGENTS.md").read_text(encoding="utf-8"))
             self.assertIn(
                 'agent-flow run "<task>"',
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),

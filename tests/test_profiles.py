@@ -144,9 +144,12 @@ def test_bootstrap_block_has_exactly_one_template_for_both_root_files():
     """불변: 블록 본문은 한 벌이다.
 
     반증: 처음에는 두 템플릿의 바이트 동일성을 요구했다(같은 본문을 두 벌 유지하라는
-    요구). 다음에는 `CLAUDE.md.template`을 `@AGENTS.md` 포인터로 바꿨고, 그건 Claude
-    CLI 하나만 고쳤다 — Codex와 OMP는 루트 `AGENTS.md`를 직접 읽으므로 import 줄이
-    아무 일도 하지 않았다. 파일이 한 벌이면 사본이 갈라질 자리가 없다.
+    요구). 다음에는 `CLAUDE.md.template`을 `@AGENTS.md` **포인터만** 담은 파일로
+    바꿨고, 그러면 Claude는 계약을 import로 받고 Codex/OMP는 직접 읽어 host마다
+    로드되는 텍스트가 갈렸다. 파일이 한 벌이면 사본이 갈라질 자리가 없다.
+
+    import는 이제 템플릿이 아니라 `rootBootstrapBlock`이 CLAUDE.md에만 붙인다 —
+    템플릿에 두면 `AGENTS.md`가 자기 자신을 import한다.
     """
     assert CANONICAL_BOOTSTRAP_TEMPLATE.is_file()
     assert sorted(p.name for p in (KIT_ROOT / "bootstrap").glob("*.template")) == [
@@ -157,6 +160,7 @@ def test_bootstrap_block_has_exactly_one_template_for_both_root_files():
     assert "<!-- agent-flow:start -->" in text
     assert "<!-- agent-flow:end -->" in text
     assert "<!-- agent-flow:skills:start -->" in text
+    assert "@AGENTS.md" not in text
 
 
 @pytest.mark.parametrize("profile_id", _profile_ids())

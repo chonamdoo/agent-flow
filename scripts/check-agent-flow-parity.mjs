@@ -641,13 +641,17 @@ function externalDomainsWithoutTerms(text) {
 // bootstrap은 반복 install 대신 기존 설치된 CLI로 worktree run을 시작해야 한다.
 //
 // 블록의 정본은 `bootstrap/AGENTS.md.template` 한 벌이고, 루트 `AGENTS.md`와
-// `CLAUDE.md`는 그 한 벌을 그대로 받는다. 예전에는 label마다 템플릿이 따로 있었다:
+// `CLAUDE.md`는 그 한 벌을 받는다. 예전에는 label마다 템플릿이 따로 있었다:
 // 처음에는 두 벌의 바이트 동일성을 요구했고(같은 본문을 두 벌 유지하라는 요구),
-// 다음에는 `CLAUDE.md.template`을 `@AGENTS.md` 포인터로 바꿨다. 포인터는 Claude CLI
-// 하나만 고쳤다 — Codex와 OMP는 루트 `AGENTS.md`를 직접 읽으므로 그 import 줄이
-// 아무 일도 하지 않았고, host마다 로드되는 계약이 달라졌다. 파일이 한 벌이면 사본이
-// 갈라질 자리가 없다. 그래서 여기서는 label별 템플릿이 되살아나지 않았는지를 본다.
+// 다음에는 `CLAUDE.md.template`을 `@AGENTS.md` **포인터만** 담은 파일로 바꿨다.
+// 포인터 하나만 두면 Claude는 계약을 import로 받고 Codex/OMP는 직접 읽어 host마다
+// 로드되는 텍스트가 갈렸다. 지금은 둘 다 같은 블록을 받고, import는 블록 **밖**
+// 프로젝트 산문을 Claude에게 전달하는 한 줄로만 남는다(`rootBootstrapBlock`).
+// 여기서는 label별 템플릿이 되살아나지 않았는지를 본다.
 assertMissing("bootstrap/CLAUDE.md.template");
+assertContains("bootstrap/AGENTS.md.template", "<!-- agent-flow:end -->");
+// 템플릿 자신은 import를 담지 않는다. 담으면 `AGENTS.md`가 자기 자신을 import한다.
+assertNotContains("bootstrap/AGENTS.md.template", "@AGENTS.md");
 
 // 두 installer 모두 그 한 벌을 읽는다. 예전에 `agent-flow-kit.mjs`는 같은 텍스트를
 // 리터럴로 또 들고 있었고, 신규 install은 템플릿을 쓰고 이후 kit install은 리터럴을 써서
@@ -659,6 +663,9 @@ assertMissing("bootstrap/CLAUDE.md.template");
 // 들고 있어 제목이 오라클이 못 됐고, 정확히 그 자리에서 사본이 갈라졌다.
 for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
   assertContains(installer, 'path.join(KIT_ROOT, "bootstrap", BOOTSTRAP_TEMPLATE_FILE)');
+  // label이 고르는 것은 이 한 줄뿐이다. 생성기가 두 벌이 되면 CLAUDE.md만 import를
+  // 잃는 조합이 다시 가능해진다.
+  assertContains(installer, "rootBootstrapBlock(label, ");
   assertNotContains(installer, "`${label}.template`");
   assertNotContains(installer, "<!-- agent-flow:skills:start -->");
   assertNotContains(installer, "## Agent Flow");
@@ -1239,8 +1246,13 @@ function assertInstalledBootstrapDerivesFromTemplate(label, tempRoot) {
   // (Claude는 `CLAUDE.md`, Codex/OMP는 `AGENTS.md`) 한쪽만 계약을 받으면 같은
   // 프로젝트에서 host에 따라 다른 규칙이 로드된다.
   //
-  // 단 하나의 예외가 skill 인덱스 자리다: install이 skill 링크를 다 만든 **뒤에**
-  // 그 자리만 실제 목록으로 바꾼다. 그래서 마커 바깥 두 조각만 원문과 대조한다.
+  // 차이는 단 한 곳, `CLAUDE.md`의 `@AGENTS.md` import다. 블록 **밖**은 프로젝트 소유
+  // 산문이고 Claude CLI는 루트 `CLAUDE.md`만 자동 로드하므로, 그 줄이 없으면 프로젝트가
+  // 블록 밖에 적은 규칙이 Claude와 Claude reviewer에게만 조용히 사라진다. `AGENTS.md`
+  // 쪽에는 없어야 한다 — 자기 자신을 import하는 줄이다.
+  //
+  // 그리고 skill 인덱스 자리: install이 skill 링크를 다 만든 **뒤에** 그 자리만 실제
+  // 목록으로 바꾼다. 그래서 마커 바깥 조각만 원문과 대조한다.
   for (const rootLabel of ["AGENTS.md", "CLAUDE.md"]) {
     const rootPath = path.join(tempRoot, rootLabel);
     if (!fs.existsSync(rootPath)) {
@@ -1248,11 +1260,20 @@ function assertInstalledBootstrapDerivesFromTemplate(label, tempRoot) {
       continue;
     }
     const rootText = fs.readFileSync(rootPath, "utf8");
-    for (const segment of blockSegmentsOutsideSkillIndex(template)) {
+    const [head, tail] = blockSegmentsOutsideSkillIndex(template);
+    const expected = rootLabel === "CLAUDE.md"
+      // CLAUDE.md는 end 마커 직전에 import가 들어가 tail이 한 조각으로 남지 않는다.
+      // 템플릿 tail에 있는 것은 두 마커뿐이므로 조각으로 나눠 봐도 덮는 범위는 같다.
+      ? [head, "<!-- agent-flow:skills:end -->", "@AGENTS.md", "<!-- agent-flow:end -->"]
+      : [head, tail];
+    for (const segment of expected) {
       if (!rootText.includes(segment)) {
         failures.push(`${label} root ${rootLabel} does not carry bootstrap/AGENTS.md.template verbatim`);
         break;
       }
+    }
+    if (rootLabel === "AGENTS.md" && rootText.includes("@AGENTS.md")) {
+      failures.push(`${label} root AGENTS.md must not import itself`);
     }
   }
 }

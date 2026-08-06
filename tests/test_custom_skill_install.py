@@ -1556,6 +1556,32 @@ def test_install_writes_the_skill_index_into_both_root_files(tmp_path: Path, bin
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_claude_root_imports_agents_md_for_the_prose_outside_the_block(
+    tmp_path: Path, binary: str
+) -> None:
+    """반증: 두 루트 파일이 블록만 같으면 블록 **밖** 프로젝트 규칙이 Claude에게만 사라진다.
+
+    Claude CLI는 루트 `CLAUDE.md`만 자동 로드한다. 프로젝트가 블록 밖에 적은 규칙이
+    Claude와 `multi-review`의 Claude reviewer에게 닿는 경로는 이 import 한 줄뿐이다.
+    `AGENTS.md`에는 없어야 한다 — 자기 자신을 import하는 줄이다.
+    """
+    project = tmp_path / f"claude-import-{binary}"
+    project.mkdir()
+    (project / "AGENTS.md").write_text(
+        "# My Project\n\n## Gotchas\n\n블록 밖 프로젝트 규칙.\n", encoding="utf-8"
+    )
+    assert _install_with(binary, project).returncode == 0
+
+    agents = (project / "AGENTS.md").read_text(encoding="utf-8")
+    claude = (project / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "블록 밖 프로젝트 규칙." in agents
+    assert "@AGENTS.md" in claude
+    assert "@AGENTS.md" not in agents
+    # import는 블록 안에 있어야 install이 그것을 유지·복구한다.
+    block = claude[claude.index("<!-- agent-flow:start -->") : claude.index("<!-- agent-flow:end -->")]
+    assert "@AGENTS.md" in block
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_passive_delivery_lands_on_the_always_line(tmp_path: Path, binary: str) -> None:
     """반증: 전부 on-demand로 적으면 "항상 적용" 선언이 인덱스에서 사라진다."""
     project = tmp_path / f"delivery-{binary}"

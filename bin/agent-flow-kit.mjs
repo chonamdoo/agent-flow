@@ -76,6 +76,7 @@ import {
   resolveLinkedWorktreeLeader,
   resolveInstallRoot,
   resolveGitCommonWorktreeRoot,
+  rootBootstrapBlock,
   retiredHookScripts,
   safeSkillName,
   samePath,
@@ -2100,7 +2101,7 @@ function upsertBootstrapBlock(pathName, label) {
   const start = "<!-- agent-flow:start -->";
   const end = "<!-- agent-flow:end -->";
   const template = readBootstrapTemplate();
-  const block = template.text;
+  const block = rootBootstrapBlock(label, template.text);
   if (!block.includes(start) || !block.includes(end)) {
     throw new Error(`bootstrap template has no ${start} / ${end} markers: ${template.path}`);
   }
