@@ -285,6 +285,36 @@ def test_missing_profile_declaration_still_warns(tmp_path: Path, monkeypatch, ca
         assert name not in err
 
 
+def test_root_context_files_survive_a_broken_profile(tmp_path: Path, monkeypatch, capsys):
+    """반증: profile 해석 뒤에 복사하면 profile 하나가 깨졌다는 이유로 계약이 통째로 빠진다.
+
+    그렇게 만들어진 checkout에서 host 세션이 그대로 일한다 — worktree는 살아 있고
+    안내만 없다. profile 선언 복사와 달리 이 둘은 profile과 무관하다.
+    """
+    from agent_flow import cli as CLI
+
+    leader, checkout = tmp_path / "leader", tmp_path / "wt"
+    _repo(leader)
+    checkout.mkdir()
+    (leader / "AGENTS.md").write_text("leader contract\n", encoding="utf-8")
+    (leader / "CLAUDE.md").write_text("leader claude\n", encoding="utf-8")
+
+    def _explode(_kit_root, _root):
+        raise RuntimeError("profile is broken")
+
+    monkeypatch.setattr(CLI, "_find_kit_root", lambda: tmp_path)
+    monkeypatch.setattr(CLI, "_load_profile", _explode)
+    monkeypatch.setattr(CLI, "_provision_host_hooks", lambda **_kwargs: None)
+
+    CLI._apply_worktree_setup(root=leader, checkout=checkout)
+
+    assert (checkout / "AGENTS.md").read_text(encoding="utf-8") == "leader contract\n"
+    assert (checkout / "CLAUDE.md").read_text(encoding="utf-8") == "leader claude\n"
+    captured = capsys.readouterr()
+    assert "skipped worktree setup" in captured.err, "profile이 깨졌다는 사실은 계속 알려야 한다"
+    assert "AGENTS.md" in captured.out, "무엇이 깔렸는지 말해야 한다"
+
+
 def _hook_command(leader: Path, script: str) -> str:
     return f"/usr/bin/python3 -I '{leader}/.agent-flow/scripts/hooks/{script}'"
 

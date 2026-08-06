@@ -426,6 +426,24 @@ function nodeKitSourceDigest() {
   )(fs, path, { createHash }, SOURCE_ROOT);
 }
 
+// 같은 목록을 두 언어가 각자 든다: JS install은 그 파일을 `.git/info/exclude`에 올리고,
+// Python `worktree create`는 그 파일을 새 checkout으로 옮긴다. 한쪽만 늘어나면 install은
+// 가려 두는데 worktree 복사는 빠지는 조합이 조용히 생긴다.
+assertRootContextFilesMatchAcrossLanguages();
+
+function assertRootContextFilesMatchAcrossLanguages() {
+  const js = read("lib/installer-shared.mjs").match(/ROOT_CONTEXT_FILES = Object\.freeze\(\[([^\]]*)\]\)/);
+  const py = read("src/agent_flow/cli.py").match(/^ROOT_CONTEXT_FILES = \(([^)]*)\)/m);
+  if (!js || !py) {
+    failures.push("ROOT_CONTEXT_FILES is not declared where parity can compare it");
+    return;
+  }
+  const names = (text) => text.match(/"[^"]+"/g)?.join(",") ?? "";
+  if (names(js[1]) !== names(py[1])) {
+    failures.push(`ROOT_CONTEXT_FILES differs: js ${names(js[1])} vs python ${names(py[1])}`);
+  }
+}
+
 
 // phase 제거가 source/generated copy 중 한 곳에만 반영되는 drift를 막는다.
 for (const rel of fullFeatureWorkflowCopies) {

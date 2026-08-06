@@ -1677,11 +1677,15 @@ def test_repeated_force_keeps_every_distinct_bootstrap_backup(
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_install_without_a_receipt_still_updates_the_block(tmp_path: Path, binary: str) -> None:
+def test_install_without_a_receipt_updates_the_block_but_keeps_a_copy(
+    tmp_path: Path, binary: str
+) -> None:
     """이 기능 이전에 깔린 설치본에는 기록이 없다. 소유를 증명할 방법이 없으므로 예전처럼
     덮는다 — 여기서 멈추면 낡은 계약이 영구히 남고 갱신 경로가 사라진다.
 
-    사용자 내용을 지우는 유일한 경로라 단언으로 못 박는다.
+    반증: 그렇다고 조용히 덮으면 안 된다. 배포 중인 모든 설치본이 이 경로를 한 번씩
+    지나고, 루트 파일은 `.git/info/exclude`에 올라 git 히스토리로도 돌아올 수 없다.
+    증명하지 못할 때는 사본을 남기고 그 자리를 알린다.
     """
     project = tmp_path / f"no-receipt-{binary}"
     project.mkdir()
@@ -1693,6 +1697,12 @@ def test_install_without_a_receipt_still_updates_the_block(tmp_path: Path, binar
     assert result.returncode == 0, result.stderr
     assert "kept (user-modified): AGENTS.md" not in result.stdout
     assert "손으로 넣은 줄" not in (project / "AGENTS.md").read_text(encoding="utf-8")
+    backup = next(
+        line.removeprefix("  ~ backup: ").strip()
+        for line in result.stdout.splitlines()
+        if line.startswith("  ~ backup: ") and "AGENTS.md" in line
+    )
+    assert "손으로 넣은 줄" in (project / backup).read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -1711,15 +1721,29 @@ def test_install_leaves_the_git_workspace_clean(tmp_path: Path, binary: str) -> 
     status = subprocess.run(
         ("git", "status", "--porcelain"), cwd=project, text=True, capture_output=True, check=True
     )
-    dirty = [line for line in status.stdout.splitlines() if line.strip()]
-    # `.gitignore`는 install이 만드는 tracked 후보라 여기 대상이 아니다. 루트 컨텍스트
-    # 파일이 dirty의 원인이 되는지만 본다 — worktree 생성을 막는 것이 그것이다.
-    assert [line for line in dirty if "AGENTS.md" in line or "CLAUDE.md" in line] == [], status.stdout
-    exclude = (project / ".git" / "info" / "exclude").read_text(encoding="utf-8")
-    assert "AGENTS.md" in exclude and "CLAUDE.md" in exclude
+    dirty = [line for line in status.stdout.splitlines() if "AGENTS.md" in line or "CLAUDE.md" in line]
+    assert dirty == [], status.stdout
+    # 계약은 "git이 무시한다"이지 "어느 파일에 무슨 줄이 적혔다"가 아니다. git에게 묻는다.
+    ignored = subprocess.run(
+        ("git", "check-ignore", "AGENTS.md", "CLAUDE.md"),
+        cwd=project, text=True, capture_output=True, check=False,
+    )
+    assert ignored.stdout.split() == ["AGENTS.md", "CLAUDE.md"], ignored.stderr
+    # 루트에만 걸려야 한다. 하위 디렉터리의 같은 이름까지 가리면 패키지마다 컨텍스트
+    # 파일을 두는 저장소에서 새 문서가 조용히 커밋에서 빠진다.
+    nested = project / "packages" / "api"
+    nested.mkdir(parents=True)
+    (nested / "AGENTS.md").write_text("package contract\n", encoding="utf-8")
+    nested_ignored = subprocess.run(
+        ("git", "check-ignore", "-q", "packages/api/AGENTS.md"), cwd=project, check=False
+    )
+    assert nested_ignored.returncode != 0
     # tracked `.gitignore`에는 여전히 적지 않는다.
-    gitignore = (project / ".gitignore").read_text(encoding="utf-8").splitlines()
-    assert "AGENTS.md" not in [line.strip() for line in gitignore]
+    gitignore = [
+        line.strip()
+        for line in (project / ".gitignore").read_text(encoding="utf-8").splitlines()
+    ]
+    assert "AGENTS.md" not in gitignore and "CLAUDE.md" not in gitignore
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
