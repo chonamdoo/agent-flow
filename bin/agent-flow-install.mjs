@@ -65,6 +65,7 @@ import {
   BOOTSTRAP_KEPT_NOTICE_PREFIX,
   pruneUninstalledProfiles,
   pushWatchSkillMarkdown,
+  pathHasSymlink,
   READ_TOOL_MATCHER,
   readHookSettings,
   readJsonIfExists,
@@ -951,17 +952,6 @@ function previousSkillHash(previousIndex, name) {
 
 
 
-function pathHasSymlink(root, target) {
-  const relative = path.relative(root, target);
-  const parts = relative.split(path.sep).filter(Boolean);
-  let cursor = root;
-  for (const part of parts) {
-    cursor = path.join(cursor, part);
-    const stat = lstatIfExists(cursor);
-    if (stat && stat.isSymbolicLink()) return true;
-  }
-  return false;
-}
 
 function runKitInstall() {
   // kit.mjs가 prompts/rules/bootstrap/concise-output의 canonical generator다.

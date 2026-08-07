@@ -2511,14 +2511,16 @@ _TEMPLATE_RELATIVE = Path(".agent-flow/templates/_shared/review/sdui.md")
 _SCRIPT_RELATIVE = Path(".agent-flow/scripts/check-agent-flow-parity.mjs")
 _CODEX_AGENT_RELATIVE = Path(".Codex/agents/code-reviewer.md")
 _RUBRIC_RELATIVE = Path(".Codex/rules/codebase-rubric.md")
-_RECORDED_ASSETS = [
-    _SIBLING_RELATIVE,
-    _TEMPLATE_RELATIVE,
-    _SCRIPT_RELATIVE,
-    _CODEX_AGENT_RELATIVE,
-    _RUBRIC_RELATIVE,
-]
-_RECORDED_ASSET_IDS = ["sibling", "template", "script", "codex-agent", "rubric"]
+# `.agent-flow/`는 install이 만들고 install만 채운다. 기록이 없는 파일을 kit
+# 소유로 단정할 수 있는 자리는 여기뿐이다.
+_OWNED_ASSETS = [_SIBLING_RELATIVE, _TEMPLATE_RELATIVE, _SCRIPT_RELATIVE]
+_OWNED_ASSET_IDS = ["sibling", "template", "script"]
+# `.Codex/`·`.claude/`는 host가 쓰는 자리다. 사용자가 먼저 둔 파일이 있을 수 있어
+# 기록이 없다는 것이 "우리 것"이라는 근거가 되지 못한다.
+_UNOWNED_ASSETS = [_CODEX_AGENT_RELATIVE, _RUBRIC_RELATIVE]
+_UNOWNED_ASSET_IDS = ["codex-agent", "rubric"]
+_RECORDED_ASSETS = _OWNED_ASSETS + _UNOWNED_ASSETS
+_RECORDED_ASSET_IDS = _OWNED_ASSET_IDS + _UNOWNED_ASSET_IDS
 
 
 def _kit_asset_backup(project: Path, relative: Path) -> Path:
@@ -2533,7 +2535,7 @@ def _kit_asset_backup(project: Path, relative: Path) -> Path:
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-@pytest.mark.parametrize("relative", _RECORDED_ASSETS, ids=_RECORDED_ASSET_IDS)
+@pytest.mark.parametrize("relative", _OWNED_ASSETS, ids=_OWNED_ASSET_IDS)
 def test_kit_assets_without_a_record_are_upgraded_once(tmp_path: Path, binary: str, relative: Path) -> None:
     """반증: `SKILL.md` 밖 자산은 오라클이 없어 낡은 채로 남았다 — review 템플릿 4개가
     실제로 그랬다. 기록이 생기기 전에 깔린 프로젝트는 사본을 남기고 한 번 갱신한다."""
@@ -2560,6 +2562,58 @@ def test_kit_assets_without_a_record_are_upgraded_once(tmp_path: Path, binary: s
     again = _install_with(binary, project)
     assert f"upgraded: {relative.as_posix()}" not in again.stdout
 
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("relative", _UNOWNED_ASSETS, ids=_UNOWNED_ASSET_IDS)
+def test_unrecorded_assets_outside_agent_flow_are_left_alone(
+    tmp_path: Path, binary: str, relative: Path
+) -> None:
+    """반증: 기록이 없다는 것은 "우리 것"이라는 근거가 못 된다. `.Codex/`는 host가
+    쓰는 자리라 사용자가 먼저 둔 파일이 있고, 거기서 덮으면 `--force-managed` 없이도
+    사본만 남기고 활성 설정이 바뀐다."""
+    project = tmp_path / f"project-{binary}-{relative.name}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    target = project / relative
+    target.write_text("# 우리 팀 규칙\n", encoding="utf-8")
+    (project / ".agent-flow" / "kit-assets.json").unlink()
+
+    result = _install_with(binary, project)
+
+    assert result.returncode == 0, result.stderr
+    assert target.read_text(encoding="utf-8") == "# 우리 팀 규칙\n"
+    assert f"no record; pass --force-managed to replace): {relative.as_posix()}" in result.stdout
+    assert not _kit_asset_backup(project, relative).exists()
+    # 기록도 남기지 않는다. 우리가 쓰지 않은 내용을 기록하면 그 hash가 곧 "우리가 쓴
+    # 것"이 되어, 다음 install이 같은 편집을 근거 있게 덮는다.
+    record = json.loads((project / ".agent-flow" / "kit-assets.json").read_text(encoding="utf-8"))
+    assert relative.as_posix() not in record["files"]
+
+    again = _install_with(binary, project)
+    assert again.returncode == 0, again.stderr
+    assert target.read_text(encoding="utf-8") == "# 우리 팀 규칙\n"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_a_symlinked_asset_path_is_never_written_through(tmp_path: Path, binary: str) -> None:
+    """반증: `fs.writeFileSync`는 링크를 따라간다. dotfile 디렉터리를 공용 위치에
+    연결해 둔 설치에서 프로젝트 install이 프로젝트 밖 설정을 갈아치웠다."""
+    project = tmp_path / f"project-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    outside = tmp_path / f"shared-{binary}"
+    outside.mkdir()
+    shared = outside / _CODEX_AGENT_RELATIVE.name
+    shared.write_text("# 공용 리뷰 규칙\n", encoding="utf-8")
+    agents = project / _CODEX_AGENT_RELATIVE.parent
+    shutil.rmtree(agents)
+    agents.symlink_to(outside, target_is_directory=True)
+
+    result = _install_with(binary, project)
+
+    assert result.returncode == 0, result.stderr
+    assert shared.read_text(encoding="utf-8") == "# 공용 리뷰 규칙\n"
+    assert f"skipped (symlinked path): {_CODEX_AGENT_RELATIVE.as_posix()}" in result.stdout
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 @pytest.mark.parametrize("relative", _RECORDED_ASSETS, ids=_RECORDED_ASSET_IDS)

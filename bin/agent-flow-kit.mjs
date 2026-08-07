@@ -62,6 +62,7 @@ import {
   pruneUninstalledProfiles,
   pushWatchSkillMarkdown,
   READ_TOOL_MATCHER,
+  pathHasSymlink,
   readHookSettings,
   readJsonIfExists,
   readKitAssetRecord,
@@ -1893,19 +1894,6 @@ function previousSkillHash(previousIndex, name) {
 
 
 
-function pathHasSymlink(root, target) {
-  const relative = path.relative(root, target);
-  const parts = relative.split(path.sep).filter(Boolean);
-  let cursor = root;
-  for (const part of parts) {
-    cursor = path.join(cursor, part);
-    const stat = lstatIfExists(cursor);
-    if (stat && stat.isSymbolicLink()) {
-      return true;
-    }
-  }
-  return false;
-}
 
 function preferredPython() {
   const virtualEnvPython = process.env.VIRTUAL_ENV

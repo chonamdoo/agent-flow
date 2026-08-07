@@ -541,6 +541,7 @@ _SHARED_ONLY = (
     "preserveKitSkillHashes", "syncKitAssets", "syncKitAsset", "syncRecordedKitAssets",
     "readKitAssetRecord", "writeKitAssetRecord",
     "isBundledSkillManifest", "isManagedHookScript", "isRecordedKitAsset",
+    "pathHasSymlink",
     "reportSkippedUserEdit",
     # `samePath`/`gitEnv`/`resolveInstallRoot`는 뺐다. `lib/omp-hooks-extension.mjs`가
     # 생성물 안에 같은 이름을 들고 있어 이 검사로는 셀 수 없다.
