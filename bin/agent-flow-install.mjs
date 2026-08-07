@@ -39,7 +39,7 @@ import {
   installedProfileFileNames,
   installProjectLauncher,
   syncManagedWorktreeHostHooks,
-  isBundledSkillManifest,
+  isRecordedKitAsset,
   isPruneBackupName,
   isRetiredHookCommand,
   KIT_ASSETS_RELATIVE,
@@ -89,7 +89,7 @@ import {
   SKILL_INDEX_START,
   SKILL_UPGRADE_NOTICE_PREFIX,
   skillIndexBlock,
-  syncKitAssets,
+  syncRecordedKitAssets,
   tomlBasicString,
   uniqueStrings,
   unquoteShellWord,
@@ -345,7 +345,12 @@ function copyDir(
         const destContent = fs.readFileSync(destPath, "utf8");
         if (srcContent !== destContent && !force) {
           skipped += 1;
-          reportSkippedUserEdit(path.relative(PROJECT, destPath));
+          // 기록이 있는 자산은 record sync가 판정한다. 여기서도 보고하면 곧
+          // 갱신될 파일에 "user-modified"가 붙어 출력이 서로를 부정한다.
+          const label = path.relative(PROJECT, destPath);
+          if (!isRecordedKitAsset(label)) {
+            reportSkippedUserEdit(label);
+          }
           continue;
         }
       }
@@ -428,7 +433,10 @@ function copyFileIfMissingOrSame(src, dest, force = false) {
     return true;
   }
   if (fs.existsSync(dest) && fs.readFileSync(dest, "utf8") !== srcContent) {
-    reportSkippedUserEdit(path.relative(PROJECT, dest));
+    const label = path.relative(PROJECT, dest);
+    if (!isRecordedKitAsset(label)) {
+      reportSkippedUserEdit(label);
+    }
     return false;
   }
   fs.copyFileSync(src, dest);
@@ -1133,17 +1141,6 @@ function install() {
     FORCE_MANAGED,
     FORCE_MANAGED,
   );
-  // 복사 단계는 내용이 다르면 손대지 않으므로 kit이 고친 형제 파일과 템플릿이 기존
-  // 설치본에 닿지 않는다. `SKILL.md`는 index hash가 오라클이고, 나머지는 이 기록이다.
-  if (recordedAssets) {
-    syncKitAssets(PROJECT, path.join(KIT_ROOT, "skills"), path.join(AF_DIR, "skills"), recordedAssets, writtenAssets, {
-      skip: isBundledSkillManifest,
-    });
-    syncKitAssets(PROJECT, path.join(KIT_ROOT, "templates"), path.join(AF_DIR, "templates"), recordedAssets, writtenAssets);
-    writeKitAssetRecord(PROJECT, writtenAssets);
-  } else {
-    console.warn(`warning: ${KIT_ASSETS_RELATIVE} is unreadable; kit asset sync skipped (delete it to re-bootstrap)`);
-  }
   copyDir(
     path.join(KIT_ROOT, "templates"),
     path.join(AF_DIR, "runtime", "python", "agent_flow", "templates"),
@@ -1218,6 +1215,18 @@ function install() {
     path.join(PROJECT, ".Codex", "rules", "codebase-rubric.md"),
     FORCE_MANAGED,
   );
+  // 복사 단계는 내용이 다르면 손대지 않으므로 kit이 고친 자산이 기존 설치본에
+  // 닿지 않는다. `SKILL.md`는 index hash가, managed hook은 digest가 오라클이고,
+  // 나머지는 이 기록이다. 목록은 `RECORDED_KIT_ASSET_TREES` 한 벌이다.
+  //
+  // 복사가 전부 끝난 뒤에 돈다. 앞서 돌면 이번 install이 처음 만든 파일이 기록에
+  // 안 남아, 다음 install이 근거 없이 판정한다.
+  if (recordedAssets) {
+    syncRecordedKitAssets(PROJECT, KIT_ROOT, recordedAssets, writtenAssets);
+    writeKitAssetRecord(PROJECT, writtenAssets);
+  } else {
+    console.warn(`warning: ${KIT_ASSETS_RELATIVE} is unreadable; kit asset sync skipped (delete it to re-bootstrap)`);
+  }
 
   const agentFlowSkill = path.join(AF_DIR, "skills", "agent-flow");
   const claudeSkillStatus = linkOrCopyDir(

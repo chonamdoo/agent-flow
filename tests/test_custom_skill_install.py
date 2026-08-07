@@ -2506,10 +2506,34 @@ def test_an_upgraded_skill_can_still_be_dropped_by_narrowing_the_profile(tmp_pat
 
 _SIBLING_RELATIVE = Path(".agent-flow/skills/android-guides/references/architecture-rules-guide.md")
 _TEMPLATE_RELATIVE = Path(".agent-flow/templates/_shared/review/sdui.md")
+# 오라클이 없어 "내용이 다르면 안 덮는다"에 영영 걸려 있던 자산들. 설치된 프로젝트
+# 13개 전부에서 script가, 그중 5개에서 reviewer/rule이 옛 판본으로 굳어 있었다.
+_SCRIPT_RELATIVE = Path(".agent-flow/scripts/check-agent-flow-parity.mjs")
+_CODEX_AGENT_RELATIVE = Path(".Codex/agents/code-reviewer.md")
+_RUBRIC_RELATIVE = Path(".Codex/rules/codebase-rubric.md")
+_RECORDED_ASSETS = [
+    _SIBLING_RELATIVE,
+    _TEMPLATE_RELATIVE,
+    _SCRIPT_RELATIVE,
+    _CODEX_AGENT_RELATIVE,
+    _RUBRIC_RELATIVE,
+]
+_RECORDED_ASSET_IDS = ["sibling", "template", "script", "codex-agent", "rubric"]
+
+
+def _kit_asset_backup(project: Path, relative: Path) -> Path:
+    """사본은 언제나 `.agent-flow/backups/` 안이다. `.agent-flow/` 밖의 자산은
+    루트 기준으로 밀어 넣는다 - 그대로 이으면 `..`가 사본을 backups 밖으로 낸다."""
+    mirrored = (
+        relative.relative_to(".agent-flow")
+        if relative.is_relative_to(".agent-flow")
+        else relative
+    )
+    return project / ".agent-flow" / "backups" / mirrored
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-@pytest.mark.parametrize("relative", [_SIBLING_RELATIVE, _TEMPLATE_RELATIVE], ids=["sibling", "template"])
+@pytest.mark.parametrize("relative", _RECORDED_ASSETS, ids=_RECORDED_ASSET_IDS)
 def test_kit_assets_without_a_record_are_upgraded_once(tmp_path: Path, binary: str, relative: Path) -> None:
     """반증: `SKILL.md` 밖 자산은 오라클이 없어 낡은 채로 남았다 — review 템플릿 4개가
     실제로 그랬다. 기록이 생기기 전에 깔린 프로젝트는 사본을 남기고 한 번 갱신한다."""
@@ -2527,18 +2551,18 @@ def test_kit_assets_without_a_record_are_upgraded_once(tmp_path: Path, binary: s
     assert result.returncode == 0, result.stderr
     assert target.read_text(encoding="utf-8") == shipped
     assert f"upgraded: {relative.as_posix()}" in result.stdout
-    backup = project / ".agent-flow" / "backups" / relative.relative_to(".agent-flow")
+    backup = _kit_asset_backup(project, relative)
     assert backup.read_text(encoding="utf-8") == "# 낡은 판본\n"
     # 사본은 미러 트리 밖에 남는다. 안에 남기면 profile을 좁혀도 그 skill이 안 지워진다.
     assert not list(target.parent.glob("*.bak*"))
-    assert f"backup: .agent-flow/backups/{relative.relative_to('.agent-flow').as_posix()}" in result.stdout
+    assert f"backup: {backup.relative_to(project).as_posix()}" in result.stdout
 
     again = _install_with(binary, project)
     assert f"upgraded: {relative.as_posix()}" not in again.stdout
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-@pytest.mark.parametrize("relative", [_SIBLING_RELATIVE, _TEMPLATE_RELATIVE], ids=["sibling", "template"])
+@pytest.mark.parametrize("relative", _RECORDED_ASSETS, ids=_RECORDED_ASSET_IDS)
 def test_kit_assets_keep_a_user_edit_across_reinstalls(tmp_path: Path, binary: str, relative: Path) -> None:
     """불변: 기록과 다른 내용은 사용자 편집이다. 몇 번을 재설치해도 남아야 한다."""
     project = tmp_path / f"project-{binary}-{relative.name}"

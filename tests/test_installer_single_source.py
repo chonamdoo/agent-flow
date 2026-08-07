@@ -508,6 +508,22 @@ def test_both_entry_points_call_the_shared_trust_removal(entry: str):
     )
 
 
+@pytest.mark.parametrize(
+    "entry", ["agent-flow-kit.mjs", "agent-flow-install.mjs"]
+)
+def test_both_entry_points_sync_the_recorded_kit_assets(entry: str):
+    """반증: 한쪽이 호출을 빼면 그 CLI로 깐 프로젝트만 kit 개정을 못 받는다.
+    자산 목록을 진입점에 손으로 나열하는 것도 같은 갈라짐이라 막는다."""
+    source = (BIN / entry).read_text(encoding="utf-8")
+    assert "syncRecordedKitAssets(" in source
+    assert "syncRecordedKitAssets," in source, (
+        f"{entry}가 공유 모듈에서 syncRecordedKitAssets를 가져오지 않는다"
+    )
+    assert "syncKitAssets(" not in source, (
+        f"{entry}가 자산 트리를 직접 지명한다; 목록은 공유 모듈 한 벌이다"
+    )
+
+
 # 두 진입점에 본문이 한 벌씩 있던 것들. 사본이 다시 생기면 여기서 걸린다.
 _SHARED_ONLY = (
     "architectureReviewerSkillMarkdown", "fullFeatureSkillMarkdown",
@@ -522,8 +538,10 @@ _SHARED_ONLY = (
     "docsIndexBlock", "upsertDocsIndexBlock", "upsertManagedSubBlock",
     "extractCliOption", "cliOptionValue", "requestedInstallRootOption",
     "withoutInstallRootOption", "assertInstallRootIsFinal", "upgradeBundledSkills",
-    "preserveKitSkillHashes", "syncKitAssets", "readKitAssetRecord", "writeKitAssetRecord",
-    "isBundledSkillManifest", "reportSkippedUserEdit",
+    "preserveKitSkillHashes", "syncKitAssets", "syncKitAsset", "syncRecordedKitAssets",
+    "readKitAssetRecord", "writeKitAssetRecord",
+    "isBundledSkillManifest", "isManagedHookScript", "isRecordedKitAsset",
+    "reportSkippedUserEdit",
     # `samePath`/`gitEnv`/`resolveInstallRoot`는 뺐다. `lib/omp-hooks-extension.mjs`가
     # 생성물 안에 같은 이름을 들고 있어 이 검사로는 셀 수 없다.
     "canonicalPath", "gitOutput",
