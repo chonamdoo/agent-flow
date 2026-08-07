@@ -96,6 +96,7 @@ import {
   upgradeBundledSkills,
   upsertGitExclude,
   upsertGitignore,
+  upsertDocsIndexBlock,
   upsertSkillIndexBlock,
   upsertRootBootstrapBlock,
   validateSkillDependencies,
@@ -1096,6 +1097,7 @@ function install() {
   installManagedWorkflowSkills();
   const skillIndex = installProjectSkills(FORCE_MANAGED, installSelection);
   upsertSkillIndexBlock(PROJECT);
+  upsertDocsIndexBlock(PROJECT);
   const workflowsCopied = copyDir(
     path.join(PACKAGED_ASSETS, "workflows"),
     path.join(AF_DIR, "workflows"),

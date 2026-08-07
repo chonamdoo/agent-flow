@@ -93,6 +93,7 @@ import {
   upsertGitExclude,
   upgradeBundledSkills,
   upsertGitignore,
+  upsertDocsIndexBlock,
   upsertSkillIndexBlock,
   upsertRootBootstrapBlock,
   validateSkillDependencies,
@@ -386,6 +387,7 @@ function installProject(requestedRoot) {
   ));
   reportRootBootstrapBlocks(bootstrapStatuses);
   upsertSkillIndexBlock(root);
+  upsertDocsIndexBlock(root);
   pruneRetiredHookScripts(root, hooksDisabled);
   pruneRetiredManagedScripts(root);
   makeHooksExecutable(root);
@@ -2143,17 +2145,18 @@ function managedBootstrapMarkdown(label) {
   const template = readBootstrapTemplate();
   const lines = rootBootstrapBlock(label, template.text).split(/\r?\n/);
   const body = [];
-  let insideSkillIndex = false;
+  let insideIndexBlock = false;
   for (const line of lines) {
     const marker = BOOTSTRAP_MARKER_LINE.exec(line.trim());
     if (marker) {
-      // skill 인덱스 자리는 install이 **루트 파일에만** 채운다. 사본에 그 자리를
+      // 인덱스 자리(skill·docs)는 install이 **루트 파일에만** 채운다. 사본에 그 자리를
       // 남기면 "아직 없다. install이 채운다"가 영원히 참이 되지 않는 문장으로 굳는다.
-      if (marker[1] === "skills:start") insideSkillIndex = true;
-      else if (marker[1] === "skills:end") insideSkillIndex = false;
+      // 인덱스별로 이 판정을 따로 적으면 새로 더한 인덱스만 사본으로 새어 나간다.
+      if (marker[1].endsWith(":start")) insideIndexBlock = true;
+      else if (marker[1].endsWith(":end")) insideIndexBlock = false;
       continue;
     }
-    if (insideSkillIndex) continue;
+    if (insideIndexBlock) continue;
     body.push(line);
   }
   const text = body.join("\n").trim();

@@ -1556,6 +1556,81 @@ def test_install_writes_the_skill_index_into_agents_md(tmp_path: Path, binary: s
     assert "[agent-flow skill index]" not in (project / "CLAUDE.md").read_text(encoding="utf-8")
 
 
+def _docs_index_lines(project: Path) -> list[str]:
+    text = (project / "AGENTS.md").read_text(encoding="utf-8")
+    start = text.index("<!-- agent-flow:docs:start -->")
+    end = text.index("<!-- agent-flow:docs:end -->")
+    return [line for line in text[start:end].splitlines() if line.startswith("|")]
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_indexes_project_docs_without_touching_two_files(
+    tmp_path: Path, binary: str
+) -> None:
+    """불변: 팀이 `docs/`에 md를 더하면 install이 인덱스를 채운다.
+
+    반증: 인덱스가 없으면 그 문서의 존재를 아는 유일한 경로가 사람이 루트 계약
+    파일을 손으로 고치는 것이다. 그리고 host마다 손댈 파일이 달라진다 — Claude는
+    `CLAUDE.md`만, Codex/OMP는 `AGENTS.md`만 읽으므로.
+
+    본문이 아니라 경로만 싣는다. Claude의 `@path`는 파일 전체를 컨텍스트에 넣고
+    Codex는 그 줄을 확장조차 하지 않으므로, import는 두 host 어디에서도 답이 아니다.
+    """
+    project = tmp_path / f"docs-index-{binary}"
+    (project / "docs" / "adr").mkdir(parents=True)
+    (project / "docs" / "new-rule.md").write_text("# rule\n", encoding="utf-8")
+    (project / "docs" / "adr" / "0001-pick-a-db.md").write_text("# adr\n", encoding="utf-8")
+    (project / "docs" / "diagram.png").write_bytes(b"not markdown")
+    assert _install_with(binary, project).returncode == 0
+
+    lines = _docs_index_lines(project)
+    assert "|docs:{new-rule.md}" in lines
+    assert "|docs/adr:{0001-pick-a-db.md}" in lines
+    assert not any("diagram.png" in line for line in lines), "md가 아닌 파일이 인덱스에 올랐다"
+    # 인덱스 자리는 하나다. 두 곳에 심으면 Claude가 `@AGENTS.md`로 같은 목록을 두 번 받는다.
+    assert "[agent-flow docs index]" not in (project / "CLAUDE.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_leaves_the_docs_index_empty_without_a_docs_dir(
+    tmp_path: Path, binary: str
+) -> None:
+    """불변: `docs/`가 없는 프로젝트는 한 줄도 부담하지 않는다.
+
+    반증: "문서가 없다"는 한 줄조차 모든 세션이 상시 낸다. 마커는 남겨야 다음
+    install이 채울 자리를 찾는다.
+    """
+    project = tmp_path / f"docs-empty-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+
+    agents = (project / "AGENTS.md").read_text(encoding="utf-8")
+    assert "<!-- agent-flow:docs:start -->" in agents
+    assert "[agent-flow docs index]" not in agents
+    assert _docs_index_lines(project) == []
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_reinstall_refreshes_the_docs_index(tmp_path: Path, binary: str) -> None:
+    """불변: 재설치가 목록을 현재 상태로 맞춘다.
+
+    반증: 한 번 쓰고 갱신하지 않으면 지워진 문서가 인덱스에 남아, 모델이 없는
+    파일을 읽으려다 실패한다. 그 실패는 "문서가 없다"와 구별되지 않는다.
+    """
+    project = tmp_path / f"docs-refresh-{binary}"
+    (project / "docs").mkdir(parents=True)
+    (project / "docs" / "first.md").write_text("# first\n", encoding="utf-8")
+    assert _install_with(binary, project).returncode == 0
+    assert "|docs:{first.md}" in _docs_index_lines(project)
+
+    (project / "docs" / "first.md").unlink()
+    (project / "docs" / "second.md").write_text("# second\n", encoding="utf-8")
+    assert _install_with(binary, project).returncode == 0
+
+    assert "|docs:{second.md}" in _docs_index_lines(project)
+    assert not any("first.md" in line for line in _docs_index_lines(project))
+
+
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_root_claude_md_is_a_pointer_to_agents_md(tmp_path: Path, binary: str) -> None:
     """반증 1: 블록만 두면 블록 **밖** 프로젝트 규칙이 Claude에게만 사라진다.

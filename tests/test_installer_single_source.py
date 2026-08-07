@@ -519,6 +519,7 @@ _SHARED_ONLY = (
     "pruneRetiredHooks", "pruneRetiredHookScripts", "mergeHookSettings",
     "mergeHookConfig", "claudeHooksSettings", "codexHooksSettings",
     "skillIndexBlock", "upsertSkillIndexBlock",
+    "docsIndexBlock", "upsertDocsIndexBlock", "upsertManagedSubBlock",
     "extractCliOption", "cliOptionValue", "requestedInstallRootOption",
     "withoutInstallRootOption", "assertInstallRootIsFinal", "upgradeBundledSkills",
     "preserveKitSkillHashes", "syncKitAssets", "readKitAssetRecord", "writeKitAssetRecord",
