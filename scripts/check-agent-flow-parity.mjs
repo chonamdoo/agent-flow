@@ -234,6 +234,12 @@ assertContains("lib/installer-shared.mjs", "export function removeCodexBroadTrus
 assertContains("lib/installer-shared.mjs", "export function skillIndexBlock(root)");
 assertContains("lib/installer-shared.mjs", "export function upsertSkillIndexBlock(root)");
 assertContains("lib/installer-shared.mjs", 'export const SKILL_INDEX_START = "<!-- agent-flow:skills:start -->"');
+assertContains("lib/installer-shared.mjs", "export function docsIndexBlock(root)");
+assertContains("lib/installer-shared.mjs", "export function upsertDocsIndexBlock(root)");
+assertContains("lib/installer-shared.mjs", 'export const DOCS_INDEX_START = "<!-- agent-flow:docs:start -->"');
+// 두 인덱스가 소유권 판정과 receipt 갱신을 한 벌로 공유해야 한다. 각자 적으면
+// 새 인덱스만 `kept-user-edited` 블록을 덮는 쪽으로 갈라진다.
+assertContains("lib/installer-shared.mjs", "function upsertManagedSubBlock(root, startMarker, endMarker, block)");
 
 // `installCodexHooks`/`installClaudeHooks`/`installOmpHooks` 본문은 각 진입점의
 // 전역을 읽어 아직 각자 갖고 있다. 아래 단언은 그 본문에 걸린 계약이라 두 파일을
@@ -245,6 +251,7 @@ for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]
   // 두 진입점이 같은 인덱스를 만들어야 한다. 한쪽만 채우면 install 순서에 따라
   // AGENTS.md의 인덱스가 있었다 없었다 한다.
   assertContains(installer, "upsertSkillIndexBlock(");
+  assertContains(installer, "upsertDocsIndexBlock(");
   // install이 **현재 등록된** hook의 해시를 trusted로 되받아 적으면, 변조된
   // 등록이 다음 install에서 승인 상태로 세탁된다. 읽는 코드도 없었다.
   // 등록 무결성은 런 시작 시 hook_integrity가 kit.json과 대조한다.
@@ -658,6 +665,10 @@ function externalDomainsWithoutTerms(text) {
 // 여기서는 label별 템플릿이 되살아나지 않았는지를 본다.
 assertMissing("bootstrap/CLAUDE.md.template");
 assertContains("bootstrap/AGENTS.md.template", "<!-- agent-flow:end -->");
+// 인덱스 자리는 템플릿이 연다. 여기 없으면 install이 채울 자리가 없어 문서 인덱스가
+// 조용히 생기지 않고, 그 침묵은 "docs/가 비었다"와 구별되지 않는다.
+assertContains("bootstrap/AGENTS.md.template", "<!-- agent-flow:docs:start -->");
+assertContains("bootstrap/AGENTS.md.template", "<!-- agent-flow:docs:end -->");
 // 템플릿 자신은 import를 담지 않는다. 담으면 `AGENTS.md`가 자기 자신을 import한다.
 assertNotContains("bootstrap/AGENTS.md.template", "@AGENTS.md");
 
@@ -676,6 +687,7 @@ for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]
   assertContains(installer, "rootBootstrapBlock(label, ");
   assertNotContains(installer, "`${label}.template`");
   assertNotContains(installer, "<!-- agent-flow:skills:start -->");
+  assertNotContains(installer, "<!-- agent-flow:docs:start -->");
   assertNotContains(installer, "## Agent Flow");
   assertNotContains(installer, "### Workflow Contract");
   assertNotContains(installer, "### Context Economy");
@@ -1222,15 +1234,17 @@ function assertInstalledBootstrapDerivesFromTemplate(label, tempRoot) {
   const template = readIfExists("bootstrap/AGENTS.md.template");
   if (template === null) return;
   const body = [];
-  let insideSkillIndex = false;
+  let insideIndexBlock = false;
   for (const line of template.split(/\r?\n/)) {
     const marker = /^<!--\s*agent-flow:([a-z:]*)\s*-->$/.exec(line.trim());
     if (marker) {
-      if (marker[1] === "skills:start") insideSkillIndex = true;
-      else if (marker[1] === "skills:end") insideSkillIndex = false;
+      // 인덱스 자리(skill·docs)는 install이 루트 파일에만 채운다. 인덱스마다 이름을
+      // 적으면 새 인덱스가 사본 대조에서 빠져 드리프트가 통과한다.
+      if (marker[1].endsWith(":start")) insideIndexBlock = true;
+      else if (marker[1].endsWith(":end")) insideIndexBlock = false;
       continue;
     }
-    if (insideSkillIndex) continue;
+    if (insideIndexBlock) continue;
     body.push(line);
   }
   const derived = body.join("\n").trim();
@@ -1263,7 +1277,7 @@ function assertInstalledBootstrapDerivesFromTemplate(label, tempRoot) {
     failures.push(`${label} install missing root AGENTS.md`);
   } else {
     const agentsText = fs.readFileSync(agentsPath, "utf8");
-    for (const segment of blockSegmentsOutsideSkillIndex(template)) {
+    for (const segment of blockSegmentsOutsideIndexes(template)) {
       if (!agentsText.includes(segment)) {
         failures.push(`${label} root AGENTS.md does not carry bootstrap/AGENTS.md.template verbatim`);
         break;
@@ -1286,7 +1300,7 @@ function assertInstalledBootstrapDerivesFromTemplate(label, tempRoot) {
         failures.push(`${label} root CLAUDE.md is missing ${segment}`);
       }
     }
-    for (const duplicated of ["### Workflow Contract", "### Context Economy", "[agent-flow skill index]"]) {
+    for (const duplicated of ["### Workflow Contract", "### Context Economy", "[agent-flow skill index]", "[agent-flow docs index]"]) {
       if (claudeText.includes(duplicated)) {
         failures.push(`${label} root CLAUDE.md duplicates ${duplicated}; it must point at AGENTS.md instead`);
       }
@@ -1294,13 +1308,24 @@ function assertInstalledBootstrapDerivesFromTemplate(label, tempRoot) {
   }
 }
 
-function blockSegmentsOutsideSkillIndex(text) {
-  const start = text.indexOf("<!-- agent-flow:skills:start -->");
-  const end = text.indexOf("<!-- agent-flow:skills:end -->");
-  if (start === -1 || end === -1) {
-    return [text.trimEnd()];
+// 인덱스 자리는 install이 채우므로 템플릿과 대조할 수 없다. 그 구간만 도려내고
+// 나머지를 원문과 맞춘다. 인덱스를 더할 때 여기를 같이 고치지 않으면 새 인덱스가
+// "템플릿에 없는 텍스트"로 보여 정상 설치가 실패로 뒤집힌다.
+function blockSegmentsOutsideIndexes(text) {
+  const cuts = [
+    ["<!-- agent-flow:skills:start -->", "<!-- agent-flow:skills:end -->"],
+    ["<!-- agent-flow:docs:start -->", "<!-- agent-flow:docs:end -->"],
+  ];
+  let segments = [text];
+  for (const [startMarker, endMarker] of cuts) {
+    segments = segments.flatMap((segment) => {
+      const start = segment.indexOf(startMarker);
+      const end = segment.indexOf(endMarker);
+      if (start === -1 || end === -1) return [segment];
+      return [segment.slice(0, start), segment.slice(end)];
+    });
   }
-  return [text.slice(0, start).trimEnd(), text.slice(end).trimEnd()];
+  return segments.map((segment) => segment.trimEnd()).filter((segment) => segment !== "");
 }
 
 // 두 installer는 같은 파일명과 같은 문장으로 알려야 한다. 문구가 갈라지면

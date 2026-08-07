@@ -25,4 +25,6 @@
 <!-- agent-flow:skills:start -->
 - 설치된 skill 인덱스가 아직 없다. install이 이 자리에 채운다.
 <!-- agent-flow:skills:end -->
+<!-- agent-flow:docs:start -->
+<!-- agent-flow:docs:end -->
 <!-- agent-flow:end -->
