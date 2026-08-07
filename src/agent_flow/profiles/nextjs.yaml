@@ -102,7 +102,12 @@ skills:
       # 실측: `context provider`는 clean-architecture 계열 4개를, `performance optimization`은
       # React Native용 best-practices skill을 함께 끌어와서 둘 다 뺐다. 웹 쪽 판정은
       # `bundle optimization` 하나로 충분하다(실측 1개).
-      - id: react-component-design
+      #
+      # id에 `web-`을 붙이는 이유는 `react-native`의 같은 관심사 domain이 다른 어휘를
+      # 쓰기 때문이다. 같은 id를 공유하면 `merged_profile_payload`가 먼저 온 profile
+      # 것만 남겨(`core/local_skills.py:109-113`) 여기서 일부러 뺀
+      # `performance optimization`이 profile 순서에 따라 다시 들어온다.
+      - id: web-component-design
         terms: ["bundle optimization", "component architecture",
                 "compound component", "render prop", "boolean prop"]
         phases: [implementation, review]

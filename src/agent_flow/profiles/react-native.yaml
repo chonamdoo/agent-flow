@@ -113,7 +113,13 @@ skills:
       # 컴포넌트 설계·렌더 비용 어휘. `list-render-performance`는 리스트 자료구조 쪽
       # 어휘라 컴포넌트 API 설계(compound component, render prop)에 걸리지 않았다.
       # 실측: `context provider`는 clean-architecture 계열 4개를 함께 끌어와서 뺐다.
-      - id: react-component-design
+      #
+      # id에 `rn-`을 붙이는 이유는 `nextjs`의 같은 관심사 domain과 어휘가 다르기
+      # 때문이다. `merged_profile_payload`는 같은 id를 먼저 온 profile 것만 남기므로
+      # (`core/local_skills.py:109-113`), id를 공유하면 `nextjs,react-native` 동시
+      # 활성에서 profile 순서가 어휘를 정하게 된다 — 여기 `performance optimization`이
+      # 통째로 사라지거나, nextjs가 일부러 뺀 그 어휘가 거기로 새어 들어간다.
+      - id: rn-component-design
         terms: ["performance optimization", "bundle optimization", "component architecture",
                 "compound component", "render prop", "boolean prop"]
         phases: [implementation, review]

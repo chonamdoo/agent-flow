@@ -22,7 +22,7 @@ from agent_flow.core.architecture_lint import (  # noqa: E402
     main as architecture_lint_main,
     profile_lint_context,
 )
-from agent_flow.core.local_skills import resolved_profile  # noqa: E402
+from agent_flow.core.local_skills import merged_profile_payload, resolved_profile  # noqa: E402
 from agent_flow.core.profiles import (  # noqa: E402
     DEFAULT_GATE_PHASE,
     GATE_PHASE_ALL,
@@ -784,3 +784,56 @@ def test_override_accepts_every_scope_the_sweep_consumes(tmp_path, value):
     payload = load_profile_payload("android", tmp_path)
 
     assert payload["branching"]["leader_tripwire"] == value
+
+
+def _external_domains(payload: dict) -> dict[str, tuple[str, ...]]:
+    block = (payload.get("skills") or {}).get("external") or {}
+    return {
+        str(domain.get("id")): tuple(domain.get("terms") or [])
+        for domain in block.get("domains") or []
+        if isinstance(domain, dict)
+    }
+
+
+def test_shipped_profiles_never_share_a_domain_id_with_different_vocabulary():
+    """불변: external domain id는 그 어휘의 소유자다.
+
+    반증: `merged_profile_payload`는 같은 id를 **먼저 온 profile 것만** 남긴다
+    (`core/local_skills.py`). 서로 다른 어휘를 적은 두 profile이 id를 공유하면
+    합집합의 어휘가 profile 탐지 순서로 정해지고, 뒤에 온 쪽 어휘는 통째로
+    사라진다. 실측으로 `nextjs`+`react-native`가 `react-component-design`을
+    공유하던 동안 RN의 `performance optimization`이 그렇게 없어졌다.
+    """
+    by_id: dict[str, dict[str, tuple[str, ...]]] = {}
+    for profile_id in _profile_ids():
+        payload = yaml.safe_load((PROFILES_DIR / f"{profile_id}.yaml").read_text(encoding="utf-8"))
+        for domain_id, terms in _external_domains(payload).items():
+            by_id.setdefault(domain_id, {})[profile_id] = terms
+
+    conflicts = {
+        domain_id: sorted(owners)
+        for domain_id, owners in by_id.items()
+        if len(set(owners.values())) > 1
+    }
+
+    assert conflicts == {}, (
+        f"같은 domain id를 다른 어휘로 선언한 profile이 있다: {conflicts}. "
+        "id를 profile별로 나누거나 어휘를 일치시켜라."
+    )
+
+
+@pytest.mark.parametrize(
+    "order", [("nextjs", "react-native"), ("react-native", "nextjs")]
+)
+def test_profile_union_keeps_each_component_design_vocabulary(order):
+    """불변: 합집합의 어휘는 profile 순서와 무관하다.
+
+    `performance optimization`은 RN에서는 필요하고(React Native용 best-practices
+    skill이 그 어휘로만 잡힌다) 웹에서는 뺀 어휘다(같은 term이 RN skill을 Next.js
+    프로젝트로 끌어온다). 두 판정이 한 id를 공유하면 둘 중 하나가 반드시 진다.
+    """
+    merged = merged_profile_payload([load_profile_payload(profile_id) for profile_id in order])
+    domains = _external_domains(merged)
+
+    assert "performance optimization" in domains["rn-component-design"]
+    assert "performance optimization" not in domains["web-component-design"]
