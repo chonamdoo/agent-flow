@@ -22,7 +22,7 @@ from agent_flow.core.architecture_lint import (  # noqa: E402
     main as architecture_lint_main,
     profile_lint_context,
 )
-from agent_flow.core.local_skills import resolved_profile  # noqa: E402
+from agent_flow.core.local_skills import merged_profile_payload, resolved_profile  # noqa: E402
 from agent_flow.core.profiles import (  # noqa: E402
     DEFAULT_GATE_PHASE,
     GATE_PHASE_ALL,
@@ -32,6 +32,9 @@ from agent_flow.core.profiles import (  # noqa: E402
     load_profile,
     load_profile_payload,
 )
+from agent_flow.core.skill_catalog import discover_skill_catalog  # noqa: E402
+from agent_flow.core.skill_matching import match_external  # noqa: E402
+from agent_flow.core.skill_resolver import skill_roots  # noqa: E402
 from agent_flow.core.worktree_isolation import LEADER_SWEEP_SCOPES  # noqa: E402
 from agent_flow.runner import _load_profile as load_runner_profile  # noqa: E402
 
@@ -784,3 +787,112 @@ def test_override_accepts_every_scope_the_sweep_consumes(tmp_path, value):
     payload = load_profile_payload("android", tmp_path)
 
     assert payload["branching"]["leader_tripwire"] == value
+
+
+def _external_domains(payload: dict) -> dict[str, tuple[str, ...]]:
+    block = (payload.get("skills") or {}).get("external") or {}
+    return {
+        str(domain.get("id")): tuple(domain.get("terms") or [])
+        for domain in block.get("domains") or []
+        if isinstance(domain, dict)
+    }
+
+
+def test_shipped_profiles_never_share_a_domain_id_with_different_vocabulary():
+    """불변: external domain id는 그 어휘의 소유자다.
+
+    반증: `merged_profile_payload`는 같은 id를 **먼저 온 profile 것만** 남긴다
+    (`core/local_skills.py`). 서로 다른 어휘를 적은 두 profile이 id를 공유하면
+    합집합의 어휘가 profile 탐지 순서로 정해지고, 뒤에 온 쪽 어휘는 통째로
+    사라진다. 실측으로 `nextjs`+`react-native`가 `react-component-design`을
+    공유하던 동안 RN의 `performance optimization`이 그렇게 없어졌다.
+    """
+    by_id: dict[str, dict[str, tuple[str, ...]]] = {}
+    for profile_id in _profile_ids():
+        payload = yaml.safe_load((PROFILES_DIR / f"{profile_id}.yaml").read_text(encoding="utf-8"))
+        for domain_id, terms in _external_domains(payload).items():
+            by_id.setdefault(domain_id, {})[profile_id] = terms
+
+    conflicts = {
+        domain_id: sorted(owners)
+        for domain_id, owners in by_id.items()
+        if len(set(owners.values())) > 1
+    }
+
+    assert conflicts == {}, (
+        f"같은 domain id를 다른 어휘로 선언한 profile이 있다: {conflicts}. "
+        "id를 profile별로 나누거나 어휘를 일치시켜라."
+    )
+
+
+@pytest.mark.parametrize(
+    "order", [("nextjs", "react-native"), ("react-native", "nextjs")]
+)
+def test_profile_union_vocabulary_is_order_independent(order):
+    """불변: 합집합의 어휘는 profile 순서와 무관하다.
+
+    `performance optimization`은 RN에서는 필요하고(React Native용 best-practices
+    skill이 그 어휘로만 잡힌다) 웹에서는 뺀 어휘다(같은 term이 그 RN skill을 Next.js
+    프로젝트로 끌어온다). 그래서 공통 어휘와 RN 전용 어휘는 다른 domain에 있어야 한다.
+    """
+    merged = merged_profile_payload([load_profile_payload(profile_id) for profile_id in order])
+    domains = _external_domains(merged)
+
+    assert domains["rn-component-performance"] == ("performance optimization",)
+    assert "performance optimization" not in domains["component-design"]
+    assert "compound component" in domains["component-design"]
+
+
+def test_no_shipped_external_domain_is_a_superset_of_another():
+    """불변: 한 domain의 어휘가 다른 domain 어휘를 통째로 포함하지 않는다.
+
+    반증: `match_external`은 skill을 **먼저 걸린 domain**에 배정하고 `_truncate`가
+    domain별 round-robin으로 자른다. superset domain이 먼저 순회되면 subset domain에도
+    걸릴 skill까지 그 bucket으로 빨려 들어가 bucket 분포가 달라지고, required cap에
+    닿는 순간 살아남는 skill 집합이 profile 순서로 갈린다. id를 나눠도 이 경로는 남는다.
+    """
+    declared: dict[str, frozenset[str]] = {}
+    for profile_id in _profile_ids():
+        payload = yaml.safe_load((PROFILES_DIR / f"{profile_id}.yaml").read_text(encoding="utf-8"))
+        for domain_id, terms in _external_domains(payload).items():
+            declared.setdefault(domain_id, frozenset(terms))
+
+    supersets = [
+        (outer, inner)
+        for outer, outer_terms in declared.items()
+        for inner, inner_terms in declared.items()
+        if outer != inner and inner_terms and inner_terms < outer_terms
+    ]
+
+    assert supersets == [], (
+        f"어휘가 다른 domain을 통째로 포함하는 domain이 있다: {supersets}. "
+        "공통 어휘를 별도 domain으로 빼라."
+    )
+
+
+def test_external_routing_is_identical_under_either_profile_order():
+    """불변: 실제 라우팅 결과가 profile 탐지 순서와 무관하다.
+
+    선언만 보는 검사로는 부족하다. 같은 어휘를 선언해도 skill이 **어느 domain에**
+    배정되는지가 순서로 갈리면 round-robin 절단의 입력이 달라진다. 그래서 이름이
+    아니라 `(name, domain, tier)`까지 대조한다.
+    """
+    root = Path(".")
+    catalog = discover_skill_catalog(root, skill_roots(root))
+    task = (
+        "compound component 리팩터링과 performance optimization, "
+        "bundle optimization, render prop 정리"
+    )
+    seen = set()
+    for order in (("nextjs", "react-native"), ("react-native", "nextjs")):
+        merged = merged_profile_payload([load_profile_payload(profile_id) for profile_id in order])
+        matches = match_external(
+            merged,
+            catalog,
+            phase_id="implement",
+            changed_files=["src/app/page.tsx"],
+            task_text=task,
+        )
+        seen.add(tuple(sorted((match.name, match.domain, match.tier) for match in matches)))
+
+    assert len(seen) == 1, f"profile 순서가 라우팅을 바꾼다: {seen}"
