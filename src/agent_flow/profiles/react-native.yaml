@@ -110,6 +110,27 @@ skills:
                 "app extension"]
         path_globs: ["ios/**"]
         phases: [implementation, review]
+      # 컴포넌트 설계·렌더 비용 어휘. `list-render-performance`는 리스트 자료구조 쪽
+      # 어휘라 컴포넌트 API 설계(compound component, render prop)에 걸리지 않았다.
+      # 실측: `context provider`는 clean-architecture 계열 4개를 함께 끌어와서 뺐다.
+      - id: react-component-design
+        terms: ["performance optimization", "bundle optimization", "component architecture",
+                "compound component", "render prop", "boolean prop"]
+        phases: [implementation, review]
+      # 스타일링·네이티브 UI 표면. `tailwind` 단독은 웹 아티팩트 skill을 끌어오므로
+      # RN 쪽은 `nativewind`로만 받는다.
+      - id: ui-styling-system
+        terms: ["nativewind", "sf symbol", "native control", "visual effect", "semantic color",
+                "apple hig", "responsive layout"]
+        phases: [implementation, review]
+      # 채택·이관 작업. 구현 단계에서만 쓰고 리뷰 각도로는 요구하지 않는다.
+      - id: migration-adoption
+        terms: ["brownfield", "greenfield", "migration readiness", "web to native",
+                "xcframework", "app clip"]
+        phases: [implementation]
+      - id: tv-surface
+        terms: ["tvos", "d-pad", "10-foot", "tv focus", "remote input"]
+        phases: [implementation, review]
 architecture:
   contract: clean-architecture-core
   platform: react-native

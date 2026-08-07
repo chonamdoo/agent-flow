@@ -97,6 +97,20 @@ skills:
                 "local web application", "debugging ui behavior", "visual regression"]
         path_globs: ["**/e2e/**", "**/*.spec.ts", "**/*.spec.tsx"]
         phases: [implementation, review]
+      # 컴포넌트 API 설계와 렌더 비용. `rsc-boundaries`는 서버/클라이언트 경계 어휘라
+      # 컴포넌트 합성(compound component, render prop)에 걸리지 않았다.
+      # 실측: `context provider`는 clean-architecture 계열 4개를, `performance optimization`은
+      # React Native용 best-practices skill을 함께 끌어와서 둘 다 뺐다. 웹 쪽 판정은
+      # `bundle optimization` 하나로 충분하다(실측 1개).
+      - id: react-component-design
+        terms: ["bundle optimization", "component architecture",
+                "compound component", "render prop", "boolean prop"]
+        phases: [implementation, review]
+      # `design-system-styling`과 가르는 이유는 근거다. 저쪽은 시각 언어이고
+      # 여기는 View Transition API라는 특정 브라우저/React API의 사용법이다.
+      - id: view-transitions
+        terms: ["view transition", "startviewtransition", "page transition", "shared element"]
+        phases: [implementation, review]
       # 아래 둘은 외부 시스템 붙이는 작업이라 리뷰 각도로 요구할 이유가 없다.
       - id: data-layer-orm
         terms: ["prisma", "prisma schema", "prisma migrate", "supabase", "row level security",
