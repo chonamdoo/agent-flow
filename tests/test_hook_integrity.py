@@ -26,6 +26,7 @@ from agent_flow.core.hook_integrity import (
     MANAGED_HOOK_SCRIPTS,
     OBSERVATIONAL_HOOK_SCRIPTS,
     PROJECT_LAUNCHER_RELATIVE,
+    HOOK_LAUNCHER_RELATIVE,
     RUNTIME_CLI_RELATIVE,
     HookIntegrityError,
     assert_managed_hooks_registered,
@@ -40,10 +41,9 @@ HOOK_DIR = Path(".agent-flow") / "scripts" / "hooks"
 
 
 def _hook_command(root: Path, name: str) -> str:
+    launcher = shlex.quote(str(root / HOOK_LAUNCHER_RELATIVE))
     path = shlex.quote(str(root / HOOK_DIR / name))
-    if name.endswith(".py"):
-        return f"/usr/bin/python3 -I {path}"
-    return f"/bin/bash {path}"
+    return f"{launcher} {path}"
 
 
 def _host_settings(root: Path) -> dict:
@@ -72,6 +72,10 @@ def _install(root: Path, *, hooks: bool = True) -> Path:
     launcher.parent.mkdir(parents=True, exist_ok=True)
     launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     launcher.chmod(0o755)
+    hook_launcher = root / HOOK_LAUNCHER_RELATIVE
+    hook_launcher.parent.mkdir(parents=True, exist_ok=True)
+    hook_launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    hook_launcher.chmod(0o755)
     runtime_cli = root / RUNTIME_CLI_RELATIVE
     runtime_cli.parent.mkdir(parents=True, exist_ok=True)
     runtime_cli.write_text("", encoding="utf-8")
@@ -92,6 +96,9 @@ def _install(root: Path, *, hooks: bool = True) -> Path:
                 "managed_hook_digests": digests,
                 "project_launcher_digest": hashlib.sha256(
                     launcher.read_bytes()
+                ).hexdigest(),
+                "hook_launcher_digest": hashlib.sha256(
+                    hook_launcher.read_bytes()
                 ).hexdigest(),
                 "project_launcher_python": {
                     "path": str(interpreter),
@@ -377,7 +384,7 @@ def test_untrusted_interpreter_on_a_managed_command_is_detected(tmp_path):
             for hook in block["hooks"]:
                 if "record-skill-read.py" in hook["command"]:
                     hook["command"] = hook["command"].replace(
-                        "/usr/bin/python3 -I",
+                        str(tmp_path / HOOK_LAUNCHER_RELATIVE),
                         "python3",
                     )
 

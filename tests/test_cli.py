@@ -1892,7 +1892,7 @@ class CliTest(unittest.TestCase):
             )
             self.assertTrue((project_root / ".agent-flow" / "skills" / "comment-checker" / "SKILL.md").is_file())
             expected_comment_checker = (
-                f"/usr/bin/python3 -I "
+                f"'{project_root.resolve() / '.agent-flow' / 'bin' / 'agent-flow-hook'}' "
                 f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
             )
             for hooks_path in (
@@ -2127,6 +2127,84 @@ class CliTest(unittest.TestCase):
                         self.assertEqual(shadowed.returncode, 0, shadowed.stderr)
                         self.assertIn("spec confirm", shadowed.stdout)
 
+    def test_managed_hooks_route_through_portable_launcher(self) -> None:
+        """hook 실행이 하드코딩 /usr/bin/python3·/bin/bash 대신 install이 pin한
+        managed python을 태우는 portable launcher alias로만 이뤄진다 (hook exec EPERM)."""
+        for installer in ("agent-flow-kit.mjs", "agent-flow-install.mjs"):
+            with self.subTest(installer=installer):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    project_root = Path(temp_dir) / "project"
+                    project_root.mkdir()
+                    result = subprocess.run(
+                        (
+                            _node_executable(),
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    hook_launcher = project_root / ".agent-flow" / "bin" / "agent-flow-hook"
+                    self.assertTrue(hook_launcher.is_file(), "managed hook launcher missing")
+                    mode = hook_launcher.stat().st_mode
+                    self.assertTrue(mode & stat.S_IXUSR)
+                    self.assertFalse(mode & (stat.S_IWGRP | stat.S_IWOTH))
+                    kit = json.loads(
+                        (project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(
+                        kit["hook_launcher_digest"],
+                        hashlib.sha256(hook_launcher.read_bytes()).hexdigest(),
+                    )
+                    settings = json.loads(
+                        (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
+                    )
+                    commands = [
+                        hook["command"]
+                        for blocks in settings["hooks"].values()
+                        for block in blocks
+                        for hook in block["hooks"]
+                    ]
+                    self.assertTrue(commands)
+                    alias = str(hook_launcher)
+                    for command in commands:
+                        self.assertIn(alias, command, command)
+                        self.assertFalse(
+                            command.startswith("/usr/bin/python3 ")
+                            or command.startswith("/bin/bash "),
+                            f"hook still hardcodes an absolute interpreter: {command}",
+                        )
+                    # launcher가 태우는 인터프리터는 install이 pin한 managed python이다 —
+                    # /usr/bin/python3 존재 여부와 무관하다.
+                    probe = Path(temp_dir) / "probe.py"
+                    probe.write_text("import sys; print(sys.executable)\n", encoding="utf-8")
+                    launched = subprocess.run(
+                        (str(hook_launcher), str(probe)),
+                        cwd=temp_dir,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(launched.returncode, 0, launched.stderr)
+                    self.assertEqual(
+                        Path(launched.stdout.strip()).resolve(),
+                        Path(kit["project_launcher_python"]["path"]).resolve(),
+                    )
+                    # shell hook 내부의 python 호출도 pin된 인터프리터를 쓴다.
+                    for shell_hook in (
+                        "guard-host-worktree.sh",
+                        "guard-protected-branch.sh",
+                        "show-phase-status.sh",
+                    ):
+                        text = (
+                            project_root / ".agent-flow" / "scripts" / "hooks" / shell_hook
+                        ).read_text(encoding="utf-8")
+                        self.assertNotIn("/usr/bin/python3", text, shell_hook)
+                        self.assertIn("AGENT_FLOW_HOOK_PYTHON", text, shell_hook)
+
     def test_node_installer_writes_cwd_independent_hook_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project with space"
@@ -2179,17 +2257,18 @@ class CliTest(unittest.TestCase):
                 for hook in entry["hooks"]
             ]
             resolved_root = project_root.resolve()
+            hook_launcher = resolved_root / ".agent-flow" / "bin" / "agent-flow-hook"
             expected = [
-                f"/bin/bash '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-protected-branch.sh'}'",
-                f"/bin/bash '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-host-worktree.sh'}'",
-                f"/usr/bin/python3 -I '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'",
-                f"/bin/bash '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-host-worktree.sh'}'",
-                f"/usr/bin/python3 -I '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-skill-read.py'}'",
-                f"/usr/bin/python3 -I '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-command-run.py'}'",
-                f"/usr/bin/python3 -I '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'bind-host-worktree.py'}'",
-                f"/bin/bash '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-host-worktree.sh'}'",
-                f"/usr/bin/python3 -I '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'worktree-tripwire.py'}'",
-                f"/bin/bash '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
+                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-protected-branch.sh'}'",
+                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-host-worktree.sh'}'",
+                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'",
+                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-host-worktree.sh'}'",
+                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-skill-read.py'}'",
+                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-command-run.py'}'",
+                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'bind-host-worktree.py'}'",
+                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-host-worktree.sh'}'",
+                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'worktree-tripwire.py'}'",
+                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
             ]
             self.assertEqual(commands, expected)
             stop_hook = subprocess.run(
@@ -2226,7 +2305,7 @@ class CliTest(unittest.TestCase):
                 for hook in entry["hooks"]
             ]
             expected_checker = (
-                f"/usr/bin/python3 -I "
+                f"'{project_root.resolve() / '.agent-flow' / 'bin' / 'agent-flow-hook'}' "
                 f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
             )
             self.assertIn(expected_checker, commands)
@@ -2303,7 +2382,7 @@ class CliTest(unittest.TestCase):
                         )
                         self.assertEqual(result.returncode, 0, result.stderr)
                         expected_checker = (
-                            f"/usr/bin/python3 -I "
+                            f"'{project_root.resolve() / '.agent-flow' / 'bin' / 'agent-flow-hook'}' "
                             f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
                         )
                         for installed_hooks_path in (
@@ -2366,7 +2445,7 @@ class CliTest(unittest.TestCase):
                         for hook in entry["hooks"]
                     ]
                     expected_checker = (
-                        f"/usr/bin/python3 -I "
+                        f"'{project_root.resolve() / '.agent-flow' / 'bin' / 'agent-flow-hook'}' "
                         f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
                     )
                     self.assertIn("custom-post-hook", commands)
@@ -2387,7 +2466,7 @@ class CliTest(unittest.TestCase):
                             f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'"
                         )
                         expected_stop_command = (
-                            f"/bin/bash "
+                            f"'{project_root.resolve() / '.agent-flow' / 'bin' / 'agent-flow-hook'}' "
                             f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'"
                         )
                         legacy_command = stop_command if scenario == "root-script" else cd_stop_command

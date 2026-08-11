@@ -494,7 +494,8 @@ def _kit_registration_bytes(root: Path, rel: str) -> str:
             "export default function agentFlowHooks(ctx) {}\n"
         )
     command = (
-        f"/bin/bash '{root}/.agent-flow/scripts/hooks/guard-protected-branch.sh'"
+        f"'{root}/.agent-flow/bin/agent-flow-hook' "
+        f"'{root}/.agent-flow/scripts/hooks/guard-protected-branch.sh'"
     )
     return json.dumps(
         {
