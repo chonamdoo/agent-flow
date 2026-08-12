@@ -1662,7 +1662,7 @@ class CliTest(unittest.TestCase):
             untracked.write_text("class New\n", encoding="utf-8")
             self.assertIn("core/domain/chat/New.kt", changed_files(root))
 
-    def test_python_runner_fix_loop_round_cap_blocks_after_three_gate_failures(self) -> None:
+    def test_python_runner_fix_loop_cap_counts_all_rejection_routes_to_collector(self) -> None:
         from agent_flow.artifact import read_meta, write_meta
         from agent_flow.runner import Phase, Runner
 
@@ -1671,35 +1671,83 @@ class CliTest(unittest.TestCase):
             write_meta(run_dir, {})
             runner = Runner.__new__(Runner)
             runner.run_dir = run_dir
+            # gates routes several rejection keys to fix-loop, so fix-loop is a fix
+            # collector; every gate-failure key (not only request-changes) then counts
+            # as one round, which is what bounds the documented gate-retry loop.
             runner.phases = [
-                Phase(id="gates", description="", routes={"request-changes": "fix-loop", "green": "multi-review"}),
-                Phase(id="fix-loop", description="", routes={"default": "gates"}),
-                Phase(id="multi-review", description=""),
+                Phase(id="implement", description=""),
+                Phase(id="gates", description="", routes={
+                    "request-changes": "fix-loop", "blocked": "fix-loop",
+                    "error": "fix-loop", "default": "fix-loop", "green": "commit",
+                }),
+                Phase(id="fix-loop", description="", routes={"default": "implement"}),
+                Phase(id="commit", description=""),
             ]
-            gates = runner.phases[0]
+            gates = runner.phases[1]
+
+            # request-changes, then blocked, then default (passed:true but unproven):
+            # each is a distinct gate-failure key that still routes to the collector.
+            rejections = (
+                '{"passed": false}',
+                '{"passed": false, "status": "blocked"}',
+                '{"passed": true, "results": []}',
+            )
+            for expected_round, content in enumerate(rejections, start=1):
+                (run_dir / "gates.md").write_text(content, encoding="utf-8")
+                self.assertEqual(runner._next_index(1, gates), (2, False))
+                self.assertEqual(read_meta(run_dir)["fix_loop_rounds"]["fix-loop"], expected_round)
+
+            # the fourth rejection (any key) is blocked for user intervention.
+            (run_dir / "gates.md").write_text('{"passed": false, "status": "error"}', encoding="utf-8")
+            self.assertEqual(runner._next_index(1, gates), (1, True))
+            self.assertEqual(read_meta(run_dir)["fix_loop_rounds"]["fix-loop"], 3)
+
+    def test_python_runner_fix_loop_cap_bounds_renamed_loops_and_skips_pr_loop(self) -> None:
+        from agent_flow.artifact import read_meta, write_meta
+        from agent_flow.runner import Phase, Runner
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            write_meta(run_dir, {})
+            runner = Runner.__new__(Runner)
+            runner.run_dir = run_dir
+            # request-changes marks refactor and implement-fix as fix collectors, so
+            # both renamed loops are bounded per target. pr-watch is only ever a
+            # "default" target (the PR event loop), so it is not a collector and that
+            # loop is never capped.
+            runner.phases = [
+                Phase(id="refactor", description=""),
+                Phase(id="implement-fix", description=""),
+                Phase(id="review", description="", routes={"request-changes": "implement-fix", "approve": "qa"}),
+                Phase(id="architecture-review", description="", routes={"request-changes": "refactor", "approve": "gates"}),
+                Phase(id="qa", description=""),
+                Phase(id="gates", description=""),
+                Phase(id="pr-watch", description="", routes={"comments": "pr-comment-fix", "green": "merge"}),
+                Phase(id="pr-comment-fix", description="", routes={"default": "pr-watch"}),
+                Phase(id="merge", description=""),
+            ]
+            review = runner.phases[2]
+            architecture_review = runner.phases[3]
+            pr_comment_fix = runner.phases[7]
 
             for expected_round in (1, 2, 3):
-                (run_dir / "gates.md").write_text('{"passed": false, "results": []}', encoding="utf-8")
-                self.assertEqual(runner._next_index(0, gates), (1, False))
-                self.assertEqual(read_meta(run_dir)["fix_loop_rounds"], expected_round)
+                (run_dir / "review.md").write_text("verdict: request-changes\n", encoding="utf-8")
+                self.assertEqual(runner._next_index(2, review), (1, False))
+                self.assertEqual(read_meta(run_dir)["fix_loop_rounds"]["implement-fix"], expected_round)
+                (run_dir / "architecture-review.md").write_text("verdict: request-changes\n", encoding="utf-8")
+                self.assertEqual(runner._next_index(3, architecture_review), (0, False))
+                self.assertEqual(read_meta(run_dir)["fix_loop_rounds"]["refactor"], expected_round)
 
-            (run_dir / "gates.md").write_text('{"passed": false, "results": []}', encoding="utf-8")
-            # gates 실패가 3회를 넘으면 fix-loop로 더 보내지 않고 사용자가 개입하도록 막는다.
-            self.assertEqual(runner._next_index(0, gates), (0, True))
-            self.assertEqual(read_meta(run_dir)["fix_loop_rounds"], 3)
+            # three rounds on each target coexist; the fourth on either blocks it.
+            (run_dir / "review.md").write_text("verdict: request-changes\n", encoding="utf-8")
+            self.assertEqual(runner._next_index(2, review), (2, True))
+            (run_dir / "architecture-review.md").write_text("verdict: request-changes\n", encoding="utf-8")
+            self.assertEqual(runner._next_index(3, architecture_review), (3, True))
 
-            (run_dir / "gates.md").write_text('{"passed": true, "results": []}', encoding="utf-8")
-            self.assertEqual(runner._next_index(0, gates), (0, True))
-
-            (run_dir / "gates.md").write_text("status: pass\n", encoding="utf-8")
-            self.assertEqual(runner._next_index(0, gates), (0, True))
-
-            (run_dir / "gates.md").write_text(
-                '{"passed": true, "results": [{"command": "npm test", "passed": true, "output": "ok"}]}',
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, gates), (2, False))
-            self.assertNotIn("fix_loop_rounds", read_meta(run_dir))
+            # pr-watch is never a rejection target, so the PR event loop is uncapped.
+            for _ in range(6):
+                self.assertEqual(runner._next_index(7, pr_comment_fix), (6, False))
+            self.assertNotIn("pr-watch", read_meta(run_dir).get("fix_loop_rounds", {}))
 
     def test_python_runner_uses_default_route_like_node_runner(self) -> None:
         from agent_flow.runner import Phase, Runner
@@ -6266,6 +6314,8 @@ if (codexContext !== undefined) {
                 )
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
 
+            # A fourth request-changes verdict (gates -> fix-loop) must halt for the
+            # user; the pr-watch event loop is deliberately never capped.
             for phase in ("comment-authoring", "multi-review", "architecture-review"):
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.write_text(_node_phase_content(phase, run_dir=run_dir), encoding="utf-8")
@@ -6282,7 +6332,7 @@ if (codexContext !== undefined) {
             self.assertEqual(result.returncode, 0)
             self.assertIn("fix-loop exceeded", result.stdout)
             current_state = _read_node_phase(run_dir)
-            self.assertEqual(current_state["fix_loop_rounds"], 3)
+            self.assertEqual(current_state["fix_loop_rounds"]["fix-loop"], 3)
 
     @mock.patch.dict(
         os.environ,
