@@ -101,6 +101,9 @@ HOOK_DIR_RELATIVE = Path(".agent-flow") / "scripts" / "hooks"
 KIT_JSON_RELATIVE = Path(".agent-flow") / "kit.json"
 # managed launcher와 포함된 Python runtime도 hook과 같은 설치 무결성 경계다.
 PROJECT_LAUNCHER_RELATIVE = Path(".agent-flow") / "bin" / "agent-flow"
+# 관리 hook은 이 portable launcher로만 실행된다. hook·CLI launcher는 같은
+# 설치 무결성 경계다.
+HOOK_LAUNCHER_RELATIVE = Path(".agent-flow") / "bin" / "agent-flow-hook"
 # launcher가 실제로 태울 CLI. digest만 맞고 이게 없으면 launcher는 exit 127이다.
 RUNTIME_CLI_RELATIVE = Path(".agent-flow") / "runtime" / "python" / "agent_flow" / "cli.py"
 
@@ -236,6 +239,7 @@ def _verify_root(root: Path) -> HookIntegrityReport:
         violations.extend(_missing_registrations(root, surfaces))
         violations.extend(_managed_hook_digest_violations(root, kit))
         violations.extend(_project_launcher_violations(root, kit))
+        violations.extend(_hook_launcher_violations(root, kit))
         violations.extend(_misplaced_managed_hooks(surfaces))
     else:
         violations.extend(_unexpected_registrations(surfaces))
@@ -387,6 +391,62 @@ def _project_launcher_violations(root: Path, kit: dict) -> Iterator[str]:
     if actual != recorded:
         yield f"managed launcher content digest does not match kit.json: {PROJECT_LAUNCHER_RELATIVE}"
     yield from _launcher_python_violations(kit)
+
+
+def _hook_launcher_violations(root: Path, kit: dict) -> Iterator[str]:
+    """설치본의 managed hook launcher를 대조한다. 관리 hook은 이 launcher로만 실행된다.
+
+    launcher가 exec하는 인터프리터는 CLI launcher와 같은 pin이라
+    `_launcher_python_violations`가 이미 지킨다 — 여기서는 launcher 파일만 본다.
+    """
+    if "hook_launcher_digest" not in kit:
+        yield (
+            "this installation predates the managed hook launcher; re-run "
+            "`node bin/agent-flow-kit.mjs install` from the leader checkout"
+        )
+        return
+    recorded = kit["hook_launcher_digest"]
+    if recorded is None:
+        yield (
+            "install could not create the managed hook launcher; fix the interpreter it "
+            "reported as `managed hook launcher not installed` (PyYAML is required) and "
+            "re-run `node bin/agent-flow-kit.mjs install` from the leader checkout"
+        )
+        return
+    if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]{64}", recorded):
+        yield (
+            "kit.json has no valid content digest for the managed hook launcher: "
+            f"{HOOK_LAUNCHER_RELATIVE}"
+        )
+        return
+    path = root / HOOK_LAUNCHER_RELATIVE
+    try:
+        identity = path.lstat()
+    except OSError:
+        yield (
+            "managed hook launcher is missing, so managed hooks cannot run: "
+            f"{HOOK_LAUNCHER_RELATIVE}"
+        )
+        return
+    if not stat.S_ISREG(identity.st_mode):
+        yield f"managed hook launcher is not a regular file: {HOOK_LAUNCHER_RELATIVE}"
+        return
+    if identity.st_uid != os.getuid():
+        yield f"managed hook launcher is not owned by the current user: {HOOK_LAUNCHER_RELATIVE}"
+    if identity.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        yield f"managed hook launcher is group or world writable: {HOOK_LAUNCHER_RELATIVE}"
+    if not os.access(path, os.X_OK):
+        yield f"managed hook launcher is not executable: {HOOK_LAUNCHER_RELATIVE}"
+    try:
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        yield (
+            "managed hook launcher cannot be read for digest verification: "
+            f"{HOOK_LAUNCHER_RELATIVE}"
+        )
+        return
+    if actual != recorded:
+        yield f"managed hook launcher content digest does not match kit.json: {HOOK_LAUNCHER_RELATIVE}"
 
 
 def _launcher_python_violations(kit: dict) -> Iterator[str]:
@@ -599,26 +659,32 @@ def _entry_commands(entry: object) -> Iterator[str]:
 
 
 def managed_path_hook_name(root: Path, command: str) -> str | None:
-    """Return the script name only for one exact trusted hook invocation."""
+    """Return the script name only for one exact trusted hook invocation.
+
+    관리 hook은 오직 managed hook launcher로만 실행된다:
+    `<root>/.agent-flow/bin/agent-flow-hook <root>/.agent-flow/scripts/hooks/<name>`.
+    하드코딩 인터프리터(`/usr/bin/python3`·`/bin/bash`)는 더는 인정하지 않는다 —
+    그 경로가 없거나 host가 직접 execve하지 못하는 자리에서 hook exec가 EPERM으로
+    죽던 자리다.
+    """
     try:
         tokens = shlex.split(command, posix=True)
     except ValueError:
         return None
-    if len(tokens) == 2 and tokens[0] == "/bin/bash":
-        candidate = tokens[1]
-        expected_suffix = ".sh"
-    elif (
-        len(tokens) == 3
-        and tokens[:2] == ["/usr/bin/python3", "-I"]
-    ):
-        candidate = tokens[2]
-        expected_suffix = ".py"
-    else:
+    if len(tokens) != 2:
+        return None
+    launcher, candidate = tokens
+    try:
+        launcher_real = os.path.realpath(launcher.replace("\\", "/"))
+        expected_launcher = os.path.realpath(Path(root) / HOOK_LAUNCHER_RELATIVE)
+    except OSError:
+        return None
+    if launcher_real != expected_launcher:
         return None
     normalized = candidate.replace("\\", "/")
     name = posixpath.basename(normalized)
     if (
-        not name.endswith(expected_suffix)
+        not (name.endswith(".py") or name.endswith(".sh"))
         or not _SAFE_HOOK_NAME.fullmatch(name)
     ):
         return None

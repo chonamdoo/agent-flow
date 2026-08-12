@@ -316,7 +316,10 @@ def test_root_context_files_survive_a_broken_profile(tmp_path: Path, monkeypatch
 
 
 def _hook_command(leader: Path, script: str) -> str:
-    return f"/usr/bin/python3 -I '{leader}/.agent-flow/scripts/hooks/{script}'"
+    return (
+        f"'{leader}/.agent-flow/bin/agent-flow-hook' "
+        f"'{leader}/.agent-flow/scripts/hooks/{script}'"
+    )
 
 
 def _leader_with_host_hooks(root: Path) -> None:

@@ -1,6 +1,6 @@
-#!/bin/bash
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-/usr/bin/python3 -I - "$SCRIPT_DIR" 3<&0 <<'PY'
+#!/bin/sh
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+"${AGENT_FLOW_HOOK_PYTHON:-python3}" -I - "$SCRIPT_DIR" 3<&0 <<'PY'
 from __future__ import annotations
 
 import json

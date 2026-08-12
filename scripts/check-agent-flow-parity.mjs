@@ -11,6 +11,7 @@ import {
   activeInstallProfileIds,
   installedProfileFileNames,
   PROJECT_LAUNCHER_RELATIVE,
+  HOOK_LAUNCHER_RELATIVE,
   resolveLinkedWorktreeLeader,
   resolveManagedWorktreeContext,
 } from "../lib/installer-shared.mjs";
@@ -260,6 +261,7 @@ for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]
   // launcher가 없으면 host의 chat 승인 hook은 실행할 것을 못 찾아 조용히 끝난다.
   // 두 진입점 중 한쪽만 심으면 그 조합에서만 승인이 죽어 재현이 안 된다.
   assertContains(installer, "installProjectLauncher(");
+  assertContains(installer, "installHookLauncher(");
 }
 // 경로·digest 키가 JS/Python/hook 세 곳에서 같은 값인지, 그리고 hook이 실행 직전
 // digest를 대조하는지. 문자열 grep만으로는 이 언어 경계가 하나도 묶이지 않는다.
@@ -1555,6 +1557,24 @@ function assertInstalledLauncherParity(label, tempRoot) {
   if (!fs.existsSync(runtimeCli)) {
     failures.push(`${label} install missing the runtime the launcher execs: ${pythonRuntimeCliRelative()}`);
   }
+  const hookLauncher = path.join(tempRoot, pythonHookLauncherRelative());
+  const hookIdentity = fs.lstatSync(hookLauncher, { throwIfNoEntry: false });
+  if (!hookIdentity || !hookIdentity.isFile()) {
+    failures.push(`${label} install missing the managed hook launcher: ${pythonHookLauncherRelative()}`);
+    return;
+  }
+  if (!(hookIdentity.mode & 0o100)) {
+    failures.push(`${label} managed hook launcher is not executable`);
+  }
+  if (hookIdentity.mode & 0o022) {
+    failures.push(`${label} managed hook launcher is group or world writable`);
+  }
+  const hookDigest = createHash("sha256").update(fs.readFileSync(hookLauncher)).digest("hex");
+  if (kit?.[pythonHookLauncherDigestKey()] !== hookDigest) {
+    failures.push(
+      `${label} kit.json ${pythonHookLauncherDigestKey()} does not match the installed hook launcher`,
+    );
+  }
 }
 
 // launcher 경로와 digest 키는 JS(installer-shared)·Python(hook_integrity)·hook
@@ -1597,6 +1617,30 @@ function pythonLauncherDigestKey() {
   return match[1];
 }
 
+function pythonHookLauncherRelative() {
+  const source = fs.readFileSync(
+    path.join(SOURCE_ROOT, "src", "agent_flow", "core", "hook_integrity.py"),
+    "utf8",
+  );
+  const block = source.match(/HOOK_LAUNCHER_RELATIVE = ([^\n]+)/);
+  if (!block) {
+    throw new Error("HOOK_LAUNCHER_RELATIVE not found in hook_integrity.py");
+  }
+  return [...block[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]).join(path.sep);
+}
+
+function pythonHookLauncherDigestKey() {
+  const source = fs.readFileSync(
+    path.join(SOURCE_ROOT, "src", "agent_flow", "core", "hook_integrity.py"),
+    "utf8",
+  );
+  const match = source.match(/"(hook_launcher_digest)"/);
+  if (!match) {
+    throw new Error("hook launcher digest key not found in hook_integrity.py");
+  }
+  return match[1];
+}
+
 function assertLauncherContractIsSingleValued() {
   const jsRelative = PROJECT_LAUNCHER_RELATIVE;
   if (jsRelative !== pythonLauncherRelative()) {
@@ -1604,8 +1648,15 @@ function assertLauncherContractIsSingleValued() {
       `launcher path differs: installer-shared has ${jsRelative}, hook_integrity has ${pythonLauncherRelative()}`,
     );
   }
+  const jsHookRelative = HOOK_LAUNCHER_RELATIVE;
+  if (jsHookRelative !== pythonHookLauncherRelative()) {
+    failures.push(
+      `hook launcher path differs: installer-shared has ${jsHookRelative}, hook_integrity has ${pythonHookLauncherRelative()}`,
+    );
+  }
   for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
     assertContains(installer, `${pythonLauncherDigestKey()}: projectLauncherDigest(`);
+    assertContains(installer, `${pythonHookLauncherDigestKey()}: hookLauncherDigest(`);
   }
 }
 

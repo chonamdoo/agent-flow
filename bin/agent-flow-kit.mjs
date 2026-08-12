@@ -34,8 +34,10 @@ import {
   gitEnv,
   hasChildWithSuffix,
   hookScriptCommand,
+  hookLauncherDigest,
   installedProfileFileNames,
   installProjectLauncher,
+  installHookLauncher,
   syncManagedWorktreeHostHooks,
   isPruneBackupName,
   isRetiredHookCommand,
@@ -196,6 +198,7 @@ function installProject(requestedRoot) {
 
   // digest는 심은 파일에서 뽑으므로 payload보다 먼저 심는다.
   installProjectLauncher(root);
+  installHookLauncher(root);
   const installTimestamp = new Date().toISOString();
   const payload = {
     install_scope: "project",
@@ -213,6 +216,7 @@ function installProject(requestedRoot) {
     kit_source_digest: kitSourceDigest(),
     managed_hook_digests: managedHookDigests(),
     project_launcher_digest: projectLauncherDigest(root),
+    hook_launcher_digest: hookLauncherDigest(root),
     project_launcher_python: projectLauncherPythonRecord(),
   };
 

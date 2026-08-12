@@ -36,8 +36,10 @@ import {
   fullFeatureSkillMarkdown,
   hasChildWithSuffix,
   hookScriptCommand,
+  hookLauncherDigest,
   installedProfileFileNames,
   installProjectLauncher,
+  installHookLauncher,
   syncManagedWorktreeHostHooks,
   isRecordedKitAsset,
   isPruneBackupName,
@@ -1161,6 +1163,7 @@ function install() {
   // kit.mjs 쪽 install이 실패해도(PyYAML 없는 환경) 이 진입점이 kit.json을 덮는다.
   // launcher를 여기서 한 번 더 보장하지 않으면 그 조합에서 승인 경로만 조용히 죽는다.
   installProjectLauncher(PROJECT);
+  installHookLauncher(PROJECT);
   let codexHooksCopied = false;
   let ompHooksCopied = false;
   removeCodexBroadTrustState(PROJECT);
@@ -1269,6 +1272,7 @@ function install() {
     kit_source_digest: existingKit?.kit_source_digest,
     managed_hook_digests: managedHookDigests(),
     project_launcher_digest: projectLauncherDigest(PROJECT),
+    hook_launcher_digest: hookLauncherDigest(PROJECT),
     project_launcher_python: projectLauncherPythonRecord(),
     skills_copied: skillsCopied,
     workflows_copied: workflowsCopied,

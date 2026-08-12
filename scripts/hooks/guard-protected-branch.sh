@@ -1,7 +1,7 @@
-#!/bin/bash
+#!/bin/sh
 # agent-flow PreToolUse hook: main/master/develop 브랜치에서 커밋·푸시 차단
 INPUT=$(cat)
-PROTECTED_BRANCH=$(python3 -c "
+PROTECTED_BRANCH=$(printf '%s' "$INPUT" | "${AGENT_FLOW_HOOK_PYTHON:-python3}" -c "
 import sys, json
 import os
 import re
@@ -207,7 +207,7 @@ def classify(command, cwd):
 
 d = json.load(sys.stdin)
 print(classify(command_from(d), declared_cwd(d)))
-" 2>/dev/null <<< "$INPUT")
+" 2>/dev/null)
 
 if [ -z "$PROTECTED_BRANCH" ]; then
   exit 0

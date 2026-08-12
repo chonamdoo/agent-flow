@@ -264,6 +264,21 @@ def _seed_install(root: Path) -> Path:
     hooks = root / ".agent-flow" / "scripts" / "hooks"
     hooks.mkdir(parents=True, exist_ok=True)
     (root / ".agent-flow" / "kit.json").write_text("{}", encoding="utf-8")
+    # managed hook launcher: hook은 이 portable launcher로만 실행된다.
+    launcher = root / ".agent-flow" / "bin" / "agent-flow-hook"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text(
+        "#!/bin/sh\n"
+        "set -u\n"
+        "script=$1\n"
+        "shift\n"
+        'case "$script" in\n'
+        '  *.py) exec python3 "$script" "$@" ;;\n'
+        '  *) exec /bin/sh "$script" "$@" ;;\n'
+        "esac\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
     return hooks
 
 

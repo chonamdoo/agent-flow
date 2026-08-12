@@ -1,6 +1,6 @@
-#!/bin/bash
+#!/bin/sh
 # agent-flow Stop hook: 세션 종료 시 현재 워크플로우 phase 표시
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT=""
 if [ -f ".agent-flow/kit.json" ]; then
   PROJECT_ROOT="$PWD"
@@ -28,7 +28,7 @@ fi
 # "invalid stop hook json output" 에러를 유발하고 사용자에게 표시되지도 않는다.
 # macOS에는 GNU timeout이 없으므로 status 호출도 python subprocess timeout으로
 # 감싸 hook이 세션 종료를 무기한 막지 않게 한다.
-AGENT_FLOW="$AGENT_FLOW" PROJECT_ROOT="$PROJECT_ROOT" python3 - <<'PY' 2>/dev/null || exit 0
+AGENT_FLOW="$AGENT_FLOW" PROJECT_ROOT="$PROJECT_ROOT" "${AGENT_FLOW_HOOK_PYTHON:-python3}" - <<'PY' 2>/dev/null || exit 0
 import json, os, subprocess
 
 try:
