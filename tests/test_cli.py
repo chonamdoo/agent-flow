@@ -2159,6 +2159,11 @@ class CliTest(unittest.TestCase):
                         kit["hook_launcher_digest"],
                         hashlib.sha256(hook_launcher.read_bytes()).hexdigest(),
                     )
+                    # 관리 hook은 CLI의 `-E` fallback을 물려받지 않고 항상 `-I`로 실행한다:
+                    # user-site의 sitecustomize/usercustomize가 보호 hook을 선점하지 못하게.
+                    launcher_src = hook_launcher.read_text(encoding="utf-8")
+                    self.assertIn('exec "$python" -I "$script"', launcher_src)
+                    self.assertNotIn("${flag}", launcher_src)
                     settings = json.loads(
                         (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
                     )
