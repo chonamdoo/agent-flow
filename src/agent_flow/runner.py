@@ -1266,6 +1266,13 @@ def _load_workflow(kit_root: Path, name: str) -> list[Phase]:
 
 def _fix_loop_round_counts(meta: dict[str, Any]) -> dict[str, int]:
     raw = meta.get("fix_loop_rounds")
+    # 구버전 형식: 정수는 리터럴 "fix-loop" 진입 횟수만 셌다. 업그레이드 중이던
+    # run이 상한을 잃지 않도록 그 값을 "fix-loop" target의 초기 카운트로 옮긴다.
+    # (bool은 int의 하위형이라 먼저 걸러 오분류를 막는다.)
+    if isinstance(raw, bool):
+        return {}
+    if isinstance(raw, int):
+        return {"fix-loop": raw} if raw > 0 else {}
     if not isinstance(raw, dict):
         return {}
     counts: dict[str, int] = {}

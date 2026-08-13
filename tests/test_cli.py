@@ -1749,6 +1749,36 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(runner._next_index(7, pr_comment_fix), (6, False))
             self.assertNotIn("pr-watch", read_meta(run_dir).get("fix_loop_rounds", {}))
 
+    def test_python_runner_fix_loop_cap_migrates_legacy_integer_count(self) -> None:
+        from agent_flow.artifact import read_meta, write_meta
+        from agent_flow.runner import Phase, Runner
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            runner = Runner.__new__(Runner)
+            runner.run_dir = run_dir
+            runner.phases = [
+                Phase(id="implement", description=""),
+                Phase(id="gates", description="", routes={"request-changes": "fix-loop", "green": "commit"}),
+                Phase(id="fix-loop", description="", routes={"default": "implement"}),
+                Phase(id="commit", description=""),
+            ]
+            gates = runner.phases[1]
+
+            # A run upgraded mid fix-loop stored fix_loop_rounds as a bare int (the
+            # old format counted only literal "fix-loop" entries). It migrates to the
+            # per-target count and keeps counting rather than resetting.
+            write_meta(run_dir, {"fix_loop_rounds": 1})
+            (run_dir / "gates.md").write_text('{"passed": false}', encoding="utf-8")
+            self.assertEqual(runner._next_index(1, gates), (2, False))
+            self.assertEqual(read_meta(run_dir)["fix_loop_rounds"]["fix-loop"], 2)
+
+            # A legacy int already at the cap still blocks the next round; the
+            # upgrade must not hand it three fresh rounds.
+            write_meta(run_dir, {"fix_loop_rounds": 3})
+            (run_dir / "gates.md").write_text('{"passed": false}', encoding="utf-8")
+            self.assertEqual(runner._next_index(1, gates), (1, True))
+
     def test_python_runner_uses_default_route_like_node_runner(self) -> None:
         from agent_flow.runner import Phase, Runner
 
