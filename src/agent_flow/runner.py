@@ -118,6 +118,10 @@ GIT_DEPENDENT_PHASES = {
     "merge-approval",
 }
 FIX_LOOP_MAX_ROUNDS = 3
+# fix collector 판정에 쓰는 rejection verdict 키. review/gate가 "다시 해라"라고
+# 되돌려 보내는 route만 상한 대상이다 — 정상 진행(default·approve·green)과 PR
+# 이벤트 루프(comments·ci-failed)는 여기 없어서 상한에서 빠진다.
+_FIX_COLLECTOR_ROUTE_KEYS = frozenset({"request-changes", "blocked", "error", "fail"})
 # 키 이름은 baseline을 쓰는 쪽과 읽는 쪽이 공유해야 한다.
 _HOST_PHASE_LEADER_BASELINE = HOST_PHASE_LEADER_BASELINE_KEY
 # baseline **레코드 자체**의 필드 구성 버전. 그 안에 담기는 스냅샷의 형식 버전은
@@ -891,43 +895,65 @@ class Runner:
                     "verdict: approve or verdict: request-changes line"
                 )
                 return current_index, True
-        # gates뿐 아니라 final-review/multi-review 등 fix-loop로 라우팅하는
-        # 모든 phase에 같은 상한을 적용해야 review ↔ fix-loop가 무한 루프하지 않는다.
-        if target == "fix-loop":
-            rounds = self._increment_fix_loop_rounds()
-            if rounds > FIX_LOOP_MAX_ROUNDS:
-                print(f"  [block] fix-loop exceeded {FIX_LOOP_MAX_ROUNDS} rounds")
-                return current_index, True
-        elif phase.id == "gates" and target and target != "block" and "fix-loop" in phase.routes.values():
-            # reviewer approve 이후 QA가 최종 통과할 때만 reset한다. review 재실행
-            # 단계에서 reset하면 QA/review loop cap이 무력화된다.
-            self._reset_fix_loop_rounds()
         if target == "block":
             print(f"  [block] {phase.id} status={key}")
             return current_index, True
         if target is None:
             print(f"  [block] {phase.id} status={key} has no route")
             return current_index, True
-        if target:
-            for i, candidate in enumerate(self.phases):
-                if candidate.id == target:
-                    if i <= current_index:
-                        for stale_phase in self.phases[i:current_index + 1]:
-                            stale_artifact = self._existing_artifact_path(stale_phase)
-                            if stale_artifact.exists():
-                                stale_artifact.unlink()
-                    elif i > current_index + 1:
-                        for skipped in self.phases[current_index + 1:i]:
-                            skipped_artifact = self._artifact_path(skipped)
-                            if not skipped_artifact.exists():
-                                skipped_artifact.parent.mkdir(parents=True, exist_ok=True)
-                                skipped_artifact.write_text(
-                                    f"# {skipped.id}\n\nstatus: skipped\nreason: route_to_{target}\n",
-                                    encoding="utf-8",
-                                )
-                    return i, False
-            raise ValueError(f"phase {phase.id}: route target not found: {target}")
-        return current_index + 1, False
+        if not target:
+            return current_index + 1, False
+        fix_collectors = self._fix_collector_targets()
+        for i, candidate in enumerate(self.phases):
+            if candidate.id == target:
+                # 상한은 리터럴 이름("fix-loop")이 아니라 "fix collector"로 판정한다.
+                # collector = 어떤 phase가 rejection verdict(request-changes·blocked·
+                # error·fail)로 되돌려 보내는 target이다. 이름은 workflow마다 달라도
+                # (fix-loop·refactor·implement-fix·slice-plan) 모두 이 집합에 든다.
+                # 일단 collector면 이후 어떤 key로 그리 보내도(gates의 default/blocked/
+                # error 포함) 카운트해 gate 재시도 루프가 상한에 걸린다. pr-watch는
+                # rejection route의 target이 아니라(pr-comment-fix/pr-ci-fix가 default로
+                # 되돌릴 뿐) collector가 아니므로, 정당하게 여러 번 도는 PR 이벤트
+                # 루프는 상한에서 빠진다. 카운트는 target별로 나눠 서로 다른 순환이
+                # 예산을 공유하지 않게 한다.
+                if target in fix_collectors:
+                    rounds = self._increment_fix_loop_rounds(target)
+                    if rounds > FIX_LOOP_MAX_ROUNDS:
+                        print(
+                            f"  [block] fix-loop exceeded {FIX_LOOP_MAX_ROUNDS} "
+                            f"rounds routing {phase.id} -> {target}"
+                        )
+                        return current_index, True
+                if i <= current_index:
+                    for stale_phase in self.phases[i:current_index + 1]:
+                        stale_artifact = self._existing_artifact_path(stale_phase)
+                        if stale_artifact.exists():
+                            stale_artifact.unlink()
+                elif i > current_index + 1:
+                    for skipped in self.phases[current_index + 1:i]:
+                        skipped_artifact = self._artifact_path(skipped)
+                        if not skipped_artifact.exists():
+                            skipped_artifact.parent.mkdir(parents=True, exist_ok=True)
+                            skipped_artifact.write_text(
+                                f"# {skipped.id}\n\nstatus: skipped\nreason: route_to_{target}\n",
+                                encoding="utf-8",
+                            )
+                return i, False
+        raise ValueError(f"phase {phase.id}: route target not found: {target}")
+
+    def _fix_collector_targets(self) -> set[str]:
+        """rejection verdict가 되돌려 보내는 target phase들. 이 집합으로 가는 route는
+        어떤 key로 가든 한 번의 fix 라운드로 센다. 리터럴 이름에 묶지 않으므로
+        fix-loop·refactor·implement-fix·slice-plan을 workflow별로 자동 인식하고,
+        pr-watch처럼 rejection route의 target이 아닌 phase(PR 이벤트 루프)는
+        제외한다."""
+        collectors: set[str] = set()
+        for candidate in self.phases:
+            routes = getattr(candidate, "routes", None) or {}
+            for route_key, route_target in routes.items():
+                if route_key in _FIX_COLLECTOR_ROUTE_KEYS and isinstance(route_target, str):
+                    collectors.add(route_target)
+        return collectors
 
     def _capture_design_ledger(self, phase: Phase) -> None:
         """설계 phase의 수치를 원장으로 굳힌다. 다음 phase는 여기서만 값을 본다."""
@@ -974,24 +1000,18 @@ class Runner:
         meta["phase_index"] = phase_index
         meta["current_phase"] = phase_id
 
-    def _increment_fix_loop_rounds(self) -> int:
+    def _increment_fix_loop_rounds(self, target: str) -> int:
         assert self.run_dir is not None
         meta = read_meta(self.run_dir)
-        rounds = _fix_loop_rounds(meta) + 1
+        counts = _fix_loop_round_counts(meta)
+        rounds = counts.get(target, 0) + 1
         if rounds > FIX_LOOP_MAX_ROUNDS:
             return rounds
-        # gates 실패 루프는 run meta에 저장해서 재시작 후에도 상한을 유지한다.
-        meta["fix_loop_rounds"] = rounds
+        # 재시작 후에도 상한을 유지하도록 target별 카운트를 run meta에 저장한다.
+        counts[target] = rounds
+        meta["fix_loop_rounds"] = counts
         write_meta(self.run_dir, meta)
         return rounds
-
-    def _reset_fix_loop_rounds(self) -> None:
-        assert self.run_dir is not None
-        meta = read_meta(self.run_dir)
-        if "fix_loop_rounds" not in meta:
-            return
-        meta.pop("fix_loop_rounds", None)
-        write_meta(self.run_dir, meta)
 
     def _write_automatic_artifact(self, phase: Phase) -> bool:
         assert self.run_dir is not None
@@ -1244,12 +1264,24 @@ def _load_workflow(kit_root: Path, name: str) -> list[Phase]:
     ]
 
 
-def _fix_loop_rounds(meta: dict[str, Any]) -> int:
-    raw = meta.get("fix_loop_rounds", 0)
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return 0
+def _fix_loop_round_counts(meta: dict[str, Any]) -> dict[str, int]:
+    raw = meta.get("fix_loop_rounds")
+    # 구버전 형식: 정수는 리터럴 "fix-loop" 진입 횟수만 셌다. 업그레이드 중이던
+    # run이 상한을 잃지 않도록 그 값을 "fix-loop" target의 초기 카운트로 옮긴다.
+    # (bool은 int의 하위형이라 먼저 걸러 오분류를 막는다.)
+    if isinstance(raw, bool):
+        return {}
+    if isinstance(raw, int):
+        return {"fix-loop": raw} if raw > 0 else {}
+    if not isinstance(raw, dict):
+        return {}
+    counts: dict[str, int] = {}
+    for target, value in raw.items():
+        try:
+            counts[str(target)] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return counts
 
 
 def _meta_timestamp(value: object) -> float | None:
