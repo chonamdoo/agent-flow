@@ -43,6 +43,8 @@ phases:
     replicas: 3
     description: Review the bug fix.
     multi_review: true
+    required_markers:
+      - "must-avoid-check: pass|fail"
     routes:
       approve: qa
       request-changes: implement-fix
@@ -53,8 +55,10 @@ phases:
       independent reviewer processes must cover the reproduced failure, the fix
       scope, regression coverage, and unintended behavior changes.
       Each reviewer section must include `reviewer-source: sub-agent` and an
-      independent verdict: approve or request-changes. Any request-changes from
-      any reviewer makes the overall verdict request-changes.
+      independent verdict: approve or request-changes.
+      The Clean Architecture reviewer must record `must-avoid-check: pass|fail`;
+      a missing or failing marker blocks approval. Any request-changes from any
+      reviewer makes the overall verdict request-changes.
       End with `## Overall` followed by exactly one verdict line:
       `verdict: approve` or `verdict: request-changes`.
       Output: review.md.

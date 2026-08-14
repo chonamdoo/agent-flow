@@ -1,7 +1,7 @@
 # Review Angle — UDF (Android)
 
 You are reviewing this change through
-`skills/android-clean-presentation-architecture/SKILL.md`. Its `ViewModel Rule`,
+`.agent-flow/skills/android-clean-presentation-architecture/SKILL.md`. Its `ViewModel Rule`,
 `UiState Rule`, `Compose Screen Rule`, and `Review Checklist` sections hold the
 rule text behind every item below; this angle only says how to judge it. Output
 markdown findings only. Do not propose code unless asked.

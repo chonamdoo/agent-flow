@@ -19,15 +19,18 @@ import asyncio
 import os
 import signal
 import time
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
-from agent_flow.core.worktree_isolation import WorktreeIsolationError, max_worker_capacity
+from agent_flow.core.worktree_isolation import (
+    WorktreeIsolationError,
+    max_worker_capacity,
+)
 from agent_flow.providers.subprocess import (
-    MAX_PROVIDER_OUTPUT_BYTES,
     _PROVIDER_POLL_S,
     _PROVIDER_REAP_TIMEOUT_S,
+    MAX_PROVIDER_OUTPUT_BYTES,
     _provider_output_exceeded,
     _read_provider_outputs,
     confined_provider_launch,
@@ -41,7 +44,7 @@ class SubprocessJob:
     args: tuple[str, ...]   # full argv after binary (e.g. ("-p", "<prompt>"))
     cwd: Path
     timeout_s: int = 600    # default 10 minutes per job
-    env: dict | None = None  # None inherits parent env; set to sanitize git leak
+    env: Mapping[str, str] | None = None
     allow_workspace_writes: bool = True
 
 
@@ -66,6 +69,8 @@ async def _run_one(job: SubprocessJob) -> SubprocessResult:
     wait_task: asyncio.Task[int] | None = None
     stdout_path: Path | None = None
     stderr_path: Path | None = None
+    captured_stdout = ""
+    captured_stderr = ""
     try:
         with confined_provider_launch(
             argv=(job.binary, *job.args),
@@ -115,11 +120,15 @@ async def _run_one(job: SubprocessJob) -> SubprocessResult:
                     duration_s=time.monotonic() - started,
                 )
             finally:
-                if proc is not None:
-                    _kill_process_tree(proc)
-                    await _bounded_reap(proc, wait_task)
+                try:
+                    await _cleanup_provider_process(proc, wait_task)
+                finally:
+                    captured_stdout, captured_stderr = _read_provider_outputs(
+                        stdout_path,
+                        stderr_path,
+                    )
 
-            stdout, stderr = _read_provider_outputs(stdout_path, stderr_path)
+            stdout, stderr = captured_stdout, captured_stderr
             return SubprocessResult(
                 job_id=job.job_id,
                 stdout=stdout,
@@ -138,7 +147,7 @@ async def _run_one(job: SubprocessJob) -> SubprocessResult:
                 ),
             )
     except (OSError, WorktreeIsolationError) as exc:
-        stdout, stderr = _read_provider_outputs(stdout_path, stderr_path)
+        stdout, stderr = captured_stdout, captured_stderr
         return SubprocessResult(
             job_id=job.job_id,
             stdout=stdout,
@@ -147,9 +156,21 @@ async def _run_one(job: SubprocessJob) -> SubprocessResult:
             duration_s=time.monotonic() - started,
         )
     finally:
-        if proc is not None:
-            _kill_process_tree(proc)
-            await _bounded_reap(proc, wait_task)
+        await _cleanup_provider_process(proc, wait_task)
+
+
+async def _cleanup_provider_process(
+    proc: asyncio.subprocess.Process | None,
+    wait_task: asyncio.Task[int] | None,
+) -> None:
+    if proc is None:
+        return
+    try:
+        _kill_process_tree(proc)
+        await _bounded_reap(proc, wait_task)
+    except (OSError, WorktreeIsolationError):
+        # Cleanup must not mask the launch, timeout, or reap error being reported.
+        pass
 
 
 async def _wait_for_provider(

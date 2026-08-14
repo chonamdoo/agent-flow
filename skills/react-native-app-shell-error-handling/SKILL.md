@@ -3,6 +3,8 @@ name: react-native-app-shell-error-handling
 description: Use when implementing or reviewing React Native app-wide error handling where screens notify common errors and App.tsx/AppShell owns NavigationContainer, root stack/tab navigation, global Modal, snackbar, toast hosts, auth flow switching, navigation reset, SessionExpired handling, and Maintenance handling.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [app shell, appshell, global error, common error, session expired, navigation reset, modal host, toast host, 공통 에러, 전역 에러, 세션 만료]
+pathGlobs: ["**/App.tsx", "**/*AppShell*.tsx", "**/*CommonError*Host.tsx"]
+requires: [app-shell-error-contract]
 ---
 
 # React Native App Shell Error Handling
@@ -28,6 +30,11 @@ implementation or review.
 - Navigation reset to login or maintenance roots.
 - Review of screens/hooks/stores that handle global errors.
 
+## Do not use for
+
+- Feature-local validation or fetch errors that render inline.
+- Ordinary screen/hook state or UI-model mapping; use `react-native-clean-presentation-architecture` instead.
+
 ## AppShell Role
 
 `App.tsx` or `AppShell` is the top-level React Native container:
@@ -42,32 +49,17 @@ implementation or review.
 
 Screens render screen UI only.
 
-## Notifier Contract
+## Shared Error Contract
 
-Use a small common error notifier/store:
-
-- `notify(error) == true`: AppShell handles the common error.
-- `notify(error) == false`: screen handles local inline error state.
-- expose pending common errors as state.
-- consume errors by stable `id`.
-- dedupe by stable key when repeated requests report the same common error.
-
-Common error examples: `SessionExpired`, `Maintenance`, `Forbidden`, and server
-codes such as `COMMON_*`.
+Read [`app-shell-error-contract`](../app-shell-error-contract/SKILL.md) before the platform rules below. It is the source of truth for classification, queue identity, acknowledgement, retry, and metadata preservation.
 
 ## Development Checklist
 
-- Keep global modal/snackbar/toast host at AppShell level.
-- Show one current common error from the pending queue.
-- Consume the common error before dispatching navigation reset.
+- Keep the global modal/snackbar/toast host at AppShell level.
+- Run root navigation recovery through the shared queue and acknowledgement contract.
 - For `SessionExpired`, reset the root navigator to the login flow.
-- For `Maintenance`, reset the root navigator to maintenance flow when present.
-- Keep local validation and screen-only fetch failures in screen state when
-  `notify(error)` returns `false`.
-- Use React Navigation auth-flow state or root `CommonActions.reset` from
-  AppShell-owned code.
-- Preserve server `code`, `title`, `message`, and `requestId` through mappers into
-  the common UI model when supplied.
+- For `Maintenance`, reset the root navigator to the maintenance flow when present.
+- Use React Navigation auth-flow state or root `CommonActions.reset` from AppShell-owned code.
 
 ## Review Checklist
 
@@ -78,9 +70,8 @@ Request changes when any of these are true:
 - A screen owns global toast/snackbar host instances.
 - Multiple `NavigationContainer` trees are introduced without a clear isolated
   mini-app reason.
-- `SessionExpired` can leave authenticated stack entries after confirm.
-- Common and local error paths both render for the same failure.
-- Error metadata is dropped before common UI can display it.
+- `SessionExpired` can leave authenticated stack entries after successful confirmation.
+- The shared classification, deduplication, acknowledgement, retry, or metadata contract is violated.
 
 ## Platform-Specific Forbidden Patterns
 
@@ -94,16 +85,10 @@ Request changes when any of these are true:
 
 ## Tests To Expect
 
-- Notifier classifies common versus local errors.
-- Notifier dedupes and consumes pending errors.
-- AppShell renders the first pending common error in the global host.
-- `SessionExpired` confirmation resets to login flow.
+- AppShell renders common errors in the global host and performs the root reset.
 - Screen tests prove common errors call `notify` instead of rendering local error
   state.
 
 ## Completion Gate
 
-When this skill applies, record:
-
-- `project-local-skills: checked`
-- `project-local-skills-used: react-native-app-shell-error-handling`
+Use only the markers supplied by the active phase.

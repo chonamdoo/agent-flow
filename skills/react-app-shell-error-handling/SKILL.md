@@ -3,6 +3,8 @@ name: react-app-shell-error-handling
 description: Use when implementing or reviewing React Web app-wide error handling where feature components notify common errors and an AppShell, root layout, root route, or client provider layer owns global dialogs, snackbars, toasts, auth flow switching, router resets, SessionExpired handling, Maintenance handling, React Router layout/error boundaries, or Next.js App Router layout/error boundaries.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [app shell, appshell, global error, common error, session expired, error boundary, snackbar, toast host, router reset, 공통 에러, 전역 에러, 세션 만료]
+pathGlobs: ["**/*AppShell*.tsx", "**/app/layout.tsx", "**/*CommonError*Provider.tsx", "**/*CommonError*Host.tsx"]
+requires: [app-shell-error-contract]
 ---
 
 # React App Shell Error Handling
@@ -32,6 +34,11 @@ implementation or review.
 - Next.js App Router root layout/provider boundary decisions.
 - Review of feature components, hooks, or stores that handle global errors.
 
+## Do not use for
+
+- Feature-local validation or fetch errors that render inline.
+- Ordinary component/hook state or UI-model mapping; use `react-clean-presentation-architecture` instead.
+
 ## AppShell Role
 
 `AppShell` is the top-level React container above feature routes:
@@ -46,35 +53,18 @@ implementation or review.
 
 Feature routes render feature UI only.
 
-## Notifier Contract
+## Shared Error Contract
 
-Use a small common error notifier/store:
-
-- `notify(error) == true`: AppShell handles the common error.
-- `notify(error) == false`: feature handles local inline error state.
-- expose pending common errors as state.
-- consume errors by stable `id`.
-- dedupe by stable key when the same server/common error can repeat.
-
-Common error examples: `SessionExpired`, `Maintenance`, `Forbidden`, and server
-codes such as `COMMON_*`.
+Read [`app-shell-error-contract`](../app-shell-error-contract/SKILL.md) before the platform rules below. It is the source of truth for classification, queue identity, acknowledgement, retry, and metadata preservation.
 
 ## Development Checklist
 
-- Keep global error state in AppShell/provider scope, not feature component
-  local state.
-- Show one current common error from the pending queue.
-- Consume the common error before running confirmation side effects.
-- For `SessionExpired`, replace/reset to the login route after confirmation.
-- For `Maintenance`, replace/reset to maintenance flow after confirmation.
-- Keep local validation and local fetch failures inside the feature when
-  `notify(error)` returns `false`.
+- Keep global error state in AppShell/provider scope, not feature component local state.
+- Run AppShell recovery effects through the shared queue and acknowledgement contract.
+- For `SessionExpired`, replace the current browser history entry with the login route. An auth guard must block protected history entries reached through Back; browser APIs cannot erase the user's prior history.
+- For `Maintenance`, replace the current entry with the maintenance flow and guard routes that cannot run during maintenance.
 - In React Router, put global hosts in the root/layout route, not leaf routes.
-- In Next.js App Router, put interactive stores/providers in a Client Component
-  imported by `layout.tsx`; avoid turning the whole root document into a client
-  component.
-- Preserve server `code`, `title`, `message`, and `requestId` through mappers into
-  the common UI model when supplied.
+- In Next.js App Router, put interactive stores/providers in a Client Component imported by `layout.tsx`; keep the root document server-rendered unless another requirement needs a client boundary.
 
 ## Review Checklist
 
@@ -84,9 +74,8 @@ Request changes when any of these are true:
 - A feature directly resets root navigation or redirects to login for common
   errors.
 - A feature owns the global snackbar/toast host.
-- `SessionExpired` can leave authenticated route state in history after confirm.
-- Common and local error paths both render for the same failure.
-- Error metadata is dropped before common UI can display it.
+- Back navigation reaches a protected route without the auth guard rejecting or redirecting it.
+- The shared classification, deduplication, acknowledgement, retry, or metadata contract is violated.
 - React Router root/layout responsibilities are duplicated in leaf routes.
 - Next.js `error.tsx` or `global-error.tsx` is used as the primary API/domain
   common error channel.
@@ -103,16 +92,10 @@ Request changes when any of these are true:
 
 ## Tests To Expect
 
-- Notifier classifies common versus local errors.
-- Notifier dedupes and consumes pending errors.
-- AppShell renders the first pending common error.
-- `SessionExpired` confirmation resets/replaces to login.
+- AppShell renders common errors and applies the router/auth recovery behavior.
 - Feature tests prove common errors call `notify` instead of rendering local
   `UiState.Error`.
 
 ## Completion Gate
 
-When this skill applies, record:
-
-- `project-local-skills: checked`
-- `project-local-skills-used: react-app-shell-error-handling`
+Use only the markers supplied by the active phase.

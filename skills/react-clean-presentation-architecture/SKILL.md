@@ -4,18 +4,14 @@ description: Use when creating, modifying, or reviewing a React Clean Architectu
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [uistate, ui state, state holder, container component, presentation hook, 상태 홀더, 화면 상태, 프레젠테이션 계층]
 pathGlobs: ["**/*UiState.ts", "**/*UiState.tsx", "**/presentation/**"]
-required_markers:
-  - "presentation-skill: react"
-  - "presentation-state-based-development: applied|n/a"
-  - "presentation-state-review: pass|fail"
-  - "ui-state-modeling: explicit"
-  - "presentation-mapping-boundary: domain-to-uimodel|n/a"
-  - "di-boundary: context-provider|tsyringe|existing|n/a"
+requires: [clean-architecture-core]
 ---
 
 # React Clean Presentation Architecture
 
 Use this skill for React Web feature work where presentation code should follow a reusable Clean Architecture pattern.
+
+For AppShell-owned global error hosts, queue acknowledgement, or root navigation reset, use `react-app-shell-error-handling` instead.
 
 ## Evidence Basis
 
@@ -151,14 +147,25 @@ Split state-holder wiring from rendering:
 
 ## Required Markers
 
-When this skill is used for presentation development or code review, include these markers in the completion artifact or review output:
+When this skill is used for presentation development or code review, write every marker below in the phase artifact or review output. The active workflow `required_markers` is the allowed-value source of truth:
 
-- `presentation-skill: react`
+- `presentation-skill: android|react|react-native|ios|n/a`
 - `presentation-state-based-development: applied|n/a`
-- `presentation-state-review: pass|fail`
-- `ui-state-modeling: explicit`
+- `presentation-state-review: pass|fail|n/a`
+- `ui-state-modeling: explicit|n/a`
 - `presentation-mapping-boundary: domain-to-uimodel|n/a`
-- `di-boundary: context-provider|tsyringe|existing|n/a`
+- `di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a`
+
+Apply these React-specific decisions:
+
+- `presentation-skill`: use `react` when React Web presentation code is in scope. Use `n/a` only when the phase has no presentation work.
+- `presentation-state-based-development`: use `applied` when presentation code was created or changed under this contract. Use `n/a` for review-only work or when no presentation code changed.
+- `presentation-state-review`: use `pass` when every applicable checklist item passes, `fail` when any applicable item fails, and `n/a` only when no React Web presentation code is in scope.
+- `ui-state-modeling`: use `explicit` when the screen's durable states are modeled explicitly. Use `n/a` only when no screen state is in scope.
+- `presentation-mapping-boundary`: use `domain-to-uimodel` when domain/application data crosses into presentation through a mapper. Use `n/a` only when no such data crosses the boundary.
+- `di-boundary`: use `context-provider`, `tsyringe`, `direct`, or `existing` for the verified React composition path. Use `n/a` only when the change neither creates nor reviews dependency wiring.
+
+A `fail` result is actionable: record the failed criterion and return to the workflow's fix path before approval.
 
 ## Sources
 

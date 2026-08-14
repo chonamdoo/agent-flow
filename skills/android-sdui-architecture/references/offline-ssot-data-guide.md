@@ -56,6 +56,8 @@ subscribes to a DTO or an API response, in any case.
 
 ## Patch operations are one transaction
 
+The following is a partial transaction skeleton for `UPSERT` and `REMOVE`. Production code must handle `REPLACE`, `MOVE`, and `PATCH_ITEM` in the same exhaustive transaction.
+
 ```kotlin
 @Transaction
 suspend fun applyOperations(screenId: String, ops: List<SectionOperationEntity>) {
@@ -83,15 +85,19 @@ anchor appends rather than failing.
 ## Repository: three-way merge
 
 ```kotlin
-override fun observeScreen(screenId: String): Flow<Screen> =
+override fun observeScreen(screenId: String): Flow<ObserveScreenResult> =
     combine(
         dao.observeScreenWithSections(screenId),  // structure
         dao.observeProductStates(),               // like / cart
-        dao.observeFilterStates(),                // filter selection
+        dao.observeFilterStates(),                // filter selections
     ) { screenData, productStates, filterStates ->
-        screenData?.toModel(json)
-            ?.mergeProductStates(productStates)
-            ?.mergeFilterStates(filterStates)
+        runCatching<ObserveScreenResult?> {
+            screenData?.toModel(
+                json = json,
+                productStates = productStates,
+                filterStates = filterStates,
+            )?.let(ObserveScreenResult::Content)
+        }.getOrElse { ObserveScreenResult.Failure(it.toDomainError()) }
     }
         .filterNotNull()
         .flowOn(dispatcher)
@@ -100,6 +106,9 @@ override fun observeScreen(screenId: String): Flow<Screen> =
 
 - `refresh` and `refreshSections` return `Result<Unit>`, never a screen. Callers
   read the flow.
+- The repository converts transport and storage failures before returning refresh
+  results. `runCatching` maps per-emission parsing or mapping failures to
+  `ObserveScreenResult.Failure` without terminating observation.
 - A filter selection is written locally first so the chip reacts immediately,
   then the patch request goes out.
 - Discard a patch whose `version` is older than the stored version before
@@ -144,9 +153,17 @@ subtree silently stops receiving merged state.
 ```kotlin
 val uiState: StateFlow<ScreenUiState> =
     screenRepository.observeScreen(SCREEN_ID)
-        .map<Screen, ScreenUiState> { ScreenUiState.Success(it) }
+        .map<ObserveScreenResult, ScreenUiState> { result ->
+            when (result) {
+                is ObserveScreenResult.Content -> ScreenUiState.Success(
+                    screenUiMapper.toUiModel(result.screen)
+                )
+                is ObserveScreenResult.Failure -> ScreenUiState.Error(
+                    screenErrorMapper.toUiModel(result.error)
+                )
+            }
+        }
         .onStart { emit(ScreenUiState.Loading) }
-        .catch { emit(ScreenUiState.Error(it.message)) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ScreenUiState.Loading)
 ```
 

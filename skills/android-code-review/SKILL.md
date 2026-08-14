@@ -42,17 +42,9 @@ them:
   Flow state/event modeling
 - KMP and domain types: expect/actual boundaries, value class suitability
 
-Do not parse upstream frontmatter through the native skill loader. Resolve
-skills through the current active host only:
+Resolve every required skill through the phase prompt and installed skill index. Read the exact path the resolver supplies; do not construct host home-directory paths or search another host's installation.
 
-- Codex: `~/.codex/skills/{skill}/SKILL.md`
-- Claude: `~/.claude/skills/{skill}/SKILL.md`
-- OMP: `~/.omp/agent/skills/{skill}/SKILL.md`
-
-Do not install, copy, link, vendor, or fallback to another host path. If a
-required local skill is missing, stop approval and report
-`missing local <group>: <skill>` with the profile source URL.
-Cite the skill paths you read in the review artifact's Calibration section.
+If a required skill is unresolved, stop approval and report `missing local <group>: <skill>` with the configured source URL. Record the resolved paths actually read in the review artifact's `Calibration` section.
 
 ## Review Order
 
@@ -74,6 +66,9 @@ changes for style preferences that already match the repository.
 
 ```markdown
 ## Android Code Review
+
+### Calibration
+- `<resolved-skill-path>`
 
 ### Findings
 - [P1] file.kt:123 - concrete issue, impact, and fix

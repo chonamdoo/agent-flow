@@ -45,6 +45,7 @@ const INSTALL_ROOT = resolveInstalledRoot(process.cwd()) ?? SOURCE_ROOT;
 // 동일해야 한다. allowlist 밖 bundled skill은 host link 없이 index에만 노출된다.
 const BUNDLED_HOST_SKILL_NAMES = new Set([
   "agent-flow",
+  "app-shell-error-contract",
   "android-appshell-error-handling",
   "comment-authoring-discipline",
   "comment-checker",
@@ -495,7 +496,8 @@ assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "verdict: request-changes")
 assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "id: comment-authoring");
 assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "`n/a` only when the changed diff has no");
 assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "comment-scope: final-pass-only");
-assertContains("skills/code-generation-discipline/SKILL.md", "Write comments only when code alone cannot carry the reason or contract.");
+assertContains("skills/code-generation-discipline/SKILL.md", "Apply `comment-authoring-discipline` as the semantic source");
+assertContains("skills/comment-authoring-discipline/SKILL.md", "only when code alone cannot explain the reason or contract");
 assertNotContains("skills/code-generation-discipline/SKILL.md", "Every new or modified code block must include Korean " + "comments");
 if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/prompts/multi-review.md", "Reviewers are installed Claude and Codex CLIs only");

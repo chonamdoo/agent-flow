@@ -20,10 +20,12 @@ Profile injection:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import yaml
+
 from agent_flow.core.design_ledger import ledger_prompt_block
 from agent_flow.core.local_skills import local_skill_prompt_block
 
@@ -54,6 +56,13 @@ class Adapter(ABC):
         self._config_root: Path | None = None
         self._task_text: str = ""
         self._changed_files: tuple[str, ...] = ()
+
+    def profile_review_angles(self) -> list[Mapping[str, object]]:
+        angles = self._profile_snapshot.get("review_angles")
+        if not isinstance(angles, list):
+            return []
+        return [angle for angle in angles if isinstance(angle, dict)]
+
 
     @abstractmethod
     def execute(self, phase: "Phase", run_dir: Path, project_root: Path) -> bool:

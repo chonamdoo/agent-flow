@@ -1943,10 +1943,10 @@ def test_multi_review_reviewer_env_is_sanitized(tmp_path, monkeypatch):
         },
         host="probe",
     )
-    results = MR.run_distribution(distribution, linked, timeout_s=60)
+    execution = MR.run_distribution(distribution, linked, timeout_s=60)
 
-    assert len(results) == 1
-    assert results[0].ok
+    assert len(execution.results) == 1
+    assert execution.results[0].ok
     rendered = out.read_text(encoding="utf-8")
     assert "LEAKS=<none>" in rendered
     assert f"TOP={real_path(linked)}" in rendered
@@ -1987,7 +1987,7 @@ def test_multi_review_rejects_non_linked_cwd_before_spawn(
         },
         host="host-cli",
     )
-    results = MR.run_distribution(distribution, tmp_path, timeout_s=60)
+    execution = MR.run_distribution(distribution, tmp_path, timeout_s=60)
 
     # 지켜야 하는 불변식은 "spawn하지 않는다"다. 거부 사유는 플랫폼이 정한다 —
     # write-sandbox가 없는 OS에서는 cwd를 관측하기 전에 backend가 먼저 막는다.
@@ -1996,8 +1996,8 @@ def test_multi_review_rejects_non_linked_cwd_before_spawn(
         if sys.platform == "darwin"
         else "no verified provider write-sandbox backend for this operating system"
     )
-    assert len(results) == 1
-    assert results[0].error == expected_error
+    assert len(execution.results) == 1
+    assert execution.results[0].error == expected_error
     assert launches == []
     assert expected_error in out.read_text(encoding="utf-8")
 

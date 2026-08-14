@@ -1,6 +1,6 @@
 # Review Angle - Clean Architecture
 
-You are reviewing this change through `skills/clean-architecture/SKILL.md`.
+You are reviewing this change through `.agent-flow/skills/clean-architecture-core/SKILL.md`.
 Output strictly markdown findings. Do not propose code unless asked.
 
 ## What to verify
@@ -55,13 +55,21 @@ Output strictly markdown findings. Do not propose code unless asked.
    - ISP: consumers do not depend on unused methods.
    - DIP: high-level policy depends on abstractions.
 
+8. Full must-avoid sweep
+   - Check every rule in the core skill's current `Must Avoid` section against
+     the changed code; do not infer coverage from the seven categories above.
+   - Record `must-avoid-check: pass|fail`.
+
 ## Must-fix policy
 
-Any violation listed in `skills/clean-architecture-core/SKILL.md` as a
+Any violation listed in `.agent-flow/skills/clean-architecture-core/SKILL.md` as a
 must-avoid rule, or any failing required checklist item from that core skill,
 must produce `verdict: request-changes`. Use
-`skills/clean-architecture/SKILL.md` only for compatibility markers and skill
+`.agent-flow/skills/clean-architecture/SKILL.md` only for compatibility markers and skill
 loading order.
+
+Record every applicable marker from the core skill's current `Review Checklist`;
+the block below is only the workflow compatibility subset.
 
 ## Required completion gate
 
@@ -70,6 +78,7 @@ The review artifact must include:
 ```text
 ## Completion Gate
 clean-architecture: applied
+must-avoid-check: pass|fail
 dependency-rule: pass|fail
 usecase-boundary: pass|fail|n/a
 usecase-calls-usecase: pass|fail

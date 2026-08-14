@@ -76,37 +76,43 @@ onRefresh, onLoad, onDismiss, onTimer, onScreenResult
 ## Action vocabulary
 
 Finite and closed. The client implements exactly these; anything else parses to
-`UNKNOWN` and is ignored.
+`UNKNOWN` and is ignored. This is field-set notation, not a JSON payload:
 
-```json
-{
-  "NAVIGATE":            { "uri", "expectResult?" },
-  "DISMISS_WITH_RESULT": { "resultKey", "payload" },
-  "API_CALL":            { "method", "endpoint", "body", "optimistic?", "onSuccess?", "onError?" },
-  "REFRESH_SECTIONS":    { "sectionIds", "allowInsert?", "context" },
-  "UPDATE_LOCAL_STATE":  { "path", "value" },
-  "SCROLL_TO":           { "sectionId", "highlight?" },
-  "OPEN_URL":            { "url", "external" },
-  "TRACK":               { "event", "props" },
-  "TOAST":               { "message" },
-  "SEQUENCE":            { "steps": [Action] },
-  "CONDITION":           { "if", "then", "else?" },
-  "NOOP":                {},
-  "UNKNOWN":             {}
-}
+```text
+NAVIGATE: uri, expectResult?
+DISMISS_WITH_RESULT: resultKey, payload
+API_CALL: method, endpoint, body, optimistic?, onSuccess?, onError?
+REFRESH_SECTIONS: sectionIds, allowInsert?, context
+UPDATE_LOCAL_STATE: path, value
+SCROLL_TO: sectionId, highlight?
+OPEN_URL: url, external
+TRACK: event, props
+TOAST: message
+SEQUENCE: steps<Action>
+CONDITION: if, then, else?
+NOOP: no fields
+UNKNOWN: no fields
 ```
 
-Optimistic update plus rollback needs no new verb — it is `SEQUENCE` with an
-`onError` branch that reverses the local write and shows a message. Condition
-operators are `EQ, NEQ, GT, LT, AND, OR, NOT, EXISTS`; nesting past two levels
-means the schema is reinventing a language, so move that logic out.
+Optimistic update plus recovery needs no new verb. On explicit server or domain
+rejection, an `onError` branch may reverse the local write and show a message.
+On transport failure, keep the local write pending and queue/retry it under
+`offline-ssot-data-guide.md`; do not roll it back. Condition operators are
+`EQ, NEQ, GT, LT, AND, OR, NOT, EXISTS`; nesting past two levels means the
+schema is reinventing a language, so move that logic out.
 
 One action serves every section because bindings resolve at runtime:
 
 ```json
-"act_filter_section": {
-  "type": "REFRESH_SECTIONS", "sectionIds": ["{$.section.id}"],
-  "context": { "filterId": "{$.filter.id}", "selected": "{$.filter.selectedId}" }
+{
+  "act_filter_section": {
+    "type": "REFRESH_SECTIONS",
+    "sectionIds": ["{$.section.id}"],
+    "context": {
+      "filterId": "{$.filter.id}",
+      "selected": "{$.filter.selectedId}"
+    }
+  }
 }
 ```
 

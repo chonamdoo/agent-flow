@@ -12,8 +12,8 @@ import re
 import shlex
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-import tempfile
 from pathlib import Path
+from typing import TypedDict
 
 from agent_flow.cli_detect import (
     CliInfo,
@@ -25,20 +25,19 @@ from agent_flow.cli_detect import (
 from agent_flow.core.hook_integrity import assert_managed_hooks_registered
 from agent_flow.core.leader_tripwire import leader_sweep_include_ignored_for
 from agent_flow.core.worktree_isolation import (
-    leader_sweep_includes_ignored,
+    WorktreeIsolationError,
     assert_leader_unchanged,
     capture_leader_snapshot,
     leader_root_for,
-    WorktreeIsolationError,
+    leader_sweep_includes_ignored,
     sanitized_worker_env,
+    validate_run_artifact_target,
+    write_run_artifact_text,
 )
 from agent_flow.subprocess_pool import SubprocessJob, SubprocessResult, run_parallel
 
 _REVIEWER_PROVENANCE_RE = re.compile(
-    r"(?m)^\s*(?:-\s*)?reviewer-source:\s*sub-agent\s*$"
-)
-_PROVIDER_FAILURE_RE = re.compile(
-    r"(?m)^(?:- status: (?:ERROR|TIMEOUT)|reason: reviewer_rate_limited)$"
+    r"(?m)^reviewer-source:\s*sub-agent[ \t]*$"
 )
 _REVIEWER_SANDBOX_FAILURE_SIGNALS = (
     "sandbox_apply: operation not permitted",
@@ -62,9 +61,6 @@ class Distribution:
     host: str | None = None
     required_job_ids: frozenset[str] = frozenset()
     accept_any_provider: bool = False
-    # 이전 시도의 실패 artifact 때문에 제외된 provider. 조용히 한 provider로
-    # 줄어드는 것을 host가 알아야 한다.
-    skipped_providers: tuple[str, ...] = ()
 
     def empty(self) -> bool:
         return not self.by_cli and not self.fallback_to_generic
@@ -76,6 +72,12 @@ class Distribution:
         if self.host:
             parts.append(f"(host={self.host})")
         return ", ".join(parts) if parts else "(no jobs)"
+
+
+@dataclass(frozen=True)
+class ReviewExecution:
+    results: tuple[SubprocessResult, ...] = ()
+    skipped_providers: tuple[str, ...] = ()
 
 
 def resolve_review_clis() -> list[CliInfo]:
@@ -90,6 +92,18 @@ def resolve_review_clis() -> list[CliInfo]:
     return out
 
 
+def _configured_reviewer_names() -> set[str] | None:
+    if not os.environ.get("AGENT_FLOW_REVIEWERS"):
+        return None
+    return {cli.name for cli in resolve_review_clis()}
+
+
+def _has_sufficient_reviewer_processes(
+    by_cli: dict[str, list[ReviewerJob]],
+) -> bool:
+    return sum(len(assigned) for assigned in by_cli.values()) >= 2
+
+
 def distribute_final_review(
     jobs: list[ReviewerJob],
     host: str | None = None,
@@ -100,66 +114,53 @@ def distribute_final_review(
     host = host or detect_host_cli()
     # AGENT_FLOW_REVIEWERS는 pool을 **좁히는** 스위치다. 여기서 무시하면 문서가
     # 약속한 좁히기가 final-review에서만 조용히 풀린다.
-    narrowed = {cli.name for cli in resolve_review_clis()}
+    narrowed = _configured_reviewer_names()
     available = {
         cli.name: cli
         for cli in detect_available_clis()
         if cli.name in REVIEW_CLI_NAMES
-        and (not narrowed or cli.name in narrowed)
+        and (narrowed is None or cli.name in narrowed)
     }
     by_cli: dict[str, list[ReviewerJob]] = {}
-    latched: dict[str, list[ReviewerJob]] = {}
     for cli_name in REVIEW_CLI_NAMES:
         if cli_name not in available:
             continue
-        assigned = [
+        by_cli[cli_name] = [
             _reviewer_job_for_cli(job, cli_name=cli_name)
             for job in jobs
         ]
-        if any(_existing_provider_failure(job) for job in assigned):
-            latched[cli_name] = assigned
-            continue
-        by_cli[cli_name] = assigned
-    # 이전 시도에서 실패한 provider는 건너뛴다. 단 모두 실패했다면 건너뛰기가
-    # 보호가 아니라 교착이다 — per-angle 실패 artifact는 phase 재시도에서 지워지지
-    # 않으므로, 그대로 두면 fix-loop을 돌아도 final-review가 영구히 raise한다.
-    if not by_cli and latched:
-        by_cli = latched
-        latched = {}
     if not by_cli:
         return Distribution(
             fallback_jobs=list(jobs),
             fallback_to_generic=True,
             insufficient_reviewers=True,
             host=host,
-            accept_any_provider=True,
         )
+    _assert_unique_output_paths(by_cli)
     required_job_ids = frozenset(
         _subprocess_job_id(cli_name, job)
         for cli_name, assigned in by_cli.items()
         for job in assigned
     )
-    # 독립성 기준은 process 수다. angle 1개라도 provider 2개면 독립 reviewer 2개다.
-    reviewer_processes = sum(len(assigned) for assigned in by_cli.values())
     return Distribution(
         by_cli=by_cli,
-        insufficient_reviewers=reviewer_processes < 2,
+        insufficient_reviewers=not _has_sufficient_reviewer_processes(by_cli),
         host=host,
         required_job_ids=required_job_ids,
         accept_any_provider=True,
-        skipped_providers=tuple(latched),
     )
 
 
 def distribute(jobs: list[ReviewerJob], host: str | None = None) -> Distribution:
-    """Assign every required angle to the host and duplicate optional extras."""
+    """Assign every required angle to one provider and fan out optional peers."""
     if not jobs:
         return Distribution()
-    host = host or detect_host_cli()
+    narrowed = _configured_reviewer_names()
     available = {
         cli.name: cli
         for cli in detect_available_clis()
         if cli.name in REVIEW_CLI_NAMES
+        and (narrowed is None or cli.name in narrowed)
     }
     primary_name = (
         host
@@ -177,22 +178,23 @@ def distribute(jobs: list[ReviewerJob], host: str | None = None) -> Distribution
 
     by_cli = {primary_cli.name: list(jobs)}
     optional = {
-        cli.name: cli
-        for cli in resolve_review_clis()
-        if cli.name != primary_cli.name
+        cli_name: cli
+        for cli_name, cli in available.items()
+        if cli_name != primary_cli.name
     }
     for cli_name in optional:
         by_cli[cli_name] = [
             _optional_reviewer_job(job, cli_name=cli_name)
             for job in jobs
         ]
+    _assert_unique_output_paths(by_cli)
     required_job_ids = frozenset(
         _subprocess_job_id(primary_cli.name, job)
         for job in jobs
     )
     return Distribution(
         by_cli=by_cli,
-        insufficient_reviewers=len(required_job_ids) < 2,
+        insufficient_reviewers=not _has_sufficient_reviewer_processes(by_cli),
         host=host,
         required_job_ids=required_job_ids,
     )
@@ -204,7 +206,7 @@ def _optional_reviewer_job(
     cli_name: str,
 ) -> ReviewerJob:
     output = job.output_path.with_name(
-        f"{job.output_path.stem}-{cli_name}{job.output_path.suffix}"
+        f"{job.output_path.stem}-extra-{cli_name}{job.output_path.suffix}"
     )
     return ReviewerJob(
         angle_id=f"{job.angle_id}-{cli_name}-extra",
@@ -230,19 +232,23 @@ def _reviewer_job_for_cli(
     )
 
 
-def _existing_provider_failure(job: ReviewerJob) -> str | None:
-    """이전 시도가 남긴 실패 artifact. 판정은 **header 블록**만 본다 —
-    리뷰 본문이 `- status: ERROR`를 인용해도 provider가 탈락하면 안 된다."""
-    output = job.output_path
-    if output.is_symlink() or not output.is_file():
-        return None
-    header_lines: list[str] = []
-    for line in output.read_text(encoding="utf-8")[:1024].splitlines():
-        if line.startswith("## "):
-            break
-        header_lines.append(line)
-    match = _PROVIDER_FAILURE_RE.search("\n".join(header_lines))
-    return match.group(0) if match is not None else None
+def _assert_unique_output_paths(
+    by_cli: dict[str, list[ReviewerJob]],
+) -> None:
+    seen: dict[str, tuple[str, str]] = {}
+    for cli_name, assigned in by_cli.items():
+        for job in assigned:
+            key = os.path.normcase(str(job.output_path.resolve()))
+            previous = seen.get(key)
+            if previous is not None:
+                raise WorktreeIsolationError(
+                    "reviewer output path collision: "
+                    f"{job.output_path} assigned to "
+                    f"{previous[0]}:{previous[1]} and {cli_name}:{job.angle_id}"
+                )
+            seen[key] = (cli_name, job.angle_id)
+
+
 
 
 def _subprocess_job_id(cli_name: str, job: ReviewerJob) -> str:
@@ -271,6 +277,7 @@ def _reviewer_cli_args(
     if cli.name == "claude":
         return (
             *cli.invoke,
+            "--safe-mode",
             "--permission-mode",
             "plan",
             "--no-session-persistence",
@@ -283,13 +290,10 @@ def run_distribution(
     distribution: Distribution,
     project_root: Path,
     timeout_s: int = 600,
-) -> list[SubprocessResult]:
-    """Final-review probes each selected provider once in parallel. A provider
-    whose probe fails is excluded from the remaining angle wave; other
-    multi-review phases retain the single parallel wave.
-    """
+) -> ReviewExecution:
+    """Run one isolated review wave and report observed provider outcomes."""
     if distribution.fallback_to_generic or distribution.empty():
-        return []
+        return ReviewExecution()
 
     sub_jobs_by_cli: dict[str, list[SubprocessJob]] = {}
     job_to_output: dict[str, ReviewerJob] = {}
@@ -320,7 +324,7 @@ def run_distribution(
         sub_jobs_by_cli[cli_name] = assigned
 
     if not sub_jobs_by_cli:
-        return []
+        return ReviewExecution()
 
     # project_root가 worktree면 그 뒤의 leader 체크아웃이 지켜야 할 대상이다.
     # leader에서 그대로 도는 리뷰라면 지킬 바깥 대상이 없어 무장하지 않는다.
@@ -335,6 +339,7 @@ def run_distribution(
     if leader is not None:
         include_ignored = leader_sweep_include_ignored_for(leader)
         leader_before = capture_leader_snapshot(leader, include_ignored=include_ignored)
+    skipped_providers: tuple[str, ...] = ()
     if distribution.accept_any_provider:
         probes = [jobs[0] for jobs in sub_jobs_by_cli.values()]
         results = run_parallel(probes)
@@ -343,6 +348,11 @@ def run_distribution(
             for result in results
             if reviewer_result_error(result) is None
         }
+        skipped_providers = tuple(
+            cli_name
+            for cli_name in sub_jobs_by_cli
+            if cli_name not in available
+        )
         remaining = [
             job
             for cli_name, jobs in sub_jobs_by_cli.items()
@@ -362,12 +372,12 @@ def run_distribution(
     #
     # 기록이 tripwire보다 **먼저**다. 순서를 뒤집으면 오탐 1회에 완료된
     # 리뷰어 N명의 산출물이 통째로 사라진다.
-    for r in results:
-        job = job_to_output.get(r.job_id)
+    for result in results:
+        job = job_to_output.get(result.job_id)
         if job is None:
             continue
-        _write_review_artifact(job, _render_angle_result(r))
-    if leader_before is not None:
+        _write_review_artifact(job, _render_angle_result(result))
+    if leader is not None and leader_before is not None:
         # 범위는 기록에서 되읽는다. 여기서 다시 profile을 해석하면 리뷰가 도는
         # 동안 선언이 바뀌었을 때 baseline과 관측이 서로 다른 범위가 되고, 그
         # 불일치는 leader를 아무도 건드리지 않아도 항상 diff로 나온다.
@@ -378,44 +388,19 @@ def run_distribution(
             worker_root=project_root,
             include_ignored=leader_sweep_includes_ignored(leader_before.scope),
         )
-    return results
+    return ReviewExecution(
+        results=tuple(results),
+        skipped_providers=skipped_providers,
+    )
 
 
 def _validate_review_artifact(job: ReviewerJob) -> tuple[Path, Path]:
-    artifact_root = job.artifact_root.resolve()
-    output = job.output_path
-    if (
-        not artifact_root.is_dir()
-        or output.parent != artifact_root
-        or output.parent.resolve() != artifact_root
-        or output.is_symlink()
-        or (output.exists() and not output.is_file())
-    ):
-        raise WorktreeIsolationError(
-            f"review artifact target is outside its attested run directory: {output}"
-        )
-    return artifact_root, output
+    return validate_run_artifact_target(job.artifact_root, job.output_path)
 
 
 def _write_review_artifact(job: ReviewerJob, content: str) -> None:
     artifact_root, output = _validate_review_artifact(job)
-    fd, raw_temporary = tempfile.mkstemp(
-        dir=artifact_root,
-        prefix=f".{output.name}.",
-        suffix=".tmp",
-    )
-    temporary = Path(raw_temporary)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            fd = -1
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, output)
-    finally:
-        if fd >= 0:
-            os.close(fd)
-        temporary.unlink(missing_ok=True)
+    write_run_artifact_text(artifact_root, output, content)
 
 
 def residual_host_jobs(distribution: Distribution) -> list[ReviewerJob]:
@@ -429,6 +414,8 @@ def reviewer_result_error(result: SubprocessResult) -> str | None:
     rate_limit = _rate_limit_payload(result)
     if rate_limit is not None:
         return f"rate limited until {rate_limit['retry_after']}"
+    if result.timed_out:
+        return "timeout"
     # 리뷰어가 본문에서 sandbox 오류 문자열을 **인용**한 정상 리뷰를 실패로 채점하면
     # 이 저장소를 리뷰할 때마다 provider가 탈락한다. rate limit 판정과 같은 예외를
     # 쓴다 — 정상 종료 + provenance면 인용으로 본다. 실제 sandbox_apply 실패는 CLI가
@@ -439,13 +426,11 @@ def reviewer_result_error(result: SubprocessResult) -> str | None:
     ):
         diagnostics = "\n".join(
             part
-            for part in (result.stdout, result.error or "")
+            for part in (result.stdout, result.stderr, result.error or "")
             if part
         ).lower()
         if any(signal in diagnostics for signal in _REVIEWER_SANDBOX_FAILURE_SIGNALS):
             return "reviewer sandbox unavailable"
-    if result.timed_out:
-        return "timeout"
     if result.error:
         return result.error
     if result.returncode != 0:
@@ -500,7 +485,15 @@ def _render_angle_result(r: SubprocessResult) -> str:
     return "\n".join(parts) + "\n"
 
 
-def _rate_limit_payload(r: SubprocessResult) -> dict[str, str] | None:
+class _RateLimitPayload(TypedDict):
+    status: str
+    reason: str
+    reviewer: str
+    retry_after: str
+    next_command: str
+
+
+def _rate_limit_payload(r: SubprocessResult) -> _RateLimitPayload | None:
     reviewer = r.job_id.split("-", 1)[0]
     text = "\n".join(part for part in (r.stdout, r.stderr, r.error or "") if part)
     lowered = text.lower()

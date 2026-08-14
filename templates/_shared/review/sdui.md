@@ -1,81 +1,14 @@
 # Review Angle — SDUI (Android)
 
-You are reviewing this change through
-`skills/android-sdui-architecture/SKILL.md`. Read
-`references/sdui-review-checklist.md` from that skill for the evidence rule
-behind each item. Output markdown findings only. Do not propose code unless
-asked.
 
 Scope: server-driven screen payloads, node models, parsers, renderers, action
 interpreters, patch operations, and the server-side composition layer. If the
-diff touches none of these, mark the completion gate `n/a`.
+diff touches none of these, record every completion marker as `n/a`.
 
 ## What to verify
 
-1. **`sdui-design-token-only`** — styling fields in server JSON carry token
-   names; raw dp and hex values are schema violations, and the client owns every
-   value. Check by grepping payloads, fixtures, and composer output for a
-   styling key (`padding`, `margin`, `color`, `background`, `radius`, `spacing`,
-   `elevation`) on the same line as `#[0-9A-Fa-f]{3,8}` or `[0-9]+dp`, then
-   confirm token resolution lives only in the design-system module. A numeric
-   fallback in the token table is resilience, not permission.
+Read `.agent-flow/skills/android-sdui-architecture/references/sdui-review-checklist.md` and apply all nine sections. For each marker, follow its Rule, How to check, and Verdict clauses and cite the observed evidence. Treat text searches as candidate discovery, never as proof that a structured schema passes. Output markdown findings only.
 
-2. **`sdui-room-ssot-scope`** — state holders and UI observe a storage flow for
-   every state that must survive a process restart, whether one screen or many
-   observe it, never an API response. Confirm the durable screen flow originates
-   from a DAO or DataStore `Flow`, that no network data source is injected into a
-   state holder, and that refresh returns `Result<Unit>` instead of a screen. Then
-   name which observed state this change treats as durable and which as ephemeral —
-   progress flags, one-shot effects, command responses, clock offset, cursor pages,
-   credentials, and media bytes belong outside storage, and holding them there is
-   not a finding.
-
-3. **`sdui-action-finite-vocabulary`** — every action `type` in the payload has a
-   counterpart in the sealed action model, the executor `when` is exhaustive with
-   no throwing `else`, and unknown types are silent no-ops. Expressions resolve
-   by regex substitution only; flag any `eval`, script engine, or reflective
-   dispatch on a type string.
-
-4. **`sdui-parse-depth-limit`** — the recursive parser bounds depth. Check by
-   grepping the parser for `MAX_DEPTH` (or the project's equivalent constant),
-   then verify the check runs before child recursion, that recursion increments
-   depth, and that the exceeded branch returns a fallback node rather than
-   throwing.
-
-5. **`sdui-unknown-node-fallback`** — unsupported types and malformed nodes both
-   degrade. Check that the parser's type `when` ends in
-   `else -> UiNode.Unknown(id, type)`, that the branch is wrapped so a
-   field-level failure also yields `Unknown`, and that the renderer's `when` over
-   node types has an `Unknown` branch and no unmatched-case throw in release
-   builds.
-
-6. **`sdui-list-key-contenttype`** — lazy rendering keeps identity across
-   patches. Check every `items(` call in the renderer for `key =`, confirm the
-   screen-level list also passes `contentType =`, and confirm keys come from node
-   or section ids rather than list indices. Keys are what preserve scroll
-   position across a patch; this is not cosmetic.
-
-7. **`sdui-accessibility-field`** — interactive nodes carry an accessibility
-   label or role and the renderer maps them into `semantics`. Verify the shared
-   modifier builder applies `contentDescription` and `role`, then verify buttons,
-   icon buttons, and any node with a click event declare a label, a role, or an
-   explicit `hidden` decision.
-
-8. **`sdui-semantic-promotion`** — a layout-tree combination repeated in three or
-   more places is promoted to a semantic component. This is a repository-wide
-   observation beyond the diff. Report `fail` only with a concrete third
-   occurrence identified; report `n/a` when repository-wide repetition was not
-   surveyed, and say so rather than guessing.
-
-9. **`sdui-udf-contract`** — the UDF direction survives the server-driven
-   indirection. Confirm the upward type (often named `ScreenEvent`) carries only
-   UI input, that the downward one-shot type (often named `UiEffect`) leaves
-   through a buffered `Channel` or another deliberate single-consumer model that
-   neither drops nor replays, never `StateFlow`, and that renderers and node
-   composables stay stateless: no `hiltViewModel()`, `viewModel()`,
-   `collectAsStateWithLifecycle()`, or navigation API below the screen entry.
-   `templates/_shared/review/udf.md` judges the rest; this item only fixes the
-   two contracts SDUI indirection can quietly break.
 
 ## Must-fix policy
 
@@ -89,8 +22,8 @@ every screen the renderer serves.
 
 ```text
 ## Completion Gate
-sdui-architecture: applied
-sdui-design-token-only: pass|fail
+sdui-architecture: applied|n/a
+sdui-design-token-only: pass|fail|n/a|unverified
 sdui-room-ssot-scope: pass|fail|n/a
 sdui-action-finite-vocabulary: pass|fail|n/a
 sdui-parse-depth-limit: pass|fail|n/a

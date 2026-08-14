@@ -175,6 +175,7 @@ class CliTest(unittest.TestCase):
                 text=True,
                 capture_output=True,
                 check=False,
+                timeout=120,
             )
             self.assertEqual(install.returncode, 0, install.stderr)
             init = subprocess.run(
@@ -191,6 +192,7 @@ class CliTest(unittest.TestCase):
                 text=True,
                 capture_output=True,
                 check=False,
+                timeout=30,
             )
             self.assertEqual(init.returncode, 0, init.stderr)
             _init_git_repo(project_root)
@@ -215,6 +217,7 @@ class CliTest(unittest.TestCase):
                 text=True,
                 capture_output=True,
                 check=False,
+                timeout=30,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             state_root = worktree_runtime_root(
@@ -333,7 +336,7 @@ class CliTest(unittest.TestCase):
                 "project-local-skills-used:",
                 "presentation-skill: android|react|react-native|ios|n/a",
                 "presentation-state-based-development: applied|n/a",
-                "presentation-state-review: pass|n/a",
+                "presentation-state-review: pass|fail|n/a",
                 "ui-state-modeling: explicit|n/a",
                 "presentation-mapping-boundary: domain-to-uimodel|n/a",
                 "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a",
@@ -412,6 +415,8 @@ class CliTest(unittest.TestCase):
         self.assertIn("clean-architecture: applied", phases["green"]["required_markers"])
         self.assertIn("clean-architecture: applied", phases["fix-loop"]["required_markers"])
         self.assertIn("clean-architecture-review: applied", phases["multi-review"]["required_markers"])
+        self.assertIn("must-avoid-check: pass|fail", phases["multi-review"]["required_markers"])
+        self.assertIn("must-avoid-check: pass|fail", phases["architecture-review"]["required_markers"])
         for phase_id in ("multi-review", "architecture-review"):
             self.assertIn("codex-claude-parity-check: pass|fail", phases[phase_id]["required_markers"])
             self.assertIn("hook-parity-check: pass|fail", phases[phase_id]["required_markers"])
@@ -650,8 +655,26 @@ class CliTest(unittest.TestCase):
             ["codex-a: reviewer output is missing provenance marker"],
         )
 
-    def test_optional_reviewer_clis_are_opt_in(self) -> None:
+        markdown_bold = [
+            SubprocessResult(
+                job_id="codex-a",
+                returncode=0,
+                stdout="**reviewer-source: sub-agent**\nNo findings",
+            ),
+            SubprocessResult(
+                job_id="codex-b",
+                returncode=0,
+                stdout="reviewer-source: sub-agent\nNo findings",
+            ),
+        ]
+        self.assertEqual(
+            _required_reviewer_failures(distribution, markdown_bold),
+            ["codex-a: reviewer output is missing provenance marker"],
+        )
+
+    def test_reviewer_pool_fans_out_and_can_be_narrowed(self) -> None:
         from agent_flow.cli_detect import CliInfo
+        from agent_flow.core.worktree_isolation import WorktreeIsolationError
         from agent_flow.multi_review import (
             ReviewerJob,
             distribute,
@@ -709,7 +732,7 @@ class CliTest(unittest.TestCase):
             ),
             mock.patch(
                 "agent_flow.multi_review.detect_available_clis",
-                return_value=[codex],
+                return_value=[claude, codex],
             ),
         ):
             distribution = distribute(jobs, host="codex")
@@ -726,6 +749,60 @@ class CliTest(unittest.TestCase):
                 for job in assigned
             ]
             self.assertEqual(len(outputs), len(set(outputs)))
+            self.assertFalse(distribution.insufficient_reviewers)
+            collision_jobs = [
+                ReviewerJob(
+                    "foo-claude",
+                    "prompt",
+                    Path("foo-claude.md"),
+                    Path.cwd(),
+                ),
+                ReviewerJob("foo", "prompt", Path("foo.md"), Path.cwd()),
+            ]
+            collision_safe = distribute(collision_jobs, host="codex")
+            collision_outputs = [
+                job.output_path
+                for assigned in collision_safe.by_cli.values()
+                for job in assigned
+            ]
+            self.assertEqual(
+                len(collision_outputs),
+                len(set(collision_outputs)),
+            )
+            self.assertIn(Path("foo-extra-claude.md"), collision_outputs)
+
+
+            duplicate_jobs = [
+                ReviewerJob("first", "prompt", Path("same.md"), Path.cwd()),
+                ReviewerJob("second", "prompt", Path("same.md"), Path.cwd()),
+            ]
+            with self.assertRaisesRegex(
+                WorktreeIsolationError,
+                "reviewer output path collision",
+            ):
+                distribute(duplicate_jobs, host="codex")
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"AGENT_FLOW_REVIEWERS": "codex"},
+                clear=True,
+            ),
+            mock.patch(
+                "agent_flow.multi_review.detect_available_clis",
+                return_value=[claude, codex],
+            ),
+        ):
+            narrowed = distribute(jobs, host="claude")
+            self.assertEqual(tuple(narrowed.by_cli), ("codex",))
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch(
+                "agent_flow.multi_review.detect_available_clis",
+                return_value=[codex],
+            ),
+        ):
+            one_process = distribute(jobs[:1], host="codex")
+            self.assertTrue(one_process.insufficient_reviewers)
         with (
             mock.patch.dict(os.environ, {}, clear=True),
             mock.patch(
@@ -734,7 +811,7 @@ class CliTest(unittest.TestCase):
             ),
         ):
             distribution = distribute(jobs, host="omp")
-            self.assertEqual(tuple(distribution.by_cli), ("claude",))
+            self.assertEqual(tuple(distribution.by_cli), ("claude", "codex"))
             self.assertNotIn("omp", distribution.by_cli)
 
     def test_final_review_uses_only_claude_and_codex(self) -> None:
@@ -790,11 +867,10 @@ class CliTest(unittest.TestCase):
                 return_value=clis,
             ):
                 retry = distribute_final_review(jobs, host="omp")
-            self.assertEqual(tuple(retry.by_cli), ("codex",))
-            self.assertEqual(retry.skipped_providers, ("claude",))
+            self.assertEqual(tuple(retry.by_cli), ("claude", "codex"))
+            self.assertFalse(hasattr(retry, "skipped_providers"))
 
-            # 두 provider가 모두 실패 artifact를 남기면 건너뛰기는 교착이다.
-            # 그때는 latch를 풀고 둘 다 다시 돌린다.
+            # 이전 실패 artifact가 둘 다 남아도 새 retry는 둘 다 다시 실행한다.
             distribution.by_cli["codex"][0].output_path.write_text(
                 "# codex-generalist\n\n- status: TIMEOUT\n",
                 encoding="utf-8",
@@ -848,6 +924,38 @@ class CliTest(unittest.TestCase):
 
             self.assertEqual(tuple(narrowed.by_cli), ("codex",))
             self.assertFalse(narrowed.fallback_to_generic)
+
+    def test_invalid_reviewer_pool_does_not_expand_to_all_providers(self) -> None:
+        from agent_flow.cli_detect import CliInfo
+        from agent_flow.multi_review import (
+            ReviewerJob,
+            distribute,
+            distribute_final_review,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            jobs = [ReviewerJob("generalist", "prompt", root / "generalist.md", root)]
+            clis = [
+                CliInfo("claude", ("claude",), ("-p",)),
+                CliInfo("codex", ("codex",), ("exec",)),
+            ]
+            with (
+                mock.patch.dict(
+                    os.environ, {"AGENT_FLOW_REVIEWERS": "omp"}, clear=True
+                ),
+                mock.patch(
+                    "agent_flow.multi_review.detect_available_clis",
+                    return_value=clis,
+                ),
+            ):
+                review = distribute(jobs, host="claude")
+                final_review = distribute_final_review(jobs, host="claude")
+
+            for distribution in (review, final_review):
+                self.assertEqual(distribution.by_cli, {})
+                self.assertTrue(distribution.fallback_to_generic)
+                self.assertTrue(distribution.insufficient_reviewers)
 
     def test_final_review_stops_failed_provider_after_probe(self) -> None:
         from agent_flow.adapters.hosted import _required_reviewer_failures
@@ -929,7 +1037,8 @@ class CliTest(unittest.TestCase):
                     return_value=None,
                 ),
             ):
-                results = run_distribution(distribution, root)
+                execution = run_distribution(distribution, root)
+            self.assertEqual(execution.skipped_providers, ("codex",))
 
             self.assertEqual(
                 launches,
@@ -944,7 +1053,7 @@ class CliTest(unittest.TestCase):
                 (root / "codex-generalist.md").read_text(encoding="utf-8"),
             )
             self.assertEqual(
-                _required_reviewer_failures(distribution, results),
+                _required_reviewer_failures(distribution, execution.results),
                 [],
             )
 
@@ -967,12 +1076,28 @@ class CliTest(unittest.TestCase):
             returncode=1,
             stdout="sandbox-exec: sandbox_apply: Operation not permitted",
         )
+        stderr_failure = SubprocessResult(
+            job_id="codex-generalist",
+            returncode=1,
+            stderr="sandbox-exec: sandbox_apply: Operation not permitted",
+        )
+        timed_failure = SubprocessResult(
+            job_id="codex-generalist",
+            returncode=-1,
+            stdout="sandbox-exec: sandbox_apply: Operation not permitted",
+            timed_out=True,
+        )
 
         self.assertIsNone(reviewer_result_error(quoted))
         self.assertEqual(
             reviewer_result_error(real_failure),
             "reviewer sandbox unavailable",
         )
+        self.assertEqual(
+            reviewer_result_error(stderr_failure),
+            "reviewer sandbox unavailable",
+        )
+        self.assertEqual(reviewer_result_error(timed_failure), "timeout")
 
     def test_review_angle_artifact_path_is_confined_to_run_dir(self) -> None:
         from agent_flow.adapters.hosted import _review_angle_output
@@ -1050,6 +1175,8 @@ class CliTest(unittest.TestCase):
             project_root=project,
         )
         self.assertIn("--no-session-persistence", claude)
+        self.assertIn("--safe-mode", claude)
+        self.assertNotIn("--bare", claude)
         self.assertEqual(claude[claude.index("--permission-mode") + 1], "plan")
 
         # OMP는 reviewer provider pool 밖이다. 전용 인자 분기를 남기면 pool이
@@ -4168,7 +4295,7 @@ if (codexContext !== undefined) {
                     )
 
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    # managed workflow와 generated skill은 stale 설치본을 남기면 안 된다.
+                    # managed workflow와 source-backed workflow skill이 모두 설치되어야 한다.
                     self.assertIn("id: domain-grill", stale_workflow.read_text(encoding="utf-8"))
                     for rel in rels:
                         self.assertTrue((project_root / rel).is_file(), rel)
@@ -4262,7 +4389,7 @@ if (codexContext !== undefined) {
             self.assertIn("## Overall", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("verdict: approve", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("verdict: request-changes", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("Full Feature Workflow", skill.read_text(encoding="utf-8"))
+            self.assertEqual(skill.read_text(encoding="utf-8"), "stale skill\n")
             self.assertIn("Workflow Contract", rules.read_text(encoding="utf-8"))
             self.assertIn("two independent Claude/Codex reviewer subprocesses", rules.read_text(encoding="utf-8"))
             self.assertNotIn("Gemini sub-agent", rules.read_text(encoding="utf-8"))
@@ -11877,6 +12004,7 @@ def _node_presentation_gate() -> str:
         "ui-state-modeling: optional\n"
         "presentation-mapping-boundary: optional\n"
         "di-boundary: optional\n"
+        "shared-presentation-contract-placement: n/a\n"
     )
 
 
@@ -12084,6 +12212,7 @@ def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
     )
     clean_review_gate = (
         "clean-architecture: applied\n"
+        "must-avoid-check: pass\n"
         "dependency-rule: pass\n"
         "usecase-boundary: n/a\n"
         "usecase-calls-usecase: pass\n"
@@ -12096,6 +12225,7 @@ def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
     )
     clean_code_review_gate = (
         "clean-architecture-review: applied\n"
+        "must-avoid-check: pass\n"
         "usecase-interface-check: applied\n"
         "usecase-composition-check: applied\n"
         "cache-boundary-check: applied\n"
@@ -12229,6 +12359,7 @@ def _with_skills_gate(content: str, phase: str = "multi-review") -> str:
         + _node_profile_skill_gate()
         + _node_review_parity_gate()
         + "clean-architecture-review: applied\n"
+        + "must-avoid-check: pass\n"
         + _node_project_local_gate(phase)
         + "usecase-interface-check: applied\n"
         "usecase-composition-check: applied\n"
@@ -12246,6 +12377,7 @@ def _with_final_review_gate(content: str, dependency_rule: str = "pass", phase: 
         + _node_profile_skill_gate()
         + _node_review_parity_gate()
         + "clean-architecture: applied\n"
+        + "must-avoid-check: pass\n"
         + _node_project_local_gate(phase)
         + f"dependency-rule: {dependency_rule}\n"
         "usecase-boundary: n/a\n"

@@ -30,10 +30,11 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Iterator, Literal, Optional, Sequence, TypeVar
+from typing import Literal, Optional, TypeVar
 
 from agent_flow.core.commands import run_safe_command
 
@@ -764,13 +765,60 @@ def real_path(value) -> Path:
     return Path(os.path.realpath(str(value)))
 
 
+def validate_run_artifact_target(
+    run_path: Path,
+    target: Path,
+) -> tuple[Path, Path]:
+    """Return an attested direct-child artifact target."""
+    artifact_root = run_path.resolve()
+    if (
+        not artifact_root.is_dir()
+        or target.parent != artifact_root
+        or target.parent.resolve() != artifact_root
+        or target.is_symlink()
+        or (target.exists() and not target.is_file())
+    ):
+        raise WorktreeIsolationError(
+            f"run artifact target is outside its attested directory: {target}"
+        )
+    return artifact_root, target
+
+
+def write_run_artifact_text(
+    run_path: Path,
+    target: Path,
+    content: str,
+) -> None:
+    """Atomically replace one regular file directly inside an attested run."""
+    artifact_root, target = validate_run_artifact_target(run_path, target)
+    fd, raw_temporary = tempfile.mkstemp(
+        dir=artifact_root,
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(raw_temporary)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        temporary.unlink(missing_ok=True)
+
+
 def max_worker_capacity() -> int:
     """선언된 동시성. 잘못된 env를 조용히 기본값으로 접으면 provider slot은
     거부하고 pool은 계속 도는 상태가 되어 선언값과 실제가 갈린다."""
     return _strict_provider_capacity(None)
 
 
-def sanitized_worker_env(*, base_env: Optional[dict] = None) -> dict:
+def sanitized_worker_env(
+    *, base_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     """워커에게 넘길 env에서 git discovery 변수를 제거한다.
 
     **보장 범위는 git 서브프로세스뿐이다.** git은 이 변수들을 cwd보다 우선하므로,
@@ -2368,6 +2416,7 @@ def git_safe(
     input_text: str | None = None,
     pass_fds: tuple[int, ...] = (),
     cwd_fd: int | None = None,
+    max_output_bytes: int | None = None,
 ):
     """Run git with git-discovery env vars stripped so cwd stays authoritative.
 
@@ -2398,6 +2447,8 @@ def git_safe(
         options["cwd_fd"] = cwd_fd
     if timeout_s is not None:
         options["timeout_s"] = timeout_s
+    if max_output_bytes is not None:
+        options["max_output_bytes"] = max_output_bytes
     return run_safe_command(command, **options)
 
 
