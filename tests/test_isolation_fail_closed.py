@@ -597,6 +597,35 @@ def test_provider_sandbox_writes_only_to_the_verified_worktree(tmp_path):
     )
 
 
+def test_confined_provider_launch_pins_claude_temp_to_private_scratch(
+    tmp_path, monkeypatch
+):
+    linked = _repo_with_linked(tmp_path)
+    monkeypatch.setattr(
+        PROVIDER_PROCESS,
+        "verify_provider_sandbox_backend",
+        lambda: Path("/usr/bin/sandbox-exec"),
+    )
+    monkeypatch.setattr(
+        PROVIDER_PROCESS,
+        "_verified_provider_argv",
+        lambda argv, verified, env: tuple(argv),
+    )
+    monkeypatch.setattr(
+        PROVIDER_PROCESS,
+        "_prepare_provider_state",
+        lambda **kwargs: None,
+    )
+
+    with PROVIDER_PROCESS.confined_provider_launch(
+        argv=("claude", "-p"),
+        cwd=linked,
+        env={"HOME": str(tmp_path)},
+    ) as launch:
+        assert launch.env["TMPDIR"] == str(launch.scratch)
+        assert launch.env["CLAUDE_CODE_TMPDIR"] == str(launch.scratch)
+
+
 def test_provider_state_isolated_in_private_scratch(tmp_path):
     user_home = tmp_path / "user"
     codex_home = user_home / ".codex"
@@ -620,6 +649,45 @@ def test_provider_state_isolated_in_private_scratch(tmp_path):
     )
     assert stat.S_IMODE(isolated_auth.stat().st_mode) == 0o600
     assert isolated_auth.resolve().is_relative_to(scratch.resolve())
+
+
+def test_claude_provider_keeps_default_host_auth_location(tmp_path):
+    user_home = tmp_path / "user"
+    user_home.mkdir()
+    scratch = tmp_path / "claude-scratch"
+    scratch.mkdir()
+    env = {"HOME": str(user_home)}
+
+    PROVIDER_PROCESS._prepare_provider_state(
+        argv=("claude", "-p"),
+        env=env,
+        scratch=scratch,
+    )
+
+    assert env["HOME"] == str(user_home)
+    assert "CLAUDE_CONFIG_DIR" not in env
+    assert not (scratch / "home").exists()
+
+
+def test_claude_provider_preserves_configured_auth_location(tmp_path):
+    configured_home = tmp_path / "configured-claude"
+    configured_home.mkdir()
+    scratch = tmp_path / "claude-scratch"
+    scratch.mkdir()
+    env = {
+        "HOME": str(tmp_path / "unused-home"),
+        "CLAUDE_CONFIG_DIR": str(configured_home),
+    }
+
+    PROVIDER_PROCESS._prepare_provider_state(
+        argv=("claude", "-p"),
+        env=env,
+        scratch=scratch,
+    )
+
+    assert env["HOME"] == str(tmp_path / "unused-home")
+    assert env["CLAUDE_CONFIG_DIR"] == str(configured_home)
+    assert not (scratch / "home").exists()
 
 
 def test_provider_state_copy_reads_the_attested_file_descriptor(
@@ -708,6 +776,8 @@ def test_omp_provider_uses_consistent_private_state_snapshot(tmp_path):
     isolated = Path(env["PI_CODING_AGENT_DIR"])
     assert isolated.resolve().is_relative_to(scratch.resolve())
     assert Path(env["HOME"]).resolve().is_relative_to(scratch.resolve())
+    assert stat.S_IMODE(isolated.stat().st_mode) == 0o700
+    assert stat.S_IMODE(Path(env["HOME"]).stat().st_mode) == 0o700
     assert (isolated / "config.yml").read_text(encoding="utf-8") == "model: test\n"
     for index, name in enumerate(("models.db", "agent.db")):
         connection = sqlite3.connect(isolated / name)
@@ -716,6 +786,33 @@ def test_omp_provider_uses_consistent_private_state_snapshot(tmp_path):
         finally:
             connection.close()
         assert stat.S_IMODE((isolated / name).stat().st_mode) == 0o600
+
+
+def test_reaped_provider_process_still_cleans_its_process_group(monkeypatch):
+    from agent_flow import subprocess_pool
+
+    class ReapedProcess:
+        pid = 123
+        returncode = 0
+
+        def kill(self):
+            raise AssertionError("the reaped parent itself must not be killed")
+
+    killpg_calls = []
+    monkeypatch.setattr(
+        PROVIDER_PROCESS.os,
+        "killpg",
+        lambda pid, signal_number: killpg_calls.append((pid, signal_number)),
+    )
+    process = ReapedProcess()
+
+    PROVIDER_PROCESS._kill_process_tree(process)
+    subprocess_pool._kill_process_tree(process)
+
+    assert killpg_calls == [
+        (process.pid, PROVIDER_PROCESS.signal.SIGKILL),
+        (process.pid, PROVIDER_PROCESS.signal.SIGKILL),
+    ]
 
 
 def test_unverified_sandbox_backend_blocks_before_provider_spawn(

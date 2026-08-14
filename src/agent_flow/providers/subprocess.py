@@ -8,11 +8,12 @@ import sqlite3
 import stat
 import subprocess
 import sys
-import time
 import tempfile
+import time
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Iterator, Sequence
+from typing import BinaryIO
 
 from agent_flow.core.worktree_isolation import (
     ProviderLease,
@@ -22,9 +23,9 @@ from agent_flow.core.worktree_isolation import (
     git_common_dir,
     git_dir,
     leader_root_for,
+    list_registered_worktrees,
     managed_worktree_root,
     provider_lease,
-    list_registered_worktrees,
     real_path,
     sanitized_worker_env,
     verify_linked_worktree,
@@ -62,7 +63,7 @@ class ProviderResult:
 class ConfinedProviderLaunch:
     argv: tuple[str, ...]
     cwd: Path
-    env: dict
+    env: dict[str, str]
     lease: ProviderLease
     scratch: Path
 
@@ -72,7 +73,7 @@ def confined_provider_launch(
     *,
     argv: Sequence[str],
     cwd: Path,
-    env: dict | None = None,
+    env: Mapping[str, str] | None = None,
     lease: ProviderLease | None = None,
     allow_workspace_writes: bool = True,
 ) -> Iterator[ConfinedProviderLaunch]:
@@ -110,6 +111,7 @@ def confined_provider_launch(
                 "TMPDIR": str(scratch),
                 "TMP": str(scratch),
                 "TEMP": str(scratch),
+                "CLAUDE_CODE_TMPDIR": str(scratch),
                 "XDG_CACHE_HOME": str(scratch / "cache"),
             }
         )
@@ -142,7 +144,7 @@ def confined_provider_launch(
 def _verified_provider_argv(
     argv: Sequence[str],
     verified_worktree: Path,
-    env: dict | None,
+    env: Mapping[str, str] | None,
 ) -> tuple[str, ...]:
     source_env = env if env is not None else os.environ
     candidate = shutil.which(argv[0], path=source_env.get("PATH"))
@@ -191,6 +193,8 @@ def _path_is_within(path: Path, root: Path) -> bool:
 
 def _provider_kind(command: str) -> str | None:
     binary = Path(command).name.lower()
+    if binary in {"claude", "claude.js"} or binary.startswith("claude-"):
+        return "claude"
     if binary in {"codex", "codex.js"} or binary.startswith("codex-"):
         return "codex"
     if binary == "omp":
@@ -273,13 +277,15 @@ def run_provider(
     *,
     prompt: str,
     cwd: Path,
-    env: dict | None = None,
+    env: Mapping[str, str] | None = None,
     lease: ProviderLease | None = None,
 ) -> ProviderResult:
     proc: subprocess.Popen[bytes] | None = None
     stdout_path: Path | None = None
     stderr_path: Path | None = None
     outcome = "failed"
+    captured_stdout = ""
+    captured_stderr = ""
     try:
         with confined_provider_launch(
             argv=command.argv,
@@ -327,13 +333,19 @@ def run_provider(
                     if _provider_output_exceeded(stdout_path, stderr_path):
                         outcome = "output-limit"
             finally:
-                if prompt_file is not None:
-                    prompt_file.close()
-                if proc is not None:
-                    _kill_process_tree(proc)
-                    _bounded_reap(proc)
+                try:
+                    if prompt_file is not None:
+                        prompt_file.close()
+                    if proc is not None:
+                        _kill_process_tree(proc)
+                        _bounded_reap(proc)
+                finally:
+                    captured_stdout, captured_stderr = _read_provider_outputs(
+                        stdout_path,
+                        stderr_path,
+                    )
 
-            stdout, stderr = _read_provider_outputs(stdout_path, stderr_path)
+            stdout, stderr = captured_stdout, captured_stderr
             if outcome == "output-limit":
                 stderr = _append_error(stderr, _PROVIDER_OUTPUT_LIMIT_MESSAGE)
             return ProviderResult(
@@ -344,7 +356,7 @@ def run_provider(
                 failed=outcome != "completed" or proc.returncode != 0,
             )
     except (OSError, WorktreeIsolationError) as exc:
-        stdout, stderr = _read_provider_outputs(stdout_path, stderr_path)
+        stdout, stderr = captured_stdout, captured_stderr
         return ProviderResult(
             name=command.name,
             exit_code=None,
@@ -369,7 +381,11 @@ def _verified_provider_worktree(cwd: Path) -> Path:
     )
     assert_cwd_bound(worktree_path=verified, cwd=candidate)
     return verified
-def _provider_worktree_identity(worktree: Path) -> tuple[object, ...]:
+
+
+def _provider_worktree_identity(
+    worktree: Path,
+) -> tuple[int, int, int, int, int, int, int, int, int, bytes]:
     verified = _verified_provider_worktree(worktree)
     checkout_identity = verified.stat()
     pointer = verified / ".git"
@@ -441,6 +457,7 @@ def _prepare_provider_state(
     if binary == "codex":
         state_home = scratch / "codex-home"
         state_home.mkdir(mode=0o700)
+        state_home.chmod(0o700)
         configured_home = env.get("CODEX_HOME")
         source_home = (
             Path(configured_home).expanduser()
@@ -458,9 +475,11 @@ def _prepare_provider_state(
         ).expanduser()
         session_home = scratch / "omp-agent"
         session_home.mkdir(mode=0o700)
+        session_home.chmod(0o700)
         _snapshot_omp_state(source_agent_home, session_home)
         isolated_home = scratch / "home"
         isolated_home.mkdir(mode=0o700)
+        isolated_home.chmod(0o700)
         env["HOME"] = str(isolated_home)
         env["PI_CODING_AGENT_DIR"] = str(session_home)
 
@@ -490,6 +509,12 @@ def _snapshot_omp_state(source_home: Path, target_home: Path) -> None:
         source_connection: sqlite3.Connection | None = None
         target_connection: sqlite3.Connection | None = None
         try:
+            target_fd = os.open(
+                target_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
+            os.close(target_fd)
             source_connection = sqlite3.connect(
                 f"{snapshot_path.resolve().as_uri()}?mode=ro", uri=True
             )
@@ -803,7 +828,7 @@ def _append_error(stderr: str, message: str) -> str:
     return f"{stderr.rstrip()}\n{message}\n" if stderr else f"{message}\n"
 
 
-def _kill_process_tree(proc: subprocess.Popen[str]) -> None:
+def _kill_process_tree(proc: subprocess.Popen[bytes]) -> None:
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
@@ -813,12 +838,3 @@ def _kill_process_tree(proc: subprocess.Popen[str]) -> None:
             proc.kill()
         except ProcessLookupError:
             pass
-
-
-def _text(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value
-

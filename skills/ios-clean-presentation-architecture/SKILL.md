@@ -4,18 +4,14 @@ description: Use when creating, modifying, or reviewing an iOS Clean Architectur
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [uistate, ui state, state holder, observableobject, swiftui view state, 상태 홀더, 화면 상태, 프레젠테이션 계층]
 pathGlobs: ["**/*ViewModel.swift", "**/*UiState.swift", "**/Presentation/**"]
-required_markers:
-  - "presentation-skill: ios"
-  - "presentation-state-based-development: applied|n/a"
-  - "presentation-state-review: pass|fail"
-  - "ui-state-modeling: explicit"
-  - "presentation-mapping-boundary: domain-to-uimodel|n/a"
-  - "di-boundary: swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
+requires: [clean-architecture-core]
 ---
 
 # iOS Clean Presentation Architecture
 
 Use this skill for iOS feature work where SwiftUI or UIKit presentation code should follow a reusable Clean Architecture pattern.
+
+For AppShell-owned global error hosts, queue acknowledgement, or root navigation reset, use `ios-app-shell-error-handling` instead.
 
 ## Evidence Basis
 
@@ -189,14 +185,25 @@ Split state-holder wiring from rendering:
 
 ## Required Markers
 
-When this skill is used for presentation development or code review, include these markers in the completion artifact or review output:
+When this skill is used for presentation development or code review, write every marker below in the phase artifact or review output. The active workflow `required_markers` is the allowed-value source of truth:
 
-- `presentation-skill: ios`
+- `presentation-skill: android|react|react-native|ios|n/a`
 - `presentation-state-based-development: applied|n/a`
-- `presentation-state-review: pass|fail`
-- `ui-state-modeling: explicit`
+- `presentation-state-review: pass|fail|n/a`
+- `ui-state-modeling: explicit|n/a`
 - `presentation-mapping-boundary: domain-to-uimodel|n/a`
-- `di-boundary: swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a`
+- `di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a`
+
+Apply these iOS-specific decisions:
+
+- `presentation-skill`: use `ios` when iOS presentation code is in scope. Use `n/a` only when the phase has no presentation work.
+- `presentation-state-based-development`: use `applied` when presentation code was created or changed under this contract. Use `n/a` for review-only work or when no presentation code changed.
+- `presentation-state-review`: use `pass` when every applicable checklist item passes, `fail` when any applicable item fails, and `n/a` only when no iOS presentation code is in scope.
+- `ui-state-modeling`: use `explicit` when the screen's durable states are modeled explicitly. Use `n/a` only when no screen state is in scope.
+- `presentation-mapping-boundary`: use `domain-to-uimodel` when domain/application data crosses into presentation through a mapper. Use `n/a` only when no such data crosses the boundary.
+- `di-boundary`: use `swift-environment`, `factory`, `swift-dependencies`, `swinject`, `needle`, `direct`, or `existing` for the verified iOS composition path. Use `n/a` only when the change neither creates nor reviews dependency wiring.
+
+A `fail` result is actionable: record the failed criterion and return to the workflow's fix path before approval.
 
 ## Sources
 

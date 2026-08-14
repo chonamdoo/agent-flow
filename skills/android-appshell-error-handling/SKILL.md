@@ -3,6 +3,8 @@ name: android-appshell-error-handling
 description: Defines Android app-shell common-error handling where feature ViewModels notify common errors and AppShell owns global UI, root navigation, Navigation3 back stack resets, SessionExpired handling, and Retrofit CallAdapter error mapping. Use when implementing or reviewing Android Kotlin Compose app-wide error handling.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [app shell, appshell, global error, common error, error mapping, session expired, snackbar host, dialog host, 공통 에러, 전역 에러, 세션 만료]
+pathGlobs: ["**/*AppShell*.kt", "**/*CommonError*Host.kt"]
+requires: [app-shell-error-contract]
 ---
 
 # Android AppShell Error Handling
@@ -31,6 +33,10 @@ implementation or review.
 - General ViewModel, Compose screen, DI, or presentation mapper design without AppShell-owned global error UI/root navigation; use `android-clean-presentation-architecture`.
 
 
+## Shared Error Contract
+
+Read [`app-shell-error-contract`](../app-shell-error-contract/SKILL.md) before the platform rules below. It is the source of truth for classification, queue identity, acknowledgement, retry, and metadata preservation.
+
 ## Core Contract
 
 Keep app-wide error UI and root navigation above feature screens:
@@ -45,25 +51,18 @@ Keep app-wide error UI and root navigation above feature screens:
 Feature ViewModels notify common errors. They do not own `NavController`,
 `Context`, dialogs, toasts, snackbar hosts, or login-flow stack resets.
 
+
 ## Development Checklist
 
-- Use a notifier contract where `notify(error) == true` means AppShell handles a
-  common error, and `notify(error) == false` means the feature emits local
-  `UiState.Error`.
-- Treat `SessionExpired`, `Maintenance`, `Forbidden`, and server-wide business
-  codes such as `COMMON_*` as common errors unless the product flow says
-  otherwise.
+- Apply the shared notifier classification and queue contract.
 - Observe pending common errors from AppShell with lifecycle-aware Compose state.
-- Show the first pending common error, consume it on confirmation, then run the
-  app-level side effect.
+- After confirmation, run the Android AppShell side effect through the shared queue and acknowledgement contract.
 - For `SessionExpired`, clear the root back stack and add the login route after
   the user confirms.
 - For maintenance mode, clear the root back stack and add the maintenance route
   after confirmation when that flow exists.
 - Use Navi3 for post-confirm navigation only. Do not put common error dialogs in
   the Navi3 back stack.
-- Preserve server `code`, `title`, `message`, and `requestId` through the mapper
-  chain into the common UI model when the server supplies them.
 
 ## Boundary Checklist
 
@@ -97,18 +96,12 @@ Request changes when any of these are true:
 - Navi3 routes are used as common error dialog entries.
 - `SessionExpired` can be confirmed without clearing the root back stack to the
   login flow.
-- `notify(error)` can double-show the same error, lose an error, or leave consumed
-  errors in the pending queue.
-- Common and local errors are mixed so the same failure can become both a common
-  dialog and a feature `UiState.Error`.
-- Server error metadata is dropped before the UI can display it.
+- The shared classification, deduplication, acknowledgement, retry, or metadata contract is violated.
+- Common and local paths can render the same failure.
 
 ## Tests To Expect
 
-- `CommonErrorNotifier` classifies common versus local errors, deduplicates by a
-  stable key, and removes errors after `consume`.
-- `CommonErrorDialogHost` renders the first pending error and consumes it on
-  confirm.
+- `CommonErrorDialogHost` renders the shared common error and drives Android AppShell recovery.
 - `SessionExpired` confirmation clears the root back stack and adds the login
   route.
 - ViewModel tests prove common errors notify AppShell instead of becoming feature
@@ -118,7 +111,4 @@ Request changes when any of these are true:
 
 ## Completion Gate
 
-When this skill applies, record it as:
-
-- `project-local-skills: checked`
-- `project-local-skills-used: android-appshell-error-handling`
+Use only the markers supplied by the active phase.

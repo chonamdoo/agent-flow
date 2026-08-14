@@ -11,6 +11,7 @@ Covers:
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -2329,6 +2330,18 @@ def test_malformed_meta_does_not_crash(tmp_path: Path):
     assert r_status.returncode == 0
 
 
+def test_non_utf8_meta_does_not_crash(tmp_path: Path, capsys):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.artifact import read_meta
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "meta.json").write_bytes(b'{"task":"\xff"}')
+
+    assert read_meta(run_dir) == {}
+    assert "is unreadable" in capsys.readouterr().err
+
+
 def test_invalid_workflow_yaml_clear_error(tmp_path: Path):
     """Direct unit-test of _load_workflow on malformed / invalid YAMLs."""
     sys.path.insert(0, str(KIT_ROOT / "src"))
@@ -3126,6 +3139,23 @@ def test_run_safe_command_times_out_without_hanging(tmp_path: Path):
     assert result.ok is False
 
 
+def test_run_safe_command_replaces_non_utf8_output(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.commands import run_safe_command
+
+    result = run_safe_command(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.buffer.write(b'\\xff')",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.ok is True
+    assert result.stdout == "\ufffd"
+
+
 def test_run_safe_command_timeout_kills_descendants(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.core.commands import run_safe_command
@@ -3151,6 +3181,182 @@ def test_run_safe_command_timeout_kills_descendants(tmp_path: Path):
 
     assert result.timed_out is True
     assert not marker.exists()
+
+
+def test_run_safe_command_timeout_does_not_wait_for_escaped_pipe_holder(
+    tmp_path: Path,
+):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.commands import run_safe_command
+
+    child = "import time; time.sleep(3)"
+    parent = (
+        "import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True); "
+        "time.sleep(5)"
+    )
+
+    started = time.monotonic()
+    result = run_safe_command(
+        [sys.executable, "-c", parent],
+        cwd=tmp_path,
+        timeout_s=0.1,
+    )
+
+    assert result.timed_out is True
+    assert time.monotonic() - started < 2.5
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups are required")
+def test_run_safe_command_timeout_kills_group_after_parent_exit(tmp_path: Path):
+    from agent_flow.core.commands import run_safe_command
+
+    marker = tmp_path / "escaped-child"
+    child = (
+        "import pathlib, sys, time; "
+        "time.sleep(0.5); "
+        "pathlib.Path(sys.argv[1]).write_text('alive', encoding='utf-8')"
+    )
+    parent = (
+        "import subprocess, sys; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}, {str(marker)!r}])"
+    )
+
+    result = run_safe_command(
+        [sys.executable, "-c", parent],
+        cwd=tmp_path,
+        timeout_s=0.1,
+    )
+    time.sleep(0.7)
+
+    assert result.timed_out is True
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups are required")
+def test_run_safe_command_capped_success_cleans_background_group(tmp_path: Path):
+    from agent_flow.core.commands import run_safe_command
+
+    marker = tmp_path / "capped-background-child"
+    child = (
+        "import os, pathlib, sys, time; "
+        "time.sleep(0.1); "
+        "[os.write(1, b'x' * 65536) for _ in range(16)]; "
+        "pathlib.Path(sys.argv[1]).write_text('alive', encoding='utf-8')"
+    )
+    parent = (
+        "import subprocess, sys; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}, {str(marker)!r}])"
+    )
+
+    result = run_safe_command(
+        [sys.executable, "-c", parent],
+        cwd=tmp_path,
+        timeout_s=3,
+        max_output_bytes=4096,
+    )
+    time.sleep(0.7)
+
+    assert result.returncode == 0
+    assert not marker.exists()
+
+
+def test_run_safe_command_caps_captured_output(tmp_path: Path):
+    from agent_flow.core.commands import run_safe_command
+
+    result = run_safe_command(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write('x' * 128)",
+        ],
+        cwd=tmp_path,
+        max_output_bytes=16,
+    )
+
+    assert result.returncode == 0
+    assert result.output_truncated is True
+    assert result.ok is False
+    assert len(result.stdout.encode("utf-8")) <= 16
+    assert "command output exceeded 16 bytes" in result.stderr
+
+
+def test_run_safe_command_stops_when_captured_output_exceeds_limit(
+    tmp_path: Path,
+):
+    from agent_flow.core.commands import run_safe_command
+
+    program = (
+        "import os\n"
+        "chunk = b'x' * 65536\n"
+        "while True:\n"
+        "    os.write(1, chunk)\n"
+    )
+    started = time.monotonic()
+    result = run_safe_command(
+        [sys.executable, "-c", program],
+        cwd=tmp_path,
+        timeout_s=3,
+        max_output_bytes=4096,
+    )
+
+    assert time.monotonic() - started < 1.5
+    assert result.timed_out is False
+    assert result.output_truncated is True
+    assert result.ok is False
+    assert "command output exceeded 4096 bytes" in result.stderr
+
+
+def test_run_safe_command_reports_capture_allocation_failure(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from agent_flow.core import commands
+
+    def fail_capture():
+        raise OSError("capture unavailable")
+
+    monkeypatch.setattr(commands.tempfile, "TemporaryFile", fail_capture)
+
+    result = commands.run_safe_command(
+        [sys.executable, "-c", "print('unreachable')"],
+        cwd=tmp_path,
+        max_output_bytes=16,
+    )
+
+    assert result.ok is False
+    assert result.returncode is None
+    assert result.error == "capture unavailable"
+
+
+def test_communicate_after_kill_reaps_after_forced_kill():
+    from agent_flow.core.commands import _communicate_after_kill
+
+    class HungProcess:
+        def __init__(self):
+            self.stdout = io.StringIO()
+            self.stderr = io.StringIO()
+            self.wait_calls = 0
+            self.kill_calls = 0
+
+        def communicate(self, timeout):
+            raise subprocess.TimeoutExpired(("hung",), timeout)
+
+        def wait(self, timeout):
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise subprocess.TimeoutExpired(("hung",), timeout)
+            return -9
+
+        def kill(self):
+            self.kill_calls += 1
+
+    process = HungProcess()
+
+    _communicate_after_kill(process)
+
+    assert process.kill_calls == 1
+    assert process.wait_calls == 2
 
 
 def test_worktree_git_commands_use_longer_timeout(tmp_path: Path, monkeypatch):
@@ -3200,6 +3406,185 @@ def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
     assert "Review Angle" in jobs[0].prompt
     assert "Architecture Design" in jobs[1].prompt
     assert "Clean Architecture" in jobs[2].prompt
+    for job in jobs:
+        assert "Start your output with exactly these two plain lines:" in job.prompt
+        assert "`## Reviewer`" in job.prompt
+        assert "`reviewer-source: sub-agent`" in job.prompt
+        assert "Do not wrap either line" in job.prompt
+
+
+def test_multi_review_precomputes_diff_outside_reviewer_sandbox(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.adapters.hosted import (
+        HostedAdapter,
+        _reviewer_jobs,
+        _write_review_input_snapshot,
+    )
+    from agent_flow.runner import Phase
+
+    project = tmp_path / "project"
+    project.mkdir()
+    _init_git_project(project)
+    (project / "README.md").write_text("changed\n", encoding="utf-8")
+    (project / "new.txt").write_text("new\n", encoding="utf-8")
+    run_dir = project / ".agent-flow" / "run"
+    run_dir.mkdir(parents=True)
+
+    snapshot = _write_review_input_snapshot(project, run_dir, "final-review")
+
+    snapshot_text = snapshot.read_text(encoding="utf-8")
+    assert " M README.md" in snapshot_text
+    assert "?? new.txt" in snapshot_text
+    assert "-test" in snapshot_text
+    assert "+changed" in snapshot_text
+
+    adapter = HostedAdapter("codex")
+    adapter._profile_snapshot = {"review_angles": []}
+    phase = Phase(id="final-review", description="", multi_review=True)
+    jobs = _reviewer_jobs(
+        phase,
+        run_dir,
+        project,
+        adapter,
+        review_input_path=snapshot,
+    )
+    for job in jobs:
+        assert str(snapshot) in job.prompt
+        assert "Do not run `git diff`" in job.prompt
+
+
+def test_review_input_snapshot_uses_extended_git_timeout(
+    tmp_path: Path,
+    monkeypatch,
+):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.adapters import hosted
+    from agent_flow.core.commands import SafeCommandResult
+
+    timeouts = []
+
+    def fake_git_safe(*args, **kwargs):
+        timeouts.append(kwargs["timeout_s"])
+        return SafeCommandResult(
+            args=("git", *args),
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(hosted, "git_safe", fake_git_safe)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    hosted._write_review_input_snapshot(tmp_path, run_dir, "final-review")
+
+    assert timeouts == [hosted._REVIEW_INPUT_TIMEOUT_S] * 2
+
+
+
+
+def test_review_input_snapshot_preserves_previous_file_on_replace_failure(
+    tmp_path: Path,
+    monkeypatch,
+):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.adapters.hosted import _write_review_input_snapshot
+    from agent_flow.core import worktree_isolation
+
+    project = tmp_path / "project"
+    project.mkdir()
+    _init_git_project(project)
+    run_dir = project / ".agent-flow" / "run"
+    run_dir.mkdir(parents=True)
+    snapshot = run_dir / "final-review-review-input.patch"
+    snapshot.write_text("previous\n", encoding="utf-8")
+
+    def fail_replace(_source, _target):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(worktree_isolation.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        _write_review_input_snapshot(project, run_dir, "final-review")
+
+    assert snapshot.read_text(encoding="utf-8") == "previous\n"
+    assert list(run_dir.glob(".final-review-review-input.patch.*.tmp")) == []
+
+
+def test_review_input_snapshot_supports_unborn_head(tmp_path: Path):
+    from agent_flow.adapters.hosted import _write_review_input_snapshot
+
+    project = tmp_path / "unborn"
+    project.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main"],
+        cwd=project,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    source = project / "source.txt"
+    source.write_text("staged\n", encoding="utf-8")
+    subprocess.run(["git", "add", "source.txt"], cwd=project, check=True)
+    source.write_text("working\n", encoding="utf-8")
+    run_dir = project / ".agent-flow" / "run"
+    run_dir.mkdir(parents=True)
+
+    snapshot = _write_review_input_snapshot(project, run_dir, "review")
+
+    content = snapshot.read_text(encoding="utf-8")
+    assert snapshot.name == "review-review-input.patch"
+    assert "## git diff --cached" in content
+    assert "## git diff" in content
+    assert "+staged" in content
+    assert "+working" in content
+
+
+def test_review_input_snapshots_are_phase_scoped(tmp_path: Path):
+    from agent_flow.adapters.hosted import _write_review_input_snapshot
+
+    project = tmp_path / "project"
+    project.mkdir()
+    _init_git_project(project)
+    run_dir = project / ".agent-flow" / "run"
+    run_dir.mkdir(parents=True)
+
+    review = _write_review_input_snapshot(project, run_dir, "review")
+    final_review = _write_review_input_snapshot(project, run_dir, "final-review")
+
+    assert review != final_review
+    assert review.is_file()
+    assert final_review.is_file()
+
+
+def test_review_input_snapshot_rejects_total_overflow(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from agent_flow.adapters import hosted
+    from agent_flow.core.commands import SafeCommandResult
+
+    monkeypatch.setattr(hosted, "_REVIEW_INPUT_MAX_BYTES", 64)
+
+    def fake_git_safe(*args, **kwargs):
+        return SafeCommandResult(
+            args=("git", *args),
+            returncode=0,
+            stdout="x" * 40,
+            stderr="",
+        )
+
+    monkeypatch.setattr(hosted, "git_safe", fake_git_safe)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    with pytest.raises(
+        hosted.WorktreeIsolationError,
+        match="snapshot exceeds 64 bytes",
+    ):
+        hosted._write_review_input_snapshot(tmp_path, run_dir, "review")
+
+
 
 
 def test_multi_review_jobs_dedupe_profile_baseline(tmp_path: Path):

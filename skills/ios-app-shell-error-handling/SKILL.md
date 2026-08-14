@@ -3,6 +3,8 @@ name: ios-app-shell-error-handling
 description: Use when implementing or reviewing iOS app-wide error handling where SwiftUI views/ViewModels notify common errors and an @main App, WindowGroup AppShell, NavigationStack coordinator, or UIKit AppCoordinator owns root navigation, tab/session flow switching, alerts, sheets, toast hosts, SessionExpired handling, Maintenance handling, and root reset behavior.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [app shell, appshell, global error, common error, session expired, alert host, toast host, root reset, 공통 에러, 전역 에러, 세션 만료]
+pathGlobs: ["**/*AppShell*.swift", "**/*AppCoordinator*.swift", "**/*CommonError*Host.swift"]
+requires: [app-shell-error-contract]
 ---
 
 # iOS App Shell Error Handling
@@ -28,6 +30,11 @@ when the app already uses UIKit navigation.
 - UIKit root coordinator, tab coordinator, or root reset work.
 - Review of Views/ViewModels that handle global errors.
 
+## Do not use for
+
+- Feature-local validation or fetch errors that render inline.
+- Ordinary View/ViewModel state or UI-model mapping; use `ios-clean-presentation-architecture` instead.
+
 ## AppShell Role
 
 SwiftUI structure:
@@ -49,32 +56,17 @@ UIKit structure:
 
 Feature views and ViewModels render feature UI and notify error intents only.
 
-## Notifier Contract
+## Shared Error Contract
 
-Use a small common error notifier/store:
-
-- `notify(error) == true`: AppShell or root coordinator handles the common error.
-- `notify(error) == false`: feature handles local inline error state.
-- expose pending common errors as observable state.
-- consume errors by stable `id`.
-- dedupe by stable key when repeated requests report the same common error.
-
-Common error examples: `SessionExpired`, `Maintenance`, `Forbidden`, and server
-codes such as `COMMON_*`.
+Read [`app-shell-error-contract`](../app-shell-error-contract/SKILL.md) before the platform rules below. It is the source of truth for classification, queue identity, acknowledgement, retry, and metadata preservation.
 
 ## Development Checklist
 
-- Keep global alert/sheet/snackbar/toast host in AppShell or root coordinator.
-- Show one current common error from the pending queue.
-- Consume the common error before changing root flow.
-- For `SessionExpired`, clear `NavigationStack` path and switch to login flow
-  after confirmation.
+- Keep the global alert/sheet/snackbar/toast host in AppShell or the root coordinator.
+- Run root-flow side effects through the shared queue and acknowledgement contract.
+- For `SessionExpired`, clear `NavigationStack` path and switch to login flow.
 - For `Maintenance`, clear path and switch to maintenance flow when present.
-- Keep local validation and feature-only fetch failures in feature state when
-  `notify(error)` returns `false`.
-- Preserve server `code`, `title`, `message`, and `requestId` through mappers into
-  the common UI model when supplied.
-- Keep root flow mutation on the main actor.
+- Keep root-flow mutation on the main actor.
 
 ## Review Checklist
 
@@ -87,8 +79,7 @@ Request changes when any of these are true:
 - A feature view presents session-expired or maintenance UI instead of AppShell.
 - `SessionExpired` can leave authenticated routes in `NavigationStack` path or
   UIKit navigation stack after confirmation.
-- Common and local error paths both render for the same failure.
-- Error metadata is dropped before common UI can display it.
+- The shared classification, deduplication, acknowledgement, retry, or metadata contract is violated.
 - UIKit feature coordinators present global session alerts instead of delegating
   to the root coordinator.
 
@@ -105,16 +96,11 @@ Request changes when any of these are true:
 
 ## Tests To Expect
 
-- Notifier classifies common versus local errors.
-- Notifier dedupes and consumes pending errors.
-- AppShell/root coordinator presents the first pending common error.
+- AppShell/root coordinator presents common errors and performs the platform root-flow recovery.
 - `SessionExpired` confirmation clears navigation state and switches to login.
 - ViewModel tests prove common errors notify instead of mutating root navigation
   or presenting alerts.
 
 ## Completion Gate
 
-When this skill applies, record:
-
-- `project-local-skills: checked`
-- `project-local-skills-used: ios-app-shell-error-handling`
+Use only the markers supplied by the active phase.

@@ -12,21 +12,35 @@ review flagged.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from importlib import resources
 from pathlib import Path
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from agent_flow.adapters.base import Adapter
-from agent_flow.core.worktree_isolation import WorktreeIsolationError
+from agent_flow.core.worktree_isolation import (
+    WorktreeIsolationError,
+    git_safe,
+    write_run_artifact_text,
+)
 from agent_flow.multi_review import (
     Distribution,
     ReviewerJob,
+    ReviewExecution,
     distribute,
     distribute_final_review,
     reviewer_result_error,
     run_distribution,
 )
 from agent_flow.subprocess_pool import SubprocessResult
+
+
+if TYPE_CHECKING:
+    from agent_flow.runner import Phase
+
+_REVIEW_INPUT_TIMEOUT_S = 120
+_REVIEW_INPUT_MAX_BYTES = 8 * 1024 * 1024
 
 _BASE_REVIEW_ANGLES: tuple[dict[str, str], ...] = (
     {
@@ -107,7 +121,7 @@ class HostedAdapter(Adapter):
         self.name = host_name
         self._hint = _HOST_HINTS[host_name]
 
-    def execute(self, phase, run_dir: Path, project_root: Path) -> bool:
+    def execute(self, phase: Phase, run_dir: Path, project_root: Path) -> bool:
         host_hint = self._hint
         host_hint += (
             "\n\n### Host-session isolation boundary\n"
@@ -117,10 +131,13 @@ class HostedAdapter(Adapter):
             "failed child process."
         )
         if phase.multi_review:
-            distribution, results = _run_multi_review_distribution(
+            distribution, execution = _run_multi_review_distribution(
                 phase, run_dir, project_root, self
             )
-            failures = _required_reviewer_failures(distribution, results)
+            failures = _required_reviewer_failures(
+                distribution,
+                execution.results,
+            )
             if distribution.fallback_to_generic:
                 failures.append("no usable Claude/Codex reviewer CLI is available")
             if distribution.insufficient_reviewers:
@@ -130,7 +147,10 @@ class HostedAdapter(Adapter):
                     "required reviewer subprocesses failed closed: "
                     + "; ".join(failures)
                 )
-            host_hint += "\n" + _multi_reviewer_block(distribution, results)
+            host_hint += "\n" + _multi_reviewer_block(
+                distribution,
+                execution,
+            )
         prompt = self.render_envelope(
             phase, run_dir, project_root, host_hint=host_hint,
         )
@@ -139,38 +159,149 @@ class HostedAdapter(Adapter):
 
 
 def _run_multi_review_distribution(
-    phase,
+    phase: Phase,
     run_dir: Path,
     project_root: Path,
     adapter: Adapter,
-) -> tuple[Distribution, list[SubprocessResult]]:
-    jobs = _reviewer_jobs(phase, run_dir, project_root, adapter)
+) -> tuple[Distribution, ReviewExecution]:
+    review_input_path = _write_review_input_snapshot(
+        project_root,
+        run_dir,
+        phase.id,
+    )
+    jobs = _reviewer_jobs(
+        phase,
+        run_dir,
+        project_root,
+        adapter,
+        review_input_path=review_input_path,
+    )
     distribution = (
         distribute_final_review(jobs, host=adapter.name)
         if phase.id == "final-review"
         else distribute(jobs, host=adapter.name)
     )
-    results = run_distribution(distribution, project_root)
-    return distribution, results
+    execution = run_distribution(distribution, project_root)
+    return distribution, execution
+
+
+def _write_review_input_snapshot(
+    project_root: Path,
+    run_dir: Path,
+    phase_id: str,
+) -> Path:
+    status = git_safe(
+        "status",
+        "--short",
+        "--untracked-files=all",
+        cwd=project_root,
+        optional_locks=False,
+        timeout_s=_REVIEW_INPUT_TIMEOUT_S,
+        max_output_bytes=_REVIEW_INPUT_MAX_BYTES,
+    )
+    diff = git_safe(
+        "diff",
+        "--no-ext-diff",
+        "--no-color",
+        "HEAD",
+        "--",
+        cwd=project_root,
+        optional_locks=False,
+        timeout_s=_REVIEW_INPUT_TIMEOUT_S,
+        max_output_bytes=_REVIEW_INPUT_MAX_BYTES,
+    )
+    observations = [("git status --short", status)]
+    if _is_unborn_head_failure(diff):
+        observations.extend((
+            (
+                "git diff --cached",
+                git_safe(
+                    "diff",
+                    "--cached",
+                    "--no-ext-diff",
+                    "--no-color",
+                    "--",
+                    cwd=project_root,
+                    optional_locks=False,
+                    timeout_s=_REVIEW_INPUT_TIMEOUT_S,
+                    max_output_bytes=_REVIEW_INPUT_MAX_BYTES,
+                ),
+            ),
+            (
+                "git diff",
+                git_safe(
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-color",
+                    "--",
+                    cwd=project_root,
+                    optional_locks=False,
+                    timeout_s=_REVIEW_INPUT_TIMEOUT_S,
+                    max_output_bytes=_REVIEW_INPUT_MAX_BYTES,
+                ),
+            ),
+        ))
+    else:
+        observations.append(("git diff HEAD", diff))
+    failed = [
+        f"{label}: {result.stderr.strip() or result.error or result.returncode}"
+        for label, result in observations
+        if not result.ok
+    ]
+    if failed:
+        raise WorktreeIsolationError(
+            "could not precompute reviewer input: " + "; ".join(failed)
+        )
+    sections = [
+        f"## {label}\n\n{result.stdout.rstrip() or '(empty)'}"
+        for label, result in observations
+    ]
+    content = "\n\n".join(sections) + "\n"
+    if len(content.encode("utf-8")) > _REVIEW_INPUT_MAX_BYTES:
+        raise WorktreeIsolationError(
+            "could not precompute reviewer input: "
+            f"snapshot exceeds {_REVIEW_INPUT_MAX_BYTES} bytes"
+        )
+    target = run_dir.resolve() / f"{phase_id}-review-input.patch"
+    write_run_artifact_text(run_dir, target, content)
+    return target
+
+
+def _is_unborn_head_failure(result) -> bool:
+    diagnostic = f"{result.stderr}\n{result.error or ''}".lower()
+    return (
+        result.returncode == 128
+        and "head" in diagnostic
+        and ("ambiguous" in diagnostic or "bad revision" in diagnostic)
+    )
 
 
 def _reviewer_jobs(
-    phase,
+    phase: Phase,
     run_dir: Path,
     project_root: Path,
     adapter: Adapter,
+    *,
+    review_input_path: Path | None = None,
 ) -> list[ReviewerJob]:
-    profile_angles = adapter._profile_snapshot.get("review_angles") or []
+    profile_angles = adapter.profile_review_angles()
     angles = _merge_review_angles(_BASE_REVIEW_ANGLES, profile_angles)
     jobs: list[ReviewerJob] = []
     base_prompt = adapter.render_envelope(phase, run_dir, project_root)
     for item in angles:
-        if not isinstance(item, dict):
-            continue
         angle_id = str(item.get("id") or "").strip()
         if not angle_id:
             continue
         angle_output = _review_angle_output(run_dir, phase.id, angle_id)
+        review_input = (
+            "\n\n## Precomputed review input\n\n"
+            f"Read `{review_input_path}` before judging the change. The controller "
+            "captured its `git status --short` and applicable staged/working-tree "
+            "diff immediately before launching reviewers. Inspect untracked files "
+            "listed there directly. Do not run `git diff` inside the reviewer sandbox."
+            if review_input_path is not None
+            else ""
+        )
         angle_prompt = (
             f"{base_prompt}\n\n"
             "## Isolated reviewer process contract\n\n"
@@ -178,8 +309,12 @@ def _reviewer_jobs(
             "`agent-flow status`, do not continue the workflow, and do not "
             "write the aggregate phase artifact named above. Return only this "
             "angle's review in your final stdout; the parent writes it to this "
-            "angle's per-provider artifact in the run directory. Include "
-            "`reviewer-source: sub-agent`.\n\n"
+            "angle's per-provider artifact in the run directory. Start your "
+            "output with exactly these two plain lines:\n"
+            "`## Reviewer`\n"
+            "`reviewer-source: sub-agent`\n"
+            "Do not wrap either line in bold, a list, or a code fence."
+            f"{review_input}\n\n"
             f"## Review angle\n\n"
             f"- id: {angle_id}\n"
             f"{_review_angle_prompt(project_root, item.get('prompt', ''))}\n"
@@ -213,7 +348,7 @@ def _review_angle_output(run_dir: Path, phase_id: str, angle_id: str) -> Path:
 
 def _merge_review_angles(
     baseline: tuple[dict[str, str], ...],
-    profile_angles: object,
+    profile_angles: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
     merged: dict[str, dict[str, object]] = {
         str(item["id"]): dict(item)
@@ -221,9 +356,7 @@ def _merge_review_angles(
         if item.get("id")
     }
     order = list(merged)
-    for item in profile_angles if isinstance(profile_angles, list) else []:
-        if not isinstance(item, dict):
-            continue
+    for item in profile_angles:
         angle_id = str(item.get("id") or "").strip()
         if not angle_id:
             continue
@@ -241,6 +374,8 @@ def _review_angle_prompt(project_root: Path, prompt_ref: object) -> str:
     package_path = resources.files("agent_flow").joinpath(prompt_path)
     repo_path = Path(__file__).resolve().parents[3] / prompt_path
     project_path = project_root / prompt_path
+    # Built-in angles are kit contracts; profile angles are extension points
+    # that the active project may override.
     paths = (
         (package_path, repo_path, project_path)
         if prompt_path in _BASE_REVIEW_PROMPTS
@@ -265,7 +400,7 @@ def _validate_review_prompt_path(prompt_path: str) -> None:
 
 def _required_reviewer_failures(
     distribution: Distribution,
-    results: list[SubprocessResult],
+    results: Sequence[SubprocessResult],
 ) -> list[str]:
     by_id = {result.job_id: result for result in results}
     if not distribution.accept_any_provider:
@@ -301,7 +436,7 @@ def _required_reviewer_failures(
 
 def _multi_reviewer_block(
     distribution: Distribution | None = None,
-    results: list[SubprocessResult] | None = None,
+    execution: ReviewExecution | None = None,
 ) -> str:
     """Render the observed subprocess distribution for host aggregation."""
     lines = [
@@ -314,11 +449,11 @@ def _multi_reviewer_block(
     if distribution is None:
         return "\n".join(lines) + "\n"
     lines.extend(("", f"Distribution summary: {distribution.summary()}."))
-    if distribution.skipped_providers:
+    if execution is not None and execution.skipped_providers:
         # 조용한 축소는 승인 근거를 흔든다. 어떤 provider가 왜 빠졌는지 적는다.
         lines.append(
-            "Skipped providers (prior attempt left a failure artifact): "
-            + ", ".join(distribution.skipped_providers)
+            "Skipped providers (current probe failed): "
+            + ", ".join(execution.skipped_providers)
         )
     if distribution.fallback_to_generic:
         lines.extend(
@@ -331,7 +466,7 @@ def _multi_reviewer_block(
         return "\n".join(lines) + "\n"
     by_id = {
         result.job_id: result
-        for result in results or []
+        for result in (execution.results if execution is not None else ())
     }
     for cli_name, jobs in distribution.by_cli.items():
         for job in jobs:

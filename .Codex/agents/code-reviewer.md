@@ -66,6 +66,8 @@ architecture-contract-check: pass|fail|n/a
 codex-claude-parity-check: pass|fail
 hook-parity-check: pass|fail
 clean-architecture: applied
+must-avoid-check: pass|fail
+shared-presentation-contract-placement: pass|fail|n/a
 project-local-skills: checked|n/a
 project-local-skills-used: <skill list or n/a>
 project-local-skill-docs: applied|n/a

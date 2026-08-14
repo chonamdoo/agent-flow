@@ -1,10 +1,10 @@
 # Review Angle - Architecture Design
 
 You are reviewing whether implementation matches the design artifact.
-Apply `skills/ddd-architecture/SKILL.md` first for domain model fit, then apply
-`skills/clean-architecture/SKILL.md` for layer boundaries and dependency rules.
-For post-implementation SOLID validation, use `skills/clean-architecture/SKILL.md`
-as the source of truth.
+Apply `.agent-flow/skills/ddd-architecture/SKILL.md` first for domain model fit, then apply
+`.agent-flow/skills/clean-architecture-core/SKILL.md` for layer boundaries, dependency rules,
+and post-implementation SOLID validation. Use platform adapters only for
+framework-specific evidence.
 
 ## Scope
 

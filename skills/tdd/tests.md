@@ -24,14 +24,13 @@ Characteristics:
 
 ## Bad Tests
 
-**Implementation-detail tests**: Coupled to internal structure.
+**Implementation-detail test** — this block illustrates one flaw only: it asserts an internal collaboration instead of the public result.
 
 ```typescript
-// BAD: Tests implementation details
-test("checkout calls paymentService.process", async () => {
-  const mockPayment = jest.mock(paymentService);
-  await checkout(cart, payment);
-  expect(mockPayment.process).toHaveBeenCalledWith(cart.total);
+test("checkout processes one payment for a valid cart", async () => {
+  const payment = { process: jest.fn().mockResolvedValue({ status: "confirmed" }) };
+  await checkout(createCart(), payment);
+  expect(payment.process).toHaveBeenCalledTimes(1);
 });
 ```
 

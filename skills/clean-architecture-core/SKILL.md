@@ -18,6 +18,7 @@ or sample-code details.
   implementation.
 - Feature Presentation owns route/screen wiring, state holder, UI state/action,
   UI events, UI models, domain-to-UI mapping, and rendering components.
+- Shared Presentation Contract owns narrow, framework-neutral interfaces for cross-presentation signals that App Shell handles, such as a common-error notifier and queue. App Shell and Feature Presentation may depend on this contract; it imports neither App Shell implementations nor platform UI types.
 - Core Domain owns business language, domain models, repository interfaces,
   use cases, policies, domain services, and domain errors.
 - Core Data implements domain repository interfaces and owns remote/local
@@ -139,6 +140,7 @@ Record these items in architecture or code review output:
 
 ```text
 clean-architecture-core: applied
+must-avoid-check: pass|fail
 dependency-rule: pass|fail
 usecase-boundary: pass|fail|n/a
 usecase-calls-usecase: pass|fail|n/a
@@ -151,6 +153,7 @@ memory-disk-cache-separated: pass|fail|n/a
 mapping-boundary: pass|fail|n/a
 dto-entity-domain-ui-separated: pass|fail
 core-ui-network-detail-import: pass|fail
+shared-presentation-contract-placement: pass|fail|n/a
 technical-adapter-exception-recorded: pass|fail|n/a
 di-composition-root-explicit: pass|fail
 platform-di-shape-consistent: pass|fail|n/a

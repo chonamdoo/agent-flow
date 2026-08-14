@@ -43,10 +43,7 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
 - Prefer existing local patterns and helpers over new abstractions.
 - Add a new abstraction only when it removes real duplication or matches an existing pattern.
 - Use the selected language-specific guides as secondary checklists. Repo patterns and task scope stay first.
-- Write comments only when code alone cannot carry the reason or contract.
-- Do not add WHAT/HOW comments that restate the code. Avoid generic comments such as "Initialize", "Set value", or "Loop through".
-- Keep comments for WHY, external API/platform constraints, workarounds, security, performance, concurrency, public API contracts, complex domain rules, and complex algorithms or regular expressions.
-- Prefer no new comment when the reason is not explicit. If a final pass is required, apply `comment-authoring-discipline` before review.
+- Default to no new comments during implementation. Apply `comment-authoring-discipline` as the semantic source for warranted comments and the final comment-quality pass.
 - Remove unused imports, variables, functions, and files created by the change.
 
 ## After Implementation

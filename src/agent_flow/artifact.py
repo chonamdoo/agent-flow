@@ -18,28 +18,30 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import secrets
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import yaml
 
-from agent_flow.core.markers import missing_markers, normalize_required_markers
+from agent_flow.core.design_value_check import missing_spec_item_evidence
 from agent_flow.core.local_skills import (
     changed_files,
     missing_local_skill_markers,
     resolved_profile,
 )
-from agent_flow.core.design_value_check import missing_spec_item_evidence
-from agent_flow.core.skill_resolver import PhaseSkills
+from agent_flow.core.markers import missing_markers, normalize_required_markers
 from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
 from agent_flow.core.security import validate_safe_name
+from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.core.worktree_isolation import (
     FileLeaseUnavailable,
     exclusive_file_lease,
+    write_run_artifact_text,
 )
 
 
@@ -287,7 +289,7 @@ def _validate_checkout_identity(value: str) -> None:
         raise ValueError(f"invalid checkout identity name: {name!r}")
 
 
-def read_meta(run_path: Path) -> dict:
+def read_meta(run_path: Path) -> dict[str, Any]:
     """Read meta.json tolerantly. Returns {} on missing/malformed.
 
     The runner depends on this for status / resume; a parse error must not
@@ -297,8 +299,11 @@ def read_meta(run_path: Path) -> dict:
     if not meta_path.exists():
         return {}
     try:
-        return json.loads(meta_path.read_text())
-    except (json.JSONDecodeError, OSError) as e:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise TypeError("top-level meta.json value is not an object")
+        return payload
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError, TypeError) as e:
         print(
             f"⚠️  meta.json at {meta_path} is unreadable ({e}); "
             f"treating as empty. Use `agent-flow abort` to clear if needed.",
@@ -307,24 +312,15 @@ def read_meta(run_path: Path) -> dict:
         return {}
 
 
-def write_meta(run_path: Path, meta: dict) -> None:
-    """Atomic write: tmpfile + os.replace. Survives Ctrl-C mid-write.
 
-    On disk-full or other write failure, the tmpfile is unlinked so we
-    don't leave `meta.json.tmp` cruft for the next run to wonder about.
-    """
-    target = run_path / META_FILE
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    try:
-        tmp.write_text(json.dumps(meta, indent=2))
-        os.replace(tmp, target)
-    except Exception:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-        raise
+
+def write_meta(run_path: Path, meta: Mapping[str, Any]) -> None:
+    """Atomically replace ``meta.json`` without exposing partial state."""
+    write_run_artifact_text(
+        run_path,
+        run_path.resolve() / META_FILE,
+        json.dumps(meta, indent=2),
+    )
 
 
 def mark_inactive(run_path: Path) -> None:

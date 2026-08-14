@@ -538,11 +538,9 @@ def test_both_entry_points_sync_the_recorded_kit_assets(entry: str):
         f"{entry}가 자산 트리를 직접 지명한다; 목록은 공유 모듈 한 벌이다"
     )
 
-
-# 두 진입점에 본문이 한 벌씩 있던 것들. 사본이 다시 생기면 여기서 걸린다.
+# 두 JS 진입점이 공유해야 하는 helper. 사본이 다시 생기면 여기서 걸린다.
 _SHARED_ONLY = (
-    "architectureReviewerSkillMarkdown", "fullFeatureSkillMarkdown",
-    "productBriefSkillMarkdown", "pushWatchSkillMarkdown", "hookScriptCommand",
+    "hookScriptCommand",
     "isPruneBackupName", "writePruneBackup", "managedHookScriptName",
     "managedHookDigests", "codexConfigPath", "ompExtensionIsKitOwned",
     "removeOmpHooksExtension", "safeSkillName",

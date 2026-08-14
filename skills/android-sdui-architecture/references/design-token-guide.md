@@ -8,14 +8,22 @@ The server states **meaning**; the client owns the **value**. Any styling field
 in server JSON carries a token name. Raw dp numbers and hex colors are a schema
 violation, not a style choice.
 
-```json
-// Rejected - lets the server break the design system
-"padding": { "all": "13dp" },
-"background": { "color": "#F3F4F6" }
+Rejected payload:
 
-// Accepted - token name only, client resolves the value
-"padding": { "all": "spacing_m" },
-"background": { "color": "surface_variant" }
+```json
+{
+  "padding": { "all": "13dp" },
+  "background": { "color": "#F3F4F6" }
+}
+```
+
+Accepted payload:
+
+```json
+{
+  "padding": { "all": "spacing_m" },
+  "background": { "color": "surface_variant" }
+}
 ```
 
 ## Token tables

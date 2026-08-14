@@ -20,7 +20,6 @@ import { parseSimpleYaml, splitFrontmatter } from "../lib/frontmatter.mjs";
 import {
   activeInstallProfileIds,
   AGENT_FLOW_COMMAND,
-  architectureReviewerSkillMarkdown,
   ASSET_BACKUP_NOTICE_PREFIX,
   ASSET_UPGRADE_NOTICE_PREFIX,
   arrayValue,
@@ -33,7 +32,6 @@ import {
   COMMAND_TOOL_MATCHER,
   ensureChildPath,
   escapeRegex,
-  fullFeatureSkillMarkdown,
   hasChildWithSuffix,
   hookScriptCommand,
   hookLauncherDigest,
@@ -53,9 +51,7 @@ import {
   mergeHookSettings,
   nextFreeBackupPath,
   ompExtensionIsKitOwned,
-  planReviewerSkillMarkdown,
   preserveKitSkillHashes,
-  productBriefSkillMarkdown,
   projectLauncherDigest,
   projectLauncherPythonRecord,
   PRUNE_BACKUP_SUFFIX,
@@ -66,7 +62,6 @@ import {
   pruneRetiredManagedScripts,
   BOOTSTRAP_KEPT_NOTICE_PREFIX,
   pruneUninstalledProfiles,
-  pushWatchSkillMarkdown,
   pathHasSymlink,
   READ_TOOL_MATCHER,
   readHookSettings,
@@ -155,6 +150,7 @@ const AF_DIR = path.join(PROJECT, ".agent-flow");
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
 const BUNDLED_HOST_SKILL_NAMES = new Set([
   "agent-flow",
+  "app-shell-error-contract",
   "android-appshell-error-handling",
   "comment-authoring-discipline",
   "comment-checker",
@@ -167,13 +163,6 @@ const BUNDLED_HOST_SKILL_NAMES = new Set([
 // 영구히 들고 있게 된다. 프로젝트 skill 색인은 우리가 배포한 것만 담고, 외부 skill은
 // 런타임이 host 경로에서 해석한다.
 const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set();
-const GENERATED_PROJECT_SKILL_NAMES = new Set([
-  "architecture-reviewer",
-  "full-feature-workflow",
-  "plan-reviewer",
-  "product-brief",
-  "push-watch",
-]);
 
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
@@ -927,18 +916,6 @@ function legacyHostSkillRoot(linkPath) {
   return null;
 }
 
-function installManagedWorkflowSkills() {
-  const generatedSkills = new Map([
-    ["full-feature-workflow", fullFeatureSkillMarkdown()],
-    ["product-brief", productBriefSkillMarkdown()],
-    ["plan-reviewer", planReviewerSkillMarkdown()],
-    ["architecture-reviewer", architectureReviewerSkillMarkdown()],
-    ["push-watch", pushWatchSkillMarkdown()],
-  ]);
-  for (const [name, content] of generatedSkills) {
-    writeManagedFile(path.join(AF_DIR, "skills", name, "SKILL.md"), content);
-  }
-}
 
 
 
@@ -1082,7 +1059,7 @@ function install() {
     path.join(AF_DIR, "skills"),
     previousSkillIndex,
     installSelection.copyRootNames,
-    GENERATED_PROJECT_SKILL_NAMES,
+    new Set(),
   );
   const skillsCopied = copyDir(
     path.join(KIT_ROOT, "skills"),
@@ -1091,10 +1068,9 @@ function install() {
     true,
     FORCE_MANAGED,
     FORCE_MANAGED,
-    new Set(["index.json", "catalog.lock.json", ...GENERATED_PROJECT_SKILL_NAMES]),
+    new Set(["index.json", "catalog.lock.json"]),
     installSelection.copyRootNames,
   );
-  installManagedWorkflowSkills();
   const skillIndex = installProjectSkills(FORCE_MANAGED, installSelection);
   upsertSkillIndexBlock(PROJECT);
   upsertDocsIndexBlock(PROJECT);

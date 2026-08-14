@@ -15,7 +15,6 @@ import { parseSimpleYaml, splitFrontmatter } from "../lib/frontmatter.mjs";
 import {
   activeInstallProfileIds,
   AGENT_FLOW_COMMAND,
-  architectureReviewerSkillMarkdown,
   arrayValue,
   assertInstallRootIsFinal,
   backupIfDifferent,
@@ -29,7 +28,6 @@ import {
   ensureChildPath,
   escapeRegex,
   extractCliOption,
-  fullFeatureSkillMarkdown,
   gitOutput,
   gitEnv,
   hasChildWithSuffix,
@@ -50,9 +48,7 @@ import {
   mergeHookSettings,
   nextFreeBackupPath,
   ompExtensionIsKitOwned,
-  planReviewerSkillMarkdown,
   preserveKitSkillHashes,
-  productBriefSkillMarkdown,
   projectLauncherDigest,
   projectLauncherPythonRecord,
   PRUNE_BACKUP_SUFFIX,
@@ -62,7 +58,6 @@ import {
   pruneRetiredHookScripts,
   pruneRetiredManagedScripts,
   pruneUninstalledProfiles,
-  pushWatchSkillMarkdown,
   READ_TOOL_MATCHER,
   pathHasSymlink,
   readHookSettings,
@@ -120,6 +115,7 @@ let cachedFullFeatureWorkflow = null;
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
 const BUNDLED_HOST_SKILL_NAMES = new Set([
   "agent-flow",
+  "app-shell-error-contract",
   "android-appshell-error-handling",
   "comment-authoring-discipline",
   "comment-checker",
@@ -132,13 +128,6 @@ const BUNDLED_HOST_SKILL_NAMES = new Set([
 // 영구히 들고 있게 된다. 프로젝트 skill 색인은 우리가 배포한 것만 담고, 외부 skill은
 // 런타임이 host 경로에서 해석한다.
 const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set();
-const GENERATED_PROJECT_SKILL_NAMES = new Set([
-  "architecture-reviewer",
-  "full-feature-workflow",
-  "plan-reviewer",
-  "product-brief",
-  "push-watch",
-]);
 
 function requestedInstallRoot() {
   const requested = requestedInstallRootOption(installArgs, process.cwd());
@@ -232,19 +221,6 @@ function installProject(requestedRoot) {
     null,
     root,
   );
-  const agentFlowSkill = agentFlowSkillMarkdown();
-  writeManagedFile(path.join(agentFlowDir, "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
-  writeManagedFile(
-    path.join(agentFlowDir, "skills", "full-feature-workflow", "SKILL.md"),
-    fullFeatureSkillMarkdown(),
-  );
-  writeManagedFile(path.join(agentFlowDir, "skills", "product-brief", "SKILL.md"), productBriefSkillMarkdown());
-  writeManagedFile(path.join(agentFlowDir, "skills", "plan-reviewer", "SKILL.md"), planReviewerSkillMarkdown());
-  writeManagedFile(
-    path.join(agentFlowDir, "skills", "architecture-reviewer", "SKILL.md"),
-    architectureReviewerSkillMarkdown(),
-  );
-  writeManagedFile(path.join(agentFlowDir, "skills", "push-watch", "SKILL.md"), pushWatchSkillMarkdown());
   const recordedAssets = readKitAssetRecord(root);
   const writtenAssets = new Map();
   upgradeBundledSkills(
@@ -253,7 +229,7 @@ function installProject(requestedRoot) {
     path.join(agentFlowDir, "skills"),
     previousSkillIndex,
     installSelection.copyRootNames,
-    GENERATED_PROJECT_SKILL_NAMES,
+    new Set(),
   );
   copyBundledDirIfMissingOrSame(
     path.join(KIT_ROOT, "skills"),
@@ -262,7 +238,7 @@ function installProject(requestedRoot) {
     PROFILE_MANAGED_HOST_ONLY_SKILLS,
     true,
     forceManaged,
-    new Set(["index.json", "catalog.lock.json", ...GENERATED_PROJECT_SKILL_NAMES]),
+    new Set(["index.json", "catalog.lock.json"]),
     installSelection.copyRootNames,
   );
   // kit이 배포하는 profile은 갱신한다. 사용자 편집을 보호한다고 두면 새 kit이
@@ -2167,64 +2143,6 @@ function fullFeatureWorkflowYaml() {
   return fullFeatureWorkflow().text;
 }
 
-function agentFlowSkillMarkdown() {
-  return `---
-name: agent-flow
-description: Use when the user types /agent-flow, asks to start or continue the project workflow, or wants Claude, Codex, or OMP to drive the agent-flow lifecycle.
----
-
-# Agent Flow
-
-Use this skill as the common entry point for the project-local agent-flow workflow.
-
-## Slash Trigger
-
-When the user types \`/agent-flow <task>\`, run:
-
-\`\`\`bash
-${AGENT_FLOW_COMMAND} run "<task>"
-\`\`\`
-
-Do not reinstall agent-flow for each task. Install is project setup, not the normal task entry.
-In a git repo, \`${AGENT_FLOW_COMMAND} run "<task>"\` starts the run inside \`~/.agent-flow/worktrees/<repo-id>/feat-<slug>/\` on branch \`feat/<slug>\`.
-
-When the user types \`/agent-flow\` with no task:
-
-- Run \`${AGENT_FLOW_COMMAND} status\` from the project root.
-- Treat the status command output as the only source of truth.
-- If status exits 0 and reports an active run, follow the \`next_command\` from status.
-- If status exits non-zero with \`no active run\`, ask for a task using \`/agent-flow <task>\`.
-- Do not infer npm, npx, or install failure unless the command actually exits non-zero with that error.
-- Do not run install just because a new session started.
-
-When the user types \`/agent-flow status\`, run:
-
-\`\`\`bash
-${AGENT_FLOW_COMMAND} status
-\`\`\`
-
-## SPEC Change Confirmation
-
-The initial SPEC list is baselined without a separate approval step. When status reports later additions, modifications, or deletions:
-
-- Show only that delta and ask the user for confirmation in the current chat.
-- After a clear affirmative reply, run the printed \`${AGENT_FLOW_COMMAND} spec confirm --run-dir <run-dir>\`.
-- For a \`manual\` verifier, ask in chat and then run \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`.
-
-Never require an exact phrase or ask the user to enter a terminal command.
-
-## Behavior
-
-- Treat \`/agent-flow\` as a project-local workflow trigger, not as a shell path.
-- Keep git-project runtime state private under the repository git dir, such as \`.git/agent-flow/worktrees/feat-<slug>/\`; expose it only for status, debugging, or artifact inspection.
-- On a new session, always check \`${AGENT_FLOW_COMMAND} status\` first and continue from that result.
-- After a phase writes its artifact, run the \`next_command\` printed by status or the current phase output.
-- If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
-- During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope. Load only the touched profile skill union. If a required local skill is missing, report it and wait for install or explicit override.
-- Keep user-facing replies short Korean by default. Keep code, commands, paths, and identifiers in English.
-- Do not paste long logs or whole files. Summarize only current phase, action, \`next_command\`, and blocker when useful.
-`;
-}
 
 
 

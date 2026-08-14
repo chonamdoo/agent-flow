@@ -5,6 +5,7 @@ description: >
   output. Keeps technical accuracy and parser markers intact while reducing
   prose. Use when writing review findings, commit messages, phase artifacts,
   PR summaries, or compressed context summaries.
+requires: [write-for-work]
 ---
 
 # Agent Flow Concise Output
@@ -16,32 +17,9 @@ The installer also writes `concise-output.md` to `.Codex/rules/concise-output.md
 
 ## Rules
 
-- Write user-facing prose in clear, natural Korean per `write-for-work`; favor plain, specific wording over mechanical shortening.
-- Keep established English technical terms and identifiers as-is; do not force awkward Korean translations. Explain a term instead of renaming it.
-- Keep code, commands, paths, URLs, API names, function names, env vars, errors, version numbers, YAML keys, JSON keys, phase ids, and parser markers unchanged.
-- Do not use emoji.
-- Do not imitate caveman speech. Use short, natural technical Korean.
-- Preserve exact verdict/status lines, including `verdict: approve`, `verdict: request-changes`, `verdict: blocked`, and `next_command`.
+Read [`concise-output.md`](concise-output.md) and apply every section relevant to the current review, commit, artifact, or compression output. It is the detailed rule source; this file owns invocation only.
 
-## Review
-
-- One finding per line.
-- Format: `path/to/file:L42: must-fix: 문제. 수정.`
-- Severity: `must-fix`, `should-fix`, `note`.
-- No praise, throat-clearing, long background, or generic advice.
-
-## Commit
-
-- Use Conventional Commits.
-- Subject target: 50 chars. Hard cap: 72 chars.
-- Add body only when the reason is not obvious from the subject.
-- Keep type and scope in English.
-
-## Artifact
-
-- Keep artifacts focused on action taken, file paths, verdict/status, blocker, and `next_command` when required.
-- Do not translate required markers or completion gates.
-- For context compression, write a summary artifact instead of overwriting the original. Preserve code blocks, inline code, URLs, paths, env vars, and version numbers exactly.
+Apply `write-for-work` when shortening requires restructuring or rewriting rather than a trivial cut. Preserve every parser-owned marker, verdict, status, and `next_command` value exactly as emitted by the active workflow.
 
 ## Source Note
 

@@ -4,7 +4,7 @@ description: Hybrid Server-Driven UI architecture for Android — server layout 
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [sdui, server-driven ui, server driven ui, 서버 드리븐, 서버드리븐, 서버 주도 ui, 동적 화면, json 렌더링, 컴포넌트 카탈로그]
 pathGlobs: ["**/sdui/**", "**/*UiNode*", "**/*ScreenComposer*", "**/*NodeRenderer*"]
-dependencies: [android-clean-architecture, android-clean-presentation-architecture]
+requires: [android-clean-architecture, android-clean-presentation-architecture]
 ---
 
 # Android SDUI Architecture
@@ -95,27 +95,15 @@ Read only the matching file.
 
 ## Review Checklist
 
-1. **Design tokens only** — styling JSON carries token names, never raw dp or hex.
-2. **Storage is the source of truth, in scope** — durable shared screen state is
-   observed from storage; ephemeral state is named and excluded.
-3. **Finite action vocabulary** — every action `type` is in the sealed vocabulary.
-4. **Parse depth limit** — the recursive parser caps depth and falls back past it.
-5. **Unknown node fallback** — unsupported types render a fallback, never crash.
-6. **List key and contentType** — lazy rendering supplies stable keys and types.
-7. **Accessibility field** — interactive nodes carry label/role mapped to semantics.
-8. **Semantic promotion** — a combination repeated in three or more places
-   becomes a semantic component.
-9. **UDF contract** — the upward event type carries only UI input, the downward
-   one-shot type leaves through a single-consumer channel that neither drops nor
-   replays, and renderers stay stateless.
+Read [`sdui-review-checklist.md`](references/sdui-review-checklist.md) and apply all nine marker rules. That file is the semantic source of truth; this skill keeps only the invocation and required output markers.
 
 ## Required Markers
 
 Include these in the completion artifact or review output:
 
 ```text
-sdui-architecture: applied
-sdui-design-token-only: pass|fail
+sdui-architecture: applied|n/a
+sdui-design-token-only: pass|fail|n/a|unverified
 sdui-room-ssot-scope: pass|fail|n/a
 sdui-action-finite-vocabulary: pass|fail|n/a
 sdui-parse-depth-limit: pass|fail|n/a

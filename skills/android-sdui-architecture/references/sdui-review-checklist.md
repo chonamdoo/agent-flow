@@ -10,15 +10,9 @@ Source: PART 4-4, PART 7-6.
 Rule: styling fields in server JSON carry token names. Raw dp numbers and hex
 colors are schema violations, and the client is the only owner of values.
 
-How to check: grep screen JSON, fixtures, and composer output for literals in
-styling positions, for example
-`"(padding|margin|color|background|radius|spacing|elevation)"` on the same line
-as `#[0-9A-Fa-f]{3,8}` or `[0-9]+dp`. Then confirm token resolution exists only
-in the design-system module.
+How to check: use a text search across screen JSON, fixtures, and composer output to find candidates such as raw `#[0-9A-Fa-f]{3,8}` colors or `[0-9]+dp` values near styling keys. The search is not validation: inspect structured payload fields, then verify the target schema or validator rejects raw literals and fixtures cover both rejection and token acceptance. Confirm token resolution exists only in the design-system module.
 
-Verdict: `fail` on any raw literal in a styling field. A numeric fallback inside
-the token table is resilience, not permission — server-side schema validation
-must still reject the literal.
+Verdict: `fail` when a raw literal is confirmed in a styling field or the schema/validator accepts one. A numeric fallback inside the token table is resilience, not permission. Report `n/a` only when no styling contract or payload is in scope; report the check as unverified rather than `pass` when the target schema/validator cannot be inspected.
 
 ## 2. `sdui-room-ssot-scope`
 

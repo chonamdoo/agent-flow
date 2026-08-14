@@ -10,7 +10,7 @@ Review Jetpack Compose code for recomposition correctness and stability.
 
 2. **Recomposition scope isolation**
    - Is the **read** of a state value as close to its consumer as possible, so one value change does not recompose the whole screen? Lambda parameters, `derivedStateOf`, and deferred reads inside `Modifier` are the tools; narrowing the read is the goal.
-   - Does flow **collection** stay at the route or top-level composable? `skills/android-clean-presentation-architecture/SKILL.md` Compose Screen Rule owns that boundary: pushing `collectAsStateWithLifecycle()` into a content composable is a UDF violation, not an optimization. Narrow the read, never the collection point.
+   - Does flow **collection** stay at the route or top-level composable? `.agent-flow/skills/android-clean-presentation-architecture/SKILL.md` Compose Screen Rule owns that boundary: pushing `collectAsStateWithLifecycle()` into a content composable is a UDF violation, not an optimization. Narrow the read, never the collection point.
    - Does a high-frequency state (input, scroll, animation) cause a parent composable to recompose unnecessarily?
 
 3. **State hoisting decisions**

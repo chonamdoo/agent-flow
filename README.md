@@ -126,7 +126,7 @@ For phases marked `multi_review: true`, review angles run only on the installed 
 - **one of them installed** → all angles run on that provider, still as independent subprocesses
 - **neither installed** → the phase fails closed; the controller session never records a reviewer verdict itself
 
-`AGENT_FLOW_REVIEWERS="codex"` narrows `final-review` to the named providers; for other `multi_review` phases it adds the named Claude/Codex providers alongside the primary one. Names outside the Claude/Codex pool are ignored. Per-angle artifacts (`final-review-<angle>-<provider>.md`) survive partial timeouts — one slow CLI does not block siblings.
+`AGENT_FLOW_REVIEWERS="codex"` narrows every `multi_review` phase to the named Claude/Codex providers. In non-final phases the first selected provider is primary and any further selected providers are optional extras. Names outside the Claude/Codex pool are ignored. Per-angle artifacts (`final-review-<angle>-<provider>.md`) survive partial timeouts — one slow CLI does not block siblings.
 
 ## Honesty notes
 

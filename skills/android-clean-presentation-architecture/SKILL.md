@@ -4,13 +4,7 @@ description: Defines Android Clean Architecture presentation-layer guidance for 
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [viewmodel, uistate, uievent, uiaction, uimodel, state holder, compose screen, 상태 홀더, 화면 상태, 프레젠테이션 계층]
 pathGlobs: ["**/*ViewModel.kt", "**/*UiState.kt", "**/presentation/**/*Screen.kt", "**/presentation/src/main/**/*.kt", "**/presentation/src/commonMain/**/*.kt", "**/presentation/src/androidMain/**/*.kt"]
-required_markers:
-  - "presentation-skill: android"
-  - "presentation-state-based-development: applied|n/a"
-  - "presentation-state-review: pass|fail"
-  - "ui-state-modeling: explicit"
-  - "presentation-mapping-boundary: domain-to-uimodel|n/a"
-  - "di-boundary: hilt"
+requires: [clean-architecture-core]
 ---
 
 # Android Clean Presentation Architecture
@@ -138,7 +132,7 @@ Coroutine rule:
 
 ## UiState Rule
 
-Use `@Stable sealed interface <Screen>UiState` for screen state by default:
+Use a sealed interface for screen state. Add a stability annotation only under the verified rules below:
 - `data object NotReady` or a domain-specific not-ready state when input is missing
 - `data object Loading`
 - `data object Refreshing` when refresh is visually distinct from first load
@@ -172,8 +166,8 @@ Keep `UiState` immutable:
 
 Use this when one scroll surface renders several distinct section types.
 
-- Model the mixed sections as one `@Stable sealed interface <Screen>ListItemUiModel` with one subtype per section.
-- Subtypes are `@Immutable data class`es or `data object`s, and each exposes a stable unique `val key: String`.
+- Model the mixed sections as one `sealed interface <Screen>ListItemUiModel` with one subtype per section.
+- Subtypes are immutable data classes or `data object`s, and each exposes a stable unique `val key: String`. Add `@Immutable` only under the `UiModel Stability` rule above.
 - The ViewModel or mapper builds one immutable list; the lazy layout renders it with `items(items, key = { it.key }, contentType = { it::class })` and an exhaustive `when`.
 - Do not model mixed sections as nullable payload buckets, `Any`, raw `Pair`/`Triple`, or a string type switch, and do not compute the list shape inside the composable.
 - Keep callbacks at the call site. Do not store lambdas in an item model.
@@ -238,7 +232,7 @@ stateless-content rule — a node renderer is a content composable.
 
 - `ViewModel` constructor injects use cases, one context's repository interface, and platform abstractions — never a repository implementation, data source, or API service. A use case is required only for the cross-context, ordered-side-effect, or error-translation cases named in the Architecture Rule.
 - `uiState` is public immutable `StateFlow`; mutable state is private.
-- `UiState` is `@Stable sealed interface` unless the repo has a documented exception.
+- `UiState` is an immutable sealed interface; any stability annotation follows the verified `UiModel Stability` rule above.
 - `UiState` is explicit for not-ready/loading/refreshing/placeholder/empty/error/offline/permission/success states that can occur; no fake domain default.
 - `UiAction`, `UiEvent`, and `UiState` roles are explicit; transient `UiEvent`s are not used for durable state.
 - one-shot UI behavior events use `Channel(...).receiveAsFlow()` or another deliberate event model.
@@ -260,14 +254,25 @@ stateless-content rule — a node renderer is a content composable.
 
 ## Required Markers
 
-When this skill is used for presentation development or code review, include these markers in the completion artifact or review output:
+When this skill is used for presentation development or code review, write every marker below in the phase artifact or review output. The active workflow `required_markers` is the allowed-value source of truth:
 
-- `presentation-skill: android`
+- `presentation-skill: android|react|react-native|ios|n/a`
 - `presentation-state-based-development: applied|n/a`
-- `presentation-state-review: pass|fail`
-- `ui-state-modeling: explicit`
+- `presentation-state-review: pass|fail|n/a`
+- `ui-state-modeling: explicit|n/a`
 - `presentation-mapping-boundary: domain-to-uimodel|n/a`
-- `di-boundary: hilt`
+- `di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a`
+
+Apply these Android-specific decisions:
+
+- `presentation-skill`: use `android` when Android presentation code is in scope. Use `n/a` only when the phase has no presentation work.
+- `presentation-state-based-development`: use `applied` when presentation code was created or changed under this contract. Use `n/a` for review-only work or when no presentation code changed.
+- `presentation-state-review`: use `pass` when every applicable checklist item passes, `fail` when any applicable item fails, and `n/a` only when no Android presentation code is in scope.
+- `ui-state-modeling`: use `explicit` when the screen's durable states are modeled explicitly. Use `n/a` only when no screen state is in scope.
+- `presentation-mapping-boundary`: use `domain-to-uimodel` when domain/application data crosses into presentation through a mapper. Use `n/a` only when no such data crosses the boundary.
+- `di-boundary`: use `hilt`, `direct`, or `existing` for the verified Android composition path. Use `n/a` only when the change neither creates nor reviews dependency wiring.
+
+A `fail` result is actionable: record the failed criterion and return to the workflow's fix path before approval.
 
 ## Sources
 

@@ -152,10 +152,10 @@ phases:
       - "solid-isp-consumer-ports:"
       - "solid-dip-dependency-direction:"
     prompt: |
-      Apply `skills/ddd-architecture/SKILL.md` first to model the domain:
+      Apply `.agent-flow/skills/ddd-architecture/SKILL.md` first to model the domain:
       Bounded Context, Ubiquitous Language, Entities, Value Objects,
       Aggregates, Domain Events, Domain Invariants, and Domain Flow.
-      Then apply `skills/clean-architecture/SKILL.md` to define layer
+      Then apply `.agent-flow/skills/clean-architecture/SKILL.md` to define layer
       boundaries, dependency direction, UseCase ports/impls, Repository
       ports/adapters, Cache, Mapper, Composition Root, Testability, and SOLID
       architecture validation.
@@ -256,7 +256,7 @@ phases:
           missing-required-profile-skills: none|<list>
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          presentation-skill: n/a
+          presentation-skill: <android|react|react-native|ios|n/a>
           regression-test: <test id that reproduces the required behavior>
           red-observed: <exit code of the failing run>
           test-run-evidence: verified|unavailable
@@ -283,14 +283,14 @@ phases:
       - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
       - "presentation-state-based-development: applied|n/a"
-      - "presentation-state-review: pass|n/a"
+      - "presentation-state-review: pass|fail|n/a"
       - "ui-state-modeling: explicit|n/a"
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
     prompt: |
       Apply code-generation-discipline. Implement the minimum code to pass red
       tests. Apply `.agent-flow/skills/tdd/SKILL.md` and
-      `skills/clean-architecture/SKILL.md`. Resolve required skills from active
+      `.agent-flow/skills/clean-architecture/SKILL.md`. Resolve required skills from active
       profile metadata, installed skill index, changed files, and task scope.
       Read only the touched profile skill union before writing code.
       Android/Kotlin/Compose/KMP changes require Android profile skills,
@@ -310,12 +310,12 @@ phases:
           clean-architecture: applied
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          presentation-skill: n/a
-          presentation-state-based-development: n/a
-          presentation-state-review: n/a
-          ui-state-modeling: n/a
-          presentation-mapping-boundary: n/a
-          di-boundary: n/a
+          presentation-skill: <android|react|react-native|ios|n/a>
+          presentation-state-based-development: <applied|n/a>
+          presentation-state-review: <pass|fail|n/a>
+          ui-state-modeling: <explicit|n/a>
+          presentation-mapping-boundary: <domain-to-uimodel|n/a>
+          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a>
 
       Output: artifacts/green.log.
 
@@ -335,7 +335,7 @@ phases:
       - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
       - "presentation-state-based-development: applied|n/a"
-      - "presentation-state-review: pass|n/a"
+      - "presentation-state-review: pass|fail|n/a"
       - "ui-state-modeling: explicit|n/a"
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
@@ -344,7 +344,7 @@ phases:
     prompt: |
       Apply code-generation-discipline. Refactor only after green. Keep
       behavior stable, apply `.agent-flow/skills/tdd/SKILL.md` and
-      `skills/clean-architecture/SKILL.md`, read every required profile skill
+      `.agent-flow/skills/clean-architecture/SKILL.md`, read every required profile skill
       before changing code, and summarize structural changes. Required skills
       come from active profile metadata, installed skill index, changed files,
       and task scope. Android/Kotlin/Compose/KMP changes require Android
@@ -365,12 +365,12 @@ phases:
           clean-architecture: applied
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          presentation-skill: n/a
-          presentation-state-based-development: n/a
-          presentation-state-review: n/a
-          ui-state-modeling: n/a
-          presentation-mapping-boundary: n/a
-          di-boundary: n/a
+          presentation-skill: <android|react|react-native|ios|n/a>
+          presentation-state-based-development: <applied|n/a>
+          presentation-state-review: <pass|fail|n/a>
+          ui-state-modeling: <explicit|n/a>
+          presentation-mapping-boundary: <domain-to-uimodel|n/a>
+          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a>
 
       Output: artifacts/refactor.md.
 
@@ -388,7 +388,7 @@ phases:
     routes:
       default: multi-review
     prompt: |
-      Apply `skills/comment-authoring-discipline/SKILL.md` to the changed diff
+      Apply `.agent-flow/skills/comment-authoring-discipline/SKILL.md` to the changed diff
       before multi-review. Add no comments by default. Add or keep comments only
       for WHY, external constraints, workarounds, security, performance,
       concurrency/lifecycle, complex algorithms or regex, business/domain rules,
@@ -428,6 +428,7 @@ phases:
       - "codex-claude-parity-check: pass|fail"
       - "hook-parity-check: pass|fail"
       - "clean-architecture-review: applied"
+      - "must-avoid-check: pass|fail"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
@@ -447,11 +448,11 @@ phases:
       agent-flow already ran this phase's reviewers as confined subprocesses on
       the installed Claude/Codex pool. Do not launch reviewer CLIs yourself:
       read the per-angle artifacts the runner lists and aggregate them. At least
-      two independent reviewer processes must have produced a verdict, each
-      using code-reviewer.md as basis: approve or request-changes.
+      two independent reviewer processes must have produced a verdict from the
+      explicit per-angle templates and required skills injected in their prompts.
       For architecture/SOLID findings, reviewers also apply
-      `skills/clean-architecture-core/SKILL.md` and the compatibility markers
-      in `skills/clean-architecture/SKILL.md`; any must-avoid or failing
+      `.agent-flow/skills/clean-architecture-core/SKILL.md` and the compatibility markers
+      in `.agent-flow/skills/clean-architecture/SKILL.md`; any must-avoid or failing
       checklist condition from the core skill makes the overall verdict
       `request-changes`.
       Any request-changes from any reviewer makes the overall verdict
@@ -498,13 +499,14 @@ phases:
           codex-claude-parity-check: pass|fail
           hook-parity-check: pass|fail
           clean-architecture-review: applied
+          must-avoid-check: pass|fail
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          presentation-skill: n/a
-          presentation-state-review: n/a
-          ui-state-modeling: n/a
-          presentation-mapping-boundary: n/a
-          di-boundary: n/a
+          presentation-skill: <android|react|react-native|ios|n/a>
+          presentation-state-review: <pass|fail|n/a>
+          ui-state-modeling: <explicit|n/a>
+          presentation-mapping-boundary: <domain-to-uimodel|n/a>
+          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a>
           usecase-interface-check: applied
           usecase-composition-check: applied
           cache-boundary-check: applied
@@ -529,6 +531,8 @@ phases:
       - "codex-claude-parity-check: pass|fail"
       - "hook-parity-check: pass|fail"
       - "clean-architecture: applied"
+      - "must-avoid-check: pass|fail"
+      - "shared-presentation-contract-placement: pass|fail|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
       - "dependency-rule: pass|fail"
@@ -558,9 +562,9 @@ phases:
       work.
       Compare code against domain-grill.md and ddd-design.md. Check layer
       violations, repository boundary leaks, naming drift, and dependency
-      direction. Apply `skills/ddd-architecture/SKILL.md` first for domain fit,
-      then `skills/clean-architecture-core/SKILL.md` plus compatibility markers
-      from `skills/clean-architecture/SKILL.md` for boundaries and SOLID
+      direction. Apply `.agent-flow/skills/ddd-architecture/SKILL.md` first for domain fit,
+      then `.agent-flow/skills/clean-architecture-core/SKILL.md` plus compatibility markers
+      from `.agent-flow/skills/clean-architecture/SKILL.md` for boundaries and SOLID
       validation. Any must-avoid or failing checklist condition from the core
       skill makes the verdict `request-changes` for that reviewer. Any request-changes
       from either reviewer makes the overall verdict request-changes.
@@ -590,6 +594,8 @@ phases:
           codex-claude-parity-check: pass|fail
           hook-parity-check: pass|fail
           clean-architecture: applied
+          must-avoid-check: pass|fail
+          shared-presentation-contract-placement: pass|fail|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
           dependency-rule: pass|fail
@@ -601,11 +607,11 @@ phases:
           mapping-boundary: pass|fail|n/a
           dto-entity-domain-ui-separated: pass|fail
           solid-boundary-check: pass|fail
-          presentation-skill: n/a
-          presentation-state-review: n/a
-          ui-state-modeling: n/a
-          presentation-mapping-boundary: n/a
-          di-boundary: n/a
+          presentation-skill: <android|react|react-native|ios|n/a>
+          presentation-state-review: <pass|fail|n/a>
+          ui-state-modeling: <explicit|n/a>
+          presentation-mapping-boundary: <domain-to-uimodel|n/a>
+          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a>
 
   - id: gates
     description: Run project verification gates after reviewer approve. Runner routes fail→fix-loop, pass→commit.
@@ -647,7 +653,7 @@ phases:
       - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
       - "presentation-state-based-development: applied|n/a"
-      - "presentation-state-review: pass|n/a"
+      - "presentation-state-review: pass|fail|n/a"
       - "ui-state-modeling: explicit|n/a"
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
@@ -656,7 +662,7 @@ phases:
     prompt: |
       Apply code-generation-discipline while fixing review/gate failures. Read
       required profile skills before writing or judging code, or record that no
-      fixes were required. Apply `skills/clean-architecture/SKILL.md` to any
+      fixes were required. Apply `.agent-flow/skills/clean-architecture/SKILL.md` to any
       boundary-affecting fix. Required skills come from active profile metadata,
       installed skill index, changed files, and task scope.
       Android/Kotlin/Compose/KMP fixes require Android profile skills,
@@ -676,12 +682,12 @@ phases:
           clean-architecture: applied
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          presentation-skill: n/a
-          presentation-state-based-development: n/a
-          presentation-state-review: n/a
-          ui-state-modeling: n/a
-          presentation-mapping-boundary: n/a
-          di-boundary: n/a
+          presentation-skill: <android|react|react-native|ios|n/a>
+          presentation-state-based-development: <applied|n/a>
+          presentation-state-review: <pass|fail|n/a>
+          ui-state-modeling: <explicit|n/a>
+          presentation-mapping-boundary: <domain-to-uimodel|n/a>
+          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a>
 
       Output: artifacts/fix-loop.md.
 
@@ -771,7 +777,7 @@ phases:
     description: Merge after explicit user approval.
     prompt: |
       Merge only after explicit user approval. If the merge or rebase hits
-      conflicts, apply `skills/resolving-merge-conflicts/SKILL.md` before
+      conflicts, apply `.agent-flow/skills/resolving-merge-conflicts/SKILL.md` before
       completing. Record merge strategy, target branch, and merge commit.
       Output: artifacts/merge.md.
 

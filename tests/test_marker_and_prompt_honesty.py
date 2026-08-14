@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-import os
+from collections.abc import Iterator
 import sys
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,7 @@ if SRC not in sys.path:
 from agent_flow.adapters.generic import STUB_SENTINEL
 from agent_flow.core.markers import missing_markers
 from agent_flow.core.skill_resolver import (
+    PhaseSkills,
     SkillResolution,
     SkillRoot,
     resolve_skill,
@@ -255,7 +256,7 @@ def test_prompt_enforcement_claim_matches_the_gate(tmp_path, phase_id, enforced)
     from agent_flow.core.local_skills import local_skill_prompt_block, missing_local_skill_markers
 
     profile = {"skills": {"required_review": ["tdd"]}}
-    phase_skills = type("PhaseSkills", (), {"required": ("tdd",), "optional": ()})()
+    phase_skills = PhaseSkills(required=("tdd",))
     block = local_skill_prompt_block(REPO, phase_id, phase_skills=phase_skills, profile=profile)
     gated = bool(
         missing_local_skill_markers("", REPO, phase_id, phase_skills=phase_skills, profile=profile)
@@ -350,15 +351,25 @@ _SKIPPED_FILES = frozenset(
 )
 
 
-def _kit_source_lines():
-    for path in sorted(REPO.rglob("*")):
-        rel = path.relative_to(REPO)
+def _kit_source_lines(root: Path = REPO) -> Iterator[tuple[str, int, str]]:
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root)
         if path.suffix not in _SCANNED_SUFFIXES or not path.is_file():
             continue
         if _SKIPPED_DIRS.intersection(rel.parts) or rel.as_posix() in _SKIPPED_FILES:
             continue
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            continue
+        for number, line in enumerate(lines, 1):
             yield rel.as_posix(), number, line
+
+
+def test_kit_source_lines_skips_non_utf8_files(tmp_path: Path):
+    (tmp_path / "binary.md").write_bytes(b"\xff")
+
+    assert list(_kit_source_lines(tmp_path)) == []
 
 
 def test_android_self_report_markers_are_gone():
@@ -417,11 +428,18 @@ def _frontmatter(path: Path) -> dict[str, Any]:
     return parsed
 
 
+def test_frontmatter_helper_accepts_crlf(tmp_path: Path):
+    skill = tmp_path / "SKILL.md"
+    skill.write_bytes(b"---\r\nname: probe\r\n---\r\n")
+
+    assert _frontmatter(skill)["name"] == "probe"
+
+
 def test_sdui_depends_on_the_presentation_contract():
-    """반증: dependencies에 presentation이 없어 SDUI 세션은 UDF 원문을 한 번도 읽지 않았다."""
-    dependencies = _frontmatter(SDUI_SKILL).get("dependencies") or []
-    assert "android-clean-architecture" in dependencies
-    assert "android-clean-presentation-architecture" in dependencies
+    """반증: `requires`에 presentation이 없으면 SDUI 세션이 UDF 원문을 읽지 않는다."""
+    requirements = _frontmatter(SDUI_SKILL).get("requires") or []
+    assert "android-clean-architecture" in requirements
+    assert "android-clean-presentation-architecture" in requirements
 
     presentation = PRESENTATION_SKILL.read_text(encoding="utf-8")
     assert "## Server-Driven Screen Exception" in presentation
@@ -506,6 +524,53 @@ def test_viewmodel_dependency_boundary_replaces_the_usecase_only_marker():
     )
 
 
+def test_shared_presentation_contract_marker_is_required_by_architecture_reviews():
+    marker = "shared-presentation-contract-placement: pass|fail|n/a"
+    for workflow_name, phase_id in (
+        ("default.yaml", "final-review"),
+        ("full-feature.yaml", "architecture-review"),
+    ):
+        workflow = yaml.safe_load(
+            (REPO / "src" / "agent_flow" / "workflows" / workflow_name).read_text(
+                encoding="utf-8"
+            )
+        )
+        phase = next(item for item in workflow["phases"] if item["id"] == phase_id)
+        assert marker in phase["required_markers"]
+        assert marker in phase["prompt"]
+
+    architecture_skill = (
+        SKILLS / "architecture-reviewer" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    assert marker not in architecture_skill
+    assert "Use only the markers supplied by the active phase" in architecture_skill
+    assert "do not launch reviewer CLIs yourself" in architecture_skill
+
+
+def test_sdui_completion_marker_values_match_the_evidence_contract():
+    template = (REVIEW_ANGLES / "sdui.md").read_text(encoding="utf-8")
+    skill = SDUI_SKILL.read_text(encoding="utf-8")
+
+    for text in (template, skill):
+        assert "sdui-architecture: applied|n/a" in text
+        assert "sdui-design-token-only: pass|fail|n/a|unverified" in text
+    assert template.count("sdui-review-checklist.md") == 1
+    assert "mark the completion gate `n/a`" not in template
+
+
+def test_sdui_ssot_maps_data_failures_before_presentation():
+    text = (
+        SKILLS / "android-sdui-architecture" / "references" / "offline-ssot-data-guide.md"
+    ).read_text(encoding="utf-8")
+
+    assert "ObserveScreenResult.Failure(it.toDomainError())" in text
+    assert "runCatching<ObserveScreenResult?>" in text
+    assert ".catch { emit(ObserveScreenResult.Failure" not in text
+    assert "screenErrorMapper.toUiModel(result.error)" in text
+    assert "screenUiMapper.toUiModel(result.screen)" in text
+    assert "ScreenUiState.Error(it.message)" not in text
+
+
 def test_use_case_error_semantics_do_not_cross_the_ui_mapping_boundary():
     """반증: use case가 screen result를 만들면 domain이 UI 표현에 의존한다."""
     sources = (
@@ -556,3 +621,37 @@ def test_the_three_contradicted_rules_are_reconciled():
     assert "existing `Result`/exception contract" in guide
     angle = generalized[1].read_text(encoding="utf-8")
     assert "transport-failure to domain-error" in angle
+
+
+def test_presentation_review_marker_has_one_runtime_contract():
+    expected = "presentation-state-review: pass|fail|n/a"
+    seen = []
+
+    for workflow_path in sorted((REPO / "src" / "agent_flow" / "workflows").glob("*.yaml")):
+        workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        for phase in workflow["phases"]:
+            prompt = phase.get("prompt") or ""
+            for canned_default in (
+                "presentation-skill: n/a",
+                "presentation-state-based-development: n/a",
+                "presentation-state-review: n/a",
+                "ui-state-modeling: n/a",
+                "presentation-mapping-boundary: n/a",
+                "di-boundary: n/a",
+            ):
+                assert canned_default not in prompt
+            for marker in phase.get("required_markers") or []:
+                if marker.startswith("presentation-state-review:"):
+                    seen.append((workflow_path.name, phase["id"], marker))
+                    assert marker == expected
+
+    assert seen
+    for name in (
+        "android-clean-presentation-architecture",
+        "ios-clean-presentation-architecture",
+        "react-clean-presentation-architecture",
+        "react-native-clean-presentation-architecture",
+    ):
+        path = SKILLS / name / "SKILL.md"
+        assert "required_markers" not in _frontmatter(path)
+        assert f"`{expected}`" in path.read_text(encoding="utf-8")

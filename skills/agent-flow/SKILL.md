@@ -9,29 +9,22 @@ Use this skill as the common entry point for the project-local agent-flow workfl
 
 ## Slash Trigger
 
-When the user types `/agent-flow <task>`, run:
+Dispatch exact inputs in this order:
+
+1. For `/agent-flow status`, run `agent-flow status` from the project root and report its output.
+2. At the start of any other new session, run `agent-flow status` from the project root before choosing a lifecycle command.
+3. When status reports an active run, execute its printed `next_command`; do not start a second run.
+4. When status exits 0 and reports no active run:
+   - `/agent-flow` with no task asks the user for `/agent-flow <task>`.
+   - `/agent-flow <task>` runs:
 
 ```bash
 agent-flow run "<task>"
 ```
 
-Do not reinstall agent-flow for each task. Install is project setup, not the normal task entry.
-In a git repo, `agent-flow run "<task>"` starts the run inside `~/.agent-flow/worktrees/<repo-id>/feat-<slug>/` on branch `feat/<slug>`.
+Treat the status command output as the only source of truth. Use the `run` output for the actual worktree, branch, phase, and next command instead of predicting them.
 
-When the user types `/agent-flow` with no task:
-
-- Run `agent-flow status` from the project root.
-- Treat the status command output as the only source of truth.
-- If status exits 0 and reports an active run, follow the `next_command` from status.
-- If status exits non-zero with `no active run`, ask for a task using `/agent-flow <task>`.
-- Do not infer npm, npx, or install failure unless the command actually exits non-zero with that error.
-- Do not run install just because a new session started.
-
-When the user types `/agent-flow status`, run:
-
-```bash
-agent-flow status
-```
+Do not run install just because a new session started. Install is project setup, not the normal task entry. Do not infer npm, npx, or install failure unless the command exits non-zero with that error.
 
 ## SPEC Change Confirmation
 
@@ -47,7 +40,6 @@ Never require an exact phrase or ask the user to enter a terminal command.
 
 - Treat `/agent-flow` as a project-local workflow trigger, not as a shell path.
 - Keep git-project runtime state private under the repository git dir, such as `.git/agent-flow/worktrees/feat-<slug>/`; expose it only for status, debugging, or artifact inspection.
-- On a new session, always check `agent-flow status` first and continue from that result.
 - After a phase writes its artifact, run the `next_command` printed by status or the current phase output.
 - If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
 - During code generation, modification, and code review phases, apply `code-generation-discipline`. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope. Load only the touched profile skill union. If a required local skill is missing, report it and wait for install or explicit override.

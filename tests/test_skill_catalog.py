@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 SRC = str(REPO / "src")
@@ -61,7 +63,11 @@ def _bundled_shipped_skill(project: Path, name: str) -> Path:
 
 
 def _required_for(
-    project: Path, changed_files: list[str], *, profile: dict | None = None
+    project: Path,
+    changed_files: list[str],
+    *,
+    profile: dict | None = None,
+    task_text: str = "",
 ) -> set[str]:
     return {
         skill.name
@@ -69,12 +75,32 @@ def _required_for(
             project_root=project,
             phase_id="implement",
             changed_files=changed_files,
+            task_text=task_text,
             host="claude",
             profile=profile,
         ).required
     }
 
 
+
+
+def test_bundled_skill_relative_markdown_links_resolve():
+    link_pattern = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+    broken = []
+    markdown_files = (
+        *(REPO / "skills").glob("*/SKILL.md"),
+        *(REPO / "skills").glob("*/references/**/*.md"),
+    )
+
+    for skill_file in sorted(markdown_files):
+        for target in link_pattern.findall(skill_file.read_text(encoding="utf-8")):
+            relative_target = target.split("#", 1)[0]
+            if not relative_target or relative_target.startswith(("http://", "https://", "mailto:")):
+                continue
+            if not (skill_file.parent / relative_target).resolve().exists():
+                broken.append((skill_file.relative_to(REPO).as_posix(), target))
+
+    assert broken == []
 
 def test_external_skill_without_workflow_phases_enters_catalog(tmp_path):
     """현행 `_catalog_entry`의 early return으로는 반드시 실패하는 계약."""
@@ -168,8 +194,9 @@ def test_symlinked_duplicate_is_catalogued_once(tmp_path):
     assert [item.name for item in catalog].count("shepherd") == 1
 
 
-def test_lock_roundtrip_and_version_mismatch_is_discarded(tmp_path):
+def test_lock_roundtrip_and_version_mismatch_is_discarded(tmp_path, monkeypatch):
     """스키마가 바뀌면 옛 lock을 읽고 죽는 대신 버린다."""
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
     project = tmp_path / "app"
     host = tmp_path / "host"
     _upstream_skill(host, "diagnose", "Use when debugging.")
@@ -455,6 +482,11 @@ MIGRATED_DEPENDENCIES = {
     "python-api-clean-architecture": ["clean-architecture-core"],
     "grill-with-docs": ["domain-modeling", "grilling"],
     "tdd": ["codebase-design", "code-review"],
+    "app-shell-error-contract": ["clean-architecture-core"],
+    "android-appshell-error-handling": ["app-shell-error-contract"],
+    "ios-app-shell-error-handling": ["app-shell-error-contract"],
+    "react-app-shell-error-handling": ["app-shell-error-contract"],
+    "react-native-app-shell-error-handling": ["app-shell-error-contract"],
 }
 
 
@@ -482,6 +514,156 @@ def test_shipped_skill_dependencies_are_declared_in_frontmatter():
     }
     assert {name: gap for name, gap in missing.items() if gap} == {}
 
+_APP_SHELL_CASES = {
+    "android-appshell-error-handling": ("android", "snackbar host"),
+    "ios-app-shell-error-handling": ("ios", "alert host"),
+    "react-app-shell-error-handling": ("nextjs", "error boundary"),
+    "react-native-app-shell-error-handling": ("react-native", "navigation reset"),
+}
+_APP_SHELL_PATHS = {
+    "android-appshell-error-handling": "app/src/main/kotlin/AppShell.kt",
+    "ios-app-shell-error-handling": "ios/AppShell.swift",
+    "react-app-shell-error-handling": "src/AppShell.tsx",
+    "react-native-app-shell-error-handling": "src/App.tsx",
+}
+
+
+
+_APP_SHELL_PRESENTATION_PAIRS = {
+    "android-appshell-error-handling": "android-clean-presentation-architecture",
+    "ios-app-shell-error-handling": "ios-clean-presentation-architecture",
+    "react-app-shell-error-handling": "react-clean-presentation-architecture",
+    "react-native-app-shell-error-handling": "react-native-clean-presentation-architecture",
+}
+
+
+def test_app_shell_contract_selector_does_not_outgrow_platform_family():
+    catalog = {entry.name: entry for entry in _shipped_catalog()}
+    contract_terms = set(catalog["app-shell-error-contract"].task_terms)
+    assert contract_terms
+    platform_terms = {
+        term
+        for name in _APP_SHELL_CASES
+        for term in catalog[name].task_terms
+    }
+
+    assert contract_terms <= platform_terms
+
+
+def test_app_shell_platform_skills_define_path_selectors():
+    catalog = {entry.name: entry for entry in _shipped_catalog()}
+
+    for name in _APP_SHELL_CASES:
+        assert catalog[name].path_globs
+
+
+def test_clean_presentation_skills_depend_on_the_core_contract():
+    catalog = {entry.name: entry for entry in _shipped_catalog()}
+
+    for name in _APP_SHELL_PRESENTATION_PAIRS.values():
+        assert "clean-architecture-core" in catalog[name].dependencies
+
+
+def test_app_shell_and_presentation_skills_define_exclusive_ownership():
+    for app_shell_name, presentation_name in _APP_SHELL_PRESENTATION_PAIRS.items():
+        app_shell = (SHIPPED_SKILLS / app_shell_name / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        presentation = (
+            SHIPPED_SKILLS / presentation_name / "SKILL.md"
+        ).read_text(encoding="utf-8")
+
+        assert f"use `{presentation_name}` instead" in app_shell
+        assert f"use `{app_shell_name}` instead" in presentation
+
+
+
+
+def test_app_shell_shared_semantics_are_not_repeated_by_platform_skills():
+    contract = (SHIPPED_SKILLS / "app-shell-error-contract" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    shared_semantics = (
+        "`pending`",
+        "`handling`",
+        "`consumed`",
+        "retryable state",
+    )
+    metadata_fields = "`code`, `title`, `message`, and `requestId`"
+
+    for semantic in shared_semantics:
+        assert semantic in contract
+    assert metadata_fields in contract
+    for name in _APP_SHELL_CASES:
+        platform = (SHIPPED_SKILLS / name / "SKILL.md").read_text(encoding="utf-8")
+        assert all(semantic not in platform for semantic in shared_semantics)
+        assert metadata_fields not in platform
+        assert "source of truth for classification" in platform
+    assert "Shared Presentation Contract" in contract
+    assert "not a Core Domain" in contract
+    core = (SHIPPED_SKILLS / "clean-architecture-core" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Shared Presentation Contract" in core
+    assert "shared-presentation-contract-placement: pass|fail|n/a" in core
+
+
+
+
+def test_react_app_shell_review_rejects_unguarded_protected_history():
+    text = (
+        SHIPPED_SKILLS / "react-app-shell-error-handling" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Back navigation reaches a protected route without the auth guard" in text
+    assert "Back navigation can reach only routes that the auth guard rejects" not in text
+
+
+def test_app_shell_skills_defer_completion_markers_to_the_active_phase():
+    for name in ("app-shell-error-contract", *_APP_SHELL_CASES):
+        text = (SHIPPED_SKILLS / name / "SKILL.md").read_text(encoding="utf-8")
+
+        assert "Use only the markers supplied by the active phase." in text
+        assert "project-local-skills-used:" not in text
+        assert "do not record it under `project-local-skills-used`" not in text
+
+
+@pytest.mark.parametrize("name", sorted(_APP_SHELL_CASES))
+def test_app_shell_skill_activates_its_shared_contract(name, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / name
+    _bundled_shipped_skill(project, name)
+    _bundled_shipped_skill(project, "app-shell-error-contract")
+    profile_name, task_text = _APP_SHELL_CASES[name]
+
+    required = _required_for(
+        project,
+        [],
+        profile=load_profile_payload(profile_name),
+        task_text=task_text,
+    )
+
+    assert {name, "app-shell-error-contract"} <= required
+@pytest.mark.parametrize("name", sorted(_APP_SHELL_PATHS))
+def test_app_shell_path_selector_activates_its_shared_contract(
+    name, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / name
+    _bundled_shipped_skill(project, name)
+    _bundled_shipped_skill(project, "app-shell-error-contract")
+    profile_name, _ = _APP_SHELL_CASES[name]
+
+    required = _required_for(
+        project,
+        [_APP_SHELL_PATHS[name]],
+        profile=load_profile_payload(profile_name),
+    )
+
+    assert {name, "app-shell-error-contract"} <= required
+
+
+
 
 def test_skill_selection_has_no_dependency_table():
     """반증: 표가 남아 있으면 정본이 둘이라 다음 skill 추가에서 다시 갈린다."""
@@ -492,6 +674,94 @@ def test_skill_selection_has_no_dependency_table():
     holders = [name for name, text in sources.items() if "SKILL_DEPENDENCIES" in text]
     assert holders == [], f"SKILL_DEPENDENCIES가 아직 남아 있다: {holders}"
 
+
+
+def test_common_profile_skills_are_source_backed():
+    source = (REPO / "lib" / "skill-selection.mjs").read_text(encoding="utf-8")
+    common_profile_skills = source.split(
+        "export const COMMON_PROFILE_SKILLS = new Set([", 1
+    )[1].split("]);", 1)[0]
+    names = re.findall(r'"([a-z0-9-]+)"', common_profile_skills)
+
+    missing = [
+        name for name in names if not (SHIPPED_SKILLS / name / "SKILL.md").is_file()
+    ]
+
+    assert missing == []
+
+
+def test_workflow_skills_are_not_generated_in_javascript():
+    source = "\n".join(
+        (
+            (REPO / "lib" / "installer-shared.mjs").read_text(encoding="utf-8"),
+            (REPO / "bin" / "agent-flow-kit.mjs").read_text(encoding="utf-8"),
+        )
+    )
+    generated_helpers = (
+        "agentFlowSkillMarkdown",
+        "architectureReviewerSkillMarkdown",
+        "fullFeatureSkillMarkdown",
+        "planReviewerSkillMarkdown",
+        "productBriefSkillMarkdown",
+        "pushWatchSkillMarkdown",
+    )
+
+    assert all(name not in source for name in generated_helpers)
+
+
+def test_push_watch_skill_resumes_the_active_run():
+    skill = (SHIPPED_SKILLS / "push-watch" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "agent-flow run push-watch" not in skill
+    assert "agent-flow status" in skill
+    assert "next_command" in skill
+
+
+def test_workflow_required_skills_are_source_backed():
+    missing: list[str] = []
+    workflows = REPO / "src" / "agent_flow" / "workflows"
+    for workflow_path in sorted(workflows.glob("*.yaml")):
+        workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        for phase in workflow.get("phases", []):
+            for name in phase.get("skills", {}).get("required", []):
+                if not (SHIPPED_SKILLS / name / "SKILL.md").is_file():
+                    missing.append(f"{workflow_path.name}:{phase['id']}:{name}")
+
+    assert missing == []
+
+
+def test_bundled_skills_use_requires_for_dependencies():
+    offenders = []
+    for skill_path in sorted(SHIPPED_SKILLS.glob("*/SKILL.md")):
+        frontmatter = yaml.safe_load(
+            skill_path.read_text(encoding="utf-8").split("---", 2)[1]
+        ) or {}
+        if "dependencies" in frontmatter:
+            offenders.append(skill_path.parent.name)
+
+    assert offenders == []
+
+
+def test_common_skill_selection_does_not_duplicate_transitive_dependencies():
+    source = (REPO / "lib" / "skill-selection.mjs").read_text(encoding="utf-8")
+    common_profile_skills = source.split(
+        "export const COMMON_PROFILE_SKILLS = new Set([", 1
+    )[1].split("]);", 1)[0]
+    transitive_dependencies = {
+        "clean-architecture-core",
+        "code-review",
+        "codebase-design",
+        "domain-modeling",
+        "grilling",
+        "write-for-work",
+    }
+
+    assert all(
+        f'"{name}"' not in common_profile_skills
+        for name in transitive_dependencies
+    )
 
 
 

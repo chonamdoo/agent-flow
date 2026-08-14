@@ -6,9 +6,8 @@ agent-flow artifact, review, commit output은 짧게 쓰되 parser contract와 �
 
 - 코드, 명령, 경로, URL, API명, 함수명, env, 에러 문자열, 버전 숫자는 원문 유지.
 - YAML/JSON key, CLI status, phase id, completion marker는 번역하거나 축약하지 않는다.
-- `verdict: approve`, `verdict: request-changes`, `verdict: blocked`는 byte-preserve.
-- `status: green`, `status: comments`, `status: ci-failed`, `status: pending`, `status: merged`, `status: skipped`, `status: closed`, `status: error`는 byte-preserve.
-- `next_command`는 byte-preserve.
+- Preserve every exact `verdict:`, `status:`, and `next_command` line emitted by the active workflow.
+- Preserve exact workflow verdict lines such as `verdict: approve`, `verdict: request-changes`, and `verdict: blocked`.
 
 ## Korean Adapter
 

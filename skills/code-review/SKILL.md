@@ -31,12 +31,12 @@ Before going further, confirm the fixed point resolves (`git rev-parse <fixed-po
 
 ### 2. Identify the spec source
 
-Look for the originating spec, in this order:
+Look for the originating spec in this order:
 
-1. Issue references in the commit messages (`#123`, `Closes #45`, GitLab `!67`, etc.) — fetch via the workflow in `docs/agents/issue-tracker.md`.
+1. Issue references in commit messages (`#123`, `Closes #45`, GitLab `!67`, etc.). Read them through the host's configured issue/PR connector or a configured read-only repository CLI.
 2. A path the user passed as an argument.
 3. A PRD/spec file under `docs/`, `specs/`, or `.scratch/` matching the branch name or feature.
-4. If nothing is found, ask the user where the spec is. If they say there isn't one, the **Spec** sub-agent will skip and report "no spec available".
+4. If nothing is found after exhausting available repository and connector sources, ask the user where the spec is. If there is no spec, the **Spec** axis reports `no spec available`.
 
 ### 3. Identify the standards sources
 
@@ -62,9 +62,11 @@ Each smell reads *what it is* → *how to fix*; match it against the diff:
 - **Middle Man** — a class or function that mostly just delegates onward. → cut it, call the real target direct.
 - **Refused Bequest** — a subclass or implementer that ignores or overrides most of what it inherits. → drop the inheritance, use composition.
 
-### 4. Spawn both sub-agents in parallel
+### 4. Run both review axes independently
 
-Send a single message with two `Agent` tool calls. Use the `general-purpose` subagent for both.
+If the active workflow phase says reviewer subprocesses already ran, do not launch more reviewers. Read the phase-provided reviewer artifacts and continue to aggregation.
+
+Otherwise dispatch Standards and Spec in one parallel batch through the current host's supported sub-agent interface. Keep the two prompts and contexts independent. If the host cannot dispatch parallel sub-agents, run the axes sequentially in separate contexts and preserve the same independent outputs.
 
 **Standards sub-agent prompt** — include:
 
@@ -78,7 +80,7 @@ Send a single message with two `Agent` tool calls. Use the `general-purpose` sub
 - The path or fetched contents of the spec.
 - The brief: "Report: (a) requirements the spec asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for (scope creep); (c) requirements that look implemented but where the implementation looks wrong. Quote the spec line for each finding. Under 400 words."
 
-If the spec is missing, skip the Spec sub-agent and note this in the final report.
+If the spec is missing, skip the Spec reviewer and note `no spec available` in the final report.
 
 ### 5. Aggregate
 
