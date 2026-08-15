@@ -6,6 +6,7 @@ pre-push 게이트까지 돌린다(issue #130).
 """
 from __future__ import annotations
 
+import copy
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +32,10 @@ from agent_flow.core.profiles import (  # noqa: E402
     _gate_from_payload,
     load_profile,
     load_profile_payload,
+)
+from agent_flow.core.reviewer_launch import (  # noqa: E402
+    ReviewerLaunchError,
+    validate_reviewer_launch_declaration,
 )
 from agent_flow.core.skill_catalog import discover_skill_catalog  # noqa: E402
 from agent_flow.core.skill_matching import match_external  # noqa: E402
@@ -176,6 +181,97 @@ def test_every_profile_declares_the_branching_contract_it_owns(profile_id):
     assert branching.get("base")
     assert branching.get("integration")
     assert pr.get("target_branch")
+
+
+def _profile_payload(profile_id: str) -> dict:
+    return yaml.safe_load((PROFILES_DIR / f"{profile_id}.yaml").read_text(encoding="utf-8"))
+
+
+def _profiles_declaring_execution() -> list[str]:
+    return [
+        profile_id
+        for profile_id in _profile_ids()
+        if "execution" in _profile_payload(profile_id)
+    ]
+
+
+@pytest.mark.parametrize("profile_id", _profile_ids())
+def test_shipped_profile_execution_declaration_is_parseable(profile_id):
+    """불변: 배포하는 reviewer launch 선언은 여기서 한 번 파싱된다.
+
+    반증: `validate_reviewer_launch_declaration`은 프로젝트 override에만 걸려 있었다
+    (`profiles.py`의 `_validate_override_execution`). 배포 profile의 선언은 리뷰가
+    provider를 띄우기 직전(`multi_review._resolve_reviewer_launch`)에 처음 해석되고,
+    그 자리는 fail-closed다 — 오타 한 글자가 설치된 **모든** 프로젝트의 리뷰를
+    막고, 그것도 CI가 아니라 사용자 run에서 처음 드러난다.
+
+    검사는 소비자가 쓰는 파서 그대로다. 여기 규칙을 따로 적으면 두 벌이 갈린다.
+    `execution`을 선언하지 않은 profile은 검사할 것이 없으므로 통과한다.
+    """
+    payload = _profile_payload(profile_id)
+    if "execution" not in payload:
+        return
+    validate_reviewer_launch_declaration(payload["execution"])
+
+
+# 선언 안에서 한 글자가 틀리는 방식들. 값을 고르는 기준은 "소비자가 실제로 거부하는
+# 모양"이고, 어느 것도 `reviewers[0]`이 mapping이라는 것 밖의 구조를 가정하지 않는다 —
+# 새 profile이 다른 모양으로 선언해도 이 검사가 헛돌지 않게.
+_EXECUTION_TYPOS: tuple[tuple[str, object], ...] = (
+    ("execution key", lambda execution: execution.update({"reviewer": []})),
+    ("rule key", lambda execution: execution["reviewers"][0].update({"candidate": []})),
+    (
+        "match key",
+        lambda execution: execution["reviewers"][0].update({"match": {"angel": "x"}}),
+    ),
+    (
+        "match value",
+        lambda execution: execution["reviewers"][0].update(
+            {"match": {"phase": "review", "angle": 5}}
+        ),
+    ),
+    (
+        "candidate provider",
+        lambda execution: execution["reviewers"][0].update(
+            {"candidates": [{"provider": "claud"}]}
+        ),
+    ),
+    (
+        "candidate model",
+        lambda execution: execution["reviewers"][0].update(
+            {"candidates": [{"provider": "claude", "model": "-opus"}]}
+        ),
+    ),
+    (
+        "candidate effort",
+        lambda execution: execution["reviewers"][0].update(
+            {"candidates": [{"provider": "claude", "effort": "maximum"}]}
+        ),
+    ),
+)
+
+
+@pytest.mark.parametrize("profile_id", _profiles_declaring_execution())
+@pytest.mark.parametrize("label,typo", _EXECUTION_TYPOS, ids=[label for label, _ in _EXECUTION_TYPOS])
+def test_the_shipped_execution_sweep_rejects_a_typo(profile_id, label, typo):
+    """불변: 위 sweep은 실제로 문다.
+
+    반증: 통과만 관측하면 "검사가 걸려 있다"와 "검사가 아무것도 보지 않는다"가 같은
+    모양이다. 배포 선언의 사본에 오타를 하나씩 넣어 그 sweep이 그때는 터지는지 본다.
+
+    `match value`가 특히 이 sweep의 사각지대였다: `rule_matches`가 비교하다 말고
+    검사하던 동안, phase가 어긋난 rule의 `angle` 오타는 그 phase에 들어서기 전까지
+    한 번도 읽히지 않았다. 검사는 `validated_match`가 비교와 무관하게 한다.
+
+    `execution`을 선언한 배포 profile이 하나도 없으면 이 검사는 skip이고, 그때는
+    위 sweep도 검사할 대상이 없다.
+    """
+    execution = copy.deepcopy(_profile_payload(profile_id)["execution"])
+    typo(execution)
+
+    with pytest.raises(ReviewerLaunchError):
+        validate_reviewer_launch_declaration(execution)
+
 
 
 def _write_override(root: Path, profile_id: str, body: str) -> Path:
@@ -896,3 +992,30 @@ def test_external_routing_is_identical_under_either_profile_order():
         seen.add(tuple(sorted((match.name, match.domain, match.tier) for match in matches)))
 
     assert len(seen) == 1, f"profile 순서가 라우팅을 바꾼다: {seen}"
+
+
+def test_profile_loading_does_not_import_the_environment_probes():
+    """profile 로딩은 선언을 읽는 일이다. PATH probe를 끌고 오면 안 된다.
+
+    `cli_detect`는 `shutil.which`와 `subprocess`로 설치된 CLI를 뒤지는 환경 탐지고,
+    `multi_review`는 reviewer 프로세스를 띄우는 자리다. reviewer 어휘 상수 하나를
+    빌리려고 그것들을 import하면, gate 나열이나 skill 해석처럼 CLI와 무관한 경로가
+    프로세스를 띄우는 모듈을 통째로 적재한다.
+
+    같은 프로세스는 이미 두 모듈을 import했을 수 있으므로 새 인터프리터에서 본다.
+    """
+    probe = (
+        "import sys, agent_flow.core.profiles;"
+        "print('agent_flow.cli_detect' in sys.modules,"
+        " 'agent_flow.multi_review' in sys.modules)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(KIT_ROOT),
+        env={"PYTHONPATH": str(KIT_ROOT / "src"), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "False False", result.stderr

@@ -34,7 +34,7 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
 - Completion Gate markers must use concrete values that the marker parser accepts. Do not leave angle-bracket placeholders; use `n/a` only when the marker is genuinely not relevant.
 - Record the generic profile-driven markers in the phase artifact's `## Completion Gate`: `profile-skill-selection: applied`, `active-profiles: <profile list>`, `changed-file-skill-resolution: applied`, `required-profile-skills: checked`, and `missing-required-profile-skills: none|<list>`.
 - If the prompt surfaces project-local code/review skill docs, read only those applicable docs, record `project-local-skills: checked`, `project-local-skills-used: <skill list>`, and `project-local-skill-docs: applied`. Design/Figma, hook, branch, PR, merge, and cleanup local skills do not satisfy or trigger this code/review marker. If no project-local code/review skill applies, record `project-local-skills: n/a` and `project-local-skills-used: n/a`.
-- If a required language/framework skill is not installed at the active host path, report `missing local <group>: <skill>` with the configured source URL and do not proceed until the user installs it or explicitly overrides.
+- Missing-skill handling lives here only; other docs point at this bullet instead of restating it. If a required local skill is not installed at the active host path, stop work, report `missing local <group>: <skill>` with the configured source URL, and do not proceed until the user installs it or explicitly overrides.
 
 ## During Implementation
 

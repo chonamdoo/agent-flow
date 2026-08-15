@@ -1,9 +1,6 @@
 # Project Instructions
 
-- 응답은 한국어로 작성한다.
-- 코드/명령/식별자는 원문 영어를 유지한다.
 - 요청하지 않은 리팩터, 문서화는 추가하지 않는다.
-- 코드 생성·수정 작업은 `code-generation-discipline` 기준을 적용한다. 언어별 guide 선택과 주석 규칙은 `code-generation-discipline`의 Before Starting 체크리스트를 따른다.
 
 ## Architecture
 
@@ -63,9 +60,7 @@ Workflow Contract와 Context Economy는 아래 agent-flow 블록이 canonical so
 
 ### Context Economy
 
-- User-facing 답변은 짧은 한글, 코드·명령·식별자는 영어 그대로. 긴 로그와 전체 파일 붙여넣기 금지. 필요할 때만 current phase, action, `next_command`, blocker를 요약한다.
-- 코드 생성·수정·리뷰에는 `code-generation-discipline`과 `comment-authoring-discipline`을 항상 적용한다. 그 밖의 skill은 변경 파일에 걸리는 것만 읽고, 이번 변경에 required인 것은 phase 프롬프트가 매 run 나열한다.
-- 인덱스에 없는 skill은 설치돼 있지 않다. 런타임에 설치를 묻지 말고 `agent-flow skills sync`에 맡긴다. 필요한 skill이 이 host에 없으면 `missing local <group>: <skill>`와 source URL을 알린다.
+- 사용자 답변은 짧은 한국어로 쓰고, code·command·path·identifier와 exact workflow marker는 원문을 유지한다.
 <!-- agent-flow:skills:start -->
 ```text
 [agent-flow skill index]|root: .agent-flow/skills
@@ -74,4 +69,6 @@ Workflow Contract와 Context Economy는 아래 agent-flow 블록이 canonical so
 |on-demand:{agent-flow,agent-flow-concise-output,architecture-reviewer,clean-architecture,clean-architecture-core,code-review,codebase-design,comment-checker,ddd-architecture,domain-modeling,full-feature-workflow,grill-with-docs,grilling,plan-reviewer,product-brief,push-watch,python-api-clean-architecture,python-development-guide,resolving-merge-conflicts,tdd,to-prd}
 ```
 <!-- agent-flow:skills:end -->
+<!-- agent-flow:docs:start -->
+<!-- agent-flow:docs:end -->
 <!-- agent-flow:end -->

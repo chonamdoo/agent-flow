@@ -1396,7 +1396,7 @@ def test_lifecycle_exemption_stays_narrow():
     면제된 경로는 R1 리터럴 검사·R2 파괴 목록·leader tripwire를 한꺼번에 건너뛴다.
     그래서 이 목록에 이름을 더하는 것은 그 셋을 그 명령에 대해 끄는 것과 같다.
     실행으로 확인된 결과: `eval --judge-command`는 임의 argv를 실행하고,
-    `worktree remove --name`은 형제 checkout을 지우고, `record-stage --run-dir`은
+    `worktree remove --name`은 형제 checkout을 지우고, `handoff --run-dir`은
     남의 런 산출물을 덮어쓴다.
     """
     import agent_flow.core.host_write_boundary as boundary
@@ -1415,7 +1415,7 @@ def test_agent_flow_calls_outside_the_exemption_still_face_the_boundary(tmp_path
     for command in (
         f"agent-flow eval --root {root} --judge-command touch {root}/pwned",
         f"agent-flow worktree remove --root {root} --name {statuses[1].name}",
-        f"agent-flow record-stage --run-dir {runs[1]} --stage implement",
+        f"agent-flow handoff --run-dir {runs[1]} --from-stage implement --to-stage review",
     ):
         assert host_write_boundary_violation(
             _command_payload(command, cwd=first.path), root

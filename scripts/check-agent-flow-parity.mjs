@@ -443,7 +443,7 @@ assertRootContextFilesMatchAcrossLanguages();
 
 function assertRootContextFilesMatchAcrossLanguages() {
   const js = read("lib/installer-shared.mjs").match(/ROOT_CONTEXT_FILES = Object\.freeze\(\[([^\]]*)\]\)/);
-  const py = read("src/agent_flow/cli.py").match(/^ROOT_CONTEXT_FILES = \(([^)]*)\)/m);
+  const py = read("src/agent_flow/core/worktrees.py").match(/^ROOT_CONTEXT_FILES = \(([^)]*)\)/m);
   if (!js || !py) {
     failures.push("ROOT_CONTEXT_FILES is not declared where parity can compare it");
     return;
@@ -676,6 +676,52 @@ assertContains("bootstrap/AGENTS.md.template", "<!-- agent-flow:docs:end -->");
 // 템플릿 자신은 import를 담지 않는다. 담으면 `AGENTS.md`가 자기 자신을 import한다.
 assertNotContains("bootstrap/AGENTS.md.template", "@AGENTS.md");
 
+// 이 저장소 자신의 루트 `AGENTS.md`도 템플릿에서 파생된 사본이다. 아래 install 검사는
+// 임시 tempRoot만 보므로, 여기 커밋된 파일이 손으로 갈라져도 지금까지 아무도 말해 주지
+// 않았다. generated index **본문**은 install이 채우므로 도려내고 마커 줄은 남긴다 —
+// 마커 쌍이 없으면 `upsertManagedSubBlock`이 조용히 건너뛰어 그 인덱스가 영구히 안 생긴다.
+assertRepoRootAgentsMatchesTemplate();
+
+function assertRepoRootAgentsMatchesTemplate() {
+  const template = readIfExists("bootstrap/AGENTS.md.template");
+  const root = readIfExists("AGENTS.md");
+  if (template === null || root === null) return;
+  const expected = managedBlockWithoutIndexBodies(template, "bootstrap/AGENTS.md.template");
+  const actual = managedBlockWithoutIndexBodies(root, "AGENTS.md");
+  if (expected === null || actual === null || expected === actual) return;
+  const expectedLines = expected.split("\n");
+  const actualLines = actual.split("\n");
+  const firstDiff = expectedLines.findIndex((line, index) => line !== actualLines[index]);
+  const at = firstDiff === -1 ? expectedLines.length : firstDiff;
+  failures.push(
+    `AGENTS.md managed block diverged from bootstrap/AGENTS.md.template at block line ${at + 1}\n`
+      + `  bootstrap/AGENTS.md.template: ${expectedLines[at] ?? "<no line>"}\n`
+      + `  AGENTS.md: ${actualLines[at] ?? "<no line>"}`,
+  );
+}
+
+function managedBlockWithoutIndexBodies(text, label) {
+  const start = text.indexOf("<!-- agent-flow:start -->");
+  const end = text.indexOf("<!-- agent-flow:end -->");
+  if (start === -1 || end === -1) {
+    failures.push(`${label} is missing the agent-flow managed block markers`);
+    return null;
+  }
+  const kept = [];
+  let insideIndexBody = false;
+  for (const line of text.slice(start, end).split(/\r?\n/)) {
+    const marker = /^<!--\s*agent-flow:[a-z]+:(start|end)\s*-->$/.exec(line.trim());
+    if (marker) {
+      insideIndexBody = marker[1] === "start";
+      kept.push(line.trim());
+      continue;
+    }
+    if (insideIndexBody) continue;
+    kept.push(line);
+  }
+  return kept.join("\n").trimEnd();
+}
+
 // 두 installer 모두 그 한 벌을 읽는다. 예전에 `agent-flow-kit.mjs`는 같은 텍스트를
 // 리터럴로 또 들고 있었고, 신규 install은 템플릿을 쓰고 이후 kit install은 리터럴을 써서
 // 같은 프로젝트의 AGENTS.md가 어느 쪽이 마지막으로 돌았는지에 따라 달라졌다. parity가
@@ -712,7 +758,7 @@ for (const rel of [
   assertContains(rel, "agent-flow status");
   assertContains(rel, "install은 프로젝트당 1회만");
   assertContains(rel, "next_command");
-  assertContains(rel, "짧은 한글");
+  assertContains(rel, "짧은 한국어");
   assertContains(rel, "설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수");
   assertContains(rel, "OMP는 host/controller로만 쓰고 reviewer provider로는 쓰지 않는다");
   assertNotContains(rel, "예: Claude/Gemini");

@@ -23,6 +23,7 @@ from pathlib import Path
 from agent_flow.adapters.base import Adapter
 from agent_flow.core.artifacts import run_gate_nonce
 from agent_flow.core.design_ledger import capture_design_ledger
+from agent_flow.core.worktree_isolation import write_run_subpath_text
 
 
 # stub-success가 만든 artifact임을 나타내는 표식. runner는 이 표식이 있는
@@ -47,9 +48,10 @@ class GenericAdapter(Adapter):
         if mode == "stub-success":
             artifact = self.artifact_path(phase, run_dir)
             if not artifact.exists():
-                artifact.parent.mkdir(parents=True, exist_ok=True)
                 if getattr(phase, "multi_review", False):
-                    artifact.write_text(
+                    write_run_subpath_text(
+                        run_dir,
+                        artifact,
                         f"# {phase.id}\n\n"
                         f"<!-- {STUB_SENTINEL} -->\n\n"
                         "## Reviewer 1\n"
@@ -60,7 +62,6 @@ class GenericAdapter(Adapter):
                         "verdict: approve\n\n"
                         "## Overall\n"
                         "verdict: approve\n",
-                        encoding="utf-8",
                     )
                     return True
                 if phase.id == "gates":
@@ -82,16 +83,17 @@ class GenericAdapter(Adapter):
                     nonce = run_gate_nonce(run_dir)
                     if nonce:
                         payload["produced_by"] = {"tool": "agent-flow gates", "nonce": nonce}
-                    artifact.write_text(
-                        f"{json.dumps(payload, sort_keys=True)}\n", encoding="utf-8"
+                    write_run_subpath_text(
+                        run_dir, artifact, f"{json.dumps(payload, sort_keys=True)}\n"
                     )
                     return True
                 if phase.id == "pr-watch":
-                    artifact.write_text(
+                    write_run_subpath_text(
+                        run_dir,
+                        artifact,
                         f"# {phase.id}\n\n"
                         f"<!-- {STUB_SENTINEL} -->\n\n"
                         "status: green\n",
-                        encoding="utf-8",
                     )
                     return True
                 if phase.id in {"design", "prd"}:
@@ -115,15 +117,17 @@ class GenericAdapter(Adapter):
                         f"spec-items: {spec_marker}\n"
                         "design-values: none\n"
                     )
-                    artifact.write_text(content, encoding="utf-8")
+                    write_run_subpath_text(run_dir, artifact, content)
                     # stub-success는 host 없는 state-machine smoke 전용이다.
                     # runner보다 먼저 source ledger를 capture한다.
                     capture_design_ledger(run_dir, phase.id, content)
                     return True
-                artifact.write_text(
+                write_run_subpath_text(
+                    run_dir,
+                    artifact,
                     f"# {phase.id}\n\n"
                     f"<!-- {STUB_SENTINEL} -->\n\n"
-                    f"_stub artifact written by GenericAdapter (stub mode)._\n"
+                    f"_stub artifact written by GenericAdapter (stub mode)._\n",
                 )
             return True
         if getattr(phase, "multi_review", False):
@@ -146,13 +150,13 @@ class GenericAdapter(Adapter):
         artifact = self.artifact_path(phase, run_dir)
         if artifact.exists():
             return
-        artifact.parent.mkdir(parents=True, exist_ok=True)
-        artifact.write_text(
+        write_run_subpath_text(
+            run_dir,
+            artifact,
             f"# {phase.id}\n\n"
             "status: blocked\n"
             f"reason: {reason}\n\n"
             "_stub artifact written by GenericAdapter (stub mode)._\n",
-            encoding="utf-8",
         )
 
 

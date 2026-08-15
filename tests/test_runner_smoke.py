@@ -850,10 +850,10 @@ def test_hosted_phase_baseline_with_an_older_record_format_is_re_captured(
     assert started.run_dir is not None
     run_dir = started.run_dir
 
-    # 이 브랜치의 이전 커밋이 남긴 상태: 레코드 축 버전이 2다.
+    # 이 브랜치가 아직 모르는 레코드 축 버전이 디스크에 있다.
     meta = read_meta(run_dir)
     baseline = dict(meta["host_phase_leader_baseline"])
-    baseline["version"] = 2
+    baseline["version"] = 3
     meta["host_phase_leader_baseline"] = baseline
     write_meta(run_dir, meta)
 
@@ -871,7 +871,7 @@ def test_hosted_phase_baseline_with_an_older_record_format_is_re_captured(
 
     out = capsys.readouterr().out
     assert "[migrate]" in out
-    assert "record format v2" in out
+    assert "record format v3" in out
     assert read_meta(run_dir).get("host_phase_leader_baseline") is None
 
 
@@ -2132,8 +2132,12 @@ def test_start_attaches_to_registered_worktree_and_keys_state_by_its_name(tmp_pa
     assert result.returncode == 0, result.stderr
     assert not (_managed(project) / "feat-api").exists()
     runtime_root = _worktree_runtime_root(project, "feat-api-work")
-    run_dir = next((runtime_root / ".agent-flow" / "runs" / "development").iterdir())
-    assert (run_dir / "manifest.json").exists()
+    run_dir = next(
+        path
+        for path in (runtime_root / ".agent-flow" / "runs").iterdir()
+        if path.is_dir()
+    )
+    assert (run_dir / "meta.json").exists()
 
 
 def test_start_adopts_registered_worktree_without_agent_flow_metadata(
@@ -2159,8 +2163,12 @@ def test_start_adopts_registered_worktree_without_agent_flow_metadata(
     assert (project / ownership["path"]).resolve() == checkout.resolve()
     assert ownership["branch"] == "feat/api"
     assert ownership["branch_created_by_agent_flow"] is False
-    run_dir = next((runtime_root / ".agent-flow" / "runs" / "development").iterdir())
-    assert (run_dir / "manifest.json").exists()
+    run_dir = next(
+        path
+        for path in (runtime_root / ".agent-flow" / "runs").iterdir()
+        if path.is_dir()
+    )
+    assert (run_dir / "meta.json").exists()
 
 
 def test_start_worktree_writes_state_outside_worktree(tmp_path: Path):
@@ -2172,8 +2180,12 @@ def test_start_worktree_writes_state_outside_worktree(tmp_path: Path):
     assert r_start.returncode == 0, r_start.stderr
     worktree = _managed(project) / "feat-task"
     runtime_root = _worktree_runtime_root(project, "feat-task")
-    run_dir = next((runtime_root / ".agent-flow" / "runs" / "development").iterdir())
-    assert (run_dir / "manifest.json").exists()
+    run_dir = next(
+        path
+        for path in (runtime_root / ".agent-flow" / "runs").iterdir()
+        if path.is_dir()
+    )
+    assert (run_dir / "meta.json").exists()
     assert not (worktree / ".agent-flow").exists()
     assert not (project / ".agent-flow" / "runs" / "default").exists()
 
@@ -2343,9 +2355,11 @@ def test_non_utf8_meta_does_not_crash(tmp_path: Path, capsys):
 
 
 def test_invalid_workflow_yaml_clear_error(tmp_path: Path):
-    """Direct unit-test of _load_workflow on malformed / invalid YAMLs."""
+    """Direct unit-test of the single workflow loader on malformed YAMLs."""
     sys.path.insert(0, str(KIT_ROOT / "src"))
-    from agent_flow.runner import _load_workflow
+    from agent_flow.core.phase_workflow import (
+        load_phase_workflow_definition as _load_workflow,
+    )
 
     # Empty file
     empty = tmp_path / "kit_empty"
@@ -2401,7 +2415,7 @@ def test_route_block_returns_without_loop(tmp_path: Path):
         )
     ]
 
-    assert runner._next_index(0, runner.phases[0]) == (0, True)
+    assert runner._next_index(0, runner.phases[0])[:2] == (0, True)
 
 
 def test_default_final_review_request_changes_routes_to_fix_loop(tmp_path: Path):
@@ -2424,10 +2438,10 @@ def test_default_final_review_request_changes_routes_to_fix_loop(tmp_path: Path)
         Phase(id="commit", description=""),
     ]
 
-    assert runner._next_index(0, runner.phases[0]) == (1, False)
+    assert runner._next_index(0, runner.phases[0])[:2] == (1, False)
 
     (run_dir / "final-review.md").write_text("verdict: request-changes\n", encoding="utf-8")
-    assert runner._next_index(0, runner.phases[0]) == (0, True)
+    assert runner._next_index(0, runner.phases[0])[:2] == (0, True)
 
 
 def test_review_fail_marker_overrides_approve_verdict(tmp_path: Path):
@@ -2453,7 +2467,7 @@ def test_review_fail_marker_overrides_approve_verdict(tmp_path: Path):
         Phase(id="commit", description=""),
     ]
 
-    assert runner._next_index(0, runner.phases[0]) == (1, False)
+    assert runner._next_index(0, runner.phases[0])[:2] == (1, False)
 
 
 def test_missing_required_profile_skills_marker_overrides_approve_verdict(tmp_path: Path):
@@ -2479,7 +2493,7 @@ def test_missing_required_profile_skills_marker_overrides_approve_verdict(tmp_pa
         Phase(id="commit", description=""),
     ]
 
-    assert runner._next_index(0, runner.phases[0]) == (1, False)
+    assert runner._next_index(0, runner.phases[0])[:2] == (1, False)
 
 
 def test_route_key_requires_exact_status_or_verdict_lines():
@@ -2532,7 +2546,7 @@ def test_route_without_target_blocks_instead_of_falling_through(tmp_path: Path):
     runner.run_dir = run_dir
     runner.phases = [phase, Phase(id="fix-loop", description=""), Phase(id="commit", description="")]
 
-    assert runner._next_index(0, phase) == (0, True)
+    assert runner._next_index(0, phase)[:2] == (0, True)
 
 
 def test_default_final_review_approve_requires_two_reviewers(tmp_path: Path):
@@ -2555,13 +2569,13 @@ def test_default_final_review_approve_requires_two_reviewers(tmp_path: Path):
         "## Reviewer 1\nreviewer-1 verdict: approve\n\nverdict: approve\n",
         encoding="utf-8",
     )
-    assert runner._next_index(0, phase) == (0, True)
+    assert runner._next_index(0, phase)[:2] == (0, True)
 
     (run_dir / "final-review.md").write_text(
         "## Reviewer 1\nverdict: approve\n\n## Reviewer 2\nverdict: approve\n\nverdict: approve\n",
         encoding="utf-8",
     )
-    assert runner._next_index(0, phase) == (0, True)
+    assert runner._next_index(0, phase)[:2] == (0, True)
 
 
 def test_required_markers_block_incomplete_artifact(tmp_path: Path):
@@ -2914,12 +2928,15 @@ def test_backward_route_invalidates_target_artifact(tmp_path: Path):
 
     runner = Runner.__new__(Runner)
     runner.run_dir = run_dir
+    runner.config_root = tmp_path
     runner.phases = [
         Phase(id="pr-watch", description="", routes={"comments": "pr-comment-fix"}, artifact="artifacts/pr-watch.md"),
         Phase(id="pr-comment-fix", description="", routes={"default": "pr-watch"}, artifact="artifacts/pr-comment-fix.md"),
     ]
 
-    assert runner._next_index(1, runner.phases[1]) == (0, False)
+    transition = runner._plan_transition(1, runner.phases[1])
+    assert (transition.to_index, transition.blocked) == (0, False)
+    runner._commit_transition(transition)
     assert not watch.exists()
     assert not (run_dir / "artifacts" / "pr-comment-fix.md").exists()
 
@@ -2944,9 +2961,12 @@ def test_backward_route_invalidates_intermediate_fresh_artifacts(tmp_path: Path)
 
     runner = Runner.__new__(Runner)
     runner.run_dir = run_dir
+    runner.config_root = tmp_path
     runner.phases = phases
 
-    assert runner._next_index(3, phases[3]) == (0, False)
+    transition = runner._plan_transition(3, phases[3])
+    assert (transition.to_index, transition.blocked) == (0, False)
+    runner._commit_transition(transition)
     for phase in phases:
         assert not (run_dir / f"{phase.id}.md").exists()
 
@@ -3004,7 +3024,7 @@ def test_ddd_architecture_review_blocks_incomplete_design_artifact(tmp_path: Pat
     assert "verdict: blocked" in text
     assert "`aggregate`" in text
     assert "`domain flow`" in text
-    assert runner._next_index(0, phase) == (0, True)
+    assert runner._next_index(0, phase)[:2] == (0, True)
 
 
 def test_ddd_architecture_review_rechecks_stale_blocked_artifact(tmp_path: Path):
@@ -3758,30 +3778,6 @@ def test_packaged_profile_review_prompts_exist():
             assert (KIT_ROOT / prompt_path).is_file(), f"missing prompt: {profile_path.name} {prompt_path}"
 
 
-def test_stage_result_updates_run_report(tmp_path: Path):
-    sys.path.insert(0, str(KIT_ROOT / "src"))
-    from agent_flow.core.artifacts import write_stage_result
-
-    run_dir = tmp_path / "run"
-    write_stage_result(
-        run_dir=run_dir,
-        stage_id="review",
-        status="completed",
-        evidence_type="verified",
-        confidence="high",
-        content="verdict: approve\n",
-    )
-
-    report = run_dir / "RUN_REPORT.md"
-    assert report.is_file()
-    text = report.read_text(encoding="utf-8")
-    assert "`review`" in text
-    assert "status=completed" in text
-    assert "verdict=approve" in text
-    assert "evidence=verified" in text
-    assert "confidence=high" in text
-
-
 def test_report_command_regenerates_latest_run_report(tmp_path: Path):
     project = tmp_path / "report_project"
     project.mkdir()
@@ -4040,7 +4036,7 @@ def test_blocked_route_keeps_phase_entered_at(tmp_path: Path):
     runner.run_dir = run_dir
     runner.phases = [Phase(id="pr-watch", description="", routes={"pending": "block"})]
 
-    phase_index, blocked = runner._next_index(0, runner.phases[0])
+    phase_index, blocked = runner._next_index(0, runner.phases[0])[:2]
     assert blocked is True
 
     meta = {"current_phase": "pr-watch", "phase_entered_at": "2026-01-01T00:00:00+00:00"}

@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+import shutil
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from typing import Any
 
 import yaml
 
+from agent_flow.core.atomic_io import atomic_write_text
 from agent_flow.core.design_value_check import missing_spec_item_evidence
 from agent_flow.core.local_skills import (
     changed_files,
@@ -238,37 +240,62 @@ def create_run(
 
             run_path = runs_dir / run_id
             run_path.mkdir()
-            meta = {
-                "run_id": run_id,
-                "workflow": workflow,
-                "task": task,
-                # design-spec.md의 task digest와 대조되는 값. 런 도중 task를 바꿔치기하면
-                # 원장이 가리키는 사용자 지시와 어긋나므로 gate가 막는다.
-                "task_digest": hashlib.sha256(task.strip().encode("utf-8")).hexdigest(),
-                "started_at": now.isoformat(),
-                "current_phase": None,
-                # gate-results.json의 출처 표식. `agent-flow gates`만 이 값을 찍는다.
-                # 손으로 쓴 JSON은 값을 모르므로 green으로 라우팅되지 않는다.
-                # 파일에 있는 값이라 복사는 가능하다 — 적대적 위조가 아니라
-                # "실수로 손으로 쓰는 것"을 막는 층이다.
-                "gate_nonce": secrets.token_hex(16),
-            }
-            if architecture:
-                meta["architecture"] = architecture
-            if checkout_identity is not None:
-                meta["checkout_identity"] = checkout_identity
-            if checkout_registration_identity is not None:
-                meta["checkout_registration_identity"] = (
-                    checkout_registration_identity
-                )
-            write_meta(run_path, meta)
-            (run_path / ACTIVE_MARKER).write_text("")
+            try:
+                meta = {
+                    "run_id": run_id,
+                    "workflow": workflow,
+                    "task": task,
+                    # design-spec.md의 task digest와 대조되는 값. 런 도중 task를
+                    # 바꿔치기하면 원장이 가리키는 사용자 지시와 어긋나므로 gate가 막는다.
+                    "task_digest": hashlib.sha256(
+                        task.strip().encode("utf-8")
+                    ).hexdigest(),
+                    "started_at": now.isoformat(),
+                    "current_phase": None,
+                    # gate-results.json의 출처 표식. `agent-flow gates`만 이 값을 찍는다.
+                    # 손으로 쓴 JSON은 값을 모르므로 green으로 라우팅되지 않는다.
+                    # 파일에 있는 값이라 복사는 가능하다 — 적대적 위조가 아니라
+                    # "실수로 손으로 쓰는 것"을 막는 층이다.
+                    "gate_nonce": secrets.token_hex(16),
+                }
+                digest = _workflow_digest(workflow)
+                if digest is not None:
+                    meta["workflow_digest"] = digest
+                if architecture:
+                    meta["architecture"] = architecture
+                if checkout_identity is not None:
+                    meta["checkout_identity"] = checkout_identity
+                if checkout_registration_identity is not None:
+                    meta["checkout_registration_identity"] = (
+                        checkout_registration_identity
+                    )
+                write_meta(run_path, meta)
+                atomic_write_text(run_path / ACTIVE_MARKER, "")
+            except Exception:
+                # meta도 active 표식도 없는 디렉터리는 run이 아니다. 남겨 두면
+                # 다음 시도가 `run already exists`로 막히고, 그 자리를 치울 명령이
+                # 없다.
+                shutil.rmtree(run_path, ignore_errors=True)
+                raise
             return run_path
     except FileLeaseUnavailable as exc:
         raise ActiveRunExists(
             "another agent-flow run is starting or its lifecycle lock is unsafe; "
             "retry after the current process exits"
         ) from exc
+
+
+def _workflow_digest(workflow: str) -> str | None:
+    """이 run이 실행하기로 한 workflow 원문의 sha256. 읽을 수 없으면 ``None``.
+
+    읽지 못한 경우를 실패로 올리지 않는다 — run 생성은 workflow 해석보다 앞선
+    단계이고, 여기서 막으면 정의를 고치려는 사용자가 run조차 열 수 없다. 값이
+    비면 cursor 검증이 drift 대신 "기록 없음"으로 취급하고 그때 채워 넣는다.
+    """
+    try:
+        return load_phase_workflow_definition(find_kit_root(), workflow).digest
+    except (OSError, RuntimeError, ValueError, yaml.YAMLError):
+        return None
 
 
 def _validate_checkout_identity(value: str) -> None:

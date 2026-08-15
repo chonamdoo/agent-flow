@@ -18,8 +18,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from agent_flow.core.commands import run_safe_command
+from agent_flow.core.atomic_io import atomic_write_text
 from agent_flow.core.security import validate_safe_name
+from agent_flow.core.worktree_isolation import git_safe
 
 _READY_MARKER = ".agent-flow-sync-ok"
 
@@ -150,15 +151,20 @@ def _fetch_source(
     if checkout.exists():
         shutil.rmtree(checkout, ignore_errors=True)
     checkout.parent.mkdir(parents=True, exist_ok=True)
-    clone = run_safe_command(
-        ["git", "clone", "--quiet", "--filter=blob:none", source.url, str(checkout)],
+    # `--`가 없으면 profile YAML이 준 url이 `-`로 시작하는 순간 git 옵션으로 읽힌다.
+    clone = git_safe(
+        "clone",
+        "--quiet",
+        "--filter=blob:none",
+        "--",
+        source.url,
+        str(checkout),
+        cwd=checkout.parent,
         timeout_s=180,
     )
     if not clone.ok:
         return SyncResult(source_id=source.id, status="failed", detail=clone.stderr.strip())
-    checkout_ref = run_safe_command(
-        ["git", "-C", str(checkout), "checkout", "--quiet", source.ref], timeout_s=60
-    )
+    checkout_ref = git_safe("checkout", "--quiet", source.ref, cwd=checkout, timeout_s=60)
     if not checkout_ref.ok:
         shutil.rmtree(checkout, ignore_errors=True)
         return SyncResult(
@@ -166,11 +172,11 @@ def _fetch_source(
         )
     # 어느 커밋을 받았는지 기록한다. ref만 적으면 `main`이 움직여도 캐시가
     # 무엇에 굳었는지 알 길이 없어서 stale을 눈으로도 확인하지 못한다.
-    resolved = run_safe_command(
-        ["git", "-C", str(checkout), "rev-parse", "HEAD"], timeout_s=30
-    )
+    resolved = git_safe("rev-parse", "HEAD", cwd=checkout, timeout_s=30, optional_locks=False)
     sha = resolved.stdout.strip() if resolved.ok else ""
-    (checkout / _READY_MARKER).write_text(f"{source.ref} {sha}\n".rstrip() + "\n", encoding="utf-8")
+    # 캐시 적중 판정은 이 표식의 **존재**만 본다. 쓰다 죽으면 그 캐시는 영원히
+    # "완성"으로 굳고 `cached_source_sha`는 빈 문자열을 돌려준다.
+    atomic_write_text(checkout / _READY_MARKER, f"{source.ref} {sha}\n".rstrip() + "\n")
     return SyncResult(source_id=source.id, status="fetched", detail=f"{checkout} {sha}".rstrip())
 
 

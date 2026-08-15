@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_flow.core.atomic_io import atomic_write_text
 from agent_flow.core.gates import GateResult, gate_results_timed_out, relativize_local_paths
 from agent_flow.core.report import write_run_report
-from agent_flow.core.worktree_isolation import AGENT_FLOW_STATE_DIRS
+from agent_flow.core.security import validate_safe_name
+from agent_flow.core.worktree_isolation import AGENT_FLOW_STATE_DIRS, write_run_subpath_text
 
 
 def init_project(root: Path) -> None:
@@ -14,14 +15,6 @@ def init_project(root: Path) -> None:
     # 명령이 leader 오염으로 오탐된다.
     for name in AGENT_FLOW_STATE_DIRS:
         (root / ".agent-flow" / name).mkdir(parents=True, exist_ok=True)
-
-
-def write_prompt(*, root: Path, run_dir: Path, stage_id: str, content: str) -> Path:
-    init_project(root)
-    path = run_dir / "prompts" / f"{stage_id}.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-    return path
 
 
 def write_gate_results(
@@ -62,15 +55,10 @@ def write_gate_results(
             "gate_phase": phase,
         }
     path = run_dir / "artifacts" / "gate-results.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        f"{json.dumps(payload, indent=2, sort_keys=True)}\n",
-        encoding="utf-8",
-    )
+    write_run_subpath_text(run_dir, path, f"{json.dumps(payload, indent=2, sort_keys=True)}\n")
     legacy_path = run_dir / "gate-results.json"
-    legacy_path.write_text(
-        f"{json.dumps(serialized_results, indent=2, sort_keys=True)}\n",
-        encoding="utf-8",
+    write_run_subpath_text(
+        run_dir, legacy_path, f"{json.dumps(serialized_results, indent=2, sort_keys=True)}\n"
     )
     write_run_report(run_dir)
     return path
@@ -105,37 +93,6 @@ def _gate_result_payload(result: GateResult, base: Path) -> dict[str, object]:
     }
 
 
-def write_stage_result(
-    *,
-    run_dir: Path,
-    stage_id: str,
-    content: str,
-    status: str = "completed",
-    evidence_type: str = "observed",
-    confidence: str = "unknown",
-) -> Path:
-    path = run_dir / "artifacts" / f"{stage_id}.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(
-            [
-                f"# Stage Result: {stage_id}",
-                "",
-                f"- Status: {status}",
-                f"- Evidence Type: {evidence_type}",
-                f"- Confidence: {confidence}",
-                f"- Recorded At: {_now()}",
-                "",
-                content.rstrip(),
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    write_run_report(run_dir)
-    return path
-
-
 def write_handoff(
     *,
     root: Path,
@@ -149,6 +106,11 @@ def write_handoff(
     remaining: str,
 ) -> Path:
     init_project(root)
+    # 이 이름은 run 안팎 두 경로의 마지막 컴포넌트가 된다. CLI가 준 값을 그대로
+    # 쓰면 `--from-stage ../../../../tmp/x`가 `mkdir -p`를 타고 run 밖에 파일을
+    # 만든다. 경로 컴포넌트가 될 값은 여기서 이름으로 증명하고 들어간다.
+    from_stage = validate_safe_name(from_stage, "handoff stage")
+    to_stage = validate_safe_name(to_stage, "handoff stage")
     filename = f"{from_stage}-to-{to_stage}.md"
     content = "\n".join(
         [
@@ -163,13 +125,12 @@ def write_handoff(
         ]
     )
     run_path = run_dir / "handoffs" / filename
-    run_path.parent.mkdir(parents=True, exist_ok=True)
-    run_path.write_text(content, encoding="utf-8")
+    write_run_subpath_text(run_dir, run_path, content)
     write_run_report(run_dir)
 
     project_path = root / ".agent-flow" / "handoffs" / filename
     project_path.parent.mkdir(parents=True, exist_ok=True)
-    project_path.write_text(content, encoding="utf-8")
+    atomic_write_text(project_path, content)
     return run_path
 
 
@@ -183,7 +144,6 @@ def write_recovery(
     manual_action: str,
 ) -> Path:
     path = run_dir / "recovery.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         f"# Recovery: {title}",
         "",
@@ -196,13 +156,9 @@ def write_recovery(
     ]
     lines.extend(f"- {artifact}" for artifact in artifacts) if artifacts else lines.append("- None")
     lines.append("")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    write_run_subpath_text(run_dir, path, "\n".join(lines))
     write_run_report(run_dir)
     return path
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def run_gate_nonce(run_dir: Path) -> str:

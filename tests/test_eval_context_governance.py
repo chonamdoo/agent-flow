@@ -502,4 +502,4 @@ def test_multi_review_requires_subagent_source_for_approval(tmp_path: Path) -> N
         encoding="utf-8",
     )
 
-    assert runner._next_index(0, phase) == (0, True)
+    assert runner._next_index(0, phase)[:2] == (0, True)

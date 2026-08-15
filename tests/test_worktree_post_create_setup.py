@@ -183,13 +183,13 @@ def test_multi_profile_union_still_declares_its_copies():
     `review_angles`/`gates`/`skills`/`architecture`만 합친다. 최상위 `branching`만
     보면 android+react-native 프로젝트에서 `local.properties`가 영영 복사되지 않는다.
     """
-    from agent_flow.cli import ROOT_CONTEXT_FILES, _declared_worktree_copies
+    from agent_flow.core.worktrees import ROOT_CONTEXT_FILES, declared_worktree_copies
 
     android = {"branching": {"worktree_setup": {"copy": ["local.properties"]}}}
     react_native = {"branching": {"worktree_setup": {"copy": [".env"]}}}
     union = {"id": "multi-profile", "profiles": [android, react_native]}
 
-    assert _declared_worktree_copies(union) == [
+    assert declared_worktree_copies(union) == [
         *ROOT_CONTEXT_FILES,
         "local.properties",
         ".env",
@@ -198,19 +198,57 @@ def test_multi_profile_union_still_declares_its_copies():
 
 def test_single_profile_declaration_still_works():
     """불변: 합성본을 지원하느라 단일 profile 경로를 잃으면 안 된다."""
-    from agent_flow.cli import ROOT_CONTEXT_FILES, _declared_worktree_copies
+    from agent_flow.core.worktrees import ROOT_CONTEXT_FILES, declared_worktree_copies
 
     single = {"branching": {"worktree_setup": {"copy": ["local.properties"]}}}
-    assert _declared_worktree_copies(single) == [*ROOT_CONTEXT_FILES, "local.properties"]
+    assert declared_worktree_copies(single) == [*ROOT_CONTEXT_FILES, "local.properties"]
 
 
 def test_duplicate_declarations_are_collapsed():
     """불변: 두 profile이 같은 파일을 선언해도 한 번만 다룬다."""
-    from agent_flow.cli import ROOT_CONTEXT_FILES, _declared_worktree_copies
+    from agent_flow.core.worktrees import ROOT_CONTEXT_FILES, declared_worktree_copies
 
     same = {"branching": {"worktree_setup": {"copy": ["local.properties"]}}}
     union = {"profiles": [same, dict(same)]}
-    assert _declared_worktree_copies(union) == [*ROOT_CONTEXT_FILES, "local.properties"]
+    assert declared_worktree_copies(union) == [*ROOT_CONTEXT_FILES, "local.properties"]
+
+
+def test_scalar_copy_declaration_does_not_unroll_into_characters(capsys):
+    """반증: 검증하지 않으면 `copy: local.properties` 한 줄이 문자 단위로 풀린다.
+
+    schema는 목록으로 선언하지만 payload는 검증되지 않은 YAML이다. 스칼라를 그대로
+    순회하면 `l`/`o`/`c`/`.`가 파일 이름이 되고, `.`은 `_worktree_setup_path`에서
+    ValueError가 되어 복사 단계 전체가 중단된다 — 정작 선언한 `local.properties`는
+    복사되지 않는다. 형태가 틀린 선언은 버리고, 무엇을 버렸는지 stderr에 남긴다.
+    """
+    from agent_flow.core.worktrees import ROOT_CONTEXT_FILES, declared_worktree_copies
+
+    scalar = {"branching": {"worktree_setup": {"copy": "local.properties"}}}
+
+    assert declared_worktree_copies(scalar) == list(ROOT_CONTEXT_FILES)
+    assert "worktree_setup.copy" in capsys.readouterr().err
+
+
+def test_non_string_copy_entries_are_skipped(capsys):
+    """불변: 목록 안 항목 하나가 문자열이 아니어도 나머지 선언은 살아야 한다.
+
+    `str(name)`으로 밀어 넣으면 `None`이 `"None"`이라는 파일 이름이 되어 복사 대상과
+    정리 예외 후보에 동시에 들어간다.
+    """
+    from agent_flow.core.worktrees import ROOT_CONTEXT_FILES, declared_worktree_copies
+
+    mixed = {
+        "branching": {
+            "worktree_setup": {"copy": ["local.properties", None, 7, [".env"], "gradle.properties"]}
+        }
+    }
+
+    assert declared_worktree_copies(mixed) == [
+        *ROOT_CONTEXT_FILES,
+        "local.properties",
+        "gradle.properties",
+    ]
+    assert "worktree_setup.copy entry" in capsys.readouterr().err
 
 
 def _stub_profile(monkeypatch, tmp_path: Path, profile: dict) -> None:
