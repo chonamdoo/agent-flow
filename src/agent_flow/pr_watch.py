@@ -90,8 +90,17 @@ def fetch_pr(number: int, repo: str | None = None) -> PRSnapshot | None:
     if repo:
         cmd += ["--repo", repo]
     try:
+        # 디코드를 로케일에 맡기면 비 UTF-8 로케일에서 `gh` 출력이
+        # UnicodeDecodeError를 낸다. 그건 아래 두 handler 어느 쪽도 아니라
+        # 호출부까지 그대로 올라간다.
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30, check=False,
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
         )
     except FileNotFoundError:
         return PRSnapshot(

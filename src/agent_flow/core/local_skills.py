@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Sequence
 
 from agent_flow.core.markers import completion_gate_marker_values
-from agent_flow.core.commands import run_safe_command
 from agent_flow.core.profiles import active_profile_ids, load_profile_payload
 from agent_flow.core.profile_routing import routed_profile_skills
 from agent_flow.core.worktree_isolation import (
@@ -16,6 +15,7 @@ from agent_flow.core.worktree_isolation import (
     adopted_checkout_path,
     adopted_worktree_parent,
     git_repo_state,
+    git_safe,
     leader_root_for,
     list_registered_worktrees,
     real_path,
@@ -42,8 +42,11 @@ def changed_files(project_root: Path) -> tuple[str, ...]:
     """working tree + staged 변경 경로. git이 없거나 실패하면 빈 튜플로 degrade한다."""
     # -uall이 없으면 git이 untracked 디렉터리를 `app/sdui/` 한 줄로 접어서
     # pathGlobs가 파일 경로를 못 본다.
-    result = run_safe_command(
-        ["git", "status", "--porcelain=v1", "-z", "-uall"], cwd=project_root, timeout_s=10
+    result = git_safe(
+        "status", "--porcelain=v1", "-z", "-uall",
+        cwd=project_root,
+        timeout_s=10,
+        optional_locks=False,
     )
     if not result.ok:
         # 저장소인데 실패한 것과 애초에 저장소가 아닌 것은 다르다. 전자는
@@ -342,7 +345,10 @@ def read_skill_evidence(project_root: Path, *, since: float | None = None) -> Sk
     paths: set[str] = set()
     names: set[str] = set()
     try:
-        raw = log_path.read_text(encoding="utf-8")
+        # `errors="replace"`가 없으면 손상 바이트 하나가 UnicodeDecodeError를 낸다.
+        # 그건 ValueError라 아래 `except OSError`를 그냥 통과해 `agent-flow status`를
+        # 죽인다. 이 로그는 hook이 append-only로 쓰는 것이라 잘린 줄이 언제든 섞인다.
+        raw = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return SkillReadEvidence(available=False, read_paths=frozenset(), checkout_roots=roots)
     for line in raw.splitlines():

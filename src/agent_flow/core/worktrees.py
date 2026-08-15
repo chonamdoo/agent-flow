@@ -10,12 +10,14 @@ import stat
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from agent_flow.artifact import ACTIVE_MARKER, find_active_runs, read_meta, write_meta
 from agent_flow.core.hook_integrity import (
@@ -23,6 +25,7 @@ from agent_flow.core.hook_integrity import (
     OMP_REGISTRATION_FILE,
     managed_path_hook_name,
 )
+from agent_flow.core.profiles import active_profile_ids, load_profile_payload
 from agent_flow.core.security import validate_git_branch
 from agent_flow.core.worktree_isolation import (
     FileLeaseUnavailable,
@@ -1577,15 +1580,25 @@ def _assert_cleanup_checkout_clean(*, root: Path, path: Path) -> None:
         raise CleanupBlockedError(
             f"cannot inspect checkout status at {path}; preserving checkout"
         )
+    # kit이 스스로 심은 것: host hook 등록 파일과 worktree setup 복사본. 같은 판정을
+    # 쓴다 — "우리가 깔았고 지금도 우리 것임을 증명할 수 있는 파일".
     provisioned = _kit_owned_host_hook_registrations(root=root, checkout=path)
+    kit_copied = _kit_copied_worktree_files(root=root, checkout=path)
+    kit_owned = provisioned | kit_copied
+    folded_dirs = _HOST_HOOK_REGISTRATION_DIRS | _folded_parent_dirs(kit_copied)
     for record, rel in _porcelain_z_records(status.stdout):
         if rel in provisioned:
             continue
+        # 복사본은 추적되지 않는 상태(`!!`/`??`)일 때만 예외다. 추적 중인 파일의
+        # 수정은 커밋되지 않은 작업이고, 그 내용이 leader 워킹트리와 우연히 같다는
+        # 사실이 "지워도 된다"를 뜻하지 않는다.
+        if rel in kit_copied and record[:2] in ("!!", "??"):
+            continue
         if (
             record.startswith("!! ")
-            and rel in _HOST_HOOK_REGISTRATION_DIRS
+            and rel in folded_dirs
             and _dir_holds_only_provisioned_registrations(
-                checkout=path, rel_dir=rel, provisioned=provisioned
+                checkout=path, rel_dir=rel, provisioned=kit_owned
             )
         ):
             continue
@@ -1687,6 +1700,80 @@ def _kit_owned_host_hook_registrations(*, root: Path, checkout: Path) -> set[str
             continue
         owned.add(rel)
     return owned
+
+
+def _kit_copied_worktree_files(*, root: Path, checkout: Path) -> set[str]:
+    """checkout의 worktree setup 복사본 중 leader와 **바이트가 같은** 것들.
+    ``root``는 leader checkout이다.
+
+    checkout을 만들 때 kit이 직접 심는 파일이다(`ROOT_CONTEXT_FILES` + profile의
+    `branching.worktree_setup.copy`). 그 이름이 gitignored인 저장소에서는 — 이 저장소의
+    `CLAUDE.md`가 그렇다 — kit이 스스로 심은 파일 하나 때문에 모든 worktree가 영구히
+    정리 불가가 된다.
+
+    판정 기준은 이름이 아니라 내용이다. 여기서 예외를 받은 경로는 checkout과 함께
+    지워지므로, 이름만 보고 통과시키면 사용자가 worktree에서 고친 `local.properties`가
+    조용히 사라진다. 한 바이트라도 다르면 사용자 작업으로 보고 그대로 막는다.
+
+    leader 쪽 파일이 없거나 symlink면 비교할 정본이 없으니 예외도 없다. checkout 쪽
+    경로가 symlink 구성요소를 거치면 읽은 내용이 그 checkout의 것이 아니므로 같은
+    이유로 예외를 주지 않는다.
+    """
+    owned: set[str] = set()
+    leader_base = Path(os.path.normpath(str(root)))
+    checkout_base = Path(os.path.normpath(str(checkout)))
+    for name in _declared_worktree_copy_names(root):
+        try:
+            source = _worktree_setup_path(leader_base, name)
+            target = _worktree_setup_path(checkout_base, name)
+        except ValueError:
+            # 저장소 밖을 가리키는 선언은 복사 쪽에서도 거부됐다. 심지 않은 파일이다.
+            continue
+        try:
+            if target.is_symlink() or not target.is_file():
+                continue
+            if _has_symlinked_component(checkout_base, target):
+                continue
+            if (
+                source.is_symlink()
+                or _has_symlinked_component(leader_base, source)
+                or not source.is_file()
+            ):
+                continue
+            if source.read_bytes() != target.read_bytes():
+                continue
+        except OSError:
+            continue
+        owned.add(target.relative_to(checkout_base).as_posix())
+    return owned
+
+
+def _declared_worktree_copy_names(root: Path) -> tuple[str, ...]:
+    """leader에 적용된 profile이 새 checkout으로 복사하라고 선언한 이름들.
+
+    복사한 쪽(`copy_declared_worktree_files` 호출자)과 **같은 선언**을 봐야 한다.
+    profile을 읽지 못하면 후보가 루트 컨텍스트 파일로 좁아질 뿐이다 — 내용 동일성
+    판정은 그대로이므로 넓게 여는 실패가 아니다.
+    """
+    names: list[str] = list(ROOT_CONTEXT_FILES)
+    # profile 선택 규칙은 소비자와 같다: `AGENT_FLOW_PROFILE`이 최우선이다.
+    forced = os.environ.get("AGENT_FLOW_PROFILE")
+    try:
+        payloads = [
+            load_profile_payload(profile_id, root, fallback_unknown_to_generic=True)
+            for profile_id in ([forced] if forced else active_profile_ids(root))
+        ]
+    except (OSError, ValueError, yaml.YAMLError):
+        # profile을 못 읽는 것은 정리를 막을 이유가 아니다. 읽지 못하는 방법은
+        # 파일 접근 실패(OSError)와 파싱/스키마 실패(YAMLError, ValueError)뿐이다.
+        return tuple(names)
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        for name in declared_worktree_copies(payload):
+            if name not in names:
+                names.append(name)
+    return tuple(names)
 
 
 def _tracked_in_checkout(*, checkout: Path, rel: str) -> bool:
@@ -2411,10 +2498,8 @@ def _profile_base_ref(root: Path) -> str:
     An auto-detected profile is only a default and may fall through to the repository's
     conventional branch names.
     """
+    forced_profile = os.environ.get("AGENT_FLOW_PROFILE")
     try:
-        from agent_flow.core.profiles import active_profile_ids, load_profile_payload
-
-        forced_profile = os.environ.get("AGENT_FLOW_PROFILE")
         explicit_profile = bool(forced_profile) or (
             root / ".agent-flow" / "kit.json"
         ).is_file()
@@ -2430,7 +2515,7 @@ def _profile_base_ref(root: Path) -> str:
             )
             for profile_id in profile_ids
         ]
-    except Exception:  # noqa: BLE001
+    except (OSError, ValueError, yaml.YAMLError):
         # profile을 못 읽는 것은 worktree를 못 만들 이유가 아니다. 이름 목록으로 내려간다.
         return ""
     for payload in payloads:
@@ -3329,6 +3414,44 @@ def run_declared_worktree_actions(
     return tuple(ran)
 
 
+# 두 파일은 프로젝트가 커밋할 수도, gitignore할 수도 있다(예전 install이 넣어 둔 항목이
+# 그대로 남아 있는 프로젝트도 많다). 추적하지 않는 쪽이면 `git worktree add`가 가져올
+# 것도, worktree 안 install(= no-op)이 만들 것도 없어서 그 checkout에서 연 host 세션은
+# agent-flow 계약을 한 글자도 받지 못한다. leader에서 복사해 그 공백을 닫는다.
+ROOT_CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md")
+
+
+def declared_worktree_copies(profile: Mapping[str, Any]) -> list[str]:
+    """새 checkout이 받아야 할 이름: 루트 컨텍스트 파일 + 단일/합성 profile 선언.
+
+    `_load_profile_union`이 만드는 합성 dict에는 최상위 `branching`이 없다 —
+    개별 profile은 `profiles` 아래에 들어가고 최상위에는 `review_angles`/`gates`/
+    `skills`/`architecture`만 합쳐진다. 최상위만 보면 android+react-native처럼
+    profile이 둘 이상인 프로젝트에서 선언이 조용히 빈 목록이 되고, `local.properties`가
+    영영 복사되지 않는다.
+
+    복사하는 쪽과 정리 쪽이 같은 목록을 봐야 한다. 두 벌을 두면 한쪽만 늘어난 순간
+    kit이 심은 파일이 정리 차단 사유가 된다.
+    """
+    sources: list[Mapping[str, Any]] = [profile]
+    nested = profile.get("profiles")
+    if isinstance(nested, list):
+        sources.extend(item for item in nested if isinstance(item, dict))
+    names: list[str] = list(ROOT_CONTEXT_FILES)
+    for source in sources:
+        branching = source.get("branching")
+        if not isinstance(branching, dict):
+            continue
+        setup = branching.get("worktree_setup")
+        if not isinstance(setup, dict):
+            continue
+        for name in setup.get("copy") or []:
+            text = str(name)
+            if text not in names:
+                names.append(text)
+    return names
+
+
 def copy_declared_worktree_files(
     *, leader: Path, checkout: Path, names: Iterable[str]
 ) -> tuple[str, ...]:
@@ -3376,11 +3499,18 @@ HOST_HOOK_REGISTRATION_FILES: tuple[str, ...] = tuple(
 )
 _OMP_REGISTRATION_REL = OMP_REGISTRATION_FILE.as_posix()
 
-# git이 접어서 보고할 수 있는 등록 디렉터리들(`.claude/`, `.omp/`, `.omp/extensions/` …).
-_HOST_HOOK_REGISTRATION_DIRS: frozenset[str] = frozenset(
-    "/".join(rel.split("/")[:depth]) + "/"
-    for rel in HOST_HOOK_REGISTRATION_FILES
-    for depth in range(1, len(rel.split("/")))
+
+def _folded_parent_dirs(rels: Iterable[str]) -> frozenset[str]:
+    """git이 접어서 보고할 수 있는 상위 디렉터리 레코드들(`.claude/`, `.omp/` …)."""
+    return frozenset(
+        "/".join(rel.split("/")[:depth]) + "/"
+        for rel in rels
+        for depth in range(1, len(rel.split("/")))
+    )
+
+
+_HOST_HOOK_REGISTRATION_DIRS: frozenset[str] = _folded_parent_dirs(
+    HOST_HOOK_REGISTRATION_FILES
 )
 
 # kit이 생성한 OMP 확장의 표지와 생성 서명. `lib/omp-hooks-extension.mjs`의

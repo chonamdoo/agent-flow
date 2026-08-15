@@ -1585,7 +1585,7 @@ def _is_lifecycle_command(
     면제 대상을 이 네 개로 좁혀 둔다. 서브커맨드 이름을 안 보고 agent-flow 호출
     전체를 면제하면, 면제된 경로가 R1 리터럴 검사·R2 파괴 목록·leader tripwire를
     한꺼번에 건너뛴다. 그 상태에서 `eval --judge-command`는 임의 argv를 실행하고,
-    `worktree remove --name`은 형제 checkout을 지우고, `record-stage --run-dir`은
+    `worktree remove --name`은 형제 checkout을 지우고, `handoff --run-dir`은
     남의 런 산출물을 덮어쓴다 — 셋 다 실행으로 확인됐다. ``_lifecycle_violation``이
     검증하는 인자는 `--root`/`--worktree`뿐이라 그 축들을 대신 막지 못한다.
 

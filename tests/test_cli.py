@@ -24,7 +24,6 @@ from importlib import resources
 from tests.test_hook_integrity import _install as _install_managed_hooks
 
 from agent_flow.cli import main
-from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.gates import GateCommand, run_gate
 from agent_flow.core.design_ledger import capture_design_ledger
 from agent_flow.core.phase_workflow import load_phase_workflow_definition
@@ -40,7 +39,6 @@ from agent_flow.core.local_skills import (
 from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.core.review import _parse_verdict
 from agent_flow.core.team import ShutdownSignal
-from agent_flow.core.workflow import _stage_from_payload
 from agent_flow.core.worktrees import (
     get_worktree_status,
     legacy_managed_root,
@@ -110,49 +108,6 @@ class CliTest(unittest.TestCase):
             self.assertTrue((root / ".agent-flow" / "runs").is_dir())
             self.assertTrue((root / ".agent-flow" / "handoffs").is_dir())
 
-    def test_start_creates_manifest_and_prompts(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir).resolve()
-            _init_git_repo(root)
-            # start는 leader가 아니라 managed worktree에서 run을 연다. manifest도
-            # 그 runtime root에 쌓이므로 경로를 프로덕션 helper에서 유도한다.
-            plan = plan_worktree(root=root, name="demo")
-            self.assertEqual(
-                main(["start", "development", "--root", str(root), "--task", "demo", "--adapter", "manual"]),
-                0,
-            )
-            state_root = worktree_runtime_root(root=root, name=plan.name)
-            manifests = list((state_root / ".agent-flow" / "runs").glob("development/*/manifest.json"))
-            self.assertEqual(len(manifests), 1)
-            run_dir = manifests[0].parent
-            self.assertTrue((run_dir / "events.jsonl").is_file())
-            self.assertTrue((run_dir / "prompts" / "explore.md").is_file())
-            self.assertTrue((run_dir / "prompts" / "review-1.md").is_file())
-            self.assertTrue((run_dir / "prompts" / "review-2.md").is_file())
-            self.assertTrue((run_dir / "prompts" / "review-3.md").is_file())
-            self.assertIn(
-                "Adapter:",
-                (run_dir / "prompts" / "explore.md").read_text(encoding="utf-8"),
-            )
-
-    def test_render_stage_prompt_uses_omp_template(self) -> None:
-        prompt = render_stage_prompt(
-            PromptContext(
-                adapter="omp-session",
-                stage_id="review",
-                role="Reviewer",
-                workflow_id="default",
-                run_id="run-1",
-                replica=1,
-                replicas=1,
-                task="Check parity.",
-            )
-        )
-
-        self.assertIn("# OMP Task Stage: review", prompt)
-        self.assertIn("Use the task tool", prompt)
-
-
     def test_cli_runs_from_outside_source_tree_with_packaged_resources(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = Path(__file__).resolve().parents[1]
@@ -207,8 +162,6 @@ class CliTest(unittest.TestCase):
                     str(project_root),
                     "--task",
                     "demo",
-                    "--adapter",
-                    "manual",
                     "--run-id",
                     "r1",
                 ),
@@ -224,17 +177,15 @@ class CliTest(unittest.TestCase):
                 root=project_root,
                 name=plan_worktree(root=project_root, name="demo").name,
             )
-            run_dir = state_root / ".agent-flow" / "runs" / "development" / "r1"
+            run_dir = state_root / ".agent-flow" / "runs" / "r1"
             self.assertTrue((project_root / ".agent-flow").is_dir())
-            self.assertTrue((run_dir / "manifest.json").is_file())
-            self.assertTrue((run_dir / "prompts" / "explore.md").is_file())
+            self.assertTrue((run_dir / "meta.json").is_file())
 
     def test_workflow_kit_resources_are_packaged(self) -> None:
         package_root = resources.files("agent_flow")
         self.assertTrue(package_root.joinpath("workflows", "development.yaml").is_file())
         self.assertTrue(package_root.joinpath("profiles", "generic.yaml").is_file())
         self.assertTrue(package_root.joinpath("roles", "default.yaml").is_file())
-        self.assertTrue(package_root.joinpath("templates", "generic", "stage.md").is_file())
 
     def test_all_packaged_workflows_export_phase_artifacts(self) -> None:
         workflows_root = resources.files("agent_flow").joinpath("workflows")
@@ -400,6 +351,14 @@ class CliTest(unittest.TestCase):
         payload = json.loads(output.getvalue())
         phases = {phase["id"]: phase for phase in payload["phases"]}
         self.assertEqual(payload["id"], "full-feature")
+        # drift 예외가 지목하는 값이 digest다. export가 그것을 빼면 사용자는
+        # `meta.workflow_digest`와 대조할 기계 가독 뷰가 하나도 없다.
+        self.assertEqual(
+            payload["digest"],
+            load_phase_workflow_definition(
+                Path(__file__).resolve().parents[1], "full-feature"
+            ).digest,
+        )
         self.assertEqual(phases["domain-grill"]["artifact"], "artifacts/domain-grill.md")
         self.assertIn("domain-grill: complete", phases["domain-grill"]["required_markers"])
         self.assertEqual(phases["red"]["artifact"], "artifacts/red.log")
@@ -598,7 +557,9 @@ class CliTest(unittest.TestCase):
         self.assertEqual(_route_key("status: ci_failed"), "ci_failed")
         self.assertEqual(_route_key("status: has_comments"), "has_comments")
         self.assertEqual(_route_key("status: has-comments"), "default")
-        self.assertEqual(_gates_route_key("status: pass"), "default")
+        # JSON이 아닌 파일은 "게이트 실패"가 아니라 "판정 불가"다. default로 접으면
+        # fix-loop가 근거 없이 돌기 시작한다.
+        self.assertEqual(_gates_route_key("status: pass"), "malformed-results")
 
     def test_host_multi_review_requires_confined_reviewer_processes(self) -> None:
         from agent_flow.adapters.hosted import HostedAdapter, _multi_reviewer_block
@@ -1253,7 +1214,7 @@ class CliTest(unittest.TestCase):
                 "## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (2, False))
+            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: APPROVE\n\n"
@@ -1261,7 +1222,7 @@ class CliTest(unittest.TestCase):
                 "## Overall\nverdict: APPROVE\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: codex sub-agent\nreviewer-1 verdict: approve\n\n"
@@ -1269,14 +1230,14 @@ class CliTest(unittest.TestCase):
                 "## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: non-sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "reviewer-1 source: non-sub-agent\n"
@@ -1284,7 +1245,7 @@ class CliTest(unittest.TestCase):
                 "## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n",
@@ -1292,64 +1253,64 @@ class CliTest(unittest.TestCase):
             )
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(runner._next_index(0, phase), (0, True))
+                self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
             self.assertIn("requires 2+ independent sub-agent reviewer verdicts", output.getvalue())
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (1, False))
+            self.assertEqual(runner._next_index(0, phase)[:2], (1, False))
 
             for legacy_status in ("verdict: request-changes\n", "status: failed\n", "status: fail\n"):
                 (run_dir / "multi-review.md").write_text(legacy_status, encoding="utf-8")
-                self.assertEqual(runner._next_index(0, phase), (0, True))
+                self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\n\nreviewer-source: sub-agent\nverdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\n### Findings\nverdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Overall\nstatus: passed\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Overall\nverdict: approve\nverdict: request-changes\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Overall\nverdict: request-changes\n\n## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Final\nverdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "reviewer verdict: approve\n## Reviewer\nverdict: approve\nverdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer Verdicts\nverdict: approve\n\n"
@@ -1359,7 +1320,7 @@ class CliTest(unittest.TestCase):
                 "verdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer Notes\nverdict: approve\n\n"
@@ -1369,7 +1330,7 @@ class CliTest(unittest.TestCase):
                 "verdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer Feedback\nverdict: approve\n\n"
@@ -1381,7 +1342,7 @@ class CliTest(unittest.TestCase):
                 "verdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (2, False))
+            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nverdict: lgtm\n\n"
@@ -1389,7 +1350,7 @@ class CliTest(unittest.TestCase):
                 "Overall verdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
@@ -1398,14 +1359,14 @@ class CliTest(unittest.TestCase):
                 "verdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (2, False))
+            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
 
     def test_python_final_review_approve_requires_subagent_reviewer(self) -> None:
         from agent_flow.runner import Phase, Runner
@@ -1432,19 +1393,19 @@ class CliTest(unittest.TestCase):
                 "## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (2, False))
+            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
 
             (run_dir / "final-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (1, False))
+            self.assertEqual(runner._next_index(0, phase)[:2], (1, False))
 
             (run_dir / "final-review.md").write_text(
                 "reviewer verdict: approve\n## Reviewer\nverdict: approve\nverdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
             (run_dir / "final-review.md").write_text(
                 "## Reviewer Verdicts\nverdict: approve\n\n"
@@ -1456,7 +1417,7 @@ class CliTest(unittest.TestCase):
                 "verdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (2, False))
+            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
 
             (run_dir / "final-review.md").write_text(
                 "## Reviewer Notes\nverdict: approve\n\n"
@@ -1468,14 +1429,14 @@ class CliTest(unittest.TestCase):
                 "verdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (2, False))
+            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
 
             (run_dir / "final-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (2, False))
+            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
 
     def test_python_architecture_review_requires_two_active_host_reviewers(self) -> None:
         from agent_flow.runner import Phase, Runner
@@ -1502,7 +1463,7 @@ class CliTest(unittest.TestCase):
                 "## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (2, False))
+            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
 
             (run_dir / "architecture-review.md").write_text(
                 "## Reviewer A\nreviewer-source: sub-agent\nverdict: approve\n\n"
@@ -1510,14 +1471,14 @@ class CliTest(unittest.TestCase):
                 "## Overall\nverdict: request-changes\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (1, False))
+            self.assertEqual(runner._next_index(0, phase)[:2], (1, False))
 
             (run_dir / "architecture-review.md").write_text(
                 "## Reviewer A\nreviewer-source: sub-agent\nverdict: approve\n\n"
                 "## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
     def test_architecture_lint_validates_android_roles_and_packages(self) -> None:
         from agent_flow.core.architecture_lint import changed_files, lint_profiles, lint_project
@@ -1821,12 +1782,12 @@ class CliTest(unittest.TestCase):
             )
             for expected_round, content in enumerate(rejections, start=1):
                 (run_dir / "gates.md").write_text(content, encoding="utf-8")
-                self.assertEqual(runner._next_index(1, gates), (2, False))
+                self.assertEqual(runner._next_index(1, gates)[:2], (2, False))
                 self.assertEqual(read_meta(run_dir)["fix_loop_rounds"]["fix-loop"], expected_round)
 
             # the fourth rejection (any key) is blocked for user intervention.
             (run_dir / "gates.md").write_text('{"passed": false, "status": "error"}', encoding="utf-8")
-            self.assertEqual(runner._next_index(1, gates), (1, True))
+            self.assertEqual(runner._next_index(1, gates)[:2], (1, True))
             self.assertEqual(read_meta(run_dir)["fix_loop_rounds"]["fix-loop"], 3)
 
     def test_python_runner_fix_loop_cap_bounds_renamed_loops_and_skips_pr_loop(self) -> None:
@@ -1859,21 +1820,21 @@ class CliTest(unittest.TestCase):
 
             for expected_round in (1, 2, 3):
                 (run_dir / "review.md").write_text("verdict: request-changes\n", encoding="utf-8")
-                self.assertEqual(runner._next_index(2, review), (1, False))
+                self.assertEqual(runner._next_index(2, review)[:2], (1, False))
                 self.assertEqual(read_meta(run_dir)["fix_loop_rounds"]["implement-fix"], expected_round)
                 (run_dir / "architecture-review.md").write_text("verdict: request-changes\n", encoding="utf-8")
-                self.assertEqual(runner._next_index(3, architecture_review), (0, False))
+                self.assertEqual(runner._next_index(3, architecture_review)[:2], (0, False))
                 self.assertEqual(read_meta(run_dir)["fix_loop_rounds"]["refactor"], expected_round)
 
             # three rounds on each target coexist; the fourth on either blocks it.
             (run_dir / "review.md").write_text("verdict: request-changes\n", encoding="utf-8")
-            self.assertEqual(runner._next_index(2, review), (2, True))
+            self.assertEqual(runner._next_index(2, review)[:2], (2, True))
             (run_dir / "architecture-review.md").write_text("verdict: request-changes\n", encoding="utf-8")
-            self.assertEqual(runner._next_index(3, architecture_review), (3, True))
+            self.assertEqual(runner._next_index(3, architecture_review)[:2], (3, True))
 
             # pr-watch is never a rejection target, so the PR event loop is uncapped.
             for _ in range(6):
-                self.assertEqual(runner._next_index(7, pr_comment_fix), (6, False))
+                self.assertEqual(runner._next_index(7, pr_comment_fix)[:2], (6, False))
             self.assertNotIn("pr-watch", read_meta(run_dir).get("fix_loop_rounds", {}))
 
     def test_python_runner_fix_loop_cap_migrates_legacy_integer_count(self) -> None:
@@ -1897,14 +1858,14 @@ class CliTest(unittest.TestCase):
             # per-target count and keeps counting rather than resetting.
             write_meta(run_dir, {"fix_loop_rounds": 1})
             (run_dir / "gates.md").write_text('{"passed": false}', encoding="utf-8")
-            self.assertEqual(runner._next_index(1, gates), (2, False))
+            self.assertEqual(runner._next_index(1, gates)[:2], (2, False))
             self.assertEqual(read_meta(run_dir)["fix_loop_rounds"]["fix-loop"], 2)
 
             # A legacy int already at the cap still blocks the next round; the
             # upgrade must not hand it three fresh rounds.
             write_meta(run_dir, {"fix_loop_rounds": 3})
             (run_dir / "gates.md").write_text('{"passed": false}', encoding="utf-8")
-            self.assertEqual(runner._next_index(1, gates), (1, True))
+            self.assertEqual(runner._next_index(1, gates)[:2], (1, True))
 
     def test_python_runner_uses_default_route_like_node_runner(self) -> None:
         from agent_flow.runner import Phase, Runner
@@ -1919,7 +1880,7 @@ class CliTest(unittest.TestCase):
             ]
             (run_dir / "fix-loop.md").write_text("status: done\n", encoding="utf-8")
 
-            self.assertEqual(runner._next_index(0, runner.phases[0]), (1, False))
+            self.assertEqual(runner._next_index(0, runner.phases[0])[:2], (1, False))
 
     def test_source_profiles_use_argv_command_lists(self) -> None:
         import yaml
@@ -2064,8 +2025,10 @@ class CliTest(unittest.TestCase):
             self.assertTrue(
                 (project_root / ".agent-flow" / "templates" / "_shared" / "review" / "architecture-design.md").is_file()
             )
-            self.assertTrue((project_root / ".agent-flow" / "templates" / "generic" / "stage.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "templates" / "omp" / "stage.md").is_file())
+            # stage prompt 렌더러와 그 자산은 삭제됐다. 설치는 `templates` 트리를
+            # 통째로 복사하므로, 자산이 되살아나면 죽은 파일이 다시 깔린다.
+            self.assertFalse((project_root / ".agent-flow" / "templates" / "generic" / "stage.md").exists())
+            self.assertFalse((project_root / ".agent-flow" / "templates" / "omp" / "stage.md").exists())
             self.assertTrue((project_root / ".Codex" / "agents" / "code-reviewer.md").is_file())
             code_reviewer = (project_root / ".Codex" / "agents" / "code-reviewer.md").read_text(encoding="utf-8")
             self.assertTrue((project_root / ".claude" / "agents" / "code-reviewer.md").is_file())
@@ -2175,9 +2138,12 @@ class CliTest(unittest.TestCase):
             self.assertTrue(
                 (project_root / ".agent-flow" / "skills" / "react-native-development-guide" / "SKILL.md").is_file()
             )
+            # 이 이름의 정본은 bootstrap 산문이 아니라 installer가 만드는 skill
+            # index다. 산문 사본을 지운 뒤에도 always skill 계약이 실제로
+            # 프로젝트 컨텍스트에 도착하는지를 그 index에서 확인한다.
             self.assertIn(
-                "code-generation-discipline",
-                (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
+                "always:{code-generation-discipline",
+                (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
                 "설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수",
@@ -3575,7 +3541,6 @@ design-values-confirmed: n/a
                 "development",
                 "--task",
                 "new task",
-                "--phase-runner",
                 "--checkout-identity",
                 "worktree:feat-existing",
             ]
@@ -4591,7 +4556,6 @@ if (codexContext !== undefined) {
         self.assertIn("-m agent_flow.cli start default", outputs["start"])
         self.assertIn("--run-id r1", outputs["start"])
         self.assertIn("--worktree feat-x", outputs["start"])
-        self.assertIn("--phase-runner", outputs["start"])
         self.assertIn("--checkout-identity worktree:feat-x", outputs["start"])
         self.assertIn("-m agent_flow.cli status", outputs["status"])
         self.assertIn("-m agent_flow.cli status", outputs["next"])
@@ -7211,8 +7175,6 @@ if (codexContext !== undefined) {
                             str(root),
                             "--task",
                             "demo",
-                            "--adapter",
-                            "manual",
                             "--run-id",
                             "r1",
                             "--worktree",
@@ -7222,16 +7184,17 @@ if (codexContext !== undefined) {
                     0,
                 )
             worktree = managed_worktrees_root(root) / "feat-slice-a"
-            run_dir = worktree_runtime_root(root=root, name="feat-slice-a") / ".agent-flow" / "runs" / "development" / "r1"
-            manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["worktree"]["name"], "feat-slice-a")
-            self.assertEqual(manifest["worktree"]["branch"], "feat/slice-a")
-            # 기본 자리가 leader 밖이라 기록은 절대 경로다. 어느 쪽이든 그
-            # checkout을 가리켜야 한다.
-            self.assertEqual(
-                (root / manifest["worktree"]["path"]).resolve(),
-                worktree.resolve(),
+            run_dir = (
+                worktree_runtime_root(root=root, name="feat-slice-a")
+                / ".agent-flow"
+                / "runs"
+                / "r1"
             )
+            meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["checkout_identity"], "worktree:feat-slice-a")
+            status = get_worktree_status(root=root, name="feat-slice-a")
+            self.assertEqual(status.branch, "feat/slice-a")
+            self.assertEqual(status.path.resolve(), worktree.resolve())
             self.assertTrue(worktree.is_dir())
 
     def test_start_worktree_rejects_dirty_leader_workspace(self) -> None:
@@ -7248,15 +7211,13 @@ if (codexContext !== undefined) {
                         str(root),
                         "--task",
                         "demo",
-                        "--adapter",
-                        "manual",
                         "--worktree",
                         "slice-a",
                     ]
                 ),
                 2,
             )
-            self.assertFalse((root / ".agent-flow" / "runs" / "development").exists())
+            self.assertFalse((root / ".agent-flow" / "runs").exists())
 
     def test_start_worktree_run_id_is_scoped_to_worktree_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -7271,8 +7232,6 @@ if (codexContext !== undefined) {
                         str(root),
                         "--task",
                         "demo",
-                        "--adapter",
-                        "manual",
                         "--run-id",
                         "r1",
                     ]
@@ -7289,8 +7248,6 @@ if (codexContext !== undefined) {
                         str(root),
                         "--task",
                         "demo",
-                        "--adapter",
-                        "manual",
                         "--run-id",
                         "r1",
                         "--worktree",
@@ -7304,7 +7261,6 @@ if (codexContext !== undefined) {
                     worktree_runtime_root(root=root, name="feat-demo")
                     / ".agent-flow"
                     / "runs"
-                    / "development"
                     / "r1"
                 ).exists()
             )
@@ -7313,7 +7269,6 @@ if (codexContext !== undefined) {
                     worktree_runtime_root(root=root, name="feat-slice-a")
                     / ".agent-flow"
                     / "runs"
-                    / "development"
                     / "r1"
                 ).exists()
             )
@@ -7323,7 +7278,10 @@ if (codexContext !== undefined) {
             root = Path(temp_dir)
             _init_git_repo(root)
 
-            with mock.patch("agent_flow.core.state._write_json", side_effect=OSError("manifest failed")):
+            with mock.patch(
+                "agent_flow.artifact.write_meta",
+                side_effect=OSError("meta failed"),
+            ):
                 self.assertEqual(
                     main(
                         [
@@ -7333,8 +7291,6 @@ if (codexContext !== undefined) {
                             str(root),
                             "--task",
                             "demo",
-                            "--adapter",
-                            "manual",
                             "--run-id",
                             "r1",
                             "--worktree",
@@ -7343,7 +7299,14 @@ if (codexContext !== undefined) {
                     ),
                     2,
                 )
-            self.assertFalse((root / ".agent-flow" / "runs" / "development" / "r1").exists())
+            self.assertFalse(
+                (
+                    worktree_runtime_root(root=root, name="feat-slice-a")
+                    / ".agent-flow"
+                    / "runs"
+                    / "r1"
+                ).exists()
+            )
             self.assertFalse((managed_worktrees_root(root) / "feat-slice-a").exists())
 
     def test_worktree_create_manifest_write_failure_cleans_worktree(self) -> None:
@@ -7387,8 +7350,6 @@ if (codexContext !== undefined) {
                         str(root),
                         "--task",
                         "demo",
-                        "--adapter",
-                        "manual",
                         "--run-id",
                         "r1",
                         "--worktree",
@@ -7397,19 +7358,19 @@ if (codexContext !== undefined) {
                 ),
                 0,
             )
-            manifest = json.loads(
+            self.assertTrue(
                 (
                     worktree_runtime_root(root=root, name="feat-slice-a")
                     / ".agent-flow"
                     / "runs"
-                    / "development"
                     / "r1"
-                    / "manifest.json"
-                ).read_text(
-                    encoding="utf-8"
-                )
+                    / "meta.json"
+                ).is_file()
             )
-            self.assertEqual(manifest["worktree"]["branch"], "feat/slice-a")
+            self.assertEqual(
+                get_worktree_status(root=root, name="feat-slice-a").branch,
+                "feat/slice-a",
+            )
 
     def test_start_worktree_can_use_existing_branch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -7426,8 +7387,6 @@ if (codexContext !== undefined) {
                         str(root),
                         "--task",
                         "demo",
-                        "--adapter",
-                        "manual",
                         "--run-id",
                         "r1",
                         "--worktree",
@@ -7438,19 +7397,19 @@ if (codexContext !== undefined) {
                 ),
                 0,
             )
-            manifest = json.loads(
+            self.assertTrue(
                 (
                     worktree_runtime_root(root=root, name="feat-slice-a")
                     / ".agent-flow"
                     / "runs"
-                    / "development"
                     / "r1"
-                    / "manifest.json"
-                ).read_text(
-                    encoding="utf-8"
-                )
+                    / "meta.json"
+                ).is_file()
             )
-            self.assertEqual(manifest["worktree"]["branch"], "feat/slice-a")
+            self.assertEqual(
+                get_worktree_status(root=root, name="feat-slice-a").branch,
+                "feat/slice-a",
+            )
             self.assertTrue((managed_worktrees_root(root) / "feat-slice-a").is_dir())
 
     def test_detect_profile_defaults_to_generic(self) -> None:
@@ -7505,50 +7464,31 @@ if (codexContext !== undefined) {
             ],
         )
 
-    def test_auto_adapter_prefers_host_env_before_omp_path_fallback(self) -> None:
-        from agent_flow.adapters.registry import detect_adapter
+    def test_host_env_hint_wins_before_omp_path_fallback(self) -> None:
+        from agent_flow.cli_detect import detect_host_cli
 
-        with mock.patch("agent_flow.adapters.registry.shutil.which") as which:
+        with mock.patch("agent_flow.cli_detect.shutil.which") as which:
             which.side_effect = lambda name: f"/usr/local/bin/{name}" if name == "omp" else None
-            with mock.patch.dict("agent_flow.adapters.registry.os.environ", {"CODEX_HOME": "/tmp/codex"}, clear=True):
-                self.assertEqual(detect_adapter(), "codex-session")
+            with mock.patch.dict("agent_flow.cli_detect.os.environ", {"CODEX_HOME": "/tmp/codex"}, clear=True):
+                self.assertEqual(detect_host_cli(), "codex")
 
-        with mock.patch("agent_flow.adapters.registry.shutil.which") as which:
+        with mock.patch("agent_flow.cli_detect.shutil.which") as which:
             which.side_effect = lambda name: f"/usr/local/bin/{name}" if name == "omp" else None
-            with mock.patch.dict("agent_flow.adapters.registry.os.environ", {"CLAUDECODE": "1"}, clear=True):
-                self.assertEqual(detect_adapter(), "claude-session")
+            with mock.patch.dict("agent_flow.cli_detect.os.environ", {"CLAUDECODE": "1"}, clear=True):
+                self.assertEqual(detect_host_cli(), "claude")
 
-    def test_auto_adapter_prefers_codex_path_before_omp_path_fallback(self) -> None:
-        from agent_flow.adapters.registry import detect_adapter
+    def test_codex_path_wins_before_omp_path_fallback(self) -> None:
         from agent_flow.cli_detect import detect_host_cli
 
         def both_codex_and_omp(name: str) -> str | None:
             return f"/usr/local/bin/{name}" if name in {"codex", "omp"} else None
 
-        with mock.patch("agent_flow.adapters.registry.shutil.which", side_effect=both_codex_and_omp):
-            with mock.patch.dict("agent_flow.adapters.registry.os.environ", {}, clear=True):
-                self.assertEqual(detect_adapter(), "codex-session")
         with mock.patch("agent_flow.cli_detect.shutil.which", side_effect=both_codex_and_omp):
             with mock.patch.dict("agent_flow.cli_detect.os.environ", {}, clear=True):
                 self.assertEqual(detect_host_cli(), "codex")
 
     def test_storage_dir_env_does_not_select_omp_host(self) -> None:
-        from agent_flow.adapters.registry import detect_adapter
         from agent_flow.cli_detect import detect_host_cli
-
-        with mock.patch("agent_flow.adapters.registry.shutil.which", return_value=None):
-            with mock.patch.dict(
-                "agent_flow.adapters.registry.os.environ",
-                {"PI_CODING_AGENT_DIR": "/tmp/omp"},
-                clear=True,
-            ):
-                self.assertEqual(detect_adapter(), "manual")
-            with mock.patch.dict(
-                "agent_flow.adapters.registry.os.environ",
-                {"PI_CODING_AGENT_DIR": "/tmp/omp", "CODEX_HOME": "/tmp/codex"},
-                clear=True,
-            ):
-                self.assertEqual(detect_adapter(), "codex-session")
 
         with mock.patch("agent_flow.cli_detect.shutil.which", return_value=None):
             with mock.patch.dict(
@@ -7583,120 +7523,6 @@ if (codexContext !== undefined) {
                 with contextlib.redirect_stdout(output):
                     self.assertEqual(main(["provider", "list"]), 0)
         self.assertIn("omp-session unavailable command=omp", output.getvalue())
-
-    def test_status_reports_latest_run(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir).resolve()
-            _init_git_repo(root)
-            plan = plan_worktree(root=root, name="review demo")
-            self.assertEqual(
-                main(["start", "review", "--root", str(root), "--task", "review demo", "--run-id", "r1"]),
-                0,
-            )
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                # run이 managed worktree로 격리됐다. "최신 run이 보인다"는 목적을
-                # 지키려면 기대값을 낮추는 대신 status에 그 checkout을 지정한다.
-                self.assertEqual(
-                    main(["status", "--root", str(root), "--worktree", plan.name]), 0
-                )
-            lines = output.getvalue().strip().splitlines()
-            self.assertEqual(lines[0], "review r1 awaiting_host")
-            self.assertIn("status: awaiting_host", lines)
-            self.assertIn("run: review/r1", lines)
-            self.assertIn("task: review demo", lines)
-            self.assertIn("current_phase: explore", lines)
-            self.assertIn("reason: missing_stage_artifact", lines)
-            self.assertIn("required_action: write_stage_artifact", lines)
-            self.assertIn(
-                "required_artifact: .agent-flow/runs/review/r1/artifacts/explore.md",
-                lines,
-            )
-            self.assertIn("next_command: none", lines)
-            self.assertIn(
-                "next_command_template: agent-flow record-stage --root "
-                + str(worktree_runtime_root(root=root, name=plan.name))
-                + " --run-dir .agent-flow/runs/review/r1 --stage explore --content '<stage result>'",
-                lines,
-            )
-            self.assertTrue(any(line.startswith("status_json: ") for line in lines))
-
-    def test_status_summary_advances_to_next_missing_stage_artifact(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir).resolve()
-            _init_git_repo(root)
-            plan = plan_worktree(root=root, name="review demo")
-            state_root = worktree_runtime_root(root=root, name=plan.name)
-            self.assertEqual(
-                main(["start", "review", "--root", str(root), "--task", "review demo", "--run-id", "r1"]),
-                0,
-            )
-            run_dir = state_root / ".agent-flow" / "runs" / "review" / "r1"
-            manifest = run_dir / "manifest.json"
-            payload = json.loads(manifest.read_text(encoding="utf-8"))
-            payload["current_phase"] = "explore"
-            manifest.write_text(json.dumps(payload), encoding="utf-8")
-            self.assertEqual(
-                main(
-                    [
-                        "record-stage",
-                        "--root",
-                        str(state_root),
-                        "--run-dir",
-                        ".agent-flow/runs/review/r1",
-                        "--stage",
-                        "explore",
-                        "--content",
-                        "explored",
-                    ]
-                ),
-                0,
-            )
-
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                self.assertEqual(
-                    main(["status", "--root", str(root), "--worktree", plan.name]), 0
-                )
-            lines = output.getvalue().strip().splitlines()
-            self.assertIn("current_phase: review-1", lines)
-            self.assertIn(
-                "required_artifact: .agent-flow/runs/review/r1/artifacts/review-1.md",
-                lines,
-            )
-            self.assertIn("next_command: none", lines)
-            self.assertIn("required_action: write_stage_artifact", lines)
-            self.assertIn(
-                "next_command_template: agent-flow record-stage --root "
-                + str(state_root)
-                + " --run-dir .agent-flow/runs/review/r1 --stage review-1 --content '<stage result>'",
-                lines,
-            )
-
-    def test_status_escapes_task_newlines_and_emits_json(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            _init_git_repo(root)
-            task = "review demo\nstatus: complete\nreason: injected"
-            plan = plan_worktree(root=root, name=task)
-            self.assertEqual(
-                main(["start", "review", "--root", str(root), "--task", task, "--run-id", "r1"]),
-                0,
-            )
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                self.assertEqual(
-                    main(["status", "--root", str(root), "--worktree", plan.name]), 0
-                )
-            lines = output.getvalue().strip().splitlines()
-            self.assertIn(r"task: review demo\nstatus: complete\nreason: injected", lines)
-            self.assertNotIn("reason: injected", lines)
-            status_json = next(line for line in lines if line.startswith("status_json: "))
-            payload = json.loads(status_json.removeprefix("status_json: "))
-            self.assertEqual(payload["task"], task)
-            self.assertEqual(payload["current_phase"], "explore")
-            self.assertEqual(payload["next_command"], "none")
-            self.assertEqual(payload["required_action"], "write_stage_artifact")
 
     def test_review_retry_reports_structured_blocker(self) -> None:
         output = io.StringIO()
@@ -7924,20 +7750,6 @@ if (codexContext !== undefined) {
             with contextlib.redirect_stdout(output):
                 self.assertEqual(main(["detect-profile", "--root", str(root)]), 0)
             self.assertEqual(output.getvalue().strip(), "ios")
-
-    def test_workflow_stage_rejects_invalid_parallel_type(self) -> None:
-        with self.assertRaises(ValueError):
-            _stage_from_payload(
-                {"id": "review", "role": "reviewer", "parallel": "false"},
-                workflow_id="bad",
-            )
-
-    def test_workflow_stage_rejects_bool_replicas(self) -> None:
-        with self.assertRaises(ValueError):
-            _stage_from_payload(
-                {"id": "review", "role": "reviewer", "replicas": True},
-                workflow_id="bad",
-            )
 
     def test_load_profile_reads_packaged_gates(self) -> None:
         profile = load_profile("node")
@@ -8351,29 +8163,6 @@ if (codexContext !== undefined) {
             self.assertFalse((cwd / ".agent-flow" / "runs" / "manual" / "gate-results.json").exists())
             self.assertFalse((cwd / ".agent-flow" / "runs" / "manual" / "artifacts" / "gate-results.json").exists())
 
-    def test_record_stage_writes_stage_result_artifact(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            self.assertEqual(
-                main(
-                    [
-                        "record-stage",
-                        "--root",
-                        str(root),
-                        "--run-dir",
-                        ".agent-flow/runs/development/r1",
-                        "--stage",
-                        "explore",
-                        "--content",
-                        "Found auth module.",
-                    ]
-                ),
-                0,
-            )
-            path = root / ".agent-flow" / "runs" / "development" / "r1" / "artifacts" / "explore.md"
-            self.assertTrue(path.is_file())
-            self.assertIn("Found auth module.", path.read_text(encoding="utf-8"))
-
     def test_handoff_writes_run_and_project_index_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -8410,70 +8199,6 @@ if (codexContext !== undefined) {
             self.assertTrue(run_handoff.is_file())
             self.assertTrue(project_handoff.is_file())
             self.assertIn("Use profile gates.", run_handoff.read_text(encoding="utf-8"))
-
-    def test_render_stage_prompt_uses_codex_template(self) -> None:
-        prompt = render_stage_prompt(
-            PromptContext(
-                adapter="codex-session",
-                stage_id="explore",
-                role="explorer",
-                workflow_id="development",
-                run_id="r1",
-                replica=1,
-                replicas=1,
-                task="inspect repo",
-            )
-        )
-        self.assertIn("Codex Subagent Stage: explore", prompt)
-        self.assertIn("Spawn a subagent for role `explorer`.", prompt)
-        self.assertIn("Run: r1", prompt)
-
-    def test_render_stage_prompt_uses_claude_template(self) -> None:
-        prompt = render_stage_prompt(
-            PromptContext(
-                adapter="claude-session",
-                stage_id="review",
-                role="reviewer",
-                workflow_id="review",
-                run_id="r2",
-                replica=2,
-                replicas=3,
-                task="review diff",
-            )
-        )
-        self.assertIn("Claude Task Stage: review", prompt)
-        self.assertIn("Replica: 2/3", prompt)
-
-    def test_render_stage_prompt_falls_back_to_generic_template(self) -> None:
-        prompt = render_stage_prompt(
-            PromptContext(
-                adapter="manual",
-                stage_id="qa",
-                role="qa",
-                workflow_id="development",
-                run_id="r3",
-                replica=1,
-                replicas=1,
-                task="run gates",
-            )
-        )
-        self.assertIn("# qa", prompt)
-        self.assertIn("Adapter: manual", prompt)
-
-    def test_render_stage_prompt_allows_task_braces(self) -> None:
-        prompt = render_stage_prompt(
-            PromptContext(
-                adapter="manual",
-                stage_id="implement",
-                role="implementer",
-                workflow_id="development",
-                run_id="r4",
-                replica=1,
-                replicas=1,
-                task="replace {{token}} in docs",
-            )
-        )
-        self.assertIn("replace {{token}} in docs", prompt)
 
     def test_review_summary_lgtm_writes_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -8527,7 +8252,7 @@ if (codexContext !== undefined) {
                 "verdict: request-changes\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (1, False))
+            self.assertEqual(runner._next_index(0, phase)[:2], (1, False))
 
             (run_dir / "final-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n\n"
@@ -8536,7 +8261,7 @@ if (codexContext !== undefined) {
                 "verdict: request-changes\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (1, False))
+            self.assertEqual(runner._next_index(0, phase)[:2], (1, False))
 
             (run_dir / "final-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
@@ -8545,7 +8270,7 @@ if (codexContext !== undefined) {
                 "verdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (2, False))
+            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
 
     def test_default_final_review_blocks_one_subagent_reviewer_approve(self) -> None:
         from agent_flow.runner import Phase, Runner
@@ -8566,7 +8291,7 @@ if (codexContext !== undefined) {
                 encoding="utf-8",
             )
 
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
     def test_provider_rate_limits_render_retry_status(self) -> None:
         from agent_flow.multi_review import _render_angle_result, reviewer_result_error

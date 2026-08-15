@@ -643,7 +643,13 @@ def test_android_upstream_skills_are_not_installed_or_vendored(tmp_path: Path) -
     assert "android_skills" not in kit
     assert "chrisbanes_skills" not in kit
     bootstrap = (project / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8")
-    assert "missing local <group>: <skill>" in bootstrap
+    # 부재 통지 문구의 정본은 `code-generation-discipline` 한 곳이다. bootstrap이 같은
+    # 규칙을 또 적으면 정지 여부를 서로 다르게 지시하는 두 소유자가 생긴다.
+    assert "missing local" not in bootstrap
+    discipline = (
+        project / ".agent-flow" / "skills" / "code-generation-discipline" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    assert "missing local <group>: <skill>" in discipline
     android_profile = (project / ".agent-flow" / "profiles" / "android.yaml").read_text(encoding="utf-8")
     assert "url: https://github.com/skydoves/compose-performance-skills" in android_profile
     assert "kind: host-managed" in android_profile
@@ -865,20 +871,25 @@ def test_external_sources_declare_host_roots_without_installing() -> None:
     assert sources["skydoves-compose-performance"]["kind"] == "fetch"
 
 
-def test_bootstrap_template_and_skill_keep_the_missing_skill_wording() -> None:
+def test_missing_skill_wording_has_one_owner() -> None:
     """부재를 알리는 문구는 계약이다. 사라지면 사용자가 무엇을 깔아야 하는지 알 수 없다.
 
-    문구의 정본은 `bootstrap/AGENTS.md.template` 한 벌이다. 예전에는 이 검사가
-    `bin/agent-flow-kit.mjs`를 봤는데, 그건 kit가 같은 본문을 리터럴로 또 들고 있던
-    시절의 자리다. 지금 kit는 그 템플릿에서 파생만 하므로 kit 소스에서 문구를 찾으면
-    문구가 멀쩡해도 실패한다 — 설치본 쪽 계약은 같은 파일의 install 테스트가 본다.
+    문구의 정본은 `skills/code-generation-discipline/SKILL.md` 한 곳이다. 예전에는
+    `bootstrap/AGENTS.md.template`이 같은 규칙을 또 적었고, 두 문장이 정지 여부라는
+    관측 가능한 행동에서 반대를 지시했다(하나는 `skills sync`에 맡기고 진행, 하나는
+    설치까지 정지). 그래서 여기서는 정본에 문구가 있는지와 템플릿이 그것을 다시 적지
+    않는지를 함께 본다.
     """
     template_text = (KIT_ROOT / "bootstrap" / "AGENTS.md.template").read_text(encoding="utf-8")
+    discipline_text = (KIT_ROOT / "skills" / "code-generation-discipline" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
     review_text = (KIT_ROOT / "skills" / "android-code-review" / "SKILL.md").read_text(
         encoding="utf-8"
     )
 
-    assert "missing local <group>: <skill>" in template_text
+    assert "missing local <group>: <skill>" in discipline_text
+    assert "missing local" not in template_text
     assert "missing local <group>: <skill>" in review_text
 
 

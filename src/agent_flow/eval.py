@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from agent_flow.core.atomic_io import atomic_write_text
+
 
 @dataclass(frozen=True)
 class EvalResult:
@@ -28,9 +30,9 @@ def run_eval(
     results = [_run_fixture(root=root, fixture=fixture, judge_command=judge_command) for fixture in fixtures]
     output_dir = run_dir if run_dir is not None else root / ".agent-flow" / "eval"
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "results.json").write_text(
+    atomic_write_text(
+        output_dir / "results.json",
         f"{json.dumps([asdict(result) for result in results], indent=2, sort_keys=True)}\n",
-        encoding="utf-8",
     )
     return results
 

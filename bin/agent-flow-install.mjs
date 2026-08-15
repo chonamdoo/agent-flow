@@ -24,6 +24,7 @@ import {
   ASSET_UPGRADE_NOTICE_PREFIX,
   arrayValue,
   assertInstallRootIsFinal,
+  atomicWriteFileSync,
   backupIfDifferent,
   BOOTSTRAP_TEMPLATE_FILE,
   claudeHooksSettings,
@@ -438,14 +439,14 @@ function copyFileIfMissingOrSame(src, dest, force = false) {
 function writeFileIfMissingOrSame(dest, content, force = false) {
   ensureDir(path.dirname(dest));
   if (force) {
-    fs.writeFileSync(dest, content, "utf8");
+    atomicWriteFileSync(dest, content);
     return true;
   }
   if (fs.existsSync(dest) && fs.readFileSync(dest, "utf8") !== content) {
     reportSkippedUserEdit(path.relative(PROJECT, dest));
     return false;
   }
-  fs.writeFileSync(dest, content, "utf8");
+  atomicWriteFileSync(dest, content);
   return true;
 }
 
@@ -494,8 +495,7 @@ function installCodexHooks(root) {
   }
   mergeHookSettings(settings, codexHooksSettings(root).hooks, hooksDisabled);
   for (const settingsPath of settingsPaths) {
-    ensureDir(path.dirname(settingsPath));
-    fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+    atomicWriteFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
   }
   return true;
 }
@@ -505,8 +505,7 @@ function installClaudeHooks(root) {
   const settingsPath = path.join(root, ".claude", "settings.json");
   const settings = readHookSettings(settingsPath);
   mergeHookSettings(settings, claudeHooksSettings(root).hooks, hooksDisabled);
-  ensureDir(path.dirname(settingsPath));
-  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  atomicWriteFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
 }
 
 
@@ -532,8 +531,7 @@ function upgradeManagedHooks(root, src, dest) {
       // `hook_integrity`가 관리 대상 아닌 실행 파일로 보고 run 시작을 막는다.
       fs.chmodSync(backup, 0o644);
     }
-    fs.writeFileSync(target, content, "utf8");
-    fs.chmodSync(target, fs.statSync(source).mode & 0o777);
+    atomicWriteFileSync(target, content, { mode: fs.statSync(source).mode & 0o777 });
   }
 }
 
@@ -599,7 +597,7 @@ function pruneManagedHookRegistrations(root) {
       continue;
     }
     if (pruneRetiredHooks(settings, false, hooksDisabled)) {
-      fs.writeFileSync(target, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+      atomicWriteFileSync(target, `${JSON.stringify(settings, null, 2)}\n`);
       console.log(`  - hooks disabled: cleared ${path.join(...rel)}`);
     }
   }
@@ -658,7 +656,9 @@ function installProjectSkills(forceManaged = false, installSelection = null) {
   }
   links.push(...removeStaleProjectSkillLinks(selected.skills, previousIndex, forceManaged));
   const index = preserveKitSkillHashes({ ...selected, links }, previousIndex, path.join(KIT_ROOT, "skills"));
-  fs.writeFileSync(path.join(AF_DIR, "skills", "index.json"), `${JSON.stringify(index, null, 2)}\n`);
+  // 잘린 index.json은 `readJsonIfExists`가 조용히 삼켜 "설치된 skill 없음"으로
+  // 읽힌다. 그러면 다음 install이 관리 링크를 stale로 보고 걷어낸다.
+  atomicWriteFileSync(path.join(AF_DIR, "skills", "index.json"), `${JSON.stringify(index, null, 2)}\n`);
   return index;
 }
 
@@ -1271,10 +1271,7 @@ function install() {
       warnings: skillIndex.warnings.length,
     },
   };
-  fs.writeFileSync(
-    path.join(AF_DIR, "kit.json"),
-    JSON.stringify(kitJson, null, 2)
-  );
+  atomicWriteFileSync(path.join(AF_DIR, "kit.json"), JSON.stringify(kitJson, null, 2));
   if (delegatedKitInstalled) {
     syncManagedWorktreeHostHooks(PROJECT);
   }

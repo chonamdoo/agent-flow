@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_flow.core.profiles import active_profile_ids, load_profile_payload
-from agent_flow.core.commands import run_safe_command
+from agent_flow.core.worktree_isolation import git_safe
 
 
 SOURCE_SUFFIXES = {".gradle", ".kt", ".kts", ".java", ".swift", ".py", ".ts", ".tsx", ".js", ".jsx"}
@@ -424,21 +424,24 @@ def root_path_is_active(rel_path: str, activation_roots: tuple[str, ...]) -> boo
 def changed_files(root: Path) -> list[str]:
     if not (root / ".git").exists():
         return []
-    tracked = run_safe_command(
-        ["git", "diff", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", "--"],
+    tracked = git_safe(
+        "diff", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", "--",
         cwd=root,
+        optional_locks=False,
     )
     tracked_outputs: list[str] = []
     if tracked.ok:
         tracked_outputs.append(tracked.stdout)
     else:
-        staged = run_safe_command(
-            ["git", "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB", "--"],
+        staged = git_safe(
+            "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB", "--",
             cwd=root,
+            optional_locks=False,
         )
-        unstaged = run_safe_command(
-            ["git", "diff", "--name-only", "-z", "--diff-filter=ACMRTUXB", "--"],
+        unstaged = git_safe(
+            "diff", "--name-only", "-z", "--diff-filter=ACMRTUXB", "--",
             cwd=root,
+            optional_locks=False,
         )
         if not staged.ok or not unstaged.ok:
             details = [
@@ -451,9 +454,10 @@ def changed_files(root: Path) -> list[str]:
                 + "; ".join(details)
             )
         tracked_outputs.extend((staged.stdout, unstaged.stdout))
-    untracked = run_safe_command(
-        ["git", "ls-files", "-z", "--others", "--exclude-standard"],
+    untracked = git_safe(
+        "ls-files", "-z", "--others", "--exclude-standard",
         cwd=root,
+        optional_locks=False,
     )
     if not untracked.ok:
         detail = untracked.stderr.strip() or untracked.error or "git did not answer"

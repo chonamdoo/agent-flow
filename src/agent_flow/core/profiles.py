@@ -8,6 +8,10 @@ from typing import Any
 
 import yaml
 
+from agent_flow.core.reviewer_launch import (
+    ReviewerLaunchError,
+    validate_reviewer_launch_declaration,
+)
 from agent_flow.core.security import (
     ensure_child_path,
     validate_git_branch,
@@ -31,7 +35,13 @@ class _UnknownProfileError(ValueError):
 
 
 # override가 실제로 반영되는 키만 받는다. 근거는 `apply_project_profile_override`.
-PROJECT_OVERRIDE_KEYS: tuple[str, ...] = ("architecture", "branching", "gates", "pr")
+PROJECT_OVERRIDE_KEYS: tuple[str, ...] = (
+    "architecture",
+    "branching",
+    "execution",
+    "gates",
+    "pr",
+)
 
 # 배포 role이 선언했으면 동명 override role도 반드시 다시 선언해야 하는 키.
 #
@@ -346,6 +356,7 @@ def _validate_project_profile_override_shape(
             _validate_override_role_fields(role, source=source)
         _assert_override_keeps_shipped_role_declarations(roles, packaged, source=source)
     _validate_override_leader_tripwire(override, source=source)
+    _validate_override_execution(override, source=source)
     if "gates" not in override:
         return
     gates = override["gates"]
@@ -357,6 +368,25 @@ def _validate_project_profile_override_shape(
             _gate_from_payload(item, profile_id=profile_id)
     except ValueError as exc:
         raise ValueError(f"invalid profile override gate: {source}: {exc}") from exc
+
+
+def _validate_override_execution(override: dict[str, Any], *, source: Path) -> None:
+    """reviewer launch 선언은 그것을 해석하는 파서로 검사한다.
+
+    파서는 `core.reviewer_launch`에 있다. 여기 규칙을 한 벌 더 적으면 gates에서
+    피한 이중화가 그대로 생긴다.
+    """
+    if "execution" not in override:
+        return
+    execution = override["execution"]
+    # 키가 있으면서 값이 없는 `execution:`은 거부한다. `_deep_merge`가 배포본 선언을
+    # `None`으로 갈아 끼우고, 소비자는 그것을 "선언 없음"으로 읽어 기본 model로 돈다.
+    if execution is None:
+        raise ValueError(f"profile override execution must be a mapping: {source}")
+    try:
+        validate_reviewer_launch_declaration(execution)
+    except ReviewerLaunchError as exc:
+        raise ValueError(f"invalid profile override execution: {source}: {exc}") from exc
 
 
 # role 필드가 소비자에게 어떤 모양으로 읽히는가. 이름을 고른 목록이 아니라

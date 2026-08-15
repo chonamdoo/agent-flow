@@ -10,8 +10,9 @@
 #
 #   .agent-flow/profiles/<profile-id>.local.yaml
 #
-# install이 손대지 않는 유일한 자리이고, `architecture`·`branching`·`gates`·`pr`만
-# 받는다(그 외 키는 거부된다 — 반영되지 않는 선언을 조용히 삼키지 않기 위해서다).
+# install이 손대지 않는 유일한 자리이고, `architecture`·`branching`·`execution`·
+# `gates`·`pr`만 받는다(그 외 키는 거부된다 — 반영되지 않는 선언을 조용히 삼키지
+# 않기 위해서다).
 # dict는 깊게 병합하고 리스트와 스칼라는 통째로 대체한다. 리스트를 대체로 두는
 # 이유는 `gates`와 `architecture.roles` 때문이다: 저장소가 자기 모듈 구조를
 # 선언하는 것은 배포본 표에 **덧붙이는** 일이 아니라 **대신하는** 일이고, 이어
@@ -89,6 +90,36 @@ optional:
       command: ["command", "argument"]
       required: true
       phase: "pre-commit | pre-push | post-merge"
+
+  # reviewer subprocess를 어떤 model/effort로 띄우는가.
+  #
+  # provider를 고르는 것은 이 블록이 아니다. reviewer pool 배정(claude/codex 각
+  # 슬롯)은 실행이 정하고, 여기 선언은 **이미 배정된 provider**를 model/effort로
+  # 장식하기만 한다. 배정된 provider에 맞는 candidate가 없으면 그 슬롯은 model
+  # 미지정 기본값으로 돈다 — 다른 provider로 갈아 끼우지 않는다. 갈아 끼우면
+  # artifact 이름(`<angle>-codex.md`)이 실제 실행과 어긋나고, "독립된 두
+  # provider가 봤다"가 존재하지 않는 다양성으로 만족된 것처럼 읽힌다.
+  #
+  # 선언하지 않으면 provider 기본값으로 돈다(model 미지정). 선언했는데 해석할 수
+  # 없으면 리뷰를 막는다 — 조용히 기본 model로 접으면 artifact의
+  # `- model:` 줄이 "선언한 model로 돌았다"를 증명하지 못한다.
+  #
+  # 플래그 번역은 실측한 철자만 쓴다(`claude --help`, `codex exec --help`):
+  # claude는 `--model`/`--effort`, codex는 `--model`과
+  # `-c model_reasoning_effort="<level>"`. reviewer pool은 claude/codex뿐이다 —
+  # omp는 run을 host할 수는 있어도 reviewer provider가 아니다.
+  execution:
+    reviewers:
+      # 먼저 일치하는 rule 하나만 쓴다. 선언 순서가 우선순위다.
+      - match:
+          phase: "optional phase id (e.g. final-review, review); omit to match every review phase"
+          angle: "optional review angle id; omit to match every angle"
+        # 배정된 provider와 일치하는 첫 candidate가 쓰인다. 같은 provider를 여러 번
+        # 선언했을 때의 우선순위가 선언 순서다.
+        candidates:
+          - provider: "claude | codex"
+            model: "optional model id the provider CLI accepts (e.g. fable, gpt-5.6-sol)"
+            effort: "low | medium | high | xhigh"
 
   review_angles:
     # zero or more specialist reviewers added at final-review.

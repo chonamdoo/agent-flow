@@ -896,3 +896,30 @@ def test_external_routing_is_identical_under_either_profile_order():
         seen.add(tuple(sorted((match.name, match.domain, match.tier) for match in matches)))
 
     assert len(seen) == 1, f"profile 순서가 라우팅을 바꾼다: {seen}"
+
+
+def test_profile_loading_does_not_import_the_environment_probes():
+    """profile 로딩은 선언을 읽는 일이다. PATH probe를 끌고 오면 안 된다.
+
+    `cli_detect`는 `shutil.which`와 `subprocess`로 설치된 CLI를 뒤지는 환경 탐지고,
+    `multi_review`는 reviewer 프로세스를 띄우는 자리다. reviewer 어휘 상수 하나를
+    빌리려고 그것들을 import하면, gate 나열이나 skill 해석처럼 CLI와 무관한 경로가
+    프로세스를 띄우는 모듈을 통째로 적재한다.
+
+    같은 프로세스는 이미 두 모듈을 import했을 수 있으므로 새 인터프리터에서 본다.
+    """
+    probe = (
+        "import sys, agent_flow.core.profiles;"
+        "print('agent_flow.cli_detect' in sys.modules,"
+        " 'agent_flow.multi_review' in sys.modules)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(KIT_ROOT),
+        env={"PYTHONPATH": str(KIT_ROOT / "src"), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "False False", result.stderr

@@ -21,7 +21,6 @@ import stat
 from pathlib import Path
 from typing import Sequence
 
-from agent_flow.core.commands import run_safe_command
 from agent_flow.core.command_evidence import (
     is_test_command_execution,
     read_command_evidence,
@@ -35,7 +34,7 @@ from agent_flow.core.design_ledger import (
 )
 from agent_flow.core.markers import completion_gate_marker_values
 from agent_flow.core.phase_workflow import overall_review_route_key
-from agent_flow.core.worktree_isolation import git_repo_state
+from agent_flow.core.worktree_isolation import git_repo_state, git_safe
 
 # 구현을 판정하는 phase. 여기서 안 잡으면 gates는 build/test만 보고 통과시킨다.
 DESIGN_VALUE_PHASES = frozenset({"final-review", "multi-review"})
@@ -218,12 +217,8 @@ def added_lines(project_root: Path, *, profile: dict | None = None) -> str | Non
     건드리지 않기 위해 `add -N` 대신 untracked 파일을 직접 읽는다.
     """
     base = _merge_base(project_root, profile=profile)
-    args = (
-        ["git", "diff", "--unified=0", base]
-        if base
-        else ["git", "diff", "--unified=0", "HEAD"]
-    )
-    result = run_safe_command(args, cwd=project_root, timeout_s=_GIT_TIMEOUT_S)
+    args = ("diff", "--unified=0", base) if base else ("diff", "--unified=0", "HEAD")
+    result = git_safe(*args, cwd=project_root, timeout_s=_GIT_TIMEOUT_S, optional_locks=False)
     if not result.ok:
         return None
     chunks = [
@@ -241,12 +236,8 @@ def changed_file_evidence(
     profile: dict | None = None,
 ) -> dict[str, tuple[str, str]] | None:
     base = _merge_base(project_root, profile=profile)
-    args = (
-        ["git", "diff", "--unified=0", base]
-        if base
-        else ["git", "diff", "--unified=0", "HEAD"]
-    )
-    result = run_safe_command(args, cwd=project_root, timeout_s=_GIT_TIMEOUT_S)
+    args = ("diff", "--unified=0", base) if base else ("diff", "--unified=0", "HEAD")
+    result = git_safe(*args, cwd=project_root, timeout_s=_GIT_TIMEOUT_S, optional_locks=False)
     if not result.ok:
         return None
     additions = _diff_added_lines(result.stdout)
@@ -290,10 +281,11 @@ def _untracked_text(project_root: Path) -> list[str]:
 
 
 def _untracked_files(project_root: Path) -> list[tuple[str, str]]:
-    result = run_safe_command(
-        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+    result = git_safe(
+        "ls-files", "--others", "--exclude-standard", "-z",
         cwd=project_root,
         timeout_s=_GIT_TIMEOUT_S,
+        optional_locks=False,
     )
     if not result.ok:
         return []
@@ -328,8 +320,11 @@ def _read_regular_checkout_file(project_root: Path, relative: str) -> str | None
 
 def _merge_base(project_root: Path, *, profile: dict | None) -> str | None:
     for candidate in _base_candidates(profile):
-        result = run_safe_command(
-            ["git", "merge-base", "HEAD", candidate], cwd=project_root, timeout_s=_GIT_TIMEOUT_S
+        result = git_safe(
+            "merge-base", "HEAD", candidate,
+            cwd=project_root,
+            timeout_s=_GIT_TIMEOUT_S,
+            optional_locks=False,
         )
         if result.ok and result.stdout.strip():
             return result.stdout.strip()

@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -14,15 +13,11 @@ from pathlib import Path
 
 import yaml
 
-from agent_flow.adapters.registry import detect_adapter
-from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.artifacts import (
     init_project,
     write_gate_results,
     write_handoff,
-    write_prompt,
     write_recovery,
-    write_stage_result,
 )
 from agent_flow.core.architecture_lint import main as architecture_lint_main
 from agent_flow.core.context_contract import (
@@ -45,6 +40,7 @@ from agent_flow.core.design_value_check import missing_spec_item_evidence
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.kit_digest import warn_if_installed_kit_is_stale
 from agent_flow.core.phase_workflow import (
+    ACCEPT_WORKFLOW_DRIFT_FLAG,
     DeclaredPhaseSkills,
     declared_phase_skills,
     load_phase_workflow_definition,
@@ -117,6 +113,8 @@ from agent_flow.core.worktrees import (
     UnknownWorktreeSetupAction,
     WORKTREE_SETUP_ACTIONS,
     copy_declared_worktree_files,
+    declared_worktree_copies,
+    ROOT_CONTEXT_FILES,
     DEFAULT_SLUG_MAX_LENGTH,
     describe_slug,
     delegated_slug,
@@ -137,7 +135,6 @@ from agent_flow.core.worktrees import (
     resolve_worktree,
     worktree_branch_exists,
     worktree_runtime_root,
-    worktree_run_activation,
     user_worktrees_root,
 )
 from agent_flow.core.hook_integrity import (
@@ -165,8 +162,6 @@ from agent_flow.core.worktree_isolation import (
     worker_claim_lock,
     worktree_path_key,
 )
-from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
-from agent_flow.core.workflow import load_workflow
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
 from agent_flow.artifact import find_active_run, mark_inactive, read_meta
@@ -228,6 +223,14 @@ def main(argv: list[str] | None = None) -> int:
             "to it; only valid for the exact state that was reported"
         ),
     )
+    continue_parser.add_argument(
+        ACCEPT_WORKFLOW_DRIFT_FLAG,
+        action="store_true",
+        help=(
+            "re-baseline this run to the current workflow definition after the "
+            "definition changed underneath it (kit upgrades change it)"
+        ),
+    )
 
     abort_parser = subparsers.add_parser("abort")
     abort_parser.add_argument("--root", default=".")
@@ -239,8 +242,6 @@ def main(argv: list[str] | None = None) -> int:
     start_parser.add_argument("--root", default=".")
     start_parser.add_argument("--task", required=True)
     start_parser.add_argument("--run-id")
-    start_parser.add_argument("--adapter", default="auto")
-    start_parser.add_argument("--profile", default="auto")
     start_parser.add_argument(
         "--architecture",
         choices=("default", "ddd", "service-layer"),
@@ -254,7 +255,6 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="reuse the managed worktree inferred from the current directory",
     )
-    start_parser.add_argument("--phase-runner", action="store_true", help=argparse.SUPPRESS)
     start_parser.add_argument("--checkout-identity", help=argparse.SUPPRESS)
 
     status_parser = subparsers.add_parser("status")
@@ -402,15 +402,6 @@ def main(argv: list[str] | None = None) -> int:
     memory_entities = memory_subparsers.add_parser("entities")
     memory_entities.add_argument("--root", default=".")
     memory_entities.add_argument("--dir")
-
-    record_parser = subparsers.add_parser("record-stage")
-    record_parser.add_argument("--root", default=".")
-    record_parser.add_argument("--run-dir", required=True)
-    record_parser.add_argument("--stage", required=True)
-    record_parser.add_argument("--status", default="completed")
-    record_parser.add_argument("--evidence-type", default="observed")
-    record_parser.add_argument("--confidence", default="unknown")
-    record_parser.add_argument("--content", required=True)
 
     handoff_parser = subparsers.add_parser("handoff")
     handoff_parser.add_argument("--root", default=".")
@@ -812,6 +803,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_root=root,
                 next_command=_continue_command(root, args.worktree),
                 accept_leader_drift=args.accept_leader_drift,
+                accept_workflow_drift=args.accept_workflow_drift,
             ).run(mode=ResumeMode.RESUME)
         except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
             # 보여야 사용자가 다음 수를 안다.
@@ -878,7 +870,9 @@ def main(argv: list[str] | None = None) -> int:
         if not (state_root / ".agent-flow" / "runs").exists():
             print("진행 중인 run 없음.")
             return 0
-        print(status_summary(state_root))
+        # run 디렉터리는 있는데 활성 표식이 없다. `bin/agent-flow-kit.mjs`와 기존
+        # 테스트가 이 문자열을 그대로 읽으므로 문구를 바꾸지 않는다.
+        print("no runs")
         return 0
 
     if args.command == "report":
@@ -1173,18 +1167,6 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"skipped: {path}: {reason}")
             return 1 if index.conflicts or index.skipped else 0
 
-    if args.command == "record-stage":
-        path = write_stage_result(
-            run_dir=_resolve_project_path(root, args.run_dir),
-            stage_id=args.stage,
-            status=args.status,
-            evidence_type=args.evidence_type,
-            confidence=args.confidence,
-            content=args.content,
-        )
-        print(path)
-        return 0
-
     if args.command == "handoff":
         path = write_handoff(
             root=root,
@@ -1211,11 +1193,11 @@ def main(argv: list[str] | None = None) -> int:
                 title="Review needs changes",
                 cause="Review findings require a fix stage.",
                 artifacts=[str(summary_path), *(str(path) for path in review_paths)],
-                rerun_command=(
-                    "agent-flow record-stage --stage fix --status completed "
-                    f"--run-dir {args.run_dir} --content '<fix summary>'"
+                rerun_command="agent-flow continue",
+                manual_action=(
+                    "Fix the findings in the current phase artifact, then "
+                    "`agent-flow continue` — the fix-loop route reruns review."
                 ),
-                manual_action="Apply fixes, record the fix stage, then rerun review-summary.",
             )
         print(f"{summary.verdict}: {len(summary.findings)} findings")
         return 1 if summary.verdict == "NEEDS_CHANGES" else 0
@@ -1865,10 +1847,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     if args.command == "start":
-        worktree = None
         worktree_status = None
         worktree_preexisting = False
-        state = None
         repo_state = git_repo_state(root)
         if repo_state == "unknown":
             print(
@@ -1888,109 +1868,61 @@ def main(argv: list[str] | None = None) -> int:
         except HookIntegrityError as exc:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
-        worktree_name = args.worktree
-        implicit_phase_worktree = args.phase_runner and worktree_name is None
-        if worktree_name is None:
-            worktree_name = args.task
-        if args.phase_runner:
-            if _legacy_js_state_exists(root):
-                _print_legacy_js_state_migration(root)
-                return 2
-            try:
-                _assert_entry_checkout_identity(
-                    root=root,
-                    worktree=None if implicit_phase_worktree else worktree_name,
-                    branch=(
-                        None if implicit_phase_worktree else args.worktree_branch
-                    ),
-                    claimed=args.checkout_identity,
-                )
-            except (OSError, ValueError, RuntimeError) as exc:
-                print(_format_cli_error(exc), file=sys.stderr)
-                return 2
+        if _legacy_js_state_exists(root):
+            _print_legacy_js_state_migration(root)
+            return 2
+        # 명시 selector가 없으면 checkout 이름은 task에서 유도한다. 그 checkout은
+        # 아직 없으므로 진입 시점의 identity는 지금 서 있는 곳(leader)이다.
+        implicit_worktree = args.worktree is None
+        worktree_name = args.worktree if args.worktree is not None else args.task
+        entry_worktree = None if implicit_worktree else worktree_name
+        entry_branch = None if implicit_worktree else args.worktree_branch
         try:
-            if worktree_name is not None:
-                status, worktree_preexisting = _resolve_entry_worktree(
-                    root=root,
-                    selector=worktree_name,
-                    explicit=args.worktree is not None,
-                    branch=args.worktree_branch,
-                    allow_dirty=args.allow_dirty,
-                    expected_registration_identity=inferred_registration_identity,
-                )
-                worktree_status = status
-                worktree = {
-                    "name": status.name,
-                    "branch": status.branch,
-                    "path": str(status.path),
-                }
-            state_root = (
-                worktree_runtime_root(root=root, name=worktree["name"])
-                if worktree is not None
-                else root
+            # relay는 상태를 건드리기 전에 자기가 선 checkout을 주장한다. 직접
+            # 호출에는 그 시점이 없으므로 같은 규칙으로 여기서 유도한다 — 진짜
+            # 검증은 worktree 해소 뒤 실제 identity와 다시 맞춰 보는 아래 비교다.
+            claimed_identity = args.checkout_identity or _expected_checkout_identity(
+                root=root, worktree=entry_worktree, branch=entry_branch
             )
-            if args.phase_runner:
-                actual_identity = _checkout_identity(
-                    worktree_status.name if worktree_status is not None else None
-                )
-                if (
-                    not implicit_phase_worktree
-                    and args.checkout_identity != actual_identity
-                ):
-                    raise ValueError(
-                        "checkout identity changed during worktree resolution; refusing to start"
-                    )
-                run_root = (
-                    worktree_status.path if worktree_status is not None else root
-                )
-                Runner(
-                    run_root,
-                    state_root=state_root,
-                    config_root=root,
-                    workflow=args.workflow,
-                    architecture=args.architecture,
-                    next_command=_continue_command(
-                        root,
-                        worktree_status.name
-                        if worktree_status is not None
-                        else None,
-                    ),
-                    requested_run_id=args.run_id,
-                    checkout_identity=actual_identity,
-                    checkout_registration_identity=(
-                        worktree_status.registration_identity
-                        if worktree_status is not None
-                        else None
-                    ),
-                ).run(mode=ResumeMode.START, task=args.task)
-                return 0
-
-            workflow = load_workflow(args.workflow)
-            profile = detect_profile(root) if args.profile == "auto" else args.profile
-            adapter = detect_adapter() if args.adapter == "auto" else args.adapter
-            if worktree_status is None:
-                raise WorktreeIsolationError(
-                    "worktree registration is unavailable before run activation"
-                )
-            with worktree_run_activation(
+            _assert_entry_checkout_identity(
                 root=root,
-                path=worktree_status.path,
-                registration_identity=worktree_status.registration_identity,
-            ):
-                state = start_run(
-                    root=state_root,
-                    request=RunRequest(
-                        workflow_id=workflow.workflow_id,
-                        task=args.task,
-                        adapter=adapter,
-                        profile=profile,
-                        architecture=args.architecture,
-                        run_id=args.run_id,
-                        worktree=worktree,
-                    ),
-                    project_root=root,
+                worktree=entry_worktree,
+                branch=entry_branch,
+                claimed=claimed_identity,
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
+        try:
+            worktree_status, worktree_preexisting = _resolve_entry_worktree(
+                root=root,
+                selector=worktree_name,
+                explicit=args.worktree is not None,
+                branch=args.worktree_branch,
+                allow_dirty=args.allow_dirty,
+                expected_registration_identity=inferred_registration_identity,
+            )
+            actual_identity = _checkout_identity(worktree_status.name)
+            if not implicit_worktree and claimed_identity != actual_identity:
+                raise ValueError(
+                    "checkout identity changed during worktree resolution; "
+                    "refusing to start"
                 )
-            _write_stage_prompts(root=state_root, state=state, workflow=workflow)
+            Runner(
+                worktree_status.path,
+                state_root=worktree_runtime_root(
+                    root=root, name=worktree_status.name
+                ),
+                config_root=root,
+                workflow=args.workflow,
+                architecture=args.architecture,
+                next_command=_continue_command(root, worktree_status.name),
+                requested_run_id=args.run_id,
+                checkout_identity=actual_identity,
+                checkout_registration_identity=(
+                    worktree_status.registration_identity
+                ),
+            ).run(mode=ResumeMode.START, task=args.task)
         except (
             OSError,
             ValueError,
@@ -1998,42 +1930,14 @@ def main(argv: list[str] | None = None) -> int:
             KeyError,
             subprocess.CalledProcessError,
         ) as exc:
-            if state is not None and state.run_dir.exists():
-                shutil.rmtree(state.run_dir)
             if worktree_status is not None and not worktree_preexisting:
                 _cleanup_worktree_after_failure(root, worktree_status, exc)
             else:
                 print(_format_cli_error(exc), file=sys.stderr)
             return 2
-        print(state.run_dir)
         return 0
 
     return 1
-
-
-def _write_stage_prompts(*, root: Path, state: RunState, workflow) -> None:
-    for stage in workflow.stages:
-        count = stage.replicas if stage.parallel else 1
-        for replica in range(1, count + 1):
-            prompt_id = stage.stage_id if count == 1 else f"{stage.stage_id}-{replica}"
-            write_prompt(
-                root=root,
-                run_dir=state.run_dir,
-                stage_id=prompt_id,
-                content=render_stage_prompt(
-                    PromptContext(
-                        adapter=state.adapter,
-                        stage_id=stage.stage_id,
-                        role=stage.role,
-                        workflow_id=state.workflow_id,
-                        run_id=state.run_id,
-                        architecture=state.architecture,
-                        replica=replica,
-                        replicas=count,
-                        task=state.task,
-                    )
-                ),
-            )
 
 
 def _read_json_file(path: str) -> object | str:
@@ -2605,41 +2509,6 @@ def _keep_failed_worktree() -> bool:
     return os.environ.get(KEEP_FAILED_WORKTREE_ENV, "").strip().lower() in _TRUTHY_ENV
 
 
-# 두 파일은 프로젝트가 커밋할 수도, gitignore할 수도 있다(예전 install이 넣어 둔 항목이
-# 그대로 남아 있는 프로젝트도 많다). 추적하지 않는 쪽이면 `git worktree add`가 가져올
-# 것도, worktree 안 install(= no-op)이 만들 것도 없어서 그 checkout에서 연 host 세션은
-# agent-flow 계약을 한 글자도 받지 못한다. leader에서 복사해 그 공백을 닫는다.
-ROOT_CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md")
-
-
-def _declared_worktree_copies(profile: dict) -> list[str]:
-    """새 checkout이 받아야 할 이름: 루트 컨텍스트 파일 + 단일/합성 profile 선언.
-
-    `_load_profile_union`이 만드는 합성 dict에는 최상위 `branching`이 없다 —
-    개별 profile은 `profiles` 아래에 들어가고 최상위에는 `review_angles`/`gates`/
-    `skills`/`architecture`만 합쳐진다. 최상위만 보면 android+react-native처럼
-    profile이 둘 이상인 프로젝트에서 선언이 조용히 빈 목록이 되고, `local.properties`가
-    영영 복사되지 않는다.
-    """
-    sources: list[dict] = [profile]
-    nested = profile.get("profiles")
-    if isinstance(nested, list):
-        sources.extend(item for item in nested if isinstance(item, dict))
-    names: list[str] = list(ROOT_CONTEXT_FILES)
-    for source in sources:
-        branching = source.get("branching")
-        if not isinstance(branching, dict):
-            continue
-        setup = branching.get("worktree_setup")
-        if not isinstance(setup, dict):
-            continue
-        for name in setup.get("copy") or []:
-            text = str(name)
-            if text not in names:
-                names.append(text)
-    return names
-
-
 def _provision_host_hooks(*, root: Path, checkout: Path) -> None:
     """checkout에서 연 host 세션에도 managed hook 등록 파일을 provision한다.
 
@@ -2677,7 +2546,7 @@ def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
     copied = list(_copy_worktree_files(root=root, checkout=checkout, names=ROOT_CONTEXT_FILES))
     try:
         _profile_id, profile = _load_profile(_find_kit_root(), root)
-        declared = [str(name) for name in _declared_worktree_copies(profile)]
+        declared = [str(name) for name in declared_worktree_copies(profile)]
     except Exception as exc:  # profile 해석 실패가 worktree 생성을 막을 이유는 없다
         print(f"warning: skipped worktree setup: {_format_cli_error(exc)}", file=sys.stderr)
         if copied:
@@ -2738,7 +2607,7 @@ def _sync_declared_worktree_files(
         return
     try:
         _profile_id, profile = _load_profile(_find_kit_root(), root)
-        declared = [str(name) for name in _declared_worktree_copies(profile)]
+        declared = [str(name) for name in declared_worktree_copies(profile)]
     except Exception as exc:  # profile 해석 실패가 install을 막을 이유는 없다
         print(
             f"warning: skipped worktree config sync: {_format_cli_error(exc)}",

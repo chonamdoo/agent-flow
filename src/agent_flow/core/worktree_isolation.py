@@ -810,6 +810,94 @@ def write_run_artifact_text(
         temporary.unlink(missing_ok=True)
 
 
+def resolve_run_subpath(run_path: Path, target: Path) -> Path:
+    """run 안으로 봉쇄된 절대 경로. 벗어나면 raise. **아무것도 만들지 않는다.**
+
+    쓰기는 `write_run_subpath_text`가, 그 밖의 접근(삭제·읽기)은 이 함수로 경로를
+    확정한 뒤에 한다. 봉쇄 규칙을 두 벌 적으면 한쪽만 고쳐 조용히 갈라진다.
+    """
+    artifact_root = run_path.resolve()
+    relative = _run_relative_subpath(run_path, artifact_root, target)
+    resolved = artifact_root.joinpath(*relative.parts)
+    _assert_directory_within_run(artifact_root, resolved.parent, target)
+    return resolved
+
+
+def write_run_subpath_text(run_path: Path, target: Path, content: str) -> None:
+    """Atomically replace one regular file anywhere inside an attested run.
+
+    `write_run_artifact_text`는 target이 **해소된** run 디렉터리의 직계 자식일
+    때만 받는다. 그런데 run 안에는 `handoffs/`, `artifacts/` 같은 하위 디렉터리가
+    있어서, 호출부마다 "target의 부모를 resolve해 그것을 run root라고 넘긴다"는
+    우회가 한 벌씩 생겼다. 그러면 직계-자식 단언이 구조적으로 항상 참이 되어
+    봉쇄가 통째로 사라진다 — 이름에 `..`가 섞여 들어와도 `mkdir -p`가 run 밖에
+    디렉터리를 만들고 그 자리에 쓴다. 하위 경로를 **진짜 run root** 기준으로
+    봉쇄하는 자리는 여기 하나뿐이고, 쓰기 자체는 그대로 정본 writer가 한다.
+    """
+    _ensure_run_root(run_path)
+    resolved = resolve_run_subpath(run_path, target)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    # mkdir는 lexical 경로에만 작용하므로 run 밖 디렉터리는 새로 생기지 않는다.
+    # 그래도 다시 본다 — 위 확인과 이 mkdir 사이에 symlink가 끼어들 수 있다.
+    directory = resolved.parent
+    _assert_directory_within_run(run_path.resolve(), directory, target)
+    attested = directory.resolve()
+    write_run_artifact_text(attested, attested / resolved.name, content)
+
+
+def _ensure_run_root(run_path: Path) -> None:
+    """run 디렉터리 자체를 필요하면 만든다.
+
+    `agent-flow gates --run-dir <아직 없는 경로>`처럼 첫 artifact가 run 디렉터리를
+    함께 만드는 호출부가 있다. 봉쇄 대상은 호출부가 준 run root가 아니라 그 **안**의
+    경로다 — root를 만들지 않으면 그 호출부가 통째로 막힌다.
+    """
+    try:
+        run_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise WorktreeIsolationError(
+            f"run artifact root is unusable: {run_path}: {exc}"
+        ) from exc
+    if not run_path.resolve().is_dir():
+        raise WorktreeIsolationError(f"run artifact root is not a directory: {run_path}")
+
+
+def _assert_directory_within_run(artifact_root: Path, directory: Path, target: Path) -> None:
+    """``directory``가 실제로 run 안인가. 없으면 볼 것이 없다.
+
+    lexical 봉쇄를 통과한 뒤 남는 탈출로는 이미 심어져 있던 symlink 디렉터리뿐이다.
+    `resolve`가 체인 전체를 따라가므로 중간 어디에 끼어 있어도 여기서 드러난다.
+    """
+    if not directory.exists():
+        return
+    resolved = directory.resolve()
+    if resolved != artifact_root and artifact_root not in resolved.parents:
+        raise WorktreeIsolationError(
+            f"run artifact target is outside its attested directory: {target}"
+        )
+
+
+def _run_relative_subpath(run_path: Path, artifact_root: Path, target: Path) -> Path:
+    """``target``이 run 안에서 차지하는 상대 경로. 벗어나면 raise.
+
+    lexical 정규화가 먼저다. `..`를 남긴 채 `mkdir -p`를 부르면 디렉터리가 run
+    밖에 **실제로 생긴 뒤에야** 검사할 것이 생긴다. 호출부의 run_path는 해소돼
+    있지 않을 수 있어(macOS `/var` -> `/private/var`) 양쪽 기준으로 본다.
+    """
+    absolute = target if target.is_absolute() else run_path / target
+    normalized = Path(os.path.normpath(str(absolute)))
+    for base in (Path(os.path.normpath(str(run_path))), artifact_root):
+        try:
+            relative = normalized.relative_to(base)
+        except ValueError:
+            continue
+        if relative.parts:
+            return relative
+    raise WorktreeIsolationError(
+        f"run artifact target is outside its attested directory: {target}"
+    )
+
+
 def max_worker_capacity() -> int:
     """선언된 동시성. 잘못된 env를 조용히 기본값으로 접으면 provider slot은
     거부하고 pool은 계속 도는 상태가 되어 선언값과 실제가 갈린다."""
@@ -2430,9 +2518,15 @@ def git_safe(
 
     The locale is pinned so every message we branch on stays deterministic. It is
     applied to this command only and never leaks into the worker env.
+
+    Interactive credential prompts are disabled unconditionally. agent-flow has no
+    call site that wants one, and a prompt does not fail — it blocks on a terminal
+    nobody is watching until the command timeout fires. Making this a parameter
+    would invent a "some calls may prompt" policy that does not exist.
     """
     env = sanitized_worker_env()
     env.update(_GIT_STABLE_LOCALE)
+    env["GIT_TERMINAL_PROMPT"] = "0"
     if not optional_locks:
         env["GIT_OPTIONAL_LOCKS"] = "0"
     command = ("git",) + tuple(str(a) for a in args)

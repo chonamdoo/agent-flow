@@ -284,7 +284,7 @@ def test_changed_file_discovery_fails_closed_when_git_fails(tmp_path, monkeypatc
         stdout="",
         stderr="fatal: cannot read index",
     )
-    monkeypatch.setattr(architecture_lint, "run_safe_command", lambda *args, **kwargs: failed)
+    monkeypatch.setattr(architecture_lint, "git_safe", lambda *args, **kwargs: failed)
 
     with pytest.raises(ValueError, match="git diff.*cannot read index"):
         architecture_lint.changed_files(tmp_path)

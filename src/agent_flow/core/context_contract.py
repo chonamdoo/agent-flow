@@ -5,17 +5,26 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_flow.core.atomic_io import atomic_write_text
+
 
 CONTRACT_DIRS = ("sources", "tool_outputs", "scratch")
 MAX_CONTEXT_CHARS = 12000
 MAX_BRIEF_CHARS = 4000
 
 
-def context_root(*, root: Path, run_dir: Path | None = None) -> Path:
-    return (run_dir / "context") if run_dir is not None else root / ".agent-flow" / "context"
+def context_root(*, root: Path | None = None, run_dir: Path | None = None) -> Path:
+    # run 안에서는 run_dir이 sink를 온전히 결정한다. `root`를 그때도 요구하면
+    # 호출자가 쓰이지 않는 leader 경로를 들고 다니게 되고, run_dir이 빠지는 날
+    # 관측이 조용히 leader에 쓰인다.
+    if run_dir is not None:
+        return run_dir / "context"
+    if root is None:
+        raise ValueError("context_root needs either root or run_dir")
+    return root / ".agent-flow" / "context"
 
 
-def ensure_context_contract(*, root: Path, run_dir: Path | None = None) -> Path:
+def ensure_context_contract(*, root: Path | None = None, run_dir: Path | None = None) -> Path:
     base = context_root(root=root, run_dir=run_dir)
     base.mkdir(parents=True, exist_ok=True)
     for name in CONTRACT_DIRS:
@@ -29,7 +38,13 @@ def ensure_context_contract(*, root: Path, run_dir: Path | None = None) -> Path:
     return base
 
 
-def append_context_event(*, root: Path, event: str, details: dict[str, object], run_dir: Path | None = None) -> Path:
+def append_context_event(
+    *,
+    event: str,
+    details: dict[str, object],
+    root: Path | None = None,
+    run_dir: Path | None = None,
+) -> Path:
     base = ensure_context_contract(root=root, run_dir=run_dir)
     payload = {
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -42,19 +57,56 @@ def append_context_event(*, root: Path, event: str, details: dict[str, object], 
     return events
 
 
-def offload_tool_output(*, root: Path, name: str, content: str, run_dir: Path | None = None) -> Path:
+def offload_tool_output(
+    *,
+    name: str,
+    content: str,
+    root: Path | None = None,
+    run_dir: Path | None = None,
+    record_event: bool = True,
+) -> Path:
+    """큰 출력을 content-addressed 파일로 내리고 경로를 돌려준다.
+
+    ``record_event=False``는 호출자가 같은 offload를 더 풍부한 event로 이미
+    기록하는 경우다. 둘 다 적으면 trace가 같은 사실을 두 줄로 말하고, 읽는 쪽은
+    어느 줄이 정본인지 알 수 없다.
+    """
     base = ensure_context_contract(root=root, run_dir=run_dir)
-    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+    encoded = content.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
     safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "-" for ch in name).strip("-") or "output"
-    output_path = base / "tool_outputs" / f"{safe_name}-{digest}.txt"
-    output_path.write_text(content, encoding="utf-8")
-    append_context_event(
-        root=root,
-        run_dir=run_dir,
-        event="tool_output_offloaded",
-        details={"path": str(output_path), "bytes": len(content.encode("utf-8"))},
-    )
+    output_path = base / "tool_outputs" / f"{safe_name}-{digest[:12]}.txt"
+    # content-addressed라 같은 내용이면 같은 파일이다. 제자리 쓰기 중에 죽으면
+    # 그 주소가 반쪽 내용으로 굳어 이후 모든 참조가 조용히 틀린 것을 가리킨다.
+    atomic_write_text(output_path, content)
+    if record_event:
+        append_context_event(
+            root=root,
+            run_dir=run_dir,
+            event="tool_output_offloaded",
+            details={
+                # run_dir 기준 상대 경로만 남긴다. 절대 경로는 호스트 레이아웃을
+                # artifact에 새겨 넣고, 그 artifact는 PR과 archive로 나간다.
+                "path": run_relative_path(output_path, run_dir),
+                "sha256": digest,
+                "bytes": len(encoded),
+            },
+        )
     return output_path
+
+
+def run_relative_path(path: Path, run_dir: Path | None) -> str:
+    """run artifact에 남길 경로 표기. 호스트 절대 경로는 남기지 않는다.
+
+    trace를 쓰는 쪽(`core.observation`)과 여기가 규칙을 각각 구현하면, 한쪽만
+    고친 날 같은 파일의 두 event가 서로 다른 표기를 쓴다.
+    """
+    if run_dir is None:
+        return path.name
+    try:
+        return path.relative_to(run_dir).as_posix()
+    except ValueError:
+        return path.name
 
 
 def write_system_invariants(*, root: Path, invariants: list[str]) -> Path:

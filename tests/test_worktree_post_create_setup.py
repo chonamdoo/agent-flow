@@ -183,13 +183,13 @@ def test_multi_profile_union_still_declares_its_copies():
     `review_angles`/`gates`/`skills`/`architecture`만 합친다. 최상위 `branching`만
     보면 android+react-native 프로젝트에서 `local.properties`가 영영 복사되지 않는다.
     """
-    from agent_flow.cli import ROOT_CONTEXT_FILES, _declared_worktree_copies
+    from agent_flow.core.worktrees import ROOT_CONTEXT_FILES, declared_worktree_copies
 
     android = {"branching": {"worktree_setup": {"copy": ["local.properties"]}}}
     react_native = {"branching": {"worktree_setup": {"copy": [".env"]}}}
     union = {"id": "multi-profile", "profiles": [android, react_native]}
 
-    assert _declared_worktree_copies(union) == [
+    assert declared_worktree_copies(union) == [
         *ROOT_CONTEXT_FILES,
         "local.properties",
         ".env",
@@ -198,19 +198,19 @@ def test_multi_profile_union_still_declares_its_copies():
 
 def test_single_profile_declaration_still_works():
     """불변: 합성본을 지원하느라 단일 profile 경로를 잃으면 안 된다."""
-    from agent_flow.cli import ROOT_CONTEXT_FILES, _declared_worktree_copies
+    from agent_flow.core.worktrees import ROOT_CONTEXT_FILES, declared_worktree_copies
 
     single = {"branching": {"worktree_setup": {"copy": ["local.properties"]}}}
-    assert _declared_worktree_copies(single) == [*ROOT_CONTEXT_FILES, "local.properties"]
+    assert declared_worktree_copies(single) == [*ROOT_CONTEXT_FILES, "local.properties"]
 
 
 def test_duplicate_declarations_are_collapsed():
     """불변: 두 profile이 같은 파일을 선언해도 한 번만 다룬다."""
-    from agent_flow.cli import ROOT_CONTEXT_FILES, _declared_worktree_copies
+    from agent_flow.core.worktrees import ROOT_CONTEXT_FILES, declared_worktree_copies
 
     same = {"branching": {"worktree_setup": {"copy": ["local.properties"]}}}
     union = {"profiles": [same, dict(same)]}
-    assert _declared_worktree_copies(union) == [*ROOT_CONTEXT_FILES, "local.properties"]
+    assert declared_worktree_copies(union) == [*ROOT_CONTEXT_FILES, "local.properties"]
 
 
 def _stub_profile(monkeypatch, tmp_path: Path, profile: dict) -> None:

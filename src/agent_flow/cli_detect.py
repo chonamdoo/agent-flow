@@ -2,8 +2,10 @@
 
 The runner uses this to (a) pick a host adapter when none is forced and
 (b) fan multi-reviewer phases out across the review pool. `KNOWN_CLIS` lists
-every host CLI; `REVIEW_CLI_NAMES` is the narrower reviewer pool. OMP can host a
-run but is never a reviewer provider, so a review phase sees Claude/Codex only.
+every host CLI; the narrower reviewer pool is `REVIEW_CLI_NAMES`, which the
+profile schema owns (`core.reviewer_launch`) and this module re-exports for
+its PATH-side consumers. OMP can host a run but is never a reviewer provider,
+so a review phase sees Claude/Codex only.
 """
 from __future__ import annotations
 
@@ -11,6 +13,10 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
+
+# 어휘의 정본은 profile 선언 쪽(`core.reviewer_launch`)이다. 여기서 다시 선언하면
+# 같은 목록이 두 벌이 된다.
+from agent_flow.core.reviewer_launch import REVIEW_CLI_NAMES  # noqa: F401  (re-export)
 
 
 @dataclass(frozen=True)
@@ -28,7 +34,6 @@ KNOWN_CLIS: tuple[CliInfo, ...] = (
     # Oh My Pi CLI one-shot: `omp -p "<prompt>"`
     CliInfo(name="omp", binaries=("omp",), invoke=("-p",)),
 )
-REVIEW_CLI_NAMES = ("claude", "codex")
 
 
 def detect_available_clis() -> list[CliInfo]:
@@ -49,6 +54,13 @@ def detect_host_cli() -> str | None:
     주의: OMP/Codex는 PATH 휴리스틱을 쓰므로 호스트가 아닌 일반 셸에서도
     바이너리가 설치돼 있으면 해당 host를 반환할 수 있다. 호스트 확정 신호가
     필요한 호출자는 env 힌트(OMP_PROFILE/CLAUDECODE/CODEX_CLI 등)가 있는 경우만 신뢰한다.
+
+    claude에는 PATH fallback이 없다. Claude Code는 `CLAUDECODE`를 항상 export하므로
+    PATH에 있다는 사실은 호스트 증거가 아니다 — 설치돼 있을 뿐인 셸에서 host를
+    주장하게 된다.
+
+    이 함수가 host 판정의 정본이다. `adapters/auto.detect_adapter`는 여기 결과를
+    adapter로 옮겨 쓴다. 우선순위를 다른 자리에 한 벌 더 적으면 두 판정이 갈린다.
     """
     if os.environ.get("OMP_PROFILE"):
         return "omp"

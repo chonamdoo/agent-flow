@@ -105,7 +105,10 @@ def read_command_evidence(
     """관측 로그를 읽는다. 파일이 없으면 hook 미등록/미지원 host로 본다."""
     log_path = project_root / COMMANDS_RUN_LOG
     try:
-        raw = log_path.read_text(encoding="utf-8")
+        # `errors="replace"`가 없으면 손상 바이트 하나가 UnicodeDecodeError를 낸다.
+        # 그건 ValueError라 아래 `except OSError`를 그냥 통과해 `agent-flow status`를
+        # 죽인다. 이 로그는 hook이 append-only로 쓰는 것이라 잘린 줄이 언제든 섞인다.
+        raw = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return CommandRunEvidence(available=False, runs=())
     runs: list[CommandRun] = []
@@ -312,6 +315,7 @@ def missing_test_evidence_markers(
     *,
     profile: dict | None = None,
     since: float | None = None,
+    cwd_root: Path | None = None,
 ) -> list[str]:
     """"테스트를 아예 안 돌렸다"만 잡는다. 그 이상은 이 층이 증명하지 못한다.
 
@@ -320,7 +324,7 @@ def missing_test_evidence_markers(
     """
     if phase_id not in TEST_EVIDENCE_PHASES:
         return []
-    evidence = read_command_evidence(project_root, since=since)
+    evidence = read_command_evidence(project_root, since=since, cwd_root=cwd_root)
     values = completion_gate_marker_values(text)
     if not evidence.available:
         if values.get("test-run-evidence") not in {"verified", "unavailable"}:

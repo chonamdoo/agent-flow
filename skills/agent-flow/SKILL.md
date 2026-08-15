@@ -42,6 +42,6 @@ Never require an exact phrase or ask the user to enter a terminal command.
 - Keep git-project runtime state private under the repository git dir, such as `.git/agent-flow/worktrees/feat-<slug>/`; expose it only for status, debugging, or artifact inspection.
 - After a phase writes its artifact, run the `next_command` printed by status or the current phase output.
 - If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
-- During code generation, modification, and code review phases, apply `code-generation-discipline`. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope. Load only the touched profile skill union. If a required local skill is missing, report it and wait for install or explicit override.
+- During code generation, modification, and code review phases, apply `code-generation-discipline`. Skill resolution and missing-skill handling are defined there; do not restate them here.
 - Keep user-facing replies short Korean by default. Keep code, commands, paths, and identifiers in English.
 - Do not paste long logs or whole files. Summarize only current phase, action, `next_command`, and blocker when useful.

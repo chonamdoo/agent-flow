@@ -19,9 +19,7 @@
 
 ### Context Economy
 
-- User-facing 답변은 짧은 한글, 코드·명령·식별자는 영어 그대로. 긴 로그와 전체 파일 붙여넣기 금지. 필요할 때만 current phase, action, `next_command`, blocker를 요약한다.
-- 코드 생성·수정·리뷰에는 `code-generation-discipline`과 `comment-authoring-discipline`을 항상 적용한다. 그 밖의 skill은 변경 파일에 걸리는 것만 읽고, 이번 변경에 required인 것은 phase 프롬프트가 매 run 나열한다.
-- 인덱스에 없는 skill은 설치돼 있지 않다. 런타임에 설치를 묻지 말고 `agent-flow skills sync`에 맡긴다. 필요한 skill이 이 host에 없으면 `missing local <group>: <skill>`와 source URL을 알린다.
+- 사용자 답변은 짧은 한국어로 쓰고, code·command·path·identifier와 exact workflow marker는 원문을 유지한다.
 <!-- agent-flow:skills:start -->
 - 설치된 skill 인덱스가 아직 없다. install이 이 자리에 채운다.
 <!-- agent-flow:skills:end -->

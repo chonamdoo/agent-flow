@@ -26,6 +26,7 @@ from agent_flow.core.worktree_isolation import (
 )
 from agent_flow.multi_review import (
     Distribution,
+    FINAL_REVIEW_PHASE_ID,
     ReviewerJob,
     ReviewExecution,
     distribute,
@@ -176,12 +177,22 @@ def _run_multi_review_distribution(
         adapter,
         review_input_path=review_input_path,
     )
+    # phase는 여기서만 안다. 넘기지 않으면 launch 선언의 `match.phase`는
+    # final-review 밖에서 비교할 값이 없어 절대 발동하지 않는다.
+    #
+    # config root도 여기서만 안다. reviewer launch 선언은 leader의 `.agent-flow/`에
+    # 있고, managed checkout에는 그 디렉터리가 없다(gitignored) — project_root를
+    # 소스로 두면 선언이 조용히 무시된다.
     distribution = (
         distribute_final_review(jobs, host=adapter.name)
-        if phase.id == "final-review"
-        else distribute(jobs, host=adapter.name)
+        if phase.id == FINAL_REVIEW_PHASE_ID
+        else distribute(jobs, host=adapter.name, phase_id=phase.id)
     )
-    execution = run_distribution(distribution, project_root)
+    execution = run_distribution(
+        distribution,
+        project_root,
+        config_root=adapter.config_root_or(project_root),
+    )
     return distribution, execution
 
 
@@ -287,7 +298,11 @@ def _reviewer_jobs(
     profile_angles = adapter.profile_review_angles()
     angles = _merge_review_angles(_BASE_REVIEW_ANGLES, profile_angles)
     jobs: list[ReviewerJob] = []
-    base_prompt = adapter.render_envelope(phase, run_dir, project_root)
+    # host가 받는 envelope와 다른 렌더다(host_hint 없음). 관측 이름을 갈라
+    # trace에서 둘을 sha 재계산 없이 구분한다.
+    base_prompt = adapter.render_envelope(
+        phase, run_dir, project_root, prompt_variant="reviewer-base"
+    )
     for item in angles:
         angle_id = str(item.get("id") or "").strip()
         if not angle_id:

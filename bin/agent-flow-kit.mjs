@@ -17,6 +17,7 @@ import {
   AGENT_FLOW_COMMAND,
   arrayValue,
   assertInstallRootIsFinal,
+  atomicWriteFileSync,
   backupIfDifferent,
   BOOTSTRAP_TEMPLATE_FILE,
   claudeHooksSettings,
@@ -389,7 +390,7 @@ function installProject(requestedRoot) {
     warnings: skillIndex.warnings.length,
   };
 
-  fs.writeFileSync(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  atomicWriteFileSync(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`);
   syncManagedWorktreeHostHooks(root);
   syncSkillSources(root);
   // root를 같이 낸다. `--root`를 줬든 cwd에서 유도했든, 어디에 설치됐는지 보이지
@@ -538,11 +539,7 @@ function relayPythonRunLifecycle(subcommand, args, root) {
     const extracted = extractCliOption(identityArgs, "--workflow");
     runPythonCliCommand(
       "start",
-      [
-        extracted.value ?? "full-feature",
-        ...extracted.args,
-        "--phase-runner",
-      ],
+      [extracted.value ?? "full-feature", ...extracted.args],
       { interactive: true },
     );
     return;
@@ -1406,7 +1403,7 @@ function writeManagedFileIfMissingOrSame(pathName, content, force = false) {
   if (fs.existsSync(pathName)) {
     const current = fs.readFileSync(pathName, "utf8");
     if (force) {
-      fs.writeFileSync(pathName, content, "utf8");
+      atomicWriteFileSync(pathName, content);
       return true;
     }
     if (current !== content) {
@@ -1414,7 +1411,7 @@ function writeManagedFileIfMissingOrSame(pathName, content, force = false) {
     }
     return true;
   }
-  fs.writeFileSync(pathName, content, "utf8");
+  atomicWriteFileSync(pathName, content);
   return true;
 }
 
@@ -1558,10 +1555,11 @@ function installProjectSkills(root, agentFlowDir, previousIndex, force = false, 
   }
   links.push(...removeStaleProjectSkillLinks(root, selected.skills, previousIndex, force));
   const index = preserveKitSkillHashes({ ...selected, links }, previousIndex, path.join(KIT_ROOT, "skills"));
-  fs.writeFileSync(
+  // 잘린 index.json은 `readJsonIfExists`가 조용히 삼켜 "설치된 skill 없음"으로
+  // 읽힌다. 그러면 다음 install이 관리 링크를 stale로 보고 걷어낸다.
+  atomicWriteFileSync(
     path.join(agentFlowDir, "skills", "index.json"),
     `${JSON.stringify(index, null, 2)}\n`,
-    "utf8",
   );
   return index;
 }
@@ -1974,6 +1972,10 @@ function gateNonceMatches(data, nonce) {
 // Python `_gate_phase_covers_verification`과 같은 규칙이다.
 const GATE_PHASE_ALL = "all";
 
+// Python `runner.GATE_MALFORMED`와 같은 값. 읽을 수 없는 결과는 실패가 아니라
+// 판정 불가이고, 어떤 workflow route도 이 key를 target으로 갖지 않는다.
+const GATE_MALFORMED = "malformed-results";
+
 function gatePhaseCoversVerification(data) {
   if (!data.produced_by || typeof data.produced_by !== "object") {
     return true;
@@ -1986,17 +1988,38 @@ function gatePhaseCoversVerification(data) {
 }
 
 function readGatesRouteKey(pathName, nonce = "") {
+  let content;
   try {
-    const content = fs.readFileSync(pathName, "utf8");
-    const data = JSON.parse(content);
-    if (typeof data.passed !== "boolean" || !Array.isArray(data.results) || data.results.length === 0) {
-      if (typeof data.passed === "boolean" && typeof data.status === "string") {
+    content = fs.readFileSync(pathName, "utf8");
+  } catch (err) {
+    // 파일이 **없다는** 것만 "게이트를 아직 안 돌렸다"다. 내용이 깨진 것과 같은
+    // 사유로 접으면 정상적인 "아직 안 함"이 차단으로 보고된다. 반대로 존재하는
+    // 파일의 EACCES·EISDIR·ELOOP까지 여기서 삼키면 읽지도 못한 결과가 "안 돌림"이
+    // 되어 fix-loop가 근거 없이 돈다 — Python 쌍둥이(`runner._next_index`)와 같이
+    // 판정 불가로 보낸다.
+    if (err?.code === "ENOENT") {
+      return "default";
+    }
+    return GATE_MALFORMED;
+  }
+  let data;
+  try {
+    data = JSON.parse(content);
+  } catch {
+    return GATE_MALFORMED;
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data) || typeof data.passed !== "boolean") {
+    return GATE_MALFORMED;
+  }
+  try {
+    if (!Array.isArray(data.results) || data.results.length === 0) {
+      if (typeof data.status === "string") {
         const status = data.status.trim().toLowerCase().replace(/_/g, "-");
         if (data.passed === false && ["request-changes", "blocked", "error", "pending"].includes(status)) {
           return status;
         }
       }
-      return typeof data.passed === "boolean" && data.passed === false ? "request-changes" : "default";
+      return data.passed === false ? "request-changes" : "default";
     }
     // timeout은 "실패"가 아니라 "판정 불가"다. Python runner와 같은 규칙이다.
     if (data.results.some((r) => r && r.timed_out === true)) {
@@ -2210,8 +2233,7 @@ function installCodexHooks(root) {
   }
   mergeHookSettings(settings, codexHooksSettings(root).hooks, hooksDisabled);
   for (const settingsPath of settingsPaths) {
-    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-    fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+    atomicWriteFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
   }
 }
 
@@ -2220,8 +2242,7 @@ function installClaudeHooks(root) {
   const settingsPath = path.join(root, ".claude", "settings.json");
   const settings = readHookSettings(settingsPath);
   mergeHookSettings(settings, claudeHooksSettings(root).hooks, hooksDisabled);
-  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  atomicWriteFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
 }
 
 
@@ -2265,8 +2286,7 @@ function upgradeManagedHooks(root, src, dest) {
       // `hook_integrity`가 관리 대상 아닌 실행 파일로 보고 run 시작을 막는다.
       fs.chmodSync(backup, 0o644);
     }
-    fs.writeFileSync(target, content, "utf8");
-    fs.chmodSync(target, fs.statSync(source).mode & 0o777);
+    atomicWriteFileSync(target, content, { mode: fs.statSync(source).mode & 0o777 });
   }
 }
 
@@ -2311,7 +2331,7 @@ function pruneManagedHookRegistrations(root) {
       continue;  // 사용자 파일이 깨져 있으면 건드리지 않는다.
     }
     if (pruneRetiredHooks(settings, false, hooksDisabled)) {
-      fs.writeFileSync(target, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+      atomicWriteFileSync(target, `${JSON.stringify(settings, null, 2)}\n`);
       console.log(`  - hooks disabled: cleared ${path.join(...rel)}`);
     }
   }

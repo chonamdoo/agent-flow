@@ -20,7 +20,7 @@ Profile injection:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -56,6 +56,23 @@ class Adapter(ABC):
         self._config_root: Path | None = None
         self._task_text: str = ""
         self._changed_files: tuple[str, ...] = ()
+        # 렌더된 envelope를 받아 갈 관측자. runner가 꽂고, 없으면 아무 일도
+        # 없다. `execute`를 넓히지 않고 정확한 주입 프롬프트를 남기는 유일한
+        # 자리다 — envelope는 여기서만 만들어지고 곧바로 stdout으로 사라진다.
+        # 인자는 `(phase_id, payload_name, envelope)`다. 한 phase가 envelope를
+        # 두 번 렌더하므로(host용, reviewer base용) 이름은 렌더러가 정한다.
+        # 이름을 관측자가 phase_id에서 만들면 두 렌더가 같은 이름으로 겹쳐
+        # 어느 쪽이 host에게 실제로 갔는지 trace로 고를 수 없다.
+        self._observer: Callable[[str, str, str], None] | None = None
+
+    def config_root_or(self, project_root: Path) -> Path:
+        """선언을 읽을 뿌리. runner가 꽂지 않았으면 project_root.
+
+        managed checkout에는 `.agent-flow/`가 없다(gitignored). 이 fallback이
+        갈라지면 한쪽은 선언을 찾고 다른 쪽은 못 찾는다 — reviewer launch 선언과
+        local skill 블록이 서로 다른 뿌리를 보게 된다.
+        """
+        return self._config_root or project_root
 
     def profile_review_angles(self) -> list[Mapping[str, object]]:
         angles = self._profile_snapshot.get("review_angles")
@@ -73,7 +90,8 @@ class Adapter(ABC):
         return run_dir / (phase.artifact or f"{phase.id}.md")
 
     def render_envelope(self, phase: "Phase", run_dir: Path,
-                        project_root: Path, host_hint: str = "") -> str:
+                        project_root: Path, host_hint: str = "",
+                        *, prompt_variant: str = "") -> str:
         """Render the prompt envelope shared by all AI adapters."""
         artifact = self.artifact_path(phase, run_dir)
         relative_artifact = (
@@ -88,7 +106,7 @@ class Adapter(ABC):
         profile_block = self._render_profile_block()
         architecture_block = self._render_architecture_block(phase)
         completion_gate_block = self._render_completion_gate_block(phase)
-        config_root = self._config_root or project_root
+        config_root = self.config_root_or(project_root)
         local_skill_block = local_skill_prompt_block(
             config_root,
             phase.id,
@@ -102,7 +120,7 @@ class Adapter(ABC):
         # 렌더러가 넣으므로 agent가 빼거나 잊을 수 없다.
         design_values_block = ledger_prompt_block(run_dir)
         task_line = f"**Task**: {self._task_text}\n" if self._task_text else ""
-        return (
+        envelope = (
             f"# agent-flow phase: {phase.id}\n\n"
             f"**Description**: {phase.description}\n\n"
             f"{task_line}"
@@ -122,6 +140,12 @@ class Adapter(ABC):
             f"After writing the artifact, run `agent-flow status` from "
             f"`{project_root}` and follow the printed `next_command`."
         )
+        if self._observer is not None:
+            # variant가 있으면 이름이 갈린다. `prompt-<phase>`는 host가 실제로
+            # 받은 envelope 하나만 가리켜야 한다.
+            suffix = f"-{prompt_variant}" if prompt_variant else ""
+            self._observer(phase.id, f"prompt-{phase.id}{suffix}", envelope)
+        return envelope
 
     def _render_architecture_block(self, phase: "Phase") -> str:
         if self._architecture == "ddd":
