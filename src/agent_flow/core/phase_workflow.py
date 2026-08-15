@@ -96,13 +96,25 @@ class RunCursor:
 
     `phase_index == len(phases)`는 마지막 phase를 지난 **완료 커서**다. 그 자리는
     cleanup이 막혔을 때 재개가 다시 지나가는 정당한 상태라 유효 범위에 든다.
-    그때 `phase_id`는 빈 문자열이어야 한다 — 완료 커서에 phase 이름이 남아 있으면
+    그때 `phase_id`는 ``None``이어야 한다 — 완료 커서에 phase 이름이 남아 있으면
     두 필드가 서로 다른 이야기를 하는 것이고, 그건 손상이다.
+
+    `phase_id`가 `str | None`인 이유: ``None`` 하나가 "meta가 어떤 phase도 지목하지
+    않는다"를 뜻하고, 그 안의 세 자리(키 없음·`current_phase: null`·아직 진입 전
+    새 run)는 `phase_index`가 이미 구분한다(0이면 진입 전, `len`이면 완료). 반면
+    빈 문자열은 "이름이 있는데 비었다"이고 그런 phase는 어떤 workflow도 정의할 수
+    없다. 예전 `raw_phase or ""`는 둘을 한 값으로 접어 그 손상을 "이름 없음"으로
+    통과시켰다.
     """
 
     workflow_digest: str
     phase_index: int
-    phase_id: str
+    phase_id: str | None
+    # 승인된 drift가 이름으로 자리를 다시 잡았을 때 그 **옛** index. 옮기지 않았으면
+    # ``None``. 호출자가 "기록된 index != 커서 index"로 재배치를 추론하면 안 되기
+    # 때문에 사실을 값으로 들려 보낸다 — 그 비교는 digest가 어긋난 안에서만 참이 될
+    # 수 있어서 재배치의 결정적 근거가 못 된다.
+    reanchored_from: int | None = None
 
     @classmethod
     def from_meta(
@@ -125,30 +137,45 @@ class RunCursor:
             raise CorruptRunCursorError(
                 f"run cursor current_phase must be a string, got {raw_phase!r}"
             )
+        if raw_phase == "":
+            # 이름 없는 phase는 어떤 workflow도 정의하지 못한다. "이름이 없다"로
+            # 흡수하면 index만 남은 채 재개해 앞선 phase를 통째로 건너뛴다.
+            raise CorruptRunCursorError(
+                "run cursor current_phase is an empty string, which names no phase of "
+                f"workflow {scope.workflow_id}. Restore meta.json from backup, or clear "
+                f"the run with `agent-flow abort`."
+            )
         recorded_digest = meta.get("workflow_digest")
         if recorded_digest is not None and not isinstance(recorded_digest, str):
             raise CorruptRunCursorError(
                 f"run cursor workflow_digest must be a string, got {recorded_digest!r}"
             )
-        if (
-            recorded_digest
-            and recorded_digest != scope.digest
-            and not accept_workflow_drift
-        ):
-            # workflow YAML은 kit이 배포한다. 업그레이드 한 번이 모든 프로젝트의
-            # 진행 중인 run을 막으므로 탈출구를 지목한다. "finish"는 이 예외가
-            # 막는 바로 그것이라 안내가 될 수 없다.
-            raise WorkflowDriftError(
-                f"workflow {scope.workflow_id} changed after this run started: run "
-                f"recorded {recorded_digest} but {scope.source} now hashes to "
-                f"{scope.digest}. Re-baseline this run to the current definition with "
-                f"`agent-flow continue {ACCEPT_WORKFLOW_DRIFT_FLAG}`, restore the "
-                f"definition it started with, or abort the run."
-            )
+        phase_id = raw_phase
+        reanchored_from: int | None = None
+        if recorded_digest and recorded_digest != scope.digest:
+            if not accept_workflow_drift:
+                # workflow YAML은 kit이 배포한다. 업그레이드 한 번이 모든 프로젝트의
+                # 진행 중인 run을 막으므로 탈출구를 지목한다. "finish"는 이 예외가
+                # 막는 바로 그것이라 안내가 될 수 없다.
+                raise WorkflowDriftError(
+                    f"workflow {scope.workflow_id} changed after this run started: run "
+                    f"recorded {recorded_digest} but {scope.source} now hashes to "
+                    f"{scope.digest}. Re-baseline this run to the current definition with "
+                    f"`agent-flow continue {ACCEPT_WORKFLOW_DRIFT_FLAG}`, restore the "
+                    f"definition it started with, or abort the run."
+                )
+            # 승인된 drift에서 index는 더 이상 기준이 아니다. 새 정의가 현재 phase
+            # 앞에 phase를 끼워 넣거나 순서를 바꿨으면 옛 index는 다른 phase를
+            # 가리키고, 그대로 대조하면 우리가 안내한 그 명령이
+            # `CorruptRunCursorError`로 죽는다. 이름이 정본이므로 이름으로 자리를
+            # 다시 잡는다.
+            anchored = _reanchor_index(scope, raw_index, phase_id)
+            if anchored != raw_index:
+                reanchored_from, raw_index = raw_index, anchored
         # digest 기록이 **없는** 예전 run은 drift가 아니다. 형식이 없던 시절의
         # run을 drift로 보고하면 진행 중인 run이 근거 없이 막힌다. 호출자가 이
         # 값으로 meta를 채워 넣는다.
-        cursor = cls(scope.digest, raw_index, raw_phase or "")
+        cursor = cls(scope.digest, raw_index, phase_id, reanchored_from)
         cursor.validate(scope)
         return cursor
 
@@ -160,18 +187,51 @@ class RunCursor:
                 f"{scope.workflow_id} (0..{total})"
             )
         if self.phase_index == total:
-            if self.phase_id:
+            if self.phase_id is not None:
                 raise CorruptRunCursorError(
                     f"run cursor is past the last phase of workflow "
                     f"{scope.workflow_id} but still names phase {self.phase_id!r}"
                 )
             return
         expected = scope.phase_ids[self.phase_index]
-        if self.phase_id and self.phase_id != expected:
+        if self.phase_id is None:
+            # index 0은 아직 어떤 phase도 찍지 않은 새 run이라 이름이 없는 게 정상이다.
+            # 그 밖에서 이름이 없으면 남은 근거가 숫자뿐이고, 숫자만 믿고 재개하면
+            # 앞선 필수 phase를 통째로 건너뛴다.
+            if self.phase_index == 0:
+                return
+            raise CorruptRunCursorError(
+                f"run cursor phase_index {self.phase_index} claims phase {expected!r} of "
+                f"workflow {scope.workflow_id} but meta records no current_phase; "
+                f"resuming on the number alone would skip every phase before it. "
+                f"Restore meta.json from backup, or clear the run with `agent-flow abort`."
+            )
+        if self.phase_id != expected:
             raise CorruptRunCursorError(
                 f"run cursor phase_index {self.phase_index} names phase {expected!r} in "
                 f"workflow {scope.workflow_id} but meta records {self.phase_id!r}"
             )
+
+
+def _reanchor_index(scope: CursorScope, phase_index: int, phase_id: str | None) -> int:
+    """승인된 drift에서 기록된 phase 이름이 새 정의에서 앉는 자리.
+
+    이름이 없으면(새 run·완료 커서) 옮길 근거가 없으므로 기록된 index를 그대로
+    돌려주고 판정은 `validate`에 맡긴다.
+    """
+    if phase_id is None:
+        return phase_index
+    try:
+        return scope.phase_ids.index(phase_id)
+    except ValueError:
+        # 재배치할 자리가 없다. 여기서 drift 승인을 다시 권하면 사용자는 방금
+        # 실행해 실패한 명령을 또 실행하게 된다.
+        raise CorruptRunCursorError(
+            f"run cursor names phase {phase_id!r}, which workflow "
+            f"{scope.workflow_id} no longer defines ({scope.source}); accepting the "
+            f"drift cannot place this run. Restore the definition it started with, or "
+            f"clear the run with `agent-flow abort`."
+        ) from None
 
 
 @dataclass(frozen=True)

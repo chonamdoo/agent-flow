@@ -86,6 +86,25 @@ def reviewer_launch_rules(
 def rule_matches(
     rule: dict[str, Any], *, phase_id: str | None, angle_id: str
 ) -> bool:
+    match = validated_match(rule)
+    if match is None:
+        return True
+    for key, observed in (("phase", phase_id), ("angle", angle_id)):
+        declared = match.get(key)
+        if declared is not None and declared != observed:
+            return False
+    return True
+
+
+def validated_match(rule: dict[str, Any]) -> dict[str, Any] | None:
+    """rule의 `match` 블록 전체를 검사하고 돌려준다. 선언 없으면 None.
+
+    비교보다 **먼저** 전부 검사한다. 검사와 비교를 섞으면 앞 키에서 어긋난 rule의
+    뒤 키가 한 번도 읽히지 않는다 — `{phase: review, angle: 5}`는 phase가 다른
+    phase에서는 조용히 통과하고 `review` phase에 들어선 순간에만 터진다. 그러면
+    선언 검증(`validate_reviewer_launch_declaration`)도 그 오타를 보지 못하고,
+    리뷰가 시작되는 자리에서 fail-closed로 처음 드러난다.
+    """
     unknown = _unknown_keys(
         rule, _RULE_KEYS, where="profile execution.reviewers entry"
     )
@@ -96,7 +115,7 @@ def rule_matches(
         )
     match = rule.get("match")
     if match is None:
-        return True
+        return None
     if not isinstance(match, dict):
         raise ReviewerLaunchError(
             "profile execution.reviewers[].match must be a mapping"
@@ -109,7 +128,9 @@ def rule_matches(
             "profile execution.reviewers[].match supports only phase, angle: "
             f"remove {', '.join(unknown)}"
         )
-    for key, observed in (("phase", phase_id), ("angle", angle_id)):
+    # frozenset이 아니라 고정 순서로 돈다. 두 키가 동시에 틀렸을 때 어느 오류가
+    # 먼저 보고되는지가 실행마다 달라지면 안 된다.
+    for key in ("phase", "angle"):
         declared = match.get(key)
         if declared is None:
             continue
@@ -117,9 +138,7 @@ def rule_matches(
             raise ReviewerLaunchError(
                 f"profile execution.reviewers[].match.{key} must be a non-empty string"
             )
-        if declared != observed:
-            return False
-    return True
+    return match
 
 
 def select_launch_candidate(
@@ -155,11 +174,13 @@ def launch_candidates(rule: dict[str, Any]) -> tuple[LaunchCandidate, ...]:
 def validate_reviewer_launch_declaration(execution: object) -> None:
     """선언이 해석 가능한지 선언한 자리에서 검사한다.
 
-    `core.profiles`의 override loader가 부른다. 실행 경로가 쓰는 파서 그대로라서
-    "override에서는 통과하는데 리뷰에서 막히는" 상태가 생기지 않는다.
+    `core.profiles`의 override loader와 배포 profile을 훑는 테스트가 부른다.
+    실행 경로가 쓰는 파서 그대로라서 "여기서는 통과하는데 리뷰에서 막히는" 상태가
+    생기지 않는다. 매칭은 흉내내지 않는다 — 검사는 어느 phase/angle에서 도는지와
+    무관해야 한다.
     """
     for rule in reviewer_launch_rules({"execution": execution}):
-        rule_matches(rule, phase_id=None, angle_id="")
+        validated_match(rule)
         launch_candidates(rule)
 
 

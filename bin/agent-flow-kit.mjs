@@ -2233,7 +2233,9 @@ function installCodexHooks(root) {
   }
   mergeHookSettings(settings, codexHooksSettings(root).hooks, hooksDisabled);
   for (const settingsPath of settingsPaths) {
-    atomicWriteFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+    // host가 읽는 사용자 설정이다. 공용 dotfile로 심링크해 둔 프로젝트가 있어
+    // 링크를 따라간다(정책은 `atomicWriteFileSync` 주석).
+    atomicWriteFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, { followSymlink: true });
   }
 }
 
@@ -2242,7 +2244,8 @@ function installClaudeHooks(root) {
   const settingsPath = path.join(root, ".claude", "settings.json");
   const settings = readHookSettings(settingsPath);
   mergeHookSettings(settings, claudeHooksSettings(root).hooks, hooksDisabled);
-  atomicWriteFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+  // host가 읽는 사용자 설정이다. 링크를 따라간다.
+  atomicWriteFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, { followSymlink: true });
 }
 
 
@@ -2331,7 +2334,8 @@ function pruneManagedHookRegistrations(root) {
       continue;  // 사용자 파일이 깨져 있으면 건드리지 않는다.
     }
     if (pruneRetiredHooks(settings, false, hooksDisabled)) {
-      atomicWriteFileSync(target, `${JSON.stringify(settings, null, 2)}\n`);
+      // 위 세 경로는 전부 host가 읽는 사용자 설정이다. 링크를 따라간다.
+      atomicWriteFileSync(target, `${JSON.stringify(settings, null, 2)}\n`, { followSymlink: true });
       console.log(`  - hooks disabled: cleared ${path.join(...rel)}`);
     }
   }

@@ -837,8 +837,9 @@ def write_run_subpath_text(run_path: Path, target: Path, content: str) -> None:
     _ensure_run_root(run_path)
     resolved = resolve_run_subpath(run_path, target)
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    # mkdir는 lexical 경로에만 작용하므로 run 밖 디렉터리는 새로 생기지 않는다.
-    # 그래도 다시 본다 — 위 확인과 이 mkdir 사이에 symlink가 끼어들 수 있다.
+    # 위 `resolve_run_subpath`가 이미 "아직 없는 마디의 가장 가까운 조상"까지
+    # 해소해 봤으므로, 여기까지 왔으면 mkdir이 채울 마디는 전부 run 안이다.
+    # 그래도 다시 본다 — 그 확인과 이 mkdir 사이에 symlink가 끼어들 수 있다.
     directory = resolved.parent
     _assert_directory_within_run(run_path.resolve(), directory, target)
     attested = directory.resolve()
@@ -863,14 +864,29 @@ def _ensure_run_root(run_path: Path) -> None:
 
 
 def _assert_directory_within_run(artifact_root: Path, directory: Path, target: Path) -> None:
-    """``directory``가 실제로 run 안인가. 없으면 볼 것이 없다.
+    """``directory``가 실제로 run 안인가. 아직 없으면 존재하는 조상까지 올라간다.
 
     lexical 봉쇄를 통과한 뒤 남는 탈출로는 이미 심어져 있던 symlink 디렉터리뿐이다.
     `resolve`가 체인 전체를 따라가므로 중간 어디에 끼어 있어도 여기서 드러난다.
+
+    없는 디렉터리를 그냥 통과시키면 안 된다. `run/nested`가 run 밖을 가리키는
+    symlink이고 대상이 `run/nested/new/f.md`이면 `run/nested/new`는 아직 없다 —
+    통과시키는 순간 `mkdir(parents=True)`가 그 symlink를 **따라가** run 밖에
+    `new/`를 실제로 만들고, 검사할 것은 그때 처음 생긴다. 거부해도 부작용은 이미
+    남은 뒤다. 그래서 없는 마디는 건너뛰고 존재하는 가장 가까운 조상을 해소한다.
+    lexical 봉쇄가 ``directory``를 run 밑으로 못박아 두었으므로 그 조상은 최악이라도
+    run root이고, run root 위로는 올라가지 않는다 — 호출부가 준 root 자체는 봉쇄
+    대상이 아니다. dangling symlink는 `exists`에 잡히지 않으므로 `lexists`로 본다.
     """
-    if not directory.exists():
+    existing = directory
+    while existing != artifact_root and not os.path.lexists(existing):
+        parent = existing.parent
+        if parent == existing:
+            return
+        existing = parent
+    if not os.path.lexists(existing):
         return
-    resolved = directory.resolve()
+    resolved = existing.resolve()
     if resolved != artifact_root and artifact_root not in resolved.parents:
         raise WorktreeIsolationError(
             f"run artifact target is outside its attested directory: {target}"

@@ -88,6 +88,7 @@ import {
   SKILL_INDEX_START,
   SKILL_UPGRADE_NOTICE_PREFIX,
   skillIndexBlock,
+  SYMLINK_FOLLOW_NOTICE_PREFIX,
   syncRecordedKitAssets,
   tomlBasicString,
   uniqueStrings,
@@ -495,7 +496,9 @@ function installCodexHooks(root) {
   }
   mergeHookSettings(settings, codexHooksSettings(root).hooks, hooksDisabled);
   for (const settingsPath of settingsPaths) {
-    atomicWriteFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+    // host가 읽는 사용자 설정이다. 공용 dotfile로 심링크해 둔 프로젝트가 있어
+    // 링크를 따라간다(정책은 `atomicWriteFileSync` 주석).
+    atomicWriteFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, { followSymlink: true });
   }
   return true;
 }
@@ -505,7 +508,8 @@ function installClaudeHooks(root) {
   const settingsPath = path.join(root, ".claude", "settings.json");
   const settings = readHookSettings(settingsPath);
   mergeHookSettings(settings, claudeHooksSettings(root).hooks, hooksDisabled);
-  atomicWriteFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+  // host가 읽는 사용자 설정이다. 링크를 따라간다.
+  atomicWriteFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, { followSymlink: true });
 }
 
 
@@ -597,7 +601,8 @@ function pruneManagedHookRegistrations(root) {
       continue;
     }
     if (pruneRetiredHooks(settings, false, hooksDisabled)) {
-      atomicWriteFileSync(target, `${JSON.stringify(settings, null, 2)}\n`);
+      // 위 세 경로는 전부 host가 읽는 사용자 설정이다. 링크를 따라간다.
+      atomicWriteFileSync(target, `${JSON.stringify(settings, null, 2)}\n`, { followSymlink: true });
       console.log(`  - hooks disabled: cleared ${path.join(...rel)}`);
     }
   }
@@ -952,6 +957,9 @@ function runKitInstall() {
       || line.startsWith(ASSET_UPGRADE_NOTICE_PREFIX)
       || line.startsWith(ASSET_BACKUP_NOTICE_PREFIX)
       || line.startsWith(BOOTSTRAP_KEPT_NOTICE_PREFIX)
+      // 링크 너머로 쓴 host 설정. 자식이 쓰고 여기서 걸러 내면 프로젝트 밖 파일을
+      // 갈아 끼운 사실이 어디에도 안 남는다.
+      || line.startsWith(SYMLINK_FOLLOW_NOTICE_PREFIX)
     ) {
       console.log(line);
     }
@@ -1304,7 +1312,15 @@ function install() {
 
 const cmd = process.argv[2];
 if (cmd === "install") {
-  install();
+  // 여기서 던지는 것 중 사용자가 고칠 수 있는 것이 있다 - 대표적으로 managed 경로
+  // 하나가 끊어진 symlink인 경우다. 맨몸으로 두면 그 안내가 stack trace 안에 묻힌다.
+  // `agent-flow-kit.mjs`의 진입점과 같은 계약이다.
+  try {
+    install();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
 } else if (cmd === "--help" || cmd === "-h" || !cmd) {
   console.log("Usage: npx <agent-flow-package> install [--root <existing dir>] [--force-managed]");
   process.exit(0);

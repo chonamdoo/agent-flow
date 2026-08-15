@@ -30,8 +30,21 @@ from agent_flow.core.phase_workflow import (
     PhaseWorkflowDefinition,
     load_phase_workflow_definition,
 )
-from agent_flow.core.worktree_isolation import WorktreeIsolationError
-from agent_flow.runner import TRANSITIONS_FILE, Phase, Runner, _phases_from_definition
+from agent_flow.core.worktree_isolation import (
+    HOST_PHASE_LEADER_BASELINE_KEY,
+    LeaderSnapshot,
+    WorktreeIsolationError,
+    leader_snapshot_payload,
+    leader_sweep_scope,
+    real_path,
+)
+from agent_flow.runner import (
+    TRANSITIONS_FILE,
+    Phase,
+    Runner,
+    _HOST_PHASE_BASELINE_RECORD_VERSION,
+    _phases_from_definition,
+)
 
 
 def _development() -> PhaseWorkflowDefinition:
@@ -141,6 +154,96 @@ def test_accepting_workflow_drift_re_baselines_the_run(tmp_path: Path):
     assert cursor.workflow_digest == runner.workflow.digest
     # 승인은 다시 찍어야 끝난다. meta에 남겨 두면 다음 실행이 같은 벽을 다시 만난다.
     assert read_meta(runner.run_dir)["workflow_digest"] == runner.workflow.digest
+
+
+def test_accepted_drift_re_anchors_the_cursor_on_the_recorded_phase_name():
+    """반증: 승인은 digest 비교만 우회했다. 새 정의가 현재 phase 앞에 phase를
+    끼워 넣으면 옛 index는 다른 phase를 가리키고, 우리가 안내한
+    `agent-flow continue --accept-workflow-drift`가 `CorruptRunCursorError`로
+    죽어 복구할 길이 없었다."""
+    workflow = _development()
+    ids = tuple(phase.id for phase in workflow.phases)
+    recorded = {
+        "phase_index": 2,
+        "current_phase": ids[2],
+        "workflow_digest": workflow.digest,
+    }
+    inserted = CursorScope("development", "development.yaml", "1" * 64, ("bootstrap",) + ids)
+    reordered = CursorScope("development", "development.yaml", "2" * 64, tuple(reversed(ids)))
+
+    for scope in (inserted, reordered):
+        cursor = RunCursor.from_meta(recorded, scope, accept_workflow_drift=True)
+
+        assert cursor.phase_id == ids[2]
+        assert cursor.phase_index == scope.phase_ids.index(ids[2])
+
+
+def test_accepted_drift_that_cannot_place_the_phase_points_at_abort_not_the_flag():
+    """이름이 새 정의에 아예 없으면 재배치할 자리가 없다. 그때 다시 flag를 권하면
+    사용자는 방금 실패한 명령을 또 실행한다."""
+    workflow = _development()
+    ids = tuple(phase.id for phase in workflow.phases)
+    dropped = CursorScope(
+        "development", "development.yaml", "3" * 64, tuple(i for i in ids if i != ids[2])
+    )
+
+    with pytest.raises(CorruptRunCursorError) as caught:
+        RunCursor.from_meta(
+            {"phase_index": 2, "current_phase": ids[2], "workflow_digest": workflow.digest},
+            dropped,
+            accept_workflow_drift=True,
+        )
+
+    message = str(caught.value)
+    assert ACCEPT_WORKFLOW_DRIFT_FLAG not in message
+    assert "agent-flow abort" in message
+
+
+def test_a_re_anchored_cursor_is_written_back_so_the_next_run_is_not_blocked(
+    tmp_path: Path,
+):
+    """digest만 다시 찍고 index를 남겨 두면, drift가 사라진 다음 실행이 옛 index와
+    이름의 불일치로 막힌다 — 승인은 한 번으로 끝나야 한다."""
+    runner, phases = _development_runner(tmp_path)
+    runner.accept_workflow_drift = True
+    # 새 정의에서 첫 phase가 사라져 'review'가 한 칸 앞으로 온 상황.
+    runner.phases = phases[1:]
+    moved = [phase.id for phase in runner.phases].index("review")
+    write_meta(
+        runner.run_dir,
+        {
+            "run_id": "r1",
+            "phase_index": 2,
+            "current_phase": "review",
+            "workflow_digest": "0" * 64,
+        },
+    )
+
+    cursor = runner._run_cursor(read_meta(runner.run_dir))
+
+    assert cursor.phase_index == moved
+    persisted = read_meta(runner.run_dir)
+    assert persisted["phase_index"] == moved
+    assert persisted["current_phase"] == "review"
+    runner.accept_workflow_drift = False
+    assert runner._run_cursor(read_meta(runner.run_dir)).phase_index == moved
+
+
+def test_a_progressed_cursor_without_a_current_phase_stops():
+    """반증: 이름이 없는 손상 meta가 통과하면 runner는 숫자만 믿고 그 phase부터
+    재개해 앞선 필수 phase를 건너뛴다. 빈 문자열은 이제 별도 진단으로 갈라졌다 —
+    `test_an_empty_current_phase_is_corruption_not_an_absent_name`."""
+    workflow = _development()
+    scope = _scope(workflow)
+    total = len(workflow.phases)
+
+    with pytest.raises(CorruptRunCursorError) as caught:
+        RunCursor.from_meta({"phase_index": 2}, scope)
+    assert workflow.phases[2].id in str(caught.value)
+
+    # 예외는 정확히 둘이다: 아직 아무 phase도 찍지 않은 새 run과 완료 커서.
+    assert RunCursor.from_meta({"current_phase": None}, scope).phase_index == 0
+    assert RunCursor.from_meta({"phase_index": total}, scope).phase_index == total
 
 
 def test_cursor_scope_carries_the_digest_of_the_definition_it_came_from():
@@ -501,3 +604,239 @@ def test_a_transition_the_workflow_cannot_place_inside_the_run_is_refused(
         runner._commit_transition(transition)
 
     assert (tmp_path / "escaped.md").read_text(encoding="utf-8") == "keep me\n"
+
+
+def _armed_snapshot(scope: str) -> LeaderSnapshot:
+    return LeaderSnapshot(
+        head="0" * 40, branch="main", status="", armed=True, scope=scope
+    )
+
+
+def _leader_runner(tmp_path: Path) -> tuple[Runner, list[Phase], LeaderSnapshot]:
+    """leader baseline 검증에 필요한 최소 runner. git은 건드리지 않는다 —
+    검증 대상은 기록과 현재 phase의 대조이고, 실제 sweep은 대조를 통과한
+    다음에야 돈다."""
+    runner, phases = _development_runner(tmp_path)
+    runner.project_root = tmp_path
+    runner.accept_leader_drift = False
+    runner._leader_include_ignored = True
+    runner._leader_scope = leader_sweep_scope(True)
+    return runner, phases, _armed_snapshot(runner._leader_scope)
+
+
+def test_a_leader_baseline_survives_a_drift_re_anchor_of_the_same_phase(
+    tmp_path: Path,
+):
+    """반증: baseline이 `phase_index`를 동일성 기준으로 들고 있으면, 승인된 drift가
+    같은 이름의 phase를 다른 자리로 옮긴 순간 재개가 `WorktreeIsolationError`로
+    죽는다. index는 이제 이름에서 나오는 파생값이라 phase가 그대로여도 정당하게
+    움직인다. 동일성은 이름·run·leader 체크아웃이 진다."""
+    runner, phases, snapshot = _leader_runner(tmp_path)
+    phase = phases[2]
+    meta = {
+        "run_id": runner.run_dir.name,
+        HOST_PHASE_LEADER_BASELINE_KEY: {
+            "version": _HOST_PHASE_BASELINE_RECORD_VERSION,
+            "run_id": runner.run_dir.name,
+            "phase_id": phase.id,
+            "leader_root": str(real_path(tmp_path)),
+            "snapshot": leader_snapshot_payload(snapshot),
+        },
+    }
+    compared: list[LeaderSnapshot] = []
+    runner._assert_leader_unchanged = (
+        lambda root, recorded, **kwargs: compared.append(recorded)
+    )
+
+    returned = runner._verify_host_phase_leader_baseline(
+        meta=meta, phase=phase, leader_root=tmp_path
+    )
+
+    # 이름이 같으므로 기록은 살아 있고 leader 대조가 실제로 돈다.
+    assert returned == snapshot
+    assert compared == [snapshot]
+    # 기록 어디에도 index가 없다. 있으면 그게 두 번째 권위가 된다.
+    assert "phase_index" not in meta[HOST_PHASE_LEADER_BASELINE_KEY]
+
+
+def test_a_leader_baseline_that_names_another_phase_still_stops(tmp_path: Path):
+    """이름을 기준으로 옮겨도 기준 자체가 사라지면 안 된다."""
+    runner, phases, snapshot = _leader_runner(tmp_path)
+    meta = {
+        "run_id": runner.run_dir.name,
+        HOST_PHASE_LEADER_BASELINE_KEY: {
+            "version": _HOST_PHASE_BASELINE_RECORD_VERSION,
+            "run_id": runner.run_dir.name,
+            "phase_id": phases[2].id,
+            "leader_root": str(real_path(tmp_path)),
+            "snapshot": leader_snapshot_payload(snapshot),
+        },
+    }
+
+    with pytest.raises(WorktreeIsolationError):
+        runner._verify_host_phase_leader_baseline(
+            meta=meta, phase=phases[3], leader_root=tmp_path
+        )
+
+
+def test_a_leader_baseline_recorded_with_the_old_index_field_is_re_captured(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+):
+    """`phase_index`를 담던 v1 레코드가 디스크에 남아 있다. 형식 차이를 오염으로
+    보고하면 업그레이드를 걸친 run이 근거 없이 막히므로, 스냅샷 축과 같이 대조
+    없이 다시 찍는다."""
+    runner, phases, snapshot = _leader_runner(tmp_path)
+    phase = phases[2]
+    meta = {
+        "run_id": runner.run_dir.name,
+        HOST_PHASE_LEADER_BASELINE_KEY: {
+            "version": 1,
+            "run_id": runner.run_dir.name,
+            "phase_id": phase.id,
+            "phase_index": 2,
+            "leader_root": str(real_path(tmp_path)),
+            "snapshot": leader_snapshot_payload(snapshot),
+        },
+    }
+    runner._assert_leader_unchanged = lambda *args, **kwargs: None
+
+    assert (
+        runner._verify_host_phase_leader_baseline(
+            meta=meta, phase=phase, leader_root=tmp_path
+        )
+        is None
+    )
+
+    assert meta.get(HOST_PHASE_LEADER_BASELINE_KEY) is None
+    out = capsys.readouterr().out
+    assert "[migrate]" in out
+    assert "record format v1" in out
+
+
+def test_an_interrupted_transition_is_replayed_on_the_name_not_the_stale_index(
+    tmp_path: Path,
+):
+    """반증: 재생이 `to_index`만 보면, 재배치된 정의에서 원장의 옛 index가 다른
+    phase를 연다. 원장은 `to_phase`를 이미 들고 있고 멱등성 검사는 그걸 쓴다 —
+    자리를 놓는 쪽도 같은 권위를 봐야 한다."""
+    runner, phases = _development_runner(tmp_path)
+    ids = [phase.id for phase in phases]
+    review_index = ids.index("review")
+    fix_index = ids.index("fix-loop")
+    assert review_index != 0
+    write_meta(
+        runner.run_dir,
+        {
+            "run_id": runner.run_dir.name,
+            "phase_index": fix_index,
+            "current_phase": "fix-loop",
+        },
+    )
+    # 원장은 phase가 앞으로 밀려나기 전 정의의 index를 들고 있다.
+    record = _journal_record(runner, phases)
+    record["to_index"] = 0
+    (runner.run_dir / TRANSITIONS_FILE).write_text(
+        json.dumps(record) + "\n", encoding="utf-8"
+    )
+
+    runner._resume_pending_transition()
+
+    resumed = read_meta(runner.run_dir)
+    assert resumed["current_phase"] == "review"
+    assert resumed["phase_index"] == review_index
+
+
+def test_a_journal_line_naming_a_phase_the_workflow_dropped_is_not_replayed(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+):
+    """이름이 현재 정의에 없으면 놓을 자리가 없다. 그때 원장의 index를 믿고 놓으면
+    아무 관계 없는 phase로 run을 옮긴다."""
+    runner, phases = _development_runner(tmp_path)
+    ids = [phase.id for phase in phases]
+    fix_index = ids.index("fix-loop")
+    write_meta(
+        runner.run_dir,
+        {
+            "run_id": runner.run_dir.name,
+            "phase_index": fix_index,
+            "current_phase": "fix-loop",
+        },
+    )
+    record = _journal_record(runner, phases)
+    record["to_phase"] = "phase-the-workflow-dropped"
+    record["to_index"] = 0
+    (runner.run_dir / TRANSITIONS_FILE).write_text(
+        json.dumps(record) + "\n", encoding="utf-8"
+    )
+
+    runner._resume_pending_transition()
+
+    held = read_meta(runner.run_dir)
+    assert held["current_phase"] == "fix-loop"
+    assert held["phase_index"] == fix_index
+    assert "[reject]" in capsys.readouterr().out
+
+
+def test_a_re_anchored_cursor_says_so_instead_of_being_inferred(tmp_path: Path):
+    """반증: shell이 `기록된 index != 커서 index`로 재배치를 추론했다. 그 비교는
+    digest 불일치 밖에서는 언제나 거짓이라 분기의 근거가 될 수 없다."""
+    runner, phases = _development_runner(tmp_path)
+    ids = [phase.id for phase in phases]
+    scope = CursorScope.of(runner.workflow, ids)
+    recorded = {
+        "phase_index": 0,
+        "current_phase": ids[2],
+        "workflow_digest": "stale-digest",
+    }
+
+    moved = RunCursor.from_meta(recorded, scope, accept_workflow_drift=True)
+    assert moved.reanchored_from == 0
+    assert moved.phase_index == 2
+
+    stayed = RunCursor.from_meta(
+        {"phase_index": 2, "current_phase": ids[2], "workflow_digest": scope.digest},
+        scope,
+    )
+    assert stayed.reanchored_from is None
+
+
+def test_a_re_anchor_prints_the_move_it_made(tmp_path: Path, capsys):
+    """승인된 drift가 run을 몇 phase 앞뒤로 옮기는데 화면에 아무 줄도 없으면,
+    사용자는 재개가 어디서 다시 시작했는지 알 수 없다."""
+    runner, phases = _development_runner(tmp_path)
+    runner.accept_workflow_drift = True
+    ids = [phase.id for phase in phases]
+    write_meta(
+        runner.run_dir,
+        {
+            "run_id": runner.run_dir.name,
+            "phase_index": 0,
+            "current_phase": ids[2],
+            "workflow_digest": "stale-digest",
+        },
+    )
+
+    cursor = runner._run_cursor(read_meta(runner.run_dir))
+
+    assert cursor.phase_index == 2
+    out = capsys.readouterr().out
+    assert "[re-anchor]" in out
+    assert ids[2] in out
+    assert "0 -> 2" in out
+
+
+def test_an_empty_current_phase_is_corruption_not_an_absent_name():
+    """`raw_phase or ""`는 "이름이 없다"와 "이름이 빈 문자열이다"를 한 값으로
+    접었다. 이름 없는 phase를 정의할 수 있는 workflow는 없으므로 후자는 손상이다."""
+    workflow = _development()
+    scope = _scope(workflow)
+
+    with pytest.raises(CorruptRunCursorError):
+        RunCursor.from_meta({"phase_index": 0, "current_phase": ""}, scope)
+
+    # 이름이 없는 두 정당한 자리는 그대로 통과하고, 값으로도 구분된다.
+    assert RunCursor.from_meta({"current_phase": None}, scope).phase_id is None
+    assert (
+        RunCursor.from_meta({"phase_index": len(scope.phase_ids)}, scope).phase_id
+        is None
+    )

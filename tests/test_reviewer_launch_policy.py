@@ -191,6 +191,34 @@ def test_unknown_execution_keys_fail_closed():
         _resolve({"execution": typo}, cli=_CLAUDE)
 
 
+@pytest.mark.parametrize("key", ["phase", "angle"])
+def test_match_shape_is_checked_before_the_comparison_outcome(key):
+    """불변: `match`의 오타는 그 rule이 발동하는 phase에 들어서기 전에 터진다.
+
+    반증: `rule_matches`가 키를 하나씩 "검사하고 비교"하던 동안, 앞 키에서 어긋난
+    rule의 뒤 키는 한 번도 읽히지 않았다. `{phase: review, angle: 5}`는 다른
+    phase에서는 조용히 통과하고 `review` phase의 리뷰 직전에만 fail-closed로
+    터졌다 — 선언 검증(override loader, 배포 profile sweep)도 그것을 보지 못했다.
+    검사는 `validated_match`가 비교와 무관하게 한다.
+    """
+    broken = {"phase": "review", "angle": "architecture-design", key: 5}
+
+    with pytest.raises(
+        reviewer_launch.ReviewerLaunchError, match=f"match.{key} must be a non-empty"
+    ):
+        reviewer_launch.validate_reviewer_launch_declaration(
+            _policy({"provider": "claude", "model": "fable"}, match=broken)["execution"]
+        )
+    # 어긋난 phase로 도는 실행 경로에서도 같다. 이전에는 여기서 False로 접혔다.
+    with pytest.raises(reviewer_launch.ReviewerLaunchError):
+        _resolve(
+            _policy({"provider": "claude", "model": "fable"}, match=broken),
+            cli=_CLAUDE,
+            phase_id="gates",
+            angle_id="io-safety",
+        )
+
+
 def test_artifact_records_identity_but_not_raw_argv_or_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

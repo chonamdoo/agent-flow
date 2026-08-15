@@ -850,10 +850,10 @@ def test_hosted_phase_baseline_with_an_older_record_format_is_re_captured(
     assert started.run_dir is not None
     run_dir = started.run_dir
 
-    # 이 브랜치의 이전 커밋이 남긴 상태: 레코드 축 버전이 2다.
+    # 이 브랜치가 아직 모르는 레코드 축 버전이 디스크에 있다.
     meta = read_meta(run_dir)
     baseline = dict(meta["host_phase_leader_baseline"])
-    baseline["version"] = 2
+    baseline["version"] = 3
     meta["host_phase_leader_baseline"] = baseline
     write_meta(run_dir, meta)
 
@@ -871,7 +871,7 @@ def test_hosted_phase_baseline_with_an_older_record_format_is_re_captured(
 
     out = capsys.readouterr().out
     assert "[migrate]" in out
-    assert "record format v2" in out
+    assert "record format v3" in out
     assert read_meta(run_dir).get("host_phase_leader_baseline") is None
 
 

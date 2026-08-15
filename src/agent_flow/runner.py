@@ -154,8 +154,12 @@ TRANSITIONS_FILE = "transitions.jsonl"
 _HOST_PHASE_LEADER_BASELINE = HOST_PHASE_LEADER_BASELINE_KEY
 # baseline **레코드 자체**의 필드 구성 버전. 그 안에 담기는 스냅샷의 형식 버전은
 # 별개 축이고 `LeaderSnapshot.version`이 들고 있다. 이 값은 `run_id`/`phase_id`/
-# `phase_index`/`leader_root`/`snapshot`의 의미가 바뀔 때만 올린다.
-_HOST_PHASE_BASELINE_RECORD_VERSION = 1
+# `leader_root`/`snapshot`의 의미가 바뀔 때만 올린다.
+#
+# v2는 v1의 `phase_index`를 뺐다. cursor의 index는 phase 이름에서 나오는 파생값이라
+# 승인된 drift가 정의를 재배치하면 이름이 그대로여도 움직인다. 그 값을 기록에 남겨
+# 등호로 대조하면 baseline이 두 번째 권위가 되어 정당한 재개를 죽인다.
+_HOST_PHASE_BASELINE_RECORD_VERSION = 2
 # 사용자가 확인한 leader 변경을 담는 자리. baseline과 **다른 키**여야 한다 —
 # baseline 레코드는 필드 집합을 등호로 검사하므로 여기에 얹으면 malformed가 된다.
 _HOST_PHASE_LEADER_DRIFT = "host_phase_leader_drift"
@@ -475,7 +479,6 @@ class Runner:
             leader_before = self._verify_host_phase_leader_baseline(
                 meta=meta,
                 phase=phase,
-                phase_index=phase_index,
                 leader_root=leader_root,
             )
             # 진입 시각은 phase를 **시작할 때** 찍는다. 실행 뒤에 찍으면 방금 쓴
@@ -574,7 +577,6 @@ class Runner:
                 )
                 self._persist_host_phase_leader_baseline(
                     phase=phase,
-                    phase_index=phase_index,
                     leader_root=leader_root,
                     snapshot=leader_before,
                 )
@@ -702,7 +704,6 @@ class Runner:
         *,
         meta: dict[str, Any],
         phase: Phase,
-        phase_index: int,
         leader_root: Path | None,
     ) -> LeaderSnapshot | None:
         raw = meta.get(_HOST_PHASE_LEADER_BASELINE)
@@ -712,19 +713,15 @@ class Runner:
             raise WorktreeIsolationError(
                 "durable host-phase leader baseline exists without a linked worktree"
             )
-        if not isinstance(raw, dict) or set(raw) != {
-            "version",
-            "run_id",
-            "phase_id",
-            "phase_index",
-            "leader_root",
-            "snapshot",
-        }:
+        if not isinstance(raw, dict):
             raise WorktreeIsolationError(
                 "durable host-phase leader baseline is malformed"
             )
         assert self.run_dir is not None
         expected_root = str(real_path(leader_root))
+        # 버전을 필드 집합보다 **먼저** 본다. 순서가 반대면 예전 형식의 기록은
+        # 필드가 다르다는 이유로 malformed 하드 raise에 걸려, 아래 재캡처 경로에
+        # 도달하지 못한 채 업그레이드를 걸친 run이 재개 불가가 된다.
         record_version = recorded_snapshot_version(raw.get("version"))
         if record_version != _HOST_PHASE_BASELINE_RECORD_VERSION:
             # 레코드 필드 구성이 다르면 그 안의 값들을 현재 의미로 읽을 수 없다.
@@ -736,11 +733,22 @@ class Runner:
                 f"v{_HOST_PHASE_BASELINE_RECORD_VERSION}",
             )
             return None
+        if set(raw) != {
+            "version",
+            "run_id",
+            "phase_id",
+            "leader_root",
+            "snapshot",
+        }:
+            raise WorktreeIsolationError(
+                "durable host-phase leader baseline is malformed"
+            )
+        # 동일성은 run·phase 이름·leader 체크아웃이 진다. index는 여기 없다 —
+        # 승인된 drift가 정의를 재배치하면 같은 phase가 다른 자리에 앉고, index를
+        # 대조하면 그 정당한 재개가 오염 보고로 죽는다.
         if (
             raw.get("run_id") != self.run_dir.name
             or raw.get("phase_id") != phase.id
-            or isinstance(raw.get("phase_index"), bool)
-            or raw.get("phase_index") != phase_index
             or raw.get("leader_root") != expected_root
         ):
             raise WorktreeIsolationError(
@@ -984,7 +992,6 @@ class Runner:
         self,
         *,
         phase: Phase,
-        phase_index: int,
         leader_root: Path,
         snapshot: LeaderSnapshot,
     ) -> None:
@@ -1002,7 +1009,6 @@ class Runner:
             "version": _HOST_PHASE_BASELINE_RECORD_VERSION,
             "run_id": self.run_dir.name,
             "phase_id": phase.id,
-            "phase_index": phase_index,
             "leader_root": str(real_path(leader_root)),
             "snapshot": leader_snapshot_payload(snapshot),
         }
@@ -1299,6 +1305,22 @@ class Runner:
                 return transition
         return None
 
+    def _transition_target_index(self, transition: PhaseTransition) -> int | None:
+        """원장 줄이 가리키는 자리를 **현재** 정의에서 찾는다. 없으면 ``None``.
+
+        기록된 `to_index`는 원장을 적을 때의 정의에서 나온 값이다. 그 뒤 승인된
+        drift가 phase를 끼워 넣거나 순서를 바꿨으면 같은 숫자가 다른 phase를 연다.
+        이름이 정본이므로 이름으로 찾는다 — 멱등성 검사가 이미 `to_phase`를 쓰고
+        있어서, 놓는 쪽만 숫자를 보면 두 권위가 갈린다.
+        """
+        if not transition.to_phase:
+            # 이름이 없는 목적지는 마지막 phase를 지난 완료 커서 하나뿐이다.
+            return len(self.phases)
+        for index, phase in enumerate(self.phases):
+            if phase.id == transition.to_phase:
+                return index
+        return None
+
     def _resume_pending_transition(self) -> None:
         """원장은 적혔지만 cursor가 아직 안 쓰인 전이를 마저 끝낸다.
 
@@ -1312,13 +1334,24 @@ class Runner:
         with exclusive_file_lease(self._transition_lock_path()):
             meta = read_meta(self.run_dir)
             recorded_phase = meta.get("current_phase") or ""
+            target_index = self._transition_target_index(transition)
+            if target_index is None:
+                # 놓을 자리가 없다. 기록된 index를 믿고 놓으면 이 원장 줄과 아무
+                # 관계 없는 phase로 run을 옮긴다 — 적용하지 않고 사람이 원장을
+                # 보게 둔다.
+                print(
+                    f"  [reject] transition journal targets phase "
+                    f"{transition.to_phase!r}, which workflow {self.workflow.id} no "
+                    f"longer defines; not applying it"
+                )
+                return
             # blocked 전이는 cursor를 옮기지 않는다. index만 보면 "이미 반영됨"으로
             # 오인해 사유가 빠진 meta를 그대로 둔다.
             blocked_recorded = (
                 meta.get("phase_blocked_reason") == "route_blocked"
             ) == transition.blocked
             if (
-                meta.get("phase_index") == transition.to_index
+                meta.get("phase_index") == target_index
                 and recorded_phase == transition.to_phase
                 and blocked_recorded
             ):
@@ -1336,7 +1369,7 @@ class Runner:
                     "directory; not applying it"
                 )
                 return
-            self._advance_phase(meta, transition.to_index, transition.blocked)
+            self._advance_phase(meta, target_index, transition.blocked)
             write_meta(self.run_dir, meta)
 
     def _cursor_scope(self) -> CursorScope:
@@ -1355,7 +1388,24 @@ class Runner:
             self._cursor_scope(),
             accept_workflow_drift=self.accept_workflow_drift,
         )
-        if meta.get("workflow_digest") != cursor.workflow_digest:
+        if cursor.reanchored_from is not None:
+            # 승인된 drift가 run을 몇 phase 앞뒤로 옮겼다. 훨씬 작은 상태 변화인
+            # 중단된 전이 재개도 한 줄을 찍는다 — 이쪽이 조용하면 사용자는 재개가
+            # 어디서 다시 시작했는지 알 방법이 없다.
+            print(
+                f"  [re-anchor] workflow drift moved phase '{cursor.phase_id}' "
+                f"{cursor.reanchored_from} -> {cursor.phase_index}"
+            )
+        # 승인된 drift는 기록된 phase 이름으로 index를 다시 잡는다. 다시 잡은 값을
+        # 남기지 않으면 digest만 새로 찍힌 채 옛 index가 meta에 남고, 다음 실행은
+        # drift가 사라진 자리에서 index와 이름이 어긋나 `CorruptRunCursorError`로
+        # 막힌다. 재배치 여부는 커서가 직접 들고 온다 — 여기서 `기록된 index !=
+        # 커서 index`로 추론하면 digest가 어긋난 안에서만 참이 되는 비교를 결정적
+        # 분기로 쓰는 것이고, 그건 근거가 될 수 없다.
+        if (
+            meta.get("workflow_digest") != cursor.workflow_digest
+            or cursor.reanchored_from is not None
+        ):
             # digest 기록이 없던 예전 run이거나, 사용자가 drift를 승인한 run이다.
             # 어느 쪽이든 지금 정의로 다시 찍어야 다음 실행이 같은 기준을 본다.
             #
@@ -1372,6 +1422,7 @@ class Runner:
                     f"the run with `agent-flow abort`."
                 )
             meta["workflow_digest"] = cursor.workflow_digest
+            meta["phase_index"] = cursor.phase_index
             write_meta(self.run_dir, meta)
         return cursor
 

@@ -279,6 +279,41 @@ def test_resolve_run_subpath_refuses_a_symlinked_subdirectory(tmp_path: Path) ->
         resolve_run_subpath(run_dir, run_dir / "handoffs" / "x.md")
 
 
+def test_run_subpath_write_refuses_a_symlinked_ancestor_before_creating_anything(
+    tmp_path: Path,
+) -> None:
+    """반증: 아직 없는 디렉터리라고 검증을 건너뛰면, `mkdir(parents=True)`가 run
+    안의 symlink 조상을 따라가 run **밖에** 디렉터리를 실제로 만든 뒤에야 거부가
+    일어난다. 거부한 쓰기가 부작용을 남기면 봉쇄가 아니다.
+    """
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (run_dir / "nested").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(WorktreeIsolationError):
+        write_run_subpath_text(run_dir, run_dir / "nested" / "new" / "f.md", "x\n")
+
+    assert list(outside.iterdir()) == []
+
+
+def test_run_subpath_write_still_creates_a_deep_missing_directory_chain(
+    tmp_path: Path,
+) -> None:
+    """symlink 조상 봉쇄가 정상 경로를 잡아먹으면 안 된다. 아직 없는 중첩
+    디렉터리를 파며 쓰는 것은 `artifacts/gate-results.json`의 정당한 사용이다.
+    """
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    target = run_dir / "artifacts" / "gates" / "nested" / "results.json"
+
+    write_run_subpath_text(run_dir, target, "{}\n")
+
+    assert target.read_text(encoding="utf-8") == "{}\n"
+
+
+
 def test_atomic_write_keeps_the_existing_file_mode(tmp_path: Path) -> None:
     """반증: `tempfile.mkstemp`가 만든 0600을 `os.replace`로 실어 보내면 사용자가
     넓혀 둔(또는 좁혀 둔) 기존 권한이 쓸 때마다 조용히 갈린다.
