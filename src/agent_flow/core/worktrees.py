@@ -3432,6 +3432,19 @@ def declared_worktree_copies(profile: Mapping[str, Any]) -> list[str]:
 
     복사하는 쪽과 정리 쪽이 같은 목록을 봐야 한다. 두 벌을 두면 한쪽만 늘어난 순간
     kit이 심은 파일이 정리 차단 사유가 된다.
+
+    `copy`는 schema가 목록으로 선언한 자리지만(`profiles/_schema.yaml`) 여기 들어오는
+    payload는 검증되지 않은 YAML이다. `copy: local.properties` 한 줄이면 스칼라 문자열이
+    되고, 순회하면 `l`/`o`/`c`/`.` 같은 **문자**가 파일 이름으로 풀린다. 그 목록은
+    복사(`copy_declared_worktree_files`)와 정리 예외(`_kit_copied_worktree_files`)가
+    함께 쓰므로, 잘못된 형태를 통과시키면 선언한 설정은 복사되지 않고 한 글자 이름이
+    정리 예외 후보로 새어 들어간다.
+
+    그래서 형태가 틀린 선언은 예외를 올리지 않고 **버리고 계속한다** — 같은 모듈의
+    `_declared_worktree_copy_names`와 `core/local_skills.resolved_profile`이 profile
+    읽기 실패를 다루는 방향이 그렇다. 여기서 raise하면 worktree 생성과 정리가 profile
+    한 줄에 막힌다. 대신 무엇을 버렸는지 stderr로 남긴다. 조용히 빈 목록이 되면
+    `local.properties` 누락의 원인을 아무도 짚지 못한다.
     """
     sources: list[Mapping[str, Any]] = [profile]
     nested = profile.get("profiles")
@@ -3445,10 +3458,27 @@ def declared_worktree_copies(profile: Mapping[str, Any]) -> list[str]:
         setup = branching.get("worktree_setup")
         if not isinstance(setup, dict):
             continue
-        for name in setup.get("copy") or []:
-            text = str(name)
-            if text not in names:
-                names.append(text)
+        declared = setup.get("copy")
+        if declared is None:
+            continue
+        # str/bytes도 순회 가능하다. 그래서 Iterable이 아니라 목록인지를 본다.
+        if not isinstance(declared, (list, tuple)):
+            print(
+                "warning: ignored branching.worktree_setup.copy: expected a list of file "
+                f"names, got {type(declared).__name__} ({declared!r})",
+                file=sys.stderr,
+            )
+            continue
+        for name in declared:
+            if not isinstance(name, str):
+                print(
+                    "warning: ignored branching.worktree_setup.copy entry: expected a "
+                    f"file name, got {type(name).__name__} ({name!r})",
+                    file=sys.stderr,
+                )
+                continue
+            if name not in names:
+                names.append(name)
     return names
 
 

@@ -27,6 +27,7 @@ from agent_flow.core.command_evidence import (  # noqa: E402
 )
 from agent_flow.core.gates import GateResult  # noqa: E402
 from agent_flow.core.local_skills import SKILLS_READ_LOG, read_skill_evidence  # noqa: E402
+from agent_flow.core.phase_workflow import load_phase_workflow_definition  # noqa: E402
 from agent_flow.core.worktree_isolation import (  # noqa: E402
     WorktreeIsolationError,
     resolve_run_subpath,
@@ -419,3 +420,120 @@ def test_an_unreadable_gate_results_file_blocks_instead_of_raising(tmp_path: Pat
     decision = runner._next_index(0, phase)
 
     assert (decision.to_index, decision.blocked, decision.route_key) == (0, True, GATE_MALFORMED)
+
+
+def _workflow_kit(root: Path, body: str) -> Path:
+    workflows = root / "workflows"
+    workflows.mkdir(parents=True, exist_ok=True)
+    (workflows / "default.yaml").write_text(body, encoding="utf-8")
+    return root
+
+
+def test_a_traversing_phase_artifact_is_rejected_at_load(tmp_path: Path) -> None:
+    """반증: `artifact`를 자유 문자열로 받으면 `artifact: ../../escape.md`가 loader를
+    통과해 run이 **시작된 뒤** 쓰기 시점에야 드러난다. 형제 필드(phase/skill 이름,
+    workflow 파일)는 전부 compile 시점에 봉쇄된다. 여기도 그래야 한다.
+    """
+    kit_root = _workflow_kit(
+        tmp_path,
+        "id: default\n"
+        "phases:\n"
+        "  - id: only\n"
+        "    description: d\n"
+        "    artifact: ../../escape.md\n",
+    )
+
+    with pytest.raises(ValueError, match="artifact"):
+        load_phase_workflow_definition(kit_root, "default")
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    ["/etc/passwd", "C:/tmp/escape.md", "a\\b.md", "", "artifacts/", "./escape.md"],
+)
+def test_absolute_and_degenerate_phase_artifacts_are_rejected_at_load(
+    tmp_path: Path, artifact: str
+) -> None:
+    kit_root = _workflow_kit(
+        tmp_path,
+        "id: default\n"
+        "phases:\n"
+        "  - id: only\n"
+        "    description: d\n"
+        f"    artifact: {artifact!r}\n",
+    )
+
+    with pytest.raises(ValueError, match="artifact"):
+        load_phase_workflow_definition(kit_root, "default")
+
+
+def test_a_nested_relative_phase_artifact_still_loads(tmp_path: Path) -> None:
+    """불변: `artifacts/gate-results.json`은 배포된 정의가 실제로 쓰는 값이다."""
+    kit_root = _workflow_kit(
+        tmp_path,
+        "id: default\n"
+        "phases:\n"
+        "  - id: gates\n"
+        "    description: d\n"
+        "    artifact: artifacts/gate-results.json\n",
+    )
+
+    definition = load_phase_workflow_definition(kit_root, "default")
+
+    assert definition.phases[0].artifact == "artifacts/gate-results.json"
+
+
+def test_every_shipped_workflow_still_loads() -> None:
+    """불변: 새 검증이 배포된 정의를 하나라도 막으면 harness 전체가 죽는다."""
+    names = sorted(
+        path.stem for path in (KIT_ROOT / "src" / "agent_flow" / "workflows").glob("*.yaml")
+    )
+
+    assert names, "배포된 workflow를 못 찾았으면 이 테스트는 아무것도 보지 않는다"
+    for name in names:
+        definition = load_phase_workflow_definition(KIT_ROOT, name)
+        assert definition.phases, name
+        for phase in definition.phases:
+            assert phase.artifact and not phase.artifact.startswith("/"), (name, phase.id)
+
+
+def test_an_automatic_artifact_cannot_be_written_outside_the_run(tmp_path: Path) -> None:
+    """반증: `_write_automatic_artifact`는 `run_dir / phase.artifact`에 맨
+    `mkdir(parents=True)` + `write_text`를 했다. 같은 변경에서 `_apply_transition`과
+    generic adapter는 정본 writer로 옮겼는데 이 자리만 봉쇄 밖에 남아 있었다.
+    """
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.project_root = project_root
+    runner.architecture = "default"
+    phase = Phase(id="commit", description="commit", artifact="../../escape.md")
+
+    with pytest.raises(WorktreeIsolationError):
+        runner._write_automatic_artifact(phase)
+
+    assert not (tmp_path / "escape.md").exists()
+    assert not (tmp_path.parent / "escape.md").exists()
+    assert list(run_dir.iterdir()) == []
+
+
+def test_an_automatic_artifact_still_lands_in_a_nested_run_subdirectory(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.project_root = project_root
+    runner.architecture = "default"
+    phase = Phase(id="commit", description="commit", artifact="artifacts/commit.md")
+
+    assert runner._write_automatic_artifact(phase) is True
+
+    written = (run_dir / "artifacts" / "commit.md").read_text(encoding="utf-8")
+    assert "status: skipped" in written

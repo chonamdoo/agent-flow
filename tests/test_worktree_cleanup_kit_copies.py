@@ -110,6 +110,35 @@ def test_profile_declared_copy_is_exempt_when_identical(tmp_path: Path) -> None:
     W._assert_cleanup_checkout_clean(root=root, path=checkout)
 
 
+def test_scalar_copy_declaration_does_not_widen_the_cleanup_exemption(tmp_path: Path) -> None:
+    """반증: 스칼라 선언을 순회하면 한 글자 이름들이 정리 예외 후보가 된다.
+
+    `copy: local.properties`(목록이 아닌 스칼라) 한 줄이 `l`/`o`/`c`/`.`/`e` …로 풀리고,
+    그 이름이 leader와 checkout에 같은 내용으로 있으면 사용자 파일이 "kit이 심은 것"으로
+    통과한다. 예외를 받은 경로는 checkout과 함께 지워지므로 이쪽이 더 위험하다.
+    """
+    root = tmp_path / "repo"
+    _init_repo(root, ignored=("CLAUDE.md", "local.properties", "e"))
+    (root / "CLAUDE.md").write_text("leader contract\n", encoding="utf-8")
+    (root / "e").write_text("user scratch\n", encoding="utf-8")
+    profiles_dir = root / ".agent-flow" / "profiles"
+    profiles_dir.mkdir(parents=True)
+    (profiles_dir / "android.yaml").write_text(
+        "id: android\nbranching:\n  worktree_setup:\n    copy: local.properties\n",
+        encoding="utf-8",
+    )
+    (root / ".agent-flow" / "kit.json").write_text(
+        json.dumps({"profile": "android"}), encoding="utf-8"
+    )
+    checkout = _checkout_with_kit_copies(root, names=("CLAUDE.md",))
+    (checkout / "e").write_text("user scratch\n", encoding="utf-8")
+
+    assert "e" not in W._kit_copied_worktree_files(root=root, checkout=checkout)
+    with pytest.raises(W.CleanupBlockedError) as excinfo:
+        W._assert_cleanup_checkout_clean(root=root, path=checkout)
+    assert str(excinfo.value).endswith(": e; preserving checkout")
+
+
 def test_tracked_context_file_modified_in_the_checkout_still_blocks(tmp_path: Path) -> None:
     """불변: 추적 중인 파일의 커밋되지 않은 수정은 leader 워킹트리와 같아도 막는다.
 

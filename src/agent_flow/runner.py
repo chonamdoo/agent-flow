@@ -1499,30 +1499,34 @@ class Runner:
         return rounds
 
     def _write_automatic_artifact(self, phase: Phase) -> bool:
+        """runner가 직접 쓰는 phase artifact. 봉쇄는 정본 writer 한 벌뿐이다.
+
+        `phase.artifact`는 workflow 정의에서 온 값이고 `run_dir / phase.artifact`는
+        절대 경로 한 번으로 run을 통째로 벗어난다. 다른 쓰기 자리와 같은 writer를
+        쓰지 않으면 이 자리만 봉쇄 밖에 남는다.
+        """
         assert self.run_dir is not None
         if phase.id in GIT_DEPENDENT_PHASES and not _is_git_repo(self.project_root):
-            artifact = self._artifact_path(phase)
-            artifact.parent.mkdir(parents=True, exist_ok=True)
-            artifact.write_text(
+            write_run_subpath_text(
+                self.run_dir,
+                self._artifact_path(phase),
                 f"# {phase.id}\n\n"
                 "status: skipped\n"
                 "reason: project root is not a git repository\n",
-                encoding="utf-8",
             )
             print(f"  [skip] {phase.id} status=skipped (not a git repository)")
             return True
         if self.architecture == "ddd" and phase.id == "architecture-review":
             missing = _missing_ddd_design_terms(self.run_dir)
             if missing:
-                artifact = self._artifact_path(phase)
-                artifact.parent.mkdir(parents=True, exist_ok=True)
-                artifact.write_text(
+                write_run_subpath_text(
+                    self.run_dir,
+                    self._artifact_path(phase),
                     "# architecture-review\n\n"
                     "verdict: blocked\n"
                     "status: failed\n\n"
                     "The DDD design artifact is missing required language-agnostic sections:\n"
                     + "".join(f"- `{term}`\n" for term in missing),
-                    encoding="utf-8",
                 )
                 print(
                     "  [fail] architecture-review missing DDD design terms: "

@@ -12,7 +12,9 @@ review flagged.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from types import MappingProxyType
@@ -42,6 +44,12 @@ if TYPE_CHECKING:
 
 _REVIEW_INPUT_TIMEOUT_S = 120
 _REVIEW_INPUT_MAX_BYTES = 8 * 1024 * 1024
+_OID_PATTERN = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
+# base ref는 git argv에 그대로 들어간다. 옵션처럼 보이는 값이나 revision 문법이
+# 섞인 값은 거부한다.
+_BASE_REF_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/+@"
+)
 
 _BASE_REVIEW_ANGLES: tuple[dict[str, str], ...] = (
     {
@@ -169,6 +177,7 @@ def _run_multi_review_distribution(
         project_root,
         run_dir,
         phase.id,
+        base_branch=_profile_base_branch(adapter),
     )
     jobs = _reviewer_jobs(
         phase,
@@ -200,7 +209,24 @@ def _write_review_input_snapshot(
     project_root: Path,
     run_dir: Path,
     phase_id: str,
+    *,
+    base_branch: str | None = None,
 ) -> Path:
+    """리뷰어가 받는 유일한 증거. 기준점은 선언된 base와의 merge-base다.
+
+    `HEAD` 기준으로 찍으면 작업이 이미 커밋된 브랜치에서는 모든 섹션이 비는데,
+    같은 프롬프트가 리뷰어에게 샌드박스 안에서 `git diff`를 돌리지 말라고 말한다.
+    그래서 리뷰어는 근거 없이 판정하게 된다 — 라운드 하나가 실제로 그렇게 무너졌다.
+    """
+    # 관측 하나당 상한을 전체 예산보다 낮게 잡는다. unborn HEAD 경로는 관측을
+    # 셋까지 만들고, 합계가 예산을 넘으면 스냅샷 자체를 못 쓴다. 상한에 걸린
+    # 섹션은 라운드를 죽이지 않고 머리말에 잘렸다고 적는다.
+    observation_max_bytes = max(1, _REVIEW_INPUT_MAX_BYTES // 4)
+    baseline = _resolve_review_baseline(
+        project_root,
+        base_branch,
+        max_output_bytes=observation_max_bytes,
+    )
     status = git_safe(
         "status",
         "--short",
@@ -208,22 +234,27 @@ def _write_review_input_snapshot(
         cwd=project_root,
         optional_locks=False,
         timeout_s=_REVIEW_INPUT_TIMEOUT_S,
-        max_output_bytes=_REVIEW_INPUT_MAX_BYTES,
+        max_output_bytes=observation_max_bytes,
     )
     diff = git_safe(
         "diff",
         "--no-ext-diff",
         "--no-color",
-        "HEAD",
+        baseline.rev,
         "--",
         cwd=project_root,
         optional_locks=False,
         timeout_s=_REVIEW_INPUT_TIMEOUT_S,
-        max_output_bytes=_REVIEW_INPUT_MAX_BYTES,
+        max_output_bytes=observation_max_bytes,
     )
-    observations = [("git status --short", status)]
+    notes: list[str] = []
+    diff_observations = []
     if _is_unborn_head_failure(diff):
-        observations.extend((
+        notes.append(
+            "HEAD carries no commit yet, so the staged and working-tree diffs "
+            "below stand in for a baseline diff"
+        )
+        diff_observations.extend((
             (
                 "git diff --cached",
                 git_safe(
@@ -235,7 +266,7 @@ def _write_review_input_snapshot(
                     cwd=project_root,
                     optional_locks=False,
                     timeout_s=_REVIEW_INPUT_TIMEOUT_S,
-                    max_output_bytes=_REVIEW_INPUT_MAX_BYTES,
+                    max_output_bytes=observation_max_bytes,
                 ),
             ),
             (
@@ -248,26 +279,66 @@ def _write_review_input_snapshot(
                     cwd=project_root,
                     optional_locks=False,
                     timeout_s=_REVIEW_INPUT_TIMEOUT_S,
-                    max_output_bytes=_REVIEW_INPUT_MAX_BYTES,
+                    max_output_bytes=observation_max_bytes,
                 ),
             ),
         ))
     else:
-        observations.append(("git diff HEAD", diff))
+        diff_observations.append((f"git diff {baseline.rev}", diff))
+    observations = [("git status --short", status), *diff_observations]
     failed = [
         f"{label}: {result.stderr.strip() or result.error or result.returncode}"
         for label, result in observations
-        if not result.ok
+        if not result.ok and not _hit_output_limit(result)
     ]
     if failed:
         raise WorktreeIsolationError(
             "could not precompute reviewer input: " + "; ".join(failed)
         )
+    truncated = [
+        label for label, result in observations if _hit_output_limit(result)
+    ]
+    if truncated:
+        notes.append(
+            f"truncated at {observation_max_bytes} bytes, so the sections are "
+            f"incomplete: {', '.join(truncated)}"
+        )
+    has_diff = any(result.stdout.strip() for _, result in diff_observations)
+    status_lines = [line for line in status.stdout.splitlines() if line.strip()]
+    # 추적 중인 변경은 반드시 diff로도 나타난다. 그런데 diff가 비었다면 스냅샷을
+    # 못 만든 것이다. 추적되지 않는 파일(`??`)은 status 목록 자체가 증거다.
+    tracked = [line for line in status_lines if not line.startswith("??")]
+    if tracked and not has_diff:
+        raise WorktreeIsolationError(
+            "could not precompute reviewer input: git status reports "
+            f"{len(tracked)} tracked change(s) but the diff against "
+            f"{baseline.rev} is empty"
+        )
+    # 성공했지만 빈 출력은 두 가지다. 변경이 정말 없는 review-only 작업은 정당하고,
+    # 기준점을 못 잡아 아무것도 못 담은 것은 리뷰를 통과시키면 안 된다.
+    if not status_lines and not has_diff:
+        if baseline.base_unresolved:
+            raise WorktreeIsolationError(
+                "could not precompute reviewer input: no diff is available "
+                f"against declared base `{base_branch}` ({baseline.detail}); "
+                "reviewers would receive no evidence"
+            )
+        notes.append(
+            "no change relative to this baseline: the snapshot is a verified "
+            "empty diff, not a missing one"
+        )
+    header = [
+        "# Reviewer input snapshot",
+        "",
+        f"- phase: {phase_id}",
+        f"- diff baseline: {baseline.detail}",
+    ]
+    header.extend(f"- note: {note}" for note in notes)
     sections = [
         f"## {label}\n\n{result.stdout.rstrip() or '(empty)'}"
         for label, result in observations
     ]
-    content = "\n\n".join(sections) + "\n"
+    content = "\n".join(header) + "\n\n" + "\n\n".join(sections) + "\n"
     if len(content.encode("utf-8")) > _REVIEW_INPUT_MAX_BYTES:
         raise WorktreeIsolationError(
             "could not precompute reviewer input: "
@@ -276,6 +347,109 @@ def _write_review_input_snapshot(
     target = run_dir.resolve() / f"{phase_id}-review-input.patch"
     write_run_artifact_text(run_dir, target, content)
     return target
+
+
+@dataclass(frozen=True)
+class _ReviewBaseline:
+    rev: str
+    detail: str
+    # 선언된 base가 있는데 그걸 기준으로 삼지 못한 상태. 이때의 빈 diff는
+    # "변경 없음"의 증거가 될 수 없다.
+    base_unresolved: bool = False
+
+
+def _resolve_review_baseline(
+    project_root: Path,
+    base_branch: str | None,
+    *,
+    max_output_bytes: int,
+) -> _ReviewBaseline:
+    fallback = "`HEAD` — changes already committed on this branch are NOT below"
+    if not base_branch:
+        return _ReviewBaseline(
+            rev="HEAD",
+            detail=(
+                f"{fallback} (the active profile declares no `branching.base`)"
+            ),
+        )
+    if not _is_usable_base_ref(base_branch):
+        return _ReviewBaseline(
+            rev="HEAD",
+            detail=(
+                f"{fallback} (declared base `{base_branch}` is not a usable git "
+                "ref name)"
+            ),
+            base_unresolved=True,
+        )
+    diagnostic = "no common ancestor"
+    for candidate in (base_branch, f"origin/{base_branch}"):
+        result = git_safe(
+            "merge-base",
+            "HEAD",
+            candidate,
+            cwd=project_root,
+            optional_locks=False,
+            timeout_s=_REVIEW_INPUT_TIMEOUT_S,
+            max_output_bytes=max_output_bytes,
+        )
+        oid = result.stdout.strip() if result.ok else ""
+        if _OID_PATTERN.fullmatch(oid):
+            return _ReviewBaseline(
+                rev=oid,
+                detail=(
+                    f"`git merge-base HEAD {candidate}` = {oid} — every change "
+                    "from the base through the current working tree is below, "
+                    "committed and uncommitted alike"
+                ),
+            )
+        if not result.ok:
+            stderr = result.stderr.strip()
+            diagnostic = (
+                stderr.splitlines()[-1]
+                if stderr
+                else result.error or f"git exited {result.returncode}"
+            )
+    return _ReviewBaseline(
+        rev="HEAD",
+        detail=(
+            f"{fallback} (declared base `{base_branch}` could not be used: "
+            f"{diagnostic})"
+        ),
+        base_unresolved=True,
+    )
+
+
+def _profile_base_branch(adapter: Adapter) -> str | None:
+    """diff 기준 브랜치. profile의 `branching.base`가 정본이다."""
+    snapshot = getattr(adapter, "_profile_snapshot", None)
+    if not isinstance(snapshot, Mapping):
+        return None
+    for section, key in (("branching", "base"), ("pr", "target_branch")):
+        block = snapshot.get(section)
+        if not isinstance(block, Mapping):
+            continue
+        value = block.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _is_usable_base_ref(value: str) -> bool:
+    return (
+        bool(value)
+        and not value.startswith("-")
+        and ".." not in value
+        and set(value) <= _BASE_REF_CHARS
+    )
+
+
+def _hit_output_limit(result) -> bool:
+    """상한에 걸려 잘린 것과 실패한 것은 다르다. 잘려도 부분 증거는 남는다."""
+    return (
+        result.output_truncated
+        and not result.timed_out
+        and result.error is None
+    )
 
 
 def _is_unborn_head_failure(result) -> bool:
@@ -311,9 +485,13 @@ def _reviewer_jobs(
         review_input = (
             "\n\n## Precomputed review input\n\n"
             f"Read `{review_input_path}` before judging the change. The controller "
-            "captured its `git status --short` and applicable staged/working-tree "
-            "diff immediately before launching reviewers. Inspect untracked files "
-            "listed there directly. Do not run `git diff` inside the reviewer sandbox."
+            "captured it immediately before launching reviewers: its header names "
+            "the diff baseline (the profile base branch's merge-base when one is "
+            "available, so changes already committed on this branch are included) "
+            "and states whether the snapshot was truncated or is a verified empty "
+            "diff. The body holds `git status --short` and that diff. Inspect "
+            "untracked files listed there directly. Do not run `git diff` inside "
+            "the reviewer sandbox."
             if review_input_path is not None
             else ""
         )

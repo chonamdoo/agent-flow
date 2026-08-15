@@ -379,7 +379,12 @@ def _normalize_phases(phases_raw: list[object], path: Path, workflow_id: str) ->
                 cite_lore=_bool_field(item.get("cite_lore", False), path, phase_id, "cite_lore"),
                 routes=routes,
                 required_markers=normalize_required_markers(item.get("required_markers")),
-                artifact=_optional_string(item.get("artifact"), _default_artifact_for_phase(workflow_id, phase_id)),
+                artifact=_artifact_field(
+                    item.get("artifact"),
+                    path,
+                    phase_id,
+                    _default_artifact_for_phase(workflow_id, phase_id),
+                ),
                 skills=_phase_skills(item.get("skills"), path, phase_id),
             )
         )
@@ -441,6 +446,52 @@ def _optional_string(value: object, default: str) -> str:
     if not isinstance(value, str):
         raise ValueError("workflow phase string field must be a string")
     return value
+
+
+# `C:` 같은 드라이브 접두사. POSIX `PurePath`는 이것을 절대 경로로 보지 않아
+# lexical 봉쇄를 그냥 통과한다.
+_ARTIFACT_DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
+
+
+def _artifact_field(value: object, path: Path, phase_id: str, default: str) -> str:
+    """`artifact`는 run 디렉터리 기준 상대 경로다. **compile 시점에** 봉쇄한다.
+
+    형제 필드는 이미 통제된다 — phase/skill 이름은 `validate_safe_name`, workflow
+    파일 자체는 `ensure_child_path`. artifact만 자유 문자열이라 `artifact: ../../x`가
+    loader를 통과했고, 그 값은 `run_dir / phase.artifact`로 그대로 쓰였다. 잘못된
+    정의는 run을 시작하기 전에 죽어야 한다. 중첩 상대경로(`artifacts/gate-results.json`)
+    는 정당하므로 계속 통과한다.
+
+    기본값도 같은 검사를 거친다 — 기본값은 `phase_id`에서 만들어지고 이 loader는
+    phase id를 safe name으로 제한하지 않으므로, 기본값 경로도 같은 탈출로다.
+    """
+    candidate = default if value is None else value
+    if not isinstance(candidate, str):
+        raise ValueError(f"workflow {path}: phase {phase_id} `artifact` must be a string")
+    reason = _artifact_reject_reason(candidate)
+    if reason is not None:
+        raise ValueError(
+            f"workflow {path}: phase {phase_id} `artifact` {reason}: {candidate!r}"
+        )
+    return candidate
+
+
+def _artifact_reject_reason(value: str) -> str | None:
+    if value != value.strip():
+        return "must not be padded with whitespace"
+    if "\x00" in value:
+        return "must not contain a NUL byte"
+    # `\`는 POSIX에서 평범한 파일명 문자지만 Windows에서는 구분자다. 한쪽에서만
+    # 상대 경로인 값은 플랫폼에 따라 다른 자리를 가리킨다.
+    if "\\" in value:
+        return "must use `/` as its only path separator"
+    if _ARTIFACT_DRIVE_PREFIX.match(value):
+        return "must not start with a drive letter"
+    # 빈 값, 절대 경로(`/x` -> 첫 조각이 빈 문자열), `//`, 디렉터리를 가리키는
+    # 뒤 슬래시, `.`/`..` 탈출을 한 번에 거른다.
+    if any(segment in ("", ".", "..") for segment in value.split("/")):
+        return "must be a non-empty relative path with no empty, `.`, or `..` segment"
+    return None
 
 
 def _optional_string_or_none(value: object) -> str | None:
