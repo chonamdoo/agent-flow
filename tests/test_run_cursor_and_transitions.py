@@ -42,9 +42,9 @@ from agent_flow.runner import (
     TRANSITIONS_FILE,
     Phase,
     Runner,
-    _HOST_PHASE_BASELINE_RECORD_VERSION,
     _phases_from_definition,
 )
+from agent_flow.core.host_phase_baseline import BASELINE_RECORD_VERSION
 
 
 def _development() -> PhaseWorkflowDefinition:
@@ -636,7 +636,7 @@ def test_a_leader_baseline_survives_a_drift_re_anchor_of_the_same_phase(
     meta = {
         "run_id": runner.run_dir.name,
         HOST_PHASE_LEADER_BASELINE_KEY: {
-            "version": _HOST_PHASE_BASELINE_RECORD_VERSION,
+            "version": BASELINE_RECORD_VERSION,
             "run_id": runner.run_dir.name,
             "phase_id": phase.id,
             "leader_root": str(real_path(tmp_path)),
@@ -665,7 +665,7 @@ def test_a_leader_baseline_that_names_another_phase_still_stops(tmp_path: Path):
     meta = {
         "run_id": runner.run_dir.name,
         HOST_PHASE_LEADER_BASELINE_KEY: {
-            "version": _HOST_PHASE_BASELINE_RECORD_VERSION,
+            "version": BASELINE_RECORD_VERSION,
             "run_id": runner.run_dir.name,
             "phase_id": phases[2].id,
             "leader_root": str(real_path(tmp_path)),
