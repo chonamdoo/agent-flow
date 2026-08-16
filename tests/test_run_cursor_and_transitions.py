@@ -39,9 +39,11 @@ from agent_flow.core.worktree_isolation import (
     real_path,
 )
 from agent_flow.runner import (
+    FIX_LOOP_MAX_ROUNDS,
     TRANSITIONS_FILE,
     Phase,
     Runner,
+    _FIX_COLLECTOR_ROUTE_KEYS,
     _phases_from_definition,
 )
 from agent_flow.core.host_phase_baseline import BASELINE_RECORD_VERSION
@@ -840,3 +842,28 @@ def test_an_empty_current_phase_is_corruption_not_an_absent_name():
         RunCursor.from_meta({"phase_index": len(scope.phase_ids)}, scope).phase_id
         is None
     )
+
+
+def test_the_fix_collector_targets_come_from_the_declared_route_keys(tmp_path: Path):
+    """반증: 이 집합이 비면 fix-loop 상한이 **전부** 조용히 꺼진다.
+
+    실측: 비었을 때 `agent-flow start development`는 review→fix-loop를 돌며 90초
+    뒤에도 끝나지 않았고, 고친 뒤 2초 안에 `reason: route_blocked`로 멈췄다.
+    상한 자체는 `_increment_fix_loop_rounds`가 지키므로, 여기서는 상한이 볼 대상이
+    실제로 잡히는지만 고정한다.
+    """
+    runner, phases = _development_runner(tmp_path)
+    declared = {
+        target
+        for phase in phases
+        for key, target in (phase.routes or {}).items()
+        if key in _FIX_COLLECTOR_ROUTE_KEYS and isinstance(target, str)
+    }
+
+    collectors = runner._fix_collector_targets()
+
+    assert collectors == declared
+    # workflow가 rejection route를 선언하는 한 이 집합은 비지 않는다. 비교식이
+    # 어긋나 항상 False가 되면 여기서 걸린다.
+    assert "fix-loop" in collectors
+    assert FIX_LOOP_MAX_ROUNDS > 0

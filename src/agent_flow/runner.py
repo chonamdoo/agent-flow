@@ -124,7 +124,10 @@ from agent_flow.core.local_skills import (
     changed_files,
     declared_concern_ids,
     missing_local_skill_markers,
+    phase_skill_resolution,
+    skill_markers_enforced,
 )
+from agent_flow.core.skill_scope import merge_scope
 from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.memory.index import LoreIndex
 from agent_flow.memory.lore import Lore
@@ -495,6 +498,20 @@ class Runner:
                         required_artifact=artifact,
                     )
                     return
+                grown = self._grown_skill_names(phase)
+                if grown:
+                    print(
+                        f"\n═══ phase '{phase.id}' scope grew: "
+                        f"{', '.join(grown)}. Read them, then update the "
+                        f"artifact and `{self.next_command}`. ═══"
+                    )
+                    self._print_structured_status(
+                        status="blocked",
+                        phase=phase,
+                        reason="skill_scope_grew",
+                        required_artifact=artifact,
+                    )
+                    return
                 missing_markers = self._missing_required_markers(phase)
                 if missing_markers:
                     print(
@@ -558,6 +575,10 @@ class Runner:
                     leader_root=leader_root,
                     snapshot=leader_before,
                 )
+            # 프롬프트가 렌더되기 전에 기록을 잡는다. 이 시점의 목록은 프롬프트가
+            # 그대로 보여 주므로 자람이 아니다. 여기서 안 잡으면 첫 게이트가 목록
+            # 전체를 자람으로 보고 모든 phase가 한 번씩 헛되게 막힌다.
+            self._grown_skill_names(phase)
             completed = adapter.execute(
                 phase, run_dir=self.run_dir, project_root=self.project_root,
             )
@@ -593,6 +614,20 @@ class Runner:
                     status="blocked",
                     phase=phase,
                     reason=blocked_reason,
+                    required_artifact=artifact,
+                )
+                return
+            grown = self._grown_skill_names(phase)
+            if grown:
+                print(
+                    f"\n═══ phase '{phase.id}' scope grew: "
+                    f"{', '.join(grown)}. Read them, then update the "
+                    f"artifact and `{self.next_command}`. ═══"
+                )
+                self._print_structured_status(
+                    status="blocked",
+                    phase=phase,
+                    reason="skill_scope_grew",
                     required_artifact=artifact,
                 )
                 return
@@ -1208,7 +1243,7 @@ class Runner:
         for candidate in self.phases:
             routes = getattr(candidate, "routes", None) or {}
             for key, route_target in routes.items():
-                if route_key in _FIX_COLLECTOR_ROUTE_KEYS and isinstance(route_target, str):
+                if key in _FIX_COLLECTOR_ROUTE_KEYS and isinstance(route_target, str):
                     collectors.add(route_target)
         return collectors
 
@@ -1317,6 +1352,41 @@ class Runner:
             return False
         print(f"  [recheck] {phase.id} status=blocked")
         return True
+
+    def _required_skill_names(self, phase: Phase, meta: dict[str, Any]) -> tuple[str, ...]:
+        """게이트가 요구하게 될 required skill 이름. 강제 지점과 같은 입력을 쓴다."""
+        resolution = phase_skill_resolution(
+            self.config_root,
+            phase.id,
+            phase_skills=phase.skills,
+            profile=self.profile,
+            changed_files=changed_files(self.project_root),
+            task_text=str(meta.get("task", "")),
+            concerns=run_concerns(meta),
+        )
+        return tuple(skill.name for skill in resolution.required)
+
+    def _grown_skill_names(self, phase: Phase) -> tuple[str, ...]:
+        """프롬프트가 보여 준 뒤로 새로 required가 된 이름. 기록도 여기서 갱신한다.
+
+        읽기와 갱신을 갈라 두면 자람을 매 라운드 다시 보고하며 같은 자리에 영원히
+        막힌다. 한 번 알린 이름은 기록에 들어가고, 다음 라운드의 요구는 정당해진다.
+        """
+        assert self.run_dir is not None
+        if not skill_markers_enforced(phase.id):
+            return ()
+        # marker 검사와 같은 픽스처 탈출구를 쓴다. stub이 쓴 artifact에서 자람으로
+        # 막으면, marker를 일부러 건너뛰는 state machine 픽스처가 아무도 요구하지
+        # 않은 skill 때문에 멈춘다.
+        artifact = self._existing_artifact_path(phase)
+        if artifact.exists() and self._is_stub_authored(
+            artifact.read_text(encoding="utf-8")
+        ):
+            return ()
+        meta = read_meta(self.run_dir)
+        added = merge_scope(meta, phase.id, self._required_skill_names(phase, meta))
+        write_meta(self.run_dir, meta)
+        return added
 
     def _missing_required_markers(self, phase: Phase) -> list[str]:
         assert self.run_dir is not None

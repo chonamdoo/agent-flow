@@ -201,6 +201,15 @@ def declared_concern_ids(profile: dict | None) -> set[str]:
     return declared_domain_ids(profile) | declared_group_concerns(profile)
 
 
+def skill_markers_enforced(phase_id: str) -> bool:
+    """이 phase에서 skill marker를 강제하는가.
+
+    프롬프트, 게이트, 자람 재진입이 **같은 술어**를 봐야 한다. 강제하지 않는 phase에서
+    required가 자랐다고 막으면, 아무도 요구하지 않은 것 때문에 막히는 자리가 생긴다.
+    """
+    return phase_id in CODE_PHASES
+
+
 def phase_skill_resolution(
     project_root: Path,
     phase_id: str,
@@ -242,7 +251,7 @@ def local_skill_prompt_block(
         concerns=concerns,
     )
     # 강제 지점과 같은 조건을 쓴다. 둘이 갈라지면 프롬프트가 다시 거짓말한다.
-    enforced = phase_id in CODE_PHASES
+    enforced = skill_markers_enforced(phase_id)
     block = skill_prompt_block(project_root, resolution, enforced=enforced)
     if not block:
         return ""
@@ -282,7 +291,7 @@ def missing_local_skill_markers(
     )
     # skill 목록 주입은 모든 phase에 하지만, marker 강제는 코드 생성/리뷰 phase에만 건다.
     # commit·merge·pr-watch까지 막으면 얻는 것 없이 막히는 경로만 늘어난다.
-    if phase_id not in CODE_PHASES or not resolution.required:
+    if not skill_markers_enforced(phase_id) or not resolution.required:
         return []
     values = completion_gate_marker_values(text)
     missing: list[str] = []
