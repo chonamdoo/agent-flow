@@ -213,9 +213,9 @@ def test_runner_profile_union_routes_like_the_flat_merge(tmp_path):
     `merged_profile_payload`로 평평하게 합쳐 5개를 보므로, 같은 run에 대해 두
     판정이 갈린다.
     """
-    from agent_flow.runner import _load_profile_union
+    from agent_flow.core.profile_resolution import load_profile_union
 
-    _profile_id, union = _load_profile_union(
+    _profile_id, union = load_profile_union(
         tmp_path, ["react-native", "android"], explicit_fallback=False
     )
     flat = merged_profile_payload(

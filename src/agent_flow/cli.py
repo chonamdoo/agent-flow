@@ -170,8 +170,8 @@ from agent_flow.runner import (
     Runner,
     ResumeMode,
     _find_kit_root,
-    _load_profile,
 )
+from agent_flow.core.profile_resolution import resolve_profile
 from agent_flow.providers.host import list_host_providers
 from agent_flow.providers.subprocess import (
     ProviderCommand,
@@ -2224,7 +2224,7 @@ def _slug_naming_for_active_host(root: Path) -> tuple[list[str], int]:
     """
     empty: tuple[list[str], int] = ([], DEFAULT_SLUG_MAX_LENGTH)
     try:
-        _profile_id, profile = _load_profile(_find_kit_root(), root)
+        _profile_id, profile = resolve_profile(_find_kit_root(), root)
     except (OSError, RuntimeError, ValueError, KeyError, TypeError):
         # profile을 못 읽는다고 worktree 생성을 막지 않는다. 이름만 못 지을 뿐이다.
         return empty
@@ -2545,7 +2545,7 @@ def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
     # 복사까지 건너뛰면, 계약을 못 받는 checkout이 만들어진 뒤 그 안에서 일하게 된다.
     copied = list(_copy_worktree_files(root=root, checkout=checkout, names=ROOT_CONTEXT_FILES))
     try:
-        _profile_id, profile = _load_profile(_find_kit_root(), root)
+        _profile_id, profile = resolve_profile(_find_kit_root(), root)
         declared = [str(name) for name in declared_worktree_copies(profile)]
     except Exception as exc:  # profile 해석 실패가 worktree 생성을 막을 이유는 없다
         print(f"warning: skipped worktree setup: {_format_cli_error(exc)}", file=sys.stderr)
@@ -2606,7 +2606,7 @@ def _sync_declared_worktree_files(
     if not checkouts:
         return
     try:
-        _profile_id, profile = _load_profile(_find_kit_root(), root)
+        _profile_id, profile = resolve_profile(_find_kit_root(), root)
         declared = [str(name) for name in declared_worktree_copies(profile)]
     except Exception as exc:  # profile 해석 실패가 install을 막을 이유는 없다
         print(

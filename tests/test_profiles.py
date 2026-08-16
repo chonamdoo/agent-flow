@@ -41,7 +41,7 @@ from agent_flow.core.skill_catalog import discover_skill_catalog  # noqa: E402
 from agent_flow.core.skill_matching import match_external  # noqa: E402
 from agent_flow.core.skill_resolver import skill_roots  # noqa: E402
 from agent_flow.core.worktree_isolation import LEADER_SWEEP_SCOPES  # noqa: E402
-from agent_flow.runner import _load_profile as load_runner_profile  # noqa: E402
+from agent_flow.core.profile_resolution import resolve_profile as load_runner_profile  # noqa: E402
 
 PROFILES_DIR = KIT_ROOT / "src" / "agent_flow" / "profiles"
 

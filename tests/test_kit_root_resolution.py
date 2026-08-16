@@ -96,9 +96,9 @@ def test_unknown_workflow_still_fails_closed(tmp_path: Path):
 
 def test_profile_loads_when_the_kit_root_has_no_profile_copy(tmp_path: Path):
     """반증: profile이 `<kit_root>/profiles`에만 있으면 루트 사본을 못 지운다."""
-    from agent_flow.runner import _load_single_profile
+    from agent_flow.core.profile_resolution import load_single_profile
 
-    profile_id, raw = _load_single_profile(
+    profile_id, raw = load_single_profile(
         tmp_path,
         "python",
         strict_missing=True,
@@ -111,10 +111,10 @@ def test_profile_loads_when_the_kit_root_has_no_profile_copy(tmp_path: Path):
 
 def test_unknown_profile_still_fails_closed(tmp_path: Path):
     """불변: kit.json 오타가 조용히 generic으로 떨어지면 잘못된 스택으로 전 워크플로가 돈다."""
-    from agent_flow.runner import _load_single_profile
+    from agent_flow.core.profile_resolution import load_single_profile
 
     with pytest.raises(FileNotFoundError):
-        _load_single_profile(
+        load_single_profile(
             tmp_path,
             "no-such-profile",
             strict_missing=True,

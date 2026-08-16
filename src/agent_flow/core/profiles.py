@@ -131,10 +131,10 @@ def detect_profile(root: Path) -> str:
 def active_profile_ids(root: Path, requested: str = "auto") -> list[str]:
     if requested != "auto":
         return _dedupe_profiles(_split_profiles(requested))
-    kit_profiles = _read_kit_profiles(root)
+    kit_profiles = kit_declared_profiles(root)
     if kit_profiles:
         return kit_profiles
-    kit_profile = _read_kit_profile(root)
+    kit_profile = kit_declared_profile(root)
     if kit_profile:
         return [kit_profile]
     return [detect_profile(root)]
@@ -570,21 +570,23 @@ def _read_profile_text(profile_id: str) -> str:
     return repo_path.read_text(encoding="utf-8")
 
 
-def _read_kit_profiles(root: Path) -> list[str]:
-    data = _read_kit_json(root)
+def kit_declared_profiles(root: Path) -> list[str]:
+    """`kit.json:profiles`. 다중 profile 선언이 정본인 자리다."""
+    data = read_kit_json(root)
     profiles = data.get("profiles")
     if isinstance(profiles, list):
         return _dedupe_profiles(profile for profile in profiles if isinstance(profile, str))
     return []
 
 
-def _read_kit_profile(root: Path) -> str:
-    data = _read_kit_json(root)
+def kit_declared_profile(root: Path) -> str:
+    """`kit.json:profile`. 단일 선언 자리이고 없으면 빈 문자열이다."""
+    data = read_kit_json(root)
     profile = data.get("profile")
     return profile if isinstance(profile, str) and profile else ""
 
 
-def _read_kit_json(root: Path) -> dict[str, Any]:
+def read_kit_json(root: Path) -> dict[str, Any]:
     path = root / ".agent-flow" / "kit.json"
     if not path.is_file():
         return {}
