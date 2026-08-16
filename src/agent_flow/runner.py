@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -48,7 +47,6 @@ from agent_flow.artifact import (
     write_meta,
 )
 from agent_flow.cli_detect import CliInfo, REVIEW_CLI_NAMES, detect_available_clis
-from agent_flow.core.commands import run_safe_command
 from agent_flow.core.command_evidence import missing_test_evidence_markers
 from agent_flow.core.context_contract import run_relative_path
 from agent_flow.core.observation import (
@@ -89,7 +87,6 @@ from agent_flow.core.worktree_isolation import (
     leader_root_for,
     leader_sweep_scope,
     resolve_run_subpath,
-    sanitized_worker_env,
     write_run_subpath_text,
 )
 from agent_flow.core.route_verdicts import (
@@ -120,8 +117,6 @@ from agent_flow.core.phase_workflow import (
     RunCursor,
     find_kit_root,
     load_phase_workflow_definition,
-    overall_review_route_key,
-    unfenced_markdown_text,
 )
 from agent_flow.core.report import write_run_report
 from agent_flow.core.markers import has_failure_markers, missing_markers
@@ -713,7 +708,6 @@ class Runner:
         assert self.run_dir is not None
         return BaselineScope(
             run_dir=self.run_dir,
-            worker_root=self.project_root,
             sweep_scope=self._leader_scope,
             include_ignored=self._leader_include_ignored,
             accept_drift=self.accept_leader_drift,
@@ -1213,7 +1207,7 @@ class Runner:
         collectors: set[str] = set()
         for candidate in self.phases:
             routes = getattr(candidate, "routes", None) or {}
-            for route_key, route_target in routes.items():
+            for key, route_target in routes.items():
                 if route_key in _FIX_COLLECTOR_ROUTE_KEYS and isinstance(route_target, str):
                     collectors.add(route_target)
         return collectors

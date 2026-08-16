@@ -3424,7 +3424,7 @@ ROOT_CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md")
 def declared_worktree_copies(profile: Mapping[str, Any]) -> list[str]:
     """새 checkout이 받아야 할 이름: 루트 컨텍스트 파일 + 단일/합성 profile 선언.
 
-    `_load_profile_union`이 만드는 합성 dict에는 최상위 `branching`이 없다 —
+    `profile_resolution.load_profile_union`이 만드는 합성 dict에는 최상위 `branching`이 없다 —
     개별 profile은 `profiles` 아래에 들어가고 최상위에는 `review_angles`/`gates`/
     `skills`/`architecture`만 합쳐진다. 최상위만 보면 android+react-native처럼
     profile이 둘 이상인 프로젝트에서 선언이 조용히 빈 목록이 되고, `local.properties`가

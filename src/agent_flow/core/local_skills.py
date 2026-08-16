@@ -175,6 +175,24 @@ class SkillReadEvidence:
     used_names: frozenset[str] = frozenset()
 
 
+# 계층 계약 문서의 이름 family. 정확한 이름은 스택마다 다르고(`react-clean-architecture`,
+# `python-api-clean-architecture`, `clean-architecture-core`) 설치 여부에 따라 dependency
+# 확장이 되거나 안 되므로, 판정은 이름 조각 하나로 한다.
+ARCHITECTURE_CONTRACT_FAMILY = "clean-architecture"
+
+
+def architecture_contract_required(resolution: SkillResolution) -> bool:
+    """이 phase가 계층 계약 문서를 요구하는가.
+
+    작성자 게이트와 reviewer angle 게이트가 **같은 술어**를 써야 한다. 한쪽이 정확한
+    이름을, 다른 쪽이 family를 보면 routed-but-uninstalled 상태에서 갈린다 — 그때
+    작성자는 `applied`를 적으라고 요구받는데 그것을 검증할 angle은 등록되지 않는다.
+    """
+    return any(
+        ARCHITECTURE_CONTRACT_FAMILY in skill.name for skill in resolution.required
+    )
+
+
 def declared_concern_ids(profile: dict | None) -> set[str]:
     """선언된 concern id 전체. 오타를 조용히 무시하지 않으려면 목록이 하나여야 한다."""
     from agent_flow.core.profile_routing import declared_group_concerns
@@ -301,15 +319,22 @@ def missing_local_skill_markers(
     # `applied|n/a`를 받는다 — 경계 경로를 건드리지 않는 변경에서 그 문서를 읽으라고
     # 요구하면 축소가 무의미해지고, 그때 `applied`를 강요하면 읽지 않은 것을 적게 된다.
     # 그래서 판정을 marker 문법이 아니라 이 phase의 required 집합으로 한다.
-    architecture_required = any(
-        "clean-architecture" in skill.name for skill in resolution.required
-    )
-    if architecture_required:
-        # 계층 계약을 요구하는 phase에서 `n/a`는 거짓이다. 두 marker 모두 그 angle이
-        # 실제로 돌았는지에 걸린다 — `must-avoid-check`는 그 angle의 산출물이다.
-        if values.get("clean-architecture") == "n/a":
+    # 여기서 marker를 **새로 요구하지 않는다.** 어떤 phase가 어떤 marker를 적어야
+    # 하는지는 workflow가 정하고(`required_markers`), 이 층은 그 값이 계층 계약을
+    # 요구하는 phase에서 거짓이 되는 경우만 잡는다. 새 요구를 만들면 그 marker를
+    # 선언하지 않은 phase(full-feature의 `multi-review`는 `clean-architecture-review`를
+    # 쓴다)까지 막힌다.
+    #
+    # `n/a`만 거부하는 것으로는 부족하다 — `markers._line_matches_marker`는 `n/a`가
+    # 대안으로 있는 marker에 `optional`도 허용하므로, 그 한 단어가 게이트를 통과한다.
+    # 그래서 적힌 값이 허용 열거에 드는지를 본다.
+    if architecture_contract_required(resolution):
+        if "clean-architecture" in values and values["clean-architecture"] != "applied":
             missing.append("clean-architecture: applied")
-        if values.get("must-avoid-check") == "n/a":
+        if "must-avoid-check" in values and values["must-avoid-check"] not in {
+            "pass",
+            "fail",
+        }:
             missing.append("must-avoid-check: pass|fail")
 
     # L3: 자기신고는 표시용이다. resolver가 required로 판정하고 실제로 있는 것만 요구한다.
@@ -331,6 +356,9 @@ def missing_local_skill_markers(
         profile=profile,
         changed_files=changed_files,
         task_text=task_text,
+        # 프롬프트 쪽과 같은 입력이어야 한다. concern을 빼면 concern으로 켜진 group의
+        # 부재를 프롬프트는 알리고 게이트는 검사하지 않는다.
+        concerns=concerns,
         resolution=resolution,
     )
     if routed_missing:

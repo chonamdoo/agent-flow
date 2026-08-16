@@ -66,7 +66,6 @@ class BaselineScope:
     """한 run의 기준선 판정에 필요한 값들. runner의 self에서 한 번 뽑아 온다."""
 
     run_dir: Path
-    worker_root: Path
     sweep_scope: str
     include_ignored: bool
     accept_drift: bool

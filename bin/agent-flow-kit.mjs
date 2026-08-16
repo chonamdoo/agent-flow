@@ -272,7 +272,7 @@ function installProject(requestedRoot) {
   // 이 디렉터리로 떨어지므로 profile YAML을 실제로 읽는 자리가 여기이고, override는
   // 설치 때 고르지 않은 profile도 지명할 수 있다 — 좁히면 `gates --profile ios`가
   // `unknown profile: ios`로 죽고, `AGENT_FLOW_PROFILE=ios`는 경고만 내고 `generic`
-  // 으로 조용히 내려앉는다(`runner.py` `_load_single_profile`). 위 `.agent-flow/profiles/`
+  // 으로 조용히 내려앉는다(`core/profile_resolution.py` `load_single_profile`). 위 `.agent-flow/profiles/`
   // 가 "이 프로젝트의 stack"을 보여 주는 자리이고, 이쪽은 override가 참조할 카탈로그다.
   copyBundledDirIfMissingOrSame(
     path.join(KIT_ROOT, "src", "agent_flow"),

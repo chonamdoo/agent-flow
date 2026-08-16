@@ -89,6 +89,8 @@ def test_profile_group_routes_the_bundled_skills_it_owns():
     )
 
     assert "android-code-review" in _names(routed)
+    # `app/src/main/java/A.kt`는 `app-shell` 경로다. 배선 자리는 architecture group에서
+    # 빼기로 했으므로 baseline만 걸린다.
     assert {skill.group for skill in routed} == {"profile"}
 
 
@@ -385,8 +387,14 @@ def test_prompt_contract_lists_every_marker_the_gate_demands(tmp_path):
 
     block = local_skill_prompt_block(project, "implement", **common)
     contract = block.split("```text")[1].split("```")[0]
-    artifact = "## Completion Gate\n" + contract.replace(
-        "skill-use-evidence: verified|unavailable", "skill-use-evidence: unavailable"
+    # 계약은 허용 값을 `a|b`로 적는다. artifact는 그중 하나를 골라야 하므로 첫 번째
+    # 대안으로 구체화한다 — 특정 marker 이름을 손으로 적으면 새 marker가 이 가드를
+    # 빠져나간다.
+    artifact = "## Completion Gate\n" + re.sub(
+        r"^([a-z0-9-]+): ([^|\n]+)\|\S+$",
+        r"\1: \2",
+        contract,
+        flags=re.M,
     )
 
     assert missing_local_skill_markers(artifact, project, "implement", **common) == []
@@ -457,7 +465,19 @@ def test_a_copy_only_component_change_does_not_require_architecture_docs():
     `react-clean-architecture`와 그 dependency `clean-architecture-core`가
     10,526 B였다. 버튼 문구를 바꾸는 작업이 계층 계약을 읽어야 할 이유는 없다.
     """
-    routed = _names(
+    for changed in ("src/components/Button.tsx", "app/globals.css", "app/page.tsx"):
+        routed = _names(
+            _route(
+                "nextjs",
+                phase_id="implement",
+                changed_files=[changed],
+                task_text="버튼 문구와 색상만 수정",
+            )
+        )
+
+        assert "react-clean-architecture" not in routed, changed
+    # baseline은 그대로 붙는다. 축소는 계층 문서에만 적용된다.
+    assert "react-development-guide" in _names(
         _route(
             "nextjs",
             phase_id="implement",
@@ -466,21 +486,60 @@ def test_a_copy_only_component_change_does_not_require_architecture_docs():
         )
     )
 
-    assert "react-development-guide" in routed
-    assert "react-clean-architecture" not in routed
+
+# 배선 자리다. `app/**`는 App Router 프로젝트 소스 대부분이라 architecture group에서
+# 빼기로 했고, 그 결정을 여기서도 같은 이름으로 적어 둔다.
+_COMPOSITION_ROOT_ROLES = {"app-shell", "android-native"}
 
 
-def test_a_boundary_path_change_still_requires_architecture_docs():
-    """불변: 축소가 계층 경계 변경까지 덮으면 그건 축소가 아니라 게이트 제거다."""
-    for changed in (
-        "src/core/domain/order/OrderRepository.ts",
-        "src/features/cart/api/useCart.ts",
-    ):
-        routed = _names(
-            _route("nextjs", phase_id="implement", changed_files=[changed], task_text="")
+def _role_sample_paths(profile_id: str) -> list[str]:
+    """선언된 role path마다 표본 두 개: layer 루트의 파일과 자리표시자 아래의 파일.
+
+    자리표시자를 항상 채우면 `**/<layer>/*/**` 같은 glob이 layer 루트 파일을 놓치는
+    것을 못 본다 — 첫 구현이 정확히 그 상태였다.
+    """
+    payload = load_profile_payload(profile_id)
+    roles = (payload.get("architecture") or {}).get("roles") or []
+    samples: list[str] = []
+    for role in roles:
+        if str(role.get("id")) in _COMPOSITION_ROOT_ROLES:
+            continue
+        for path in role.get("paths") or []:
+            filled = re.sub(r"<[^>]+>", "sample", str(path)).strip("/")
+            root = str(path).split("<", 1)[0].strip("/")
+            if filled:
+                samples.append(f"{filled}/Probe.txt")
+            if root:
+                samples.append(f"{root}/Probe.txt")
+    return sorted(dict.fromkeys(samples))
+
+
+@pytest.mark.parametrize("profile_id", ["android", "ios", "nextjs", "python", "react-native"])
+def test_every_declared_role_path_requires_the_architecture_doc(profile_id):
+    """불변: 축소가 계층 경계 변경까지 덮으면 그건 축소가 아니라 게이트 제거다.
+
+    두 경로만 확인하면 나머지 role path가 빠져도 통과한다 — 실제로 첫 구현에서
+    `app-shell`과 `core-ui` role이 전부 빠졌고 두 테스트 모두 초록이었다. 그래서
+    표본은 profile이 선언한 `architecture.roles`에서 전부 뽑는다.
+    """
+    architecture_skills = {
+        name
+        for group in load_profile_payload(profile_id)["skills"]["required_review"]
+        if group.get("group") == "architecture"
+        for name in group.get("skills") or ()
+    }
+    assert architecture_skills, profile_id
+
+    uncovered = [
+        sample
+        for sample in _role_sample_paths(profile_id)
+        if not architecture_skills
+        <= _names(
+            _route(profile_id, phase_id="implement", changed_files=[sample], task_text="")
         )
+    ]
 
-        assert "react-clean-architecture" in routed, changed
+    assert uncovered == []
 
 
 @pytest.mark.parametrize("profile_id", ["android", "ios", "nextjs", "python", "react-native"])

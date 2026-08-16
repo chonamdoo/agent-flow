@@ -4259,3 +4259,46 @@ def test_a_review_angle_is_dropped_when_its_skill_is_not_required(tmp_path: Path
     jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
 
     assert [job.angle_id for job in jobs] == ["generalist", "architecture-design"]
+
+
+def test_the_angle_gate_and_the_writer_gate_agree_on_a_routed_but_missing_skill(
+    tmp_path: Path, monkeypatch
+):
+    """반증: angle이 정확한 이름을, 작성자 게이트가 이름 family를 보면 갈린다.
+
+    profile 표로 라우팅됐지만 이 머신에 설치되지 않은 platform adapter는
+    `expand_dependencies`가 카탈로그 엔트리를 못 찾아 `clean-architecture-core`를
+    끌어오지 않는다. 그 상태에서 작성자는 `clean-architecture: applied`를 요구받는데
+    그것을 검증할 angle이 없으면, 리뷰 없는 통과가 된다.
+    """
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.core.local_skills import missing_local_skill_markers
+    from agent_flow.core.profiles import load_profile_payload
+    from agent_flow.runner import Phase
+
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "web"
+    project.mkdir()
+    profile = load_profile_payload("nextjs")
+    changed = ["src/core/domain/order/OrderRepository.ts"]
+
+    adapter = HostedAdapter("codex")
+    adapter._profile_snapshot = profile
+    adapter._changed_files = tuple(changed)
+    adapter._config_root = project
+    phase = Phase(id="review", description="", multi_review=True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    jobs = _reviewer_jobs(phase, run_dir, project, adapter)
+    writer_missing = missing_local_skill_markers(
+        "## Completion Gate\nclean-architecture: n/a\n",
+        project,
+        "review",
+        profile=profile,
+        changed_files=changed,
+    )
+
+    assert "clean-architecture" in {job.angle_id for job in jobs}
+    assert "clean-architecture: applied" in writer_missing

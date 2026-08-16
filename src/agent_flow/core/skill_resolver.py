@@ -254,6 +254,10 @@ def resolve_phase_skills(
     optional_names: list[str] = list(declared.optional)
 
     catalog = discover_skill_catalog(project_root, roots)
+    # task 문구로만 켜져 offered로 내려간 이름. 명시된 concern이 그것을 다시 required로
+    # 올릴 수 있어야 한다 — 그러지 않으면 강등을 되돌리라고 만든 탈출구가 정확히
+    # 강등 대상에만 듣지 않는다.
+    demoted: set[str] = set()
     for entry in catalog:
         if entry.name in required_names or entry.name in optional_names:
             continue
@@ -265,6 +269,7 @@ def resolve_phase_skills(
             # 카탈로그가 되고, 같은 변경이 host마다 다른 required를 만든다. 우리가
             # 배포하는 skill의 `taskTerms`는 저장소가 소유한 어휘라 그 문제가 없다.
             optional_names.append(entry.name)
+            demoted.add(entry.name)
         else:
             required_names.append(entry.name)
 
@@ -299,8 +304,12 @@ def resolve_phase_skills(
         concerns=concerns,
         env=env,
     ):
-        if match.name in required_names or match.name in optional_names:
+        if match.name in required_names:
             continue
+        if match.name in optional_names:
+            if match.tier != EXTERNAL_REQUIRED or match.name not in demoted:
+                continue
+            optional_names.remove(match.name)
         matched[match.name] = ResolvedSkill(
             name=match.name,
             path=match.path,

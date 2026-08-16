@@ -55,11 +55,16 @@ skills:
       when: React Native/Expo files change
       missing: "missing local profile: <skill>"
       path_globs: ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/app.json", "**/app.config.*"]
+    # app-shell과 native host role은 여기서 뺀다. `app/**`는 App Router 프로젝트의
+    # 소스 대부분이고 Android의 `app` 모듈도 그렇다 — 넣으면 문구만 바꾸는 변경이 다시
+    # 계층 문서를 요구해 축소가 사라진다. 그 자리의 배선 검토는 `--concern`으로 지목한다.
+    # 자리표시자(`<context>`) 아래만 걸면 layer 루트의 파일이 빠지므로 layer 디렉터리
+    # 전체를 잡는다.
     - group: architecture
       skills: [react-native-clean-architecture]
       when: React Native profile architecture role paths change
       missing: "missing local profile: <skill>"
-      path_globs: ["**/src/core/domain/**", "**/src/core/data/**", "**/src/core/network/**", "**/src/core/platform/**", "**/src/core/navigation/**", "**/src/features/*/api/**", "**/src/features/*/presentation/**"]
+      path_globs: ["**/src/core/domain/**", "**/src/core/data/**", "**/src/features/**", "**/src/core/ui/**", "**/src/core/design-system/**", "**/src/core/resources/**", "**/src/core/network/**", "**/src/core/platform/**", "**/src/core/permission/**", "**/src/core/navigation/api/**", "**/src/core/navigation/impl/**"]
     # TypeScript 가이드의 범위는 그 skill이 선언한 `*.ts`/`*.tsx`다. RN 표의 glob에
     # 섞으면 `app.json`이나 `*.js` 변경에서도 required가 된다.
     - group: typescript

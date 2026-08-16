@@ -56,11 +56,16 @@ skills:
       when: Python files change
       missing: "missing local profile: <skill>"
       path_globs: ["**/*.py", "**/*.pyi"]
+    # app-shell과 native host role은 여기서 뺀다. `app/**`는 App Router 프로젝트의
+    # 소스 대부분이고 Android의 `app` 모듈도 그렇다 — 넣으면 문구만 바꾸는 변경이 다시
+    # 계층 문서를 요구해 축소가 사라진다. 그 자리의 배선 검토는 `--concern`으로 지목한다.
+    # 자리표시자(`<context>`) 아래만 걸면 layer 루트의 파일이 빠지므로 layer 디렉터리
+    # 전체를 잡는다.
     - group: architecture
       skills: [python-api-clean-architecture]
       when: Python profile architecture role paths change
       missing: "missing local profile: <skill>"
-      path_globs: ["**/src/core/domain/**", "**/src/domain/**", "**/src/core/data/**", "**/src/data/**", "**/src/core/network/**", "**/src/core/platform/**", "**/src/core/navigation/**", "**/src/features/*/api/**", "**/src/features/*/presentation/**"]
+      path_globs: ["**/src/core/domain/**", "**/src/domain/**", "**/src/core/data/**", "**/src/data/**", "**/src/features/**", "**/src/core/ui/**", "**/src/core/resources/**", "**/src/core/network/**", "**/src/core/platform/**", "**/src/core/permission/**", "**/src/core/navigation/api/**", "**/src/core/navigation/impl/**"]
   # 설치된 외부 skill 라우팅. 이름은 적지 않는다 — Python은 벤더 first-party skill이 사실상
   # 없어(FastAPI·Pydantic 각 1개, Django/Flask/SQLAlchemy 0개) 이름 목록은 대부분 빈 칸이 되고,
   # 실제 공급원인 커뮤니티 배포본은 이름이 더 자주 바뀐다. 대신 스택 어휘로 판정한다.

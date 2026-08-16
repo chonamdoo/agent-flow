@@ -21,7 +21,10 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from agent_flow.adapters.base import Adapter
-from agent_flow.core.local_skills import phase_skill_resolution
+from agent_flow.core.local_skills import (
+    ARCHITECTURE_CONTRACT_FAMILY,
+    phase_skill_resolution,
+)
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
     git_safe,
@@ -69,7 +72,11 @@ _BASE_REVIEW_ANGLES: tuple[dict[str, str], ...] = (
     {
         "id": "clean-architecture",
         "prompt": "templates/_shared/review/clean-architecture.md",
-        "requires": "clean-architecture-core",
+        # 값은 이름 family다. 정확한 이름(`clean-architecture-core`)으로 보면
+        # routed-but-uninstalled 상태에서 dependency 확장이 일어나지 않아 angle이
+        # 빠지는데, 작성자 게이트는 family로 판정해 `applied`를 요구한다 —
+        # 두 술어가 갈리는 그 자리가 정확히 리뷰 없는 통과가 된다.
+        "requires": ARCHITECTURE_CONTRACT_FAMILY,
     },
 )
 _BASE_REVIEW_PROMPTS = {
@@ -496,8 +503,15 @@ def _applicable_angles(
     return [
         angle
         for angle in angles
-        if not angle.get("requires") or angle["requires"] in required
+        if not angle.get("requires") or _angle_requirement_met(angle["requires"], required)
     ]
+
+
+def _angle_requirement_met(requirement: str, required: set[str]) -> bool:
+    """`requires`는 이름 family다. 작성자 게이트와 같은 술어를 쓴다."""
+    if requirement == ARCHITECTURE_CONTRACT_FAMILY:
+        return any(ARCHITECTURE_CONTRACT_FAMILY in name for name in required)
+    return requirement in required
 
 
 def _reviewer_jobs(

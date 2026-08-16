@@ -129,7 +129,7 @@ phases:
     description: DDD first, then Clean Architecture design.
     required_markers:
       - "## Clean Architecture Boundary Map"
-      - "clean-architecture: applied|n/a"
+      - "clean-architecture: applied"
       - "## Dependency Rule"
       - "## Use Case Boundaries"
       - "usecase-interface: required|optional|n/a"
@@ -174,7 +174,7 @@ phases:
       End with:
 
           ## Completion Gate
-          clean-architecture: applied|n/a
+          clean-architecture: applied
           usecase-interface: required|optional|n/a
           usecase-composition: none|domain-service|application-service|orchestrator|justified
           cache-required: yes|no

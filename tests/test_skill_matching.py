@@ -590,3 +590,61 @@ def test_external_budget_stops_after_the_crossing_document(tmp_path: Path) -> No
     total = sum(item.path.stat().st_size for item in required if item.path is not None)
     assert len(required) == 3
     assert total - 9_000 < budget
+
+
+def test_a_declared_concern_activates_a_domain_the_wording_never_reaches():
+    """반증: concern이 tier만 올리면 `path_globs` 없는 domain은 문구에 계속 매여 있다.
+
+    실측으로 영어 task에서만 `frontend-design`이 붙었다. concern을 명시했는데도 문구가
+    안 걸려 domain이 잠들면, flag는 조용한 no-op이 되고 사용자는 skill이 붙었다고
+    믿은 채 진행한다.
+    """
+    domain = {"id": "design-system", "terms": ["typography"], "phases": ["implementation"]}
+    catalog = (_entry("frontend-design", "Guidance for typography and color palette."),)
+    args = dict(phase_id="implement", task_text="버튼 색상만 조정", env={})
+
+    without = match_external(_profile([domain]), catalog, **args)
+    with_concern = match_external(
+        _profile([domain]), catalog, concerns=["design-system"], **args
+    )
+
+    assert without == ()
+    assert [(item.name, item.tier) for item in with_concern] == [
+        ("frontend-design", REQUIRED)
+    ]
+
+
+def test_a_concern_promotes_a_skill_that_task_wording_had_demoted(tmp_path, monkeypatch):
+    """반증: 강등된 이름이 `optional_names`에 있으면 승격 루프가 `continue`로 건너뛴다.
+
+    강등을 되돌리라고 만든 탈출구가 정확히 강등 대상에만 듣지 않는 상태였다.
+    """
+    home = tmp_path / "home"
+    path = home / ".claude" / "skills" / "prisma-orm" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\nname: prisma-orm\ndescription: Use for prisma schema work.\n"
+        "workflowPhases: [implement]\ntaskTerms: [prisma]\n---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    project = tmp_path / "app"
+    project.mkdir()
+    profile = _profile([{"id": "orm", "terms": ["prisma"], "phases": ["implementation"]}])
+
+    def resolve(concerns):
+        return resolve_phase_skills(
+            project_root=project,
+            phase_id="implement",
+            profile=profile,
+            task_text="prisma schema 수정",
+            concerns=concerns,
+            host="claude",
+        )
+
+    demoted = resolve(())
+    promoted = resolve(("orm",))
+
+    assert "prisma-orm" in {skill.name for skill in demoted.optional}
+    assert "prisma-orm" not in {skill.name for skill in demoted.required}
+    assert "prisma-orm" in {skill.name for skill in promoted.required}

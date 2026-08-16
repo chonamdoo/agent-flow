@@ -465,7 +465,7 @@ def _reviewer_launch_profile(config_root: Path) -> dict[str, Any]:
     `branching.worktree: required` 프로젝트의 managed checkout에는 `.agent-flow/`가
     아예 없어서(gitignored) checkout을 소스로 쓰면 kit.json도 override도 못 읽고
     선언 전체가 조용히 무시된다. run의 다른 profile 소비자와 같은 기준을 쓴다
-    (`Runner.__init__`의 `_load_profile(self.kit_root, self.config_root)`).
+    (`Runner.__init__`의 `resolve_profile(self.kit_root, self.config_root)`).
 
     두 profile이 동시에 선언하면 어느 쪽이 이기는지 선언된 규칙이 없다. 임의로
     고르면 android+react-native 저장소에서 아무도 고르지 않은 model로 리뷰가 돈다.

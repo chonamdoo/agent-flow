@@ -75,11 +75,16 @@ skills:
       when: Android/Kotlin/Compose/KMP files change
       missing: "missing local profile: <skill>"
       path_globs: ["**/*.kt", "**/*.kts", "**/*.java", "**/AndroidManifest.xml"]
+    # app-shell과 native host role은 여기서 뺀다. `app/**`는 App Router 프로젝트의
+    # 소스 대부분이고 Android의 `app` 모듈도 그렇다 — 넣으면 문구만 바꾸는 변경이 다시
+    # 계층 문서를 요구해 축소가 사라진다. 그 자리의 배선 검토는 `--concern`으로 지목한다.
+    # 자리표시자(`<context>`) 아래만 걸면 layer 루트의 파일이 빠지므로 layer 디렉터리
+    # 전체를 잡는다.
     - group: architecture
       skills: [android-clean-architecture]
       when: Android profile architecture role paths change
       missing: "missing local profile: <skill>"
-      path_globs: ["**/core/domain/**", "**/core/data/**", "**/core/database/**", "**/core/network/**", "**/core/platform/**", "**/core/navigation/**", "**/feature/*/api/**", "**/feature/*/presentation/**"]
+      path_globs: ["**/core/domain/**", "**/core/data/**", "**/feature/**", "**/core/designsystem/**", "**/core/ui/**", "**/core/resources/**", "**/core/network/**", "**/core/database/**", "**/core/platform/**", "**/core/permission/**", "**/core/navigation/api/**", "**/core/navigation/impl/**"]
   # 설치된 외부 skill 라우팅. 이름은 여기 적지 않는다 — upstream이 6개월에 이름 35%를
   # 바꿨고(실측: `camera1-to-camerax` → `camerax`), 이름을 적는 순간 우리 파일이 낡는다.
   # 대신 스택 어휘를 적고, 판정은 설치된 SKILL.md의 name + description에 대해 한다.
