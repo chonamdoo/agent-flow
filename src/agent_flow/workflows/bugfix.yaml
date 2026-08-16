@@ -11,6 +11,8 @@ phases:
 
   - id: implement-fix
     role: fixer
+    skills:
+      required: [code-generation-discipline]
     description: Fix the reproduced defect with a regression test that ran.
     required_markers:
       - "regression-test:"
@@ -39,6 +41,8 @@ phases:
 
   - id: review
     role: reviewer
+    skills:
+      required: [code-generation-discipline]
     parallel: true
     replicas: 3
     description: Review the bug fix.

@@ -414,7 +414,7 @@ phases:
 
   - id: multi-review
     skills:
-      required: [code-review, clean-architecture-core, clean-architecture, agent-flow-concise-output]
+      required: [code-generation-discipline, code-review, clean-architecture-core, clean-architecture, agent-flow-concise-output]
     description: Run implementation review with at least two independent sub-agent reviewers before approve. Runner routes approve→architecture-review, request-changes→fix-loop.
     multi_review: true
     required_markers:
@@ -517,7 +517,7 @@ phases:
 
   - id: architecture-review
     skills:
-      required: [ddd-architecture, clean-architecture-core, clean-architecture, architecture-reviewer]
+      required: [code-generation-discipline, ddd-architecture, clean-architecture-core, clean-architecture, architecture-reviewer]
     description: Review implementation against DDD/Clean design. Runner routes approve→gates, request-changes→refactor.
     multi_review: true
     required_markers:

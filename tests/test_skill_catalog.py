@@ -25,6 +25,7 @@ from agent_flow.core import skill_catalog
 from agent_flow.core.phase_workflow import declared_phase_skills
 from agent_flow.core.profiles import load_profile_payload
 from agent_flow.core.skill_resolver import (
+    CODE_PHASES,
     SkillRoot,
     discover_skill_catalog,
     resolve_phase_skills,
@@ -415,6 +416,28 @@ def test_declared_phase_skills_degrades_on_an_unreadable_workflow(tmp_path):
 
     assert "code-generation-discipline" in declared.names
     assert [error for error in declared.errors if error.startswith("workflow broken:")]
+
+
+def test_every_code_phase_declares_the_invariant_core():
+    """반증: 작은 workflow는 `skills:`를 아예 안 적어서 코드 생성 규율이 required가
+    아니었다. 그 상태에서도 profile 표는 걸리므로 architecture 문서는 들어오고,
+    정작 모든 코드 작업의 기준인 `code-generation-discipline`만 빠진다.
+
+    phase 목록은 `CODE_PHASES`에서 가져온다. 여기에 리터럴 이름을 적으면 새 code
+    phase가 생겼을 때 이 가드가 그것을 못 본다.
+    """
+    from agent_flow.core.phase_workflow import load_phase_workflow_definition
+
+    missing: dict[str, list[str]] = {}
+    for workflow in ("default", "full-feature", "development", "bugfix", "review"):
+        for phase in load_phase_workflow_definition(REPO, workflow).phases:
+            if phase.id not in CODE_PHASES:
+                continue
+            declared = phase.skills.required if phase.skills else ()
+            if "code-generation-discipline" not in declared:
+                missing.setdefault(workflow, []).append(phase.id)
+
+    assert missing == {}
 
 
 def test_every_profile_install_name_is_activation_reachable(tmp_path, monkeypatch):
