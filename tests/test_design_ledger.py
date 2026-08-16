@@ -29,6 +29,7 @@ from agent_flow.core.design_ledger import (
     confirm_current_spec_changes,
     ledger_prompt_block,
     missing_design_value_markers,
+    parse_declared_concerns,
     parse_design_values,
     parse_spec_item_section,
     pending_spec_changes_for_run,
@@ -709,3 +710,24 @@ def test_default_and_full_feature_require_spec_items(copy, workflow_name, phase_
     assert "spec-items:" in phase["required_markers"]
     assert "SPEC-<n>" in phase["prompt"]
     assert "test:<name> | symbol:<symbol>=<value> | manual" in phase["prompt"]
+
+
+def test_parses_declared_concerns_from_the_completion_gate():
+    """경로가 드러내지 못하는 concern의 유일한 무료 입력 경로다. 소문자로 눕히고
+    쉼표로 나누며, `none`과 부재는 같은 뜻이다."""
+    gate = ARTIFACT.replace(
+        "design-values-confirmed: yes",
+        "design-values-confirmed: yes\nconcerns: Architecture, rsc-boundaries",
+    )
+    assert parse_declared_concerns(gate) == ("architecture", "rsc-boundaries")
+    assert parse_declared_concerns(ARTIFACT) == ()
+    assert parse_declared_concerns(
+        ARTIFACT.replace("design-values-confirmed: yes", "concerns: none")
+    ) == ()
+
+
+def test_declared_concerns_ignores_code_blocks():
+    """예시 줄로 required를 키우면 문서에 마커를 쓴 것만으로 기준이 바뀐다."""
+    assert parse_declared_concerns(
+        "## Completion Gate\n\n```\nconcerns: architecture\n```\n"
+    ) == ()

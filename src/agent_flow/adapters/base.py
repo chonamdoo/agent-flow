@@ -26,8 +26,8 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from agent_flow.core.design_ledger import ledger_prompt_block
-from agent_flow.core.local_skills import local_skill_prompt_block
+from agent_flow.core.design_ledger import LEDGER_SOURCE_PHASES, ledger_prompt_block
+from agent_flow.core.local_skills import declared_concern_ids, local_skill_prompt_block
 
 if TYPE_CHECKING:
     from agent_flow.runner import Phase
@@ -105,7 +105,7 @@ class Adapter(ABC):
         host_block = (
             f"\n\n## Host-specific guidance\n{host_hint}\n" if host_hint else ""
         )
-        profile_block = self._render_profile_block()
+        profile_block = self._render_profile_block(phase)
         architecture_block = self._render_architecture_block(phase)
         completion_gate_block = self._render_completion_gate_block(phase)
         config_root = self.config_root_or(project_root)
@@ -229,7 +229,7 @@ class Adapter(ABC):
             lines.append("")
         return "\n".join(lines) + "\n"
 
-    def _render_profile_block(self) -> str:
+    def _render_profile_block(self, phase: "Phase") -> str:
         """Inline the active profile YAML so the host AI sees real data.
 
         The runner injects `_profile_snapshot` and `_profile_id` before
@@ -255,7 +255,21 @@ class Adapter(ABC):
             f"This is the parsed profile YAML — use these values directly, "
             f"don't ask the user to look them up:\n\n"
             f"```yaml\n{yaml_dump}\n```\n"
-        )
+        ) + self._render_declared_concerns(phase)
+
+    def _render_declared_concerns(self, phase: "Phase") -> str:
+        """`concerns:` 로 적을 수 있는 id 목록. `skills`/`skill_sources`는 프롬프트에서
+        떼어내므로(`_RESOLVER_OWNED_PROFILE_KEYS`) 이 목록은 여기서만 보인다.
+
+        선언하는 phase에만 싣는다. 선언할 수 없는 phase에 목록을 실으면 그 phase는
+        쓸 수 없는 어휘값만 지불한다.
+        """
+        if getattr(phase, "id", "") not in LEDGER_SOURCE_PHASES:
+            return ""
+        ids = sorted(declared_concern_ids(self._profile_snapshot))
+        if not ids:
+            return ""
+        return f"\nDeclared concern ids: {', '.join(ids)}\n"
 
 
 def _oneline(text: str, max_len: int) -> str:

@@ -142,6 +142,15 @@ phases:
       that survives a compacted conversation, so an omitted instruction or
       value will not reach implementation.
 
+      ## Concerns
+      Declare a concern id only when this change touches something the changed
+      paths cannot reveal — a layer boundary inside an ordinary wiring file,
+      authorization inside an ordinary component. Valid ids are the
+      `Declared concern ids` line in this envelope's profile block; an id
+      outside that list blocks this phase. A declared concern makes its skills
+      required for every later phase, so declare it only with a one-line reason
+      here. Omit the marker when nothing applies.
+
       Output: design.md (single artifact, all eight sections).
       End with:
 
@@ -162,6 +171,7 @@ phases:
           solid-dip-dependency-direction: <summary>
           spec-items: <comma-separated SPEC ids recorded above, or none>
           design-values: <comma-separated keys recorded above, or none>
+          concerns: <comma-separated declared concern ids, or omit the line>
 
   - id: slice-plan
     description: Decompose the design into TDD-ready slices (≤50% context each).
