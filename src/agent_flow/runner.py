@@ -61,6 +61,7 @@ from agent_flow.core.design_ledger import (
     LEDGER_SOURCE_PHASES,
     capture_design_ledger,
     missing_design_value_markers,
+    parse_declared_concerns,
 )
 from agent_flow.core.design_value_check import (
     missing_design_value_implementations,
@@ -1254,7 +1255,45 @@ class Runner:
         artifact = self._existing_artifact_path(phase)
         if not artifact.exists():
             return
-        capture_design_ledger(self.run_dir, phase.id, artifact.read_text(encoding="utf-8"))
+        text = artifact.read_text(encoding="utf-8")
+        capture_design_ledger(self.run_dir, phase.id, text)
+        self._merge_declared_concerns(text)
+
+    def _merge_declared_concerns(self, artifact_text: str) -> None:
+        """설계 artifact가 선언한 concern을 run meta에 합친다. `--concern`과 같은
+        입력으로 들어가고, 사람은 이미 하는 SPEC 확인에서 그 줄을 읽는다.
+
+        미선언 id는 여기서 버린다 — `_missing_required_markers`가 이미 그 artifact를
+        막았으므로, 통과한 값만 원장 입력이 된다.
+        """
+        assert self.run_dir is not None
+        declared = declared_concern_ids(self.profile)
+        incoming = tuple(
+            item for item in parse_declared_concerns(artifact_text) if item in declared
+        )
+        if not incoming:
+            return
+        meta = read_meta(self.run_dir)
+        current = run_concerns(meta)
+        merged = run_concerns_value((*current, *incoming))
+        if merged == current:
+            return
+        meta["concerns"] = list(merged)
+        write_meta(self.run_dir, meta)
+
+    def _unknown_declared_concerns(self, text: str, phase_id: str) -> list[str]:
+        """설계 artifact가 적은 미선언 id는 오타다. 조용히 무시하면 사용자는 그 skill이
+        붙었다고 믿은 채 다음 phase로 간다 — `--concern`이 열거형인 이유와 같다."""
+        if phase_id not in LEDGER_SOURCE_PHASES:
+            return []
+        declared = declared_concern_ids(self.profile)
+        unknown = [item for item in parse_declared_concerns(text) if item not in declared]
+        if not unknown:
+            return []
+        known = ", ".join(sorted(declared)) or "(none declared by this profile)"
+        return [
+            f"concerns: unknown id(s) {', '.join(unknown)} (declared concerns: {known})"
+        ]
 
     def _advance_phase(self, meta: dict[str, Any], phase_index: int, blocked: bool) -> None:
         """route 결과를 meta에 반영한다.
@@ -1409,6 +1448,7 @@ class Runner:
             )
         )
         missing.extend(missing_design_value_markers(text, phase.id))
+        missing.extend(self._unknown_declared_concerns(text, phase.id))
         meta = read_meta(self.run_dir)
         missing.extend(
             missing_test_evidence_markers(

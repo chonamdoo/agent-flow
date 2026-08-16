@@ -92,6 +92,16 @@ phases:
       that survives a compacted conversation, so an omitted instruction or
       value will not reach implementation.
 
+      ## Concerns
+      Declare a concern id only when this change touches something the changed
+      paths cannot reveal — a layer boundary inside an ordinary wiring file,
+      authorization inside an ordinary component. Valid ids are the
+      `Declared concern ids` line in this envelope's profile block; an id
+      outside that list blocks this phase. A declared concern makes its skills
+      required for every later phase, so declare it only with a one-line reason
+      here. Add `concerns: <ids>` to the Completion Gate when it applies and
+      omit the marker when nothing does.
+
       ## Read-back
       Before finishing, print the recorded values back to the user as a table
       and ask them to confirm each one. You are the only reader of the image;

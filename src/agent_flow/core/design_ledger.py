@@ -31,6 +31,7 @@ LEDGER_SECTION = "design values"
 LEDGER_MARKER = "design-values:"
 SPEC_LEDGER_SECTION = "spec items"
 SPEC_MARKER = "spec-items:"
+CONCERN_MARKER = "concerns:"
 MANUAL_SPEC_APPROVALS_FILE = "spec-manual-approvals.json"
 SPEC_CAPTURE_FILE = "spec-capture.json"
 SPEC_CONFIRMATION_FILE = "spec-confirmed.json"
@@ -148,6 +149,22 @@ def parse_design_values(text: str) -> tuple[tuple[str, str], ...]:
             continue
         values.append((key, value))
     return tuple(values)
+
+def parse_declared_concerns(text: str) -> tuple[str, ...]:
+    """Completion Gate의 `concerns:` 한 줄. 경로가 드러내지 못하는 의도를 설계
+    시점에 선언하는 자리다 — 코드가 아직 없으니 `path_globs`는 구조적으로 못 잡고,
+    선언자에게는 아직 심사받을 구현물이 없다.
+
+    **원장 파일에는 굳히지 않는다.** resolver 입력의 정본은 run meta의 `concerns`
+    하나이고(`artifact.run_concerns`), 원장에도 적으면 그 값이 사후에 고쳐지지
+    않았음을 대조하는 digest가 하나 더 필요해진다. 여기서는 읽기만 한다.
+    """
+    value = completion_gate_marker_values(text).get("concerns", "")
+    if not value or value.lower() in _NONE_VALUES:
+        return ()
+    return tuple(
+        item for item in (part.strip().lower() for part in value.split(",")) if item
+    )
 
 def parse_spec_items(text: str) -> tuple[SpecItem, ...]:
     return parse_spec_item_section(text).items
