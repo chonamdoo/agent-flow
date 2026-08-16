@@ -39,14 +39,17 @@ skills:
     - ios-clean-architecture
     - ios-clean-presentation-architecture
   required_review:
-    - group: profile
-      # presentation skill은 여기 적지 않는다. 표의 glob은 Swift 전체라 데이터 계층
-      # 변경에도 걸리고, 그러면 skill 자신의 frontmatter가 선언한 presentation 범위를
-      # 표가 덮어써 무력화한다. 활성화는 그 skill의 pathGlobs가 맡는다.
+    # baseline과 architecture를 가른다. 한 group에 두면 문구·색상만 바꾸는 변경에도
+    # 계층 계약 문서가 required가 된다(실측: `.tsx` 한 줄 변경에 required 4개 /
+    # 15,746 B → 2개 / 5,220 B). architecture 문서는 계층 경계 경로가 실제로 바뀔 때만
+    # 요구한다 — 경로 목록은 이 profile의 `architecture.roles`에서 온다.
+    # presentation skill은 여기 적지 않는다. 표의 glob이 skill 자신의 frontmatter가
+    # 선언한 presentation 범위를 덮어써 무력화한다. 활성화는 그 skill의 pathGlobs가 맡는다.
+    - group: architecture
       skills: [ios-clean-architecture]
-      when: iOS/Swift files change
+      when: iOS profile architecture role paths change
       missing: "missing local profile: <skill>"
-      path_globs: ["**/*.swift", "**/*.m", "**/*.mm", "**/*.h"]
+      path_globs: ["**/Sources/Core/Domain/**", "**/Sources/Core/Data/**", "**/Sources/Core/Network/**", "**/Sources/Core/Platform/**", "**/Sources/Core/Navigation/**", "**/Sources/Features/*/API/**", "**/Sources/Features/*/Presentation/**"]
   # iOS 생태계에는 Apple 공식 앱개발 skill이 없고, 커뮤니티가 1 repo = 1 skill로
   # 파편화되어 있다(twostraws/Dimillian/AvdLee/...). 이름을 적으면 repo 하나가 사라질
   # 때마다 낡으므로, 스택 어휘만 두고 설치된 SKILL.md의 name + description에 맞춘다.

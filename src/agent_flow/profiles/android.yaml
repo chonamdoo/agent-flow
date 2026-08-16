@@ -66,11 +66,20 @@ skills:
     # 설치는 profile이 넓게, 활성화는 선언이 좁게 한다.
     - android-sdui-architecture
   required_review:
+    # baseline과 architecture를 가른다. 한 group에 두면 문구·색상만 바꾸는 변경에도
+    # 계층 계약 문서가 required가 된다(실측: `.tsx` 한 줄 변경에 required 4개 /
+    # 15,746 B → 2개 / 5,220 B). architecture 문서는 계층 경계 경로가 실제로 바뀔 때만
+    # 요구한다 — 경로 목록은 이 profile의 `architecture.roles`에서 온다.
     - group: profile
-      skills: [android-code-review, android-clean-architecture]
-      when: Android/Kotlin/Compose/KMP files or Android profile architecture roles change
+      skills: [android-code-review]
+      when: Android/Kotlin/Compose/KMP files change
       missing: "missing local profile: <skill>"
       path_globs: ["**/*.kt", "**/*.kts", "**/*.java", "**/AndroidManifest.xml"]
+    - group: architecture
+      skills: [android-clean-architecture]
+      when: Android profile architecture role paths change
+      missing: "missing local profile: <skill>"
+      path_globs: ["**/core/domain/**", "**/core/data/**", "**/core/database/**", "**/core/network/**", "**/core/platform/**", "**/core/navigation/**", "**/feature/*/api/**", "**/feature/*/presentation/**"]
   # 설치된 외부 skill 라우팅. 이름은 여기 적지 않는다 — upstream이 6개월에 이름 35%를
   # 바꿨고(실측: `camera1-to-camerax` → `camerax`), 이름을 적는 순간 우리 파일이 낡는다.
   # 대신 스택 어휘를 적고, 판정은 설치된 SKILL.md의 name + description에 대해 한다.

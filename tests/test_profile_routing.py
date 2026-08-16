@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -443,3 +444,57 @@ def test_missing_report_uses_the_declared_wording():
     skill = RoutedSkill("android-code-review", "profile", "", "missing local profile: <skill>")
 
     assert missing_routed_report(skill) == "missing local profile: android-code-review"
+
+
+def test_a_copy_only_component_change_does_not_require_architecture_docs():
+    """반증: baseline과 architecture가 한 group이면 문구 변경에도 계층 문서가 붙는다.
+
+    실측 근거: `.tsx` 한 줄 변경의 required가 4개 / 15,746 B였고, 그중
+    `react-clean-architecture`와 그 dependency `clean-architecture-core`가
+    10,526 B였다. 버튼 문구를 바꾸는 작업이 계층 계약을 읽어야 할 이유는 없다.
+    """
+    routed = _names(
+        _route(
+            "nextjs",
+            phase_id="implement",
+            changed_files=["src/components/Button.tsx"],
+            task_text="버튼 문구와 색상만 수정",
+        )
+    )
+
+    assert "react-development-guide" in routed
+    assert "react-clean-architecture" not in routed
+
+
+def test_a_boundary_path_change_still_requires_architecture_docs():
+    """불변: 축소가 계층 경계 변경까지 덮으면 그건 축소가 아니라 게이트 제거다."""
+    for changed in (
+        "src/core/domain/order/OrderRepository.ts",
+        "src/features/cart/api/useCart.ts",
+    ):
+        routed = _names(
+            _route("nextjs", phase_id="implement", changed_files=[changed], task_text="")
+        )
+
+        assert "react-clean-architecture" in routed, changed
+
+
+@pytest.mark.parametrize("profile_id", ["android", "ios", "nextjs", "python", "react-native"])
+def test_architecture_groups_never_activate_on_a_bare_extension(profile_id):
+    """architecture group이 언어 확장자만으로 켜지면 split이 무의미하다.
+
+    이름을 고른 목록이 아니라 성질 판정이다: `**/*.<ext>` 형태의 glob 하나라도
+    architecture group에 있으면 그 스택의 모든 소스 변경이 계층 문서를 요구한다.
+    """
+    profile = load_profile_payload(profile_id)
+    groups = profile["skills"]["required_review"]
+
+    bare = [
+        glob
+        for group in groups
+        if group.get("group") == "architecture"
+        for glob in group.get("path_globs") or ()
+        if re.fullmatch(r"\*\*/\*\.[A-Za-z0-9]+", glob)
+    ]
+
+    assert bare == []

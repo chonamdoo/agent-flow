@@ -47,11 +47,20 @@ skills:
     - python-api-clean-architecture
     - python-development-guide
   required_review:
+    # baseline과 architecture를 가른다. 한 group에 두면 문구·색상만 바꾸는 변경에도
+    # 계층 계약 문서가 required가 된다(실측: `.tsx` 한 줄 변경에 required 4개 /
+    # 15,746 B → 2개 / 5,220 B). architecture 문서는 계층 경계 경로가 실제로 바뀔 때만
+    # 요구한다 — 경로 목록은 이 profile의 `architecture.roles`에서 온다.
     - group: profile
-      skills: [python-development-guide, python-api-clean-architecture]
-      when: Python/API files change
+      skills: [python-development-guide]
+      when: Python files change
       missing: "missing local profile: <skill>"
       path_globs: ["**/*.py", "**/*.pyi"]
+    - group: architecture
+      skills: [python-api-clean-architecture]
+      when: Python profile architecture role paths change
+      missing: "missing local profile: <skill>"
+      path_globs: ["**/src/core/domain/**", "**/src/domain/**", "**/src/core/data/**", "**/src/data/**", "**/src/core/network/**", "**/src/core/platform/**", "**/src/core/navigation/**", "**/src/features/*/api/**", "**/src/features/*/presentation/**"]
   # 설치된 외부 skill 라우팅. 이름은 적지 않는다 — Python은 벤더 first-party skill이 사실상
   # 없어(FastAPI·Pydantic 각 1개, Django/Flask/SQLAlchemy 0개) 이름 목록은 대부분 빈 칸이 되고,
   # 실제 공급원인 커뮤니티 배포본은 이름이 더 자주 바뀐다. 대신 스택 어휘로 판정한다.

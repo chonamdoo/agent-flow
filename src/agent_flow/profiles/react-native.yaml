@@ -46,11 +46,20 @@ skills:
     - react-native-operational-adoption
     - typescript-development-guide
   required_review:
+    # baseline과 architecture를 가른다. 한 group에 두면 문구·색상만 바꾸는 변경에도
+    # 계층 계약 문서가 required가 된다(실측: `.tsx` 한 줄 변경에 required 4개 /
+    # 15,746 B → 2개 / 5,220 B). architecture 문서는 계층 경계 경로가 실제로 바뀔 때만
+    # 요구한다 — 경로 목록은 이 profile의 `architecture.roles`에서 온다.
     - group: profile
-      skills: [react-native-development-guide, react-native-clean-architecture]
+      skills: [react-native-development-guide]
       when: React Native/Expo files change
       missing: "missing local profile: <skill>"
       path_globs: ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/app.json", "**/app.config.*"]
+    - group: architecture
+      skills: [react-native-clean-architecture]
+      when: React Native profile architecture role paths change
+      missing: "missing local profile: <skill>"
+      path_globs: ["**/src/core/domain/**", "**/src/core/data/**", "**/src/core/network/**", "**/src/core/platform/**", "**/src/core/navigation/**", "**/src/features/*/api/**", "**/src/features/*/presentation/**"]
     # TypeScript 가이드의 범위는 그 skill이 선언한 `*.ts`/`*.tsx`다. RN 표의 glob에
     # 섞으면 `app.json`이나 `*.js` 변경에서도 required가 된다.
     - group: typescript

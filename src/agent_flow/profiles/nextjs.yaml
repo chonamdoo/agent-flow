@@ -41,11 +41,20 @@ skills:
     - react-development-guide
     - typescript-development-guide
   required_review:
+    # baseline과 architecture를 가른다. 한 group에 두면 문구·색상만 바꾸는 변경에도
+    # 계층 계약 문서가 required가 된다(실측: `.tsx` 한 줄 변경에 required 4개 /
+    # 15,746 B → 2개 / 5,220 B). architecture 문서는 계층 경계 경로가 실제로 바뀔 때만
+    # 요구한다 — 경로 목록은 이 profile의 `architecture.roles`에서 온다.
     - group: profile
-      skills: [react-development-guide, react-clean-architecture]
+      skills: [react-development-guide]
       when: React/Next.js files change
       missing: "missing local profile: <skill>"
       path_globs: ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.mjs"]
+    - group: architecture
+      skills: [react-clean-architecture]
+      when: React profile architecture role paths change
+      missing: "missing local profile: <skill>"
+      path_globs: ["**/src/core/domain/**", "**/src/core/data/**", "**/src/core/network/**", "**/src/core/platform/**", "**/src/core/navigation/**", "**/src/features/*/api/**", "**/src/features/*/presentation/**"]
     # TypeScript 가이드는 스스로 `*.ts`/`*.tsx` 범위를 선언한다. React 표의 glob에
     # 섞으면 `next.config.mjs` 하나만 바뀐 변경에서도 required가 되고, 같은 skill의
     # 범위를 두 profile이 다르게 선언하게 된다.
