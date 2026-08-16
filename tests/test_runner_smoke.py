@@ -3413,11 +3413,19 @@ def test_cli_detection_runs():
 def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.core.skill_resolver import PhaseSkills
     from agent_flow.runner import Phase
 
     adapter = HostedAdapter("codex")
     adapter._profile_snapshot = {"review_angles": []}
-    phase = Phase(id="final-review", description="", multi_review=True)
+    # 실제 `final-review`는 계층 계약을 required로 선언한다. angle이 그 선언에 걸리므로
+    # 여기서도 같은 선언을 준다 — 선언 없는 phase의 기대값은 아래 조건부 테스트가 잡는다.
+    phase = Phase(
+        id="final-review",
+        description="",
+        multi_review=True,
+        skills=PhaseSkills(required=("clean-architecture-core",)),
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
@@ -3440,6 +3448,7 @@ def test_multi_review_precomputes_diff_outside_reviewer_sandbox(tmp_path: Path):
         _reviewer_jobs,
         _write_review_input_snapshot,
     )
+    from agent_flow.core.skill_resolver import PhaseSkills
     from agent_flow.runner import Phase
 
     project = tmp_path / "project"
@@ -3460,7 +3469,14 @@ def test_multi_review_precomputes_diff_outside_reviewer_sandbox(tmp_path: Path):
 
     adapter = HostedAdapter("codex")
     adapter._profile_snapshot = {"review_angles": []}
-    phase = Phase(id="final-review", description="", multi_review=True)
+    # 실제 `final-review`는 계층 계약을 required로 선언한다. angle이 그 선언에 걸리므로
+    # 여기서도 같은 선언을 준다 — 선언 없는 phase의 기대값은 아래 조건부 테스트가 잡는다.
+    phase = Phase(
+        id="final-review",
+        description="",
+        multi_review=True,
+        skills=PhaseSkills(required=("clean-architecture-core",)),
+    )
     jobs = _reviewer_jobs(
         phase,
         run_dir,
@@ -3610,6 +3626,7 @@ def test_review_input_snapshot_rejects_total_overflow(
 def test_multi_review_jobs_dedupe_profile_baseline(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.core.skill_resolver import PhaseSkills
     from agent_flow.runner import Phase
 
     adapter = HostedAdapter("codex")
@@ -3625,7 +3642,14 @@ def test_multi_review_jobs_dedupe_profile_baseline(tmp_path: Path):
             },
         ]
     }
-    phase = Phase(id="final-review", description="", multi_review=True)
+    # 실제 `final-review`는 계층 계약을 required로 선언한다. angle이 그 선언에 걸리므로
+    # 여기서도 같은 선언을 준다 — 선언 없는 phase의 기대값은 아래 조건부 테스트가 잡는다.
+    phase = Phase(
+        id="final-review",
+        description="",
+        multi_review=True,
+        skills=PhaseSkills(required=("clean-architecture-core",)),
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
@@ -3641,6 +3665,7 @@ def test_multi_review_jobs_dedupe_profile_baseline(tmp_path: Path):
 def test_multi_review_profile_can_override_baseline_prompt(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.core.skill_resolver import PhaseSkills
     from agent_flow.runner import Phase
 
     project = tmp_path / "project"
@@ -3654,7 +3679,14 @@ def test_multi_review_profile_can_override_baseline_prompt(tmp_path: Path):
             {"id": "generalist", "prompt": "templates/_shared/review/custom-generalist.md"},
         ]
     }
-    phase = Phase(id="final-review", description="", multi_review=True)
+    # 실제 `final-review`는 계층 계약을 required로 선언한다. angle이 그 선언에 걸리므로
+    # 여기서도 같은 선언을 준다 — 선언 없는 phase의 기대값은 아래 조건부 테스트가 잡는다.
+    phase = Phase(
+        id="final-review",
+        description="",
+        multi_review=True,
+        skills=PhaseSkills(required=("clean-architecture-core",)),
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
@@ -3666,6 +3698,7 @@ def test_multi_review_profile_can_override_baseline_prompt(tmp_path: Path):
 def test_multi_review_missing_prompt_file_fails_loudly(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.core.skill_resolver import PhaseSkills
     from agent_flow.runner import Phase
 
     adapter = HostedAdapter("codex")
@@ -3674,7 +3707,14 @@ def test_multi_review_missing_prompt_file_fails_loudly(tmp_path: Path):
             {"id": "missing", "prompt": "templates/_shared/review/missing-review-angle.md"},
         ]
     }
-    phase = Phase(id="final-review", description="", multi_review=True)
+    # 실제 `final-review`는 계층 계약을 required로 선언한다. angle이 그 선언에 걸리므로
+    # 여기서도 같은 선언을 준다 — 선언 없는 phase의 기대값은 아래 조건부 테스트가 잡는다.
+    phase = Phase(
+        id="final-review",
+        description="",
+        multi_review=True,
+        skills=PhaseSkills(required=("clean-architecture-core",)),
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
@@ -3685,6 +3725,7 @@ def test_multi_review_missing_prompt_file_fails_loudly(tmp_path: Path):
 def test_multi_review_empty_prompt_file_fails_loudly(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.core.skill_resolver import PhaseSkills
     from agent_flow.runner import Phase
 
     adapter = HostedAdapter("codex")
@@ -3693,7 +3734,14 @@ def test_multi_review_empty_prompt_file_fails_loudly(tmp_path: Path):
             {"id": "empty", "prompt": ""},
         ]
     }
-    phase = Phase(id="final-review", description="", multi_review=True)
+    # 실제 `final-review`는 계층 계약을 required로 선언한다. angle이 그 선언에 걸리므로
+    # 여기서도 같은 선언을 준다 — 선언 없는 phase의 기대값은 아래 조건부 테스트가 잡는다.
+    phase = Phase(
+        id="final-review",
+        description="",
+        multi_review=True,
+        skills=PhaseSkills(required=("clean-architecture-core",)),
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
@@ -3704,6 +3752,7 @@ def test_multi_review_empty_prompt_file_fails_loudly(tmp_path: Path):
 def test_multi_review_rejects_escaped_prompt_path(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.core.skill_resolver import PhaseSkills
     from agent_flow.runner import Phase
 
     adapter = HostedAdapter("codex")
@@ -3712,7 +3761,14 @@ def test_multi_review_rejects_escaped_prompt_path(tmp_path: Path):
             {"id": "escaped", "prompt": "../../../etc/passwd"},
         ]
     }
-    phase = Phase(id="final-review", description="", multi_review=True)
+    # 실제 `final-review`는 계층 계약을 required로 선언한다. angle이 그 선언에 걸리므로
+    # 여기서도 같은 선언을 준다 — 선언 없는 phase의 기대값은 아래 조건부 테스트가 잡는다.
+    phase = Phase(
+        id="final-review",
+        description="",
+        multi_review=True,
+        skills=PhaseSkills(required=("clean-architecture-core",)),
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
@@ -3723,6 +3779,7 @@ def test_multi_review_rejects_escaped_prompt_path(tmp_path: Path):
 def test_multi_review_rejects_nested_prompt_prefix(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.core.skill_resolver import PhaseSkills
     from agent_flow.runner import Phase
 
     adapter = HostedAdapter("codex")
@@ -3731,7 +3788,14 @@ def test_multi_review_rejects_nested_prompt_prefix(tmp_path: Path):
             {"id": "nested", "prompt": "foo/templates/_shared/review/x.md"},
         ]
     }
-    phase = Phase(id="final-review", description="", multi_review=True)
+    # 실제 `final-review`는 계층 계약을 required로 선언한다. angle이 그 선언에 걸리므로
+    # 여기서도 같은 선언을 준다 — 선언 없는 phase의 기대값은 아래 조건부 테스트가 잡는다.
+    phase = Phase(
+        id="final-review",
+        description="",
+        multi_review=True,
+        skills=PhaseSkills(required=("clean-architecture-core",)),
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
@@ -3742,13 +3806,21 @@ def test_multi_review_rejects_nested_prompt_prefix(tmp_path: Path):
 def test_multi_review_packaged_prompt_survives_project_templates_dir(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.core.skill_resolver import PhaseSkills
     from agent_flow.runner import Phase
 
     project = tmp_path / "project"
     (project / "templates").mkdir(parents=True)
     adapter = HostedAdapter("codex")
     adapter._profile_snapshot = {"review_angles": []}
-    phase = Phase(id="final-review", description="", multi_review=True)
+    # 실제 `final-review`는 계층 계약을 required로 선언한다. angle이 그 선언에 걸리므로
+    # 여기서도 같은 선언을 준다 — 선언 없는 phase의 기대값은 아래 조건부 테스트가 잡는다.
+    phase = Phase(
+        id="final-review",
+        description="",
+        multi_review=True,
+        skills=PhaseSkills(required=("clean-architecture-core",)),
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
@@ -4165,3 +4237,25 @@ def test_push_pr_evidence_uses_profile_target_branch(
         profile={"pr": {"target_branch": "main"}},
     )
     assert "delivery evidence: pr-base must match profile target main" in mismatch
+
+
+def test_a_review_angle_is_dropped_when_its_skill_is_not_required(tmp_path: Path):
+    """반증: angle을 무조건 등록하면 resolver 쪽 축소가 review phase에서 전부 사라진다.
+
+    `base_prompt`는 angle마다 그대로 복제되므로(`_reviewer_jobs`) required 목록 하나가
+    angle 수 × provider 수만큼 늘어난다. 그리고 이 angle의 template은
+    `clean-architecture-core/SKILL.md`를 읽으라고 직접 지시한다.
+    """
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.runner import Phase
+
+    adapter = HostedAdapter("codex")
+    adapter._profile_snapshot = {"review_angles": []}
+    phase = Phase(id="final-review", description="", multi_review=True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+
+    assert [job.angle_id for job in jobs] == ["generalist", "architecture-design"]

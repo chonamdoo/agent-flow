@@ -349,3 +349,49 @@ def test_the_skill_and_command_evidence_layers_do_not_share_one_contract(tmp_pat
     doc = command_evidence.__doc__ or ""
     assert "L2와 같은 계약이다" not in doc
     assert "같은 계약이 아니다" in doc
+
+
+def _clean_architecture_skill(root: Path) -> Path:
+    skill = root / "skills" / "clean-architecture" / "SKILL.md"
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    skill.write_text("# clean-architecture\n", encoding="utf-8")
+    return skill
+
+
+def test_the_architecture_marker_accepts_n_a_when_the_skill_is_not_required(tmp_path):
+    """축소가 marker에서 되살아나면 안 된다.
+
+    경계 경로를 건드리지 않는 변경은 계층 계약 문서를 required로 받지 않는다. 그
+    상태에서 `clean-architecture: applied`를 강요하면 읽지 않은 것을 적게 된다.
+    """
+    root = _project(tmp_path)
+    _installed_skill(root)
+
+    missing = missing_local_skill_markers(
+        _gate("skill-use-evidence: verified") + "clean-architecture: n/a\n",
+        root,
+        "implement",
+        phase_skills=PhaseSkills(required=("alpha",)),
+        profile={},
+    )
+
+    assert missing == []
+
+
+def test_the_architecture_marker_rejects_n_a_when_the_skill_is_required(tmp_path):
+    """불변: required인 문서를 `n/a`로 넘기면 그건 축소가 아니라 게이트 제거다."""
+    root = _project(tmp_path)
+    _installed_skill(root)
+    _clean_architecture_skill(root)
+
+    missing = missing_local_skill_markers(
+        _gate("skill-use-evidence: verified")
+        + "project-local-skills-used: alpha, clean-architecture\n"
+        + "clean-architecture: n/a\n",
+        root,
+        "implement",
+        phase_skills=PhaseSkills(required=("alpha", "clean-architecture")),
+        profile={},
+    )
+
+    assert "clean-architecture: applied" in missing

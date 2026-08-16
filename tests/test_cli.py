@@ -282,7 +282,7 @@ class CliTest(unittest.TestCase):
                 "changed-file-skill-resolution: applied",
                 "required-profile-skills: checked",
                 "missing-required-profile-skills:",
-                "clean-architecture: applied",
+                "clean-architecture: applied|n/a",
                 "project-local-skills: checked|n/a",
                 "project-local-skills-used:",
                 "presentation-skill: android|react|react-native|ios|n/a",
@@ -371,8 +371,8 @@ class CliTest(unittest.TestCase):
             self.assertIn("missing-required-profile-skills:", phases[phase_id]["required_markers"])
             self.assertIn("project-local-skills: checked|n/a", phases[phase_id]["required_markers"])
             self.assertIn("project-local-skills-used:", phases[phase_id]["required_markers"])
-        self.assertIn("clean-architecture: applied", phases["green"]["required_markers"])
-        self.assertIn("clean-architecture: applied", phases["fix-loop"]["required_markers"])
+        self.assertIn("clean-architecture: applied|n/a", phases["green"]["required_markers"])
+        self.assertIn("clean-architecture: applied|n/a", phases["fix-loop"]["required_markers"])
         self.assertIn("clean-architecture-review: applied", phases["multi-review"]["required_markers"])
         self.assertIn("must-avoid-check: pass|fail", phases["multi-review"]["required_markers"])
         self.assertIn("must-avoid-check: pass|fail", phases["architecture-review"]["required_markers"])

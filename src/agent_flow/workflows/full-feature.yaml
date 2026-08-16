@@ -129,7 +129,7 @@ phases:
     description: DDD first, then Clean Architecture design.
     required_markers:
       - "## Clean Architecture Boundary Map"
-      - "clean-architecture: applied"
+      - "clean-architecture: applied|n/a"
       - "## Dependency Rule"
       - "## Use Case Boundaries"
       - "usecase-interface: required|optional|n/a"
@@ -174,7 +174,7 @@ phases:
       End with:
 
           ## Completion Gate
-          clean-architecture: applied
+          clean-architecture: applied|n/a
           usecase-interface: required|optional|n/a
           usecase-composition: none|domain-service|application-service|orchestrator|justified
           cache-required: yes|no
@@ -278,7 +278,7 @@ phases:
       - "changed-file-skill-resolution: applied"
       - "required-profile-skills: checked"
       - "missing-required-profile-skills:"
-      - "clean-architecture: applied"
+      - "clean-architecture: applied|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
@@ -307,7 +307,7 @@ phases:
           changed-file-skill-resolution: applied
           required-profile-skills: checked
           missing-required-profile-skills: none|<list>
-          clean-architecture: applied
+          clean-architecture: applied|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
           presentation-skill: <android|react|react-native|ios|n/a>
@@ -330,7 +330,7 @@ phases:
       - "changed-file-skill-resolution: applied"
       - "required-profile-skills: checked"
       - "missing-required-profile-skills:"
-      - "clean-architecture: applied"
+      - "clean-architecture: applied|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
@@ -362,7 +362,7 @@ phases:
           changed-file-skill-resolution: applied
           required-profile-skills: checked
           missing-required-profile-skills: none|<list>
-          clean-architecture: applied
+          clean-architecture: applied|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
           presentation-skill: <android|react|react-native|ios|n/a>
@@ -530,7 +530,7 @@ phases:
       - "architecture-contract-check: pass|fail|n/a"
       - "codex-claude-parity-check: pass|fail"
       - "hook-parity-check: pass|fail"
-      - "clean-architecture: applied"
+      - "clean-architecture: applied|n/a"
       - "must-avoid-check: pass|fail"
       - "shared-presentation-contract-placement: pass|fail|n/a"
       - "project-local-skills: checked|n/a"
@@ -593,7 +593,7 @@ phases:
           architecture-contract-check: pass|fail|n/a
           codex-claude-parity-check: pass|fail
           hook-parity-check: pass|fail
-          clean-architecture: applied
+          clean-architecture: applied|n/a
           must-avoid-check: pass|fail
           shared-presentation-contract-placement: pass|fail|n/a
           project-local-skills: checked|n/a
@@ -648,7 +648,7 @@ phases:
       - "changed-file-skill-resolution: applied"
       - "required-profile-skills: checked"
       - "missing-required-profile-skills:"
-      - "clean-architecture: applied"
+      - "clean-architecture: applied|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
@@ -679,7 +679,7 @@ phases:
           changed-file-skill-resolution: applied
           required-profile-skills: checked
           missing-required-profile-skills: none|<list>
-          clean-architecture: applied
+          clean-architecture: applied|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
           presentation-skill: <android|react|react-native|ios|n/a>

@@ -297,6 +297,15 @@ def missing_local_skill_markers(
         if diagnosis:
             missing.append(diagnosis)
 
+    # 계층 계약 문서가 required면 `clean-architecture: n/a`는 거짓이다. marker 자체는
+    # `applied|n/a`를 받는다 — 경계 경로를 건드리지 않는 변경에서 그 문서를 읽으라고
+    # 요구하면 축소가 무의미해지고, 그때 `applied`를 강요하면 읽지 않은 것을 적게 된다.
+    # 그래서 판정을 marker 문법이 아니라 이 phase의 required 집합으로 한다.
+    if values.get("clean-architecture") == "n/a" and any(
+        "clean-architecture" in skill.name for skill in resolution.required
+    ):
+        missing.append("clean-architecture: applied")
+
     # L3: 자기신고는 표시용이다. resolver가 required로 판정하고 실제로 있는 것만 요구한다.
     if values.get("project-local-skills") != "checked":
         missing.append("project-local-skills: checked")
