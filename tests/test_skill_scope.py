@@ -238,3 +238,44 @@ def test_the_resume_gate_reports_the_growth_instead_of_demanding_it(
     assert ARCHITECTURE_SKILL in reported
     # 요구는 이 라운드에 나가지 않는다. 프롬프트가 아직 보여 준 적 없는 이름이다.
     assert "missing_completion_markers" not in reported
+
+
+def test_every_lifecycle_command_accepts_a_declared_concern():
+    """반증: 전달부가 `getattr`로 감싸여 있으면 옵션 누락이 조용히 빈 값이 된다.
+
+    실측: `start`가 이 선언을 빼먹어 `agent-flow start … --concern <id>`가 argparse
+    unknown-option으로 exit 2였고, 그 lifecycle에서는 concern이 언제나 비어 있었다.
+    parser를 직접 보므로 run을 만들지 않고도 세 곳의 어긋남을 잡는다.
+    """
+    import argparse
+
+    from agent_flow.cli import _add_concern_option
+
+    parsed = {}
+    for command in ("run", "start", "continue"):
+        parser = argparse.ArgumentParser(prog=command)
+        _add_concern_option(parser)
+        parsed[command] = parser.parse_args(
+            ["--concern", "architecture", "--concern", "security"]
+        ).concerns
+
+    assert parsed == {
+        command: ["architecture", "security"]
+        for command in ("run", "start", "continue")
+    }
+
+
+def test_the_shipped_cli_registers_the_concern_option_on_every_lifecycle_command(
+    capsys,
+):
+    """위 테스트는 helper만 본다. 실제 CLI가 그 helper를 세 subparser에 붙였는지는
+    출하되는 parser를 봐야 드러난다 — 누락됐던 곳이 바로 `start`다."""
+    import pytest
+
+    from agent_flow.cli import main
+
+    for command in ("run", "start", "continue"):
+        with pytest.raises(SystemExit) as caught:
+            main([command, "--help"])
+        assert caught.value.code == 0, command
+        assert "--concern" in capsys.readouterr().out, command

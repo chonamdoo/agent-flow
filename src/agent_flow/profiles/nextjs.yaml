@@ -59,6 +59,9 @@ skills:
       skills: [react-clean-architecture]
       when: React profile architecture role paths change
       missing: "missing local profile: <skill>"
+      # 배선 자리처럼 경로로 드러나지 않는 계층 검토를 지목하는 유일한 통로다.
+      # 주석이 `--concern`을 가리키므로 id가 여기 선언돼 있어야 오타로 거부되지 않는다.
+      concerns: [architecture]
       path_globs: ["**/src/core/domain/**", "**/src/core/data/**", "**/src/features/**", "**/src/core/ui/**", "**/src/core/design-system/**", "**/src/core/resources/**", "**/src/core/network/**", "**/src/core/platform/**", "**/src/core/permission/**", "**/src/core/navigation/api/**", "**/src/core/navigation/impl/**"]
     # TypeScript 가이드는 스스로 `*.ts`/`*.tsx` 범위를 선언한다. React 표의 glob에
     # 섞으면 `next.config.mjs` 하나만 바뀐 변경에서도 required가 되고, 같은 skill의

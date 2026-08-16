@@ -642,3 +642,43 @@ def test_an_uppercase_extension_still_matches_its_glob():
         changed_files=["src/components/Button.TSX"],
         task_text="",
     )
+
+
+def test_every_architecture_group_declares_the_opt_in_concern():
+    """반증: 이 group의 주석은 배제된 배선 경로의 계층 검토를 `--concern`으로
+    지목하라고 안내한다. id가 선언돼 있지 않으면 그 안내는 거짓이고, 명시 요청은
+    unknown concern으로 **거부된다** — 축소만 남고 탈출구가 0이 된다.
+    """
+    from agent_flow.core.local_skills import declared_concern_ids
+
+    for profile_id in ("android", "ios", "nextjs", "python", "react-native"):
+        payload = load_profile_payload(profile_id)
+        groups = [
+            group
+            for group in payload["skills"]["required_review"]
+            if group.get("group") == "architecture"
+        ]
+        assert groups, profile_id
+        for group in groups:
+            assert "architecture" in (group.get("concerns") or []), profile_id
+        assert "architecture" in declared_concern_ids(payload), profile_id
+
+
+def test_the_opt_in_concern_reaches_a_path_the_globs_exclude():
+    """배선 자리(`app/**`)는 architecture glob에서 빼기로 했다. 그 변경에서 계층
+    문서를 요구하려면 concern 하나로 되어야 한다 — 되지 않으면 축소가 되돌릴 수
+    없는 축소가 된다."""
+    wiring = ["app/providers.tsx"]
+
+    without = _names(_route("nextjs", phase_id="implement", changed_files=wiring))
+    with_concern = _names(
+        _route(
+            "nextjs",
+            phase_id="implement",
+            changed_files=wiring,
+            concerns=["architecture"],
+        )
+    )
+
+    assert "react-clean-architecture" not in without
+    assert "react-clean-architecture" in with_concern

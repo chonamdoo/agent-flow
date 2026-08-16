@@ -64,6 +64,9 @@ skills:
       skills: [react-native-clean-architecture]
       when: React Native profile architecture role paths change
       missing: "missing local profile: <skill>"
+      # 배선 자리처럼 경로로 드러나지 않는 계층 검토를 지목하는 유일한 통로다.
+      # 주석이 `--concern`을 가리키므로 id가 여기 선언돼 있어야 오타로 거부되지 않는다.
+      concerns: [architecture]
       path_globs: ["**/src/core/domain/**", "**/src/core/data/**", "**/src/features/**", "**/src/core/ui/**", "**/src/core/design-system/**", "**/src/core/resources/**", "**/src/core/network/**", "**/src/core/platform/**", "**/src/core/permission/**", "**/src/core/navigation/api/**", "**/src/core/navigation/impl/**"]
     # TypeScript 가이드의 범위는 그 skill이 선언한 `*.ts`/`*.tsx`다. RN 표의 glob에
     # 섞으면 `app.json`이나 `*.js` 변경에서도 required가 된다.

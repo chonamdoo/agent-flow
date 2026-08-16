@@ -186,6 +186,27 @@ from agent_flow.pr_watch import fetch_pr, watch_pr
 _KIT_FRESHNESS_COMMANDS = frozenset({"run", "start", "status", "continue"})
 
 
+def _add_concern_option(parser: argparse.ArgumentParser) -> None:
+    """run·start·continue가 같은 옵션을 갖게 한다. 세 곳에 손으로 적으면 갈라진다.
+
+    실제로 갈라졌다: `start`가 이 선언을 빼먹어 `agent-flow start … --concern <id>`가
+    argparse의 unknown-option으로 죽었고, 전달부는 `getattr`로 감싸여 있어서 그 lifecycle
+    에서는 concern이 언제나 빈 값이라는 사실이 조용히 지나갔다.
+    """
+    parser.add_argument(
+        "--concern",
+        action="append",
+        dest="concerns",
+        default=[],
+        help=(
+            "declare an explicit concern id (repeatable). Only declared ids are "
+            "accepted; an unknown id is a typo and fails the run. Concerns are the "
+            "only free-text-free way to require a skill that the changed paths do "
+            "not reveal."
+        ),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent-flow")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -210,35 +231,13 @@ def main(argv: list[str] | None = None) -> int:
         choices=("default", "ddd", "service-layer"),
         default="default",
     )
-    run_parser.add_argument(
-        "--concern",
-        action="append",
-        dest="concerns",
-        default=[],
-        help=(
-            "declare an explicit concern id (repeatable). Only declared ids are "
-            "accepted; an unknown id is a typo and fails the run. Concerns are the "
-            "only free-text-free way to require a skill that the changed paths do "
-            "not reveal."
-        ),
-    )
+    _add_concern_option(run_parser)
 
     continue_parser = subparsers.add_parser("continue")
     continue_parser.add_argument("--root", default=".")
     continue_parser.add_argument("--worktree")
     continue_parser.add_argument("--checkout-identity", help=argparse.SUPPRESS)
-    continue_parser.add_argument(
-        "--concern",
-        action="append",
-        dest="concerns",
-        default=[],
-        help=(
-            "declare an explicit concern id (repeatable). Only declared ids are "
-            "accepted; an unknown id is a typo and fails the run. Concerns are the "
-            "only free-text-free way to require a skill that the changed paths do "
-            "not reveal."
-        ),
-    )
+    _add_concern_option(continue_parser)
     continue_parser.add_argument(
         ACCEPT_LEADER_DRIFT_FLAG,
         action="store_true",
@@ -280,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         help="reuse the managed worktree inferred from the current directory",
     )
     start_parser.add_argument("--checkout-identity", help=argparse.SUPPRESS)
+    _add_concern_option(start_parser)
 
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("--root", default=".")
@@ -762,7 +762,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_root=root,
                 workflow=args.workflow,
                 architecture=args.architecture,
-                concerns=getattr(args, "concerns", None) or (),
+                concerns=tuple(args.concerns),
                 next_command=_continue_command(
                     root, worktree_status.name if worktree_status is not None else worktree_name
                 ),
@@ -829,7 +829,7 @@ def main(argv: list[str] | None = None) -> int:
                 next_command=_continue_command(root, args.worktree),
                 accept_leader_drift=args.accept_leader_drift,
                 accept_workflow_drift=args.accept_workflow_drift,
-                concerns=getattr(args, "concerns", None) or (),
+                concerns=tuple(args.concerns),
             ).run(mode=ResumeMode.RESUME)
         except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
             # 보여야 사용자가 다음 수를 안다.
@@ -1942,7 +1942,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_root=root,
                 workflow=args.workflow,
                 architecture=args.architecture,
-                concerns=getattr(args, "concerns", None) or (),
+                concerns=tuple(args.concerns),
                 next_command=_continue_command(root, worktree_status.name),
                 requested_run_id=args.run_id,
                 checkout_identity=actual_identity,
