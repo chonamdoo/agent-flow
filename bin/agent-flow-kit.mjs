@@ -2261,7 +2261,11 @@ function upgradeBundledProfiles(root, src, dest, keepNames) {
     }
     const content = fs.readFileSync(path.join(src, entry.name), "utf8");
     const target = path.join(dest, entry.name);
-    backupIfDifferent(root, target, content);
+    // 사본을 못 남겼으면 덮지 않는다. 사용자가 고친 profile을 사본 없이 잃는 것보다
+    // 옛 판본으로 남는 편이 낫다 - 다음 install이 다시 시도한다.
+    if (!backupIfDifferent(root, target, content).safeToWrite) {
+      continue;
+    }
     fs.writeFileSync(target, content, "utf8");
   }
   pruneUninstalledProfiles(root, src, dest, keepNames);
@@ -2283,8 +2287,14 @@ function upgradeManagedHooks(root, src, dest) {
     const source = path.join(src, entry.name);
     const content = fs.readFileSync(source, "utf8");
     const target = path.join(dest, entry.name);
-    const backup = backupIfDifferent(root, target, content);
-    if (backup) {
+    const { safeToWrite, backup } = backupIfDifferent(root, target, content);
+    // 사본을 못 남겼으면 덮지 않는다. 옛 판본으로 남은 hook은 `hook_integrity`가
+    // run 시작에서 잡아 주고 다음 install이 다시 시도하지만, 사본 없이 덮은
+    // 사용자 편집은 되돌릴 방법이 없다.
+    if (!safeToWrite) {
+      continue;
+    }
+    if (backup !== null) {
       // 백업은 hook 디렉터리 안에 남는다. 실행 권한을 그대로 물려주면
       // `hook_integrity`가 관리 대상 아닌 실행 파일로 보고 run 시작을 막는다.
       fs.chmodSync(backup, 0o644);
@@ -2310,9 +2320,12 @@ function installOmpHooks(root) {
     );
     return false;
   }
-  // kit 소유여도 사용자가 손댔을 수 있다. 서명만으로는 구분이 안 되므로
-  // 다른 내용이면 지우기 전에 사본을 남긴다.
-  backupIfDifferent(root, target, ompHooksExtensionSource());
+  // kit 소유여도 사용자가 손댔을 수 있다. 서명만으로는 구분이 안 되므로 다른 내용이면
+  // 덮기 전에 사본을 남기고, 사본을 못 남겼으면 덮지 않는다 - 확장이 옛 판본으로
+  // 남는 것보다 사용자 편집을 사본 없이 잃는 것이 나쁘다.
+  if (!backupIfDifferent(root, target, ompHooksExtensionSource()).safeToWrite) {
+    return false;
+  }
   return writeManagedFileIfMissingOrSame(target, ompHooksExtensionSource(), true);
 }
 

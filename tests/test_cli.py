@@ -452,7 +452,13 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(missing, [])
 
-    def test_use_evidence_blocks_when_available_skill_was_not_read(self) -> None:
+    def test_use_evidence_takes_the_self_report_even_when_a_skill_was_not_read(self) -> None:
+        """원래 이 테스트는 "관측된 미독은 차단된다"를 지켰다.
+
+        그 강제가 hook을 로드하지 않은 host 세션을 영원히 막았기 때문에, 계약을
+        자기신고로 낮췄다. 지키는 것은 이제 "관측 상태와 무관하게 자기신고가
+        결정한다"이다.
+        """
         with tempfile.TemporaryDirectory() as temp_dir:
             root = _write_resolver_skills(temp_dir)
             phase_skills = PhaseSkills(required=("alpha-guide", "beta-guide"))
@@ -465,24 +471,27 @@ class CliTest(unittest.TestCase):
                 "project-local-skill-docs: applied\n"
             )
 
-            # hook이 없으면 관측 자체가 불가능하므로 self-report로 통과시킨다.
+            # hook이 없으면 관측 자체가 불가능하다. 자기신고로 통과시킨다.
             self.assertEqual(
                 missing_local_skill_markers(gate, root, "green", phase_skills=phase_skills), []
             )
 
-            # hook이 alpha만 관측했다면 beta 미독으로 차단되어야 한다.
+            # alpha만 관측돼도 자기신고가 verified면 더 이상 막지 않는다.
             record_skill_read(root, root / "skills" / "alpha-guide" / "SKILL.md")
+            self.assertEqual(
+                missing_local_skill_markers(gate, root, "green", phase_skills=phase_skills), []
+            )
+
+            # 자기신고가 없으면 관측이 전부 채워져 있어도 막는다.
+            record_skill_read(root, root / "skills" / "beta-guide" / "SKILL.md")
             missing = missing_local_skill_markers(
-                gate, root, "green", phase_skills=phase_skills
+                gate.replace("skill-use-evidence: verified\n", ""),
+                root,
+                "green",
+                phase_skills=phase_skills,
             )
             self.assertEqual(len(missing), 1)
-            self.assertIn("skill-use-evidence: verified", missing[0])
-            self.assertIn("never opened", missing[0])
-
-            record_skill_read(root, root / "skills" / "beta-guide" / "SKILL.md")
-            self.assertEqual(
-                missing_local_skill_markers(gate, root, "green", phase_skills=phase_skills), []
-            )
+            self.assertTrue(missing[0].startswith("skill-use-evidence: verified|unavailable"))
 
     def test_no_required_skills_never_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
