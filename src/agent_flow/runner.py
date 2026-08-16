@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Sequence
 
 from agent_flow.adapters.auto import detect_adapter
 from agent_flow.adapters.generic import STUB_SENTINEL
@@ -43,6 +43,8 @@ from agent_flow.artifact import (
     create_run,
     mark_inactive,
     read_meta,
+    run_concerns,
+    run_concerns_value,
     write_meta,
 )
 from agent_flow.cli_detect import CliInfo, REVIEW_CLI_NAMES, detect_available_clis
@@ -123,7 +125,11 @@ from agent_flow.core.phase_workflow import (
 )
 from agent_flow.core.report import write_run_report
 from agent_flow.core.markers import has_failure_markers, missing_markers
-from agent_flow.core.local_skills import changed_files, missing_local_skill_markers
+from agent_flow.core.local_skills import (
+    changed_files,
+    declared_concern_ids,
+    missing_local_skill_markers,
+)
 from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.memory.index import LoreIndex
 from agent_flow.memory.lore import Lore
@@ -300,6 +306,7 @@ class Runner:
         checkout_registration_identity: str | None = None,
         accept_leader_drift: bool = False,
         accept_workflow_drift: bool = False,
+        concerns: Sequence[str] = (),
     ) -> None:
         if architecture not in ARCHITECTURE_MODES:
             raise ValueError(f"invalid architecture mode: {architecture!r}")
@@ -315,6 +322,7 @@ class Runner:
         self.checkout_registration_identity = checkout_registration_identity
         self.accept_leader_drift = accept_leader_drift
         self.accept_workflow_drift = accept_workflow_drift
+        self.requested_concerns = run_concerns_value(concerns)
         self.kit_root = _find_kit_root()
         if run_dir is not None:
             meta = read_meta(run_dir)
@@ -325,6 +333,7 @@ class Runner:
         )
         self.phases = _phases_from_definition(self.workflow)
         self.profile_id, self.profile = resolve_profile(self.kit_root, self.config_root)
+        self._assert_declared_concerns()
         # run 한 번 안에서 범위가 바뀌면 baseline과 관측이 서로 다른 범위가 된다.
         # 여기서 한 번 정해 굳힌다. 병합된 `self.profile`이 아니라 leader의 선언
         # 파일을 직접 보는 해석기를 쓴다 — 병합은 어느 파일이 선언했는지를 지우고,
@@ -356,6 +365,7 @@ class Runner:
                     task,
                     architecture=self.architecture,
                     run_id=self.requested_run_id,
+                    concerns=self.requested_concerns,
                     checkout_identity=self.checkout_identity,
                     checkout_registration_identity=(
                         self.checkout_registration_identity
@@ -389,7 +399,7 @@ class Runner:
         # 원장보다 한 걸음 뒤에 있고, 그대로 커서를 세우면 방금 무효화하기로 한
         # phase를 다시 실행한다.
         self._resume_pending_transition()
-        run_meta = read_meta(self.run_dir)
+        run_meta = self._merge_requested_concerns(read_meta(self.run_dir))
         cursor = self._run_cursor(run_meta)
         banner_phase = (
             self.phases[cursor.phase_index]
@@ -420,6 +430,7 @@ class Runner:
         adapter._config_root = self.config_root
         adapter._task_text = run_meta.get("task", "")
         adapter._changed_files = changed_files(self.project_root)
+        adapter._concerns = run_concerns(run_meta)
         # 정확히 무엇을 주입했는지는 envelope를 만드는 자리에서만 알 수 있다.
         # 여기서 잡지 않으면 run이 끝난 뒤 프롬프트를 되살릴 방법이 없다.
         # multi-review phase는 envelope를 두 번 만든다(host, reviewer base).
@@ -670,6 +681,33 @@ class Runner:
             reason="workflow_complete",
             report=report_path,
         )
+
+    def _assert_declared_concerns(self) -> None:
+        """선언되지 않은 concern은 오타다. 조용히 무시하면 사용자는 그 skill이 붙었다고
+        믿은 채 진행한다 — 열거형을 쓰는 이유가 그것이다."""
+        if not self.requested_concerns:
+            return
+        declared = declared_concern_ids(self.profile)
+        unknown = [item for item in self.requested_concerns if item not in declared]
+        if unknown:
+            known = ", ".join(sorted(declared)) or "(none declared by this profile)"
+            raise ValueError(
+                f"unknown concern(s): {', '.join(unknown)}. "
+                f"declared concerns: {known}"
+            )
+
+    def _merge_requested_concerns(self, meta: dict[str, Any]) -> dict[str, Any]:
+        """재개할 때 새로 지정된 concern을 합친다. 빼지는 않는다 — 한 번 required가 된
+        기준이 다음 phase에서 사라지면 reviewer가 작성자보다 느슨한 기준을 본다."""
+        assert self.run_dir is not None
+        if not self.requested_concerns:
+            return meta
+        merged = run_concerns_value((*run_concerns(meta), *self.requested_concerns))
+        if merged == run_concerns(meta):
+            return meta
+        meta["concerns"] = list(merged)
+        write_meta(self.run_dir, meta)
+        return meta
 
     def _baseline_scope(self) -> BaselineScope:
         assert self.run_dir is not None
@@ -1329,6 +1367,7 @@ class Runner:
                 profile=self.profile,
                 changed_files=changed_files(self.project_root),
                 task_text=str(meta.get("task", "")),
+                concerns=run_concerns(meta),
                 since=_meta_timestamp(meta.get("phase_entered_at")),
             )
         )

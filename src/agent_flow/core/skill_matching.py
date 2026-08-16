@@ -96,13 +96,25 @@ def match_external(
     phase_id: str,
     changed_files: Sequence[str] = (),
     task_text: str = "",
+    concerns: Sequence[str] = (),
     env: dict[str, str] | None = None,
 ) -> tuple[ExternalMatch, ...]:
-    """이번 phase/범위에서 활성화되는 설치 skill. 순서까지 결정론이다."""
+    """이번 phase/범위에서 활성화되는 설치 skill. 순서까지 결정론이다.
+
+    tier는 **선언된 concern**과 `pins`만 required로 만든다. 예전에는 task 문구와
+    skill 텍스트에 같은 term이 걸리면 required였는데, 그 경로는 두 가지를 동시에
+    깬다. 첫째, 같은 뜻을 한국어로 적으면 term이 안 걸려 required가 사라진다
+    (실측: 영어 task 6개 / 26,241 B, 한국어 4개). 둘째, 후보 집합이 이 머신에 깔린
+    카탈로그라서 같은 변경이 host마다 다른 required를 만든다.
+
+    그래서 free-form task 문구는 offered까지만 만들고, 무엇을 반드시 읽어야 하는지는
+    호출자가 `--concern <domain-id>`로 열거해서 정한다.
+    """
     config = parse_external(profile, env=env)
     if not config.enabled:
         return ()
     haystack = task_text.lower()
+    declared_concerns = {str(item).strip().lower() for item in concerns if str(item).strip()}
     matches: dict[str, ExternalMatch] = {}
     for domain in config.domains:
         if not _domain_active(domain, phase_id, changed_files, task_text):
@@ -113,10 +125,10 @@ def match_external(
             terms = _entry_terms(entry, domain.terms)
             if not terms:
                 continue
-            # tier는 "어느 term이 양쪽에 다 걸렸나"로 정한다. 첫 매치만 보면 skill 쪽에서
-            # 먼저 걸린 term이 task 쪽에 없다는 이유로 required가 offered로 떨어진다.
+            # term 기록은 남긴다 — 어느 어휘로 걸렸는지가 프롬프트와 진단의 근거다.
             shared = next((term for term in terms if _term_in(term, haystack)), None)
-            tier = REQUIRED if shared or entry.name in config.pins else OFFERED
+            required = domain.id.lower() in declared_concerns or entry.name in config.pins
+            tier = REQUIRED if required else OFFERED
             existing = matches.get(entry.name)
             if existing is not None and (existing.tier == REQUIRED or tier == OFFERED):
                 continue
@@ -124,6 +136,12 @@ def match_external(
                 entry.name, domain.id, tier, shared or terms[0], entry.path, entry.source
             )
     return _truncate(matches.values(), config)
+
+
+def declared_domain_ids(profile: dict | None, *, env: dict[str, str] | None = None) -> set[str]:
+    """이 profile이 선언한 external domain id. `--concern`의 유효 값 목록이다."""
+    config = parse_external(profile, env=env)
+    return {domain.id.lower() for domain in config.domains if domain.id}
 
 
 def routable_names(

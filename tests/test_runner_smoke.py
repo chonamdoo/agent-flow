@@ -2497,17 +2497,17 @@ def test_missing_required_profile_skills_marker_overrides_approve_verdict(tmp_pa
 
 
 def test_route_key_requires_exact_status_or_verdict_lines():
-    from agent_flow.runner import _route_key
+    from agent_flow.core.route_verdicts import route_key
 
-    assert _route_key("verdict: approved\n") == "default"
-    assert _route_key("status: passed with warnings\n") == "default"
-    assert _route_key("verdict: request-changes pending\n") == "default"
-    assert _route_key("status: passed\n") == "default"
-    assert _route_key("- status: green\n") == "default"
-    assert _route_key("note: status: green\n") == "default"
-    assert _route_key("  status: green\n") == "default"
-    assert _route_key("- verdict: approve\n") == "default"
-    assert _route_key("status: green\n") == "green"
+    assert route_key("verdict: approved\n") == "default"
+    assert route_key("status: passed with warnings\n") == "default"
+    assert route_key("verdict: request-changes pending\n") == "default"
+    assert route_key("status: passed\n") == "default"
+    assert route_key("- status: green\n") == "default"
+    assert route_key("note: status: green\n") == "default"
+    assert route_key("  status: green\n") == "default"
+    assert route_key("- verdict: approve\n") == "default"
+    assert route_key("status: green\n") == "green"
 
 
 def test_overall_review_verdict_ignores_code_fences_and_body_prose():
@@ -2524,9 +2524,9 @@ def test_overall_review_verdict_ignores_code_fences_and_body_prose():
         "## Overall\nverdict: approve\n"
     ) == "approve"
 
-    from agent_flow.runner import _multi_review_route_key
+    from agent_flow.core.route_verdicts import multi_review_route_key
 
-    assert _multi_review_route_key(
+    assert multi_review_route_key(
         "```markdown\n"
         "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n"
         "## Reviewer 2\nreviewer-source: sub-agent\nverdict: approve\n"
@@ -3087,7 +3087,7 @@ def test_ddd_architecture_review_rejects_service_layer_refactor_bypass(tmp_path:
 
 def test_ddd_design_validation_ignores_body_paragraph_labels(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
-    from agent_flow.runner import _missing_ddd_design_terms
+    from agent_flow.core.design_sections import missing_ddd_design_terms
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -3101,7 +3101,7 @@ def test_ddd_design_validation_ignores_body_paragraph_labels(tmp_path: Path):
         encoding="utf-8",
     )
 
-    missing = _missing_ddd_design_terms(run_dir)
+    missing = missing_ddd_design_terms(run_dir)
 
     assert "bounded context" in missing
     assert "domain flow" in missing
@@ -3110,7 +3110,7 @@ def test_ddd_design_validation_ignores_body_paragraph_labels(tmp_path: Path):
 
 def test_ddd_design_validation_accepts_markdown_heading_and_list_labels(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
-    from agent_flow.runner import _missing_ddd_design_terms
+    from agent_flow.core.design_sections import missing_ddd_design_terms
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -3127,7 +3127,7 @@ def test_ddd_design_validation_accepts_markdown_heading_and_list_labels(tmp_path
         encoding="utf-8",
     )
 
-    assert _missing_ddd_design_terms(run_dir) == []
+    assert missing_ddd_design_terms(run_dir) == []
 
 
 def test_abort_yes_flag_skips_prompt(tmp_path: Path):
@@ -4082,7 +4082,7 @@ def test_push_pr_evidence_uses_profile_target_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from agent_flow.core.commands import SafeCommandResult
-    from agent_flow.runner import _missing_delivery_evidence
+    from agent_flow.core.delivery_evidence import missing_delivery_evidence
 
     project = tmp_path / "profile-target"
     project.mkdir()
@@ -4152,13 +4152,13 @@ def test_push_pr_evidence_uses_profile_target_branch(
         "pr-base: release\n"
     )
 
-    assert _missing_delivery_evidence(
+    assert missing_delivery_evidence(
         project,
         "push-pr",
         artifact,
         profile={"pr": {"target_branch": "release"}},
     ) == []
-    mismatch = _missing_delivery_evidence(
+    mismatch = missing_delivery_evidence(
         project,
         "push-pr",
         artifact,

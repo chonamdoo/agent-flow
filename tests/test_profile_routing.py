@@ -307,6 +307,9 @@ def test_resolver_surfaces_a_vocabulary_matched_skill(tmp_path, monkeypatch):
         profile=load_profile_payload("android"),
         changed_files=["app/src/main/java/A.kt"],
         task_text="status bar가 콘텐츠를 가린다",
+        # required tier는 명시된 concern에서만 나온다. 어휘 매칭만으로 required가
+        # 되면 같은 변경이 host의 카탈로그 구성에 따라 다른 게이트를 만든다.
+        concerns=["ui-insets-systembars"],
     )
 
     resolution = resolve_phase_skills(
@@ -402,6 +405,7 @@ def test_matched_skill_reports_the_path_it_was_discovered_at(tmp_path, monkeypat
         profile=load_profile_payload("android"),
         changed_files=["app/src/main/java/A.kt"],
         task_text="status bar overlap 수정",
+        concerns=["ui-insets-systembars"],
     )
 
     def matched(host: str):
@@ -498,3 +502,52 @@ def test_architecture_groups_never_activate_on_a_bare_extension(profile_id):
     ]
 
     assert bare == []
+
+
+def test_the_same_change_requires_the_same_skills_in_either_language(tmp_path, monkeypatch):
+    """반증: 판정이 task 문구에 걸리면 한국어로 쓴 작업이 다른 게이트를 받는다.
+
+    실측 근거: 영어 문구는 required 6개 / 26,241 B, 같은 뜻의 한국어는 4개였다.
+    `term_in`이 ASCII 단어 경계로 맞추고 domain `terms`가 영어 전용이기 때문인데,
+    그 차이가 required를 만들면 안 된다.
+    """
+    home = tmp_path / "home"
+    _install(home, "frontend-design", "Guidance for typography and color palette.")
+    monkeypatch.setenv("HOME", str(home))
+    project = tmp_path / "web"
+    project.mkdir()
+    profile = load_profile_payload("nextjs")
+
+    def required(task_text: str) -> set[str]:
+        return {
+            skill.name
+            for skill in resolve_phase_skills(
+                project_root=project,
+                phase_id="implement",
+                profile=profile,
+                changed_files=["src/components/Button.tsx"],
+                task_text=task_text,
+                host="claude",
+            ).required
+        }
+
+    assert required("버튼 색상 팔레트와 타이포그래피만 조정") == required(
+        "adjust button color palette and typography only"
+    )
+
+
+def test_a_concern_only_group_waits_for_the_concern():
+    """경로가 드러내지 못하는 것을 위한 자리다. 명시되지 않으면 켜지지 않는다."""
+    profile = {
+        "skills": {
+            "required_review": [
+                {"group": "security", "skills": ["threat-model"], "concerns": ["security"]}
+            ]
+        }
+    }
+    args = dict(phase_id="implement", changed_files=["src/components/Button.tsx"], task_text="")
+
+    assert _names(routed_profile_skills(profile, **args)) == set()
+    assert _names(routed_profile_skills(profile, concerns=["security"], **args)) == {
+        "threat-model"
+    }

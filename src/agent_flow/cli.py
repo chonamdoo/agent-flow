@@ -210,11 +210,35 @@ def main(argv: list[str] | None = None) -> int:
         choices=("default", "ddd", "service-layer"),
         default="default",
     )
+    run_parser.add_argument(
+        "--concern",
+        action="append",
+        dest="concerns",
+        default=[],
+        help=(
+            "declare an explicit concern id (repeatable). Only declared ids are "
+            "accepted; an unknown id is a typo and fails the run. Concerns are the "
+            "only free-text-free way to require a skill that the changed paths do "
+            "not reveal."
+        ),
+    )
 
     continue_parser = subparsers.add_parser("continue")
     continue_parser.add_argument("--root", default=".")
     continue_parser.add_argument("--worktree")
     continue_parser.add_argument("--checkout-identity", help=argparse.SUPPRESS)
+    continue_parser.add_argument(
+        "--concern",
+        action="append",
+        dest="concerns",
+        default=[],
+        help=(
+            "declare an explicit concern id (repeatable). Only declared ids are "
+            "accepted; an unknown id is a typo and fails the run. Concerns are the "
+            "only free-text-free way to require a skill that the changed paths do "
+            "not reveal."
+        ),
+    )
     continue_parser.add_argument(
         ACCEPT_LEADER_DRIFT_FLAG,
         action="store_true",
@@ -738,6 +762,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_root=root,
                 workflow=args.workflow,
                 architecture=args.architecture,
+                concerns=getattr(args, "concerns", None) or (),
                 next_command=_continue_command(
                     root, worktree_status.name if worktree_status is not None else worktree_name
                 ),
@@ -804,6 +829,7 @@ def main(argv: list[str] | None = None) -> int:
                 next_command=_continue_command(root, args.worktree),
                 accept_leader_drift=args.accept_leader_drift,
                 accept_workflow_drift=args.accept_workflow_drift,
+                concerns=getattr(args, "concerns", None) or (),
             ).run(mode=ResumeMode.RESUME)
         except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
             # 보여야 사용자가 다음 수를 안다.
@@ -1916,6 +1942,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_root=root,
                 workflow=args.workflow,
                 architecture=args.architecture,
+                concerns=getattr(args, "concerns", None) or (),
                 next_command=_continue_command(root, worktree_status.name),
                 requested_run_id=args.run_id,
                 checkout_identity=actual_identity,

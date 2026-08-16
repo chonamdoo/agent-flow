@@ -263,7 +263,7 @@ def test_a_failed_copy_does_not_cancel_the_declared_actions(tmp_path: Path, monk
         }
     }
     monkeypatch.setattr(CLI, "_find_kit_root", lambda: tmp_path)
-    monkeypatch.setattr(CLI, "_load_profile", lambda kit_root, root: ("p", profile))
+    monkeypatch.setattr(CLI, "resolve_profile", lambda kit_root, root: ("p", profile))
 
     def _boom(**_kwargs):
         raise OSError("read-only filesystem")

@@ -7789,12 +7789,17 @@ if (codexContext !== undefined) {
         android_required = android.skills["required_review"]
         self.assertEqual(android_required[0]["group"], "profile")
         self.assertIn("android-code-review", android_required[0]["skills"])
-        self.assertEqual([group["group"] for group in android_required], ["profile"])
+        # baseline과 architecture는 서로 다른 group이다. 한 group이면 Kotlin 한 줄
+        # 변경에도 계층 계약 문서가 required가 된다.
+        self.assertEqual(
+            [group["group"] for group in android_required], ["profile", "architecture"]
+        )
         self.assertNotIn("android_skills", android.skills)
         rn_required = load_profile("react-native").skills["required_review"]
         # `typescript` group은 `typescript-development-guide`의 범위를 스택 glob에서
-        # 분리한 자리다. 옛 escalation group이 되살아나면 이 목록이 늘어난다.
-        self.assertEqual([group["group"] for group in rn_required], ["profile", "typescript"])
+        # 분리한 자리이고, `architecture`는 계층 계약 문서를 경계 경로로 분리한 자리다.
+        # 옛 escalation group이 되살아나면 이 목록이 늘어난다.
+        self.assertEqual([group["group"] for group in rn_required], ["profile", "architecture", "typescript"])
 
     def test_runner_prefers_repository_kit_root(self) -> None:
         from agent_flow.runner import _find_kit_root

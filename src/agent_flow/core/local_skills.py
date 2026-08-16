@@ -153,6 +153,14 @@ class SkillReadEvidence:
     used_names: frozenset[str] = frozenset()
 
 
+def declared_concern_ids(profile: dict | None) -> set[str]:
+    """선언된 concern id 전체. 오타를 조용히 무시하지 않으려면 목록이 하나여야 한다."""
+    from agent_flow.core.profile_routing import declared_group_concerns
+    from agent_flow.core.skill_matching import declared_domain_ids
+
+    return declared_domain_ids(profile) | declared_group_concerns(profile)
+
+
 def phase_skill_resolution(
     project_root: Path,
     phase_id: str,
@@ -161,6 +169,7 @@ def phase_skill_resolution(
     profile: dict | None = None,
     changed_files: Sequence[str] = (),
     task_text: str = "",
+    concerns: Sequence[str] = (),
 ) -> SkillResolution:
     return resolve_phase_skills(
         project_root=project_root,
@@ -169,6 +178,7 @@ def phase_skill_resolution(
         profile=profile,
         changed_files=changed_files,
         task_text=task_text,
+        concerns=concerns,
     )
 
 
@@ -180,6 +190,7 @@ def local_skill_prompt_block(
     profile: dict | None = None,
     changed_files: Sequence[str] = (),
     task_text: str = "",
+    concerns: Sequence[str] = (),
 ) -> str:
     resolution = phase_skill_resolution(
         project_root,
@@ -188,6 +199,7 @@ def local_skill_prompt_block(
         profile=profile,
         changed_files=changed_files,
         task_text=task_text,
+        concerns=concerns,
     )
     # 강제 지점과 같은 조건을 쓴다. 둘이 갈라지면 프롬프트가 다시 거짓말한다.
     enforced = phase_id in CODE_PHASES
@@ -199,6 +211,7 @@ def local_skill_prompt_block(
         profile=profile,
         changed_files=changed_files,
         task_text=task_text,
+        concerns=concerns,
         resolution=resolution,
     )
     return block + _marker_instruction(
@@ -215,6 +228,7 @@ def missing_local_skill_markers(
     profile: dict | None = None,
     changed_files: Sequence[str] = (),
     task_text: str = "",
+    concerns: Sequence[str] = (),
     since: float | None = None,
 ) -> list[str]:
     resolution = phase_skill_resolution(
@@ -224,6 +238,7 @@ def missing_local_skill_markers(
         profile=profile,
         changed_files=changed_files,
         task_text=task_text,
+        concerns=concerns,
     )
     # skill 목록 주입은 모든 phase에 하지만, marker 강제는 코드 생성/리뷰 phase에만 건다.
     # commit·merge·pr-watch까지 막으면 얻는 것 없이 막히는 경로만 늘어난다.
@@ -407,6 +422,7 @@ def _missing_routed_names(
     profile: dict | None,
     changed_files: Sequence[str],
     task_text: str,
+    concerns: Sequence[str] = (),
     resolution: SkillResolution,
 ) -> list[str]:
     routed = {
@@ -416,6 +432,7 @@ def _missing_routed_names(
             phase_id=phase_id,
             changed_files=changed_files,
             task_text=task_text,
+            concerns=concerns,
         )
     }
     if not routed:
