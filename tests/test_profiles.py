@@ -41,7 +41,7 @@ from agent_flow.core.skill_catalog import discover_skill_catalog  # noqa: E402
 from agent_flow.core.skill_matching import match_external  # noqa: E402
 from agent_flow.core.skill_resolver import skill_roots  # noqa: E402
 from agent_flow.core.worktree_isolation import LEADER_SWEEP_SCOPES  # noqa: E402
-from agent_flow.runner import _load_profile as load_runner_profile  # noqa: E402
+from agent_flow.core.profile_resolution import resolve_profile as load_runner_profile  # noqa: E402
 
 PROFILES_DIR = KIT_ROOT / "src" / "agent_flow" / "profiles"
 
@@ -1019,3 +1019,36 @@ def test_profile_loading_does_not_import_the_environment_probes():
     )
 
     assert result.stdout.strip() == "False False", result.stderr
+
+
+def test_the_gate_order_survives_an_interpreter_path_that_says_build():
+    """반증: gate 종류를 명령 문자열에서 읽으면 인터프리터 경로 하나로 순서가 뒤집힌다.
+
+    실측: `uv run --with pytest`의 인터프리터가
+    `/Users/…/.cache/uv/builds-v0/.tmp…/bin/python`이라 "builds"가 python profile의
+    gate 셋을 모두 build 칸으로 옮겼고, `type → architecture-lint → lint`가
+    `architecture-lint → lint → type`이 됐다. BUILD → TYPECHECK → LINT 계약이
+    실행 환경에 따라 참이 되면 그 계약은 없는 것이다.
+    """
+    from agent_flow.cli import _gate_order_key
+    from agent_flow.core.gates import GateCommand
+
+    hostile = "/cache/uv/builds-v0/.tmp/typecheck-tests-lint/bin/python"
+    ordered = sorted(
+        (
+            GateCommand("lint", (hostile, "-m", "ruff", "check", ".")),
+            GateCommand("test", (hostile, "-m", "pytest", "-q")),
+            GateCommand("architecture-lint", (hostile, "-m", "x.architecture_lint")),
+            GateCommand("type", (hostile, "-m", "mypy", ".")),
+            GateCommand("build", (hostile, "-m", "x.build")),
+        ),
+        key=_gate_order_key,
+    )
+
+    assert [gate.gate_id for gate in ordered] == [
+        "build",
+        "type",
+        "architecture-lint",
+        "lint",
+        "test",
+    ]

@@ -141,6 +141,10 @@ optional:
         when: "human rationale; not machine-matched"
         task_terms: ["optional lowercase substring matched against the run task"]
         path_globs: ["optional changed-file glob"]
+        concerns: ["optional concern id; the group activates when `--concern <id>` names it.
+          A group declaring only concerns never activates on its own - that is the point:
+          it covers what the changed paths cannot reveal (authorization inside an ordinary
+          component, PII handling, a lockfile with a runtime effect)."]
         missing: "missing local <skill-group>: <skill>"
     # Installed external skills. We never enumerate their names here: upstream
     # renames and deletions make any name list stale (measured: 35% name churn in
@@ -156,6 +160,11 @@ optional:
         selection stops there, so the tier can reach budget + that one document. Counts only
         this vocabulary tier - profile declared skills and their dependencies are never budgeted."
       pins: ["exact skill name to force into the required tier when matched by a domain"]
+      # tier: a matched skill is `offered` unless `--concern <domain id>` names its domain
+      # or `pins` lists it. Task wording never promotes to required: the same change
+      # described in another language produced a different required set (measured: 6
+      # required / 26,241 B in English, 4 in Korean), and the candidate set is whatever
+      # happens to be installed on this machine.
       domains:
         - id: "stable domain id owned by this repo, not by upstream"
           terms: ["lowercase substring matched against both the run task and the skill text"]

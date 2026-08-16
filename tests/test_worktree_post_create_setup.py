@@ -255,7 +255,7 @@ def _stub_profile(monkeypatch, tmp_path: Path, profile: dict) -> None:
     from agent_flow import cli as CLI
 
     monkeypatch.setattr(CLI, "_find_kit_root", lambda: tmp_path)
-    monkeypatch.setattr(CLI, "_load_profile", lambda kit_root, root: ("p", profile))
+    monkeypatch.setattr(CLI, "resolve_profile", lambda kit_root, root: ("p", profile))
     # hook provision은 이 테스트의 대상이 아니다. leader에 등록 파일을 심는 것까지
     # 요구하면 복사 계약이 hook 설치 상태에 얽힌다.
     monkeypatch.setattr(CLI, "_provision_host_hooks", lambda **_kwargs: None)
@@ -341,7 +341,7 @@ def test_root_context_files_survive_a_broken_profile(tmp_path: Path, monkeypatch
         raise RuntimeError("profile is broken")
 
     monkeypatch.setattr(CLI, "_find_kit_root", lambda: tmp_path)
-    monkeypatch.setattr(CLI, "_load_profile", _explode)
+    monkeypatch.setattr(CLI, "resolve_profile", _explode)
     monkeypatch.setattr(CLI, "_provision_host_hooks", lambda **_kwargs: None)
 
     CLI._apply_worktree_setup(root=leader, checkout=checkout)

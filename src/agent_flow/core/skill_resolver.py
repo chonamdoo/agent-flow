@@ -232,10 +232,17 @@ def resolve_phase_skills(
     profile: dict | None = None,
     changed_files: Sequence[str] = (),
     task_text: str = "",
+    concerns: Sequence[str] = (),
     host: str | None = None,
     env: dict[str, str] | None = None,
 ) -> SkillResolution:
-    """phase 선언 + frontmatter 선언 + profile 표/어휘를 합쳐 해석한다."""
+    """phase 선언 + frontmatter 선언 + profile 표/어휘를 합쳐 해석한다.
+
+    required를 만들 수 있는 출처는 넷이다: workflow phase 선언, profile 표,
+    project-local drop-box, 그리고 명시된 concern. `task_text`는 offered까지만
+    만든다 — 같은 변경을 다른 언어로 적으면 결과가 달라지고, 그러면 작성자와
+    reviewer가 같은 기준을 본다는 보장이 문구 표기에 걸린다.
+    """
     # 지연 import: 두 모듈이 이 모듈을 되짚어 참조한다.
     from agent_flow.core.profile_routing import routed_profile_skills
     from agent_flow.core.skill_matching import REQUIRED as EXTERNAL_REQUIRED
@@ -247,10 +254,23 @@ def resolve_phase_skills(
     optional_names: list[str] = list(declared.optional)
 
     catalog = discover_skill_catalog(project_root, roots)
+    # task 문구로만 켜져 offered로 내려간 이름. 명시된 concern이 그것을 다시 required로
+    # 올릴 수 있어야 한다 — 그러지 않으면 강등을 되돌리라고 만든 탈출구가 정확히
+    # 강등 대상에만 듣지 않는다.
+    demoted: set[str] = set()
     for entry in catalog:
         if entry.name in required_names or entry.name in optional_names:
             continue
-        if _entry_activates(entry, phase_id, changed_files, task_text):
+        activation = entry_activation(entry, phase_id, changed_files, task_text)
+        if activation is None:
+            continue
+        if activation == ACTIVATED_BY_TASK_TERMS and entry.source not in OWNED_SOURCES:
+            # 설치된 남의 skill을 task 문구로 required로 올리면 후보 집합이 이 머신의
+            # 카탈로그가 되고, 같은 변경이 host마다 다른 required를 만든다. 우리가
+            # 배포하는 skill의 `taskTerms`는 저장소가 소유한 어휘라 그 문제가 없다.
+            optional_names.append(entry.name)
+            demoted.add(entry.name)
+        else:
             required_names.append(entry.name)
 
     # profile 표로 붙는 skill은 upstream 파일이라 frontmatter 선언이 없다.
@@ -259,7 +279,11 @@ def resolve_phase_skills(
     routed_hints: dict[str, str] = {}
     routed_only: set[str] = set()
     for routed in routed_profile_skills(
-        profile, phase_id=phase_id, changed_files=changed_files, task_text=task_text
+        profile,
+        phase_id=phase_id,
+        changed_files=changed_files,
+        task_text=task_text,
+        concerns=concerns,
     ):
         if routed.source:
             routed_hints.setdefault(routed.name, routed.source)
@@ -277,10 +301,15 @@ def resolve_phase_skills(
         phase_id=phase_id,
         changed_files=changed_files,
         task_text=task_text,
+        concerns=concerns,
         env=env,
     ):
-        if match.name in required_names or match.name in optional_names:
+        if match.name in required_names:
             continue
+        if match.name in optional_names:
+            if match.tier != EXTERNAL_REQUIRED or match.name not in demoted:
+                continue
+            optional_names.remove(match.name)
         matched[match.name] = ResolvedSkill(
             name=match.name,
             path=match.path,
@@ -687,29 +716,64 @@ def entry_can_activate(entry: SkillCatalogEntry) -> bool:
     return bool(entry.phase_declared and entry.workflow_phases)
 
 
-def _entry_activates(
+# 이름과 어휘를 저장소가 소유하는 소스. 이쪽 `taskTerms`는 머신 구성에 따라 달라지지
+# 않으므로 required를 만들 수 있다.
+OWNED_SOURCES = frozenset({"project-local", "project", "bundled"})
+
+ACTIVATED_BY_PLACEMENT = "placement"
+ACTIVATED_BY_PATH = "path-globs"
+ACTIVATED_BY_TASK_TERMS = "task-terms"
+ACTIVATED_BY_DECLARATION = "declaration"
+
+
+def entry_activation(
     entry: SkillCatalogEntry, phase_id: str, changed_files: Sequence[str], task_text: str
-) -> bool:
+) -> str | None:
+    """이 엔트리가 왜 켜졌는가. 안 켜지면 ``None``.
+
+    tier가 이유에 걸린다. 경로와 배치는 결정론적이라 required를 만들 수 있고,
+    task 문구는 표기에 따라 달라지므로 offered까지만 만든다.
+    """
     if phase_id not in entry.workflow_phases:
-        return False
+        return None
     if not entry_can_activate(entry):
-        return False
+        return None
     if not entry.selector_declared and not entry.task_terms and not entry.path_globs:
-        return True
-    return selector_matches(
-        task_terms=entry.task_terms,
+        # drop-box는 거기 둔 것 자체가 선언이다. 그 밖의 소스는
+        # `entry_can_activate`가 이미 `workflowPhases` 선언을 요구했다.
+        return (
+            ACTIVATED_BY_PLACEMENT
+            if entry.source == "project-local"
+            else ACTIVATED_BY_DECLARATION
+        )
+    if selector_matches(
+        task_terms=(),
         path_globs=entry.path_globs,
         changed_files=changed_files,
+        task_text="",
+    ):
+        return ACTIVATED_BY_PATH
+    if selector_matches(
+        task_terms=entry.task_terms,
+        path_globs=(),
+        changed_files=(),
         task_text=task_text,
-    )
+    ):
+        return ACTIVATED_BY_TASK_TERMS
+    return None
 
 
 def _glob_matches(pattern: str, candidate: str) -> bool:
-    if fnmatch(candidate, pattern):
+    # 대소문자를 접어서 본다. `fnmatch`는 POSIX에서 대소문자를 구분하므로
+    # `Button.TSX`가 `**/*.tsx`에 안 걸린다. 확장자 표기 하나로 skill 강제가
+    # 사라지는 쪽이 문서 한 장을 더 읽는 쪽보다 나쁘다.
+    folded_pattern = pattern.lower()
+    folded_candidate = candidate.lower()
+    if fnmatch(folded_candidate, folded_pattern):
         return True
     # `**/x` 는 최상위 경로에도 걸려야 한다. fnmatch는 이를 처리하지 않는다.
-    if pattern.startswith("**/"):
-        return fnmatch(candidate, pattern[3:])
+    if folded_pattern.startswith("**/"):
+        return fnmatch(folded_candidate, folded_pattern[3:])
     return False
 
 

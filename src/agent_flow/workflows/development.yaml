@@ -11,6 +11,8 @@ phases:
 
   - id: implement
     role: implementer
+    skills:
+      required: [code-generation-discipline]
     description: Implement the requested change.
     prompt: |
       Implement the requested change using the existing project patterns. Keep the
@@ -19,12 +21,14 @@ phases:
 
   - id: review
     role: reviewer
+    skills:
+      required: [code-generation-discipline]
     parallel: true
     replicas: 3
     description: Review the implementation.
     multi_review: true
     required_markers:
-      - "must-avoid-check: pass|fail"
+      - "must-avoid-check: pass|fail|n/a"
     routes:
       approve: qa
       request-changes: fix-loop
@@ -37,7 +41,9 @@ phases:
       Each reviewer section must include `reviewer-source: sub-agent` and an
       independent verdict: approve or request-changes.
       The Clean Architecture reviewer must record `must-avoid-check: pass|fail`;
-      a missing or failing marker blocks approval. Any request-changes from any
+      a missing or failing marker blocks approval. That angle only runs when this
+      phase requires a clean-architecture skill — the reviewer list the runner
+      printed is the fact. When it is absent, record `must-avoid-check: n/a`. Any request-changes from any
       reviewer makes the overall verdict request-changes.
       End with `## Overall` followed by exactly one verdict line:
       `verdict: approve` or `verdict: request-changes`.
@@ -62,6 +68,8 @@ phases:
 
   - id: fix-loop
     role: fixer
+    skills:
+      required: [code-generation-discipline]
     description: Fix review or QA findings.
     routes:
       default: review

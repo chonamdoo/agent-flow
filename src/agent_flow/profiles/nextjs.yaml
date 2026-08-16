@@ -41,11 +41,28 @@ skills:
     - react-development-guide
     - typescript-development-guide
   required_review:
+    # baseline과 architecture를 가른다. 한 group에 두면 문구·색상만 바꾸는 변경에도
+    # 계층 계약 문서가 required가 된다(실측: `.tsx` 한 줄 변경에 required 4개 /
+    # 15,746 B → 2개 / 5,220 B). architecture 문서는 계층 경계 경로가 실제로 바뀔 때만
+    # 요구한다 — 경로 목록은 이 profile의 `architecture.roles`에서 온다.
     - group: profile
-      skills: [react-development-guide, react-clean-architecture]
+      skills: [react-development-guide]
       when: React/Next.js files change
       missing: "missing local profile: <skill>"
       path_globs: ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.mjs"]
+    # app-shell과 native host role은 여기서 뺀다. `app/**`는 App Router 프로젝트의
+    # 소스 대부분이고 Android의 `app` 모듈도 그렇다 — 넣으면 문구만 바꾸는 변경이 다시
+    # 계층 문서를 요구해 축소가 사라진다. 그 자리의 배선 검토는 `--concern`으로 지목한다.
+    # 자리표시자(`<context>`) 아래만 걸면 layer 루트의 파일이 빠지므로 layer 디렉터리
+    # 전체를 잡는다.
+    - group: architecture
+      skills: [react-clean-architecture]
+      when: React profile architecture role paths change
+      missing: "missing local profile: <skill>"
+      # 배선 자리처럼 경로로 드러나지 않는 계층 검토를 지목하는 유일한 통로다.
+      # 주석이 `--concern`을 가리키므로 id가 여기 선언돼 있어야 오타로 거부되지 않는다.
+      concerns: [architecture]
+      path_globs: ["**/src/core/domain/**", "**/src/core/data/**", "**/src/features/**", "**/src/core/ui/**", "**/src/core/design-system/**", "**/src/core/resources/**", "**/src/core/network/**", "**/src/core/platform/**", "**/src/core/permission/**", "**/src/core/navigation/api/**", "**/src/core/navigation/impl/**"]
     # TypeScript 가이드는 스스로 `*.ts`/`*.tsx` 범위를 선언한다. React 표의 glob에
     # 섞으면 `next.config.mjs` 하나만 바뀐 변경에서도 required가 되고, 같은 skill의
     # 범위를 두 profile이 다르게 선언하게 된다.

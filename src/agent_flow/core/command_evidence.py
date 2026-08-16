@@ -11,16 +11,17 @@
 
 hook이 없는 host에서는 로그 파일 자체가 없다. 그때는 `available=False`로
 축퇴시키고 자기신고(`unavailable`)를 받는다 — 관측 불가를 위반으로 들면 hook
-미지원 host에서 모든 런이 막힌다.
+미지원 host에서 모든 런이 막힌다. 파일이 있어도 **이 checkout의 명령이 한 번도
+잡힌 적 없으면** 같은 축퇴를 쓴다: 로그는 저장소가 공유하므로 파일 존재가 이
+세션의 hook 로드를 뜻하지 않는다.
 
-**skill 쪽 L2와 같은 계약이 아니다.** 관측이 가능한 host에서 이쪽은 관측으로
-막는다(`missing_test_evidence_markers`: 실행이 하나도 안 잡히면 자기신고가
-무엇이든 차단이다). skill 쪽 L2(`local_skills.missing_local_skill_markers`)는
-자기신고 하나만 요구하고 관측은 진단에만 쓴다. 갈라진 이유는 생산자다 —
-`record-command-run.py`는 argv를 실행 시점에 잡으므로 hook이 로드된 세션이면
-빠짐이 없지만, skill 읽음 기록은 hook이 없는 세션에서 실제 읽기를 놓치면서도
-다른 세션이 만든 로그 파일 때문에 `available=True`가 되어 그 세션을 영원히
-막았다. 두 층을 같은 문장으로 요약하지 마라.
+**skill 쪽 L2와 같은 계약이 아니다.** 관측된 기록이 있는 host에서 이쪽은
+관측으로 막는다(`missing_test_evidence_markers`: 창에 기록이 있는데 테스트
+실행만 없으면 자기신고가 무엇이든 차단이다). skill 쪽 L2
+(`local_skills.missing_local_skill_markers`)는 자기신고 하나만 요구하고 관측은
+진단에만 쓴다. 갈라진 이유는 생산자다 — `record-command-run.py`는 argv를 실행
+시점에 잡으므로 hook이 로드된 세션이면 빠짐이 없고, 그 세션은 창을 비우지
+않는다. 두 층을 같은 문장으로 요약하지 마라.
 """
 from __future__ import annotations
 
@@ -317,6 +318,22 @@ def resolve_test_command_tokens(profile: dict | None) -> tuple[tuple[str, ...], 
     return tuple((token,) for token in FALLBACK_TEST_TOKENS)
 
 
+def _observation_reaches_checkout(
+    evidence: CommandRunEvidence, project_root: Path, *, cwd_root: Path | None
+) -> bool:
+    """이 checkout의 명령이 로그에 한 번이라도 잡혔는가.
+
+    `evidence`는 phase 창으로 좁혀진 결과다. 그것이 비어 있을 때만 창 없이 다시
+    읽는다 — 파일 존재가 아니라 "이 checkout이 관측된 적이 있는가"가 hook 로드
+    여부의 유일한 관측 가능한 대리 지표다.
+    """
+    if not evidence.available:
+        return False
+    if evidence.runs:
+        return True
+    return bool(read_command_evidence(project_root, cwd_root=cwd_root).runs)
+
+
 def missing_test_evidence_markers(
     project_root: Path,
     phase_id: str,
@@ -328,14 +345,30 @@ def missing_test_evidence_markers(
 ) -> list[str]:
     """"테스트를 아예 안 돌렸다"만 잡는다. 그 이상은 이 층이 증명하지 못한다.
 
-    관측이 불가능한 host에서는 자기신고(`unavailable`)로 축퇴한다. 관측 불가를
-    위반으로 들면 hook 미지원 host에서 red/fix phase가 통째로 막힌다.
+    관측이 불가능하면 자기신고(`unavailable`)로 축퇴한다. 관측 불가를 위반으로
+    들면 hook 미지원 host에서 red/fix phase가 통째로 막힌다.
+
+    "관측 불가"의 판정은 로그 파일 존재가 아니다. 파일은 저장소가 공유하므로
+    형제 worktree나 이전 세션이 한 번 만들어 두면 hook이 로드되지 않은 세션에서도
+    `available=True`가 된다. 그 세션은 실제로 테스트를 돌려도 기록을 남기지
+    못하는데 관측에는 아무것도 안 잡혀서, 자기가 만들 수 없는 증거를 요구받고
+    `unavailable`로 신고해도 그 가지에 닿지 못했다. 탈출구가 0인 상태다.
+
+    그래서 "관측 불가"는 **이 checkout의 명령이 로그에 한 번이라도 잡혔는가**로
+    판정한다. 한 번도 없으면 hook이 이 세션에 실리지 않은 것으로 보고 자기신고를
+    받는다. 기록은 있는데 이번 phase 창에만 없으면 hook은 살아 있는 것이므로
+    그대로 막는다 — 이전 phase의 실행을 이번 증거로 재활용하는 경로가 그 자리다.
+
+    대가는 명시해 둔다: hook을 한 번도 태운 적 없는 새 checkout에서는 첫 phase가
+    `unavailable`로 통과할 수 있다. 관측으로 그것과 hook 부재를 가를 방법이 없어서
+    받는 값이고, 같은 교환을 skill 쪽 L2가 이미 하고 있다
+    (`local_skills.missing_local_skill_markers`).
     """
     if phase_id not in TEST_EVIDENCE_PHASES:
         return []
     evidence = read_command_evidence(project_root, since=since, cwd_root=cwd_root)
     values = completion_gate_marker_values(text)
-    if not evidence.available:
+    if not _observation_reaches_checkout(evidence, project_root, cwd_root=cwd_root):
         if values.get("test-run-evidence") not in {"verified", "unavailable"}:
             return [TEST_RUN_EVIDENCE_MARKER]
         return []

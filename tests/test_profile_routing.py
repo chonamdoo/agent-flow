@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -88,6 +89,8 @@ def test_profile_group_routes_the_bundled_skills_it_owns():
     )
 
     assert "android-code-review" in _names(routed)
+    # `app/src/main/java/A.kt`는 `app-shell` 경로다. 배선 자리는 architecture group에서
+    # 빼기로 했으므로 baseline만 걸린다.
     assert {skill.group for skill in routed} == {"profile"}
 
 
@@ -204,6 +207,36 @@ def test_multi_profile_merge_keeps_both_vocabularies():
     assert "android_skills" not in merged
 
 
+def test_runner_profile_union_routes_like_the_flat_merge(tmp_path):
+    """runner가 만든 union이 resolver가 읽는 shape인가.
+
+    반증 대상은 하나다: `skills`를 profile id로 한 겹 감싸면
+    `_required_review_groups`가 `required_review` 키를 못 찾아 다중 profile run의
+    routed required가 조용히 0개가 된다. 그 상태에서도 `agent-flow status`는
+    `merged_profile_payload`로 평평하게 합쳐 5개를 보므로, 같은 run에 대해 두
+    판정이 갈린다.
+    """
+    from agent_flow.core.profile_resolution import load_profile_union
+
+    _profile_id, union = load_profile_union(
+        tmp_path, ["react-native", "android"], explicit_fallback=False
+    )
+    flat = merged_profile_payload(
+        [load_profile_payload("react-native"), load_profile_payload("android")]
+    )
+
+    changed = ["android/app/src/main/java/A.kt"]
+    union_routed = _names(
+        routed_profile_skills(union, phase_id="implement", changed_files=changed, task_text="")
+    )
+    flat_routed = _names(
+        routed_profile_skills(flat, phase_id="implement", changed_files=changed, task_text="")
+    )
+
+    assert union_routed == flat_routed
+    assert "android-code-review" in union_routed
+
+
 def test_first_profile_owns_a_duplicated_group():
     first = {
         "skills": {
@@ -276,6 +309,9 @@ def test_resolver_surfaces_a_vocabulary_matched_skill(tmp_path, monkeypatch):
         profile=load_profile_payload("android"),
         changed_files=["app/src/main/java/A.kt"],
         task_text="status bar가 콘텐츠를 가린다",
+        # required tier는 명시된 concern에서만 나온다. 어휘 매칭만으로 required가
+        # 되면 같은 변경이 host의 카탈로그 구성에 따라 다른 게이트를 만든다.
+        concerns=["ui-insets-systembars"],
     )
 
     resolution = resolve_phase_skills(
@@ -351,8 +387,14 @@ def test_prompt_contract_lists_every_marker_the_gate_demands(tmp_path):
 
     block = local_skill_prompt_block(project, "implement", **common)
     contract = block.split("```text")[1].split("```")[0]
-    artifact = "## Completion Gate\n" + contract.replace(
-        "skill-use-evidence: verified|unavailable", "skill-use-evidence: unavailable"
+    # 계약은 허용 값을 `a|b`로 적는다. artifact는 그중 하나를 골라야 하므로 첫 번째
+    # 대안으로 구체화한다 — 특정 marker 이름을 손으로 적으면 새 marker가 이 가드를
+    # 빠져나간다.
+    artifact = "## Completion Gate\n" + re.sub(
+        r"^([a-z0-9-]+): ([^|\n]+)\|\S+$",
+        r"\1: \2",
+        contract,
+        flags=re.M,
     )
 
     assert missing_local_skill_markers(artifact, project, "implement", **common) == []
@@ -371,6 +413,7 @@ def test_matched_skill_reports_the_path_it_was_discovered_at(tmp_path, monkeypat
         profile=load_profile_payload("android"),
         changed_files=["app/src/main/java/A.kt"],
         task_text="status bar overlap 수정",
+        concerns=["ui-insets-systembars"],
     )
 
     def matched(host: str):
@@ -413,3 +456,229 @@ def test_missing_report_uses_the_declared_wording():
     skill = RoutedSkill("android-code-review", "profile", "", "missing local profile: <skill>")
 
     assert missing_routed_report(skill) == "missing local profile: android-code-review"
+
+
+def test_a_copy_only_component_change_does_not_require_architecture_docs():
+    """반증: baseline과 architecture가 한 group이면 문구 변경에도 계층 문서가 붙는다.
+
+    실측 근거: `.tsx` 한 줄 변경의 required가 4개 / 15,746 B였고, 그중
+    `react-clean-architecture`와 그 dependency `clean-architecture-core`가
+    10,526 B였다. 버튼 문구를 바꾸는 작업이 계층 계약을 읽어야 할 이유는 없다.
+    """
+    for changed in ("src/components/Button.tsx", "app/globals.css", "app/page.tsx"):
+        routed = _names(
+            _route(
+                "nextjs",
+                phase_id="implement",
+                changed_files=[changed],
+                task_text="버튼 문구와 색상만 수정",
+            )
+        )
+
+        assert "react-clean-architecture" not in routed, changed
+    # baseline은 그대로 붙는다. 축소는 계층 문서에만 적용된다.
+    assert "react-development-guide" in _names(
+        _route(
+            "nextjs",
+            phase_id="implement",
+            changed_files=["src/components/Button.tsx"],
+            task_text="버튼 문구와 색상만 수정",
+        )
+    )
+
+
+# 배선 자리다. `app/**`는 App Router 프로젝트 소스 대부분이라 architecture group에서
+# 빼기로 했고, 그 결정을 여기서도 같은 이름으로 적어 둔다.
+_COMPOSITION_ROOT_ROLES = {"app-shell", "android-native"}
+
+
+def _role_sample_paths(profile_id: str) -> list[str]:
+    """선언된 role path마다 표본 두 개: layer 루트의 파일과 자리표시자 아래의 파일.
+
+    자리표시자를 항상 채우면 `**/<layer>/*/**` 같은 glob이 layer 루트 파일을 놓치는
+    것을 못 본다 — 첫 구현이 정확히 그 상태였다.
+    """
+    payload = load_profile_payload(profile_id)
+    roles = (payload.get("architecture") or {}).get("roles") or []
+    samples: list[str] = []
+    for role in roles:
+        if str(role.get("id")) in _COMPOSITION_ROOT_ROLES:
+            continue
+        for path in role.get("paths") or []:
+            filled = re.sub(r"<[^>]+>", "sample", str(path)).strip("/")
+            root = str(path).split("<", 1)[0].strip("/")
+            if filled:
+                samples.append(f"{filled}/Probe.txt")
+            if root:
+                samples.append(f"{root}/Probe.txt")
+    return sorted(dict.fromkeys(samples))
+
+
+@pytest.mark.parametrize("profile_id", ["android", "ios", "nextjs", "python", "react-native"])
+def test_every_declared_role_path_requires_the_architecture_doc(profile_id):
+    """불변: 축소가 계층 경계 변경까지 덮으면 그건 축소가 아니라 게이트 제거다.
+
+    두 경로만 확인하면 나머지 role path가 빠져도 통과한다 — 실제로 첫 구현에서
+    `app-shell`과 `core-ui` role이 전부 빠졌고 두 테스트 모두 초록이었다. 그래서
+    표본은 profile이 선언한 `architecture.roles`에서 전부 뽑는다.
+    """
+    architecture_skills = {
+        name
+        for group in load_profile_payload(profile_id)["skills"]["required_review"]
+        if group.get("group") == "architecture"
+        for name in group.get("skills") or ()
+    }
+    assert architecture_skills, profile_id
+
+    uncovered = [
+        sample
+        for sample in _role_sample_paths(profile_id)
+        if not architecture_skills
+        <= _names(
+            _route(profile_id, phase_id="implement", changed_files=[sample], task_text="")
+        )
+    ]
+
+    assert uncovered == []
+
+
+@pytest.mark.parametrize("profile_id", ["android", "ios", "nextjs", "python", "react-native"])
+def test_architecture_groups_never_activate_on_a_bare_extension(profile_id):
+    """architecture group이 언어 확장자만으로 켜지면 split이 무의미하다.
+
+    이름을 고른 목록이 아니라 성질 판정이다: `**/*.<ext>` 형태의 glob 하나라도
+    architecture group에 있으면 그 스택의 모든 소스 변경이 계층 문서를 요구한다.
+    """
+    profile = load_profile_payload(profile_id)
+    groups = profile["skills"]["required_review"]
+
+    bare = [
+        glob
+        for group in groups
+        if group.get("group") == "architecture"
+        for glob in group.get("path_globs") or ()
+        if re.fullmatch(r"\*\*/\*\.[A-Za-z0-9]+", glob)
+    ]
+
+    assert bare == []
+
+
+def test_the_same_change_requires_the_same_skills_in_either_language(tmp_path, monkeypatch):
+    """반증: 판정이 task 문구에 걸리면 한국어로 쓴 작업이 다른 게이트를 받는다.
+
+    실측 근거: 영어 문구는 required 6개 / 26,241 B, 같은 뜻의 한국어는 4개였다.
+    `term_in`이 ASCII 단어 경계로 맞추고 domain `terms`가 영어 전용이기 때문인데,
+    그 차이가 required를 만들면 안 된다.
+    """
+    home = tmp_path / "home"
+    _install(home, "frontend-design", "Guidance for typography and color palette.")
+    monkeypatch.setenv("HOME", str(home))
+    project = tmp_path / "web"
+    project.mkdir()
+    profile = load_profile_payload("nextjs")
+
+    def required(task_text: str) -> set[str]:
+        return {
+            skill.name
+            for skill in resolve_phase_skills(
+                project_root=project,
+                phase_id="implement",
+                profile=profile,
+                changed_files=["src/components/Button.tsx"],
+                task_text=task_text,
+                host="claude",
+            ).required
+        }
+
+    assert required("버튼 색상 팔레트와 타이포그래피만 조정") == required(
+        "adjust button color palette and typography only"
+    )
+
+
+def test_a_concern_only_group_waits_for_the_concern():
+    """경로가 드러내지 못하는 것을 위한 자리다. 명시되지 않으면 켜지지 않는다."""
+    profile = {
+        "skills": {
+            "required_review": [
+                {"group": "security", "skills": ["threat-model"], "concerns": ["security"]}
+            ]
+        }
+    }
+    args = dict(phase_id="implement", changed_files=["src/components/Button.tsx"], task_text="")
+
+    assert _names(routed_profile_skills(profile, **args)) == set()
+    assert _names(routed_profile_skills(profile, concerns=["security"], **args)) == {
+        "threat-model"
+    }
+
+
+def test_a_rename_keeps_both_paths_in_the_change_set(tmp_path, monkeypatch):
+    """반증: rename 레코드의 원본 경로는 상태 접두사가 없다.
+
+    레코드마다 앞 3글자를 자르면 그 필드에서 실제 문자 3개가 사라져
+    `core/domain/A.kt`가 `e/domain/A.kt`가 되고, 파일을 옮기는 변경은 경로 기반
+    라우팅에서 조용히 빠진다.
+    """
+    from agent_flow.core.local_skills import _porcelain_paths
+
+    stdout = "R  core/domain/order/New.kt\0core/domain/order/Old.kt\0 D core/data/order/Gone.kt\0"
+
+    paths = _porcelain_paths(stdout)
+
+    assert paths == (
+        "core/domain/order/New.kt",
+        "core/domain/order/Old.kt",
+        "core/data/order/Gone.kt",
+    )
+
+
+def test_an_uppercase_extension_still_matches_its_glob():
+    """확장자 표기 하나로 skill 강제가 사라지면 안 된다. macOS에서 실제로 그랬다."""
+    from agent_flow.core.skill_resolver import selector_matches
+
+    assert selector_matches(
+        task_terms=[],
+        path_globs=["**/*.tsx"],
+        changed_files=["src/components/Button.TSX"],
+        task_text="",
+    )
+
+
+def test_every_architecture_group_declares_the_opt_in_concern():
+    """반증: 이 group의 주석은 배제된 배선 경로의 계층 검토를 `--concern`으로
+    지목하라고 안내한다. id가 선언돼 있지 않으면 그 안내는 거짓이고, 명시 요청은
+    unknown concern으로 **거부된다** — 축소만 남고 탈출구가 0이 된다.
+    """
+    from agent_flow.core.local_skills import declared_concern_ids
+
+    for profile_id in ("android", "ios", "nextjs", "python", "react-native"):
+        payload = load_profile_payload(profile_id)
+        groups = [
+            group
+            for group in payload["skills"]["required_review"]
+            if group.get("group") == "architecture"
+        ]
+        assert groups, profile_id
+        for group in groups:
+            assert "architecture" in (group.get("concerns") or []), profile_id
+        assert "architecture" in declared_concern_ids(payload), profile_id
+
+
+def test_the_opt_in_concern_reaches_a_path_the_globs_exclude():
+    """배선 자리(`app/**`)는 architecture glob에서 빼기로 했다. 그 변경에서 계층
+    문서를 요구하려면 concern 하나로 되어야 한다 — 되지 않으면 축소가 되돌릴 수
+    없는 축소가 된다."""
+    wiring = ["app/providers.tsx"]
+
+    without = _names(_route("nextjs", phase_id="implement", changed_files=wiring))
+    with_concern = _names(
+        _route(
+            "nextjs",
+            phase_id="implement",
+            changed_files=wiring,
+            concerns=["architecture"],
+        )
+    )
+
+    assert "react-clean-architecture" not in without
+    assert "react-clean-architecture" in with_concern

@@ -27,15 +27,12 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, NamedTuple
-
-import yaml
+from typing import Any, NamedTuple, Sequence
 
 from agent_flow.adapters.auto import detect_adapter
 from agent_flow.adapters.generic import STUB_SENTINEL
@@ -45,10 +42,11 @@ from agent_flow.artifact import (
     create_run,
     mark_inactive,
     read_meta,
+    run_concerns,
+    run_concerns_value,
     write_meta,
 )
 from agent_flow.cli_detect import CliInfo, REVIEW_CLI_NAMES, detect_available_clis
-from agent_flow.core.commands import run_safe_command
 from agent_flow.core.command_evidence import missing_test_evidence_markers
 from agent_flow.core.context_contract import run_relative_path
 from agent_flow.core.observation import (
@@ -77,8 +75,6 @@ from agent_flow.core.worktrees import (
     worktree_run_activation,
 )
 from agent_flow.core.worktree_isolation import (
-    HOST_PHASE_LEADER_BASELINE_KEY,
-    LEADER_SNAPSHOT_VERSION,
     STATUS_DRIFT_KIND,
     LeaderDrift,
     LeaderDriftError,
@@ -88,40 +84,50 @@ from agent_flow.core.worktree_isolation import (
     capture_leader_snapshot,
     exclusive_file_lease,
     git_safe,
-    leader_drift_paths,
     leader_root_for,
-    leader_snapshot_payload,
-    leader_sweep_includes_ignored,
     leader_sweep_scope,
-    real_path,
-    recorded_snapshot_scope,
-    recorded_snapshot_version,
     resolve_run_subpath,
-    sanitized_worker_env,
     write_run_subpath_text,
 )
-from agent_flow.core.atomic_io import fsync_directory
-from agent_flow.core.profiles import (
-    GATE_PHASE_ALL,
-    apply_project_profile_override,
-    project_profile_path,
+from agent_flow.core.route_verdicts import (
+    GATE_MALFORMED,
+    gate_parse_error,
+    gates_route_key,
+    multi_review_route_key,
+    recorded_gate_phase,
+    route_key,
 )
+from agent_flow.core.delivery_evidence import missing_delivery_evidence
+from agent_flow.core.design_sections import missing_ddd_design_terms
+from agent_flow.core.host_phase_baseline import (
+    BASELINE_KEY,
+    BaselineScope,
+    persist_baseline,
+    record_drift,
+    verify_baseline,
+)
+from agent_flow.core.atomic_io import fsync_directory
+from agent_flow.core.profiles import GATE_PHASE_ALL
+from agent_flow.core.profile_resolution import resolve_profile
 from agent_flow.core.phase_workflow import (
     ACCEPT_WORKFLOW_DRIFT_FLAG,
     CorruptRunCursorError,
     CursorScope,
     PhaseWorkflowDefinition,
     RunCursor,
-    package_root,
     find_kit_root,
     load_phase_workflow_definition,
-    overall_review_route_key,
-    unfenced_markdown_text,
 )
 from agent_flow.core.report import write_run_report
-from agent_flow.core.security import ensure_child_path, validate_safe_name
 from agent_flow.core.markers import has_failure_markers, missing_markers
-from agent_flow.core.local_skills import changed_files, missing_local_skill_markers
+from agent_flow.core.local_skills import (
+    changed_files,
+    declared_concern_ids,
+    missing_local_skill_markers,
+    phase_skill_resolution,
+    skill_markers_enforced,
+)
+from agent_flow.core.skill_scope import merge_scope
 from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.memory.index import LoreIndex
 from agent_flow.memory.lore import Lore
@@ -150,37 +156,7 @@ TRANSITIONS_FILE = "transitions.jsonl"
 # 잡는다. run 하나의 생성과 전이는 시간상 겹치지 않고, 같은 state root에서 동시에
 # 도는 run은 활성 run 가드가 이미 막는다. run_dir 안에 lock 파일을 새로 만들면
 # cleanup의 run 트리 검사와 산출물 목록에 그 파일이 섞인다.
-# 키 이름은 baseline을 쓰는 쪽과 읽는 쪽이 공유해야 한다.
-_HOST_PHASE_LEADER_BASELINE = HOST_PHASE_LEADER_BASELINE_KEY
-# baseline **레코드 자체**의 필드 구성 버전. 그 안에 담기는 스냅샷의 형식 버전은
-# 별개 축이고 `LeaderSnapshot.version`이 들고 있다. 이 값은 `run_id`/`phase_id`/
-# `leader_root`/`snapshot`의 의미가 바뀔 때만 올린다.
-#
-# v2는 v1의 `phase_index`를 뺐다. cursor의 index는 phase 이름에서 나오는 파생값이라
-# 승인된 drift가 정의를 재배치하면 이름이 그대로여도 움직인다. 그 값을 기록에 남겨
-# 등호로 대조하면 baseline이 두 번째 권위가 되어 정당한 재개를 죽인다.
-_HOST_PHASE_BASELINE_RECORD_VERSION = 2
-# 사용자가 확인한 leader 변경을 담는 자리. baseline과 **다른 키**여야 한다 —
-# baseline 레코드는 필드 집합을 등호로 검사하므로 여기에 얹으면 malformed가 된다.
-_HOST_PHASE_LEADER_DRIFT = "host_phase_leader_drift"
-_LEADER_DRIFT_ACKNOWLEDGEMENTS = "leader_drift_acknowledgements"
-_HOST_PHASE_DRIFT_RECORD_VERSION = 1
 ACCEPT_LEADER_DRIFT_FLAG = "--accept-leader-drift"
-PROTECTED_BRANCHES = frozenset({"main", "master", "develop"})
-CONVENTIONAL_COMMIT_RE = re.compile(
-    r"^(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)"
-    r"(?:\([^)]+\))?!?: \S.*$"
-)
-DDD_REQUIRED_DESIGN_SECTIONS = (
-    ("bounded context", ("bounded context", "bounded contexts", "context map", "컨텍스트")),
-    ("ubiquitous language", ("ubiquitous language", "ubiquitous language terms", "domain language", "보편 언어", "유비쿼터스 언어")),
-    ("aggregate", ("aggregate", "aggregates", "aggregate root", "애그리거트")),
-    ("entity", ("entity", "entities", "엔티티")),
-    ("value object", ("value object", "value objects", "vo", "값 객체")),
-    ("domain event", ("domain event", "domain events", "도메인 이벤트")),
-    ("domain invariant", ("domain invariant", "domain invariants", "invariant", "invariants", "도메인 불변식", "불변식")),
-    ("domain flow", ("domain flow", "domain flows", "domain workflow", "domain workflows", "도메인 흐름")),
-)
 
 
 class ResumeMode(Enum):
@@ -328,6 +304,7 @@ class Runner:
         checkout_registration_identity: str | None = None,
         accept_leader_drift: bool = False,
         accept_workflow_drift: bool = False,
+        concerns: Sequence[str] = (),
     ) -> None:
         if architecture not in ARCHITECTURE_MODES:
             raise ValueError(f"invalid architecture mode: {architecture!r}")
@@ -343,6 +320,7 @@ class Runner:
         self.checkout_registration_identity = checkout_registration_identity
         self.accept_leader_drift = accept_leader_drift
         self.accept_workflow_drift = accept_workflow_drift
+        self.requested_concerns = run_concerns_value(concerns)
         self.kit_root = _find_kit_root()
         if run_dir is not None:
             meta = read_meta(run_dir)
@@ -352,7 +330,8 @@ class Runner:
             self.kit_root, self.workflow_name
         )
         self.phases = _phases_from_definition(self.workflow)
-        self.profile_id, self.profile = _load_profile(self.kit_root, self.config_root)
+        self.profile_id, self.profile = resolve_profile(self.kit_root, self.config_root)
+        self._assert_declared_concerns()
         # run 한 번 안에서 범위가 바뀌면 baseline과 관측이 서로 다른 범위가 된다.
         # 여기서 한 번 정해 굳힌다. 병합된 `self.profile`이 아니라 leader의 선언
         # 파일을 직접 보는 해석기를 쓴다 — 병합은 어느 파일이 선언했는지를 지우고,
@@ -384,6 +363,7 @@ class Runner:
                     task,
                     architecture=self.architecture,
                     run_id=self.requested_run_id,
+                    concerns=self.requested_concerns,
                     checkout_identity=self.checkout_identity,
                     checkout_registration_identity=(
                         self.checkout_registration_identity
@@ -417,7 +397,7 @@ class Runner:
         # 원장보다 한 걸음 뒤에 있고, 그대로 커서를 세우면 방금 무효화하기로 한
         # phase를 다시 실행한다.
         self._resume_pending_transition()
-        run_meta = read_meta(self.run_dir)
+        run_meta = self._merge_requested_concerns(read_meta(self.run_dir))
         cursor = self._run_cursor(run_meta)
         banner_phase = (
             self.phases[cursor.phase_index]
@@ -448,6 +428,7 @@ class Runner:
         adapter._config_root = self.config_root
         adapter._task_text = run_meta.get("task", "")
         adapter._changed_files = changed_files(self.project_root)
+        adapter._concerns = run_concerns(run_meta)
         # 정확히 무엇을 주입했는지는 envelope를 만드는 자리에서만 알 수 있다.
         # 여기서 잡지 않으면 run이 끝난 뒤 프롬프트를 되살릴 방법이 없다.
         # multi-review phase는 envelope를 두 번 만든다(host, reviewer base).
@@ -517,6 +498,20 @@ class Runner:
                         required_artifact=artifact,
                     )
                     return
+                grown = self._grown_skill_names(phase)
+                if grown:
+                    print(
+                        f"\n═══ phase '{phase.id}' scope grew: "
+                        f"{', '.join(grown)}. Read them, then update the "
+                        f"artifact and `{self.next_command}`. ═══"
+                    )
+                    self._print_structured_status(
+                        status="blocked",
+                        phase=phase,
+                        reason="skill_scope_grew",
+                        required_artifact=artifact,
+                    )
+                    return
                 missing_markers = self._missing_required_markers(phase)
                 if missing_markers:
                     print(
@@ -580,6 +575,10 @@ class Runner:
                     leader_root=leader_root,
                     snapshot=leader_before,
                 )
+            # 프롬프트가 렌더되기 전에 기록을 잡는다. 이 시점의 목록은 프롬프트가
+            # 그대로 보여 주므로 자람이 아니다. 여기서 안 잡으면 첫 게이트가 목록
+            # 전체를 자람으로 보고 모든 phase가 한 번씩 헛되게 막힌다.
+            self._grown_skill_names(phase)
             completed = adapter.execute(
                 phase, run_dir=self.run_dir, project_root=self.project_root,
             )
@@ -615,6 +614,20 @@ class Runner:
                     status="blocked",
                     phase=phase,
                     reason=blocked_reason,
+                    required_artifact=artifact,
+                )
+                return
+            grown = self._grown_skill_names(phase)
+            if grown:
+                print(
+                    f"\n═══ phase '{phase.id}' scope grew: "
+                    f"{', '.join(grown)}. Read them, then update the "
+                    f"artifact and `{self.next_command}`. ═══"
+                )
+                self._print_structured_status(
+                    status="blocked",
+                    phase=phase,
+                    reason="skill_scope_grew",
                     required_artifact=artifact,
                 )
                 return
@@ -699,6 +712,42 @@ class Runner:
             report=report_path,
         )
 
+    def _assert_declared_concerns(self) -> None:
+        """선언되지 않은 concern은 오타다. 조용히 무시하면 사용자는 그 skill이 붙었다고
+        믿은 채 진행한다 — 열거형을 쓰는 이유가 그것이다."""
+        if not self.requested_concerns:
+            return
+        declared = declared_concern_ids(self.profile)
+        unknown = [item for item in self.requested_concerns if item not in declared]
+        if unknown:
+            known = ", ".join(sorted(declared)) or "(none declared by this profile)"
+            raise ValueError(
+                f"unknown concern(s): {', '.join(unknown)}. "
+                f"declared concerns: {known}"
+            )
+
+    def _merge_requested_concerns(self, meta: dict[str, Any]) -> dict[str, Any]:
+        """재개할 때 새로 지정된 concern을 합친다. 빼지는 않는다 — 한 번 required가 된
+        기준이 다음 phase에서 사라지면 reviewer가 작성자보다 느슨한 기준을 본다."""
+        assert self.run_dir is not None
+        if not self.requested_concerns:
+            return meta
+        merged = run_concerns_value((*run_concerns(meta), *self.requested_concerns))
+        if merged == run_concerns(meta):
+            return meta
+        meta["concerns"] = list(merged)
+        write_meta(self.run_dir, meta)
+        return meta
+
+    def _baseline_scope(self) -> BaselineScope:
+        assert self.run_dir is not None
+        return BaselineScope(
+            run_dir=self.run_dir,
+            sweep_scope=self._leader_scope,
+            include_ignored=self._leader_include_ignored,
+            accept_drift=self.accept_leader_drift,
+        )
+
     def _verify_host_phase_leader_baseline(
         self,
         *,
@@ -706,229 +755,15 @@ class Runner:
         phase: Phase,
         leader_root: Path | None,
     ) -> LeaderSnapshot | None:
-        raw = meta.get(_HOST_PHASE_LEADER_BASELINE)
-        if raw is None:
-            return None
-        if leader_root is None:
-            raise WorktreeIsolationError(
-                "durable host-phase leader baseline exists without a linked worktree"
-            )
-        if not isinstance(raw, dict):
-            raise WorktreeIsolationError(
-                "durable host-phase leader baseline is malformed"
-            )
-        assert self.run_dir is not None
-        expected_root = str(real_path(leader_root))
-        # 버전을 필드 집합보다 **먼저** 본다. 순서가 반대면 예전 형식의 기록은
-        # 필드가 다르다는 이유로 malformed 하드 raise에 걸려, 아래 재캡처 경로에
-        # 도달하지 못한 채 업그레이드를 걸친 run이 재개 불가가 된다.
-        record_version = recorded_snapshot_version(raw.get("version"))
-        if record_version != _HOST_PHASE_BASELINE_RECORD_VERSION:
-            # 레코드 필드 구성이 다르면 그 안의 값들을 현재 의미로 읽을 수 없다.
-            # 스냅샷 형식과 같은 처리를 한다 — 하드 raise로 막으면 업그레이드를
-            # 걸친 run이 재개 불가가 되고, 그건 이 경로가 없애려던 교착이다.
-            self._migrate_stale_host_phase_baseline(
-                meta,
-                f"record format v{record_version}",
-                f"v{_HOST_PHASE_BASELINE_RECORD_VERSION}",
-            )
-            return None
-        if set(raw) != {
-            "version",
-            "run_id",
-            "phase_id",
-            "leader_root",
-            "snapshot",
-        }:
-            raise WorktreeIsolationError(
-                "durable host-phase leader baseline is malformed"
-            )
-        # 동일성은 run·phase 이름·leader 체크아웃이 진다. index는 여기 없다 —
-        # 승인된 drift가 정의를 재배치하면 같은 phase가 다른 자리에 앉고, index를
-        # 대조하면 그 정당한 재개가 오염 보고로 죽는다.
-        if (
-            raw.get("run_id") != self.run_dir.name
-            or raw.get("phase_id") != phase.id
-            or raw.get("leader_root") != expected_root
-        ):
-            raise WorktreeIsolationError(
-                "durable host-phase leader baseline does not match the current "
-                "run, phase, or leader checkout"
-            )
-        snapshot_raw = raw.get("snapshot")
-        if not isinstance(snapshot_raw, dict) or not {
-            "head",
-            "branch",
-            "status",
-            "armed",
-        } <= set(snapshot_raw) <= {
-            "head",
-            "branch",
-            "status",
-            "armed",
-            "version",
-            "scope",
-        }:
-            raise WorktreeIsolationError(
-                "durable host-phase leader snapshot is malformed"
-            )
-        head = snapshot_raw.get("head")
-        branch = snapshot_raw.get("branch")
-        status = snapshot_raw.get("status")
-        armed = snapshot_raw.get("armed")
-        if (
-            not isinstance(head, str)
-            or not head
-            or not isinstance(branch, str)
-            or not branch
-            or not isinstance(status, str)
-            or armed is not True
-        ):
-            raise WorktreeIsolationError(
-                "durable host-phase leader snapshot is incomplete"
-            )
-        snapshot = LeaderSnapshot(
-            head=head,
-            branch=branch,
-            status=status,
-            armed=True,
-            version=recorded_snapshot_version(snapshot_raw.get("version")),
-            scope=recorded_snapshot_scope(snapshot_raw.get("scope")),
+        return verify_baseline(
+            self._baseline_scope(),
+            meta,
+            phase_id=phase.id,
+            leader_root=leader_root,
+            # 응답 정책은 runner가 갖는다. 무엇을 출력하고 어떤 해제 명령을
+            # 광고하는지가 여기서만 결정되도록 콜러블로 넘긴다.
+            assert_unchanged=self._assert_leader_unchanged,
         )
-        if not snapshot.comparable:
-            self._migrate_stale_host_phase_baseline(
-                meta,
-                f"snapshot format v{snapshot.version}",
-                f"v{LEADER_SNAPSHOT_VERSION}",
-            )
-            return None
-        if not snapshot.comparable_within(self._leader_scope):
-            # profile이 sweep 범위를 바꿨다. 범위가 다른 두 기록은 leader를 아무도
-            # 건드리지 않아도 항상 다르므로 새 범위로 다시 찍어야 한다.
-            #
-            # 다만 형식 전환과 달리 여기서는 **기록된 범위로 먼저 대조한다**. 형식은
-            # kit 업그레이드가 바꾸지만 범위는 파일 한 줄이 바꾸고, 그 파일은 워커가
-            # 닿을 수 있는 자리에 있다. 대조 없이 버리면 범위를 좁히는 그 phase 하나가
-            # 검사 없는 통과가 되고, 그 창이 정확히 워커가 노릴 자리다.
-            #
-            # 승인 경로를 대조보다 **앞에** 둔다. 뒤에 두면 도달하지 못한다 — 대조가
-            # raise하면 그 아래가 실행되지 않고 baseline도 그대로 남아, 다음 재개가
-            # 같은 지점에서 다시 막힌다. 그러면 이 knob이 존재하는 이유인 "leader가
-            # 계속 움직이는 상황"에서 광고된 해제 명령이 무효가 된다.
-            recorded_include_ignored = leader_sweep_includes_ignored(snapshot.scope)
-            accepted = self._accept_recorded_leader_drift(
-                meta=meta,
-                raw=raw,
-                leader_root=leader_root,
-                include_ignored=recorded_include_ignored,
-            )
-            if accepted is None:
-                self._assert_leader_unchanged(
-                    leader_root, snapshot, include_ignored=recorded_include_ignored
-                )
-            self._migrate_stale_host_phase_baseline(
-                meta,
-                f"sweep scope {snapshot.scope}",
-                self._leader_scope,
-            )
-            return None
-        accepted = self._accept_recorded_leader_drift(
-            meta=meta, raw=raw, leader_root=leader_root
-        )
-        if accepted is not None:
-            return accepted
-        self._assert_leader_unchanged(leader_root, snapshot)
-        if meta.pop(_HOST_PHASE_LEADER_DRIFT, None) is not None:
-            # leader가 스스로 돌아왔다. 남은 보고 기록은 나중에 같은 상태가 우연히
-            # 재현될 때 승인을 대신 서 줄 수 있으므로 여기서 버린다.
-            assert self.run_dir is not None
-            write_meta(self.run_dir, meta)
-        return snapshot
-
-    def _accept_recorded_leader_drift(
-        self,
-        *,
-        meta: dict[str, Any],
-        raw: dict[str, Any],
-        leader_root: Path,
-        include_ignored: bool | None = None,
-    ) -> LeaderSnapshot | None:
-        """사용자가 확인한 leader 변경만 새 기준선으로 굳힌다. 아니면 ``None``.
-
-        경로를 비교에서 빼지 않는 이유: ignored 경로에는 빌드 산출물만 있는 게
-        아니라 host가 **실행하는** 것도 있다(`.agent-flow/scripts/hooks/`,
-        `.claude/hooks/`, `.venv/bin`). 예외 목록을 만들면 그 자리의 변조가 영원히
-        조용해진다. 그래서 탐지 범위는 그대로 두고 응답만 바꾼다 — 무엇이 바뀌었는지
-        전부 보여주고, 사람이 받아들인 그 상태에서 다시 시작한다.
-
-        승인은 **보여준 그 상태**에만 붙는다. 보고 이후 leader가 또 움직였으면
-        기록을 버리고 통과시키지 않는다. 그러지 않으면 승인 한 번이 이후의 모든
-        변경까지 함께 덮어, 사람이 본 적 없는 오염이 기준선이 된다.
-        """
-        assert self.run_dir is not None
-        if not self.accept_leader_drift:
-            return None
-        recorded = meta.get(_HOST_PHASE_LEADER_DRIFT)
-        if (
-            not isinstance(recorded, dict)
-            or recorded.get("version") != _HOST_PHASE_DRIFT_RECORD_VERSION
-            or recorded.get("run_id") != self.run_dir.name
-            or recorded.get("kind") != STATUS_DRIFT_KIND
-            or not isinstance(recorded.get("observed"), dict)
-        ):
-            return None
-        # 보고했던 그 범위로 다시 찍는다. 범위 전환 중이라면 기록은 옛 범위로
-        # 만들어졌으므로, 새 범위로 찍어 비교하면 leader가 그대로여도 절대 일치하지
-        # 않아 승인이 영원히 성립하지 않는다.
-        observed = capture_leader_snapshot(
-            leader_root,
-            include_ignored=(
-                self._leader_include_ignored
-                if include_ignored is None
-                else include_ignored
-            ),
-        )
-        if leader_snapshot_payload(observed) != recorded["observed"]:
-            # 보고한 상태가 아니다. 기록을 버려 다음 검사가 현재 차이를 새로 보고한다.
-            meta.pop(_HOST_PHASE_LEADER_DRIFT, None)
-            write_meta(self.run_dir, meta)
-            return None
-        paths = [str(path) for path in recorded.get("paths") or ()]
-        meta[_HOST_PHASE_LEADER_BASELINE] = {
-            **raw,
-            "snapshot": leader_snapshot_payload(observed),
-        }
-        meta.setdefault(_LEADER_DRIFT_ACKNOWLEDGEMENTS, []).append(
-            {
-                "at": datetime.now(timezone.utc).isoformat(),
-                "phase_id": raw.get("phase_id"),
-                "paths": paths,
-            }
-        )
-        meta.pop(_HOST_PHASE_LEADER_DRIFT, None)
-        write_meta(self.run_dir, meta)
-        print(
-            f"  [accepted] leader drift acknowledged ({len(paths)} paths); "
-            "re-baselined to the state reported above"
-        )
-        return observed
-
-    def _migrate_stale_host_phase_baseline(
-        self, meta: dict[str, Any], recorded: str, expected: str
-    ) -> None:
-        """비교할 수 없는 기록을 버린다. 이 phase가 새 형식으로 다시 찍는다.
-
-        형식이 다른 기록을 그대로 대조하면 **항상** 차이가 나온다 — leader를 아무도
-        건드리지 않아도 그렇다. 그 오탐은 진행 중인 run 전부를 막고 근거가 없으므로
-        사용자가 풀 방법도 없다. 하드 raise도 같은 결과다(run 재개 불가).
-        """
-        assert self.run_dir is not None
-        print(
-            f"  [migrate] host-phase leader baseline was recorded in "
-            f"{recorded}; re-capturing as {expected}"
-        )
-        meta.pop(_HOST_PHASE_LEADER_BASELINE, None)
-        write_meta(self.run_dir, meta)
 
     def _assert_leader_unchanged(
         self,
@@ -970,23 +805,7 @@ class Runner:
             ) from None
 
     def _record_leader_drift(self, drift: LeaderDrift) -> tuple[str, ...]:
-        """보고한 상태를 남기고 공개할 경로를 돌려준다.
-
-        승인은 이 기록과 대조해서만 통한다. `reasons`가 아니라 `paths`를 남기는
-        이유는 `reasons`가 8개에서 잘리기 때문이다.
-        """
-        assert self.run_dir is not None
-        paths = leader_drift_paths(drift)
-        meta = read_meta(self.run_dir)
-        meta[_HOST_PHASE_LEADER_DRIFT] = {
-            "version": _HOST_PHASE_DRIFT_RECORD_VERSION,
-            "run_id": self.run_dir.name,
-            "kind": drift.kind,
-            "paths": list(paths),
-            "observed": leader_snapshot_payload(drift.after),
-        }
-        write_meta(self.run_dir, meta)
-        return paths
+        return record_drift(self._baseline_scope(), drift)
 
     def _persist_host_phase_leader_baseline(
         self,
@@ -995,24 +814,12 @@ class Runner:
         leader_root: Path,
         snapshot: LeaderSnapshot,
     ) -> None:
-        assert self.run_dir is not None
-        if not snapshot.armed:
-            raise WorktreeIsolationError(
-                "cannot persist an unarmed host-phase leader baseline"
-            )
-        meta = read_meta(self.run_dir)
-        if meta.get(_HOST_PHASE_LEADER_BASELINE) is not None:
-            raise WorktreeIsolationError(
-                "host-phase leader baseline changed without phase advancement"
-            )
-        meta[_HOST_PHASE_LEADER_BASELINE] = {
-            "version": _HOST_PHASE_BASELINE_RECORD_VERSION,
-            "run_id": self.run_dir.name,
-            "phase_id": phase.id,
-            "leader_root": str(real_path(leader_root)),
-            "snapshot": leader_snapshot_payload(snapshot),
-        }
-        write_meta(self.run_dir, meta)
+        persist_baseline(
+            self._baseline_scope(),
+            phase_id=phase.id,
+            leader_root=leader_root,
+            snapshot=snapshot,
+        )
 
     def _next_index(self, current_index: int, phase: Phase) -> RouteDecision:
         """route가 가리키는 다음 자리와 그렇게 판정한 key.
@@ -1042,11 +849,11 @@ class Runner:
         except OSError:
             text = ""
         if phase.multi_review:
-            key = _multi_review_route_key(text, phase.id)
+            key = multi_review_route_key(text, phase.id)
         elif phase.id == "gates":
-            key = _gates_route_key(text, nonce=str(read_meta(self.run_dir).get("gate_nonce", "")))
+            key = gates_route_key(text, nonce=str(read_meta(self.run_dir).get("gate_nonce", "")))
             if key == GATE_MALFORMED:
-                detail = _gate_parse_error(text)
+                detail = gate_parse_error(text)
                 print(f"  [block] gate-results.json is unreadable: {detail}")
                 self._emit_observation(
                     OBS_VALIDATION_FAILED,
@@ -1058,7 +865,7 @@ class Runner:
                 # `passed: true`인 파일이 fix-loop로 되돌려지는 이유는 결과 목록에
                 # 안 보인다. 말하지 않으면 같은 명령을 세 번 재시도하다 round cap에
                 # 걸려 run이 영구 정지한다.
-                recorded = _recorded_gate_phase(text)
+                recorded = recorded_gate_phase(text)
                 if recorded and recorded != GATE_PHASE_ALL:
                     print(
                         f"  [route] gate-results.json ran --phase {recorded}; "
@@ -1066,7 +873,7 @@ class Runner:
                         f"agent-flow gates --phase {GATE_PHASE_ALL} --run-dir <run-dir>"
                     )
         else:
-            key = _route_key(text)
+            key = route_key(text)
         if key == "approve" and phase.routes.get("request-changes") and has_failure_markers(text):
             print("  [route] approve overridden to request-changes: Completion Gate has failure markers")
             key = "request-changes"
@@ -1435,8 +1242,8 @@ class Runner:
         collectors: set[str] = set()
         for candidate in self.phases:
             routes = getattr(candidate, "routes", None) or {}
-            for route_key, route_target in routes.items():
-                if route_key in _FIX_COLLECTOR_ROUTE_KEYS and isinstance(route_target, str):
+            for key, route_target in routes.items():
+                if key in _FIX_COLLECTOR_ROUTE_KEYS and isinstance(route_target, str):
                     collectors.add(route_target)
         return collectors
 
@@ -1459,7 +1266,7 @@ class Runner:
         if blocked:
             meta["phase_blocked_reason"] = "route_blocked"
         else:
-            meta.pop(_HOST_PHASE_LEADER_BASELINE, None)
+            meta.pop(BASELINE_KEY, None)
             meta.pop("phase_blocked_reason", None)
         self._stamp_phase(meta, phase_index, entering=not blocked)
 
@@ -1517,7 +1324,7 @@ class Runner:
             print(f"  [skip] {phase.id} status=skipped (not a git repository)")
             return True
         if self.architecture == "ddd" and phase.id == "architecture-review":
-            missing = _missing_ddd_design_terms(self.run_dir)
+            missing = missing_ddd_design_terms(self.run_dir)
             if missing:
                 write_run_subpath_text(
                     self.run_dir,
@@ -1541,10 +1348,45 @@ class Runner:
         assert self.run_dir is not None
         artifact = self._existing_artifact_path(phase)
         text = artifact.read_text(encoding="utf-8") if artifact.exists() else ""
-        if _route_key(text) != "blocked":
+        if route_key(text) != "blocked":
             return False
         print(f"  [recheck] {phase.id} status=blocked")
         return True
+
+    def _required_skill_names(self, phase: Phase, meta: dict[str, Any]) -> tuple[str, ...]:
+        """게이트가 요구하게 될 required skill 이름. 강제 지점과 같은 입력을 쓴다."""
+        resolution = phase_skill_resolution(
+            self.config_root,
+            phase.id,
+            phase_skills=phase.skills,
+            profile=self.profile,
+            changed_files=changed_files(self.project_root),
+            task_text=str(meta.get("task", "")),
+            concerns=run_concerns(meta),
+        )
+        return tuple(skill.name for skill in resolution.required)
+
+    def _grown_skill_names(self, phase: Phase) -> tuple[str, ...]:
+        """프롬프트가 보여 준 뒤로 새로 required가 된 이름. 기록도 여기서 갱신한다.
+
+        읽기와 갱신을 갈라 두면 자람을 매 라운드 다시 보고하며 같은 자리에 영원히
+        막힌다. 한 번 알린 이름은 기록에 들어가고, 다음 라운드의 요구는 정당해진다.
+        """
+        assert self.run_dir is not None
+        if not skill_markers_enforced(phase.id):
+            return ()
+        # marker 검사와 같은 픽스처 탈출구를 쓴다. stub이 쓴 artifact에서 자람으로
+        # 막으면, marker를 일부러 건너뛰는 state machine 픽스처가 아무도 요구하지
+        # 않은 skill 때문에 멈춘다.
+        artifact = self._existing_artifact_path(phase)
+        if artifact.exists() and self._is_stub_authored(
+            artifact.read_text(encoding="utf-8")
+        ):
+            return ()
+        meta = read_meta(self.run_dir)
+        added = merge_scope(meta, phase.id, self._required_skill_names(phase, meta))
+        write_meta(self.run_dir, meta)
+        return added
 
     def _missing_required_markers(self, phase: Phase) -> list[str]:
         assert self.run_dir is not None
@@ -1559,7 +1401,7 @@ class Runner:
             return []
         missing = list(_missing_markers(text, phase.required_markers))
         missing.extend(
-            _missing_delivery_evidence(
+            missing_delivery_evidence(
                 self.project_root,
                 phase.id,
                 text,
@@ -1589,6 +1431,7 @@ class Runner:
                 profile=self.profile,
                 changed_files=changed_files(self.project_root),
                 task_text=str(meta.get("task", "")),
+                concerns=run_concerns(meta),
                 since=_meta_timestamp(meta.get("phase_entered_at")),
             )
         )
@@ -1828,588 +1671,6 @@ def _meta_timestamp(value: object) -> float | None:
     return parsed.timestamp()
 
 
-def _route_key(text: str) -> str:
-    lowered = text.lower()
-    # gates 결과 JSON은 nested result가 아니라 top-level passed만 route source로 본다.
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        payload = None
-    if isinstance(payload, dict) and isinstance(payload.get("passed"), bool):
-        results = payload.get("results")
-        if payload["passed"] is True:
-            if _gate_results_prove_pass(results):
-                return "green"
-            return "default"
-        return "request-changes"
-    checks = (
-        "blocked",
-        "request-changes",
-        "ci-failed",
-        "ci_failed",
-        "comments",
-        "has_comments",
-        "skipped",
-        "pending",
-        "green",
-        "approve",
-        "merged",
-        "closed",
-        "error",
-    )
-    for line in lowered.splitlines():
-        match = re.match(r"^(?:verdict|status):\s*([a-z_-]+)\s*$", line)
-        if not match:
-            continue
-        key = match.group(1)
-        if key in checks:
-            return key
-    return "default"
-
-
-# route key가 아니라 "판정 불가" 표식이다. workflow가 이 key로 갈 target을
-# 선언할 수 없게 이름을 route 어휘 밖에 둔다.
-GATE_MALFORMED = "malformed-results"
-
-
-def _gate_parse_error(text: str) -> str:
-    """왜 못 읽었는지 한 줄로. 사유가 없으면 사용자는 무엇을 고칠지 모른다."""
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        return f"invalid JSON at line {exc.lineno} column {exc.colno}"
-    if not isinstance(payload, dict):
-        return f"top-level value is {type(payload).__name__}, expected an object"
-    return "`passed` is missing or not a boolean"
-
-
-def _gates_route_key(text: str, *, nonce: str = "") -> str:
-    # 읽을 수 없는 gate 결과는 "게이트가 실패했다"가 아니라 "판정 자체가 없다"다.
-    # 예전처럼 `default`로 접으면 fix-loop가 근거 없이 코드를 고치기 시작하고,
-    # 세 라운드를 태운 뒤 상한에 걸려 run이 영구 정지한다.
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        return GATE_MALFORMED
-    if not isinstance(payload, dict) or not isinstance(payload.get("passed"), bool):
-        return GATE_MALFORMED
-    # timeout은 "실패"가 아니라 "판정 불가"다. optional 게이트가 상한을 다 쓰고
-    # 죽어도 passed 집계는 required만 보므로 green이 된다. 그 구멍을 여기서 닫는다.
-    if _gate_results_timed_out(payload.get("results")):
-        return "error"
-    # 통과 라우팅에만 출처를 요구한다. 실패/차단은 손으로 써도 앞으로 못 가므로
-    # 막을 이유가 없고, 막으면 복구 경로만 좁아진다.
-    proven = (
-        _gate_results_prove_pass(payload.get("results"))
-        and _gate_nonce_matches(payload, nonce)
-        and _gate_phase_covers_verification(payload)
-    )
-    status = payload.get("status")
-    if isinstance(status, str):
-        normalized_status = status.strip().lower().replace("_", "-")
-        if payload["passed"] is True and normalized_status in {"green", "approve"}:
-            return normalized_status if proven else "default"
-        if payload["passed"] is False and normalized_status in {"request-changes", "blocked", "error", "pending"}:
-            return normalized_status
-    if payload["passed"] is True:
-        return "green" if proven else "default"
-    return "request-changes"
-
-
-def _gate_results_timed_out(results: object) -> bool:
-    if not isinstance(results, list):
-        return False
-    return any(
-        isinstance(result, dict) and result.get("timed_out") is True
-        for result in results
-    )
-
-
-def _gate_nonce_matches(payload: dict[str, object], nonce: str) -> bool:
-    """이 run의 `agent-flow gates`가 쓴 파일인가.
-
-    run에 nonce가 없으면(구버전 run, CLI 직접 사용) 대조할 기준이 없으므로
-    요구하지 않는다. "없으면 위반"이 아니라 "기록과 다르면 위반"이다.
-    """
-    if not nonce:
-        return True
-    produced_by = payload.get("produced_by")
-    if not isinstance(produced_by, dict):
-        return False
-    return produced_by.get("nonce") == nonce
-
-
-def _gate_phase_covers_verification(payload: dict[str, object]) -> bool:
-    """QA gate가 build/test까지 돌렸는가.
-
-    `agent-flow gates`의 기본 phase는 `pre-commit`이고 build/test는 `pre-push`다.
-    workflow의 gates phase는 커밋 직전 마지막 검증이므로 둘 다 돌아야 한다.
-    `--phase pre-commit`으로 돈 결과는 "전부 통과"처럼 보이지만 실제로는
-    build/test가 목록에 오르지도 않은 실행이다.
-
-    `all`만 받는다. `pre-push` 단독은 lint/type/architecture-lint를 빼먹고, 부분
-    phase를 조합으로 인정하기 시작하면 "무엇이 돌았는가"를 결과 목록에서 다시
-    역산해야 한다. 번들 프로필에 post-merge gate는 아직 없다 — 생기면 `all`이
-    그것까지 커밋 전에 돌리므로 그때 이 규칙을 다시 봐야 한다.
-
-    기록이 없으면(구버전 파일, CLI 직접 사용) 대조할 기준이 없으므로 요구하지
-    않는다. nonce와 같은 규칙이다 — "없으면 위반"이 아니라 "기록과 다르면 위반".
-    """
-    produced_by = payload.get("produced_by")
-    if not isinstance(produced_by, dict):
-        return True
-    recorded = produced_by.get("gate_phase")
-    if not isinstance(recorded, str) or not recorded:
-        return True
-    return recorded == GATE_PHASE_ALL
-
-
-def _recorded_gate_phase(text: str) -> str:
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        return ""
-    if not isinstance(payload, dict):
-        return ""
-    produced_by = payload.get("produced_by")
-    if not isinstance(produced_by, dict):
-        return ""
-    recorded = produced_by.get("gate_phase")
-    return recorded if isinstance(recorded, str) else ""
-
-
-def _multi_review_route_key(text: str, phase_id: str = "") -> str:
-    verdicts = _independent_reviewer_verdicts(text)
-    overall = overall_review_route_key(text)
-    if not verdicts:
-        return "missing-reviewer"
-    if overall == "invalid-verdict":
-        return "invalid-verdict"
-    if "request-changes" in verdicts.values() or overall == "request-changes":
-        return "request-changes"
-    if len(verdicts) < 2:
-        return "insufficient-reviewers"
-    if overall == "default":
-        return "default"
-    has_subagent = _has_subagent_reviewer(text)
-    if overall == "approve" and has_subagent and len(verdicts) >= 2:
-        return "approve"
-    return "invalid-verdict"
-
-
-def _gate_results_prove_pass(results: object) -> bool:
-    if not isinstance(results, list) or not results:
-        return False
-    required_seen = False
-    for result in results:
-        if not isinstance(result, dict):
-            return False
-        if result.get("required") is False:
-            continue
-        required_seen = True
-        command = result.get("command")
-        if not isinstance(command, str) or not command.strip():
-            return False
-        if not _gate_result_has_evidence(result):
-            return False
-        if not (result.get("passed") is True or result.get("status") in {"pass", "ok"}):
-            return False
-    return required_seen
-
-
-def _gate_result_has_evidence(result: dict[str, object]) -> bool:
-    for key in ("output", "stdout", "stderr", "artifact", "path"):
-        value = result.get(key)
-        if isinstance(value, str) and value.strip():
-            return True
-    for key in ("exit_code", "exitCode"):
-        value = result.get(key)
-        if isinstance(value, int) and not isinstance(value, bool) and value == 0:
-            return True
-    return False
-
-
-
-
-def _independent_reviewer_verdict_count(text: str) -> int:
-    return len(_independent_reviewer_verdicts(text))
-
-
-def _independent_reviewer_verdicts(text: str) -> dict[str, str]:
-    reviewers: dict[str, dict[str, object]] = {}
-    current_reviewer: str | None = None
-    for line in unfenced_markdown_text(text).splitlines():
-        stripped = line.strip()
-        lowered = stripped.lower()
-        if not stripped:
-            continue
-        if stripped.startswith("#"):
-            if re.match(r"^##\s*(?:overall|final)(?:\s+verdict)?\s*$", lowered):
-                current_reviewer = None
-                continue
-            heading = re.match(r"^##\s*reviewer\s+(.+)$", lowered)
-            if heading:
-                key = _normalized_reviewer_heading_id(heading.group(1))
-                current_reviewer = key or None
-            continue
-        source_match = re.match(
-            r"^(reviewer[-_ ]?[a-z0-9-]+)\s+reviewer[-_ ]?source:\s*(.+)$",
-            lowered,
-        )
-        if source_match:
-            key = _normalized_reviewer_id(source_match.group(1))
-            if key:
-                state = reviewers.setdefault(key, {"has_source": False, "subagent": False, "verdict": None})
-                state["has_source"] = True
-                if _is_subagent_source(source_match.group(2)):
-                    state["subagent"] = True
-            continue
-        if current_reviewer is not None and _line_marks_subagent_source(lowered):
-            state = reviewers.setdefault(current_reviewer, {"has_source": False, "subagent": False, "verdict": None})
-            state["has_source"] = True
-            state["subagent"] = True
-            continue
-        if current_reviewer is not None and _line_marks_non_subagent_source(lowered):
-            reviewers.setdefault(current_reviewer, {"has_source": True, "subagent": False, "verdict": None})
-            continue
-        if "verdict:" not in lowered:
-            continue
-        verdict_match = re.match(r"^(.*?)verdict:\s*(approve|request-changes)\s*$", stripped)
-        if not verdict_match:
-            continue
-        prefix = verdict_match.group(1).strip(" -").lower()
-        verdict = verdict_match.group(2)
-        if prefix in {"overall", "overall verdict", "final", "final verdict"}:
-            continue
-        if prefix:
-            key = _normalized_reviewer_id(prefix)
-            if key:
-                reviewers.setdefault(key, {"has_source": False, "subagent": False, "verdict": None})["verdict"] = verdict
-        elif current_reviewer is not None:
-            reviewers.setdefault(current_reviewer, {"has_source": False, "subagent": False, "verdict": None})["verdict"] = verdict
-    return {
-        reviewer: str(state["verdict"])
-        for reviewer, state in reviewers.items()
-        if state["verdict"] and state["subagent"]
-    }
-
-
-def _line_marks_subagent_source(value: str) -> bool:
-    source_match = re.search(r"reviewer[-_ ]?source\s*:\s*(.+)$", value)
-    return bool(source_match and _is_subagent_source(source_match.group(1)))
-
-
-def _line_marks_non_subagent_source(value: str) -> bool:
-    source_match = re.search(r"reviewer[-_ ]?source\s*:\s*(.+)$", value)
-    return bool(source_match and not _is_subagent_source(source_match.group(1)))
-
-
-def _has_subagent_reviewer(text: str) -> bool:
-    return any(
-        _line_marks_subagent_source(line.strip().lower())
-        for line in unfenced_markdown_text(text).splitlines()
-    )
-
-
-def _is_subagent_source(value: str) -> bool:
-    normalized = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
-    return normalized in {
-        "sub agent",
-        "subagent",
-        "host sub agent",
-        "host subagent",
-        "active host sub agent",
-        "active host subagent",
-    }
-
-
-def _reviewer_key(value: str) -> str:
-    normalized = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
-    return normalized or value
-
-
-def _normalized_reviewer_id(value: str) -> str:
-    # 섹션 라벨과 종합 verdict는 독립 reviewer id로 세지 않는다.
-    key = _reviewer_key(value)
-    key = re.sub(r"^reviewer\b", "", key).strip()
-    generic_labels = {
-        "verdict",
-        "verdicts",
-        "overall",
-        "final",
-        "summary",
-        "review",
-        "reviews",
-        "feedback",
-        "report",
-        "reports",
-        "assessment",
-        "assessments",
-        "analysis",
-        "analyses",
-        "decision",
-        "decisions",
-        "conclusion",
-        "conclusions",
-        "status",
-        "statuses",
-        "approval",
-        "approvals",
-        "note",
-        "notes",
-        "finding",
-        "findings",
-        "comment",
-        "comments",
-        "output",
-        "outputs",
-        "result",
-        "results",
-        "scope",
-        "check",
-        "checks",
-        "checklist",
-        "details",
-        "detail",
-    }
-    if not key or any(part in generic_labels for part in key.split()):
-        return ""
-    return key
-
-
-def _normalized_reviewer_heading_id(value: str) -> str:
-    # Reviewer heading은 1-2 단어 id(claude, agent 1 등)만 독립 id로 인정한다.
-    # 긴 서술형 heading은 reviewer가 아니라 prose일 가능성이 높아 제외한다.
-    key = _normalized_reviewer_id(value)
-    if re.fullmatch(r"[a-z0-9]+(?: [a-z0-9]+)?", key):
-        return key
-    return ""
-
-
-def _missing_delivery_evidence(
-    project_root: Path,
-    phase_id: str,
-    text: str,
-    *,
-    profile: dict[str, Any] | None = None,
-) -> list[str]:
-    if phase_id == "commit":
-        return _missing_commit_evidence(project_root, text)
-    if phase_id == "push-pr":
-        target_branch = _profile_pr_target(profile)
-        if target_branch is None:
-            return ["delivery evidence: profile pr.target_branch is unavailable"]
-        return _missing_push_pr_evidence(
-            project_root,
-            text,
-            target_branch=target_branch,
-        )
-    return []
-
-
-def _delivery_fields(
-    text: str, names: tuple[str, ...]
-) -> tuple[dict[str, str], list[str]]:
-    body = unfenced_markdown_text(text)
-    fields: dict[str, str] = {}
-    errors: list[str] = []
-    for name in names:
-        values = [
-            match.group(1).strip()
-            for match in re.finditer(
-                rf"^[ \t]*{re.escape(name)}[ \t]*:[ \t]*(.*?)[ \t]*$",
-                body,
-                re.MULTILINE,
-            )
-            if match.group(1).strip()
-        ]
-        if len(values) != 1:
-            errors.append(
-                f"delivery evidence: {name}: requires exactly one non-empty value"
-            )
-            continue
-        fields[name] = values[0]
-    return fields, errors
-
-
-def _missing_commit_evidence(project_root: Path, text: str) -> list[str]:
-    fields, errors = _delivery_fields(text, ("commit-oid", "commit-subject"))
-    if errors:
-        return errors
-
-    head = git_safe(
-        "rev-parse", "--verify", "HEAD^{commit}",
-        cwd=project_root,
-        optional_locks=False,
-    )
-    if not head.ok or not head.stdout.strip():
-        return ["delivery evidence: cannot prove current git HEAD"]
-    head_oid = head.stdout.strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{40,64}", fields["commit-oid"].lower()):
-        errors.append("delivery evidence: commit-oid must be a full git object id")
-    elif fields["commit-oid"].lower() != head_oid:
-        errors.append("delivery evidence: commit-oid does not match current HEAD")
-
-    branch = git_safe(
-        "symbolic-ref", "--quiet", "--short", "HEAD",
-        cwd=project_root,
-        optional_locks=False,
-    )
-    if not branch.ok or not branch.stdout.strip():
-        errors.append("delivery evidence: detached or unknown current branch")
-    elif branch.stdout.strip() in PROTECTED_BRANCHES:
-        errors.append(
-            f"delivery evidence: protected branch {branch.stdout.strip()} cannot be committed"
-        )
-
-    status = git_safe(
-        "status", "--porcelain=v1", "--untracked-files=normal",
-        cwd=project_root,
-        optional_locks=False,
-    )
-    if not status.ok:
-        errors.append("delivery evidence: cannot prove a clean git worktree")
-    elif status.stdout.strip():
-        errors.append("delivery evidence: git worktree is not clean")
-
-    subject = git_safe(
-        "show", "-s", "--format=%s", head_oid,
-        cwd=project_root,
-        optional_locks=False,
-    )
-    if not subject.ok:
-        errors.append("delivery evidence: cannot read the committed subject")
-    else:
-        actual_subject = subject.stdout.rstrip("\r\n")
-        if fields["commit-subject"] != actual_subject:
-            errors.append(
-                "delivery evidence: commit-subject does not match current HEAD"
-            )
-        if not CONVENTIONAL_COMMIT_RE.fullmatch(actual_subject):
-            errors.append(
-                "delivery evidence: current HEAD subject is not a Conventional Commit"
-            )
-    return errors
-
-
-def _profile_pr_target(profile: dict[str, Any] | None) -> str | None:
-    pr = profile.get("pr") if isinstance(profile, dict) else None
-    target = pr.get("target_branch") if isinstance(pr, dict) else None
-    return target.strip() if isinstance(target, str) and target.strip() else None
-
-
-def _missing_push_pr_evidence(
-    project_root: Path,
-    text: str,
-    *,
-    target_branch: str,
-) -> list[str]:
-    fields, errors = _delivery_fields(
-        text,
-        ("remote", "branch", "remote-oid", "pr-url", "pr-base"),
-    )
-    if errors:
-        return errors
-    if fields["pr-base"] != target_branch:
-        errors.append(
-            f"delivery evidence: pr-base must match profile target {target_branch}"
-        )
-    if not re.fullmatch(r"https://[^\s]+", fields["pr-url"]):
-        errors.append("delivery evidence: pr-url must be an HTTPS URL")
-
-    head = git_safe(
-        "rev-parse", "--verify", "HEAD^{commit}",
-        cwd=project_root,
-        optional_locks=False,
-    )
-    branch = git_safe(
-        "symbolic-ref", "--quiet", "--short", "HEAD",
-        cwd=project_root,
-        optional_locks=False,
-    )
-    if not head.ok or not head.stdout.strip():
-        errors.append("delivery evidence: cannot prove current git HEAD")
-    if not branch.ok or not branch.stdout.strip():
-        errors.append("delivery evidence: detached or unknown current branch")
-    if errors:
-        return errors
-
-    head_oid = head.stdout.strip().lower()
-    branch_name = branch.stdout.strip()
-    if fields["branch"] != branch_name:
-        errors.append("delivery evidence: branch does not match the current branch")
-    if fields["remote-oid"].lower() != head_oid:
-        errors.append("delivery evidence: remote-oid does not match local HEAD")
-
-    remotes = git_safe("remote", cwd=project_root, optional_locks=False)
-    if not remotes.ok or fields["remote"] not in remotes.stdout.splitlines():
-        errors.append("delivery evidence: named git remote is unavailable")
-    else:
-        remote_ref = f"refs/heads/{branch_name}"
-        remote = git_safe(
-            "ls-remote", "--heads", fields["remote"], remote_ref,
-            cwd=project_root,
-            timeout_s=30,
-            optional_locks=False,
-        )
-        rows = [line.split() for line in remote.stdout.splitlines()] if remote.ok else []
-        matching = [
-            row[0].lower()
-            for row in rows
-            if len(row) == 2 and row[1] == remote_ref
-        ]
-        if len(matching) != 1:
-            errors.append("delivery evidence: cannot prove the pushed remote branch OID")
-        elif matching[0] != head_oid or matching[0] != fields["remote-oid"].lower():
-            errors.append(
-                "delivery evidence: local HEAD, remote-oid, and pushed branch OID differ"
-            )
-
-    pr = run_safe_command(
-        (
-            "gh", "pr", "view", fields["pr-url"], "--json",
-            "url,baseRefName,headRefName,headRefOid",
-        ),
-        cwd=project_root,
-        env=sanitized_worker_env(),
-        timeout_s=30,
-    )
-    if not pr.ok:
-        errors.append("delivery evidence: gh cannot prove the pull request")
-        return errors
-    try:
-        payload = json.loads(pr.stdout)
-    except json.JSONDecodeError:
-        errors.append("delivery evidence: gh returned invalid pull request evidence")
-        return errors
-    if not isinstance(payload, dict):
-        return [*errors, "delivery evidence: gh returned invalid pull request evidence"]
-
-    actual_url = payload.get("url")
-    if (
-        not isinstance(actual_url, str)
-        or not actual_url.startswith("https://")
-        or actual_url.rstrip("/") != fields["pr-url"].rstrip("/")
-    ):
-        errors.append("delivery evidence: pr-url does not match the live pull request")
-    if payload.get("baseRefName") != target_branch:
-        errors.append(
-            f"delivery evidence: live pull request base is not {target_branch}"
-        )
-    if payload.get("headRefName") != branch_name:
-        errors.append("delivery evidence: live pull request head branch differs")
-    gh_head_oid = payload.get("headRefOid")
-    if (
-        not isinstance(gh_head_oid, str)
-        or gh_head_oid.lower() != head_oid
-        or gh_head_oid.lower() != fields["remote-oid"].lower()
-    ):
-        errors.append(
-            "delivery evidence: local HEAD, remote-oid, and PR headRefOid differ"
-        )
-    return errors
-
-
 def _missing_markers(text: str, markers: tuple[str, ...]) -> list[str]:
     return missing_markers(text, markers)
 
@@ -2428,299 +1689,6 @@ def _is_git_repo(project_root: Path) -> bool:
         optional_locks=False,
     )
     return result.ok and result.stdout.strip() == "true"
-
-
-def _missing_ddd_design_terms(run_dir: Path) -> list[str]:
-    candidates = [run_dir / "ddd-design.md", run_dir / "design.md"]
-    text = ""
-    for candidate in candidates:
-        if candidate.exists():
-            text = candidate.read_text(encoding="utf-8")
-            break
-    if not text:
-        return ["ddd-design.md or design.md"]
-
-    section_titles = _design_section_titles(text)
-    if any(_section_title_matches(section_titles, alias) for alias in ("service-layer refactor", "service layer refactor")):
-        return ["ddd mode cannot be service-layer refactor"]
-    return [
-        label
-        for label, aliases in DDD_REQUIRED_DESIGN_SECTIONS
-        if not any(_section_title_matches(section_titles, alias) for alias in aliases)
-    ]
-
-
-def _design_section_titles(text: str) -> list[str]:
-    titles: list[str] = []
-    in_fence = False
-    for line in text.splitlines():
-        if line.startswith("```") or line.startswith("~~~"):
-            in_fence = not in_fence
-            continue
-        if in_fence or line.startswith("    ") or line.startswith("\t"):
-            continue
-        stripped = line.strip()
-        # DDD 판정은 Markdown heading과 list label만 본다. 본문 문장은 relay를 막지 않는다.
-        heading = re.match(r"^#{1,6}\s+(.+)$", stripped)
-        if heading:
-            titles.append(_normalize_design_heading(heading.group(1)))
-            continue
-        label = re.match(r"^(?:[-*+]\s+|\d+[.)]\s+)(?:\*\*)?([^:]{1,80}?)(?:\*\*)?\s*:", stripped)
-        if label:
-            titles.append(_normalize_design_heading(label.group(1)))
-    return titles
-
-
-def _normalize_design_heading(value: str) -> str:
-    lowered = value.lower()
-    cleaned = re.sub(r"[`*_#]+", " ", lowered)
-    cleaned = re.sub(r"^\s*\d+(?:[.)]|\s+-)\s*", "", cleaned)
-    return re.sub(r"\s+", " ", cleaned).strip(" :-")
-
-
-def _section_title_matches(section_titles: list[str], alias: str) -> bool:
-    normalized_alias = _normalize_design_heading(alias)
-    return any(title == normalized_alias or title.startswith(f"{normalized_alias} ") for title in section_titles)
-
-
-def _load_profile(kit_root: Path, project_root: Path) -> tuple[str, dict[str, Any]]:
-    """Return (profile_id, profile_dict).
-
-    Resolution order:
-      1. `AGENT_FLOW_PROFILE` env override (always wins; user opted in)
-      2. `.agent-flow/kit.json:profiles` written by filtered installer
-      3. `.agent-flow/kit.json:profile` written by the installer
-      4. fall back to "generic"
-
-    A typo in `kit.json:profile(s)` would otherwise run the entire workflow
-    against the wrong stack (wrong branching, gates, PR target) — a
-    correctness bug, not a degraded mode. So we treat that case as a hard
-    error unless `AGENT_FLOW_FALLBACK_GENERIC=1` opts into silent fallback.
-    Env-var override case stays lenient (the user explicitly set it; let
-    them shoot their foot).
-    """
-    import os
-    forced = os.environ.get("AGENT_FLOW_PROFILE")
-    explicit_fallback = os.environ.get("AGENT_FLOW_FALLBACK_GENERIC") == "1"
-    if forced:
-        return _load_single_profile(
-            kit_root,
-            forced,
-            strict_missing=False,
-            explicit_fallback=explicit_fallback,
-            source="AGENT_FLOW_PROFILE",
-            project_root=project_root,
-        )
-
-    from_kit_profiles = _read_kit_profiles(project_root)
-    if from_kit_profiles:
-        return _load_profile_union(
-            kit_root,
-            from_kit_profiles,
-            explicit_fallback=explicit_fallback,
-            project_root=project_root,
-        )
-
-    from_kit = _read_kit_profile(project_root)
-    profile_id = from_kit or "generic"
-    return _load_single_profile(
-        kit_root,
-        profile_id,
-        strict_missing=bool(from_kit),
-        explicit_fallback=explicit_fallback,
-        source=".agent-flow/kit.json:profile" if from_kit else "default",
-        project_root=project_root,
-    )
-
-
-def _packaged_profile_path(profile_id: str) -> Path | None:
-    """설치된 `agent_flow` 패키지가 싣고 있는 profile 정의."""
-    package_dir = package_root()
-    if package_dir is None:
-        return None
-    path = package_dir / "profiles" / f"{profile_id}.yaml"
-    _ensure_child_path(package_dir / "profiles", path, "profile")
-    return path if path.is_file() else None
-
-
-def _load_single_profile(
-    kit_root: Path,
-    profile_id: str,
-    *,
-    strict_missing: bool,
-    explicit_fallback: bool,
-    source: str,
-    project_root: Path | None = None,
-) -> tuple[str, dict[str, Any]]:
-    _validate_yaml_name(profile_id, "profile")
-
-    profile_path = kit_root / "profiles" / f"{profile_id}.yaml"
-    _ensure_child_path(kit_root / "profiles", profile_path, "profile")
-    if project_root is not None:
-        installed_profile = project_profile_path(project_root, profile_id)
-        if installed_profile.is_file():
-            profile_path = installed_profile
-    if not profile_path.exists():
-        # 워크플로 정의와 같은 규율이다 — 정본은 패키지 자원이고 kit root 사본은
-        # 설치본이 덮어쓰는 자리다. 사본이 없다고 "없는 profile"로 판정하면
-        # 루트 사본을 지울 수 없다.
-        packaged = _packaged_profile_path(profile_id)
-        if packaged is not None:
-            profile_path = packaged
-    if not profile_path.exists():
-        # Hard error when kit.json says a profile that doesn't exist (typo).
-        # Lenient fallback only when explicitly requested via env var or when
-        # the resolution path was already "generic" (true unknown setup).
-        if strict_missing and not explicit_fallback:
-            raise FileNotFoundError(
-                f"profile {profile_id!r} not found at {profile_path}. "
-                f"Likely a typo in `{source}`. "
-                f"Set `AGENT_FLOW_FALLBACK_GENERIC=1` to fall back silently, "
-                f"or fix the kit.json value."
-            )
-        print(
-            f"⚠️  profile {profile_id!r} not found at {profile_path}; "
-            f"falling back to `generic`.",
-            file=__import__("sys").stderr,
-        )
-        profile_id = "generic"
-        profile_path = kit_root / "profiles" / "generic.yaml"
-        if project_root is not None:
-            installed_generic = project_profile_path(project_root, profile_id)
-            if installed_generic.is_file():
-                profile_path = installed_generic
-        if not profile_path.exists():
-            packaged_generic = _packaged_profile_path("generic")
-            if packaged_generic is not None:
-                profile_path = packaged_generic
-
-    raw = yaml.safe_load(profile_path.read_text(encoding="utf-8")) or {}
-    if not isinstance(raw, dict):
-        raise ValueError(f"profile {profile_path}: top-level must be a mapping")
-    if raw.get("id") != profile_id:
-        raise ValueError(f"profile id mismatch: {profile_id}")
-    if project_root is not None:
-        raw = apply_project_profile_override(raw, profile_id=profile_id, root=project_root)
-    return profile_id, raw
-
-
-def _load_profile_union(
-    kit_root: Path,
-    profile_ids: list[str],
-    *,
-    explicit_fallback: bool,
-    project_root: Path | None = None,
-) -> tuple[str, dict[str, Any]]:
-    loaded: list[tuple[str, dict[str, Any]]] = []
-    for profile_id in profile_ids:
-        loaded.append(
-            _load_single_profile(
-                kit_root,
-                profile_id,
-                strict_missing=True,
-                explicit_fallback=explicit_fallback,
-                source=".agent-flow/kit.json:profiles",
-                project_root=project_root,
-            )
-        )
-    deduped = _dedupe_loaded_profiles(loaded)
-    if not deduped:
-        return _load_single_profile(
-            kit_root,
-            "generic",
-            strict_missing=False,
-            explicit_fallback=explicit_fallback,
-            source="default",
-            project_root=project_root,
-        )
-    if len(deduped) == 1:
-        return deduped[0]
-    active_ids = [profile_id for profile_id, _ in deduped]
-    return ",".join(active_ids), {
-        "id": "multi-profile",
-        "active_profiles": active_ids,
-        "profiles": [profile for _, profile in deduped],
-        "review_angles": _merge_profile_list_field(deduped, "review_angles"),
-        "gates": _merge_profile_list_field(deduped, "gates"),
-        "skills": {
-            profile_id: profile.get("skills", {})
-            for profile_id, profile in deduped
-            if isinstance(profile.get("skills"), dict)
-        },
-        "architecture": {
-            profile_id: profile.get("architecture")
-            for profile_id, profile in deduped
-            if isinstance(profile.get("architecture"), dict)
-        },
-    }
-
-
-def _dedupe_loaded_profiles(profiles: list[tuple[str, dict[str, Any]]]) -> list[tuple[str, dict[str, Any]]]:
-    deduped: list[tuple[str, dict[str, Any]]] = []
-    seen: set[str] = set()
-    for profile_id, profile in profiles:
-        if profile_id in seen:
-            continue
-        seen.add(profile_id)
-        deduped.append((profile_id, profile))
-    return deduped
-
-
-def _merge_profile_list_field(profiles: list[tuple[str, dict[str, Any]]], field: str) -> list[Any]:
-    merged: list[Any] = []
-    seen: set[str] = set()
-    for _, profile in profiles:
-        values = profile.get(field)
-        if not isinstance(values, list):
-            continue
-        for value in values:
-            key = json.dumps(value, sort_keys=True, ensure_ascii=False)
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(value)
-    return merged
-
-
-def _read_kit_profile(project_root: Path) -> str | None:
-    data = _read_kit_json(project_root)
-    p = data.get("profile")
-    return p if isinstance(p, str) else None
-
-
-def _read_kit_profiles(project_root: Path) -> list[str]:
-    data = _read_kit_json(project_root)
-    profiles = data.get("profiles")
-    if not isinstance(profiles, list):
-        return []
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for profile in profiles:
-        if isinstance(profile, str) and profile and profile not in seen:
-            deduped.append(profile)
-            seen.add(profile)
-    return deduped
-
-
-def _read_kit_json(project_root: Path) -> dict[str, Any]:
-    kit_json = project_root / ".agent-flow" / "kit.json"
-    if not kit_json.exists():
-        return {}
-    try:
-        data = json.loads(kit_json.read_text(encoding="utf-8"))
-    # `UnicodeDecodeError`는 `OSError`가 아니라 `ValueError`다. 좁게 잡으면 손상된
-    # kit.json 하나가 여기서 그대로 튀어나온다.
-    except (ValueError, OSError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _validate_yaml_name(name: str, kind: str) -> None:
-    validate_safe_name(name, kind)
-
-
-def _ensure_child_path(root: Path, path: Path, kind: str) -> None:
-    ensure_child_path(root, path, kind)
 
 
 def _search_lore(project_root: Path, task: str, top_k: int = 5) -> list[Lore]:

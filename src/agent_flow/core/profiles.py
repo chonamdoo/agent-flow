@@ -131,10 +131,10 @@ def detect_profile(root: Path) -> str:
 def active_profile_ids(root: Path, requested: str = "auto") -> list[str]:
     if requested != "auto":
         return _dedupe_profiles(_split_profiles(requested))
-    kit_profiles = _read_kit_profiles(root)
+    kit_profiles = kit_declared_profiles(root)
     if kit_profiles:
         return kit_profiles
-    kit_profile = _read_kit_profile(root)
+    kit_profile = kit_declared_profile(root)
     if kit_profile:
         return [kit_profile]
     return [detect_profile(root)]
@@ -225,7 +225,7 @@ def apply_project_profile_override(
 
     branch 계약과 함께 gates/architecture도 받는다. 이 두 키를 소비하는 경로를 전수
     확인했고 전부 프로젝트 root를 넘긴다 — `architecture_lint`의 네 호출(root 또는
-    `profile_root or root`), `cli._profile_gate_commands`, `runner._load_single_profile`,
+    `profile_root or root`), `cli._profile_gate_commands`, `profile_resolution.load_single_profile`,
     `local_skills.resolved_profile`, `worktrees`의 lint 준비. 즉 "여기서 받아도 반영되지
     않는 경로가 있다"는 낡은 근거는 더 이상 성립하지 않는다. root 없이 payload를 읽는
     호출자를 새로 넣으면 그쪽에서만 override가 조용히 사라지므로, 새 호출자는 root를
@@ -570,21 +570,23 @@ def _read_profile_text(profile_id: str) -> str:
     return repo_path.read_text(encoding="utf-8")
 
 
-def _read_kit_profiles(root: Path) -> list[str]:
-    data = _read_kit_json(root)
+def kit_declared_profiles(root: Path) -> list[str]:
+    """`kit.json:profiles`. 다중 profile 선언이 정본인 자리다."""
+    data = read_kit_json(root)
     profiles = data.get("profiles")
     if isinstance(profiles, list):
         return _dedupe_profiles(profile for profile in profiles if isinstance(profile, str))
     return []
 
 
-def _read_kit_profile(root: Path) -> str:
-    data = _read_kit_json(root)
+def kit_declared_profile(root: Path) -> str:
+    """`kit.json:profile`. 단일 선언 자리이고 없으면 빈 문자열이다."""
+    data = read_kit_json(root)
     profile = data.get("profile")
     return profile if isinstance(profile, str) and profile else ""
 
 
-def _read_kit_json(root: Path) -> dict[str, Any]:
+def read_kit_json(root: Path) -> dict[str, Any]:
     path = root / ".agent-flow" / "kit.json"
     if not path.is_file():
         return {}

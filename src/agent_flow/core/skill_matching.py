@@ -7,7 +7,14 @@
 런의 task 문구와 변경 경로를 조인해서 한다.
 
 두 축이 모두 필요하다. 어휘가 skill 쪽에만 걸리면 그 skill은 이 저장소와 무관한 것이고,
-런 쪽에만 걸리면 그 일을 도와줄 skill이 안 깔린 것이다. 둘 다 걸릴 때만 required가 된다.
+런 쪽에만 걸리면 그 일을 도와줄 skill이 안 깔린 것이다.
+
+**tier는 그 조인이 정하지 않는다.** 설치된 skill은 `--concern <domain id>`가 그 domain을
+지목하거나 `pins`에 이름이 있을 때만 required가 되고, 그 밖에는 offered다. task 문구로
+required를 만들면 같은 변경이 표기와 머신 구성에 따라 다른 게이트를 받는다(실측: 영어
+문구 required 6개 / 26,241 B, 같은 뜻의 한국어 4개). 그래서 이 모듈만으로는 required가
+나오지 않는다 — 그것이 의도다. 어느 concern이 선언돼 있는지는
+`local_skills.declared_concern_ids`가 답하고, 오타는 run 시작 시 거부된다.
 """
 from __future__ import annotations
 
@@ -96,16 +103,30 @@ def match_external(
     phase_id: str,
     changed_files: Sequence[str] = (),
     task_text: str = "",
+    concerns: Sequence[str] = (),
     env: dict[str, str] | None = None,
 ) -> tuple[ExternalMatch, ...]:
-    """이번 phase/범위에서 활성화되는 설치 skill. 순서까지 결정론이다."""
+    """이번 phase/범위에서 활성화되는 설치 skill. 순서까지 결정론이다.
+
+    tier는 **선언된 concern**과 `pins`만 required로 만든다. 예전에는 task 문구와
+    skill 텍스트에 같은 term이 걸리면 required였는데, 그 경로는 두 가지를 동시에
+    깬다. 첫째, 같은 뜻을 한국어로 적으면 term이 안 걸려 required가 사라진다
+    (실측: 영어 task 6개 / 26,241 B, 한국어 4개). 둘째, 후보 집합이 이 머신에 깔린
+    카탈로그라서 같은 변경이 host마다 다른 required를 만든다.
+
+    그래서 free-form task 문구는 offered까지만 만들고, 무엇을 반드시 읽어야 하는지는
+    호출자가 `--concern <domain-id>`로 열거해서 정한다.
+    """
     config = parse_external(profile, env=env)
     if not config.enabled:
         return ()
     haystack = task_text.lower()
+    declared_concerns = {str(item).strip().lower() for item in concerns if str(item).strip()}
     matches: dict[str, ExternalMatch] = {}
     for domain in config.domains:
-        if not _domain_active(domain, phase_id, changed_files, task_text):
+        if not _domain_active(
+            domain, phase_id, changed_files, task_text, declared_concerns
+        ):
             continue
         for entry in catalog:
             if entry.source not in _EXTERNAL_SOURCES:
@@ -113,10 +134,10 @@ def match_external(
             terms = _entry_terms(entry, domain.terms)
             if not terms:
                 continue
-            # tier는 "어느 term이 양쪽에 다 걸렸나"로 정한다. 첫 매치만 보면 skill 쪽에서
-            # 먼저 걸린 term이 task 쪽에 없다는 이유로 required가 offered로 떨어진다.
+            # term 기록은 남긴다 — 어느 어휘로 걸렸는지가 프롬프트와 진단의 근거다.
             shared = next((term for term in terms if _term_in(term, haystack)), None)
-            tier = REQUIRED if shared or entry.name in config.pins else OFFERED
+            required = domain.id.lower() in declared_concerns or entry.name in config.pins
+            tier = REQUIRED if required else OFFERED
             existing = matches.get(entry.name)
             if existing is not None and (existing.tier == REQUIRED or tier == OFFERED):
                 continue
@@ -124,6 +145,12 @@ def match_external(
                 entry.name, domain.id, tier, shared or terms[0], entry.path, entry.source
             )
     return _truncate(matches.values(), config)
+
+
+def declared_domain_ids(profile: dict | None, *, env: dict[str, str] | None = None) -> set[str]:
+    """이 profile이 선언한 external domain id. `--concern`의 유효 값 목록이다."""
+    config = parse_external(profile, env=env)
+    return {domain.id.lower() for domain in config.domains if domain.id}
 
 
 def routable_names(
@@ -225,12 +252,19 @@ def _domain_active(
     phase_id: str,
     changed_files: Sequence[str],
     task_text: str,
+    concerns: set[str] = frozenset(),  # type: ignore[assignment]
 ) -> bool:
     if not domain.terms:
         # 어휘 없는 domain은 활성화 근거가 없다. profile 표의 선택자 없는 엔트리와 같은 규칙이다.
         return False
     if not any(phase_id in _SECTION_PHASES.get(section, frozenset()) for section in domain.phases):
         return False
+    if domain.id.lower() in concerns:
+        # 선언된 concern은 **단독 활성화 근거**다. tier만 올리고 활성화를 문구에 맡기면
+        # `path_globs` 없는 domain(스타일링·보안처럼 의도가 경로에 없는 것들)은 같은 뜻을
+        # 한국어로 적었을 때 concern이 조용한 no-op이 된다 — 실측으로 영어 문구에서만
+        # `frontend-design`이 붙었다. `profile_routing._selectors_match`와 같은 규칙이다.
+        return True
     return selector_matches(
         task_terms=domain.terms,
         path_globs=domain.path_globs,

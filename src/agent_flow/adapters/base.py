@@ -56,6 +56,8 @@ class Adapter(ABC):
         self._config_root: Path | None = None
         self._task_text: str = ""
         self._changed_files: tuple[str, ...] = ()
+        # 열거된 concern. free-form task 문구와 달리 required tier를 만들 수 있다.
+        self._concerns: tuple[str, ...] = ()
         # 렌더된 envelope를 받아 갈 관측자. runner가 꽂고, 없으면 아무 일도
         # 없다. `execute`를 넓히지 않고 정확한 주입 프롬프트를 남기는 유일한
         # 자리다 — envelope는 여기서만 만들어지고 곧바로 stdout으로 사라진다.
@@ -114,6 +116,7 @@ class Adapter(ABC):
             profile=self._profile_snapshot,
             changed_files=self._changed_files,
             task_text=self._task_text,
+            concerns=self._concerns,
         )
         lore_block = self._render_lore_block(project_root, phase)
         # 이전 phase의 수치는 대화 컨텍스트가 아니라 여기로만 건너온다.

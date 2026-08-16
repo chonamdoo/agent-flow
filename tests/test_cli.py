@@ -282,7 +282,7 @@ class CliTest(unittest.TestCase):
                 "changed-file-skill-resolution: applied",
                 "required-profile-skills: checked",
                 "missing-required-profile-skills:",
-                "clean-architecture: applied",
+                "clean-architecture: applied|n/a",
                 "project-local-skills: checked|n/a",
                 "project-local-skills-used:",
                 "presentation-skill: android|react|react-native|ios|n/a",
@@ -371,11 +371,11 @@ class CliTest(unittest.TestCase):
             self.assertIn("missing-required-profile-skills:", phases[phase_id]["required_markers"])
             self.assertIn("project-local-skills: checked|n/a", phases[phase_id]["required_markers"])
             self.assertIn("project-local-skills-used:", phases[phase_id]["required_markers"])
-        self.assertIn("clean-architecture: applied", phases["green"]["required_markers"])
-        self.assertIn("clean-architecture: applied", phases["fix-loop"]["required_markers"])
+        self.assertIn("clean-architecture: applied|n/a", phases["green"]["required_markers"])
+        self.assertIn("clean-architecture: applied|n/a", phases["fix-loop"]["required_markers"])
         self.assertIn("clean-architecture-review: applied", phases["multi-review"]["required_markers"])
-        self.assertIn("must-avoid-check: pass|fail", phases["multi-review"]["required_markers"])
-        self.assertIn("must-avoid-check: pass|fail", phases["architecture-review"]["required_markers"])
+        self.assertIn("must-avoid-check: pass|fail|n/a", phases["multi-review"]["required_markers"])
+        self.assertIn("must-avoid-check: pass|fail|n/a", phases["architecture-review"]["required_markers"])
         for phase_id in ("multi-review", "architecture-review"):
             self.assertIn("codex-claude-parity-check: pass|fail", phases[phase_id]["required_markers"])
             self.assertIn("hook-parity-check: pass|fail", phases[phase_id]["required_markers"])
@@ -518,21 +518,21 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("listed as a must-fix in `skills/clean-architecture/SKILL.md`", template)
 
     def test_python_runner_route_key_understands_gate_results(self) -> None:
-        from agent_flow.runner import _gates_route_key, _route_key
+        from agent_flow.core.route_verdicts import gates_route_key, route_key
 
         # gates 통과 JSON은 실제 command 결과가 있을 때만 green으로 정규화된다.
-        self.assertEqual(_gates_route_key('{"passed": true}'), "default")
-        self.assertEqual(_gates_route_key('{"passed": true, "results": []}'), "default")
+        self.assertEqual(gates_route_key('{"passed": true}'), "default")
+        self.assertEqual(gates_route_key('{"passed": true, "results": []}'), "default")
         self.assertEqual(
-            _gates_route_key('{"passed": true, "results": [{"command": "npm test", "passed": true, "output": "ok"}]}'),
+            gates_route_key('{"passed": true, "results": [{"command": "npm test", "passed": true, "output": "ok"}]}'),
             "green",
         )
         self.assertEqual(
-            _gates_route_key('{"passed": true, "results": [{"command": "npm test", "passed": true, "exit_code": 0}]}'),
+            gates_route_key('{"passed": true, "results": [{"command": "npm test", "passed": true, "exit_code": 0}]}'),
             "green",
         )
         self.assertEqual(
-            _gates_route_key(
+            gates_route_key(
                 '{"passed": true, "results": ['
                 '{"command": "npm test", "passed": true, "exit_code": 0, "required": true},'
                 '{"command": "npm run lint", "passed": false, "stderr": "missing", "required": false}'
@@ -541,34 +541,34 @@ class CliTest(unittest.TestCase):
             "green",
         )
         self.assertEqual(
-            _gates_route_key('{"passed": true, "status": "approve", "results": [{"command": "npm test", "passed": true, "output": "ok"}]}'),
+            gates_route_key('{"passed": true, "status": "approve", "results": [{"command": "npm test", "passed": true, "output": "ok"}]}'),
             "approve",
         )
-        self.assertEqual(_gates_route_key('{"passed": false, "results": []}'), "request-changes")
+        self.assertEqual(gates_route_key('{"passed": false, "results": []}'), "request-changes")
         self.assertEqual(
-            _gates_route_key('{"passed": false, "results": [{"id": "lint", "passed": true}]}'),
+            gates_route_key('{"passed": false, "results": [{"id": "lint", "passed": true}]}'),
             "request-changes",
         )
         self.assertEqual(
-            _gates_route_key('{"passed": false, "status": "request-changes", "results": []}'),
+            gates_route_key('{"passed": false, "status": "request-changes", "results": []}'),
             "request-changes",
         )
-        self.assertEqual(_gates_route_key('{"passed": false, "status": "blocked", "results": []}'), "blocked")
-        self.assertEqual(_gates_route_key('{"passed": false, "status": "error", "results": []}'), "error")
-        self.assertEqual(_gates_route_key('{"passed": false, "status": "pending", "results": []}'), "pending")
-        self.assertEqual(_route_key("status: failed"), "default")
-        self.assertEqual(_route_key("status: pass"), "default")
-        self.assertEqual(_route_key("- status: green"), "default")
-        self.assertEqual(_route_key("note: status: green"), "default")
-        self.assertEqual(_route_key("  status: green"), "default")
-        self.assertEqual(_route_key("- verdict: approve"), "default")
-        self.assertEqual(_route_key("status: green"), "green")
-        self.assertEqual(_route_key("status: ci_failed"), "ci_failed")
-        self.assertEqual(_route_key("status: has_comments"), "has_comments")
-        self.assertEqual(_route_key("status: has-comments"), "default")
+        self.assertEqual(gates_route_key('{"passed": false, "status": "blocked", "results": []}'), "blocked")
+        self.assertEqual(gates_route_key('{"passed": false, "status": "error", "results": []}'), "error")
+        self.assertEqual(gates_route_key('{"passed": false, "status": "pending", "results": []}'), "pending")
+        self.assertEqual(route_key("status: failed"), "default")
+        self.assertEqual(route_key("status: pass"), "default")
+        self.assertEqual(route_key("- status: green"), "default")
+        self.assertEqual(route_key("note: status: green"), "default")
+        self.assertEqual(route_key("  status: green"), "default")
+        self.assertEqual(route_key("- verdict: approve"), "default")
+        self.assertEqual(route_key("status: green"), "green")
+        self.assertEqual(route_key("status: ci_failed"), "ci_failed")
+        self.assertEqual(route_key("status: has_comments"), "has_comments")
+        self.assertEqual(route_key("status: has-comments"), "default")
         # JSON이 아닌 파일은 "게이트 실패"가 아니라 "판정 불가"다. default로 접으면
         # fix-loop가 근거 없이 돌기 시작한다.
-        self.assertEqual(_gates_route_key("status: pass"), "malformed-results")
+        self.assertEqual(gates_route_key("status: pass"), "malformed-results")
 
     def test_host_multi_review_requires_confined_reviewer_processes(self) -> None:
         from agent_flow.adapters.hosted import HostedAdapter, _multi_reviewer_block
@@ -7789,12 +7789,17 @@ if (codexContext !== undefined) {
         android_required = android.skills["required_review"]
         self.assertEqual(android_required[0]["group"], "profile")
         self.assertIn("android-code-review", android_required[0]["skills"])
-        self.assertEqual([group["group"] for group in android_required], ["profile"])
+        # baseline과 architecture는 서로 다른 group이다. 한 group이면 Kotlin 한 줄
+        # 변경에도 계층 계약 문서가 required가 된다.
+        self.assertEqual(
+            [group["group"] for group in android_required], ["profile", "architecture"]
+        )
         self.assertNotIn("android_skills", android.skills)
         rn_required = load_profile("react-native").skills["required_review"]
         # `typescript` group은 `typescript-development-guide`의 범위를 스택 glob에서
-        # 분리한 자리다. 옛 escalation group이 되살아나면 이 목록이 늘어난다.
-        self.assertEqual([group["group"] for group in rn_required], ["profile", "typescript"])
+        # 분리한 자리이고, `architecture`는 계층 계약 문서를 경계 경로로 분리한 자리다.
+        # 옛 escalation group이 되살아나면 이 목록이 늘어난다.
+        self.assertEqual([group["group"] for group in rn_required], ["profile", "architecture", "typescript"])
 
     def test_runner_prefers_repository_kit_root(self) -> None:
         from agent_flow.runner import _find_kit_root

@@ -24,7 +24,11 @@ from agent_flow.core.observation import (  # noqa: E402
     PhaseObservation,
     record_observation,
 )
-from agent_flow.runner import GATE_MALFORMED, _gate_parse_error, _gates_route_key  # noqa: E402
+from agent_flow.core.route_verdicts import (  # noqa: E402
+    GATE_MALFORMED,
+    gate_parse_error,
+    gates_route_key,
+)
 
 
 def _events(run_dir: Path) -> list[dict]:
@@ -232,14 +236,14 @@ def test_committing_a_transition_records_why_it_moved(tmp_path: Path):
     ],
 )
 def test_unreadable_gate_results_are_not_a_gate_failure(text: str):
-    assert _gates_route_key(text) == GATE_MALFORMED
-    assert _gate_parse_error(text)
+    assert gates_route_key(text) == GATE_MALFORMED
+    assert gate_parse_error(text)
 
 
 def test_readable_gate_results_still_route_as_before():
-    assert _gates_route_key('{"passed": false, "results": []}') == "request-changes"
+    assert gates_route_key('{"passed": false, "results": []}') == "request-changes"
     assert (
-        _gates_route_key(
+        gates_route_key(
             '{"passed": true, "results": [{"command": "pytest -q", "passed": true, "output": "ok"}]}'
         )
         == "green"
@@ -273,7 +277,7 @@ def test_node_and_python_agree_that_unreadable_results_are_malformed(tmp_path: P
             check=True,
         ).stdout.strip()
         assert node_key == GATE_MALFORMED
-        assert _gates_route_key(text) == GATE_MALFORMED
+        assert gates_route_key(text) == GATE_MALFORMED
 
     # 파일 자체가 없는 것은 "아직 안 돌렸다"이지 깨진 것이 아니다.
     missing = subprocess.run(

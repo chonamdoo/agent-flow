@@ -21,6 +21,10 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from agent_flow.adapters.base import Adapter
+from agent_flow.core.local_skills import (
+    ARCHITECTURE_CONTRACT_FAMILY,
+    phase_skill_resolution,
+)
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
     git_safe,
@@ -51,6 +55,11 @@ _BASE_REF_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/+@"
 )
 
+# `requires`가 있는 angle은 그 skill이 이 phase의 required 집합에 있을 때만 등록한다.
+# base_prompt는 angle마다 그대로 복제되므로(`_reviewer_jobs`) required 목록 하나가
+# angle 수 × provider 수만큼 늘어난다. 계층 계약을 요구하지 않는 변경에서 그 angle을
+# 그대로 띄우면 resolver 쪽 축소가 review phase에서 전부 사라진다 — 이 template이
+# `clean-architecture-core/SKILL.md`를 읽으라고 직접 지시하기 때문이다.
 _BASE_REVIEW_ANGLES: tuple[dict[str, str], ...] = (
     {
         "id": "generalist",
@@ -63,6 +72,11 @@ _BASE_REVIEW_ANGLES: tuple[dict[str, str], ...] = (
     {
         "id": "clean-architecture",
         "prompt": "templates/_shared/review/clean-architecture.md",
+        # 값은 이름 family다. 정확한 이름(`clean-architecture-core`)으로 보면
+        # routed-but-uninstalled 상태에서 dependency 확장이 일어나지 않아 angle이
+        # 빠지는데, 작성자 게이트는 family로 판정해 `applied`를 요구한다 —
+        # 두 술어가 갈리는 그 자리가 정확히 리뷰 없는 통과가 된다.
+        "requires": ARCHITECTURE_CONTRACT_FAMILY,
     },
 )
 _BASE_REVIEW_PROMPTS = {
@@ -461,6 +475,45 @@ def _is_unborn_head_failure(result) -> bool:
     )
 
 
+def _applicable_angles(
+    angles: list[dict[str, str]] | tuple[dict[str, str], ...],
+    phase: Phase,
+    project_root: Path,
+    adapter: Adapter,
+) -> list[dict[str, str]]:
+    """`requires`를 선언한 angle은 그 skill이 required일 때만 남긴다.
+
+    판정은 writer prompt와 **같은 resolver 호출**로 한다. 여기서 조건을 다시 쓰면
+    reviewer가 작성자보다 넓거나 좁은 기준을 받고, 그게 agent-flow가 지키겠다는
+    성질이다.
+    """
+    gated = [angle for angle in angles if angle.get("requires")]
+    if not gated:
+        return list(angles)
+    resolution = phase_skill_resolution(
+        adapter.config_root_or(project_root),
+        phase.id,
+        phase_skills=getattr(phase, "skills", None),
+        profile=adapter._profile_snapshot,
+        changed_files=adapter._changed_files,
+        task_text=adapter._task_text,
+        concerns=adapter._concerns,
+    )
+    required = {skill.name for skill in resolution.required}
+    return [
+        angle
+        for angle in angles
+        if not angle.get("requires") or _angle_requirement_met(angle["requires"], required)
+    ]
+
+
+def _angle_requirement_met(requirement: str, required: set[str]) -> bool:
+    """`requires`는 이름 family다. 작성자 게이트와 같은 술어를 쓴다."""
+    if requirement == ARCHITECTURE_CONTRACT_FAMILY:
+        return any(ARCHITECTURE_CONTRACT_FAMILY in name for name in required)
+    return requirement in required
+
+
 def _reviewer_jobs(
     phase: Phase,
     run_dir: Path,
@@ -470,7 +523,12 @@ def _reviewer_jobs(
     review_input_path: Path | None = None,
 ) -> list[ReviewerJob]:
     profile_angles = adapter.profile_review_angles()
-    angles = _merge_review_angles(_BASE_REVIEW_ANGLES, profile_angles)
+    angles = _applicable_angles(
+        _merge_review_angles(_BASE_REVIEW_ANGLES, profile_angles),
+        phase,
+        project_root,
+        adapter,
+    )
     jobs: list[ReviewerJob] = []
     # host가 받는 envelope와 다른 렌더다(host_hint 없음). 관측 이름을 갈라
     # trace에서 둘을 sha 재계산 없이 구분한다.

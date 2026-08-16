@@ -21,7 +21,7 @@ import json
 import secrets
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -182,6 +182,22 @@ def _active_run(path: Path) -> ActiveRun:
     )
 
 
+def run_concerns_value(concerns: Sequence[str]) -> tuple[str, ...]:
+    """concern 목록 정규화. 소문자, 공백 제거, 순서 유지, 중복 제거."""
+    seen: list[str] = []
+    for item in concerns or ():
+        value = str(item).strip().lower()
+        if value and value not in seen:
+            seen.append(value)
+    return tuple(seen)
+
+
+def run_concerns(meta: Mapping[str, Any]) -> tuple[str, ...]:
+    """run meta가 기록한 concern. 이 값이 resolver 입력의 정본이다."""
+    raw = meta.get("concerns")
+    return run_concerns_value(raw if isinstance(raw, list) else ())
+
+
 def create_run(
     project_root: Path,
     workflow: str,
@@ -191,6 +207,7 @@ def create_run(
     run_id: str | None = None,
     checkout_identity: str | None = None,
     checkout_registration_identity: str | None = None,
+    concerns: Sequence[str] = (),
 ) -> Path:
     """Create a new run directory. Refuses if an active run exists."""
     if run_id is not None:
@@ -245,6 +262,9 @@ def create_run(
                     "run_id": run_id,
                     "workflow": workflow,
                     "task": task,
+                    # 명시된 concern. free-form task 문구와 달리 열거형이라
+                    # 같은 입력이 항상 같은 required 집합을 만든다.
+                    "concerns": list(run_concerns_value(concerns)),
                     # design-spec.md의 task digest와 대조되는 값. 런 도중 task를
                     # 바꿔치기하면 원장이 가리키는 사용자 지시와 어긋나므로 gate가 막는다.
                     "task_digest": hashlib.sha256(
@@ -390,6 +410,7 @@ def _missing_completion_markers(
             profile=profile,
             changed_files=changed_files(project),
             task_text=str(meta.get("task", "")),
+            concerns=run_concerns(meta),
             since=phase_since,
         )
     )

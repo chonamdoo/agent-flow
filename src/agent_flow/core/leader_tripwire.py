@@ -132,7 +132,7 @@ def leader_tripwire_declarations(
 def _requested_profiles() -> str:
     """소비자가 쓰는 profile 선택 규칙. `AGENT_FLOW_PROFILE`이 최우선이다.
 
-    `runner._load_profile`이 이 env를 먼저 보고, `cli`의 `--profile auto`도 같은
+    `profile_resolution.resolve_profile`이 이 env를 먼저 보고, `cli`의 `--profile auto`도 같은
     자리를 통과한다. 여기서만 `kit.json`을 보면 강제된 profile의 선언이 사라진다.
     """
     return os.environ.get("AGENT_FLOW_PROFILE") or "auto"

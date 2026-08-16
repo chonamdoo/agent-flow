@@ -28,7 +28,14 @@ SKILLS_READ_LOG = Path(".agent-flow") / "skills-read.jsonl"
 
 
 def changed_files(project_root: Path) -> tuple[str, ...]:
-    """working tree + staged 변경 경로. git이 없거나 실패하면 빈 튜플로 degrade한다."""
+    """working tree + staged 변경 경로. git이 없거나 실패하면 빈 튜플로 degrade한다.
+
+    rename/copy 레코드는 `XY <new>\\0<old>\\0` 두 필드다. 레코드를 독립적으로 보고
+    앞 3글자를 자르면 두 번째 필드(상태 접두사가 없는 원본 경로)에서 실제 문자
+    3개가 잘려 `core/domain/A.kt`가 `e/domain/A.kt`가 된다. 그 값은 어떤 glob에도
+    걸리지 않으므로 파일을 옮기는 변경은 경로 기반 skill 라우팅에서 조용히 사라진다.
+    삭제된 경로도 그대로 남긴다 — 계층 경계에서 파일이 사라진 것은 그 경계의 변경이다.
+    """
     # -uall이 없으면 git이 untracked 디렉터리를 `app/sdui/` 한 줄로 접어서
     # pathGlobs가 파일 경로를 못 본다.
     result = git_safe(
@@ -48,10 +55,25 @@ def changed_files(project_root: Path) -> tuple[str, ...]:
                 file=sys.stderr,
             )
         return ()
+    return _porcelain_paths(result.stdout)
+
+
+def _porcelain_paths(stdout: str) -> tuple[str, ...]:
+    fields = stdout.split("\0")
     paths: list[str] = []
-    for record in result.stdout.split("\0"):
-        if len(record) > 3:
-            paths.append(record[3:].replace("\\", "/"))
+    index = 0
+    while index < len(fields):
+        record = fields[index]
+        index += 1
+        if len(record) < 4:
+            continue
+        status, path = record[:2], record[3:]
+        paths.append(path.replace("\\", "/"))
+        if "R" in status or "C" in status:
+            # 원본 경로는 다음 필드다. 없으면(잘린 출력) 새 경로만 남긴다.
+            if index < len(fields) and fields[index]:
+                paths.append(fields[index].replace("\\", "/"))
+            index += 1
     return tuple(dict.fromkeys(paths))
 
 
@@ -153,6 +175,41 @@ class SkillReadEvidence:
     used_names: frozenset[str] = frozenset()
 
 
+# 계층 계약 문서의 이름 family. 정확한 이름은 스택마다 다르고(`react-clean-architecture`,
+# `python-api-clean-architecture`, `clean-architecture-core`) 설치 여부에 따라 dependency
+# 확장이 되거나 안 되므로, 판정은 이름 조각 하나로 한다.
+ARCHITECTURE_CONTRACT_FAMILY = "clean-architecture"
+
+
+def architecture_contract_required(resolution: SkillResolution) -> bool:
+    """이 phase가 계층 계약 문서를 요구하는가.
+
+    작성자 게이트와 reviewer angle 게이트가 **같은 술어**를 써야 한다. 한쪽이 정확한
+    이름을, 다른 쪽이 family를 보면 routed-but-uninstalled 상태에서 갈린다 — 그때
+    작성자는 `applied`를 적으라고 요구받는데 그것을 검증할 angle은 등록되지 않는다.
+    """
+    return any(
+        ARCHITECTURE_CONTRACT_FAMILY in skill.name for skill in resolution.required
+    )
+
+
+def declared_concern_ids(profile: dict | None) -> set[str]:
+    """선언된 concern id 전체. 오타를 조용히 무시하지 않으려면 목록이 하나여야 한다."""
+    from agent_flow.core.profile_routing import declared_group_concerns
+    from agent_flow.core.skill_matching import declared_domain_ids
+
+    return declared_domain_ids(profile) | declared_group_concerns(profile)
+
+
+def skill_markers_enforced(phase_id: str) -> bool:
+    """이 phase에서 skill marker를 강제하는가.
+
+    프롬프트, 게이트, 자람 재진입이 **같은 술어**를 봐야 한다. 강제하지 않는 phase에서
+    required가 자랐다고 막으면, 아무도 요구하지 않은 것 때문에 막히는 자리가 생긴다.
+    """
+    return phase_id in CODE_PHASES
+
+
 def phase_skill_resolution(
     project_root: Path,
     phase_id: str,
@@ -161,6 +218,7 @@ def phase_skill_resolution(
     profile: dict | None = None,
     changed_files: Sequence[str] = (),
     task_text: str = "",
+    concerns: Sequence[str] = (),
 ) -> SkillResolution:
     return resolve_phase_skills(
         project_root=project_root,
@@ -169,6 +227,7 @@ def phase_skill_resolution(
         profile=profile,
         changed_files=changed_files,
         task_text=task_text,
+        concerns=concerns,
     )
 
 
@@ -180,6 +239,7 @@ def local_skill_prompt_block(
     profile: dict | None = None,
     changed_files: Sequence[str] = (),
     task_text: str = "",
+    concerns: Sequence[str] = (),
 ) -> str:
     resolution = phase_skill_resolution(
         project_root,
@@ -188,9 +248,10 @@ def local_skill_prompt_block(
         profile=profile,
         changed_files=changed_files,
         task_text=task_text,
+        concerns=concerns,
     )
     # 강제 지점과 같은 조건을 쓴다. 둘이 갈라지면 프롬프트가 다시 거짓말한다.
-    enforced = phase_id in CODE_PHASES
+    enforced = skill_markers_enforced(phase_id)
     block = skill_prompt_block(project_root, resolution, enforced=enforced)
     if not block:
         return ""
@@ -199,6 +260,7 @@ def local_skill_prompt_block(
         profile=profile,
         changed_files=changed_files,
         task_text=task_text,
+        concerns=concerns,
         resolution=resolution,
     )
     return block + _marker_instruction(
@@ -215,6 +277,7 @@ def missing_local_skill_markers(
     profile: dict | None = None,
     changed_files: Sequence[str] = (),
     task_text: str = "",
+    concerns: Sequence[str] = (),
     since: float | None = None,
 ) -> list[str]:
     resolution = phase_skill_resolution(
@@ -224,10 +287,11 @@ def missing_local_skill_markers(
         profile=profile,
         changed_files=changed_files,
         task_text=task_text,
+        concerns=concerns,
     )
     # skill 목록 주입은 모든 phase에 하지만, marker 강제는 코드 생성/리뷰 phase에만 건다.
     # commit·merge·pr-watch까지 막으면 얻는 것 없이 막히는 경로만 늘어난다.
-    if phase_id not in CODE_PHASES or not resolution.required:
+    if not skill_markers_enforced(phase_id) or not resolution.required:
         return []
     values = completion_gate_marker_values(text)
     missing: list[str] = []
@@ -260,6 +324,28 @@ def missing_local_skill_markers(
         if diagnosis:
             missing.append(diagnosis)
 
+    # 계층 계약 문서가 required면 `clean-architecture: n/a`는 거짓이다. marker 자체는
+    # `applied|n/a`를 받는다 — 경계 경로를 건드리지 않는 변경에서 그 문서를 읽으라고
+    # 요구하면 축소가 무의미해지고, 그때 `applied`를 강요하면 읽지 않은 것을 적게 된다.
+    # 그래서 판정을 marker 문법이 아니라 이 phase의 required 집합으로 한다.
+    # 여기서 marker를 **새로 요구하지 않는다.** 어떤 phase가 어떤 marker를 적어야
+    # 하는지는 workflow가 정하고(`required_markers`), 이 층은 그 값이 계층 계약을
+    # 요구하는 phase에서 거짓이 되는 경우만 잡는다. 새 요구를 만들면 그 marker를
+    # 선언하지 않은 phase(full-feature의 `multi-review`는 `clean-architecture-review`를
+    # 쓴다)까지 막힌다.
+    #
+    # `n/a`만 거부하는 것으로는 부족하다 — `markers._line_matches_marker`는 `n/a`가
+    # 대안으로 있는 marker에 `optional`도 허용하므로, 그 한 단어가 게이트를 통과한다.
+    # 그래서 적힌 값이 허용 열거에 드는지를 본다.
+    if architecture_contract_required(resolution):
+        if "clean-architecture" in values and values["clean-architecture"] != "applied":
+            missing.append("clean-architecture: applied")
+        if "must-avoid-check" in values and values["must-avoid-check"] not in {
+            "pass",
+            "fail",
+        }:
+            missing.append("must-avoid-check: pass|fail")
+
     # L3: 자기신고는 표시용이다. resolver가 required로 판정하고 실제로 있는 것만 요구한다.
     if values.get("project-local-skills") != "checked":
         missing.append("project-local-skills: checked")
@@ -279,6 +365,9 @@ def missing_local_skill_markers(
         profile=profile,
         changed_files=changed_files,
         task_text=task_text,
+        # 프롬프트 쪽과 같은 입력이어야 한다. concern을 빼면 concern으로 켜진 group의
+        # 부재를 프롬프트는 알리고 게이트는 검사하지 않는다.
+        concerns=concerns,
         resolution=resolution,
     )
     if routed_missing:
@@ -407,6 +496,7 @@ def _missing_routed_names(
     profile: dict | None,
     changed_files: Sequence[str],
     task_text: str,
+    concerns: Sequence[str] = (),
     resolution: SkillResolution,
 ) -> list[str]:
     routed = {
@@ -416,6 +506,7 @@ def _missing_routed_names(
             phase_id=phase_id,
             changed_files=changed_files,
             task_text=task_text,
+            concerns=concerns,
         )
     }
     if not routed:

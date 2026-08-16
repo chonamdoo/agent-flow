@@ -20,7 +20,7 @@ if SRC not in sys.path:
 from agent_flow.artifact import create_run, read_meta
 from agent_flow.core.artifacts import run_gate_nonce, write_gate_results
 from agent_flow.core.gates import GateCommand, GateResult, run_gate
-from agent_flow.runner import _gates_route_key
+from agent_flow.core.route_verdicts import gates_route_key
 
 FORGED = json.dumps(
     {
@@ -53,37 +53,37 @@ def test_cli_written_results_carry_the_nonce(tmp_path):
     )
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["produced_by"]["nonce"] == read_meta(run_dir)["gate_nonce"]
-    assert _gates_route_key(path.read_text(encoding="utf-8"), nonce=read_meta(run_dir)["gate_nonce"]) == "green"
+    assert gates_route_key(path.read_text(encoding="utf-8"), nonce=read_meta(run_dir)["gate_nonce"]) == "green"
 
 
 def test_hand_written_green_does_not_route_green():
     """#102 F1의 실증 경로. 손으로 쓴 4개 키로 green → commit이 됐다."""
-    assert _gates_route_key(FORGED, nonce="abc123") == "default"
+    assert gates_route_key(FORGED, nonce="abc123") == "default"
 
 
 def test_wrong_nonce_does_not_route_green():
     payload = json.loads(FORGED)
     payload["produced_by"] = {"tool": "agent-flow gates", "nonce": "not-the-one"}
-    assert _gates_route_key(json.dumps(payload), nonce="abc123") == "default"
+    assert gates_route_key(json.dumps(payload), nonce="abc123") == "default"
 
 
 def test_approve_status_also_requires_provenance():
     payload = json.loads(FORGED)
     payload["status"] = "approve"
-    assert _gates_route_key(json.dumps(payload), nonce="abc123") == "default"
+    assert gates_route_key(json.dumps(payload), nonce="abc123") == "default"
 
 
 def test_runs_without_a_nonce_are_not_blocked():
     """구버전 run과 CLI 직접 사용에는 대조할 기록이 없다. 없으면 위반이 아니다."""
-    assert _gates_route_key(FORGED) == "green"
-    assert _gates_route_key(FORGED, nonce="") == "green"
+    assert gates_route_key(FORGED) == "green"
+    assert gates_route_key(FORGED, nonce="") == "green"
 
 
 def test_failure_routing_never_needs_provenance():
     """실패/차단까지 막으면 복구 경로만 좁아진다. 앞으로 가는 길에만 건다."""
     for status in ("request-changes", "blocked", "error", "pending"):
         text = json.dumps({"passed": False, "status": status, "results": []})
-        assert _gates_route_key(text, nonce="abc123") == status
+        assert gates_route_key(text, nonce="abc123") == status
 
 
 def test_python_and_node_agree_on_provenance(tmp_path):
@@ -132,7 +132,7 @@ def test_pre_commit_gate_phase_does_not_route_green():
         "nonce": "abc123",
         "gate_phase": "pre-commit",
     }
-    assert _gates_route_key(json.dumps(payload), nonce="abc123") == "default"
+    assert gates_route_key(json.dumps(payload), nonce="abc123") == "default"
 
 
 def test_all_gate_phase_routes_green():
@@ -142,14 +142,14 @@ def test_all_gate_phase_routes_green():
         "nonce": "abc123",
         "gate_phase": "all",
     }
-    assert _gates_route_key(json.dumps(payload), nonce="abc123") == "green"
+    assert gates_route_key(json.dumps(payload), nonce="abc123") == "green"
 
 
 def test_results_without_a_recorded_gate_phase_are_not_blocked():
     """구버전 파일에는 기록이 없다. nonce와 같은 규칙 — 없으면 위반이 아니다."""
     payload = json.loads(FORGED)
     payload["produced_by"] = {"tool": "agent-flow gates", "nonce": "abc123"}
-    assert _gates_route_key(json.dumps(payload), nonce="abc123") == "green"
+    assert gates_route_key(json.dumps(payload), nonce="abc123") == "green"
 
 
 def test_cli_written_results_record_the_gate_phase(tmp_path):
@@ -162,7 +162,7 @@ def test_cli_written_results_record_the_gate_phase(tmp_path):
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["produced_by"]["gate_phase"] == "all"
     assert (
-        _gates_route_key(
+        gates_route_key(
             path.read_text(encoding="utf-8"), nonce=read_meta(run_dir)["gate_nonce"]
         )
         == "green"
@@ -206,7 +206,7 @@ def test_gates_cli_records_the_phase_it_filtered_on(tmp_path, phase, expected_ro
     payload = json.loads(text)
     assert payload["produced_by"]["gate_phase"] == phase
     assert (
-        _gates_route_key(text, nonce=read_meta(run_dir)["gate_nonce"]) == expected_route
+        gates_route_key(text, nonce=read_meta(run_dir)["gate_nonce"]) == expected_route
     )
 
 
@@ -271,7 +271,7 @@ def test_python_and_node_agree_on_gate_phase(tmp_path):
             check=True,
         ).stdout.strip()
         assert node_key == expected
-        assert _gates_route_key(target.read_text(encoding="utf-8"), nonce="abc123") == expected
+        assert gates_route_key(target.read_text(encoding="utf-8"), nonce="abc123") == expected
 
 
 def test_node_run_manifest_nonce_is_read(tmp_path):
@@ -319,7 +319,7 @@ def test_results_written_into_a_node_run_route_green(tmp_path):
     )
 
     assert (
-        _gates_route_key(path.read_text(encoding="utf-8"), nonce="node-side-nonce")
+        gates_route_key(path.read_text(encoding="utf-8"), nonce="node-side-nonce")
         == "green"
     )
 
@@ -374,7 +374,7 @@ def _timed_out_payload(required: bool) -> str:
 @pytest.mark.parametrize("required", [True, False])
 def test_timed_out_gate_routes_to_error(required):
     """반증: optional 게이트가 상한을 다 쓰고 죽어도 passed 집계는 green이다."""
-    assert _gates_route_key(_timed_out_payload(required), nonce="abc123") == "error"
+    assert gates_route_key(_timed_out_payload(required), nonce="abc123") == "error"
 
 
 def test_node_and_python_agree_on_timeout_routing(tmp_path):
@@ -446,7 +446,7 @@ def test_written_timeout_survives_serialization_and_routes_to_error(tmp_path):
     assert payload["passed"] is False
     assert payload["status"] == "error"
     assert any(entry["timed_out"] is True for entry in payload["results"])
-    assert _gates_route_key(
+    assert gates_route_key(
         path.read_text(encoding="utf-8"),
         nonce=run_gate_nonce(run_dir),
     ) == "error"

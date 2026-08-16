@@ -278,7 +278,7 @@ phases:
       - "changed-file-skill-resolution: applied"
       - "required-profile-skills: checked"
       - "missing-required-profile-skills:"
-      - "clean-architecture: applied"
+      - "clean-architecture: applied|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
@@ -307,7 +307,7 @@ phases:
           changed-file-skill-resolution: applied
           required-profile-skills: checked
           missing-required-profile-skills: none|<list>
-          clean-architecture: applied
+          clean-architecture: applied|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
           presentation-skill: <android|react|react-native|ios|n/a>
@@ -330,7 +330,7 @@ phases:
       - "changed-file-skill-resolution: applied"
       - "required-profile-skills: checked"
       - "missing-required-profile-skills:"
-      - "clean-architecture: applied"
+      - "clean-architecture: applied|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
@@ -362,7 +362,7 @@ phases:
           changed-file-skill-resolution: applied
           required-profile-skills: checked
           missing-required-profile-skills: none|<list>
-          clean-architecture: applied
+          clean-architecture: applied|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
           presentation-skill: <android|react|react-native|ios|n/a>
@@ -414,7 +414,7 @@ phases:
 
   - id: multi-review
     skills:
-      required: [code-review, clean-architecture-core, clean-architecture, agent-flow-concise-output]
+      required: [code-generation-discipline, code-review, clean-architecture-core, clean-architecture, agent-flow-concise-output]
     description: Run implementation review with at least two independent sub-agent reviewers before approve. Runner routes approve→architecture-review, request-changes→fix-loop.
     multi_review: true
     required_markers:
@@ -428,7 +428,7 @@ phases:
       - "codex-claude-parity-check: pass|fail"
       - "hook-parity-check: pass|fail"
       - "clean-architecture-review: applied"
-      - "must-avoid-check: pass|fail"
+      - "must-avoid-check: pass|fail|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
@@ -499,7 +499,7 @@ phases:
           codex-claude-parity-check: pass|fail
           hook-parity-check: pass|fail
           clean-architecture-review: applied
-          must-avoid-check: pass|fail
+          must-avoid-check: pass|fail|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
           presentation-skill: <android|react|react-native|ios|n/a>
@@ -517,7 +517,7 @@ phases:
 
   - id: architecture-review
     skills:
-      required: [ddd-architecture, clean-architecture-core, clean-architecture, architecture-reviewer]
+      required: [code-generation-discipline, ddd-architecture, clean-architecture-core, clean-architecture, architecture-reviewer]
     description: Review implementation against DDD/Clean design. Runner routes approve→gates, request-changes→refactor.
     multi_review: true
     required_markers:
@@ -530,8 +530,8 @@ phases:
       - "architecture-contract-check: pass|fail|n/a"
       - "codex-claude-parity-check: pass|fail"
       - "hook-parity-check: pass|fail"
-      - "clean-architecture: applied"
-      - "must-avoid-check: pass|fail"
+      - "clean-architecture: applied|n/a"
+      - "must-avoid-check: pass|fail|n/a"
       - "shared-presentation-contract-placement: pass|fail|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
@@ -593,8 +593,8 @@ phases:
           architecture-contract-check: pass|fail|n/a
           codex-claude-parity-check: pass|fail
           hook-parity-check: pass|fail
-          clean-architecture: applied
-          must-avoid-check: pass|fail
+          clean-architecture: applied|n/a
+          must-avoid-check: pass|fail|n/a
           shared-presentation-contract-placement: pass|fail|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
@@ -648,7 +648,7 @@ phases:
       - "changed-file-skill-resolution: applied"
       - "required-profile-skills: checked"
       - "missing-required-profile-skills:"
-      - "clean-architecture: applied"
+      - "clean-architecture: applied|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
@@ -679,7 +679,7 @@ phases:
           changed-file-skill-resolution: applied
           required-profile-skills: checked
           missing-required-profile-skills: none|<list>
-          clean-architecture: applied
+          clean-architecture: applied|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
           presentation-skill: <android|react|react-native|ios|n/a>

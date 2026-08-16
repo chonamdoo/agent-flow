@@ -39,14 +39,35 @@ skills:
     - ios-clean-architecture
     - ios-clean-presentation-architecture
   required_review:
+    # baseline과 architecture를 가른다. 한 group에 두면 문구·색상만 바꾸는 변경에도
+    # 계층 계약 문서가 required가 된다(실측: `.tsx` 한 줄 변경에 required 4개 /
+    # 15,746 B → 2개 / 5,220 B). architecture 문서는 계층 경계 경로가 실제로 바뀔 때만
+    # 요구한다 — 경로 목록은 이 profile의 `architecture.roles`에서 온다.
+    #
+    # baseline이 `ios-app-shell-error-handling`인 이유: iOS에는 다른 스택의
+    # `*-development-guide`에 대응하는 배포 skill이 없다. 그것 없이 architecture group만
+    # 두면 role path 밖의 평범한 Swift 변경에서 required profile skill이 0개가 되는데,
+    # 그건 이 split이 의도한 축소보다 큰 손실이다.
     - group: profile
-      # presentation skill은 여기 적지 않는다. 표의 glob은 Swift 전체라 데이터 계층
-      # 변경에도 걸리고, 그러면 skill 자신의 frontmatter가 선언한 presentation 범위를
-      # 표가 덮어써 무력화한다. 활성화는 그 skill의 pathGlobs가 맡는다.
-      skills: [ios-clean-architecture]
+      skills: [ios-app-shell-error-handling]
       when: iOS/Swift files change
       missing: "missing local profile: <skill>"
       path_globs: ["**/*.swift", "**/*.m", "**/*.mm", "**/*.h"]
+    # presentation skill은 여기 적지 않는다. 표의 glob이 skill 자신의 frontmatter가
+    # 선언한 presentation 범위를 덮어써 무력화한다. 활성화는 그 skill의 pathGlobs가 맡는다.
+    # app-shell과 native host role은 여기서 뺀다. `app/**`는 App Router 프로젝트의
+    # 소스 대부분이고 Android의 `app` 모듈도 그렇다 — 넣으면 문구만 바꾸는 변경이 다시
+    # 계층 문서를 요구해 축소가 사라진다. 그 자리의 배선 검토는 `--concern`으로 지목한다.
+    # 자리표시자(`<context>`) 아래만 걸면 layer 루트의 파일이 빠지므로 layer 디렉터리
+    # 전체를 잡는다.
+    - group: architecture
+      skills: [ios-clean-architecture]
+      when: iOS profile architecture role paths change
+      missing: "missing local profile: <skill>"
+      # 배선 자리처럼 경로로 드러나지 않는 계층 검토를 지목하는 유일한 통로다.
+      # 주석이 `--concern`을 가리키므로 id가 여기 선언돼 있어야 오타로 거부되지 않는다.
+      concerns: [architecture]
+      path_globs: ["**/Sources/Core/Domain/**", "**/Sources/Core/Data/**", "**/Sources/Features/**", "**/Sources/Core/UI/**", "**/Sources/Core/DesignSystem/**", "**/Sources/Core/Resources/**", "**/Sources/Core/Network/**", "**/Sources/Core/Platform/**", "**/Sources/Core/Permission/**", "**/Sources/Core/Navigation/API/**", "**/Sources/Core/Navigation/Impl/**"]
   # iOS 생태계에는 Apple 공식 앱개발 skill이 없고, 커뮤니티가 1 repo = 1 skill로
   # 파편화되어 있다(twostraws/Dimillian/AvdLee/...). 이름을 적으면 repo 하나가 사라질
   # 때마다 낡으므로, 스택 어휘만 두고 설치된 SKILL.md의 name + description에 맞춘다.

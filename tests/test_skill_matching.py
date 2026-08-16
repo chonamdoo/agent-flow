@@ -102,12 +102,38 @@ def test_a_domain_without_terms_never_activates():
     assert matches == ()
 
 
-def test_term_shared_by_task_and_skill_is_required():
+def test_task_wording_alone_offers_but_never_requires():
+    """반증: 같은 뜻을 다른 언어로 적으면 required가 사라진다.
+
+    실측으로 영어 task는 required 6개 / 26,241 B였고 한국어는 4개였다. 후보 집합도
+    이 머신에 깔린 카탈로그라 host마다 갈린다. 그래서 free-form 문구는 offered까지만
+    만들고, 무엇을 반드시 읽어야 하는지는 `--concern`이 정한다.
+    """
+    args = dict(
+        phase_id="implement",
+        env={},
+    )
+    catalog = (_entry("edge-to-edge", "Use when the status bar overlaps content."),)
+
+    korean = match_external(
+        _profile([_INSETS]), catalog, task_text="status bar가 콘텐츠를 가린다", **args
+    )
+    english = match_external(
+        _profile([_INSETS]), catalog, task_text="the status bar overlaps content", **args
+    )
+
+    assert [(item.name, item.tier) for item in korean] == [("edge-to-edge", OFFERED)]
+    assert [(item.name, item.tier) for item in english] == [("edge-to-edge", OFFERED)]
+
+
+def test_a_declared_concern_promotes_its_domain_to_required():
+    """concern은 열거형이라 표기와 무관하게 같은 결과를 낸다."""
     matches = match_external(
         _profile([_INSETS]),
         (_entry("edge-to-edge", "Use when the status bar overlaps content."),),
         phase_id="implement",
         task_text="status bar가 콘텐츠를 가린다",
+        concerns=["ui-insets"],
         env={},
     )
 
@@ -135,13 +161,14 @@ def test_term_matching_only_the_skill_is_offered_not_required():
     assert [(item.name, item.tier) for item in matches] == [("edge-to-edge", OFFERED)]
 
 
-def test_tier_uses_any_shared_term_not_just_the_first_match():
-    """첫 매치만 보면 skill 쪽에서 먼저 걸린 term 때문에 required가 offered로 떨어진다."""
+def test_the_recorded_term_is_the_one_both_sides_share():
+    """tier는 concern이 정하지만, 어느 어휘로 걸렸는지는 프롬프트와 진단의 근거다."""
     matches = match_external(
         _profile([_INSETS]),
         (_entry("edge-to-edge", "Use when insets or system bars change."),),
         phase_id="implement",
         task_text="insets 정리",
+        concerns=["ui-insets"],
         env={},
     )
 
@@ -191,9 +218,16 @@ def test_required_tier_is_truncated_deterministically():
     catalog = tuple(_entry(f"skill-{index}", "Use when skill.") for index in range(5))
     profile = _profile([domain], required_max=2)
 
-    first = match_external(profile, catalog, phase_id="implement", task_text="skill", env={})
+    first = match_external(
+        profile, catalog, phase_id="implement", task_text="skill", concerns=["wide"], env={}
+    )
     second = match_external(
-        profile, tuple(reversed(catalog)), phase_id="implement", task_text="skill", env={}
+        profile,
+        tuple(reversed(catalog)),
+        phase_id="implement",
+        task_text="skill",
+        concerns=["wide"],
+        env={},
     )
 
     assert [item.name for item in first if item.tier == REQUIRED] == ["skill-0", "skill-1"]
@@ -285,6 +319,7 @@ def test_resolution_puts_required_in_required_and_offered_in_optional(tmp_path, 
         profile=profile,
         changed_files=["app/proguard-rules.pro"],
         task_text="insets 정리",
+        concerns=["ui-insets"],
         host="claude",
     )
 
@@ -335,6 +370,7 @@ def test_truncation_gives_every_domain_a_slot():
         catalog,
         phase_id="implement",
         task_text="recomposition jank과 insets 정리",
+        concerns=["a-perf", "z-insets"],
         env={},
     )
 
@@ -433,6 +469,7 @@ def test_a_vendor_skill_installed_under_the_project_routes(tmp_path, monkeypatch
         phase_id="implement",
         profile=profile,
         task_text="prisma schema 수정",
+        concerns=["orm"],
         host="claude",
     )
 
@@ -481,11 +518,16 @@ def _external_matches(tmp_path: Path, sizes: dict[str, int], budget: int | None)
     for name, size in sizes.items():
         _sized_host_skill(host, name, size)
     catalog = discover_skill_catalog(tmp_path, (_host_root(host),))
+    # 예산은 required tier에만 걸린다. required는 이제 명시된 concern에서만 나오므로
+    # 예산 계약을 반증하려면 그 concern을 함께 선언해야 한다.
+    profile = _external_profile(budget)
+    concerns = [domain["id"] for domain in profile["skills"]["external"]["domains"]]
     return match_external(
-        _external_profile(budget),
+        profile,
         catalog,
         phase_id="implement",
         task_text="compose work",
+        concerns=concerns,
     )
 
 
@@ -548,3 +590,61 @@ def test_external_budget_stops_after_the_crossing_document(tmp_path: Path) -> No
     total = sum(item.path.stat().st_size for item in required if item.path is not None)
     assert len(required) == 3
     assert total - 9_000 < budget
+
+
+def test_a_declared_concern_activates_a_domain_the_wording_never_reaches():
+    """반증: concern이 tier만 올리면 `path_globs` 없는 domain은 문구에 계속 매여 있다.
+
+    실측으로 영어 task에서만 `frontend-design`이 붙었다. concern을 명시했는데도 문구가
+    안 걸려 domain이 잠들면, flag는 조용한 no-op이 되고 사용자는 skill이 붙었다고
+    믿은 채 진행한다.
+    """
+    domain = {"id": "design-system", "terms": ["typography"], "phases": ["implementation"]}
+    catalog = (_entry("frontend-design", "Guidance for typography and color palette."),)
+    args = dict(phase_id="implement", task_text="버튼 색상만 조정", env={})
+
+    without = match_external(_profile([domain]), catalog, **args)
+    with_concern = match_external(
+        _profile([domain]), catalog, concerns=["design-system"], **args
+    )
+
+    assert without == ()
+    assert [(item.name, item.tier) for item in with_concern] == [
+        ("frontend-design", REQUIRED)
+    ]
+
+
+def test_a_concern_promotes_a_skill_that_task_wording_had_demoted(tmp_path, monkeypatch):
+    """반증: 강등된 이름이 `optional_names`에 있으면 승격 루프가 `continue`로 건너뛴다.
+
+    강등을 되돌리라고 만든 탈출구가 정확히 강등 대상에만 듣지 않는 상태였다.
+    """
+    home = tmp_path / "home"
+    path = home / ".claude" / "skills" / "prisma-orm" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\nname: prisma-orm\ndescription: Use for prisma schema work.\n"
+        "workflowPhases: [implement]\ntaskTerms: [prisma]\n---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    project = tmp_path / "app"
+    project.mkdir()
+    profile = _profile([{"id": "orm", "terms": ["prisma"], "phases": ["implementation"]}])
+
+    def resolve(concerns):
+        return resolve_phase_skills(
+            project_root=project,
+            phase_id="implement",
+            profile=profile,
+            task_text="prisma schema 수정",
+            concerns=concerns,
+            host="claude",
+        )
+
+    demoted = resolve(())
+    promoted = resolve(("orm",))
+
+    assert "prisma-orm" in {skill.name for skill in demoted.optional}
+    assert "prisma-orm" not in {skill.name for skill in demoted.required}
+    assert "prisma-orm" in {skill.name for skill in promoted.required}

@@ -69,6 +69,62 @@ def test_no_observation_log_degrades_to_self_report(tmp_path):
     )
 
 
+def test_a_sibling_checkout_log_does_not_trap_an_unobserved_session(tmp_path):
+    """반증: 로그 파일 존재만으로 관측 가능으로 보면 탈출구가 0이 된다.
+
+    로그는 저장소가 공유한다. 형제 worktree의 세션이 파일을 만들어 두면 hook이
+    실리지 않은 세션도 `available=True`가 되어, 테스트를 실제로 돌려도 기록이 없고
+    `unavailable`로 신고해도 그 가지에 닿지 못해 phase가 영구히 막혔다.
+    """
+    root = _project(tmp_path)
+    sibling = tmp_path.parent / "sibling"
+    sibling.mkdir(exist_ok=True)
+    path = root / COMMANDS_RUN_LOG
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {"command": "pytest -q", "exit_code": 1, "cwd": str(sibling), "at": time.time()}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert missing_test_evidence_markers(
+        root, "red", GATE, profile=PYTHON_PROFILE, cwd_root=root
+    ) == [TEST_RUN_EVIDENCE_MARKER]
+    assert (
+        missing_test_evidence_markers(
+            root,
+            "red",
+            GATE + "test-run-evidence: unavailable\n",
+            profile=PYTHON_PROFILE,
+            cwd_root=root,
+        )
+        == []
+    )
+
+
+def test_an_observed_checkout_still_blocks_a_phase_with_no_test_run(tmp_path):
+    """불변: hook이 살아 있는 checkout에서 이전 phase의 실행을 재활용할 수는 없다.
+
+    탈출구는 "이 checkout이 한 번도 관측되지 않았다"에만 열린다. 기록이 있는데
+    이번 창에만 없으면 hook은 살아 있는 것이므로 그대로 막힌다.
+    """
+    root = _project(tmp_path)
+    _observe(root, "pytest -q", exit_code=1, at=100.0)
+
+    missing = missing_test_evidence_markers(
+        root,
+        "red",
+        GATE + "test-run-evidence: unavailable\n",
+        profile=PYTHON_PROFILE,
+        since=200.0,
+        cwd_root=root,
+    )
+
+    assert any("no test command was observed" in item for item in missing)
+
+
 def test_observed_but_no_test_command_is_blocked(tmp_path):
     """반증: 마커만 채우고 테스트를 안 돌린 red가 통과하면 F1이 그대로 남는다."""
     root = _project(tmp_path)

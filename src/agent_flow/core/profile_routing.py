@@ -75,13 +75,16 @@ def routed_profile_skills(
     phase_id: str,
     changed_files: Sequence[str] = (),
     task_text: str = "",
+    concerns: Sequence[str] = (),
 ) -> tuple[RoutedSkill, ...]:
     """활성 profile 선언에서 이번 phase/변경 범위에 걸리는 skill을 고른다."""
     if not isinstance(profile, dict):
         return ()
     routed: dict[str, RoutedSkill] = {}
     for group in _required_review_groups(profile):
-        if not _selectors_match(group, changed_files=changed_files, task_text=task_text):
+        if not _selectors_match(
+            group, changed_files=changed_files, task_text=task_text, concerns=concerns
+        ):
             continue
         for skill in _group_skills(group, phase_id=phase_id):
             routed.setdefault(skill.name, skill)
@@ -103,6 +106,17 @@ def routable_group_skills(profile: dict | None) -> frozenset[str]:
         if _has_selectors(group)
         for name in _string_list(group.get("skills"))
     )
+
+
+def declared_group_concerns(profile: dict | None) -> set[str]:
+    """`required_review` group이 선언한 concern id. `--concern`의 유효 값 목록이다."""
+    if not isinstance(profile, dict):
+        return set()
+    return {
+        value.lower()
+        for group in _required_review_groups(profile)
+        for value in _string_list(group.get("concerns"))
+    }
 
 
 def _required_review_groups(profile: dict) -> list[dict]:
@@ -137,22 +151,35 @@ def _has_selectors(declaration: dict) -> bool:
     return bool(
         _string_list(declaration.get("task_terms"))
         or _string_list(declaration.get("path_globs"))
+        or _string_list(declaration.get("concerns"))
     )
 
 
 def _selectors_match(
-    declaration: dict, *, changed_files: Sequence[str], task_text: str
+    declaration: dict,
+    *,
+    changed_files: Sequence[str],
+    task_text: str,
+    concerns: Sequence[str] = (),
 ) -> bool:
     # 지연 import: skill_resolver가 이 모듈을 부르므로 상단 import는 순환이 된다.
     from agent_flow.core.skill_resolver import selector_matches
 
     task_terms = _string_list(declaration.get("task_terms"))
     path_globs = _string_list(declaration.get("path_globs"))
-    if not task_terms and not path_globs:
+    declared_concerns = {value.lower() for value in _string_list(declaration.get("concerns"))}
+    if declared_concerns and declared_concerns & {
+        str(item).strip().lower() for item in concerns if str(item).strip()
+    }:
+        return True
+    if not task_terms and not path_globs and not declared_concerns:
         # 그룹 게이트는 선택자를 안 적으면 "제한 없음"이다. 엔트리 쪽에서 다시
         # 좁히므로 여기서 막으면 그룹 전체가 죽는다. 반대로 엔트리가 선택자를
         # 안 적었으면 활성화 근거가 없다.
         return "skill" not in declaration
+    if not task_terms and not path_globs:
+        # concern만 선언한 그룹은 그 concern이 명시될 때만 켜진다.
+        return False
     return selector_matches(
         task_terms=task_terms,
         path_globs=path_globs,
