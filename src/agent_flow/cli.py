@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -2133,25 +2134,43 @@ def _architecture_lint_command(
     return (*command, "--profile-root", str(profile_root))
 
 
+# gate 종류는 **선언된 gate id**에서만 읽는다. 명령 문자열에는 인터프리터와
+# 프로젝트의 절대 경로가 섞이고, 그 경로가 이 어휘와 부딪히면 순서가 실행 환경마다
+# 달라진다. 실측: `uv run --with pytest`가 만든 인터프리터
+# `/Users/…/.cache/uv/builds-v0/.tmp…/bin/python`의 "builds"가 python profile의 gate
+# 셋을 모두 build 칸으로 옮겨 `type → architecture-lint → lint`가
+# `architecture-lint → lint → type`으로 뒤집혔다 — BUILD → TYPECHECK → LINT 계약이
+# 인터프리터 경로 하나로 깨진 것이다. id는 profile이 선언하는 값이라 그런 오염이 없다.
+#
+# 어휘에 없는 id(예: gradle build를 도는 `verify`)는 마지막 칸으로 간다. 답이
+# 안정적이고 선언으로 고칠 수 있다 — 명령 문자열을 추측하는 쪽은 둘 다 아니다.
+_GATE_KIND_VOCABULARY: tuple[tuple[int, frozenset[str]], ...] = (
+    (0, frozenset({"build", "assemble", "xcodebuild"})),
+    (1, frozenset({"typecheck", "type", "types", "tsc", "mypy", "pyright"})),
+    (2, frozenset({"lint", "ruff", "detekt", "ktlint", "swiftlint"})),
+    (3, frozenset({"test", "tests", "pytest"})),
+)
+
+
+def _gate_id_words(gate_id: str) -> frozenset[str]:
+    """`android:ios-build` → {android, ios, build}. 부분 문자열이 아니라 낱말로 본다."""
+    return frozenset(word for word in re.split(r"[^a-z0-9]+", gate_id.lower()) if word)
+
+
 def _gate_order_key(gate: GateCommand) -> tuple[int, int, str]:
-    gate_id = gate.gate_id
-    command = " ".join(gate.command).lower()
-    lowered = f"{gate_id} {command}".lower()
-    if any(token in lowered for token in ("build", "assemble", "xcodebuild")):
-        return (0, _profile_gate_kind_tiebreaker(lowered), gate_id)
-    if any(token in lowered for token in ("typecheck", "tsc", "mypy", "pyright", "type ")):
-        return (1, _profile_gate_kind_tiebreaker(lowered), gate_id)
-    if any(token in lowered for token in ("lint", "ruff", "detekt", "ktlint", "architecture-lint")):
-        return (2, _profile_gate_kind_tiebreaker(lowered), gate_id)
-    if "test" in lowered or "pytest" in lowered:
-        return (3, _profile_gate_kind_tiebreaker(lowered), gate_id)
-    return (4, _profile_gate_kind_tiebreaker(lowered), gate_id)
+    words = _gate_id_words(gate.gate_id)
+    for rank, vocabulary in _GATE_KIND_VOCABULARY:
+        if words & vocabulary:
+            return (rank, _profile_gate_kind_tiebreaker(gate.gate_id), gate.gate_id)
+    return (4, _profile_gate_kind_tiebreaker(gate.gate_id), gate.gate_id)
 
 
-def _profile_gate_kind_tiebreaker(text: str) -> int:
-    if "architecture-lint" in text:
+def _profile_gate_kind_tiebreaker(gate_id: str) -> int:
+    """같은 칸 안의 순서. architecture 계약이 스택 lint보다 먼저 답을 준다."""
+    words = _gate_id_words(gate_id)
+    if "architecture" in words:
         return 0
-    if "context" in text:
+    if "context" in words:
         return 1
     return 2
 
