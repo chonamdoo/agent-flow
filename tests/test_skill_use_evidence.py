@@ -368,7 +368,9 @@ def test_the_architecture_marker_accepts_n_a_when_the_skill_is_not_required(tmp_
     _installed_skill(root)
 
     missing = missing_local_skill_markers(
-        _gate("skill-use-evidence: verified") + "clean-architecture: n/a\n",
+        _gate("skill-use-evidence: verified")
+        + "clean-architecture: n/a\n"
+        + "must-avoid-check: n/a\n",
         root,
         "implement",
         phase_skills=PhaseSkills(required=("alpha",)),
@@ -387,7 +389,8 @@ def test_the_architecture_marker_rejects_n_a_when_the_skill_is_required(tmp_path
     missing = missing_local_skill_markers(
         _gate("skill-use-evidence: verified")
         + "project-local-skills-used: alpha, clean-architecture\n"
-        + "clean-architecture: n/a\n",
+        + "clean-architecture: n/a\n"
+        + "must-avoid-check: n/a\n",
         root,
         "implement",
         phase_skills=PhaseSkills(required=("alpha", "clean-architecture")),
@@ -395,3 +398,6 @@ def test_the_architecture_marker_rejects_n_a_when_the_skill_is_required(tmp_path
     )
 
     assert "clean-architecture: applied" in missing
+    # `must-avoid-check`는 그 angle의 산출물이다. angle이 돌아야 하는 phase에서
+    # `n/a`로 넘기면 리뷰가 없었다는 사실이 조용해진다.
+    assert "must-avoid-check: pass|fail" in missing

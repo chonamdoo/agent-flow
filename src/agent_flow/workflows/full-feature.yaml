@@ -428,7 +428,7 @@ phases:
       - "codex-claude-parity-check: pass|fail"
       - "hook-parity-check: pass|fail"
       - "clean-architecture-review: applied"
-      - "must-avoid-check: pass|fail"
+      - "must-avoid-check: pass|fail|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
@@ -499,7 +499,7 @@ phases:
           codex-claude-parity-check: pass|fail
           hook-parity-check: pass|fail
           clean-architecture-review: applied
-          must-avoid-check: pass|fail
+          must-avoid-check: pass|fail|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
           presentation-skill: <android|react|react-native|ios|n/a>
@@ -531,7 +531,7 @@ phases:
       - "codex-claude-parity-check: pass|fail"
       - "hook-parity-check: pass|fail"
       - "clean-architecture: applied|n/a"
-      - "must-avoid-check: pass|fail"
+      - "must-avoid-check: pass|fail|n/a"
       - "shared-presentation-contract-placement: pass|fail|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
@@ -594,7 +594,7 @@ phases:
           codex-claude-parity-check: pass|fail
           hook-parity-check: pass|fail
           clean-architecture: applied|n/a
-          must-avoid-check: pass|fail
+          must-avoid-check: pass|fail|n/a
           shared-presentation-contract-placement: pass|fail|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>

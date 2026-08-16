@@ -301,10 +301,16 @@ def missing_local_skill_markers(
     # `applied|n/a`를 받는다 — 경계 경로를 건드리지 않는 변경에서 그 문서를 읽으라고
     # 요구하면 축소가 무의미해지고, 그때 `applied`를 강요하면 읽지 않은 것을 적게 된다.
     # 그래서 판정을 marker 문법이 아니라 이 phase의 required 집합으로 한다.
-    if values.get("clean-architecture") == "n/a" and any(
+    architecture_required = any(
         "clean-architecture" in skill.name for skill in resolution.required
-    ):
-        missing.append("clean-architecture: applied")
+    )
+    if architecture_required:
+        # 계층 계약을 요구하는 phase에서 `n/a`는 거짓이다. 두 marker 모두 그 angle이
+        # 실제로 돌았는지에 걸린다 — `must-avoid-check`는 그 angle의 산출물이다.
+        if values.get("clean-architecture") == "n/a":
+            missing.append("clean-architecture: applied")
+        if values.get("must-avoid-check") == "n/a":
+            missing.append("must-avoid-check: pass|fail")
 
     # L3: 자기신고는 표시용이다. resolver가 required로 판정하고 실제로 있는 것만 요구한다.
     if values.get("project-local-skills") != "checked":

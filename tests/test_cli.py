@@ -374,8 +374,8 @@ class CliTest(unittest.TestCase):
         self.assertIn("clean-architecture: applied|n/a", phases["green"]["required_markers"])
         self.assertIn("clean-architecture: applied|n/a", phases["fix-loop"]["required_markers"])
         self.assertIn("clean-architecture-review: applied", phases["multi-review"]["required_markers"])
-        self.assertIn("must-avoid-check: pass|fail", phases["multi-review"]["required_markers"])
-        self.assertIn("must-avoid-check: pass|fail", phases["architecture-review"]["required_markers"])
+        self.assertIn("must-avoid-check: pass|fail|n/a", phases["multi-review"]["required_markers"])
+        self.assertIn("must-avoid-check: pass|fail|n/a", phases["architecture-review"]["required_markers"])
         for phase_id in ("multi-review", "architecture-review"):
             self.assertIn("codex-claude-parity-check: pass|fail", phases[phase_id]["required_markers"])
             self.assertIn("hook-parity-check: pass|fail", phases[phase_id]["required_markers"])
