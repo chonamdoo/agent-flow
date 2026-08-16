@@ -33,7 +33,8 @@ from agent_flow.core.worktree_isolation import (  # noqa: E402
     resolve_run_subpath,
     write_run_subpath_text,
 )
-from agent_flow.runner import GATE_MALFORMED, Phase, Runner  # noqa: E402
+from agent_flow.core.route_verdicts import GATE_MALFORMED  # noqa: E402
+from agent_flow.runner import Phase, Runner  # noqa: E402
 
 
 # UTF-8로 디코드할 수 없는 바이트열. hook은 O_APPEND로 쓰므로 프로세스가 줄

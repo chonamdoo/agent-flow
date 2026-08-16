@@ -4143,7 +4143,7 @@ def test_push_pr_evidence_uses_profile_target_branch(
             stderr="",
         )
 
-    monkeypatch.setattr("agent_flow.runner.run_safe_command", fake_gh)
+    monkeypatch.setattr("agent_flow.core.delivery_evidence.run_safe_command", fake_gh)
     artifact = (
         "remote: origin\n"
         "branch: feat/release-target\n"

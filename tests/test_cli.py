@@ -518,21 +518,21 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("listed as a must-fix in `skills/clean-architecture/SKILL.md`", template)
 
     def test_python_runner_route_key_understands_gate_results(self) -> None:
-        from agent_flow.runner import _gates_route_key, _route_key
+        from agent_flow.core.route_verdicts import gates_route_key, route_key
 
         # gates 통과 JSON은 실제 command 결과가 있을 때만 green으로 정규화된다.
-        self.assertEqual(_gates_route_key('{"passed": true}'), "default")
-        self.assertEqual(_gates_route_key('{"passed": true, "results": []}'), "default")
+        self.assertEqual(gates_route_key('{"passed": true}'), "default")
+        self.assertEqual(gates_route_key('{"passed": true, "results": []}'), "default")
         self.assertEqual(
-            _gates_route_key('{"passed": true, "results": [{"command": "npm test", "passed": true, "output": "ok"}]}'),
+            gates_route_key('{"passed": true, "results": [{"command": "npm test", "passed": true, "output": "ok"}]}'),
             "green",
         )
         self.assertEqual(
-            _gates_route_key('{"passed": true, "results": [{"command": "npm test", "passed": true, "exit_code": 0}]}'),
+            gates_route_key('{"passed": true, "results": [{"command": "npm test", "passed": true, "exit_code": 0}]}'),
             "green",
         )
         self.assertEqual(
-            _gates_route_key(
+            gates_route_key(
                 '{"passed": true, "results": ['
                 '{"command": "npm test", "passed": true, "exit_code": 0, "required": true},'
                 '{"command": "npm run lint", "passed": false, "stderr": "missing", "required": false}'
@@ -541,34 +541,34 @@ class CliTest(unittest.TestCase):
             "green",
         )
         self.assertEqual(
-            _gates_route_key('{"passed": true, "status": "approve", "results": [{"command": "npm test", "passed": true, "output": "ok"}]}'),
+            gates_route_key('{"passed": true, "status": "approve", "results": [{"command": "npm test", "passed": true, "output": "ok"}]}'),
             "approve",
         )
-        self.assertEqual(_gates_route_key('{"passed": false, "results": []}'), "request-changes")
+        self.assertEqual(gates_route_key('{"passed": false, "results": []}'), "request-changes")
         self.assertEqual(
-            _gates_route_key('{"passed": false, "results": [{"id": "lint", "passed": true}]}'),
+            gates_route_key('{"passed": false, "results": [{"id": "lint", "passed": true}]}'),
             "request-changes",
         )
         self.assertEqual(
-            _gates_route_key('{"passed": false, "status": "request-changes", "results": []}'),
+            gates_route_key('{"passed": false, "status": "request-changes", "results": []}'),
             "request-changes",
         )
-        self.assertEqual(_gates_route_key('{"passed": false, "status": "blocked", "results": []}'), "blocked")
-        self.assertEqual(_gates_route_key('{"passed": false, "status": "error", "results": []}'), "error")
-        self.assertEqual(_gates_route_key('{"passed": false, "status": "pending", "results": []}'), "pending")
-        self.assertEqual(_route_key("status: failed"), "default")
-        self.assertEqual(_route_key("status: pass"), "default")
-        self.assertEqual(_route_key("- status: green"), "default")
-        self.assertEqual(_route_key("note: status: green"), "default")
-        self.assertEqual(_route_key("  status: green"), "default")
-        self.assertEqual(_route_key("- verdict: approve"), "default")
-        self.assertEqual(_route_key("status: green"), "green")
-        self.assertEqual(_route_key("status: ci_failed"), "ci_failed")
-        self.assertEqual(_route_key("status: has_comments"), "has_comments")
-        self.assertEqual(_route_key("status: has-comments"), "default")
+        self.assertEqual(gates_route_key('{"passed": false, "status": "blocked", "results": []}'), "blocked")
+        self.assertEqual(gates_route_key('{"passed": false, "status": "error", "results": []}'), "error")
+        self.assertEqual(gates_route_key('{"passed": false, "status": "pending", "results": []}'), "pending")
+        self.assertEqual(route_key("status: failed"), "default")
+        self.assertEqual(route_key("status: pass"), "default")
+        self.assertEqual(route_key("- status: green"), "default")
+        self.assertEqual(route_key("note: status: green"), "default")
+        self.assertEqual(route_key("  status: green"), "default")
+        self.assertEqual(route_key("- verdict: approve"), "default")
+        self.assertEqual(route_key("status: green"), "green")
+        self.assertEqual(route_key("status: ci_failed"), "ci_failed")
+        self.assertEqual(route_key("status: has_comments"), "has_comments")
+        self.assertEqual(route_key("status: has-comments"), "default")
         # JSON이 아닌 파일은 "게이트 실패"가 아니라 "판정 불가"다. default로 접으면
         # fix-loop가 근거 없이 돌기 시작한다.
-        self.assertEqual(_gates_route_key("status: pass"), "malformed-results")
+        self.assertEqual(gates_route_key("status: pass"), "malformed-results")
 
     def test_host_multi_review_requires_confined_reviewer_processes(self) -> None:
         from agent_flow.adapters.hosted import HostedAdapter, _multi_reviewer_block
