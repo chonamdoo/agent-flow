@@ -551,3 +551,35 @@ def test_a_concern_only_group_waits_for_the_concern():
     assert _names(routed_profile_skills(profile, concerns=["security"], **args)) == {
         "threat-model"
     }
+
+
+def test_a_rename_keeps_both_paths_in_the_change_set(tmp_path, monkeypatch):
+    """반증: rename 레코드의 원본 경로는 상태 접두사가 없다.
+
+    레코드마다 앞 3글자를 자르면 그 필드에서 실제 문자 3개가 사라져
+    `core/domain/A.kt`가 `e/domain/A.kt`가 되고, 파일을 옮기는 변경은 경로 기반
+    라우팅에서 조용히 빠진다.
+    """
+    from agent_flow.core.local_skills import _porcelain_paths
+
+    stdout = "R  core/domain/order/New.kt\0core/domain/order/Old.kt\0 D core/data/order/Gone.kt\0"
+
+    paths = _porcelain_paths(stdout)
+
+    assert paths == (
+        "core/domain/order/New.kt",
+        "core/domain/order/Old.kt",
+        "core/data/order/Gone.kt",
+    )
+
+
+def test_an_uppercase_extension_still_matches_its_glob():
+    """확장자 표기 하나로 skill 강제가 사라지면 안 된다. macOS에서 실제로 그랬다."""
+    from agent_flow.core.skill_resolver import selector_matches
+
+    assert selector_matches(
+        task_terms=[],
+        path_globs=["**/*.tsx"],
+        changed_files=["src/components/Button.TSX"],
+        task_text="",
+    )

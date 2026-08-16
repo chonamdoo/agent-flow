@@ -755,11 +755,16 @@ def entry_activation(
 
 
 def _glob_matches(pattern: str, candidate: str) -> bool:
-    if fnmatch(candidate, pattern):
+    # 대소문자를 접어서 본다. `fnmatch`는 POSIX에서 대소문자를 구분하므로
+    # `Button.TSX`가 `**/*.tsx`에 안 걸린다. 확장자 표기 하나로 skill 강제가
+    # 사라지는 쪽이 문서 한 장을 더 읽는 쪽보다 나쁘다.
+    folded_pattern = pattern.lower()
+    folded_candidate = candidate.lower()
+    if fnmatch(folded_candidate, folded_pattern):
         return True
     # `**/x` 는 최상위 경로에도 걸려야 한다. fnmatch는 이를 처리하지 않는다.
-    if pattern.startswith("**/"):
-        return fnmatch(candidate, pattern[3:])
+    if folded_pattern.startswith("**/"):
+        return fnmatch(folded_candidate, folded_pattern[3:])
     return False
 
 

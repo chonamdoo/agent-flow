@@ -28,7 +28,14 @@ SKILLS_READ_LOG = Path(".agent-flow") / "skills-read.jsonl"
 
 
 def changed_files(project_root: Path) -> tuple[str, ...]:
-    """working tree + staged 변경 경로. git이 없거나 실패하면 빈 튜플로 degrade한다."""
+    """working tree + staged 변경 경로. git이 없거나 실패하면 빈 튜플로 degrade한다.
+
+    rename/copy 레코드는 `XY <new>\\0<old>\\0` 두 필드다. 레코드를 독립적으로 보고
+    앞 3글자를 자르면 두 번째 필드(상태 접두사가 없는 원본 경로)에서 실제 문자
+    3개가 잘려 `core/domain/A.kt`가 `e/domain/A.kt`가 된다. 그 값은 어떤 glob에도
+    걸리지 않으므로 파일을 옮기는 변경은 경로 기반 skill 라우팅에서 조용히 사라진다.
+    삭제된 경로도 그대로 남긴다 — 계층 경계에서 파일이 사라진 것은 그 경계의 변경이다.
+    """
     # -uall이 없으면 git이 untracked 디렉터리를 `app/sdui/` 한 줄로 접어서
     # pathGlobs가 파일 경로를 못 본다.
     result = git_safe(
@@ -48,10 +55,25 @@ def changed_files(project_root: Path) -> tuple[str, ...]:
                 file=sys.stderr,
             )
         return ()
+    return _porcelain_paths(result.stdout)
+
+
+def _porcelain_paths(stdout: str) -> tuple[str, ...]:
+    fields = stdout.split("\0")
     paths: list[str] = []
-    for record in result.stdout.split("\0"):
-        if len(record) > 3:
-            paths.append(record[3:].replace("\\", "/"))
+    index = 0
+    while index < len(fields):
+        record = fields[index]
+        index += 1
+        if len(record) < 4:
+            continue
+        status, path = record[:2], record[3:]
+        paths.append(path.replace("\\", "/"))
+        if "R" in status or "C" in status:
+            # 원본 경로는 다음 필드다. 없으면(잘린 출력) 새 경로만 남긴다.
+            if index < len(fields) and fields[index]:
+                paths.append(fields[index].replace("\\", "/"))
+            index += 1
     return tuple(dict.fromkeys(paths))
 
 
