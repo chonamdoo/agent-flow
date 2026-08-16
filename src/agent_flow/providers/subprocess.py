@@ -92,8 +92,26 @@ def confined_provider_launch(
         provider_kind=provider_kind,
     )
     provider_argv = _verified_provider_argv(bound_argv, verified, env)
-    with tempfile.TemporaryDirectory(prefix="agent-flow-provider-") as temp_dir:
-        scratch = real_path(Path(temp_dir))
+    # `_prepare_provider_state`가 어느 자리에 쓰는지는 `provider_kind`로 결정된다.
+    # 정리도 같은 지식을 봐야 하므로 여기서 한 번 확정한다 - 두 자리가 갈라지면
+    # 지우려는 자리와 쓴 자리가 달라지고 `auth.json` 사본이 남는다.
+    provider_kind = provider_kind or _provider_kind(provider_argv[0])
+    # scratch 정리 실패는 reviewer 실패가 아니다. `TMPDIR`을 여기로 묶어 두므로
+    # 자식이 만든 0o500/0o000 디렉터리 하나가 `rmtree`를 ENOTEMPTY로 죽이고,
+    # 그 예외가 `with`를 타고 나가 **이미 artifact를 낸** provider를 실패로 만든다
+    # (실측: pytest를 돌린 reviewer가 `pytest-of-<user>/pytest-N`을 남겨 review
+    # phase 전체가 fail-closed로 막혔다). 정리는 결과를 검증하지 않으므로
+    # 판정 근거가 될 수 없다 - 남은 것은 OS temp reaper의 몫이다.
+    #
+    # 그렇다고 조용히 무시하면 안 된다. 이 scratch에는 `auth.json` 사본과 OMP
+    # state DB가 들어 있어서, 정리 실패가 곧 credential 잔존이다. 그래서 (1) 민감한
+    # 자리를 먼저 명시적으로 지우고, (2) 그래도 scratch가 남았으면 알린다.
+    # `with` 대신 직접 만들고 닫는 이유는 정리 순서를 이 세 단계로 고정하기 위함이다.
+    temp_scratch = tempfile.TemporaryDirectory(
+        prefix="agent-flow-provider-", ignore_cleanup_errors=True
+    )
+    scratch = real_path(Path(temp_scratch.name))
+    try:
         host_home = Path(
             str((env if env is not None else os.environ).get("HOME") or Path.home())
         ).expanduser()
@@ -130,15 +148,43 @@ def confined_provider_launch(
                 lease=lease,
                 scratch=scratch,
             )
-            return
-        with provider_lease(verified) as acquired:
-            yield ConfinedProviderLaunch(
-                argv=sandboxed_argv,
-                cwd=verified,
-                env=worker_env,
-                lease=acquired,
-                scratch=scratch,
+        else:
+            with provider_lease(verified) as acquired:
+                yield ConfinedProviderLaunch(
+                    argv=sandboxed_argv,
+                    cwd=verified,
+                    env=worker_env,
+                    lease=acquired,
+                    scratch=scratch,
+                )
+    finally:
+        # 이 teardown의 계약은 "정리 실패는 provider 실패가 아니다"다. 가운데 단계만
+        # `ignore_cleanup_errors=True`로 그 계약을 지키면 양옆이 무방비이고, 던지는
+        # 순간 이미 끝난 provider가 정리 오류로 실패로 뒤집힌다. 세 단계를 모두
+        # 계약 안에 둔다 — 구현 세부에 계약을 맡기지 않는다.
+        try:
+            surviving_state = _purge_provider_state(scratch, provider_kind)
+        except Exception as exc:
+            # 무엇이 지워졌는지 관측하지 못했다. 잔존을 놓치는 쪽이 더 나쁘므로
+            # 민감한 자리 전부를 남은 것으로 본다(`_path_exists`와 같은 방향).
+            surviving_state = _provider_state_paths(scratch, provider_kind)
+            print(
+                f"agent-flow: provider 상태 정리가 예외로 끝났다: {exc}",
+                file=sys.stderr,
             )
+        try:
+            temp_scratch.cleanup()
+        except Exception as exc:
+            print(
+                f"agent-flow: provider scratch 정리가 예외로 끝났다: {exc}",
+                file=sys.stderr,
+            )
+        try:
+            _report_surviving_scratch(scratch, state=surviving_state)
+        except Exception:
+            # 보고 자체가 실패하면 알릴 수단이 없다. 그 오류까지 provider 실패로
+            # 올리지는 않는다.
+            pass
 
 
 def _verified_provider_argv(
@@ -446,6 +492,51 @@ def verify_provider_sandbox_backend() -> Path:
     return backend
 
 
+# provider 자격증명·세션 상태 사본이 놓이는 scratch 하위 자리. `_prepare_provider_state`가
+# 여기에 쓰고 `_purge_provider_state`가 여기를 지운다. 두 자리가 갈라지면 `auth.json`
+# 사본이 정리에서 빠지므로 이름은 아래 layout 생성자에만 둔다.
+#
+# 자리 수는 provider마다 고정이다. 그것을 `tuple[Path, ...]`로 내면 호출부의 분해가
+# 타입에서 사라져 arity 변경이 런타임까지 밀린다. 이름 있는 필드로 드러낸다.
+@dataclass(frozen=True)
+class _CodexStateLayout:
+    state_home: Path
+
+    @property
+    def paths(self) -> tuple[Path, ...]:
+        return (self.state_home,)
+
+
+@dataclass(frozen=True)
+class _OmpStateLayout:
+    session_home: Path
+    isolated_home: Path
+
+    @property
+    def paths(self) -> tuple[Path, ...]:
+        return (self.session_home, self.isolated_home)
+
+
+def _codex_state_layout(scratch: Path) -> _CodexStateLayout:
+    return _CodexStateLayout(state_home=scratch / "codex-home")
+
+
+def _omp_state_layout(scratch: Path) -> _OmpStateLayout:
+    return _OmpStateLayout(
+        session_home=scratch / "omp-agent",
+        isolated_home=scratch / "home",
+    )
+
+
+def _provider_state_paths(scratch: Path, provider_kind: str | None) -> tuple[Path, ...]:
+    """정리 대상 전체. 여기만 provider 종류를 모른 채 순회한다."""
+    if provider_kind == "codex":
+        return _codex_state_layout(scratch).paths
+    if provider_kind == "omp":
+        return _omp_state_layout(scratch).paths
+    return ()
+
+
 def _prepare_provider_state(
     *,
     argv: Sequence[str],
@@ -455,7 +546,7 @@ def _prepare_provider_state(
 ) -> None:
     binary = provider_kind or _provider_kind(argv[0])
     if binary == "codex":
-        state_home = scratch / "codex-home"
+        state_home = _codex_state_layout(scratch).state_home
         state_home.mkdir(mode=0o700)
         state_home.chmod(0o700)
         configured_home = env.get("CODEX_HOME")
@@ -473,15 +564,90 @@ def _prepare_provider_state(
                 str(Path(env.get("HOME", str(Path.home()))) / ".omp" / "agent"),
             )
         ).expanduser()
-        session_home = scratch / "omp-agent"
+        omp = _omp_state_layout(scratch)
+        session_home = omp.session_home
+        isolated_home = omp.isolated_home
         session_home.mkdir(mode=0o700)
         session_home.chmod(0o700)
         _snapshot_omp_state(source_agent_home, session_home)
-        isolated_home = scratch / "home"
         isolated_home.mkdir(mode=0o700)
         isolated_home.chmod(0o700)
         env["HOME"] = str(isolated_home)
         env["PI_CODING_AGENT_DIR"] = str(session_home)
+
+
+def _purge_provider_state(scratch: Path, provider_kind: str | None) -> tuple[Path, ...]:
+    """자격증명·세션 상태 사본을 scratch 전체 정리보다 **먼저** 지운다.
+
+    scratch 정리는 실패해도 provider를 실패로 만들지 않는다. 그 관용이 credential
+    사본까지 덮으면 `auth.json`과 OMP state DB가 `/var/folders`에 남는다. 그래서
+    민감한 자리는 따로, 먼저 지운다. 그래도 남은 자리를 돌려준다 - 조용히 넘기지
+    않기 위한 것이다.
+    """
+    remaining: list[Path] = []
+    for path in _provider_state_paths(scratch, provider_kind):
+        shutil.rmtree(path, ignore_errors=True)
+        if not _path_exists(path):
+            continue
+        # 자식이 하위 디렉터리를 0o500/0o000으로 만들어 두면 unlink가 EACCES로 막힌다.
+        # 우리가 만든 자리이므로 소유자 권한을 되돌리고 한 번 더 지운다.
+        _restore_owner_access(path)
+        shutil.rmtree(path, ignore_errors=True)
+        if _path_exists(path):
+            remaining.append(path)
+    return tuple(remaining)
+
+
+def _restore_owner_access(path: Path) -> None:
+    """`path` 아래에서 소유자 권한을 복구한다. 심볼릭 링크는 따라가지 않는다."""
+    try:
+        if path.is_symlink():
+            return
+        os.chmod(path, 0o700)
+        children = tuple(path.iterdir()) if path.is_dir() else ()
+    except OSError:
+        return
+    for child in children:
+        _restore_owner_access(child)
+
+
+def _path_exists(path: Path) -> bool:
+    """존재를 확인할 수 없으면 남은 것으로 본다. 잔존을 놓치는 쪽이 더 나쁘다.
+
+    `Path.exists()`로는 그 계약을 지킬 수 없다. 그 메서드는 ENOENT뿐 아니라
+    ENOTDIR·EBADF·ELOOP를 자기 안에서 삼켜 `False`를 돌려주므로 `except OSError`에
+    영영 도달하지 못하고, **관측 실패가 "지워졌다"로 접힌다.** 그러면 살아남은
+    credential 사본을 `_purge_provider_state`가 건너뛰고 잔존 보고까지 조용해진다.
+    오류가 실제로 올라오는 `os.lstat`으로 묻고, 관측된 부재(ENOENT·ENOTDIR)만
+    부재로 읽는다.
+
+    링크는 따라가지 않는다. 끊어진 심볼릭 링크는 대상이 없어도 지워야 할 자리로
+    남아 있고, `shutil.rmtree`는 심볼릭 링크를 지우지 못한다.
+    """
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _report_surviving_scratch(scratch: Path, *, state: Sequence[Path]) -> None:
+    """정리가 실패해 남은 scratch를 알린다. 조용한 잔존이 credential 잔존이다."""
+    if state:
+        print(
+            "agent-flow: provider 자격증명 사본을 지우지 못했다. 직접 지워라: "
+            + ", ".join(str(path) for path in state),
+            file=sys.stderr,
+        )
+        return
+    if _path_exists(scratch):
+        print(
+            "agent-flow: provider scratch 정리가 실패해 남았다(자격증명 사본은 지웠다). "
+            f"OS temp reaper가 거둘 때까지 남는다: {scratch}",
+            file=sys.stderr,
+        )
 
 
 def _snapshot_omp_state(source_home: Path, target_home: Path) -> None:

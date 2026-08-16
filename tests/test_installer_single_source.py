@@ -538,6 +538,41 @@ def test_both_entry_points_sync_the_recorded_kit_assets(entry: str):
         f"{entry}가 자산 트리를 직접 지명한다; 목록은 공유 모듈 한 벌이다"
     )
 
+# 두 진입점이 각자 본문을 들고 있는 세 함수. 셋 다 `backupIfDifferent`의 답을 읽고
+# 그 자리에서 원본을 덮는다.
+_BACKUP_CONSUMERS = ("upgradeManagedHooks", "upgradeBundledProfiles", "installOmpHooks")
+
+
+def _function_body(source: str, name: str) -> str:
+    start = re.search(rf"^function {re.escape(name)}\(", source, re.M)
+    assert start is not None, f"{name}()를 찾지 못했다"
+    end = source.index("\n}\n", start.start())
+    return source[start.start():end]
+
+
+@pytest.mark.parametrize("name", _BACKUP_CONSUMERS)
+def test_both_entry_points_read_the_backup_verdict_the_same_way(name: str):
+    """불변: `backupIfDifferent`는 "덮어도 되는가"를 답한다. 한쪽 진입점만 그 답을
+
+    읽으면 어느 CLI로 깔았는지에 따라 사본 없는 덮어쓰기가 갈린다 - 실측: 두 진입점이
+    답을 falsy 하나로 읽던 동안, 사본 자리가 고갈된 프로젝트에서 사용자가 고친 hook이
+    둘 다에서 사본 없이 사라졌다. 계약을 소비하는 줄이 두 파일에서 같은지 본다."""
+    guards = {}
+    for entry in ("agent-flow-kit.mjs", "agent-flow-install.mjs"):
+        body = _function_body((BIN / entry).read_text(encoding="utf-8"), name)
+        guards[entry] = [
+            line.strip()
+            for line in body.splitlines()
+            if "backupIfDifferent(" in line or "safeToWrite" in line
+        ]
+        assert guards[entry], f"{entry}의 {name}()가 사본 판정을 읽지 않는다"
+        assert any("safeToWrite" in line for line in guards[entry]), (
+            f"{entry}의 {name}()가 사본을 못 남긴 경우를 구분하지 않고 덮는다"
+        )
+    assert len(set(map(tuple, guards.values()))) == 1, (
+        f"{name}()가 두 진입점에서 사본 판정을 다르게 읽는다: {guards}"
+    )
+
 # 두 JS 진입점이 공유해야 하는 helper. 사본이 다시 생기면 여기서 걸린다.
 _SHARED_ONLY = (
     "hookScriptCommand",

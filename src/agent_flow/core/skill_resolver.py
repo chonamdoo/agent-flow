@@ -377,14 +377,18 @@ def skill_prompt_block(
 ) -> str:
     """resolver 결과만 프롬프트에 넣는다. profile YAML 전량 dump를 대체한다.
 
-    `enforced`는 이 phase에 실제로 read gate가 걸리는지다. 게이트 없는 phase에서
+    `enforced`는 이 phase에 실제로 완료 게이트가 걸리는지다. 게이트 없는 phase에서
     "Read every one of these"는 거짓 약속이고, 거짓 약속은 지켜지는 다른 게이트의
     신뢰까지 깎는다. 강제를 늘리는 대신 문구를 사실대로 적는다.
 
+    강제되는 phase에서도 게이트가 하는 일은 **자기신고 요구**다. 읽음 관측은
+    진단에만 쓰이고 차단하지 않는다(`local_skills.missing_local_skill_markers`의 L2).
+    그러니 여기서 관측 기반 강제를 약속하면 안 된다.
+
     문구 순서는 취향이 아니다. Vercel의 Next.js 16 eval에서 같은 skill·같은 문서로
     "먼저 skill을 호출하라"는 문서 패턴에 앵커링돼 프로젝트 컨텍스트를 놓쳤고,
-    "프로젝트를 먼저 훑고 그 다음 호출하라"가 더 나은 결과를 냈다. 게이트는 읽음
-    여부만 보고 순서는 보지 않으므로, 강제는 그대로 두고 순서만 사실대로 권한다.
+    "프로젝트를 먼저 훑고 그 다음 호출하라"가 더 나은 결과를 냈다. 게이트는 순서도
+    읽음 여부도 보지 않으므로, 강제는 그대로 두고 순서만 사실대로 권한다.
     """
     if not resolution.required and not resolution.optional:
         return ""
@@ -400,8 +404,11 @@ def skill_prompt_block(
     if resolution.required:
         lines.append(
             "First skim the files this phase actually changes, then read every one of "
-            "these before you write or judge code. The completion gate blocks this "
-            "phase when a listed skill exists on disk and was never opened during it:"
+            "these before you write or judge code. The completion gate takes your word "
+            "for it — it blocks this phase until the artifact records a "
+            "`skill-use-evidence` value, and it does not check which files you actually "
+            "opened; when nothing was recorded during this phase the block message says "
+            "so, and nothing more:"
             if enforced
             else "This phase has no skill read gate. Nothing below is machine-checked "
             "— skim the change first, then read the ones that actually apply:"

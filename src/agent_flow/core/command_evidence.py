@@ -10,8 +10,17 @@
 가짜 테스트는 관측으로 갈 수 없다. 이 층에 그 이상을 기대하면 안 된다.
 
 hook이 없는 host에서는 로그 파일 자체가 없다. 그때는 `available=False`로
-축퇴시키고 자기신고(`unavailable`)를 받는다 — L2와 같은 계약이다. 관측 불가를
-위반으로 들면 hook 미지원 host에서 모든 런이 막힌다.
+축퇴시키고 자기신고(`unavailable`)를 받는다 — 관측 불가를 위반으로 들면 hook
+미지원 host에서 모든 런이 막힌다.
+
+**skill 쪽 L2와 같은 계약이 아니다.** 관측이 가능한 host에서 이쪽은 관측으로
+막는다(`missing_test_evidence_markers`: 실행이 하나도 안 잡히면 자기신고가
+무엇이든 차단이다). skill 쪽 L2(`local_skills.missing_local_skill_markers`)는
+자기신고 하나만 요구하고 관측은 진단에만 쓴다. 갈라진 이유는 생산자다 —
+`record-command-run.py`는 argv를 실행 시점에 잡으므로 hook이 로드된 세션이면
+빠짐이 없지만, skill 읽음 기록은 hook이 없는 세션에서 실제 읽기를 놓치면서도
+다른 세션이 만든 로그 파일 때문에 `available=True`가 되어 그 세션을 영원히
+막았다. 두 층을 같은 문장으로 요약하지 마라.
 """
 from __future__ import annotations
 

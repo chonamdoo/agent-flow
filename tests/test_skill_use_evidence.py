@@ -19,7 +19,7 @@ if SRC not in sys.path:
 HOOK = REPO / "scripts" / "hooks" / "record-skill-read.py"
 
 from agent_flow.core.local_skills import missing_local_skill_markers, read_skill_evidence
-from agent_flow.core.skill_resolver import PhaseSkills, ResolvedSkill
+from agent_flow.core.skill_resolver import PhaseSkills
 
 
 def _project(tmp_path: Path) -> Path:
@@ -101,21 +101,15 @@ def test_unsafe_skill_name_is_not_recorded(tmp_path):
     assert _log(root) == []
 
 
-def test_evidence_covers_a_skill_used_through_the_skill_tool(tmp_path):
+def test_a_skill_used_through_the_skill_tool_is_read_back_by_name(tmp_path):
+    """hook이 쓴 이름이 진단 입력까지 이어지는지. 경로 대조는 이제 없다."""
     root = _project(tmp_path)
     _run_hook(root, {"tool_name": "Skill", "tool_input": {"skill": "alpha"}})
 
     evidence = read_skill_evidence(root)
 
     assert evidence.available
-    assert evidence.covers(
-        ResolvedSkill(
-            name="alpha",
-            path=root / "skills" / "alpha" / "SKILL.md",
-            source="project",
-            exists=True,
-        )
-    )
+    assert "alpha" in evidence.used_names
 
 
 def _gate(evidence_line: str) -> str:
@@ -170,3 +164,188 @@ def test_shell_commands_that_do_not_read_are_not_evidence(tmp_path):
         _run_hook(root, {"tool_name": "Bash", "tool_input": {"command": command}})
 
     assert _log(root) == []
+
+
+# --- L2 계약: 강제는 자기신고, 관측은 진단 -----------------------------------
+#
+# 관측으로 막던 시절에는 read hook이 로드되지 않은 host 세션이 영원히 막혔다.
+# 그 세션은 기록을 남길 수 없는데, 다른 세션이 만들어 둔 로그 파일 때문에 관측이
+# "가능"으로 판정되어 자기가 만들 수 없는 marker를 요구받았다.
+
+
+def _installed_skill(root: Path) -> Path:
+    skill = root / "skills" / "alpha" / "SKILL.md"
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    skill.write_text("# alpha\n", encoding="utf-8")
+    return skill
+
+
+def _stale_log(root: Path, *, at: float) -> None:
+    """다른(예전) 세션이 남겨 둔 로그. 이번 phase 기록은 하나도 없는 상태다."""
+    log = root / ".agent-flow" / "skills-read.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(
+        json.dumps({"path": str(root / "skills" / "other" / "SKILL.md"), "at": at}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _phase_markers(root: Path, gate: str, *, since: float | None = None) -> list[str]:
+    return missing_local_skill_markers(
+        gate,
+        root,
+        "implement",
+        phase_skills=PhaseSkills(required=("alpha",)),
+        profile={},
+        since=since,
+    )
+
+
+def test_unread_required_skill_does_not_block_when_self_reported(tmp_path):
+    """관측을 이유로 막지 않는다. 낮춘 지점 자신이다."""
+    root = _project(tmp_path)
+    _installed_skill(root)
+    _run_hook(root, {"tool_name": "Skill", "tool_input": {"skill": "unrelated"}})
+
+    assert _phase_markers(root, _gate("skill-use-evidence: verified")) == []
+
+
+def test_missing_self_report_still_blocks(tmp_path):
+    """뭐라도 신고하게 하는 강제는 남는다."""
+    root = _project(tmp_path)
+    _installed_skill(root)
+    _run_hook(root, {"tool_name": "Skill", "tool_input": {"skill": "alpha"}})
+
+    missing = _phase_markers(root, _gate("skills-checked: true"))
+
+    assert [item for item in missing if item.startswith("skill-use-evidence")]
+
+
+def test_blocker_points_at_the_session_when_the_phase_recorded_nothing(tmp_path):
+    """로그는 읽히는데 이번 phase 기록이 0건이면 원인을 알려 준다."""
+    root = _project(tmp_path)
+    _installed_skill(root)
+    started = 10_000.0
+    _stale_log(root, at=started - 100)
+
+    missing = _phase_markers(root, _gate("skills-checked: true"), since=started)
+
+    joined = "\n".join(missing)
+    assert "nothing was recorded during this phase" in joined
+    assert "restart it" in joined
+
+
+def test_the_diagnosis_is_not_glued_onto_a_marker_name(tmp_path):
+    """반증: 산문을 marker 원소에 붙이면 그것을 그대로 옮겨 적은 artifact가 영구 차단된다.
+
+    이 리스트는 runner가 "이 marker들을 artifact에 적어라"로 그대로 보여 주는
+    계약 표면이다. 이 강제는 값을 열거(`verified`/`unavailable`)로 대조하므로
+    `skill-use-evidence: verified|unavailable (…)`을 옮겨 적으면 값이 열거에 없어
+    같은 자리에서 다시 막힌다. 그래서 marker 원소는 정확히 marker 이름이어야 하고,
+    진단은 marker 모양(`key: value`)을 갖지 않는 별 원소로 나가야 한다.
+    """
+    root = _project(tmp_path)
+    _installed_skill(root)
+    started = 10_000.0
+    _stale_log(root, at=started - 100)
+
+    missing = _phase_markers(root, _gate("skills-checked: true"), since=started)
+
+    marker = [item for item in missing if item.startswith("skill-use-evidence")]
+    assert marker == ["skill-use-evidence: verified|unavailable"]
+    diagnosis = next(item for item in missing if "nothing was recorded" in item)
+    assert ":" not in diagnosis, diagnosis
+
+
+def test_every_marker_shaped_element_carries_a_gate_key(tmp_path):
+    """불변: 원소가 `key: value` 모양이면 그 key는 게이트가 실제로 읽는 marker 이름이다.
+
+    반증: 위 테스트만 있으면 다른 층이 같은 실수를 반복해도 조용하다.
+    """
+    root = _project(tmp_path)
+    _installed_skill(root)
+    started = 10_000.0
+    _stale_log(root, at=started - 100)
+
+    missing = _phase_markers(root, _gate("skills-checked: true"), since=started)
+
+    read_keys = {
+        "skill-availability",
+        "skill-use-evidence",
+        "project-local-skills",
+        "project-local-skills-used",
+        "project-local-skill-docs",
+        "missing-required-profile-skills",
+    }
+    for item in missing:
+        key, separator, _value = item.partition(":")
+        if separator:
+            assert key in read_keys, item
+
+
+def test_no_diagnosis_when_the_log_cannot_be_read(tmp_path):
+    """관측할 수 없으면 진단하지 않는다. 없는 사실을 말하지 않는다."""
+    root = _project(tmp_path)
+    _installed_skill(root)
+
+    missing = _phase_markers(root, _gate("skills-checked: true"))
+
+    blocker = next(item for item in missing if item.startswith("skill-use-evidence"))
+    assert blocker == "skill-use-evidence: verified|unavailable"
+
+
+def test_hookless_session_passes_by_reporting_unavailable(tmp_path):
+    """원래 결함의 직접 반증.
+
+    이 세션에는 read hook이 없어 기록을 남길 수 없고, 로그 파일은 다른 세션이 이미
+    만들어 뒀다. 예전에는 이 조합이 `unavailable` 자기신고를 무시하고 영원히 막았다.
+    """
+    root = _project(tmp_path)
+    _installed_skill(root)
+    started = 10_000.0
+    _stale_log(root, at=started - 100)
+
+    assert _phase_markers(root, _gate("skill-use-evidence: unavailable"), since=started) == []
+
+
+# --- skill L2와 test evidence는 반대 계약이다 --------------------------------
+
+
+def test_the_skill_and_command_evidence_layers_do_not_share_one_contract(tmp_path):
+    """반증: `command_evidence` 모듈 docstring이 "L2와 같은 계약"이라고 적어 뒀다.
+
+    skill 쪽 L2만 자기신고로 낮췄으므로 두 층은 이제 반대다. 관측이 가능한 같은
+    조건(로그는 읽히고 이번 phase의 해당 기록은 0건)에서 답이 갈리는 것을 못 박고,
+    docstring이 다시 둘을 같다고 말하지 않는지 함께 본다. 문서만 검사하면 강제가
+    갈라져도 조용하고, 행동만 검사하면 문서가 거짓이어도 조용하다.
+    """
+    from agent_flow.core import command_evidence
+    from agent_flow.core.command_evidence import missing_test_evidence_markers
+
+    root = _project(tmp_path)
+    _installed_skill(root)
+    started = 10_000.0
+    _stale_log(root, at=started - 100)
+    # 실행 로그는 읽히지만 테스트 명령은 하나도 없다.
+    commands = root / ".agent-flow" / "commands-run.jsonl"
+    commands.write_text(
+        json.dumps({"command": "git status", "cwd": str(root), "at": started + 1, "exit_code": 0})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    # skill 쪽: 자기신고가 관측을 이긴다.
+    assert _phase_markers(root, _gate("skill-use-evidence: verified"), since=started) == []
+    # test 쪽: 관측이 자기신고를 이긴다.
+    assert missing_test_evidence_markers(
+        root,
+        "implement",
+        "## Completion Gate\ntest-run-evidence: verified\n",
+        profile={},
+        since=started,
+        cwd_root=root,
+    )
+
+    doc = command_evidence.__doc__ or ""
+    assert "L2와 같은 계약이다" not in doc
+    assert "같은 계약이 아니다" in doc

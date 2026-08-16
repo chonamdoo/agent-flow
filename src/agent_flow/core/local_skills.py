@@ -10,21 +10,10 @@ from typing import Sequence
 from agent_flow.core.markers import completion_gate_marker_values
 from agent_flow.core.profiles import active_profile_ids, load_profile_payload
 from agent_flow.core.profile_routing import routed_profile_skills
-from agent_flow.core.worktree_isolation import (
-    WorktreeIsolationError,
-    adopted_checkout_path,
-    adopted_worktree_parent,
-    git_repo_state,
-    git_safe,
-    leader_root_for,
-    list_registered_worktrees,
-    real_path,
-    trusted_checkout_paths,
-)
+from agent_flow.core.worktree_isolation import git_repo_state, git_safe
 from agent_flow.core.skill_resolver import (
     CODE_PHASES,
     PhaseSkills,
-    ResolvedSkill,
     SkillResolution,
     resolve_phase_skills,
     skill_prompt_block,
@@ -145,63 +134,23 @@ def resolved_profile(project_root: Path, requested: str | None = None) -> dict |
 
 @dataclass(frozen=True)
 class SkillReadEvidence:
-    """L2 관측 결과. hook이 없으면 available=False이고 강제하지 않는다.
+    """L2 관측 결과. 게이트를 막는 데는 쓰지 않고 진단에만 쓴다.
 
     한계를 분명히 해 둔다: 이 기록은 agent가 쓰기 가능한 워크스페이스 안의 평문
-    로그다. 서명도 소유권 검증도 없으므로 **위조 불가능한 증명이 아니다.**
-    자기신고보다 강한 이유는 하나뿐이다 — 통과하려면 실제 tool 호출을 흉내 내는
-    별도 행위가 필요하고, 그 행위가 로그에 남는다. 신뢰 수준을 그 이상으로
-    표현하지 마라.
+    로그다. 서명도 소유권 검증도 없으므로 **위조 불가능한 증명이 아니다.** 게다가
+    hook이 로드되지 않은 세션에서는 실제 읽기도 기록되지 않는다 — 기록이 없다는
+    것은 "안 읽었다"가 아니라 "관측되지 않았다"는 뜻이다. 그래서 이 값으로
+    차단하지 않고, 자기신고가 없어 막는 순간의 원인 안내에만 쓴다.
+
+    진단만 쓰므로 개별 skill과 기록을 대조하지 않는다. 그 대조(체크아웃 기준
+    상대경로 매칭)는 관측으로 차단하던 L2 가지가 유일한 소비자였고 함께 지웠다.
     """
 
+    # 로그를 읽을 수 있었는가. 강제 여부가 아니라 진단 가능 여부다.
     available: bool
     read_paths: frozenset[str]
-    # 같은 저장소의 다른 체크아웃들(leader와 worktree). 같은 skill이 여기 각각
-    # 존재하므로 절대경로는 다르지만 체크아웃 기준 상대경로는 같다.
-    checkout_roots: tuple[str, ...] = ()
     # Skill tool과 `skill://`은 경로를 주지 않는다. 이름만 관측되는 사용 경로다.
     used_names: frozenset[str] = frozenset()
-
-    def covers(self, skill: ResolvedSkill) -> bool:
-        if skill.name in self.used_names:
-            return True
-        if skill.path is None:
-            return False
-        resolved = skill.path.resolve()
-        if str(resolved) in self.read_paths:
-            return True
-        # worktree 안에서 읽으면 같은 skill이라도 절대경로가 leader와 다르다.
-        # 경로 동등비교만 하면 실제로 읽은 skill을 "안 읽었다"고 차단한다.
-        #
-        # 그렇다고 이름이나 경로 꼬리로 비교하면 안 된다. `skills/<n>/SKILL.md`
-        # 꼬리는 project·bundled·host root 7곳이 전부 공유해서, 낡은 사본이나
-        # `/tmp/skills/<n>/SKILL.md`를 읽어도 통과해 버린다. 체크아웃 기준
-        # **상대경로**가 같을 때만 같은 skill로 본다.
-        target = _checkout_relative(resolved, self.checkout_roots)
-        if target is None:
-            return False
-        return any(
-            _checkout_relative(Path(path), self.checkout_roots) == target
-            for path in self.read_paths
-        )
-
-
-def _checkout_relative(path: Path, roots: Sequence[str]) -> str | None:
-    """path를 담고 있는 체크아웃 root를 찾아 그 기준 상대경로를 돌려준다.
-
-    **가장 긴** root가 이긴다. checkout root 목록에는 leader와 예전 내부 worktree
-    (`<leader>/.agent-flow/worktrees/<name>`)가 함께 있을 수 있다. leader가 접두사로
-    먼저 걸리면 상대경로가 `.agent-flow/worktrees/...`가 되어 같은 skill을 못 알아본다.
-    """
-    text = str(path)
-    best: str | None = None
-    best_len = -1
-    for root in roots:
-        prefix = root.rstrip("/") + "/"
-        if text.startswith(prefix) and len(prefix) > best_len:
-            best = text[len(prefix):]
-            best_len = len(prefix)
-    return best
 
 
 def phase_skill_resolution(
@@ -288,18 +237,28 @@ def missing_local_skill_markers(
     if values.get("skill-availability") not in {"pass", "degraded", "n/a"}:
         missing.append(AVAILABILITY_MARKER)
 
-    # L2: 진짜 강제 지점. 디스크에 있는데 안 읽은 skill만 막는다.
-    #     hook이 없는 host는 관측이 불가능하므로 unavailable로 기록만 하고 통과시킨다.
-    evidence = read_skill_evidence(project_root, since=since)
-    if evidence.available:
-        unread = [skill for skill in resolution.available_required if not evidence.covers(skill)]
-        if unread:
-            missing.append(
-                f"skill-use-evidence: verified ({len(unread)} required skill(s) were "
-                "never opened during this phase)"
-            )
-    elif values.get("skill-use-evidence") not in {"verified", "unavailable"}:
+    # L2: 강제는 자기신고 하나로 한다. 관측은 진단에만 쓴다.
+    #
+    #     관측으로 강제하면 read hook이 로드되지 않은 host 세션이 영원히 막힌다.
+    #     그 세션은 skill을 실제로 읽어도 기록을 남기지 못하는데, 다른 세션이 로그
+    #     파일을 한 번이라도 만들어 뒀으면 available=True가 되어 "안 읽었다"로 차단된다.
+    #     자기가 만들 수 없는 marker를 요구받는 상태이고, `unavailable`로 자기신고해도
+    #     그 가지에는 닿지 못했다. 그래서 관측을 강제 조건에서 뺀다. 로그에서 안 읽은
+    #     skill이 보이는 것은 이제 blocker가 아니다.
+    #
+    #     이 교환의 대가: 읽지 않고 `verified`라고 적으면 이제 통지 없이 통과한다.
+    #     그것을 잡아내던 자리는 여기 하나뿐이었다. 남은 것은 "뭐라도 신고하게 하는"
+    #     강제와, 막는 순간 붙는 진단뿐이다.
+    if values.get("skill-use-evidence") not in {"verified", "unavailable"}:
         missing.append(USE_EVIDENCE_MARKER)
+        # 진단은 marker 이름에 붙이지 않는다. 이 리스트는 runner가 "이 marker들을
+        # artifact에 적어라"로 그대로 보여 주는 자리이고(`runner.py`가 `', '.join`으로
+        # 출력), 이 강제는 값을 열거로 대조한다. `skill-use-evidence: verified|unavailable
+        # (…)`을 통째로 옮겨 적으면 값이 열거에 없어 같은 자리에서 다시 막힌다 —
+        # 관측으로 막던 base에서는 그 가지가 값을 안 봐서 무해했던 형태다.
+        diagnosis = _use_evidence_diagnosis(project_root, since=since)
+        if diagnosis:
+            missing.append(diagnosis)
 
     # L3: 자기신고는 표시용이다. resolver가 required로 판정하고 실제로 있는 것만 요구한다.
     if values.get("project-local-skills") != "checked":
@@ -336,12 +295,35 @@ def missing_local_skill_markers(
     return missing
 
 
+def _use_evidence_diagnosis(project_root: Path, *, since: float | None) -> str:
+    """자기신고가 없어 막는 그 순간에만 붙는 원인 안내.
+
+    관측할 수 없으면(로그 파일이 없거나 못 읽으면) 아무 말도 하지 않는다. 없는
+    사실을 지어내지 않기 위해서다. hook 등록 여부는 조회하지 않으므로 "이 host에
+    등록됐다/안 됐다"는 말할 수 없고, 말할 수 있는 사실은 "이번 phase 기록이 0건"뿐이다.
+    """
+    evidence = read_skill_evidence(project_root, since=since)
+    if not evidence.available or evidence.read_paths or evidence.used_names:
+        return ""
+    # marker 모양(`key: value`)을 피한다. 이 문구는 marker 목록에 별 원소로 실려
+    # 나가므로, 콜론이 있으면 그 자체가 적어야 할 marker로 읽힌다.
+    return (
+        "(nothing was recorded during this phase; if you did read them this host "
+        "session has not loaded the read hook - restart it and report `unavailable` "
+        "if records still do not appear)"
+    )
+
+
 def read_skill_evidence(project_root: Path, *, since: float | None = None) -> SkillReadEvidence:
-    """Read hook이 남긴 기록을 읽는다. 파일이 없으면 hook 미등록/미지원 host로 본다."""
-    roots = _checkout_roots(project_root)
+    """Read hook이 남긴 기록을 읽는다.
+
+    `available`은 **로그를 읽을 수 있었는가**일 뿐이다. 게이트 통과 여부를 정하지
+    않고 진단을 할 수 있는지만 정한다. 파일이 없으면 이 host/체크아웃에서는 관측
+    자체가 불가능한 상태로 본다.
+    """
     log_path = project_root / SKILLS_READ_LOG
     if not log_path.is_file():
-        return SkillReadEvidence(available=False, read_paths=frozenset(), checkout_roots=roots)
+        return SkillReadEvidence(available=False, read_paths=frozenset())
     paths: set[str] = set()
     names: set[str] = set()
     try:
@@ -350,7 +332,7 @@ def read_skill_evidence(project_root: Path, *, since: float | None = None) -> Sk
         # 죽인다. 이 로그는 hook이 append-only로 쓰는 것이라 잘린 줄이 언제든 섞인다.
         raw = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return SkillReadEvidence(available=False, read_paths=frozenset(), checkout_roots=roots)
+        return SkillReadEvidence(available=False, read_paths=frozenset())
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -372,80 +354,8 @@ def read_skill_evidence(project_root: Path, *, since: float | None = None) -> Sk
     return SkillReadEvidence(
         available=True,
         read_paths=frozenset(paths),
-        checkout_roots=roots,
         used_names=frozenset(names),
     )
-
-
-def _trusted_checkout(*, base: Path, path: Path) -> bool:
-    """이 checkout에서 읽은 skill을 증거로 인정할 수 있는가.
-
-    등록만으로는 안 된다. 활성 워커도 `git worktree add`를 할 수 있고, 그렇게 만든
-    checkout에 변조한 `skills/<name>/SKILL.md`를 두면 증거 게이트가 leader 정본을 읽은
-    것으로 인정한다. 채택 기록은 지문까지 대조한다 — 채택했던 자리를 지우고 다시 만든
-    checkout은 기록의 경로는 맞지만 지문이 낡아서 여기서 걸린다.
-    """
-    if adopted_worktree_parent(root=base, path=path) is not None:
-        return True
-    # 생성 규약이 정한 자리(관리 루트 아래)는 채택 기록 없이도 agent-flow가 만든 것이다.
-    adopted = adopted_checkout_path(root=base, name=path.name)
-    layout = tuple(
-        candidate
-        for candidate in trusted_checkout_paths(root=base, name=path.name)
-        if candidate != adopted
-    )
-    return real_path(path) in layout
-
-
-def _checkout_roots(project_root: Path) -> tuple[str, ...]:
-    """같은 저장소의 체크아웃 root들.
-
-    양방향이어야 한다. worktree에서 돌면 leader를, leader에서 돌면 그 아래
-    관리형 worktree들을 함께 본다. 게이트는 항상 leader root로 불리는데
-    (`cli.py`가 `config_root=root`를 넘긴다) agent는 worktree cwd에서 상대경로로
-    읽는다. leader 쪽만 보면 정당한 읽음이 전부 미인정으로 차단된다.
-    """
-    roots = [str(project_root.resolve())]
-
-    def add(path) -> None:
-        resolved = str(Path(path).resolve())
-        if resolved not in roots:
-            roots.append(resolved)
-
-    leader = leader_root_for(project_root)
-    if leader is not None:
-        add(leader)
-    base = Path(leader if leader is not None else project_root)
-    try:
-        # 등록부가 authority다. 관리 루트 밖 linked worktree(Orca 워크스페이스 등)는
-        # 디렉터리 스캔에 안 잡히고, 그러면 그 checkout에서 읽은 skill이 전부
-        # 미인정으로 차단된다. 조회가 실패하면 아래 스캔 결과만 남는다 — 실패로
-        # 목록을 넓히지는 않는다.
-        for registered in list_registered_worktrees(base):
-            # prunable 행은 checkout이 이미 사라진 자리다.
-            if registered.prunable or not (registered.path / ".git").exists():
-                continue
-            if not _trusted_checkout(base=base, path=registered.path):
-                continue
-            add(registered.path)
-    except WorktreeIsolationError:
-        pass
-    checkout_parent = base / ".agent-flow" / "worktrees"
-    try:
-        entries = sorted(checkout_parent.iterdir())
-    except OSError:
-        entries = []
-    for entry in entries:
-        # 디렉터리라는 것만으로 신뢰하면 안 된다. 삭제 잔재나 누가 만들어 둔
-        # 빈 디렉터리, 저장소 밖을 가리키는 symlink까지 "같은 체크아웃"으로
-        # 인정돼 엉뚱한 파일을 읽고도 게이트를 통과한다. git이 인정한 linked
-        # worktree만 받는다.
-        if entry.is_symlink() or not entry.is_dir():
-            continue
-        if not (entry / ".git").exists():
-            continue
-        add(entry)
-    return tuple(roots)
 
 
 def record_skill_read(project_root: Path, skill_path: Path) -> None:

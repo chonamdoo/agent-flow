@@ -7,11 +7,14 @@
 """
 from __future__ import annotations
 
+import errno
 import os
+import shutil
 import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -626,6 +629,244 @@ def test_confined_provider_launch_pins_claude_temp_to_private_scratch(
         assert launch.env["CLAUDE_CODE_TMPDIR"] == str(launch.scratch)
 
 
+def test_a_scratch_cleanup_failure_does_not_fail_the_provider(tmp_path, monkeypatch):
+    """scratch 정리 실패가 이미 끝난 provider를 실패로 만들지 않는다.
+
+    실측한 자리다. `TMPDIR`이 scratch를 가리키므로 sandbox 안에서 pytest를 돌린
+    reviewer가 그 아래에 `pytest-of-<user>/pytest-N`을 남기고, 정리가
+    `[Errno 66] Directory not empty`로 죽어 artifact를 이미 낸 reviewer가 실패로
+    집계됐다 - review phase 전체가 fail-closed로 막혔다.
+
+    실패를 파일시스템으로 재현하지 않는다. 권한도 `chflags uchg`도 통하지 않는데,
+    `TemporaryDirectory._rmtree`의 `onexc`가 `chflags(path, 0)`와 `chmod(0o700)`을
+    걸고 재시도하기 때문이다. 실제 ENOTEMPTY는 살아남은 손자 프로세스가 정리 중에
+    새 항목을 만들어서 나므로 결정적으로 만들 수 없다. 그래서 관측한 errno를
+    정리 지점에 그대로 주입하고, 그것이 `with`를 타고 나가는지만 본다.
+    """
+    linked = _repo_with_linked(tmp_path)
+    monkeypatch.setattr(
+        PROVIDER_PROCESS,
+        "verify_provider_sandbox_backend",
+        lambda: Path("/usr/bin/sandbox-exec"),
+    )
+    monkeypatch.setattr(
+        PROVIDER_PROCESS,
+        "_verified_provider_argv",
+        lambda argv, verified, env: tuple(argv),
+    )
+    monkeypatch.setattr(
+        PROVIDER_PROCESS,
+        "_prepare_provider_state",
+        lambda **kwargs: None,
+    )
+
+    class UncleanableTempDir(tempfile.TemporaryDirectory):
+        """`ignore_cleanup_errors`를 존중하는 stdlib 계약을 그대로 흉내 낸다."""
+
+        def cleanup(self) -> None:
+            if not getattr(self, "_ignore_cleanup_errors", False):
+                raise OSError(errno.ENOTEMPTY, "Directory not empty", self.name)
+            shutil.rmtree(self.name, ignore_errors=True)
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", UncleanableTempDir)
+
+    with PROVIDER_PROCESS.confined_provider_launch(
+        argv=("claude", "-p"),
+        cwd=linked,
+        env={"HOME": str(tmp_path)},
+    ) as launch:
+        observed = launch.scratch
+
+    assert observed.name.startswith("agent-flow-provider-")
+
+
+class _LingeringTempDir(tempfile.TemporaryDirectory):
+    """정리가 실패해 scratch가 그대로 남는 경우.
+
+    `ignore_cleanup_errors=True`의 stdlib 계약은 "예외를 내지 않는다"뿐이다. 아무것도
+    지우지 못한 채 조용히 돌아오는 상태가 실측한 자리다(자식이 남긴 하위 디렉터리).
+    finalizer도 떼어 낸다 — GC가 뒤늦게 지우면 무엇이 남았는지 관측할 수 없다.
+    """
+
+    def cleanup(self) -> None:
+        self._finalizer.detach()
+
+
+def _codex_home_with_auth(tmp_path: Path) -> Path:
+    user_home = tmp_path / "user"
+    codex_home = user_home / ".codex"
+    codex_home.mkdir(parents=True)
+    auth = codex_home / "auth.json"
+    auth.write_text('{"token":"secret"}\n', encoding="utf-8")
+    auth.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    return user_home
+
+
+def _stub_provider_launch(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        PROVIDER_PROCESS,
+        "verify_provider_sandbox_backend",
+        lambda: Path("/usr/bin/sandbox-exec"),
+    )
+    monkeypatch.setattr(
+        PROVIDER_PROCESS,
+        "_verified_provider_argv",
+        lambda argv, verified, env: tuple(argv),
+    )
+    # scratch를 tmp_path 아래로 옮긴다. 정리가 실패하는 테스트라 OS temp에 남기면
+    # 그 잔존이 다음 실행으로 새어 나간다.
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+
+def test_a_scratch_cleanup_failure_does_not_leave_the_credential_copy(
+    tmp_path, monkeypatch, capsys
+):
+    """정리 실패에 credential 사본이 얹혀 살아남지 않는다.
+
+    `ignore_cleanup_errors=True`는 정리 실패를 provider 실패로 만들지 않기 위한
+    것이고 그 성질은 유지한다. 그러나 이 scratch에는 `auth.json` 사본이 있으므로,
+    관용이 곧 자격증명 잔존이면 안 된다 — 민감한 자리는 전체 정리보다 먼저 지운다.
+    """
+    linked = _repo_with_linked(tmp_path)
+    user_home = _codex_home_with_auth(tmp_path)
+    _stub_provider_launch(monkeypatch, tmp_path)
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", _LingeringTempDir)
+
+    with PROVIDER_PROCESS.confined_provider_launch(
+        argv=("codex", "exec"),
+        cwd=linked,
+        env={"HOME": str(user_home)},
+    ) as launch:
+        scratch = launch.scratch
+        copied = Path(launch.env["CODEX_HOME"]) / "auth.json"
+        assert copied.read_text(encoding="utf-8") == '{"token":"secret"}\n'
+
+    assert scratch.is_dir(), "이 테스트는 정리가 실패해 남은 scratch를 봐야 한다"
+    assert not copied.exists(), "정리 실패가 자격증명 사본을 남겼다"
+    assert not (scratch / "codex-home").exists()
+
+
+def test_a_surviving_provider_scratch_is_not_silent(tmp_path, monkeypatch, capsys):
+    """남은 scratch를 조용히 넘기지 않는다. 조용한 잔존은 아무도 안 지운다."""
+    linked = _repo_with_linked(tmp_path)
+    user_home = _codex_home_with_auth(tmp_path)
+    _stub_provider_launch(monkeypatch, tmp_path)
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", _LingeringTempDir)
+
+    with PROVIDER_PROCESS.confined_provider_launch(
+        argv=("codex", "exec"),
+        cwd=linked,
+        env={"HOME": str(user_home)},
+    ) as launch:
+        scratch = launch.scratch
+
+    message = capsys.readouterr().err
+    assert str(scratch) in message
+    assert "scratch" in message
+
+
+def test_a_clean_provider_teardown_says_nothing(tmp_path, monkeypatch, capsys):
+    """양성 단언. 정리가 성공하면 경고가 없다 — 없으면 위 두 단언이 공허해진다."""
+    linked = _repo_with_linked(tmp_path)
+    user_home = _codex_home_with_auth(tmp_path)
+    _stub_provider_launch(monkeypatch, tmp_path)
+
+    with PROVIDER_PROCESS.confined_provider_launch(
+        argv=("codex", "exec"),
+        cwd=linked,
+        env={"HOME": str(user_home)},
+    ) as launch:
+        scratch = launch.scratch
+
+    assert not scratch.exists()
+    assert capsys.readouterr().err == ""
+
+
+def test_the_credential_copy_is_purged_even_under_a_locked_state_dir(
+    tmp_path, monkeypatch
+):
+    """자식이 상태 디렉터리를 0o500으로 잠가도 자격증명 사본은 지워진다.
+
+    sandbox는 scratch 쓰기를 허용하므로 provider가 자기 state home 아래에 권한을
+    걸 수 있다. 여기서는 scratch 전체 정리까지 실패시킨다 — 그래야 잠긴 자리를
+    실제로 여는 것이 자격증명 선삭제 하나뿐임을 본다(stdlib 정리의 chmod 재시도에
+    기대면 이 단언은 공허하다).
+    """
+    linked = _repo_with_linked(tmp_path)
+    user_home = _codex_home_with_auth(tmp_path)
+    _stub_provider_launch(monkeypatch, tmp_path)
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", _LingeringTempDir)
+
+    with PROVIDER_PROCESS.confined_provider_launch(
+        argv=("codex", "exec"),
+        cwd=linked,
+        env={"HOME": str(user_home)},
+    ) as launch:
+        state_home = Path(launch.env["CODEX_HOME"])
+        locked = state_home / "sessions"
+        locked.mkdir()
+        (locked / "history.jsonl").write_text("{}\n", encoding="utf-8")
+        locked.chmod(0o500)
+
+    assert launch.scratch.is_dir(), "정리가 실패해 남은 scratch를 봐야 한다"
+    assert not state_home.exists()
+
+
+def test_a_throwing_state_purge_does_not_fail_the_provider(tmp_path, monkeypatch, capsys):
+    """반증: teardown의 첫 단계가 던지면 이미 끝난 provider가 실패로 뒤집힌다.
+
+    이 teardown의 계약은 "정리 실패는 provider 실패가 아니다"다. 가운데 단계만
+    `ignore_cleanup_errors=True`로 그 계약을 지키면 양옆은 무방비이고, 이 PR이
+    고친 결함(정리 오류가 review phase 전체를 fail-closed로 막은 것)이 그대로
+    돌아온다. 계약을 구현 세부에 맡기지 않는다.
+    """
+    linked = _repo_with_linked(tmp_path)
+    user_home = _codex_home_with_auth(tmp_path)
+    _stub_provider_launch(monkeypatch, tmp_path)
+
+    def boom(scratch, provider_kind):
+        raise OSError(errno.EACCES, "Permission denied", str(scratch))
+
+    monkeypatch.setattr(PROVIDER_PROCESS, "_purge_provider_state", boom)
+
+    with PROVIDER_PROCESS.confined_provider_launch(
+        argv=("codex", "exec"),
+        cwd=linked,
+        env={"HOME": str(user_home)},
+    ) as launch:
+        state_home = Path(launch.env["CODEX_HOME"])
+
+    # 무엇이 지워졌는지 관측하지 못했으므로 민감한 자리는 전부 잔존으로 보고한다.
+    # 조용히 넘기면 자격증명 사본이 조용히 남는다.
+    message = capsys.readouterr().err
+    assert str(state_home) in message
+
+
+def test_a_throwing_scratch_report_does_not_fail_the_provider(tmp_path, monkeypatch):
+    """반증: teardown의 마지막 단계가 던져도 같은 결함이 돌아온다.
+
+    보고는 stderr에 쓴다. 파이프가 닫혀 있으면 `print`가 던지는데, 그 오류로
+    artifact를 이미 낸 provider를 실패시킬 이유가 없다.
+    """
+    linked = _repo_with_linked(tmp_path)
+    user_home = _codex_home_with_auth(tmp_path)
+    _stub_provider_launch(monkeypatch, tmp_path)
+
+    def boom(scratch, *, state):
+        raise ValueError("I/O operation on closed file")
+
+    monkeypatch.setattr(PROVIDER_PROCESS, "_report_surviving_scratch", boom)
+
+    with PROVIDER_PROCESS.confined_provider_launch(
+        argv=("codex", "exec"),
+        cwd=linked,
+        env={"HOME": str(user_home)},
+    ) as launch:
+        scratch = launch.scratch
+
+    assert not scratch.exists(), "보고 단계 오류가 정리 자체를 건너뛰게 하면 안 된다"
+
+
 def test_provider_state_isolated_in_private_scratch(tmp_path):
     user_home = tmp_path / "user"
     codex_home = user_home / ".codex"
@@ -915,3 +1156,46 @@ def test_provider_executable_cannot_resolve_from_the_repository(
     assert result.failed is True
     assert "provider executable is not a trusted external regular file" in result.stderr
     assert provider_launches == []
+
+
+def test_an_unresolvable_provider_state_path_is_reported_as_surviving(tmp_path, capsys):
+    """반증: `Path.exists()`는 ELOOP를 자기 안에서 삼켜 `False`를 준다.
+
+    `_path_exists`의 계약은 "존재를 확인할 수 없으면 남은 것으로 본다"인데,
+    `path.exists()` + `except OSError`로는 그 예외 가지에 도달하지 못한다 — ENOENT뿐
+    아니라 ENOTDIR·EBADF·ELOOP까지 그 메서드가 삼키기 때문이다. 그러면 살아남은
+    credential 자리를 `_purge_provider_state`가 "지워졌다"로 읽고 건너뛰며, 잔존
+    보고(`_report_surviving_scratch`)까지 조용해진다.
+
+    픽스처가 **그 상태를 실제로 만들었는지** 먼저 못 박는다. 자리를 만들지 못한
+    픽스처는 답만 보면 통과와 구분되지 않는다.
+    """
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    state = scratch / "codex-home"
+    state.symlink_to(state.name)
+
+    # 자리는 실제로 남아 있는데 `exists()`가 부재와 같은 답을 준다.
+    assert stat.S_ISLNK(os.lstat(state).st_mode)
+    assert state.exists() is False
+    with pytest.raises(OSError) as raised:
+        os.stat(state)
+    assert raised.value.errno == errno.ELOOP
+
+    remaining = PROVIDER_PROCESS._purge_provider_state(scratch, "codex")
+
+    # 정리는 이 자리를 지우지 못했다 — `shutil.rmtree`는 심볼릭 링크를 못 지운다.
+    assert stat.S_ISLNK(os.lstat(state).st_mode)
+    assert remaining == (state,)
+    PROVIDER_PROCESS._report_surviving_scratch(scratch, state=list(remaining))
+    assert str(state) in capsys.readouterr().err
+
+
+def test_a_purged_provider_state_path_is_not_reported(tmp_path):
+    """봉쇄가 정상 경로를 잡아먹으면 provider 실행마다 거짓 잔존 경고가 나간다."""
+    scratch = tmp_path / "scratch"
+    (scratch / "codex-home").mkdir(parents=True)
+    (scratch / "codex-home" / "auth.json").write_text("{}", encoding="utf-8")
+
+    assert PROVIDER_PROCESS._purge_provider_state(scratch, "codex") == ()
+    assert not (scratch / "codex-home").exists()

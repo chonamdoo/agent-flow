@@ -169,16 +169,28 @@ def _resolution() -> SkillResolution:
     return SkillResolution(required=(resolve_skill("tdd", (root,)),), optional=())
 
 
-def test_enforced_phase_prompt_states_the_gate():
+def test_enforced_phase_prompt_names_the_marker_the_gate_requires():
     block = skill_prompt_block(REPO, _resolution(), enforced=True)
-    assert "completion gate blocks this phase" in block
+    assert "skill-use-evidence" in block
 
 
 def test_ungated_phase_prompt_does_not_promise_enforcement():
     """게이트 없는 phase의 "Read every one of these"는 거짓 약속이다."""
     block = skill_prompt_block(REPO, _resolution(), enforced=False)
     assert "no skill read gate" in block
-    assert "completion gate blocks this phase" not in block
+    assert "skill-use-evidence" not in block
+
+
+def test_enforced_phase_prompt_does_not_claim_observed_reads_are_enforced():
+    """반증: 관측 강제를 자기신고로 낮췄는데 프롬프트가 그 약속을 그대로 남겼다.
+
+    "listed skill exists on disk and was never opened" 류의 문장은 이제 거짓이다.
+    아래 `test_the_prompt_claim_survives_only_while_the_gate_backs_it`이 행동과
+    엮어 지키고, 이 테스트는 되돌아온 옛 문구를 이름으로 잡는다.
+    """
+    block = skill_prompt_block(REPO, _resolution(), enforced=True)
+    assert "never opened" not in block
+    assert "was never" not in block
 
 
 def test_prompt_puts_exploration_before_reading():
@@ -252,19 +264,83 @@ def test_a_multiline_description_stays_on_one_line(tmp_path):
 
 @pytest.mark.parametrize("phase_id,enforced", [("green", True), ("commit", False)])
 def test_prompt_enforcement_claim_matches_the_gate(tmp_path, phase_id, enforced):
-    """불변: 프롬프트의 약속과 실제 강제 조건이 같은 값을 쓴다."""
+    """불변: 프롬프트의 약속과 실제 강제 조건이 같은 값을 쓴다.
+
+    약속의 내용은 "`skill-use-evidence`를 적어야 통과한다"다. 그러니 프롬프트가
+    그 이름을 대는지와 게이트가 그 이름으로 막는지를 같은 값으로 묶는다.
+    """
     from agent_flow.core.local_skills import local_skill_prompt_block, missing_local_skill_markers
 
     profile = {"skills": {"required_review": ["tdd"]}}
     phase_skills = PhaseSkills(required=("tdd",))
     block = local_skill_prompt_block(REPO, phase_id, phase_skills=phase_skills, profile=profile)
-    gated = bool(
-        missing_local_skill_markers("", REPO, phase_id, phase_skills=phase_skills, profile=profile)
+    missing = missing_local_skill_markers(
+        "", REPO, phase_id, phase_skills=phase_skills, profile=profile
     )
-    assert gated is enforced
+    assert bool(missing) is enforced
+    assert any(item.startswith("skill-use-evidence") for item in missing) is enforced
     if not block:
         pytest.skip("no skills resolved for this phase")
-    assert ("completion gate blocks this phase" in block) is enforced
+    assert ("skill-use-evidence" in block) is enforced
+
+
+def _project_with_one_installed_skill(tmp_path: Path) -> Path:
+    root = tmp_path / "proj"
+    skill = root / "skills" / "alpha" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: alpha\ndescription: Alpha rules.\n---\n# alpha\n", encoding="utf-8")
+    return root
+
+
+def test_the_prompt_claim_survives_only_while_the_gate_backs_it(tmp_path):
+    """불변: 프롬프트 문장과 게이트의 실제 행동을 한 단언 안에 묶는다.
+
+    반증: 문자열만 검사하면 강제를 관측 기반에서 자기신고로 낮춘 뒤에도
+    "a listed skill exists on disk and was never opened during it" 문장이 남아
+    통과했다. 여기서는 **디스크에 있는 required skill을 한 번도 열지 않은** 상태를
+    실제로 만들고 자기신고만 적는다. 게이트가 그것을 통과시키면 프롬프트는 관측
+    강제를 말할 수 없고, 막으면 말해야 한다.
+    """
+    from agent_flow.core.local_skills import (
+        SKILLS_READ_LOG,
+        local_skill_prompt_block,
+        missing_local_skill_markers,
+    )
+
+    root = _project_with_one_installed_skill(tmp_path)
+    # 로그는 읽히지만 이 skill 기록은 없다 — 관측으로 막던 시절의 차단 조건이다.
+    log = root / SKILLS_READ_LOG
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text('{"path": "/elsewhere/skills/other/SKILL.md", "at": 1.0}\n', encoding="utf-8")
+    phase_skills = PhaseSkills(required=("alpha",))
+    gate = (
+        "## Completion Gate\n"
+        "skill-availability: pass\n"
+        "skill-use-evidence: verified\n"
+        "project-local-skills: checked\n"
+        "project-local-skills-used: alpha\n"
+        "project-local-skill-docs: applied\n"
+        "missing-required-profile-skills: none\n"
+    )
+    missing = missing_local_skill_markers(
+        gate, root, "implement", phase_skills=phase_skills, profile={}
+    )
+    block = local_skill_prompt_block(root, "implement", phase_skills=phase_skills, profile={})
+
+    assert "- `alpha`" in block, block
+    blocks_unopened_skills = any(
+        item.startswith("skill-use-evidence") for item in missing
+    )
+    claims_it_checks_reads = (
+        "never opened" in block
+        or "does check which files you actually opened" in block
+        or "verifies that you opened" in block
+    )
+    assert claims_it_checks_reads is blocks_unopened_skills, (missing, block)
+    # 양성 축: 낮춘 계약을 프롬프트가 실제로 말하고 있는지.
+    assert not blocks_unopened_skills
+    assert "takes your word for it" in block
+    assert "does not check which files you actually opened" in block
 
 
 # --- P8 -----------------------------------------------------------------
