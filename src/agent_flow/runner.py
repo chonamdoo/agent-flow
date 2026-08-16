@@ -121,7 +121,11 @@ from agent_flow.core.phase_workflow import (
 from agent_flow.core.report import write_run_report
 from agent_flow.core.security import ensure_child_path, validate_safe_name
 from agent_flow.core.markers import has_failure_markers, missing_markers
-from agent_flow.core.local_skills import changed_files, missing_local_skill_markers
+from agent_flow.core.local_skills import (
+    changed_files,
+    merged_profile_payload,
+    missing_local_skill_markers,
+)
 from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.memory.index import LoreIndex
 from agent_flow.memory.lore import Lore
@@ -2636,23 +2640,31 @@ def _load_profile_union(
     if len(deduped) == 1:
         return deduped[0]
     active_ids = [profile_id for profile_id, _ in deduped]
-    return ",".join(active_ids), {
+    # resolver가 읽는 skill 키는 평평하다 — `skills.required_review`,
+    # `skills.external`, `skill_sources`. profile id로 한 겹 감싸면 그 키가 사라져
+    # 다중 profile run의 routed required가 통째로 0개가 된다(실측: react-native +
+    # android에서 `.kt` 변경에 required 5개 → 0개). 병합 규칙은
+    # `merged_profile_payload` 하나뿐이다. 여기서 다시 구현하면 status와 runner가
+    # 같은 run에 대해 서로 다른 required 집합을 본다.
+    merged = merged_profile_payload([profile for _, profile in deduped])
+    union: dict[str, Any] = {
         "id": "multi-profile",
         "active_profiles": active_ids,
         "profiles": [profile for _, profile in deduped],
         "review_angles": _merge_profile_list_field(deduped, "review_angles"),
         "gates": _merge_profile_list_field(deduped, "gates"),
-        "skills": {
-            profile_id: profile.get("skills", {})
-            for profile_id, profile in deduped
-            if isinstance(profile.get("skills"), dict)
-        },
+        # architecture는 role 표를 profile별로 소유해야 해서 중첩을 유지한다.
+        # resolver는 이 키를 읽지 않는다.
         "architecture": {
             profile_id: profile.get("architecture")
             for profile_id, profile in deduped
             if isinstance(profile.get("architecture"), dict)
         },
     }
+    for key in ("skills", "skill_sources"):
+        if key in merged:
+            union[key] = merged[key]
+    return ",".join(active_ids), union
 
 
 def _dedupe_loaded_profiles(profiles: list[tuple[str, dict[str, Any]]]) -> list[tuple[str, dict[str, Any]]]:

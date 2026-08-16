@@ -204,6 +204,36 @@ def test_multi_profile_merge_keeps_both_vocabularies():
     assert "android_skills" not in merged
 
 
+def test_runner_profile_union_routes_like_the_flat_merge(tmp_path):
+    """runner가 만든 union이 resolver가 읽는 shape인가.
+
+    반증 대상은 하나다: `skills`를 profile id로 한 겹 감싸면
+    `_required_review_groups`가 `required_review` 키를 못 찾아 다중 profile run의
+    routed required가 조용히 0개가 된다. 그 상태에서도 `agent-flow status`는
+    `merged_profile_payload`로 평평하게 합쳐 5개를 보므로, 같은 run에 대해 두
+    판정이 갈린다.
+    """
+    from agent_flow.runner import _load_profile_union
+
+    _profile_id, union = _load_profile_union(
+        tmp_path, ["react-native", "android"], explicit_fallback=False
+    )
+    flat = merged_profile_payload(
+        [load_profile_payload("react-native"), load_profile_payload("android")]
+    )
+
+    changed = ["android/app/src/main/java/A.kt"]
+    union_routed = _names(
+        routed_profile_skills(union, phase_id="implement", changed_files=changed, task_text="")
+    )
+    flat_routed = _names(
+        routed_profile_skills(flat, phase_id="implement", changed_files=changed, task_text="")
+    )
+
+    assert union_routed == flat_routed
+    assert "android-code-review" in union_routed
+
+
 def test_first_profile_owns_a_duplicated_group():
     first = {
         "skills": {
