@@ -2006,6 +2006,62 @@ def test_a_corrupt_receipt_stops_the_overwrite(tmp_path: Path, binary: str) -> N
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_a_stale_receipt_still_refreshes_the_indexes(tmp_path: Path, binary: str) -> None:
+    """반증: 소유 증명을 로컬 기록 하나에만 걸면 `git checkout` 한 번이 인덱스를 영구히 멈춘다.
+
+    루트 계약 파일은 커밋될 수 있는데 `.agent-flow/bootstrap/blocks.json`은 커밋되지
+    않는다. 그래서 브랜치를 옮기거나 pull만 해도 블록과 기록이 어긋나고, 그 상태에서
+    인덱스 갱신이 조용히 멈춘 채 아무도 그것을 관측하지 못한다.
+
+    인덱스 본문은 install이 채우는 자리이므로 소유 판정에서 뺀다. 산문이 템플릿과 같으면
+    그 블록은 우리 것이고, 기록은 다시 맞춘다.
+    """
+    project = tmp_path / f"stale-receipt-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    docs = project / "docs"
+    docs.mkdir()
+    (docs / "new-rule.md").write_text("# rule\n", encoding="utf-8")
+    receipt = project / ".agent-flow" / "bootstrap" / "blocks.json"
+    receipt.write_text(
+        json.dumps({"blocks": {"AGENTS.md": "0" * 64}}) + "\n", encoding="utf-8"
+    )
+
+    result = _install_with(binary, project)
+    assert result.returncode == 0, result.stderr
+    assert "! kept (user-modified): AGENTS.md" not in result.stdout
+    # 기록 없이 인정한 사실은 알린다. 인정한 뒤 install이 인덱스 자리를 다시 채우므로,
+    # 거기 손으로 쓴 것이 있었다면 이 실행이 덮는다.
+    assert "~ adopted (index slots): AGENTS.md" in result.stdout
+    assert any("new-rule.md" in line for line in _docs_index_lines(project))
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_an_edited_block_keeps_its_prose_and_says_the_index_stopped(
+    tmp_path: Path, binary: str
+) -> None:
+    """인덱스 본문을 판정에서 뺀 뒤에도 블록 **산문** 편집은 그대로 지켜야 한다.
+
+    그리고 지켰다는 사실만으로는 부족하다. 블록을 지키면 인덱스도 함께 멈추는데, 블록
+    통지는 블록만 말하므로 인덱스가 낡은 채 남은 것을 아는 통로가 없다.
+    """
+    project = tmp_path / f"edited-block-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    _hand_edit_bootstrap_block(project)
+    docs = project / "docs"
+    docs.mkdir()
+    (docs / "new-rule.md").write_text("# rule\n", encoding="utf-8")
+
+    result = _install_with(binary, project)
+    assert result.returncode == 0, result.stderr
+    assert "! kept (user-modified): AGENTS.md" in result.stdout
+    assert "skill/docs index stays stale" in result.stdout
+    assert "손으로 넣은 줄" in (project / "AGENTS.md").read_text(encoding="utf-8")
+    assert not any("new-rule.md" in line for line in _docs_index_lines(project))
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_install_leaves_the_git_workspace_clean(tmp_path: Path, binary: str) -> None:
     """반증: 두 파일이 untracked로 남으면 워크스페이스가 dirty가 되고, 그 즉시
     `agent-flow worktree create`가 막힌다 — install 직후 첫 명령이 실패한다.
