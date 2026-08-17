@@ -9,11 +9,18 @@ import { fileURLToPath } from "node:url";
 
 import {
   activeInstallProfileIds,
+  blockWithoutIndexBodies,
+  DOCS_INDEX_END,
+  DOCS_INDEX_START,
+  docsIndexBlock,
   installedProfileFileNames,
   PROJECT_LAUNCHER_RELATIVE,
   HOOK_LAUNCHER_RELATIVE,
   resolveLinkedWorktreeLeader,
   resolveManagedWorktreeContext,
+  SKILL_INDEX_END,
+  SKILL_INDEX_START,
+  skillIndexBlock,
 } from "../lib/installer-shared.mjs";
 
 // Python `LEAKY_GIT_ENV_VARS`(`src/agent_flow/core/worktree_isolation.py`) 및 두
@@ -700,6 +707,61 @@ function assertRepoRootAgentsMatchesTemplate() {
   );
 }
 
+// 위 검사가 인덱스 본문을 도려내고, install 산출물 대조는 임시 tempRoot를 본다. 그래서
+// **커밋된** `AGENTS.md`의 인덱스가 낡아도 지금까지 아무 검사도 그것을 보지 못했고,
+// 실제로 `docs` 인덱스는 이 저장소의 커밋 히스토리 전 구간에서 비어 있었다.
+assertCommittedRootIndexesAreFresh();
+
+function assertCommittedRootIndexesAreFresh() {
+  // working tree가 아니라 HEAD를 본다. parity는 CI에서 install 뒤에 돌고 install이 방금
+  // 인덱스를 다시 채우므로, working tree를 보면 이 검사는 언제나 통과한다.
+  const committed = gitOutput(SOURCE_ROOT, ["show", "HEAD:AGENTS.md"]);
+  if (committed === null) return;
+  // 기대값은 generator가 만들고 generator는 워킹 트리를 읽는다. 그래서 그 입력이 HEAD와
+  // 어긋나 있으면 이 검사는 남이 재현할 수 없는 실패를 낸다 — 커밋하지 않은 `docs/`
+  // 초안 하나로 `npm test`가 통째로 막히고, 안내를 따르면 그 초안 이름이 tracked
+  // `AGENTS.md`에 박힌다. 입력이 git과 일치할 때만 판정한다.
+  const docsDirty = gitOutput(SOURCE_ROOT, ["status", "--porcelain", "--untracked-files=all", "--", "docs"]);
+  const installedSkills = readJsonSafe(path.join(SOURCE_ROOT, ".agent-flow", "skills", "index.json"));
+  const indexes = [
+    {
+      name: "skills",
+      start: SKILL_INDEX_START,
+      end: SKILL_INDEX_END,
+      // 게이트는 `index.json`의 존재가 아니라 generator가 자리표시자를 내는 조건과 같아야
+      // 한다(`skillIndexBlock`은 `skills` 배열이 비면 자리표시자를 낸다). 두 조건이 갈리면
+      // 빈 배열을 기록한 install에서 그 자리표시자를 커밋하라는 실패가 난다.
+      available: Array.isArray(installedSkills?.skills) && installedSkills.skills.length > 0,
+      expected: () => skillIndexBlock(SOURCE_ROOT),
+    },
+    {
+      name: "docs",
+      start: DOCS_INDEX_START,
+      end: DOCS_INDEX_END,
+      available: docsDirty === null,
+      expected: () => docsIndexBlock(SOURCE_ROOT),
+    },
+  ];
+  for (const index of indexes) {
+    if (!index.available) continue;
+    const from = committed.indexOf(index.start);
+    const to = committed.indexOf(index.end);
+    if (from === -1 || to === -1 || to < from) {
+      failures.push(`committed AGENTS.md has no ${index.name} index markers`);
+      continue;
+    }
+    if (committed.slice(from, to + index.end.length) === index.expected()) continue;
+    failures.push(
+      `committed AGENTS.md ${index.name} index does not match the installer output;`
+        + " re-run install and commit AGENTS.md",
+    );
+  }
+}
+
+// 인덱스 본문 도려내기는 `lib/installer-shared.mjs`의 `blockWithoutIndexBodies`가 정본이다.
+// installer가 그 함수로 블록 소유를 판정하므로, 여기 사본을 두면 한쪽만 고친 순간 installer는
+// 블록을 "우리 것"으로 보고 인덱스를 덮는데 parity는 같은 줄을 산문 편집으로 읽어, 고칠 수
+// 없는 실패를 요구한다.
 function managedBlockWithoutIndexBodies(text, label) {
   const start = text.indexOf("<!-- agent-flow:start -->");
   const end = text.indexOf("<!-- agent-flow:end -->");
@@ -707,19 +769,7 @@ function managedBlockWithoutIndexBodies(text, label) {
     failures.push(`${label} is missing the agent-flow managed block markers`);
     return null;
   }
-  const kept = [];
-  let insideIndexBody = false;
-  for (const line of text.slice(start, end).split(/\r?\n/)) {
-    const marker = /^<!--\s*agent-flow:[a-z]+:(start|end)\s*-->$/.exec(line.trim());
-    if (marker) {
-      insideIndexBody = marker[1] === "start";
-      kept.push(line.trim());
-      continue;
-    }
-    if (insideIndexBody) continue;
-    kept.push(line);
-  }
-  return kept.join("\n").trimEnd();
+  return blockWithoutIndexBodies(text.slice(start, end));
 }
 
 // 두 installer 모두 그 한 벌을 읽는다. 예전에 `agent-flow-kit.mjs`는 같은 텍스트를

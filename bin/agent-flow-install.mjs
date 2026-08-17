@@ -61,6 +61,7 @@ import {
   pruneRetiredHooks,
   pruneRetiredHookScripts,
   pruneRetiredManagedScripts,
+  BOOTSTRAP_ADOPTED_NOTICE_PREFIX,
   BOOTSTRAP_KEPT_NOTICE_PREFIX,
   pruneUninstalledProfiles,
   pathHasSymlink,
@@ -970,6 +971,7 @@ function runKitInstall() {
       || line.startsWith(ASSET_UPGRADE_NOTICE_PREFIX)
       || line.startsWith(ASSET_BACKUP_NOTICE_PREFIX)
       || line.startsWith(BOOTSTRAP_KEPT_NOTICE_PREFIX)
+      || line.startsWith(BOOTSTRAP_ADOPTED_NOTICE_PREFIX)
       // 링크 너머로 쓴 host 설정. 자식이 쓰고 여기서 걸러 내면 프로젝트 밖 파일을
       // 갈아 끼운 사실이 어디에도 안 남는다.
       || line.startsWith(SYMLINK_FOLLOW_NOTICE_PREFIX)

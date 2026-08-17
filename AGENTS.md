@@ -66,9 +66,16 @@ Workflow Contract와 Context Economy는 아래 agent-flow 블록이 canonical so
 [agent-flow skill index]|root: .agent-flow/skills
 |IMPORTANT: 아래 파일이 기억보다 우선한다. 변경 대상을 먼저 훑고, scope가 걸리는 것만 읽는다.
 |always:{code-generation-discipline,comment-authoring-discipline}
-|on-demand:{agent-flow,agent-flow-concise-output,architecture-reviewer,clean-architecture,clean-architecture-core,code-review,codebase-design,comment-checker,ddd-architecture,domain-modeling,full-feature-workflow,grill-with-docs,grilling,plan-reviewer,product-brief,push-watch,python-api-clean-architecture,python-development-guide,resolving-merge-conflicts,tdd,to-prd}
+|on-demand:{agent-flow,agent-flow-concise-output,architecture-reviewer,clean-architecture,clean-architecture-core,code-review,codebase-design,comment-checker,ddd-architecture,domain-modeling,full-feature-workflow,grill-with-docs,grilling,plan-reviewer,product-brief,push-watch,python-api-clean-architecture,python-development-guide,resolving-merge-conflicts,tdd,to-prd,write-for-work}
 ```
 <!-- agent-flow:skills:end -->
 <!-- agent-flow:docs:start -->
+```text
+[agent-flow docs index]|root: docs
+|IMPORTANT: 경로만 있다. 본문은 필요할 때 읽고, 여기로 옮기지 않는다.
+|docs:{PLAN.md,semantic-clean-architecture-code-review.md,semantic-clean-architecture-skill-audit.md}
+|docs/adr:{0001-separate-core-from-environment-adapters.md,0002-use-stage-artifacts-for-subagent-first-workflows.md,0003-keep-team-orchestration-optional.md,0004-exclude-sandboxed-ai-cli-execution.md,0005-prefer-team-state-archive-before-delete.md,0006-add-domain-and-architecture-gates-to-full-feature.md,0006-use-push-watch-as-pr-automation-entrypoint.md,0007-hosted-remote-sandbox-queue-session-infra.md}
+|docs/issues:{0001-host-provider-discovery.md,0002-worktree-backed-run-start.md,0003-team-runtime-tracer.md,0004-installable-workflow-kit.md,0005-domain-ddd-full-feature-phases.md,0005-push-watch-workflow.md,0006-enforce-ddd-architecture-intent.md}
+```
 <!-- agent-flow:docs:end -->
 <!-- agent-flow:end -->
