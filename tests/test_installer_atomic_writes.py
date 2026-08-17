@@ -186,6 +186,9 @@ def test_interrupted_publish_keeps_the_previous_config_readable(tmp_path: Path) 
         capture_output=True,
         check=False,
         timeout=60,
+        # 이 probe의 주입점이 `fsyncSync`다. 스위트 기본값(`0`)을 물려받으면 주입이
+        # 아무 데도 닿지 않아, 중단을 재현하지 않은 실행이 통과로 보인다.
+        env={**os.environ, "AGENT_FLOW_INSTALL_FSYNC": "1"},
     )
     assert result.returncode == 0, result.stderr
 
@@ -317,6 +320,9 @@ def test_js_atomic_write_flushes_the_rename_and_not_only_the_bytes(tmp_path: Pat
         capture_output=True,
         check=False,
         timeout=60,
+        # 이 probe가 세는 것이 fsync다. 스위트 기본값(`0`)을 물려받으면 아무것도 세지
+        # 못한 실행을 "내려보냈다"로 읽을 수 없어야 한다.
+        env={**os.environ, "AGENT_FLOW_INSTALL_FSYNC": "1"},
     )
     assert result.returncode == 0, result.stderr
     flushed = json.loads(result.stdout)

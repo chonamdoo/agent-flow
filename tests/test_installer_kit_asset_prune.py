@@ -1168,6 +1168,9 @@ def test_prune_backup_reaches_the_disk_before_the_original_is_removed(tmp_path: 
         capture_output=True,
         check=False,
         timeout=120,
+        # 이 probe가 보는 순서가 `fsync` → `rm`이다. 스위트 기본값(`0`)을 물려받으면
+        # fsync가 아예 없는 실행을 판정 대상으로 삼게 된다.
+        env={**os.environ, "AGENT_FLOW_INSTALL_FSYNC": "1"},
     )
     assert result.returncode == 0, result.stderr
 
@@ -1321,6 +1324,9 @@ def _durability_trace(tmp_path: Path, *, imports: str, call: str) -> list[str]:
         capture_output=True,
         check=False,
         timeout=120,
+        # 이 trace의 판정 기준이 `fsync`의 위치다. 스위트 기본값(`0`)을 물려받으면
+        # 사본을 내려보내지 않은 실행과 구분할 수 없다.
+        env={**os.environ, "AGENT_FLOW_INSTALL_FSYNC": "1"},
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.splitlines()[-1])["trace"]

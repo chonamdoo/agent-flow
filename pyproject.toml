@@ -16,6 +16,9 @@ readme = "README.md"
 [project.optional-dependencies]
 dev = [
   "pytest>=8",
+  # 이 스위트는 시간의 거의 전부를 자식 프로세스 대기로 쓴다(install·node CLI·git).
+  # 직렬로 두면 코어가 몇 개든 한 번에 하나씩만 기다린다.
+  "pytest-xdist>=3",
 ]
 
 [project.scripts]
