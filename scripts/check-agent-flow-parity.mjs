@@ -22,6 +22,7 @@ import {
   SKILL_INDEX_START,
   skillIndexBlock,
 } from "../lib/installer-shared.mjs";
+import { resolveInstallSelection } from "../lib/skill-selection.mjs";
 
 // Python `LEAKY_GIT_ENV_VARS`(`src/agent_flow/core/worktree_isolation.py`) 및 두
 // installer와 같은 목록이다. ambient discovery 변수가 남아 있으면 이 검사가 검사
@@ -728,10 +729,7 @@ function assertCommittedRootIndexesAreFresh() {
       name: "skills",
       start: SKILL_INDEX_START,
       end: SKILL_INDEX_END,
-      // 게이트는 `index.json`의 존재가 아니라 generator가 자리표시자를 내는 조건과 같아야
-      // 한다(`skillIndexBlock`은 `skills` 배열이 비면 자리표시자를 낸다). 두 조건이 갈리면
-      // 빈 배열을 기록한 install에서 그 자리표시자를 커밋하라는 실패가 난다.
-      available: Array.isArray(installedSkills?.skills) && installedSkills.skills.length > 0,
+      available: installedSelectionIsCanonical(installedSkills),
       expected: () => skillIndexBlock(SOURCE_ROOT),
     },
     {
@@ -756,6 +754,38 @@ function assertCommittedRootIndexesAreFresh() {
         + " re-run install and commit AGENTS.md",
     );
   }
+}
+
+// 커밋된 skill 인덱스는 **이 저장소의 기본 install**이 고르는 집합만 검증할 수 있다.
+// skill 선택은 `--profile`/`--skills`와 감지된 profile이 정하므로(`lib/skill-selection.mjs`),
+// 좁혀 설치한 checkout의 `index.json`을 기대값으로 쓰면 그 host의 부분집합을 커밋하라는
+// 실패가 난다 — 이 저장소 자신도 python profile로 이미 24개로 좁혀져 있다.
+//
+// 그래서 기록된 선택이 인자 없는 install의 선택과 같을 때만 판정한다. `detectedProfile`은
+// install이 기록해 둔 감지값을 쓴다: 그 값은 저장소에서 파생되고, `--profile`로 넘긴 것과
+// 무관하게 항상 기록된다.
+function installedSelectionIsCanonical(installedSkills) {
+  const installed = Array.isArray(installedSkills?.skills)
+    ? installedSkills.skills.map((skill) => String(skill.name))
+    : [];
+  if (installed.length === 0) return false;
+  const kit = readJsonSafe(path.join(SOURCE_ROOT, ".agent-flow", "kit.json"));
+  if (typeof kit?.profile !== "string") return false;
+  let canonical;
+  try {
+    canonical = resolveInstallSelection({
+      args: [],
+      detectedProfile: kit.profile,
+      kitRoot: SOURCE_ROOT,
+      projectRoot: SOURCE_ROOT,
+    }).skillNames;
+  } catch {
+    return false;
+  }
+  // `skillNames === null`은 "좁히지 않았다"이고, 그때 install은 배포된 skill 전부를 깐다.
+  if (canonical === null) return true;
+  if (canonical.size !== installed.length) return false;
+  return installed.every((name) => canonical.has(name));
 }
 
 // 인덱스 본문 도려내기는 `lib/installer-shared.mjs`의 `blockWithoutIndexBodies`가 정본이다.
