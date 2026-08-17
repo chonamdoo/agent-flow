@@ -21,7 +21,10 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 실측이 근거다: 이 변경 뒤 첫 dispatch 실행(32042088206)이 setup 포함 12m32s였고,
+    # 그 전 직렬·fsync 시절이 16~28.5분이었다. 상한은 그 실측에 60% 여유를 둔 값이다 —
+    # runner 지연 변동을 실패로 바꾸지 않으면서, 매달린 job은 20분에 끊는다.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       # 설치·hook·worktree 테스트가 node를 서브프로세스로 띄운다.
@@ -42,12 +45,14 @@ jobs:
         run: |
           started=$(date +%s)
           set +e
+          # `-n auto`는 runner의 코어 수를 쓴다. 이 스위트는 시간의 거의 전부가 자식
+          # 프로세스 대기라 코어 수만큼 곧바로 줄어든다.
           if [ -n "$PYTEST_K" ]; then
             PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider -o addopts="" \
-              --durations=20 -k "$PYTEST_K" 2>&1 | tee pytest.log
+              -n auto --durations=20 -k "$PYTEST_K" 2>&1 | tee pytest.log
           else
             PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider -o addopts="" \
-              --durations=20 2>&1 | tee pytest.log
+              -n auto --durations=20 2>&1 | tee pytest.log
           fi
           status=${PIPESTATUS[0]}
           set -e

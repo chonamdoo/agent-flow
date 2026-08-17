@@ -98,6 +98,20 @@ def _node() -> str:
     return node
 
 
+def _user_default_env() -> dict[str, str]:
+    """사용자 install과 같은 구성. `AGENT_FLOW_INSTALL_FSYNC`를 지운다.
+
+    스위트는 그 변수를 `0`으로 깔아 install의 fsync를 내린다(`tests/conftest.py`).
+    아래 probe들은 그 값을 `1`로 덮는 대신 **지운다**. 덮으면 "변수를 준 실행"만
+    보게 되어, `durableInstallWrites()`가 opt-in(`=== "1"`)으로 뒤집혀도 전 스위트가
+    초록이고 정작 사용자 install만 조용히 fsync를 잃는다. 지우면 그 뒤집기가 여기서
+    빨간색이 된다 — 이 probe가 보는 구성이 사용자의 구성이다.
+    """
+    env = dict(os.environ)
+    env.pop("AGENT_FLOW_INSTALL_FSYNC", None)
+    return env
+
+
 def _observed_writes(project: Path, binary: str) -> dict[str, set[str]]:
     """install을 실제로 돌리고, 대상 경로마다 어떤 호출이 그것을 만들었는지 모은다.
 
@@ -186,6 +200,9 @@ def test_interrupted_publish_keeps_the_previous_config_readable(tmp_path: Path) 
         capture_output=True,
         check=False,
         timeout=60,
+        # 이 probe의 주입점이 `fsyncSync`다. 스위트 기본값(`0`)을 물려받으면 주입이
+        # 아무 데도 닿지 않아, 중단을 재현하지 않은 실행이 통과로 보인다.
+        env=_user_default_env(),
     )
     assert result.returncode == 0, result.stderr
 
@@ -317,6 +334,9 @@ def test_js_atomic_write_flushes_the_rename_and_not_only_the_bytes(tmp_path: Pat
         capture_output=True,
         check=False,
         timeout=60,
+        # 이 probe가 세는 것이 fsync다. 스위트 기본값(`0`)을 물려받으면 아무것도 세지
+        # 못한 실행을 "내려보냈다"로 읽을 수 없어야 한다.
+        env=_user_default_env(),
     )
     assert result.returncode == 0, result.stderr
     flushed = json.loads(result.stdout)

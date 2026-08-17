@@ -1168,6 +1168,9 @@ def test_prune_backup_reaches_the_disk_before_the_original_is_removed(tmp_path: 
         capture_output=True,
         check=False,
         timeout=120,
+        # env를 손대지 않는다. 사본 경로는 `atomicWriteFileSync`에 `durable: true`를
+        # 주어 `AGENT_FLOW_INSTALL_FSYNC`를 보지 않으므로, 스위트 기본값(`0`) 그대로
+        # 돌려야 그 `durable`이 사라진 것을 여기서 잡는다.
     )
     assert result.returncode == 0, result.stderr
 
@@ -1321,6 +1324,8 @@ def _durability_trace(tmp_path: Path, *, imports: str, call: str) -> list[str]:
         capture_output=True,
         check=False,
         timeout=120,
+        # env를 손대지 않는다 — 위와 같은 이유다. 사본 경로의 `durable: true`가
+        # 빠지면 스위트 기본값에서 이 trace가 빨간색이 된다.
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.splitlines()[-1])["trace"]
