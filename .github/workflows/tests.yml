@@ -21,9 +21,10 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    # 직렬·fsync 시절 상한이 30이었고 실측이 28.5분까지 붙었다. 병렬·fsync-off 실측이
-    # 로컬 4m47s라, 15를 넘기면 그것은 느려진 것이 아니라 무언가 매달린 것이다.
-    timeout-minutes: 15
+    # 실측이 근거다: 이 변경 뒤 첫 dispatch 실행(32042088206)이 setup 포함 12m32s였고,
+    # 그 전 직렬·fsync 시절이 16~28.5분이었다. 상한은 그 실측에 60% 여유를 둔 값이다 —
+    # runner 지연 변동을 실패로 바꾸지 않으면서, 매달린 job은 20분에 끊는다.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       # 설치·hook·worktree 테스트가 node를 서브프로세스로 띄운다.
