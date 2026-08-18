@@ -2474,11 +2474,14 @@ function installedPythonRuntimePath(root) {
 
 try {
   if (command === "install" || (command === "run" && process.argv[3] === "install")) {
-    if (installHelpRequested(installArgs)) {
+    // `run install`은 첫 토큰이 서브커맨드 이름이다. 검증에 그대로 넘기면 그 예외를
+    // 위치와 무관하게 허용해야 하고, 그러면 `install install`이 통과한다.
+    const args = command === "run" ? installArgs.slice(1) : installArgs;
+    if (installHelpRequested(args)) {
       console.log(`usage: ${INSTALL_SYNOPSIS}`);
       process.exit(0);
     }
-    assertKnownInstallArgs(installArgs);
+    assertKnownInstallArgs(args);
     installProject(requestedInstallRoot());
     process.exit(0);
   }

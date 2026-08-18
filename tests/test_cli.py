@@ -2540,6 +2540,10 @@ class CliTest(unittest.TestCase):
                 (("install", "--root", "no-such-dir", "--help"), 0, "usage:"),
                 (("install", "--profile"), 1, "--profile requires a value"),
                 (("install", "--profile="), 1, "--profile requires a value"),
+                # 다음 플래그를 값으로 삼키면 그 플래그가 skill 이름이 되면서 동시에
+                # 전역 플래그로도 적용된다.
+                (("install", "--skill", "--no-hooks"), 1, "--skill requires a value"),
+                (("install", "install"), 1, "unknown install argument: install"),
             ):
                 with self.subTest(installer=installer, args=args):
                     with tempfile.TemporaryDirectory() as temp_dir:
