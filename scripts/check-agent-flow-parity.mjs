@@ -48,6 +48,13 @@ const CHECK_INSTALLED_COPY = !SOURCE_IS_MANAGED_WORKTREE;
 // 같은 파일이 또 있었고, 이 스크립트가 둘의 바이트 동일성을 지켰다.
 const PACKAGED_WORKFLOWS = "src/agent_flow/workflows";
 const PACKAGED_PROFILES = "src/agent_flow/profiles";
+// 대조 함수는 파일 하단에 있지만 이 상수는 최상위 호출부보다 위에 있어야 한다.
+// 아래에 두면 TDZ로 죽는다.
+const DOC_WORKFLOW_ROW = /^\|\s*`([a-z][a-z0-9-]*)`\s*\|[^|]*\|\s*(\d+)\s*\|/gm;
+const DOC_PROFILE_LINE = /^프로파일\s+(\d+)종\s*—\s*(.+)$/m;
+const DOC_SKILL_LINE = /^스킬\s+(\d+)종/m;
+const DOC_BACKTICK_NAME = /`([a-z][a-z0-9-]*)`/g;
+const DOC_COUNT_SOURCE = "README.md";
 const INSTALL_ROOT = resolveInstalledRoot(process.cwd()) ?? SOURCE_ROOT;
 // bin/agent-flow-install.mjs / bin/agent-flow-kit.mjs의 BUNDLED_HOST_SKILL_NAMES와
 // 동일해야 한다. allowlist 밖 bundled skill은 host link 없이 index에만 노출된다.
@@ -402,6 +409,12 @@ assertCodeReviewerCoversWorkflowMarkers("full-feature", "multi-review");
 assertCodeReviewerCoversWorkflowMarkers("full-feature", "architecture-review");
 
 assertAllWorkflowContracts();
+// 숫자가 문서 안에서만 살면 워크플로·프로파일·스킬이 늘어도 문서는 조용히 낡고,
+// 저장소를 처음 여는 사람에게는 그 차이를 확인할 방법이 없다.
+assertDocumentedCountsMatchSources();
+assertFile("docs/USAGE.md");
+assertLicenseMatchesDeclaration();
+assertPackagedFilesIncludeDocs();
 // 같은 git discovery 변수 목록이 7군데에 복사되어 있고 지금까지는 주석만 "같아야
 // 한다"고 말했다. 한 군데만 밀려도 그 진입점에서만 ambient GIT_*가 살아남아 남의
 // checkout을 보고, 증상은 전혀 다른 곳에서 터진다. 실제로 목록을 추출해 강제한다.
@@ -2001,6 +2014,152 @@ function assertHostSkillParity(root, index, label = "clean install") {
     if (statuses.size !== 1) {
       failures.push(`${label} host link status differs for ${name}: ${hostLinks.map((link) => `${link.host}=${link.status}`).join(" ")}`);
     }
+  }
+}
+
+function assertDocumentedCountsMatchSources() {
+  assertDocWorkflowPhaseCounts(DOC_COUNT_SOURCE);
+  assertDocProfileNames(DOC_COUNT_SOURCE);
+  assertDocSkillCount(DOC_COUNT_SOURCE);
+}
+
+function assertDocWorkflowPhaseCounts(rel) {
+  const text = readIfExists(rel);
+  if (text === null) return;
+  const documented = new Map();
+  for (const match of text.matchAll(DOC_WORKFLOW_ROW)) {
+    // 같은 이름을 덮어쓰면 서로 다른 수를 적은 두 행 중 뒤엣것만 대조된다.
+    if (documented.has(match[1])) {
+      failures.push(`${rel} lists workflow ${match[1]} more than once`);
+      continue;
+    }
+    documented.set(match[1], Number(match[2]));
+  }
+  // 한 건도 못 읽었으면 통과시키지 않는다. 표 형식이 바뀐 것을 "어긋난 숫자 없음"으로
+  // 접으면 이 검사는 있으나 마나 한 상태로 남는다.
+  if (documented.size === 0) {
+    failures.push(
+      `${rel} declares no workflow phase counts (expected rows like "| \`default\` | ... | 15 |")`,
+    );
+    return;
+  }
+  const actual = sourceWorkflowPhaseCounts();
+  for (const [name, count] of documented) {
+    if (!actual.has(name)) {
+      failures.push(`${rel} documents unknown workflow ${name}`);
+      continue;
+    }
+    if (actual.get(name) !== count) {
+      failures.push(
+        `${rel} says workflow ${name} has ${count} phases, ${PACKAGED_WORKFLOWS}/${name}.yaml has ${actual.get(name)}`,
+      );
+    }
+  }
+  for (const name of actual.keys()) {
+    if (!documented.has(name)) {
+      failures.push(`${rel} does not document workflow ${name}`);
+    }
+  }
+}
+
+// phase 수는 `workflow export`가 센 것을 쓴다. 여기서 YAML을 직접 파싱하면 JS가
+// Python loader와 별개의 해석 경로를 갖게 되고, 뜻이 같은 YAML 표기 변경만으로
+// 문서가 틀렸다고 보고한다.
+function sourceWorkflowPhaseCounts() {
+  const counts = new Map();
+  for (const file of yamlFileNames(PACKAGED_WORKFLOWS)) {
+    const name = file.replace(/\.yaml$/, "");
+    const workflow = workflowExport(name);
+    if (!workflow) continue;
+    counts.set(name, workflow.phases.length);
+  }
+  return counts;
+}
+
+function assertDocProfileNames(rel) {
+  const text = readIfExists(rel);
+  if (text === null) return;
+  const match = DOC_PROFILE_LINE.exec(text);
+  if (!match) {
+    failures.push(
+      `${rel} has no profile roster line (expected "프로파일 <n>종 — \`android\` \`generic\` ...")`,
+    );
+    return;
+  }
+  const documented = [...match[2].matchAll(DOC_BACKTICK_NAME)].map((name) => name[1]);
+  const actual = sourceProfileNames();
+  const declared = Number(match[1]);
+  if (declared !== actual.length) {
+    failures.push(
+      `${rel} says ${declared} profiles, ${PACKAGED_PROFILES} has ${actual.length}`,
+    );
+  }
+  // 선언한 수와 실제로 적힌 이름 수를 따로 본다. 아래 양방향 대조는 집합 비교라
+  // 중복 이름이나 개수 초과를 그대로 통과시킨다.
+  if (documented.length !== declared) {
+    failures.push(`${rel} says ${declared} profiles but lists ${documented.length} names`);
+  }
+  for (const name of new Set(documented.filter((name, index) => documented.indexOf(name) !== index))) {
+    failures.push(`${rel} lists profile ${name} more than once`);
+  }
+  for (const name of actual) {
+    if (!documented.includes(name)) {
+      failures.push(`${rel} does not list profile ${name}`);
+    }
+  }
+  for (const name of documented) {
+    if (!actual.includes(name)) {
+      failures.push(`${rel} lists unknown profile ${name}`);
+    }
+  }
+}
+
+function sourceProfileNames() {
+  return yamlFileNames(PACKAGED_PROFILES)
+    .filter((file) => !file.startsWith("_"))
+    .map((file) => file.replace(/\.yaml$/, ""))
+    .sort();
+}
+
+function assertDocSkillCount(rel) {
+  const text = readIfExists(rel);
+  if (text === null) return;
+  const match = DOC_SKILL_LINE.exec(text);
+  if (!match) {
+    failures.push(`${rel} has no skill count line (expected "스킬 <n>종")`);
+    return;
+  }
+  const skillsDir = path.join(SOURCE_ROOT, "skills");
+  const actual = fs
+    .readdirSync(skillsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory()
+      && fs.existsSync(path.join(skillsDir, entry.name, "SKILL.md"))).length;
+  if (Number(match[1]) !== actual) {
+    failures.push(`${rel} says ${match[1]} skills, skills/ has ${actual}`);
+  }
+}
+
+function assertLicenseMatchesDeclaration() {
+  const text = readIfExists("LICENSE");
+  if (text === null) return;
+  const declared = readJsonSafe(path.join(SOURCE_ROOT, "package.json"))?.license;
+  if (declared && !text.includes(declared)) {
+    failures.push(`LICENSE does not name the license package.json declares (${declared})`);
+  }
+}
+
+// USAGE를 README에서 떼어낸 뒤 `files`를 그대로 두면 npm tarball에서 사용법이 통째로
+// 빠진다. 링크만 남고 대상이 없는 상태를 여기서 막는다.
+function assertPackagedFilesIncludeDocs() {
+  const files = readJsonSafe(path.join(SOURCE_ROOT, "package.json"))?.files;
+  // `files`가 없으면 npm이 전부 담지만, 이 저장소는 목록을 선언해 왔다. 그 선언이
+  // 사라진 것을 통과로 접으면 이 검사는 배열이 있을 때만 도는 검사가 된다.
+  if (!Array.isArray(files)) {
+    failures.push("package.json has no files array, so docs packaging cannot be checked");
+    return;
+  }
+  if (!files.some((entry) => entry === "docs" || entry.startsWith("docs/"))) {
+    failures.push("package.json files does not cover docs/USAGE.md, so it is left out of the package");
   }
 }
 
