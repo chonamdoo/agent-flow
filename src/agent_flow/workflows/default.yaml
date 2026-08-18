@@ -21,7 +21,6 @@ phases:
       Architecture layer map → SOLID check. Single artifact captures the
       shared understanding plus the architectural blueprint. Mandatory for
       every project.
-    cite_lore: true
     required_markers:
       - "## Clean Architecture Boundary Map"
       - "## Dependency Rule"
@@ -65,10 +64,7 @@ phases:
 
       ## 2. Spec (renamed per profile.vocabulary)
       Goal, in-scope, out-of-scope, acceptance criteria, observable behavior,
-      dependencies, open risks. If a "Relevant lore" block was injected into
-      this prompt envelope (auto-cited from `.agent-flow/memory/lore/`),
-      cite the entries that actually apply by relative path. Ignore unrelated
-      entries and never fabricate citations for lore that wasn't surfaced.
+      dependencies, open risks.
 
       ## 3. DDD model
       Apply `.agent-flow/skills/ddd-architecture/SKILL.md` first.
@@ -113,8 +109,7 @@ phases:
 
       ## 6. Decision log (if applicable)
       If the design introduces or revisits an architectural decision, record
-      it as Constraint / Rejected / Directive (matches lore schema). Skip
-      otherwise.
+      it as Constraint / Rejected / Directive. Skip otherwise.
 
       ## Spec Items
       Record every user instruction as one ordered item:
@@ -694,7 +689,7 @@ phases:
     description: Record cleanup handoff; Runner retires the checkout transactionally.
     prompt: |
       Do not delete the working branch, worktree, runtime metadata, or `active`
-      marker. Record the integration target and any Lore-worthy architectural
+      marker. Record the integration target and any noteworthy architectural
       decisions, failures, or tradeoffs in cleanup.md. After this artifact is
       accepted, Runner owns the durable archive → integration proof → worktree
       removal → expected-OID branch CAS → metadata cleanup transaction.

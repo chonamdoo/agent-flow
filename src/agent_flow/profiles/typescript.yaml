@@ -53,7 +53,6 @@ artifacts:
 vocabulary:
   prd: spec
   adr: decision-log
-  lore: notes
 commit_convention:
   style: conventional
   co_author: skip

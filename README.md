@@ -2,7 +2,7 @@
 
 Project-agnostic AI workflow kit. Start with `/agent-flow` in Claude Code or Codex; the same CLI core writes the same artifacts underneath.
 
-> **Status**: Phase 1–5 active. Scaffold, real adapters, multi-CLI fan-out, 8 profiles, Lore engine (parse / search / 4-tier compaction / auto-cite), PR-watch (gh-CLI polling with status classification). Phase 6 (optional sandboxing) deferred.
+> **Status**: Scaffold, real adapters, multi-CLI fan-out, 8 profiles, and PR-watch (gh-CLI polling with status classification) are active. Phase 6 (optional sandboxing) is deferred.
 
 ## Philosophy
 
@@ -66,14 +66,6 @@ agent-flow gates --phase all                 # required by the gates phase: pre-
 # Profiles and workflows themselves are updated by re-running the installer.
 agent-flow skills sync
 
-# Lore (memory) management
-agent-flow lore init <slug>                  # scaffold a new lore entry
-agent-flow lore list                         # list active lore, sorted by weight
-agent-flow lore search "<query>"             # keyword search
-agent-flow lore compact                      # dry-run compaction report
-agent-flow lore compact --apply              # commit compaction (archives duplicates + stale)
-agent-flow lore restore <filename>           # restore an archived lore
-
 # PR-watch
 agent-flow pr-watch <number>                 # poll PR until actionable status
 agent-flow pr-watch <number> --once          # single fetch (debugging)
@@ -135,6 +127,5 @@ For phases marked `multi_review: true`, review angles run only on the installed 
 
 ## Roadmap
 
-- **Phase 4** (active): Lore engine — Constraint/Rejected/Directive index, fingerprint dedup, 4-tier compaction (dedup/stale-drop/weight-decay/cluster reports), auto-cite into design phase.
 - **Phase 5** (active): PR-watch — gh-CLI polling, status classification (green / has_comments / ci_failed / pending / merged / closed), exponential backoff with jitter.
 - **Phase 6** (deferred): optional sandboxing if user demand emerges (currently out of scope).

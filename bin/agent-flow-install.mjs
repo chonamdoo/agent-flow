@@ -1037,8 +1037,6 @@ function install() {
   const delegatedKitInstalled = runKitInstall();
   ensureDir(path.join(AF_DIR, "runs"));
   ensureDir(path.join(AF_DIR, "memory"));
-  ensureDir(path.join(AF_DIR, "memory", "lore"));
-  ensureDir(path.join(AF_DIR, "memory", "lore", "archive"));
   ensureDir(path.join(AF_DIR, "local-skills"));
 
   const profile = detectProfile();
