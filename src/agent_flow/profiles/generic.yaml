@@ -26,7 +26,6 @@ artifacts:
 vocabulary:
   prd: spec
   adr: decision-log
-  lore: notes
 commit_convention:
   style: freeform
   co_author: skip

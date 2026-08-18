@@ -17,7 +17,6 @@ phases:
     skills:
       required: [grill-with-docs, grilling, domain-modeling]
     description: Interview the user in rounds until the domain problem is clear.
-    cite_lore: true
     required_markers:
       - "domain-grill: complete"
       - "shared_understanding: reached"

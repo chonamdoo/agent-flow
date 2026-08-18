@@ -3,7 +3,7 @@
 
 - 새 세션은 `agent-flow status`로 시작한다. active run이 있으면 그 출력의 `next_command`를 그대로 실행하고, 없으면 `agent-flow run "<task>"`로 시작한다. `agent-flow continue`나 `agent-flow run advance`를 추측하지 않는다.
 - install은 프로젝트당 1회만 수행한다. 새 세션이 시작됐다는 이유로 다시 실행하지 않는다.
-- `/agent-flow`는 shell path가 아니라 skill trigger다. 진입 절차, SPEC 확인·승인, run artifact 위치, lore 조회는 `.agent-flow/skills/agent-flow/SKILL.md`에 있다.
+- `/agent-flow`는 shell path가 아니라 skill trigger다. 진입 절차, SPEC 확인·승인, run artifact 위치는 `.agent-flow/skills/agent-flow/SKILL.md`에 있다.
 
 ### Workflow Contract
 

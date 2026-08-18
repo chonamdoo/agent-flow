@@ -52,7 +52,6 @@ class Adapter(ABC):
         self._profile_snapshot: dict[str, Any] = {}
         self._profile_id: str = "generic"
         self._architecture: str = "default"
-        self._lore_citations: list[Any] = []  # list[Lore]; typed loose to avoid import cycle
         self._config_root: Path | None = None
         self._task_text: str = ""
         self._changed_files: tuple[str, ...] = ()
@@ -118,7 +117,6 @@ class Adapter(ABC):
             task_text=self._task_text,
             concerns=self._concerns,
         )
-        lore_block = self._render_lore_block(project_root, phase)
         # 이전 phase의 수치는 대화 컨텍스트가 아니라 여기로만 건너온다.
         # 렌더러가 넣으므로 agent가 빼거나 잊을 수 없다.
         design_values_block = ledger_prompt_block(run_dir)
@@ -137,7 +135,6 @@ class Adapter(ABC):
             f"{architecture_block}"
             f"{completion_gate_block}"
             f"{local_skill_block}"
-            f"{lore_block}"
             f"{host_block}"
             f"\n## When complete\n"
             f"After writing the artifact, run `agent-flow status` from "
@@ -192,43 +189,6 @@ class Adapter(ABC):
         lines.append("")
         return "\n".join(lines)
 
-    def _render_lore_block(self, project_root: Path, phase: "Phase") -> str:
-        """Inline relevant lore entries for phases that opt in.
-
-        The runner pre-searches the lore index using the task description and
-        sets `_lore_citations` on this adapter. We surface them here as a
-        digest the host AI can cite or skim. Empty when no matches.
-
-        Phases declare `cite_lore: true` in workflow YAML to receive the
-        block — this avoids hardcoding `phase.id == "design"` so renamed
-        phases or new workflows still work.
-        """
-        if not self._lore_citations:
-            return ""
-        if not getattr(phase, "cite_lore", False):
-            return ""
-        lines = [
-            "\n## Relevant lore (auto-cited from `.agent-flow/memory/lore/`)",
-            "",
-            "These entries match the task keywords. Cite by relative path "
-            "where they actually apply; ignore entries that aren't relevant. "
-            "Do NOT fabricate citations.",
-            "",
-        ]
-        for lore in self._lore_citations:
-            try:
-                rel = lore.path.relative_to(project_root)
-            except ValueError:
-                rel = lore.path
-            lines.append(f"### `{rel}` (weight {lore.weight:.2f}, type {lore.type})")
-            lines.append(f"**Title**: {lore.title}")
-            if lore.constraint:
-                lines.append(f"**Constraint**: {_oneline(lore.constraint, 200)}")
-            if lore.directive:
-                lines.append(f"**Directive**: {_oneline(lore.directive, 200)}")
-            lines.append("")
-        return "\n".join(lines) + "\n"
-
     def _render_profile_block(self, phase: "Phase") -> str:
         """Inline the active profile YAML so the host AI sees real data.
 
@@ -270,12 +230,3 @@ class Adapter(ABC):
         if not ids:
             return ""
         return f"\nDeclared concern ids: {', '.join(ids)}\n"
-
-
-def _oneline(text: str, max_len: int) -> str:
-    """Compress whitespace and truncate for prompt-budget single-line digest."""
-    import re
-    flat = re.sub(r"\s+", " ", text).strip()
-    if len(flat) <= max_len:
-        return flat
-    return flat[:max_len - 1] + "…"

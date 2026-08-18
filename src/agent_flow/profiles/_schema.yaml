@@ -192,11 +192,10 @@ optional:
     slice_plan: "required | optional | skip"
 
   vocabulary:
-    # Stack-native renaming. Workflow YAML uses canonical ids (spec, decision-log,
-    # notes); the AI substitutes vocabulary[name] when speaking to the user.
+    # Stack-native renaming. Workflow YAML uses canonical ids (spec,
+    # decision-log); the AI substitutes vocabulary[name] when speaking to the user.
     prd: "spec"
     adr: "decision-log"
-    lore: "notes"
 
   commit_convention:
     style: "conventional | tagged | freeform"

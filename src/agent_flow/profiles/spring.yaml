@@ -40,7 +40,6 @@ artifacts:
 vocabulary:
   prd: spec
   adr: ADR
-  lore: notes
 commit_convention:
   style: conventional
   co_author: skip

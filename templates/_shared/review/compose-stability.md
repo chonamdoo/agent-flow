@@ -31,6 +31,6 @@ Review Jetpack Compose code for recomposition correctness and stability.
 
 ## Output format
 
-Same structure as other angles (Must-fix / Should-fix / Notes / Calibration). Reference relevant lore entries on Compose stability if they exist in `.agent-flow/memory/lore/`.
+Same structure as other angles (Must-fix / Should-fix / Notes / Calibration).
 
 Keep under 200 lines.

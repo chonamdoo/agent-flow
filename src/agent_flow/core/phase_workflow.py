@@ -27,7 +27,6 @@ class PhaseDefinition:
     pause_after: bool
     optional: bool
     multi_review: bool
-    cite_lore: bool
     routes: dict[str, str] | None
     required_markers: tuple[str, ...]
     artifact: str
@@ -376,7 +375,6 @@ def _normalize_phases(phases_raw: list[object], path: Path, workflow_id: str) ->
                 pause_after=_bool_field(item.get("pause_after", False), path, phase_id, "pause_after"),
                 optional=_bool_field(item.get("optional", False), path, phase_id, "optional"),
                 multi_review=_bool_field(item.get("multi_review", False), path, phase_id, "multi_review"),
-                cite_lore=_bool_field(item.get("cite_lore", False), path, phase_id, "cite_lore"),
                 routes=routes,
                 required_markers=normalize_required_markers(item.get("required_markers")),
                 artifact=_artifact_field(

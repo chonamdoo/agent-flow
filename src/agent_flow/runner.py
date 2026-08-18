@@ -130,8 +130,6 @@ from agent_flow.core.local_skills import (
 )
 from agent_flow.core.skill_scope import merge_scope
 from agent_flow.core.skill_resolver import PhaseSkills
-from agent_flow.memory.index import LoreIndex
-from agent_flow.memory.lore import Lore
 
 
 ARCHITECTURE_MODES = {"default", "ddd", "service-layer"}
@@ -173,7 +171,6 @@ class Phase:
     pause_after: bool = False
     optional: bool = False
     multi_review: bool = False  # Triggers fan-out hint in adapter envelope
-    cite_lore: bool = False     # Inject relevant lore into prompt envelope
     routes: dict[str, str] | None = None
     required_markers: tuple[str, ...] = ()
     artifact: str = ""
@@ -440,13 +437,6 @@ class Runner:
             phase_id,
             payload=envelope,
             payload_name=payload_name,
-        )
-
-        # Auto-cite lore: search the local lore index for entries relevant
-        # to the task description and inject them into the prompt envelope.
-        # Empty list when memory dir is missing or no matches.
-        adapter._lore_citations = _search_lore(
-            self.project_root, run_meta.get("task", ""),
         )
 
         # 이 실행이 worktree 안이라면 뒤에 있는 leader 체크아웃이 지켜야 할
@@ -1669,7 +1659,6 @@ def _phases_from_definition(definition: PhaseWorkflowDefinition) -> list[Phase]:
             pause_after=phase.pause_after,
             optional=phase.optional,
             multi_review=phase.multi_review,
-            cite_lore=phase.cite_lore,
             routes=phase.routes,
             required_markers=phase.required_markers,
             artifact=phase.artifact,
@@ -1729,20 +1718,3 @@ def _is_git_repo(project_root: Path) -> bool:
         optional_locks=False,
     )
     return result.ok and result.stdout.strip() == "true"
-
-
-def _search_lore(project_root: Path, task: str, top_k: int = 5) -> list[Lore]:
-    """Find lore entries relevant to the task description.
-
-    Delegates tokenization to `LoreIndex.search_text` so the runner and
-    `agent-flow lore search` use the same tokenizer. Tolerant of missing
-    memory dir / unparseable files. Suppresses parse-warning at run time
-    (the CLI surfaces them via `agent-flow lore list`).
-    """
-    if not task or not task.strip():
-        return []
-    lore_dir = project_root / ".agent-flow" / "memory" / "lore"
-    index = LoreIndex.load(lore_dir, warn=False)
-    if not index.entries:
-        return []
-    return index.search_text(task, top_k=top_k)
