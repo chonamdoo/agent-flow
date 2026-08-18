@@ -246,7 +246,6 @@ artifacts:
 vocabulary:
   prd: PRD
   adr: ADR
-  lore: lore
 commit_convention:
   style: tagged          # [Feat] / [Fix] / [Refactor] / ...
   co_author: skip
