@@ -55,6 +55,7 @@ const DOC_PROFILE_LINE = /^프로파일\s+(\d+)종\s*—\s*(.+)$/m;
 const DOC_SKILL_LINE = /^스킬\s+(\d+)종/m;
 const DOC_BACKTICK_NAME = /`([a-z][a-z0-9-]*)`/g;
 const DOC_COUNT_SOURCE = "README.md";
+const DOC_USAGE_PATH = "docs/USAGE.md";
 const INSTALL_ROOT = resolveInstalledRoot(process.cwd()) ?? SOURCE_ROOT;
 // bin/agent-flow-install.mjs / bin/agent-flow-kit.mjs의 BUNDLED_HOST_SKILL_NAMES와
 // 동일해야 한다. allowlist 밖 bundled skill은 host link 없이 index에만 노출된다.
@@ -412,7 +413,7 @@ assertAllWorkflowContracts();
 // 숫자가 문서 안에서만 살면 워크플로·프로파일·스킬이 늘어도 문서는 조용히 낡고,
 // 저장소를 처음 여는 사람에게는 그 차이를 확인할 방법이 없다.
 assertDocumentedCountsMatchSources();
-assertFile("docs/USAGE.md");
+assertFile(DOC_USAGE_PATH);
 assertLicenseMatchesDeclaration();
 assertPackagedFilesIncludeDocs();
 // 같은 git discovery 변수 목록이 7군데에 복사되어 있고 지금까지는 주석만 "같아야
@@ -2158,8 +2159,10 @@ function assertPackagedFilesIncludeDocs() {
     failures.push("package.json has no files array, so docs packaging cannot be checked");
     return;
   }
-  if (!files.some((entry) => entry === "docs" || entry.startsWith("docs/"))) {
-    failures.push("package.json files does not cover docs/USAGE.md, so it is left out of the package");
+  // `docs/` 접두어 전부를 인정하면 `files`가 `["docs/PLAN.md"]`로 좁혀져도 통과하면서
+  // USAGE는 tarball에서 빠진다. 지키려는 대상을 담는 두 형태만 인정한다.
+  if (!files.some((entry) => entry === "docs" || entry === DOC_USAGE_PATH)) {
+    failures.push(`package.json files does not cover ${DOC_USAGE_PATH}, so it is left out of the package`);
   }
 }
 
