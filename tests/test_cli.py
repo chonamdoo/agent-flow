@@ -2524,6 +2524,46 @@ class CliTest(unittest.TestCase):
                     )
                     self.assertFalse((project_root / "scripts").exists())
 
+    def test_node_installers_treat_help_as_a_question_not_an_install(self) -> None:
+        """`install --help`은 아무것도 쓰지 않는다.
+
+        모르는 토큰을 무시하는 파서에서는 `--help`가 전체 설치를 수행했다. 오타 하나도
+        같은 결과를 냈으므로 두 진입점에서 둘을 함께 고정한다.
+        """
+        node = _node_executable()
+        for installer in ("agent-flow-kit.mjs", "agent-flow-install.mjs"):
+            for args, expected_code, expected_text in (
+                (("install", "--help"), 0, "usage:"),
+                (("install", "-h"), 0, "usage:"),
+                (("install", "--hlep"), 1, "unknown install argument: --hlep"),
+                # root 해석이 먼저 돌면 usage 대신 root 오류로 죽는다.
+                (("install", "--root", "no-such-dir", "--help"), 0, "usage:"),
+                (("install", "--profile"), 1, "--profile requires a value"),
+                (("install", "--profile="), 1, "--profile requires a value"),
+                # 다음 플래그를 값으로 삼키면 그 플래그가 skill 이름이 되면서 동시에
+                # 전역 플래그로도 적용된다.
+                (("install", "--skill", "--no-hooks"), 1, "--skill requires a value"),
+                (("install", "install"), 1, "unknown install argument: install"),
+            ):
+                with self.subTest(installer=installer, args=args):
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        project_root = Path(temp_dir) / "project"
+                        project_root.mkdir()
+                        result = subprocess.run(
+                            (
+                                node,
+                                str(Path(__file__).resolve().parents[1] / "bin" / installer),
+                                *args,
+                            ),
+                            cwd=project_root,
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertEqual(result.returncode, expected_code, result.stderr)
+                        self.assertIn(expected_text, result.stdout + result.stderr)
+                        self.assertEqual(list(project_root.iterdir()), [])
+
     def test_node_installers_merge_existing_codex_hooks(self) -> None:
         for installer in ("agent-flow-kit.mjs", "agent-flow-install.mjs"):
             for seed_dir, custom_command in (

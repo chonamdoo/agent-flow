@@ -24,6 +24,7 @@ import {
   ASSET_UPGRADE_NOTICE_PREFIX,
   arrayValue,
   assertInstallRootIsFinal,
+  assertKnownInstallArgs,
   atomicWriteFileSync,
   backupIfDifferent,
   BOOTSTRAP_TEMPLATE_FILE,
@@ -36,6 +37,8 @@ import {
   hasChildWithSuffix,
   hookScriptCommand,
   hookLauncherDigest,
+  INSTALL_SYNOPSIS,
+  installHelpRequested,
   installedProfileFileNames,
   installProjectLauncher,
   installHookLauncher,
@@ -139,6 +142,14 @@ function installRoot(requested) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
+}
+
+// help는 질문이다. 아래 두 상수가 모듈 평가 중에 root를 풀고 `process.exit(1)`로
+// 끝날 수 있으므로 그보다 먼저 답한다 — `install --root <오타> --help`가 usage 대신
+// root 오류로 죽으면 `--help`는 안전한 질문이 아니게 된다.
+if (process.argv[2] === "install" && installHelpRequested(INSTALL_ARGS)) {
+  console.log(`usage: npx <agent-flow-package> ${INSTALL_SYNOPSIS}`);
+  process.exit(0);
 }
 
 // `--root`는 install만 받는다. 커맨드 디스패치보다 먼저 도는 자리라, 여기서
@@ -1331,13 +1342,14 @@ if (cmd === "install") {
   // 하나가 끊어진 symlink인 경우다. 맨몸으로 두면 그 안내가 stack trace 안에 묻힌다.
   // `agent-flow-kit.mjs`의 진입점과 같은 계약이다.
   try {
+    assertKnownInstallArgs(INSTALL_ARGS);
     install();
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
 } else if (cmd === "--help" || cmd === "-h" || !cmd) {
-  console.log("Usage: npx <agent-flow-package> install [--root <existing dir>] [--force-managed]");
+  console.log(`usage: npx <agent-flow-package> ${INSTALL_SYNOPSIS}`);
   process.exit(0);
 } else {
   console.error(`Unknown command: ${cmd}`);
