@@ -105,8 +105,12 @@ async def _run_one(job: SubprocessJob) -> SubprocessResult:
                     if outcome != "completed":
                         _kill_process_tree(proc)
                     await _bounded_reap(proc, wait_task)
-                    if _provider_output_exceeded(stdout_path, stderr_path):
-                        outcome = "output-limit"
+                    # 출력 한계 초과로 `outcome`을 덮지 않는다. 덮으면 스스로
+                    # 종료한 프로세스의 exit status와 timeout 사실이 같은 자리에서
+                    # 사라진다.
+                    output_limited = outcome == "output-limit" or (
+                        _provider_output_exceeded(stdout_path, stderr_path)
+                    )
             except FileNotFoundError:
                 return SubprocessResult(
                     job_id=job.job_id,
@@ -142,7 +146,7 @@ async def _run_one(job: SubprocessJob) -> SubprocessResult:
                 timed_out=outcome == "timeout",
                 error=(
                     f"provider output exceeded {MAX_PROVIDER_OUTPUT_BYTES} bytes"
-                    if outcome == "output-limit"
+                    if output_limited
                     else None
                 ),
             )
