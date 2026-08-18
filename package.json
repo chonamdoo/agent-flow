@@ -21,7 +21,8 @@
     ".claude",
     "src",
     "pyproject.toml",
-    "README.md"
+    "README.md",
+    "docs"
   ],
   "license": "MIT",
   "type": "module"
