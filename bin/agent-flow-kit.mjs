@@ -17,6 +17,7 @@ import {
   AGENT_FLOW_COMMAND,
   arrayValue,
   assertInstallRootIsFinal,
+  assertKnownInstallArgs,
   atomicWriteFileSync,
   backupIfDifferent,
   BOOTSTRAP_TEMPLATE_FILE,
@@ -34,6 +35,8 @@ import {
   hasChildWithSuffix,
   hookScriptCommand,
   hookLauncherDigest,
+  INSTALL_SYNOPSIS,
+  installHelpRequested,
   installedProfileFileNames,
   installProjectLauncher,
   installHookLauncher,
@@ -2470,12 +2473,12 @@ function installedPythonRuntimePath(root) {
 }
 
 try {
-  if (command === "install") {
-    installProject(requestedInstallRoot());
-    process.exit(0);
-  }
-
-  if (command === "run" && process.argv[3] === "install") {
+  if (command === "install" || (command === "run" && process.argv[3] === "install")) {
+    if (installHelpRequested(installArgs)) {
+      console.log(`usage: ${INSTALL_SYNOPSIS}`);
+      process.exit(0);
+    }
+    assertKnownInstallArgs(installArgs);
     installProject(requestedInstallRoot());
     process.exit(0);
   }
