@@ -41,6 +41,7 @@ from agent_flow.core.design_value_check import missing_spec_item_evidence
 from agent_flow.core.gate_plan import profile_gate_commands
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.kit_digest import warn_if_installed_kit_is_stale
+from agent_flow.core.kit_install import run_project_install
 from agent_flow.core.phase_workflow import (
     ACCEPT_WORKFLOW_DRIFT_FLAG,
     DeclaredPhaseSkills,
@@ -71,6 +72,11 @@ from agent_flow.core.query import explain_run, query_run
 from agent_flow.core.security import resolve_project_path
 from agent_flow.core.tool_lint import lint_tools
 from agent_flow.core.watch import write_watch_snapshot
+from agent_flow.core.update_check import (
+    installed_version,
+    print_update_report,
+    warn_if_update_available,
+)
 from agent_flow.core.team import (
     acknowledge_shutdown,
     add_task,
@@ -208,12 +214,50 @@ def _add_concern_option(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _with_install_shorthand(argv: list[str], commands: set[str]) -> list[str]:
+    """`agent-flow .`을 `agent-flow install .`로 읽는다.
+
+    첫 토큰이 서브커맨드도 옵션도 아니고 **실재하는 디렉터리**일 때만 바꾼다. 존재
+    여부를 보지 않으면 오타가 설치로 해석되고, 설치는 파일을 만드는 명령이라
+    되돌리는 일이 사용자 몫이 된다.
+    """
+    if not argv:
+        return argv
+    first = argv[0]
+    if first in commands or first.startswith("-"):
+        return argv
+    try:
+        if not Path(first).expanduser().is_dir():
+            return argv
+    except OSError:
+        return argv
+    return ["install", *argv]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent-flow")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"agent-flow {installed_version() or 'unknown'}",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser("init")
     init_parser.add_argument("--root", default=".")
+
+    # `agent-flow .`이 오는 자리. 설치 자체는 `bin/agent-flow-kit.mjs`가 하고, 남은
+    # 인수는 검증까지 그 스크립트에 넘긴다 — 설치 플래그 목록을 여기 베끼면 두 곳이
+    # 갈라진다.
+    install_parser = subparsers.add_parser("install")
+    # 경로는 생략할 수 없다. `nargs="?"`로 두면 REMAINDER가 positional 하나를 먹은
+    # 뒤에야 모으기 시작하는 argparse 규칙과 부딪혀, `install --profile android`가
+    # `android`를 경로로 삼고 `--profile`을 unknown으로 죽인다. 경로 없는 형태는
+    # 지름길(`agent-flow .`) 하나로 남긴다.
+    install_parser.add_argument("path")
+    install_parser.add_argument("installer_args", nargs=argparse.REMAINDER)
+
+    subparsers.add_parser("update")
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("task")
@@ -623,7 +667,23 @@ def main(argv: list[str] | None = None) -> int:
     team_import_apply.add_argument("--file", required=True)
     team_import_apply.add_argument("--report")
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(
+        _with_install_shorthand(
+            sys.argv[1:] if argv is None else argv, set(subparsers.choices)
+        )
+    )
+
+    # 이 두 명령은 프로젝트 root 해석보다 앞에 온다. `install`의 대상은 아직 설치되지
+    # 않은 디렉터리이고, `update`는 프로젝트가 아니라 kit 자신을 본다.
+    if args.command == "install":
+        return run_project_install(
+            kit_root=_find_kit_root(),
+            target=Path(args.path).expanduser().resolve(),
+            extra_args=tuple(args.installer_args),
+        )
+    if args.command == "update":
+        return print_update_report(_find_kit_root())
+
     args._worktree_explicit = bool(getattr(args, "worktree", None))
     requested_root = Path(getattr(args, "root", ".")).resolve()
     root = requested_root
@@ -699,7 +759,11 @@ def main(argv: list[str] | None = None) -> int:
     # 문서가 안내하는 진입점은 이쪽이다. JS 래퍼에만 검사가 있으면 일반적인
     # 사용자는 kit을 올린 뒤에도 낡은 설치본을 끝까지 못 본다.
     if args.command in _KIT_FRESHNESS_COMMANDS:
-        warn_if_installed_kit_is_stale(root, _find_kit_root())
+        kit_root = _find_kit_root()
+        warn_if_installed_kit_is_stale(root, kit_root)
+        # 다른 축이다: 위는 프로젝트 설치본이 낡았는지, 아래는 kit 자신이 낡았는지.
+        # 재설치로 풀리는 문제와 업그레이드로 풀리는 문제를 한 문장에 섞지 않는다.
+        warn_if_update_available(kit_root)
 
 
     if args.command == "init":

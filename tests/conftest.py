@@ -21,6 +21,28 @@ def isolate_agent_flow_user_state(tmp_path_factory: pytest.TempPathFactory) -> I
 
 
 @pytest.fixture(scope="session", autouse=True)
+def disable_release_update_check() -> Iterator[None]:
+    """릴리스 확인을 이 스위트 안에서 끈다.
+
+    이 스위트는 `run`/`status`/`continue`를 수백 번 부르고, 그 경로는 하루에 한 번
+    github.com에 묻는다. 켠 채로 두면 두 가지가 생긴다: 새 홈마다 한 번씩 붙는
+    네트워크 지연, 그리고 릴리스가 실제로 나온 뒤부터는 stderr에 끼어드는 경고 한 줄
+    — 출력 전체를 대조하는 테스트는 그 줄 때문에 붉어진다.
+
+    확인 로직 자체는 `tests/test_update_check.py`가 fetcher를 주입해 판정하므로,
+    이 스위치가 그 반증을 삼키지 않는다.
+    """
+    previous = os.environ.get("AGENT_FLOW_NO_UPDATE_CHECK")
+    if previous is None:
+        os.environ["AGENT_FLOW_NO_UPDATE_CHECK"] = "1"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("AGENT_FLOW_NO_UPDATE_CHECK", None)
+
+
+@pytest.fixture(scope="session", autouse=True)
 def skip_install_fsync() -> Iterator[None]:
     """install의 fsync를 이 스위트 안에서만 내린다.
 
