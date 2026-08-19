@@ -28,8 +28,9 @@ failure-path coverage.
      the clock is advanced with `tester.pump(duration)` instead.
 
 4. **Widget tests**
-   - Every declared `UiState` branch — loading, empty, error, offline,
-     success — has a rendered assertion.
+   - Every declared `UiState` branch has a rendered assertion — not-ready,
+     loading, refreshing, placeholder, empty, error, success, offline, and
+     permission-required, whichever the screen declares.
    - `pump` is called with an explicit duration where an animation never
      settles; a bare `pumpAndSettle` there fails with `pumpAndSettle timed out`.
    - Assertions use `find.bySemanticsLabel` or a stable key rather than

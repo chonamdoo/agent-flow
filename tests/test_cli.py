@@ -7496,6 +7496,66 @@ if (codexContext !== undefined) {
                 self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
             self.assertEqual(output.getvalue().strip(), "react-native")
 
+    def test_detect_profile_reports_flutter_for_sdk_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "pubspec.yaml").write_text(
+                "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
+            self.assertEqual(output.getvalue().strip(), "flutter")
+
+    def test_detect_profile_reads_the_sdk_value_not_its_bytes(self) -> None:
+        """인용과 인라인 주석은 저자의 선택이다. 바이트로 비교하면 실제 Flutter
+        저장소가 조용히 profile을 잃는다."""
+        for dependency in (
+            '    sdk: "flutter"',
+            "    sdk: 'flutter'  # Flutter SDK",
+            "    sdk: flutter # Flutter SDK",
+            "    sdk:  flutter",
+        ):
+            with self.subTest(dependency=dependency):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    (root / "pubspec.yaml").write_text(
+                        f"name: app\ndependencies:\n  flutter:\n{dependency}\n",
+                        encoding="utf-8",
+                    )
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
+                    self.assertEqual(output.getvalue().strip(), "flutter")
+
+    def test_detect_profile_keeps_a_pure_dart_package_off_the_flutter_profile(self) -> None:
+        """`pubspec.yaml`은 Dart 패키지 manifest다. SDK 의존이 없는 저장소를
+        flutter로 잡으면 `flutter analyze`·`flutter test`가 상시 실패한다."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "pubspec.yaml").write_text(
+                "name: cli\ndescription: helper for flutter devs\ndependencies:\n  args: ^2.5.0\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
+            self.assertEqual(output.getvalue().strip(), "generic")
+
+    def test_detect_profile_prefers_flutter_over_a_root_gradle_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "pubspec.yaml").write_text(
+                "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+                encoding="utf-8",
+            )
+            (root / "settings.gradle.kts").write_text("", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
+            self.assertEqual(output.getvalue().strip(), "flutter")
+
     def test_provider_list_reports_host_provider_availability(self) -> None:
         output = io.StringIO()
         with mock.patch("agent_flow.providers.host.shutil.which") as which:

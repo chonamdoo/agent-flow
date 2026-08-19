@@ -59,7 +59,9 @@ skills:
       skills: [flutter-development-guide]
       when: Flutter widget/framework files change
       missing: "missing local profile: <skill>"
-      path_globs: ["**/*.dart", "**/pubspec.yaml"]
+      # `**/pubspec.yaml`은 넣지 않는다. 이 skill의 본문에 manifest 규칙이 없어서,
+      # 의존성만 바꾼 변경에 적용할 지침이 없는 skill이 required가 된다.
+      path_globs: ["**/*.dart"]
     # Dart 가이드의 범위는 그 skill이 선언한 `*.dart`와 분석기 설정이다. Flutter 표의
     # glob에 섞으면 `pubspec.yaml`만 바꿔도 언어 가이드가 required가 된다.
     - group: dart

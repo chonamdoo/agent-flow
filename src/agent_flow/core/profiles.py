@@ -30,8 +30,12 @@ GATE_PHASE_ALL = "all"
 # 프로젝트가 배포 profile 위에 얹는 파일. install이 덮지 않는 유일한 자리다.
 PROJECT_OVERRIDE_SUFFIX = ".local.yaml"
 # `flutter create`가 `dependencies:`에 쓰는 Flutter SDK 의존. 이것이 pubspec을 가진
-# 순수 Dart 패키지와 Flutter 저장소를 가르는 유일한 표지다.
-_FLUTTER_SDK_DEPENDENCY_RE = re.compile(r"""^\s*sdk:\s*["']?flutter["']?\s*$""", re.MULTILINE)
+# 순수 Dart 패키지와 Flutter 저장소를 가르는 유일한 표지다. 인라인 주석을 허용한다 —
+# `sdk: flutter # Flutter SDK`도 같은 매핑으로 파싱되는 유효한 pubspec이다. `#` 앞의
+# 공백을 요구해야 `sdk: flutter#c`(주석이 아니라 스칼라 `flutter#c`)를 잡지 않는다.
+_FLUTTER_SDK_DEPENDENCY_RE = re.compile(
+    r"""^\s*sdk:\s*["']?flutter["']?(?:[ \t]+#.*)?[ \t]*$""", re.MULTILINE
+)
 
 
 class _UnknownProfileError(ValueError):

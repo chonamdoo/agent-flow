@@ -43,8 +43,9 @@ build.
    - Every `StreamSubscription` and `Timer` is cancelled in `dispose`.
 
 6. **State reads**
-   - A provider is watched where the value is rendered, not read once and
-     cached in a field.
+   - A provider that affects widget output is watched at the render boundary
+     rather than read once and cached in a field. A state holder reads its
+     dependencies through `ref`.
    - A provider is declared at library top level, not constructed inside
      `build`.
 

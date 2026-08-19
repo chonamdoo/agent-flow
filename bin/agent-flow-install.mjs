@@ -246,8 +246,9 @@ function bootstrapLocalSkillName(skillPath, fallback) {
 }
 
 // `flutter create`가 `dependencies:`에 쓰는 Flutter SDK 의존. pubspec을 가진 순수 Dart
-// 패키지와 Flutter 저장소를 가르는 유일한 표지다. Python 쪽과 같은 패턴을 쓴다.
-const FLUTTER_SDK_DEPENDENCY_RE = /^\s*sdk:\s*["']?flutter["']?\s*$/m;
+// 패키지와 Flutter 저장소를 가르는 유일한 표지다. Python 쪽과 같은 패턴을 쓴다 — 인라인
+// 주석을 허용하고, `#` 앞의 공백을 요구해 `sdk: flutter#c` 스칼라는 잡지 않는다.
+const FLUTTER_SDK_DEPENDENCY_RE = /^\s*sdk:\s*["']?flutter["']?(?:[ \t]+#.*)?[ \t]*$/m;
 
 function detectProfile() {
   // 설치 배너도 Python CLI와 같은 profile을 보여줘야 agent가 다른 guide를 고르지 않는다.
