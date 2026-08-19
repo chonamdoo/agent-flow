@@ -34,34 +34,12 @@ explicit.
 
 - FastAPI/Django/Flask dependency mechanisms belong at app/API adapter edge.
 - Domain, use case, and repository contracts must not import framework DI.
+- Declare repository and data-source contracts as `typing.Protocol` so an
+  implementation conforms structurally without inheriting the contract.
 - App shell owns factory/provider construction in `app/container.py`,
   `app/di.py`, or equivalent.
 - API handlers call use cases and map domain/application results to response
   models at the adapter boundary.
-
-## Generic Sample
-
-```python
-class HomeRepository(Protocol):
-    async def get_home_feed(self) -> HomeFeed: ...
-
-
-class HomeRepositoryImpl:
-    def __init__(self, remote_data_source: HomeRemoteDataSource) -> None:
-        self._remote_data_source = remote_data_source
-
-    async def get_home_feed(self) -> HomeFeed:
-        dto = await self._remote_data_source.get_home_feed()
-        return to_home_feed(dto)
-```
-
-```python
-def create_container() -> Dependencies:
-    api_client = HomeApiClient(http_client=create_http_client())
-    remote_data_source = HomeRemoteDataSourceImpl(api_client)
-    repository = HomeRepositoryImpl(remote_data_source)
-    return Dependencies(get_home_feed=GetHomeFeedUseCase(repository))
-```
 
 ## Review Additions
 

@@ -6,8 +6,8 @@ description: Platform-neutral Clean Architecture contract for semantic layers, d
 # Clean Architecture Core
 
 Use this skill as the canonical source for platform-neutral architecture rules.
-Load a platform-specific clean architecture skill only for path, framework, DI,
-or sample-code details.
+Load a platform-specific clean architecture skill only for path, framework, or
+DI details.
 
 ## Semantic Layers
 
