@@ -6,7 +6,11 @@
 `git -C <clone> diff <pinned>..HEAD -- skills/` 범위 diff로 줄어든다.
 
 - upstream: `https://github.com/mattpocock/skills`
-- pinned commit: `8b36d4fb2635b3c21998dcd8144439c9e5ba7302` (2026-08-05)
+- pinned commit: `9c9f36ccd3995266cd675468af71639c8dde1ec5` (2026-08-17)
+
+pin을 올릴 때는 채택한 것과 미채택한 것을 아래 표/목록에 같이 적는다. pin만 올리면 다음
+동기화가 "이미 본 변경"과 "안 본 변경"을 구별하지 못한다. 대조 근거는
+`docs/mattpocock-skills-upstream-audit.md`에 있다.
 
 ## 매핑
 
@@ -16,10 +20,10 @@ upstream은 `skills/engineering|productivity/<name>/`로 묶고, 우리는 `skil
 | 우리 | upstream | 상태 |
 | --- | --- | --- |
 | `codebase-design` | `engineering/codebase-design` | 바이트 동일 |
-| `domain-modeling` | `engineering/domain-modeling` | 바이트 동일 |
-| `tdd` | `engineering/tdd` | 동일 + 우리 `requires` |
-| `grill-with-docs` | `engineering/grill-with-docs` | 동일 + 우리 `requires` |
-| `grilling` | `productivity/grilling` | 동일 + 아래 이모지 예외 |
+| `domain-modeling` | `engineering/domain-modeling` | description 병합 (아래) |
+| `tdd` | `engineering/tdd` | 우리 `requires` + `tests.md` 예제 재작성 + `Skill` tool 표현 미채택 (아래) |
+| `grill-with-docs` | `engineering/grill-with-docs` | 우리 `requires` + `Skill` tool 표현 미채택 (아래) |
+| `grilling` | `productivity/grilling` | 이모지 예외 + sub-agent dispatch 문장 + em-dash 미채택 (아래) |
 | `code-review` | `engineering/code-review` | 의도적 분기 (아래) |
 | `resolving-merge-conflicts` | `engineering/resolving-merge-conflicts` | description 인용부호만 다름 |
 | `to-prd` | `engineering/to-spec` | 우리 PRD 용어로 재작성 |
@@ -41,6 +45,25 @@ upstream은 `skills/engineering|productivity/<name>/`로 묶고, 우리는 `skil
   않으므로 `**Q1** — ...` / `→ ...`로 바꿨다. 알고리즘(design tree, frontier, round 단위 질문,
   종료 조건)은 upstream 그대로다.
 - **`resolving-merge-conflicts`의 description 인용부호** — 파싱 결과가 같아 따라가지 않는다.
+- **`Skill` tool 호출 표현** — upstream은 skill 간 참조를 `call the Skill tool with "<name>"`로
+  통일했다(`tdd`, `grill-with-docs`). 가져오지 않는다. 여기 vendored skill은
+  `BUNDLED_HOST_SKILL_NAMES` 밖이라 host skill picker에 올라가지 않고, phase 프롬프트는
+  `.agent-flow/skills/<name>/SKILL.md` **경로**로 읽으라고 지시한다
+  (`workflows/full-feature.yaml`의 domain-grill phase). 그 문장을 따라가면 우리 install에서
+  존재하지 않는 호출 경로를 지시하게 된다.
+- **`domain-modeling`의 description** — upstream은 trigger를 파일 기준(CONTEXT.md/ADR)으로
+  바꾸면서 `or when another skill needs to maintain the domain model` 절을 지웠다. 그 절은
+  우리에게 살아 있는 trigger다 — `grill-with-docs`의 `requires`, `workflows/default.yaml`과
+  `workflows/full-feature.yaml`의 design/domain-grill phase가 다른 skill/phase에서 이 skill을
+  부른다. 그래서 파일 기준 trigger만 더하고 그 절은 남긴다.
+- **`tdd/tests.md`의 implementation-detail 예제** — upstream 예제는 mock 남용과 내부 호출 단정을
+  한 블록에 섞어 둔다. 결함 하나만 보이도록 다시 썼다. upstream 본문을 덮어쓸 때 되돌리지 않는다.
+- **`grilling`의 sub-agent dispatch 문장** — upstream은 "dispatch a sub-agent to find it"이다.
+  우리는 "find it yourself — read the repo, run the tool, or dispatch a read-only exploration
+  sub-agent"로 바꿨다. 사실 조회를 subagent 전용으로 읽으면 도구로 바로 확인할 수 있는 것도
+  위임하게 된다.
+- **`grilling`의 em-dash 정리** — upstream은 em-dash를 콜론으로 바꿨다(`86cba45`). 이 저장소는
+  본문에서 em-dash를 쓰므로 따라가지 않는다. 의미 차이가 없다.
 
 ## `agents/openai.yaml`
 
