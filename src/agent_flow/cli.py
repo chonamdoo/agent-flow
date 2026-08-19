@@ -38,6 +38,7 @@ from agent_flow.core.design_ledger import (
     render_spec_changes,
 )
 from agent_flow.core.design_value_check import missing_spec_item_evidence
+from agent_flow.core.gate_plan import profile_gate_commands
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.kit_digest import warn_if_installed_kit_is_stale
 from agent_flow.core.phase_workflow import (
@@ -52,7 +53,6 @@ from agent_flow.core.profiles import (
     GATE_PHASES,
     active_profile_ids,
     detect_profile,
-    load_profile,
     load_profile_payload,
 )
 from agent_flow.core.local_skills import (
@@ -324,7 +324,11 @@ def main(argv: list[str] | None = None) -> int:
     gates_parser.add_argument("--root", default=".")
     gates_parser.add_argument("--profile", default="auto")
     gates_parser.add_argument("--run-dir")
-    gates_parser.add_argument("--timeout", type=int, default=600)
+    # 기본값은 상수가 아니라 `None`이다. 값을 박으면 "사용자가 지정했다"와
+    # "기본값이다"를 구분할 수 없고, profile이 선언한 gate 상한이 항상 이 값에
+    # 덮여 gradle/xcodebuild가 매번 판정 불가로 기록된다. 지정하면 그것이 선언을
+    # 이기고, 생략하면 선언(없으면 `DEFAULT_GATE_TIMEOUT_S`)이 쓰인다.
+    gates_parser.add_argument("--timeout", type=int, default=None)
     gates_parser.add_argument("--worktree")
     gates_parser.add_argument(
         "--phase",
@@ -958,7 +962,7 @@ def main(argv: list[str] | None = None) -> int:
                 root, requested_root, getattr(args, "worktree", None)
             )
             profile_ids = active_profile_ids(profile_root, args.profile)
-            commands = _profile_gate_commands(
+            commands = profile_gate_commands(
                 profile_ids,
                 root=profile_root,
                 phase=args.phase,
@@ -966,7 +970,12 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 1
-        results = run_gates(commands, cwd=command_root, timeout_s=args.timeout)
+        results = run_gates(
+            commands,
+            cwd=command_root,
+            timeout_s=args.timeout,
+            on_start=_print_gate_progress,
+        )
         if args.run_dir is not None:
             # run을 소유하는 것은 leader checkout도 worktree checkout도 아니라
             # worktree runtime root다(`cli.py:497`가 state_root로 쓰는 자리).
@@ -2044,135 +2053,15 @@ def _resolve_project_path(root: Path, value: str) -> Path:
     return resolve_project_path(root, value)
 
 
-def _profile_gate_commands(
-    profile_ids: list[str],
-    *,
-    root: Path | None = None,
-    phase: str = DEFAULT_GATE_PHASE,
-) -> list[GateCommand]:
-    commands: list[tuple[int, GateCommand]] = []
-    seen: set[tuple[str, ...]] = set()
-    multi_profile = len(profile_ids) > 1
-    architecture_lint_added = False
-    architecture_lint_profile = ",".join(profile_ids)
-    order = 0
-    for profile_id in profile_ids:
-        profile = load_profile(profile_id, root)
-        for gate in profile.gates:
-            if phase != GATE_PHASE_ALL and gate.phase != phase:
-                continue
-            command = _normalize_profile_gate_command(
-                profile.profile_id,
-                gate.gate_id,
-                gate.command,
-                profile_root=root,
-            )
-            required = gate.required
-            gate_id = f"{profile.profile_id}:{gate.gate_id}" if multi_profile else gate.gate_id
-            if multi_profile and _is_architecture_lint_gate(gate.gate_id, gate.command):
-                if architecture_lint_added:
-                    continue
-                command = _architecture_lint_command(
-                    architecture_lint_profile,
-                    profile_root=root,
-                )
-                gate_id = "architecture-lint"
-                required = True
-                architecture_lint_added = True
-            if command in seen:
-                continue
-            seen.add(command)
-            commands.append((order, GateCommand(gate_id, command, required=required)))
-            order += 1
-    return [
-        command
-        for _, command in sorted(
-            commands,
-            key=lambda item: (*_gate_order_key(item[1]), item[0]),
-        )
-    ]
+def _print_gate_progress(gate: GateCommand, index: int, total: int) -> None:
+    """gate 시작을 stderr에 알린다.
 
-
-def _is_architecture_lint_gate(gate_id: str, command: tuple[str, ...]) -> bool:
-    return gate_id == "architecture-lint" or "architecture-lint" in command
-
-
-def _normalize_profile_gate_command(
-    profile_id: str,
-    gate_id: str,
-    command: tuple[str, ...],
-    *,
-    profile_root: Path | None = None,
-) -> tuple[str, ...]:
-    if _is_architecture_lint_gate(gate_id, command):
-        profile_index = command.index("--profile") + 1 if "--profile" in command else -1
-        if profile_index > 0 and profile_index < len(command):
-            return _architecture_lint_command(
-                command[profile_index],
-                profile_root=profile_root,
-            )
-    if profile_id == "python" and command:
-        if command[0] in {"mypy", "pytest", "ruff"}:
-            return (sys.executable, "-m", command[0], *command[1:])
-    return command
-
-
-def _architecture_lint_command(
-    profile_ids: str,
-    *,
-    profile_root: Path | None = None,
-) -> tuple[str, ...]:
-    command = (
-        sys.executable,
-        "-m",
-        "agent_flow.core.architecture_lint",
-        "--profile",
-        profile_ids,
-    )
-    if profile_root is None:
-        return command
-    return (*command, "--profile-root", str(profile_root))
-
-
-# gate 종류는 **선언된 gate id**에서만 읽는다. 명령 문자열에는 인터프리터와
-# 프로젝트의 절대 경로가 섞이고, 그 경로가 이 어휘와 부딪히면 순서가 실행 환경마다
-# 달라진다. 실측: `uv run --with pytest`가 만든 인터프리터
-# `/Users/…/.cache/uv/builds-v0/.tmp…/bin/python`의 "builds"가 python profile의 gate
-# 셋을 모두 build 칸으로 옮겨 `type → architecture-lint → lint`가
-# `architecture-lint → lint → type`으로 뒤집혔다 — BUILD → TYPECHECK → LINT 계약이
-# 인터프리터 경로 하나로 깨진 것이다. id는 profile이 선언하는 값이라 그런 오염이 없다.
-#
-# 어휘에 없는 id(예: gradle build를 도는 `verify`)는 마지막 칸으로 간다. 답이
-# 안정적이고 선언으로 고칠 수 있다 — 명령 문자열을 추측하는 쪽은 둘 다 아니다.
-_GATE_KIND_VOCABULARY: tuple[tuple[int, frozenset[str]], ...] = (
-    (0, frozenset({"build", "assemble", "xcodebuild"})),
-    (1, frozenset({"typecheck", "type", "types", "tsc", "mypy", "pyright"})),
-    (2, frozenset({"lint", "ruff", "detekt", "ktlint", "swiftlint"})),
-    (3, frozenset({"test", "tests", "pytest"})),
-)
-
-
-def _gate_id_words(gate_id: str) -> frozenset[str]:
-    """`android:ios-build` → {android, ios, build}. 부분 문자열이 아니라 낱말로 본다."""
-    return frozenset(word for word in re.split(r"[^a-z0-9]+", gate_id.lower()) if word)
-
-
-def _gate_order_key(gate: GateCommand) -> tuple[int, int, str]:
-    words = _gate_id_words(gate.gate_id)
-    for rank, vocabulary in _GATE_KIND_VOCABULARY:
-        if words & vocabulary:
-            return (rank, _profile_gate_kind_tiebreaker(gate.gate_id), gate.gate_id)
-    return (4, _profile_gate_kind_tiebreaker(gate.gate_id), gate.gate_id)
-
-
-def _profile_gate_kind_tiebreaker(gate_id: str) -> int:
-    """같은 칸 안의 순서. architecture 계약이 스택 lint보다 먼저 답을 준다."""
-    words = _gate_id_words(gate_id)
-    if "architecture" in words:
-        return 0
-    if "context" in words:
-        return 1
-    return 2
+    stdout이 아닌 이유: stdout의 `<profiles>: n/m gates passed` 한 줄은 스크립트와
+    테스트가 그대로 읽는 요약이다. 진행 표시를 거기 섞으면 그 계약이 깨진다.
+    `run_gate`는 `capture_output=True`라 이 줄이 없으면 gradle/xcodebuild가 도는
+    수십 분 동안 관측 가능한 신호가 0이고, 멈춘 것과 구분되지 않는다.
+    """
+    print(f"[gate {index}/{total}] {gate.gate_id}", file=sys.stderr, flush=True)
 
 
 def _resolve_run_dir(root: Path, value: str | None) -> Path | None:

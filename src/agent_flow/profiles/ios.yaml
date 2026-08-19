@@ -18,10 +18,14 @@ gates:
     command: ["xcodebuild", "-scheme", "App", "-destination", "platform=iOS Simulator,name=iPhone 15", "build"]
     required: true
     phase: pre-push
+    # 시뮬레이터 부팅을 포함한 xcodebuild는 600s 기본값을 넘긴다. 넘기면
+    # timeout=판정 불가로 기록되어 빌드 상태를 관측하지 못한 채 error로 라우팅된다.
+    timeout_s: 2400
   - id: test
     command: ["xcodebuild", "-scheme", "App", "-destination", "platform=iOS Simulator,name=iPhone 15", "test"]
     required: true
     phase: pre-push
+    timeout_s: 2400
   - id: lint
     command: ["swiftlint"]
     required: false

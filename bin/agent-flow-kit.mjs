@@ -939,17 +939,28 @@ const DEFAULT_RELAY_TIMEOUT_MS = 30_000;
 // 경우 전경이 영영 멈춘다.
 const DEFAULT_GATE_TIMEOUT_S = 600;
 // `--profile a,b`와 kit.json의 profiles 리스트는 여러 프로파일의 게이트를 합집합으로
-// 돌린다(`src/agent_flow/cli.py:_profile_gate_commands`). 배포 프로파일 전부를 켠
+// 돌린다(`src/agent_flow/core/gate_plan.py:profile_gate_commands`). 배포 프로파일 전부를 켠
 // 실측 최대가 20개라 그보다 위에서 자른다.
 const MAX_TOTAL_GATES = 24;
 const GATE_RELAY_SLACK_MS = 120_000;
+// `gateTimeoutSeconds * MAX_TOTAL_GATES`는 **모든 gate가 기본 상한**이라고 가정한다.
+// `gates[].timeout_s`가 그 가정을 깬다 — 배포 profile 전부를 켠 plan의 선언 합계
+// 실측이 15,600초로 기본 예산 14,400초를 넘는다. 넘으면 gate는 다 돌았는데 결과
+// 파일을 쓰기 전에 SIGKILL이 나고, 파일이 없으니 cursor가 gates에 남아 다음
+// 실행이 같은 자리에서 다시 죽는다. JS가 profile YAML을 읽어 예산을 계산하게
+// 만들지는 않는다(parity가 profile 로직의 JS 재구현을 금지한다). 바닥값을 둔다.
+// 여백은 `tests/test_cli.py`의 `test_declared_gate_timeouts_fit_inside_the_relay_budget`가
+// 지킨다 — 새 profile이 상한을 올리면 그 테스트가 먼저 깨진다.
+const GATE_PLAN_FLOOR_S = 18_000;
 
-function gateTimeoutSeconds(args) {
+function requestedGateTimeoutSeconds(args) {
   // argparse는 `--timeout 900`, `--timeout=900`, 유일 접두 축약(`--time 900`)을
   // 모두 받는다. 한 형태만 읽으면 사용자가 올린 상한이 예산에 반영되지 않는다.
+  // 지정하지 않았으면 `null`이다 — 기본값으로 접으면 "사용자가 지정했다"와
+  // "선언이 실제 상한이다"를 구분할 수 없다.
   const isTimeoutFlag = (value) =>
     value.length >= 3 && "--timeout".startsWith(value);
-  let selected = DEFAULT_GATE_TIMEOUT_S;
+  let selected = null;
   for (const [index, arg] of args.entries()) {
     if (typeof arg !== "string" || !arg.startsWith("--t")) {
       continue;
@@ -970,17 +981,43 @@ function gateTimeoutSeconds(args) {
   return selected;
 }
 
+function gateTimeoutSeconds(args) {
+  return requestedGateTimeoutSeconds(args) ?? DEFAULT_GATE_TIMEOUT_S;
+}
+
 // architecture-lint는 profile gate로도 돌고(그때는 gate 예산 안에 있다) node로
 // 직접도 불린다. 직접 호출만 30초로 잘리면 같은 명령이 호출 경로에 따라 다르게
 // 죽는다. Python 파서에 `--timeout`이 없으므로 게이트 하나치 기본 예산을 준다.
 const SINGLE_GATE_RELAY_TIMEOUT_MS = DEFAULT_GATE_TIMEOUT_S * 1000 + GATE_RELAY_SLACK_MS;
 
+function gatePlanRelayTimeoutMs(args) {
+  // 명시한 상한은 profile 선언을 이긴다(`core/gates.py`의 `run_gate`). 그래서
+  // 명시했으면 선언 합계를 볼 이유가 없고, 생략했으면 선언이 실제 상한이라
+  // 바닥값이 필요하다. 둘을 `max`로 접으면 바닥값이 사용자가 올린 상한을 삼켜
+  // `--timeout`을 올려도 예산이 그대로인 구간이 생긴다.
+  const requested = requestedGateTimeoutSeconds(args);
+  const seconds =
+    requested === null ? GATE_PLAN_FLOOR_S : requested * MAX_TOTAL_GATES;
+  return seconds * 1000 + GATE_RELAY_SLACK_MS;
+}
+
 function relayTimeoutForSubcommand(subcommand, args) {
   if (subcommand === "gates") {
-    return gateTimeoutSeconds(args) * 1000 * MAX_TOTAL_GATES + GATE_RELAY_SLACK_MS;
+    return gatePlanRelayTimeoutMs(args);
   }
   if (subcommand === "architecture-lint") {
     return SINGLE_GATE_RELAY_TIMEOUT_MS;
+  }
+  if (subcommand === "continue") {
+    // `continue`는 phase를 전진시키는 명령이고, gates phase에서는 runner가 프로파일
+    // 게이트를 **이 프로세스 안에서** 직접 돌린다(`src/agent_flow/runner.py`의
+    // `_run_project_gates`). 30초를 주면 android/ios의 gradle·xcodebuild 게이트는
+    // 첫 하나도 끝나지 않고, SIGKILL 시점에는 gate-results.json이 아직 없어서
+    // cursor가 gates에 그대로 남는다 — 다음 `run advance`가 같은 자리에서 다시
+    // 죽어 이 진입점에서 gates를 통과할 방법이 사라진다. multi-review도 같은
+    // 프로세스에서 reviewer subprocess를 돌리므로 예산은 게이트 총량과 같이 둔다.
+    // 상한을 없애지는 않는다 — python이 시작조차 못 한 경우 전경이 영영 멈춘다.
+    return gatePlanRelayTimeoutMs(args);
   }
   return DEFAULT_RELAY_TIMEOUT_MS;
 }
@@ -2390,9 +2427,9 @@ Implementation rules:
 - Run every phase through the runner. Do not skip review, QA, PR watch, or fix-loop phases.
 - Apply \`code-generation-discipline\` during red, green, refactor, fix-loop, and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code.
 - If review or QA fails, return to the fix phase before continuing.
-- Required review happens before completion QA. After reviewer approve, run \`agent-flow gates --phase all\`. The CLI default is \`pre-commit\` and build/test gates are declared \`pre-push\`, so only \`--phase all\` runs them; a \`pre-commit\` run is not accepted as QA evidence. If review or QA fails, fix-loop routes back through comment-authoring and review before gates run again.
+- Required review happens before completion QA. Do not run \`agent-flow gates\` as part of a phase and do not author \`gate-results.json\`: the runner runs the profile gates itself at the gates phase, at \`--phase all\`, and writes the result file. A result file you write is discarded. \`agent-flow gates\` remains available for reproducing a failure by hand. If review or QA fails, fix-loop routes back through comment-authoring and review before gates run again.
 - Code review requires at least two independent Claude/Codex reviewer subprocesses. If the changed scope spans multiple areas, run one additional reviewer subprocess in parallel. OMP and controller-session work are never reviewer providers, and every multi-review verdict requires 2+ independent reviewer verdicts with reviewer-source: sub-agent. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
-- In the default workflow, gates run as their own phase after final-review approve.
+- In the default workflow, gates run as their own runner-owned phase after final-review approve. Per-gate limits come from the active profile's \`gates[].timeout_s\`.
 
 Document size rules:
 

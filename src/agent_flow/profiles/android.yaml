@@ -29,14 +29,29 @@ gates:
     command: ["./gradlew", "assembleDebug"]
     required: true
     phase: pre-push
+    # 콜드 캐시 gradle assemble은 600s 기본값을 넘긴다. 넘기면 timeout=판정 불가로
+    # 기록되어 빌드 상태를 관측하지 못한 채 run이 error로 라우팅된다.
+    timeout_s: 1800
   - id: test
+    # `pre-commit`에 두면 gates phase가 아닌 중간 실행에서도 gradle이 뜬다. gate는
+    # 순차 실행이고(`core/gates.py`) workflow의 gates phase는 어차피 `--phase all`을
+    # 요구하므로(`workflows/default.yaml`), `pre-push`로 내려도 최종 검증 강도는
+    # 같고 중간 실행만 gradle을 안 띄운다. 컴파일 확인(`build`)보다 먼저 돌 이유도
+    # 없다.
+    #
+    # 이 gate를 **지우지는** 않는다. `core/command_evidence.py`의
+    # `resolve_test_command_tokens`가 id에 `test`가 든 gate 명령에서 "이 저장소의
+    # 테스트 명령"을 뽑는다. 지우면 `FALLBACK_TEST_TOKENS`로 떨어지고 거기엔
+    # `gradlew`가 단일 토큰으로 있어서 `./gradlew assembleDebug`가 테스트 실행
+    # 증거로 인정된다 — implement/fix-loop의 증거 검사가 조용히 약해진다.
     command: ["./gradlew", "test"]
     required: true
-    phase: pre-commit
-  - id: lint
-    command: ["./gradlew", "lint"]
-    required: false
-    phase: pre-commit
+    phase: pre-push
+    timeout_s: 1800
+  # `lint`(`./gradlew lint`, required: false) gate는 뺐다. 실패해도 막지 않으므로
+  # (`core/artifacts.py`의 required 판정) 판정에는 기여하지 않는데 gate 실행마다
+  # gradle을 한 번 더 띄웠다. Android Lint가 보는 자리는 review angle
+  # (`templates/_shared/review/a11y.md`, `android-skills.md`)이 이미 덮는다.
 review_angles:
   - id: architecture-design
     prompt: templates/_shared/review/architecture-design.md

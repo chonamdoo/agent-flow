@@ -21,7 +21,6 @@ import os
 from pathlib import Path
 
 from agent_flow.adapters.base import Adapter
-from agent_flow.core.artifacts import run_gate_nonce
 from agent_flow.core.design_ledger import capture_design_ledger
 from agent_flow.core.worktree_isolation import write_run_subpath_text
 
@@ -62,29 +61,6 @@ class GenericAdapter(Adapter):
                         "verdict: approve\n\n"
                         "## Overall\n"
                         "verdict: approve\n",
-                    )
-                    return True
-                if phase.id == "gates":
-                    # 출처 표식은 runner 쪽에서 찍는다. 이 파일을 쓴 주체가
-                    # agent가 아니라 adapter이므로 provenance는 성립한다.
-                    payload = {
-                        "passed": True,
-                        "status": "green",
-                        "results": [
-                            {
-                                "id": "stub",
-                                "command": "agent-flow generic stub-success",
-                                "argv": ["agent-flow", "generic", "stub-success"],
-                                "passed": True,
-                                "exit_code": 0,
-                            }
-                        ],
-                    }
-                    nonce = run_gate_nonce(run_dir)
-                    if nonce:
-                        payload["produced_by"] = {"tool": "agent-flow gates", "nonce": nonce}
-                    write_run_subpath_text(
-                        run_dir, artifact, f"{json.dumps(payload, sort_keys=True)}\n"
                     )
                     return True
                 if phase.id == "pr-watch":

@@ -250,7 +250,7 @@ def apply_project_profile_override(
 
     branch 계약과 함께 gates/architecture도 받는다. 이 두 키를 소비하는 경로를 전수
     확인했고 전부 프로젝트 root를 넘긴다 — `architecture_lint`의 네 호출(root 또는
-    `profile_root or root`), `cli._profile_gate_commands`, `profile_resolution.load_single_profile`,
+    `profile_root or root`), `gate_plan.profile_gate_commands`, `profile_resolution.load_single_profile`,
     `local_skills.resolved_profile`, `worktrees`의 lint 준비. 즉 "여기서 받아도 반영되지
     않는 경로가 있다"는 낡은 근거는 더 이상 성립하지 않는다. root 없이 payload를 읽는
     호출자를 새로 넣으면 그쪽에서만 override가 조용히 사라지므로, 새 호출자는 root를
