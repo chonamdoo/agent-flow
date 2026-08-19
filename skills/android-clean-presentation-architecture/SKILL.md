@@ -256,12 +256,12 @@ stateless-content rule — a node renderer is a content composable.
 
 When this skill is used for presentation development or code review, write every marker below in the phase artifact or review output. The active workflow `required_markers` is the allowed-value source of truth:
 
-- `presentation-skill: android|react|react-native|ios|n/a`
+- `presentation-skill: android|flutter|react|react-native|ios|n/a`
 - `presentation-state-based-development: applied|n/a`
 - `presentation-state-review: pass|fail|n/a`
 - `ui-state-modeling: explicit|n/a`
 - `presentation-mapping-boundary: domain-to-uimodel|n/a`
-- `di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a`
+- `di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a`
 
 Apply these Android-specific decisions:
 

@@ -67,6 +67,7 @@ ANDROID_PRESENTATION_ROLE = {"id": "feature-presentation", "forbidden": ["ApiSer
 IOS_DOMAIN_ROLE = {"id": "core-domain", "forbidden": ["ApiClient", "DTO", "View", "ViewModel"]}
 PY_DOMAIN_ROLE = {"id": "core-domain", "forbidden": ["ApiClient", "DTO", "View", "Router"]}
 WEB_DOMAIN_ROLE = {"id": "core-domain", "forbidden": ["ApiClient", "Dto", "Component", "Screen"]}
+DART_DOMAIN_ROLE = {"id": "core-domain", "forbidden": ["package:flutter", "Widget", "BuildContext", "Dto"]}
 
 
 def _forbidden(role: dict, name: str, text: str):
@@ -523,6 +524,13 @@ def test_every_language_keeps_its_own_interpolation_as_code():
     assert len(_forbidden(PY_DOMAIN_ROLE, "chat.py", 'x = f"{ApiClient.value}"\n')) == 1
     # Kotlin/Groovy는 중괄호 없는 `$name`도 보간이다.
     assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "$orderDto"\n')) == 1
+    # Dart는 두 따옴표 모두 보간이고, `r` 접두사만 그것을 끈다.
+    assert len(_forbidden(DART_DOMAIN_ROLE, "chat.dart", "final s = 'order ${o.orderDto.id}';\n")) == 1
+    assert len(_forbidden(DART_DOMAIN_ROLE, "chat.dart", 'final s = "$orderDto";\n')) == 1
+    assert _forbidden(DART_DOMAIN_ROLE, "chat.dart", "final s = r'raw $orderDto';\n") == []
+    assert _forbidden(DART_DOMAIN_ROLE, "chat.dart", "final s = 'plain Dto text';\n") == []
+    # Dart import 지정자는 문자열이지만 코드 참조다.
+    assert len(_forbidden(DART_DOMAIN_ROLE, "chat.dart", "import 'package:flutter/material.dart';\n")) == 1
     # 접두사 없는 리터럴과 `{{` 이스케이프는 보간이 아니다.
     assert _forbidden(PY_DOMAIN_ROLE, "chat.py", 'x = "{ApiClient.value}"\n') == []
     assert _forbidden(PY_DOMAIN_ROLE, "chat.py", 'x = f"{{ApiClient}}"\n') == []

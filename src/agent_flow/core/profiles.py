@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -28,6 +29,13 @@ DEFAULT_GATE_PHASE = "pre-commit"
 GATE_PHASE_ALL = "all"
 # 프로젝트가 배포 profile 위에 얹는 파일. install이 덮지 않는 유일한 자리다.
 PROJECT_OVERRIDE_SUFFIX = ".local.yaml"
+# `flutter create`가 `dependencies:`에 쓰는 Flutter SDK 의존. 이것이 pubspec을 가진
+# 순수 Dart 패키지와 Flutter 저장소를 가르는 유일한 표지다. 인라인 주석을 허용한다 —
+# `sdk: flutter # Flutter SDK`도 같은 매핑으로 파싱되는 유효한 pubspec이다. `#` 앞의
+# 공백을 요구해야 `sdk: flutter#c`(주석이 아니라 스칼라 `flutter#c`)를 잡지 않는다.
+_FLUTTER_SDK_DEPENDENCY_RE = re.compile(
+    r"""^\s*sdk:\s*["']?flutter["']?(?:[ \t]+#.*)?[ \t]*$""", re.MULTILINE
+)
 
 
 class _UnknownProfileError(ValueError):
@@ -75,6 +83,7 @@ class ProfileGate:
     command: tuple[str, ...]
     required: bool = True
     phase: str = DEFAULT_GATE_PHASE
+    timeout_s: int | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +116,22 @@ def detect_profile(root: Path) -> str:
         package_text = package_path.read_text(encoding="utf-8", errors="ignore")
         if "react-native" in package_text:
             return "react-native"
+    # `pubspec.yaml`만으로는 Flutter가 아니다 — 순수 Dart 패키지(server/CLI/library)도
+    # 전부 갖고 있다. 그런 저장소를 flutter로 잡으면 `flutter analyze`·`flutter test`가
+    # 필수 gate가 되는데 그 저장소에는 Flutter SDK 의존이 없어서 상시 실패한다. 확정
+    # 표지는 `flutter create`가 `dependencies:`에 쓰는 SDK 의존이다. gradle 분기보다
+    # 앞에 두는 이유는 Android 호스트를 함께 빌드하는 monorepo다 — 루트 gradle과
+    # pubspec이 함께 있는 저장소를 android로 잡으면 Dart gate가 하나도 돌지 않는다.
+    #
+    # 값으로 매칭한다. 옆의 `"react-native" in package_text`는 JSON 안의 패키지 이름을
+    # 보므로 인용이 형식에 고정돼 있지만, 여기는 YAML 스칼라라 인용과 공백이 저자의
+    # 선택이다. 바이트로 비교하면 `sdk: "flutter"`와 `sdk:  flutter`를 쓴 실제 Flutter
+    # 저장소가 조용히 profile을 잃는다(실측).
+    pubspec_path = root / "pubspec.yaml"
+    if pubspec_path.exists():
+        pubspec_text = pubspec_path.read_text(encoding="utf-8", errors="ignore")
+        if _FLUTTER_SDK_DEPENDENCY_RE.search(pubspec_text):
+            return "flutter"
     if (
         (root / "build.gradle").exists()
         or (root / "settings.gradle").exists()
@@ -544,7 +569,21 @@ def _gate_from_payload(item: object, *, profile_id: str) -> ProfileGate:
         command=tuple(command),
         required=required if isinstance(required, bool) else True,
         phase=_gate_phase_from_payload(item.get("phase"), profile_id=profile_id, gate_id=gate_id),
+        timeout_s=_gate_timeout_from_payload(
+            item.get("timeout_s"), profile_id=profile_id, gate_id=gate_id
+        ),
     )
+
+
+def _gate_timeout_from_payload(value: object, *, profile_id: str, gate_id: str) -> int | None:
+    if value is None:
+        return None
+    # `bool`은 `int`의 하위형이라 먼저 걸러야 `timeout_s: true`가 1초가 되지 않는다.
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(
+            f"profile gate timeout_s must be a positive integer: {profile_id}:{gate_id}"
+        )
+    return value
 
 
 def _gate_phase_from_payload(value: object, *, profile_id: str, gate_id: str) -> str:

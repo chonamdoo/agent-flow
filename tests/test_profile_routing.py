@@ -514,7 +514,7 @@ def _role_sample_paths(profile_id: str) -> list[str]:
     return sorted(dict.fromkeys(samples))
 
 
-@pytest.mark.parametrize("profile_id", ["android", "ios", "nextjs", "python", "react-native"])
+@pytest.mark.parametrize("profile_id", ["android", "flutter", "ios", "nextjs", "python", "react-native"])
 def test_every_declared_role_path_requires_the_architecture_doc(profile_id):
     """불변: 축소가 계층 경계 변경까지 덮으면 그건 축소가 아니라 게이트 제거다.
 
@@ -542,7 +542,7 @@ def test_every_declared_role_path_requires_the_architecture_doc(profile_id):
     assert uncovered == []
 
 
-@pytest.mark.parametrize("profile_id", ["android", "ios", "nextjs", "python", "react-native"])
+@pytest.mark.parametrize("profile_id", ["android", "flutter", "ios", "nextjs", "python", "react-native"])
 def test_architecture_groups_never_activate_on_a_bare_extension(profile_id):
     """architecture group이 언어 확장자만으로 켜지면 split이 무의미하다.
 
@@ -651,7 +651,7 @@ def test_every_architecture_group_declares_the_opt_in_concern():
     """
     from agent_flow.core.local_skills import declared_concern_ids
 
-    for profile_id in ("android", "ios", "nextjs", "python", "react-native"):
+    for profile_id in ("android", "flutter", "ios", "nextjs", "python", "react-native"):
         payload = load_profile_payload(profile_id)
         groups = [
             group

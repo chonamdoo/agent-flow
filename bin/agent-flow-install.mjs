@@ -245,6 +245,11 @@ function bootstrapLocalSkillName(skillPath, fallback) {
   return fallback;
 }
 
+// `flutter create`가 `dependencies:`에 쓰는 Flutter SDK 의존. pubspec을 가진 순수 Dart
+// 패키지와 Flutter 저장소를 가르는 유일한 표지다. Python 쪽과 같은 패턴을 쓴다 — 인라인
+// 주석을 허용하고, `#` 앞의 공백을 요구해 `sdk: flutter#c` 스칼라는 잡지 않는다.
+const FLUTTER_SDK_DEPENDENCY_RE = /^\s*sdk:\s*["']?flutter["']?(?:[ \t]+#.*)?[ \t]*$/m;
+
 function detectProfile() {
   // 설치 배너도 Python CLI와 같은 profile을 보여줘야 agent가 다른 guide를 고르지 않는다.
   if (fs.existsSync(path.join(PROJECT, "next.config.js")) ||
@@ -269,6 +274,15 @@ function detectProfile() {
     if (packageText.includes("react-native")) {
       return "react-native";
     }
+  }
+  // `pubspec.yaml`만으로는 Flutter가 아니다 — 순수 Dart 패키지도 전부 갖고 있고, 그런
+  // 저장소를 flutter로 잡으면 `flutter analyze`·`flutter test`가 상시 실패하는 필수
+  // gate가 된다. 확정 표지는 `flutter create`가 쓰는 SDK 의존이다. gradle 분기보다 앞에
+  // 두는 이유는 Android 호스트를 함께 빌드하는 monorepo다. 값으로 매칭한다 — YAML
+  // 스칼라라 인용과 공백이 저자의 선택이고, 바이트 비교는 `sdk: "flutter"`를 놓친다.
+  const pubspecPath = path.join(PROJECT, "pubspec.yaml");
+  if (fs.existsSync(pubspecPath) && FLUTTER_SDK_DEPENDENCY_RE.test(fs.readFileSync(pubspecPath, "utf8"))) {
+    return "flutter";
   }
   if (
       fs.existsSync(path.join(PROJECT, "build.gradle")) ||

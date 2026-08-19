@@ -25,6 +25,7 @@
 - TypeScript/React/Next 변경은 React/Next/TypeScript profile의 required skill group만 확인했는가.
 - React Native/Expo 변경은 React Native profile의 required skill group만 확인했는가. RN의 `android/` native code를 직접 변경한 경우에만 Android profile mapping과 Android 관련 skill을 추가 적용했는가.
 - iOS/Swift 변경은 iOS profile의 required skill group만 확인했는가.
+- Flutter/Dart 변경은 Flutter profile의 required skill group(`flutter-development-guide`, `dart-development-guide`, 계층 경계 경로 변경 시 `flutter-clean-architecture`)만 확인했는가. 리뷰 관점은 rebuild 범위, constraint·overflow, `await` 이후 `BuildContext`, `State` 소유 controller dispose, `UiState` 모델링, Riverpod provider 경계로 잡는다.
 - Android/Kotlin/Compose/KMP 변경은 `android-code-review`와 phase 프롬프트가 이번 변경에 대해 나열한 skill의 로컬 설치본만 현재 host 경로에서 읽었는가. required 항목은 경로까지 함께 제시되므로 모두 읽고, optional로만 제시된 항목은 변경이 실제로 그 범위에 닿을 때만 쓴다. 활성화는 task 문구와 변경 파일 경로로 판정되므로 프롬프트에 오르지 않은 항목은 이번 변경의 요구사항이 아니다. 리뷰 관점은 Compose state/effect, recomposition·stability, modifier·layout·slot, focus, animation, Compose UI 테스트, Kotlin Flow/coroutine 소유권, KMP 경계, value class로 잡는다.
 - 필요한 profile/local skill이 없으면 `missing local <skill-group>: <skill>`와 source URL을 기록하고 `request-changes`로 판단했는가. Project-local skill은 코드 작성/리뷰에 적용되는 로컬 markdown skill만 포함하며 Figma/design, hook, branch, PR, merge, cleanup skill은 제외했는가.
 - 설계/구현 변경이면 `skills/clean-architecture/SKILL.md`를 적용했는가.
@@ -81,12 +82,12 @@ mapping-boundary: pass|fail|n/a
 dto-entity-domain-ui-separated: pass|fail
 solid-boundary-check: pass|fail
 clean-architecture-review: applied
-presentation-skill: android|react|react-native|ios|n/a
+presentation-skill: android|flutter|react|react-native|ios|n/a
 presentation-state-based-development: applied|n/a
 presentation-state-review: pass|fail|n/a
 ui-state-modeling: explicit|n/a
 presentation-mapping-boundary: domain-to-uimodel|n/a
-di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a
+di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a
 usecase-interface-check: applied
 usecase-composition-check: applied
 cache-boundary-check: applied

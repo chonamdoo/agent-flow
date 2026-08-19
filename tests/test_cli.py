@@ -285,12 +285,12 @@ class CliTest(unittest.TestCase):
                 "clean-architecture: applied|n/a",
                 "project-local-skills: checked|n/a",
                 "project-local-skills-used:",
-                "presentation-skill: android|react|react-native|ios|n/a",
+                "presentation-skill: android|flutter|react|react-native|ios|n/a",
                 "presentation-state-based-development: applied|n/a",
                 "presentation-state-review: pass|fail|n/a",
                 "ui-state-modeling: explicit|n/a",
                 "presentation-mapping-boundary: domain-to-uimodel|n/a",
-                "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a",
+                "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a",
                 "regression-test:",
                 "red-observed:",
                 "test-run-evidence: verified|unavailable",
@@ -392,7 +392,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("skills/clean-architecture/SKILL.md", architecture_review_prompt)
         self.assertIn("must-avoid or failing checklist", architecture_review_prompt)
         self.assertIn("skill makes the verdict", architecture_review_prompt)
-        self.assertIn("presentation-skill: android|react|react-native|ios|n/a", phases["green"]["required_markers"])
+        self.assertIn("presentation-skill: android|flutter|react|react-native|ios|n/a", phases["green"]["required_markers"])
         self.assertIn("Android/Kotlin/Compose/KMP changes require Android profile skills", phases["green"]["prompt"])
         self.assertEqual(phases["gates"]["artifact"], "artifacts/gate-results.json")
         self.assertEqual(phases["gates"]["routes"]["green"], "commit")
@@ -7495,6 +7495,66 @@ if (codexContext !== undefined) {
             with contextlib.redirect_stdout(output):
                 self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
             self.assertEqual(output.getvalue().strip(), "react-native")
+
+    def test_detect_profile_reports_flutter_for_sdk_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "pubspec.yaml").write_text(
+                "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
+            self.assertEqual(output.getvalue().strip(), "flutter")
+
+    def test_detect_profile_reads_the_sdk_value_not_its_bytes(self) -> None:
+        """인용과 인라인 주석은 저자의 선택이다. 바이트로 비교하면 실제 Flutter
+        저장소가 조용히 profile을 잃는다."""
+        for dependency in (
+            '    sdk: "flutter"',
+            "    sdk: 'flutter'  # Flutter SDK",
+            "    sdk: flutter # Flutter SDK",
+            "    sdk:  flutter",
+        ):
+            with self.subTest(dependency=dependency):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    (root / "pubspec.yaml").write_text(
+                        f"name: app\ndependencies:\n  flutter:\n{dependency}\n",
+                        encoding="utf-8",
+                    )
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
+                    self.assertEqual(output.getvalue().strip(), "flutter")
+
+    def test_detect_profile_keeps_a_pure_dart_package_off_the_flutter_profile(self) -> None:
+        """`pubspec.yaml`은 Dart 패키지 manifest다. SDK 의존이 없는 저장소를
+        flutter로 잡으면 `flutter analyze`·`flutter test`가 상시 실패한다."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "pubspec.yaml").write_text(
+                "name: cli\ndescription: helper for flutter devs\ndependencies:\n  args: ^2.5.0\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
+            self.assertEqual(output.getvalue().strip(), "generic")
+
+    def test_detect_profile_prefers_flutter_over_a_root_gradle_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "pubspec.yaml").write_text(
+                "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+                encoding="utf-8",
+            )
+            (root / "settings.gradle.kts").write_text("", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
+            self.assertEqual(output.getvalue().strip(), "flutter")
 
     def test_provider_list_reports_host_provider_availability(self) -> None:
         output = io.StringIO()
