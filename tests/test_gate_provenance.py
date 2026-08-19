@@ -1,13 +1,19 @@
 """gate-results.json 출처 검증.
 
-이 층이 막는 것은 **손으로 쓴 gate 결과**다. nonce도 디스크에 있으니 읽어서
-복사할 수 있으므로 적대적 위조는 못 막는다. 진짜 해법은 runner가 `run_gates`를
-직접 부르는 것이고, 여기 테스트도 딱 그 경계까지만 주장한다.
+실행은 runner가 한다(`runner.Runner._run_project_gates`). 그래서 `gates`는
+`RUNNER_OWNED_PHASES`이고, 디스크에 이미 있는 결과 파일은 입력이 아니라 덮어쓸
+출력이다 — 검증 결과의 작성자가 검증 대상 본인이 될 수 있는 경로를 없앤 것이다.
+
+아래 nonce/`gate_phase` 테스트가 지키는 범위는 그만큼 좁아졌다. gates phase가
+정상으로 돌면 라우팅 입력은 항상 runner가 방금 쓴 파일이므로, 남은 유효 범위는
+gates가 도중에 끊긴 뒤(예: profile 오류로 `ValueError`) host가 더 새 파일을 써
+넣는 잔여 경로다. 그 경로가 실재하므로 단언은 유지한다.
 """
 from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -17,7 +23,7 @@ SRC = str(REPO / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from agent_flow.artifact import create_run, read_meta
+from agent_flow.artifact import create_run, read_meta, write_meta
 from agent_flow.core.artifacts import run_gate_nonce, write_gate_results
 from agent_flow.core.gates import GateCommand, GateResult, run_gate
 from agent_flow.core.route_verdicts import gates_route_key
@@ -450,3 +456,352 @@ def test_written_timeout_survives_serialization_and_routes_to_error(tmp_path):
         path.read_text(encoding="utf-8"),
         nonce=run_gate_nonce(run_dir),
     ) == "error"
+
+
+def _gates_runner(run_dir: Path, project_root: Path, config_root: Path):
+    """`_run_project_gates`가 보는 최소 조립. 이 메서드는 세 경로만 본다."""
+    from agent_flow.runner import Runner
+
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.project_root = project_root
+    runner.config_root = config_root
+    return runner
+
+
+def _declare_two_phase_gates(root: Path) -> None:
+    """`pre-commit` 하나와 `pre-push` 하나를 선언한다. `--phase all`만 둘 다 고른다.
+
+    두 명령을 다르게 두는 것은 필수다 — `profile_gate_commands`는 같은 argv를
+    한 번만 담으므로 같은 명령이면 phase 필터와 무관하게 하나로 접힌다.
+    """
+    (root / ".agent-flow").mkdir(parents=True, exist_ok=True)
+    (root / ".agent-flow" / "kit.json").write_text(
+        json.dumps({"profile": "generic", "profiles": ["generic"]}), encoding="utf-8"
+    )
+    profiles = root / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True, exist_ok=True)
+    (profiles / "generic.local.yaml").write_text(
+        "gates:\n"
+        "  - id: quick-lint\n"
+        '    command: ["true"]\n'
+        "    required: true\n"
+        "    phase: pre-commit\n"
+        "  - id: slow-build\n"
+        '    command: ["true", "build"]\n'
+        "    required: true\n"
+        "    phase: pre-push\n",
+        encoding="utf-8",
+    )
+
+
+def test_gates_regenerates_unless_the_phase_is_already_route_blocked(tmp_path):
+    """불변: runner-owned phase는 디스크의 artifact를 입력으로 읽지 않는다. 단
+    route로 막힌 자리에서는 다시 만들지 않고, 판독 불가만 예외다.
+
+    반증(전자): 입력으로 읽으면 phase에 도달하기 전에 쓰인 파일이 그대로 라우팅된다.
+    그 파일을 쓸 수 있는 것은 검증 대상 본인이고, 위조를 막던 nonce는 run meta에
+    있어 읽어 복사할 수 있다.
+    반증(후자): fix-loop 상한에 걸려 멈춘 run은 gate를 다시 돌려도 같은 상한에 다시
+    걸린다. 걸러 내지 않으면 매 `continue`가 수십 분의 빌드를 돌린 뒤 같은 자리에서
+    막히는 것을 무한히 반복한다.
+    반증(예외): 판독 불가까지 막으면 그 run은 gate를 다시 돌릴 방법이 없다. 남는
+    안내는 "artifact를 고쳐라"인데 phase prompt가 그 행위를 금지한다.
+    """
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = create_run(tmp_path, "default", "task")
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+
+    gates = Phase(id="gates", description="", prompt="", artifact="artifacts/gate-results.json")
+    other = Phase(id="commit", description="", prompt="")
+    blocked = {"current_phase": "gates", "phase_blocked_reason": "route_blocked"}
+
+    assert runner._phase_regenerates_artifact(gates, {}) is True
+    # 다른 phase가 막혀 있는 것은 gates의 재생성과 무관하다.
+    assert (
+        runner._phase_regenerates_artifact(
+            gates, {"current_phase": "commit", "phase_blocked_reason": "route_blocked"}
+        )
+        is True
+    )
+    # host가 쓰는 phase는 언제나 디스크의 artifact가 입력이다.
+    assert runner._phase_regenerates_artifact(other, {}) is False
+
+    target = run_dir / "artifacts" / "gate-results.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(FORGED, encoding="utf-8")
+    assert runner._phase_regenerates_artifact(gates, blocked) is False
+
+    # 판독 불가는 안정된 상태가 아니다 — 막지 않는다.
+    target.write_text("{not json", encoding="utf-8")
+    assert runner._phase_regenerates_artifact(gates, blocked) is True
+
+
+def test_runner_run_gates_overwrite_a_model_authored_result(tmp_path, monkeypatch):
+    from agent_flow import runner as runner_module
+
+    run_dir = create_run(tmp_path, "default", "task")
+    _declare_two_phase_gates(tmp_path)
+    target = run_dir / "artifacts" / "gate-results.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(FORGED, encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def fake_run_gates(commands, *, cwd, timeout_s=None, on_start=None):
+        seen["cwd"] = cwd
+        seen["gate_ids"] = [command.gate_id for command in commands]
+        return [GateResult("slow-build", ("ruff", "check", "."), True, 0, "ok", "")]
+
+    monkeypatch.setattr(runner_module, "run_gates", fake_run_gates)
+    _gates_runner(run_dir, tmp_path, tmp_path)._run_project_gates()
+
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    # cwd는 checkout이다. leader에서 돌면 빌드 산출물이 leader tripwire에 걸린다.
+    assert seen["cwd"] == tmp_path
+    # `--phase all`은 파일에 적힌 주장이 아니라 실행에 넘긴 필터다. 이 단언이 없으면
+    # 필터를 `pre-commit`으로 좁혀도 파일에는 `all`이 찍혀 아무도 알아채지 못한다 —
+    # android/ios의 build·test가 `pre-push`라 통째로 빠진 green이 된다.
+    assert sorted(seen["gate_ids"]) == ["quick-lint", "slow-build"]
+    assert payload["results"][0]["gate_id"] == "slow-build"
+    assert "ruff" in payload["results"][0]["command"]
+    assert payload["produced_by"]["gate_phase"] == "all"
+    assert payload["produced_by"]["nonce"] == read_meta(run_dir)["gate_nonce"]
+    assert (
+        gates_route_key(
+            target.read_text(encoding="utf-8"), nonce=read_meta(run_dir)["gate_nonce"]
+        )
+        == "green"
+    )
+
+
+def test_runner_gate_planning_honours_the_profile_override(tmp_path, monkeypatch):
+    """불변: gate 계획의 profile 선택은 형제 소비자와 같다 — `AGENT_FLOW_PROFILE`이 최우선.
+
+    반증: kit.json만 보면 `AGENT_FLOW_PROFILE=python`으로 도는 run이 `▶ profile: python`을
+    찍고 python skill/branching을 쓰면서 QA는 kit.json의 generic gate 하나만 통과한
+    green으로 commit까지 라우팅된다. 새 phase prompt가 `agent-flow gates` 수동 실행과
+    결과 파일 작성을 금지하므로 그 차이를 메울 우회로도 없다.
+    """
+    from agent_flow import runner as runner_module
+
+    run_dir = create_run(tmp_path, "default", "task")
+    (tmp_path / ".agent-flow").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".agent-flow" / "kit.json").write_text(
+        json.dumps({"profile": "generic", "profiles": ["generic"]}), encoding="utf-8"
+    )
+    monkeypatch.setenv("AGENT_FLOW_PROFILE", "python")
+    seen: dict[str, object] = {}
+
+    def fake_run_gates(commands, *, cwd, timeout_s=None, on_start=None):
+        seen["gate_ids"] = [command.gate_id for command in commands]
+        return [GateResult("type", ("true",), True, 0, "ok", "")]
+
+    monkeypatch.setattr(runner_module, "run_gates", fake_run_gates)
+    _gates_runner(run_dir, tmp_path, tmp_path)._run_project_gates()
+
+    gate_ids = seen["gate_ids"]
+    # python profile 고유 gate. generic은 architecture-lint 하나뿐이다.
+    assert "type" in gate_ids
+    assert "test" in gate_ids
+
+
+def test_a_declared_gate_timeout_beats_the_default(tmp_path):
+    slow = GateCommand(
+        "build", (sys.executable, "-c", "import time; time.sleep(30)"), timeout_s=1
+    )
+
+    result = run_gate(slow, cwd=tmp_path)
+
+    assert result.timed_out
+    assert "after 1s" in result.stderr
+
+
+def test_an_explicit_caller_timeout_beats_the_declared_one(tmp_path):
+    """불변: 순서는 명시 > 선언 > 기본값이다.
+
+    반증: 선언이 명시를 이기면 `agent-flow gates --timeout 60`이 android build에
+    아무 효과가 없다. node wrapper는 그 플래그로 총예산을 계산하므로
+    (`bin/agent-flow-kit.mjs`의 `relayTimeoutForSubcommand`) 상한을 낮추면 예산이
+    실제 gate 상한보다 작아져 wrapper가 먼저 SIGKILL한다.
+    """
+    declared_long = GateCommand(
+        "build", (sys.executable, "-c", "import time; time.sleep(30)"), timeout_s=30
+    )
+
+    result = run_gate(declared_long, cwd=tmp_path, timeout_s=1)
+
+    assert result.timed_out
+    assert "after 1s" in result.stderr
+
+
+def test_the_resolved_timeout_order_is_explicit_then_declared_then_default(
+    tmp_path, monkeypatch
+):
+    """불변: `subprocess.run`이 받는 상한은 명시 > 선언 > 기본값 순으로 결정된다.
+
+    반증: 선언도 명시도 없을 때 상한이 사라지면(`timeout=None`) 멈춘 gate가 run을
+    영구히 붙잡는다. 이 조합이 `--timeout` 기본값을 `None`으로 바꾼 뒤의 **기본
+    경로**이고, runner는 timeout을 아예 넘기지 않으므로 항상 이 경로로 돈다.
+    실제 시간을 쓰는 테스트로는 600s 기본값을 관측할 수 없어 인자를 직접 본다.
+    """
+    from agent_flow.core import gates as gates_module
+
+    seen: list[object] = []
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        seen.append(kwargs["timeout"])
+        return _Completed()
+
+    monkeypatch.setattr(gates_module.subprocess, "run", fake_run)
+
+    run_gate(GateCommand("lint", ("true",)), cwd=tmp_path)
+    run_gate(GateCommand("build", ("true",), timeout_s=1800), cwd=tmp_path)
+    run_gate(GateCommand("build", ("true",), timeout_s=1800), cwd=tmp_path, timeout_s=60)
+
+    assert seen == [gates_module.DEFAULT_GATE_TIMEOUT_S, 1800, 60]
+
+
+def test_slow_profile_gates_declare_their_own_timeout():
+    """불변: gradle/xcodebuild gate는 자기 상한을 선언한다.
+
+    반증: 기본 600s로 두면 콜드 캐시 빌드가 timeout=판정 불가로 기록된다. run에
+    남는 문장이 "빌드가 깨졌다"가 아니라 "검증이 끊겼다"가 되고, gates는 error로
+    라우팅되어 고칠 것이 없는 fix-loop 라운드를 태운다.
+    """
+    from agent_flow.core.gate_plan import profile_gate_commands
+
+    android = {gate.gate_id: gate for gate in profile_gate_commands(["android"], phase="all")}
+    ios = {gate.gate_id: gate for gate in profile_gate_commands(["ios"], phase="all")}
+
+    assert android["build"].timeout_s == 1800
+    assert android["test"].timeout_s == 1800
+    assert ios["build"].timeout_s == 2400
+    assert ios["test"].timeout_s == 2400
+    # 빠른 gate는 선언하지 않는다. 선언하지 않은 값은 호출자 기본값이다.
+    assert android["architecture-lint"].timeout_s is None
+
+
+def test_run_gates_announces_each_gate_before_running_it(tmp_path):
+    """불변: gate 시작이 관측된다.
+
+    반증: `run_gate`는 출력을 캡처한다. 알림이 없으면 분 단위 gate가 도는 동안
+    신호가 0이고 멈춘 것과 구분되지 않는다.
+    """
+    from agent_flow.core.gates import run_gates
+
+    commands = [
+        GateCommand("first", (sys.executable, "-c", "print(1)")),
+        GateCommand("second", (sys.executable, "-c", "print(2)")),
+    ]
+    announced: list[tuple[str, int, int]] = []
+
+    results = run_gates(
+        commands,
+        cwd=tmp_path,
+        on_start=lambda gate, index, total: announced.append((gate.gate_id, index, total)),
+    )
+
+    assert announced == [("first", 1, 2), ("second", 2, 2)]
+    assert [result.gate_id for result in results] == ["first", "second"]
+
+
+def test_a_gate_result_written_before_the_phase_is_replaced_by_the_runner(
+    tmp_path, monkeypatch
+):
+    """불변: gates에 **도달하기 전에** 놓인 결과 파일은 라우팅 입력이 되지 않는다.
+
+    반증: `runner.py`의 loop guard에서 `_phase_regenerates_artifact` 항을 빼면
+    (= `if self._has_artifact(phase):`) 이 위조본이 그대로 읽혀 green으로 라우팅되고
+    run은 다음 phase까지 전진한다. 그 파일을 쓸 수 있는 것은 검증 대상 본인이고,
+    위조를 막던 nonce는 run meta에 있어 읽어 복사할 수 있다 — 이 변경이 닫으려던
+    구멍이 그대로 열린다.
+
+    fixture가 meta의 `current_phase`/`phase_entered_at`을 미리 찍는 것은 필수다.
+    찍지 않으면 runner가 진입 시각을 지금으로 갱신해 심어 둔 파일이 항상 과거가
+    되고, guard를 빼도 라우팅이 아니라 `stale_artifact` 차단으로 멈춘다 — mutant는
+    죽지만 반증 문장이 가리키는 경로는 재현되지 않는다. 여기서 재현하는 것은 모듈
+    docstring이 말하는 "gates가 도중에 끊긴 뒤 host가 더 새 파일을 써 넣는" 경로다.
+
+    predicate 단위 테스트로는 이 배선이 잡히지 않는다. gates가 뒤로 라우팅될 때는
+    `_plan_transition`이 자기 artifact를 무효화하므로 재진입 시점에 파일이 없고,
+    guard가 있으나 없으나 같은 분기를 탄다.
+    """
+    import agent_flow.runner as runner_module
+    from agent_flow.adapters.generic import GenericAdapter
+    from agent_flow.runner import Phase, ResumeMode, Runner
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("AGENT_FLOW_GENERIC_MODE", "emit")
+    monkeypatch.setattr(runner_module, "detect_adapter", GenericAdapter)
+    monkeypatch.setattr(
+        runner_module, "assert_managed_hooks_registered", lambda *a, **k: None
+    )
+    monkeypatch.setattr(runner_module, "detect_available_clis", lambda: [])
+
+    run_dir = create_run(project, "development", "replace the planted result")
+    # gates에 이미 진입한 뒤 끊긴 run을 재현한다. 진입 시각이 과거여야 심어 둔
+    # 파일이 stale로 걸러지지 않고 라우팅 입력 후보가 된다.
+    meta = read_meta(run_dir)
+    meta["current_phase"] = "gates"
+    meta["phase_index"] = 0
+    meta["phase_entered_at"] = (
+        datetime.now(timezone.utc) - timedelta(minutes=5)
+    ).isoformat()
+    write_meta(run_dir, meta)
+    planted = run_dir / "artifacts" / "gate-results.json"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    # nonce까지 맞춘 위조본. 현재 provenance 층이 통과시키는 형태다.
+    planted.write_text(
+        json.dumps(
+            {
+                "passed": True,
+                "status": "green",
+                "results": [
+                    {
+                        "gate_id": "planted",
+                        "command": "true",
+                        "required": True,
+                        "passed": True,
+                        "exit_code": 0,
+                    }
+                ],
+                "produced_by": {
+                    "tool": "agent-flow gates",
+                    "nonce": read_meta(run_dir)["gate_nonce"],
+                    "gate_phase": "all",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_gates(commands, *, cwd, timeout_s=None, on_start=None):
+        return [GateResult("architecture-lint", ("true",), True, 0, "ran", "")]
+
+    monkeypatch.setattr(runner_module, "run_gates", fake_run_gates)
+
+    runner = Runner(project, run_dir=run_dir, workflow="development")
+    runner.phases = [
+        Phase(
+            id="gates",
+            description="gates",
+            artifact="artifacts/gate-results.json",
+            routes={"green": "after"},
+        ),
+        Phase(id="after", description="stop here"),
+    ]
+    runner.run(ResumeMode.RESUME)
+
+    payload = json.loads(planted.read_text(encoding="utf-8"))
+    gate_ids = [entry["gate_id"] for entry in payload["results"]]
+    assert "planted" not in gate_ids
+    assert gate_ids == ["architecture-lint"]

@@ -99,10 +99,17 @@ agent-flow spec approve <spec-id> --run-dir <run-dir>
 
 ### 게이트
 
-`gates` 단계는 `--phase all`로 실행해야 합니다. CLI 기본값은 `pre-commit`이고 빌드와
-테스트는 `pre-push`로 선언되어 있어, 기본 실행으로는 목록에 오르지 않습니다. 런너는
-결과 파일의 `produced_by.gate_phase`를 확인하고 `pre-commit` 실행을 QA 증거로 인정하지
-않습니다.
+`gates` 단계는 런너가 직접 실행합니다. 프로파일 게이트를 `--phase all`로 돌리고
+결과 파일도 런너가 씁니다 — 검증 결과를 검증 대상이 쓰지 않게 하려는 것입니다.
+에이전트가 이 단계에서 `agent-flow gates`를 돌리거나 결과 파일을 쓰면 그 파일은
+버려집니다.
+
+게이트 하나의 상한은 프로파일의 `gates[].timeout_s`가 정합니다. 선언이 없으면
+600초입니다. timeout은 실패가 아니라 판정 불가로 기록되므로, gradle/xcodebuild처럼
+분 단위인 게이트는 프로파일에서 상한을 올려 선언합니다.
+
+아래는 실패를 손으로 재현할 때 쓰는 형태입니다. 이 출력은 run의 라우팅 근거가
+아닙니다.
 
 ```bash
 agent-flow gates --phase all
@@ -112,7 +119,8 @@ agent-flow gates --phase all
 agent-flow gates
 ```
 
-두 번째 형태는 기본값인 `pre-commit`만 돌리는 국소 점검입니다.
+두 번째 형태는 기본값인 `pre-commit`만 돌리는 국소 점검입니다. `--timeout`을 주면
+프로파일 선언보다 그 값이 우선합니다.
 
 ### 스킬
 
@@ -183,9 +191,8 @@ branching:
 
 gates:
   - architecture-lint  (pre-commit, 필수)
-  - test               (pre-commit, 필수)
-  - lint               (pre-commit, 선택)
-  - build              (pre-push,   필수)
+  - build              (pre-push,   필수, timeout_s 1800)
+  - test               (pre-push,   필수, timeout_s 1800)
 
 review_angles:
   - architecture-design

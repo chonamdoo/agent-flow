@@ -108,7 +108,10 @@ from agent_flow.core.host_phase_baseline import (
     verify_baseline,
 )
 from agent_flow.core.atomic_io import fsync_directory
-from agent_flow.core.profiles import GATE_PHASE_ALL
+from agent_flow.core.artifacts import write_gate_results
+from agent_flow.core.gate_plan import profile_gate_commands
+from agent_flow.core.gates import GateCommand, run_gates
+from agent_flow.core.profiles import GATE_PHASE_ALL, active_profile_ids
 from agent_flow.core.profile_resolution import resolve_profile
 from agent_flow.core.phase_workflow import (
     ACCEPT_WORKFLOW_DRIFT_FLAG,
@@ -142,6 +145,12 @@ GIT_DEPENDENT_PHASES = {
     "merge",
     "merge-approval",
 }
+# artifact를 runner가 만드는 phase. 여기서는 디스크의 artifact가 입력이 아니라
+# **출력**이다 — 이미 있는 파일을 읽어 라우팅하면 검증 결과의 작성자가 다시 검증
+# 대상이 될 수 있고, 그 위조를 막던 nonce는 run meta에 있어 읽어 복사할 수 있다
+# (`core/artifacts.py`의 provenance 주석). 그래서 이 phase는 파일이 이미 있어도
+# stale/marker 검사로 막지 않고 매번 다시 만든다.
+RUNNER_OWNED_PHASES = frozenset({"gates"})
 FIX_LOOP_MAX_ROUNDS = 3
 # fix collector 판정에 쓰는 rejection verdict 키. review/gate가 "다시 해라"라고
 # 되돌려 보내는 route만 상한 대상이다 — 정상 진행(default·approve·green)과 PR
@@ -470,7 +479,7 @@ class Runner:
                 phase.id,
                 details={"phase_index": phase_index},
             )
-            if self._has_artifact(phase):
+            if self._has_artifact(phase) and not self._phase_regenerates_artifact(phase, meta):
                 artifact = self._existing_artifact_path(phase)
                 blocked_reason = (
                     self._stale_artifact_block_reason(artifact, meta)
@@ -539,7 +548,11 @@ class Runner:
                         return
                     continue
             if self._write_automatic_artifact(phase):
-                print(f"  [skip] {phase.id}")
+                # runner-owned phase는 건너뛴 것이 아니라 방금 **실행**했고 자기
+                # 요약을 이미 찍었다. 여기서 `[skip]`을 덧붙이면 gate를 수십 분
+                # 돌린 직후에 건너뛴 것처럼 읽힌다.
+                if phase.id not in RUNNER_OWNED_PHASES:
+                    print(f"  [skip] {phase.id}")
                 transition = self._plan_transition(phase_index, phase)
                 meta = self._commit_transition(transition)
                 phase_index, blocked = transition.to_index, transition.blocked
@@ -1369,7 +1382,109 @@ class Runner:
                     + ", ".join(missing)
                 )
                 return True
+        if phase.id == "gates":
+            self._run_project_gates()
+            return True
         return False
+
+    def _run_project_gates(self) -> None:
+        """gate를 여기서 돌리고 결과 파일도 여기서 쓴다.
+
+        전에는 프롬프트만 찍고 host AI가 `agent-flow gates`를 따로 돌려 JSON을
+        저장했다. 그 경로에서는 검증 결과의 작성자가 검증 대상 본인이었고, 위조를
+        막던 nonce는 run meta에 있어 읽어 복사할 수 있었다. `--phase all`도 파일에
+        적힌 주장이라 사후에 확인해야 했다 — 실행이 여기로 오면 그것은 이 호출의
+        인자가 된다.
+
+        cwd는 `self.project_root`(bound worktree checkout)이고 gate 선언은
+        `self.config_root`(leader)에서 읽는다. `agent-flow gates`가 `--worktree`로
+        만드는 분리와 같은 분리다 — 빌드 산출물은 worktree에 쌓이고 leader는
+        그대로여서 phase 경계 tripwire를 건드리지 않는다.
+
+        profile 해석이 실패하면 `ValueError`를 그대로 올린다. 잘못된 설정은 gate
+        판정이 아니다. 그것을 `status: error`로 적으면 fix-loop 라운드를 태우면서
+        고칠 수 없는 곳을 고치라고 되돌려 보낸다. CLI가 이 예외를 사람이 읽는
+        메시지로 바꾼다(`cli.py`의 `continue` 핸들러).
+        """
+        assert self.run_dir is not None
+        # profile 선택 규칙은 형제 소비자와 같아야 한다: `AGENT_FLOW_PROFILE`이 최우선
+        # (`multi_review.py`, `core/worktrees.py`, `core/leader_tripwire.py`). 이걸 빼면
+        # `self.profile_id`는 env override를 따라 python인데 gate는 kit.json의 generic
+        # 하나만 돌아, run이 python skill/branching으로 돌면서 QA는 거의 아무것도
+        # 검증하지 않은 green이 된다. 이제 `agent-flow gates`를 손으로 돌려 그 차이를
+        # 메우는 우회로도 phase prompt가 금지한다.
+        profile_ids = active_profile_ids(
+            self.config_root, os.environ.get("AGENT_FLOW_PROFILE") or "auto"
+        )
+        commands = profile_gate_commands(
+            profile_ids,
+            root=self.config_root,
+            phase=GATE_PHASE_ALL,
+        )
+        print(
+            f"  [gates] {','.join(profile_ids)} — {len(commands)} gates "
+            f"(--phase {GATE_PHASE_ALL})"
+        )
+        results = run_gates(
+            commands,
+            cwd=self.project_root,
+            on_start=self._print_gate_start,
+        )
+        write_gate_results(
+            run_dir=self.run_dir,
+            results=results,
+            cwd=self.project_root,
+            phase=GATE_PHASE_ALL,
+        )
+        passed = sum(1 for result in results if result.passed)
+        print(f"  [gates] {passed}/{len(results)} passed")
+        blocking = [
+            result.gate_id for result in results if result.required and not result.passed
+        ]
+        if blocking:
+            print(f"  [gates] required failed: {', '.join(blocking)}")
+
+    @staticmethod
+    def _print_gate_start(gate: GateCommand, index: int, total: int) -> None:
+        """gate 시작을 알린다. `run_gate`는 출력을 캡처하므로 이 줄이 없으면
+        gradle/xcodebuild가 도는 수십 분 동안 관측 가능한 신호가 0이다."""
+        print(f"  [gate {index}/{total}] {gate.gate_id}", flush=True)
+
+    def _phase_regenerates_artifact(self, phase: Phase, meta: dict[str, Any]) -> bool:
+        """이 phase의 artifact를 runner가 지금 다시 만들 것인가.
+
+        runner-owned phase는 디스크의 artifact를 입력으로 읽지 않는다. 다만 이미
+        route로 막혀 있으면 다시 만들지 않는다 — fix-loop 상한에 걸려 멈춘 run은
+        gate를 다시 돌려도 같은 상한에 다시 걸린다. 상한 초과는 카운터를 저장하지
+        않아 상태가 안정적이므로, 걸러 내지 않으면 매 `continue`가 전체 gate
+        스위트(android 기준 수십 분)를 돌린 뒤 같은 자리에서 막히는 것을 무한히
+        반복한다.
+
+        예외는 판독 불가다. `route_blocked`는 gates의 **모든** 차단 판정이 공유하는
+        한 값이어서 상한 초과와 판독 불가를 구분하지 못하는데, 뒤쪽은 안정된 상태가
+        아니다 — 이 파일을 쓰는 것은 이제 runner뿐이므로 다시 돌리면 유효한 파일로
+        바뀐다. 여기서 막으면 사용자에게 남는 유일한 안내가 "artifact를 고쳐라"인데
+        같은 run의 phase prompt가 그 행위를 금지하므로 탈출구가 0이 된다.
+        """
+        if phase.id not in RUNNER_OWNED_PHASES:
+            return False
+        blocked_here = (
+            meta.get("current_phase") == phase.id
+            and meta.get("phase_blocked_reason") == "route_blocked"
+        )
+        if not blocked_here:
+            return True
+        return self._gate_results_are_unreadable(phase, meta)
+
+    def _gate_results_are_unreadable(self, phase: Phase, meta: dict[str, Any]) -> bool:
+        """라우팅과 **같은** 판정을 쓴다. 여기서 따로 파싱하면 두 판정이 갈린다."""
+        artifact = self._existing_artifact_path(phase)
+        try:
+            text = artifact.read_text(encoding="utf-8")
+        except OSError:
+            return True
+        recorded_nonce = str(meta.get("gate_nonce", ""))
+        return gates_route_key(text, nonce=recorded_nonce) == GATE_MALFORMED
 
     def _artifact_needs_auto_revalidation(self, phase: Phase) -> bool:
         if self.architecture != "ddd" or phase.id != "architecture-review":

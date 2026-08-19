@@ -17,7 +17,7 @@ import yaml
 KIT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(KIT_ROOT / "src"))
 
-from agent_flow.cli import _profile_gate_commands  # noqa: E402
+from agent_flow.core.gate_plan import profile_gate_commands as _profile_gate_commands  # noqa: E402
 from agent_flow.core.architecture_lint import (  # noqa: E402
     lint_project,
     main as architecture_lint_main,
@@ -131,10 +131,11 @@ def test_phase_filter_applies_across_a_profile_union():
     union = [command.gate_id for command in _profile_gate_commands(["android", "react-native"])]
 
     assert "android:build" not in union
+    assert "android:test" not in union
     assert "react-native:android-build" not in union
     assert "react-native:ios-build" not in union
     assert "react-native:test" not in union
-    assert "android:test" in union
+    assert "react-native:lint" in union
 
 
 CANONICAL_BOOTSTRAP_TEMPLATE = KIT_ROOT / "bootstrap" / "AGENTS.md.template"
@@ -1030,7 +1031,7 @@ def test_the_gate_order_survives_an_interpreter_path_that_says_build():
     `architecture-lint → lint → type`이 됐다. BUILD → TYPECHECK → LINT 계약이
     실행 환경에 따라 참이 되면 그 계약은 없는 것이다.
     """
-    from agent_flow.cli import _gate_order_key
+    from agent_flow.core.gate_plan import gate_order_key
     from agent_flow.core.gates import GateCommand
 
     hostile = "/cache/uv/builds-v0/.tmp/typecheck-tests-lint/bin/python"
@@ -1042,7 +1043,7 @@ def test_the_gate_order_survives_an_interpreter_path_that_says_build():
             GateCommand("type", (hostile, "-m", "mypy", ".")),
             GateCommand("build", (hostile, "-m", "x.build")),
         ),
-        key=_gate_order_key,
+        key=gate_order_key,
     )
 
     assert [gate.gate_id for gate in ordered] == [

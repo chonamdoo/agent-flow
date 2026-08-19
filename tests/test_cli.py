@@ -5659,7 +5659,9 @@ if (codexContext !== undefined) {
                 "comment-authoring",
                 "multi-review",
                 "architecture-review",
-                "gates",
+                # `gates`는 여기 없다. runner가 직접 돌리고 결과 파일도 직접 쓰므로
+                # host가 서는 phase가 아니다 — architecture-review를 떠난 advance가
+                # gates를 통과해 commit에 선다.
                 "commit",
                 "push-pr",
             ]
@@ -6069,6 +6071,9 @@ if (codexContext !== undefined) {
             self.assertIn("reason: generic_stub_artifact", missing_architecture_review.stdout)
 
             architecture_review.write_text(_node_phase_content("architecture-review"), encoding="utf-8")
+            # architecture-review approve → gates. runner가 gates를 직접 돌리므로 이
+            # advance 하나가 gates까지 통과해 commit에 선다. 예전에는 여기서 멈추고
+            # host가 gate 결과 파일을 써 줄 때까지 기다렸다.
             approved = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -6077,30 +6082,7 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(approved.returncode, 0, approved.stderr)
-            self.assertIn("current_phase: gates", approved.stdout)
-
-            gates = run_dir / _node_phase_artifact("gates")
-            gates.write_text(
-                _node_gate_results(
-                    run_dir,
-                    {
-                        "passed": True,
-                        "results": [
-                            {"id": "lint", "command": "npm run lint", "passed": True, "exit_code": 0}
-                        ],
-                    },
-                ),
-                encoding="utf-8",
-            )
-            committed = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(committed.returncode, 0, committed.stderr)
-            self.assertIn("current_phase: commit", committed.stdout)
+            self.assertIn("current_phase: commit", approved.stdout)
 
     @mock.patch.dict(
         os.environ,
@@ -6116,6 +6098,7 @@ if (codexContext !== undefined) {
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
             _init_git_repo(project_root)
+            _declare_conditional_gate(project_root)
             # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
             # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
             plan = plan_worktree(root=project_root, name="demo")
@@ -6128,6 +6111,9 @@ if (codexContext !== undefined) {
                 0,
             )
             run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
+            # 선언된 gate를 실패로 돌린다. `run start`가 worktree를 이미 만들었고
+            # gate는 그 worktree를 cwd로 돌기 때문에 이 파일 하나가 판정을 뒤집는다.
+            (plan.path / "gate-must-fail").write_text("", encoding="utf-8")
             for phase in [
                 "domain-grill", "product-brief", "prd",
                 "slice-plan", "plan-review", "ddd-design", "worktree",
@@ -6140,21 +6126,10 @@ if (codexContext !== undefined) {
                 artifact.write_text(content, encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
 
+            # runner가 gates를 직접 돌린다. marker 파일 때문에 선언된 gate가 실제로
+            # 실패했고, 그래서 이 advance는 gates에 서지 않고 fix-loop로 갔다.
             state = _read_node_phase(run_dir)
-            self.assertEqual(state["current_phase"], "gates")
-
-            gates_artifact = run_dir / _node_phase_artifact("gates")
-            gates_artifact.parent.mkdir(parents=True, exist_ok=True)
-            gates_artifact.write_text('{"passed": false, "results": [{"name": "lint", "passed": false}]}\n', encoding="utf-8")
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("current_phase: fix-loop", result.stdout)
+            self.assertEqual(state["current_phase"], "fix-loop")
 
             fix_loop_artifact = run_dir / _node_phase_artifact("fix-loop")
             fix_loop_artifact.write_text(
@@ -6197,28 +6172,9 @@ if (codexContext !== undefined) {
 
             architecture_review = run_dir / _node_phase_artifact("architecture-review")
             architecture_review.write_text(_node_phase_content("architecture-review"), encoding="utf-8")
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("current_phase: gates", result.stdout)
-
-            gates_artifact.write_text(
-                _node_gate_results(
-                    run_dir,
-                    {
-                        "passed": True,
-                        "results": [
-                            {"id": "lint", "command": "npm run lint", "passed": True, "output": "ok"}
-                        ],
-                    },
-                ),
-                encoding="utf-8",
-            )
+            # 같은 gate를 통과로 돌린다. 결과 파일을 손으로 고치는 것이 아니라 gate가
+            # 보는 상태를 고친다 — runner가 돌리는 판정을 밖에서 바꿀 방법은 그것뿐이다.
+            (plan.path / "gate-must-fail").unlink()
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -6444,6 +6400,7 @@ if (codexContext !== undefined) {
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
             _init_git_repo(project_root)
+            _declare_conditional_gate(project_root)
             # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
             # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
             plan = plan_worktree(root=project_root, name="demo")
@@ -6456,6 +6413,9 @@ if (codexContext !== undefined) {
                 0,
             )
             run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
+            # gate를 계속 실패로 둔다. 라운드마다 architecture-review를 떠날 때
+            # runner가 gates를 돌리고 실패해서 fix-loop로 되돌아온다.
+            (plan.path / "gate-must-fail").write_text("", encoding="utf-8")
             for phase in [
                 "domain-grill", "product-brief", "prd",
                 "slice-plan", "plan-review", "ddd-design", "worktree",
@@ -6473,10 +6433,6 @@ if (codexContext !== undefined) {
                     artifact.parent.mkdir(parents=True, exist_ok=True)
                     artifact.write_text(_node_phase_content(phase, run_dir=run_dir), encoding="utf-8")
                     self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
-                gates_artifact = run_dir / _node_phase_artifact("gates")
-                gates_artifact.parent.mkdir(parents=True, exist_ok=True)
-                gates_artifact.write_text('{"passed": false}\n', encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
                 fix_artifact = run_dir / _node_phase_artifact("fix-loop")
                 fix_artifact.write_text(
                     _node_phase_content("fix-loop", run_dir=run_dir),
@@ -6486,12 +6442,14 @@ if (codexContext !== undefined) {
 
             # A fourth request-changes verdict (gates -> fix-loop) must halt for the
             # user; the pr-watch event loop is deliberately never capped.
-            for phase in ("comment-authoring", "multi-review", "architecture-review"):
+            for phase in ("comment-authoring", "multi-review"):
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.write_text(_node_phase_content(phase, run_dir=run_dir), encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
-            gates_artifact = run_dir / _node_phase_artifact("gates")
-            gates_artifact.write_text('{"passed": false}\n', encoding="utf-8")
+            arch_artifact = run_dir / _node_phase_artifact("architecture-review")
+            arch_artifact.write_text(
+                _node_phase_content("architecture-review", run_dir=run_dir), encoding="utf-8"
+            )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -7988,7 +7946,13 @@ if (codexContext !== undefined) {
             )
             captured: list[GateCommand] = []
 
-            def fake_run_gates(commands: list[GateCommand], *, cwd: Path, timeout_s: int = 600) -> list[GateResult]:
+            def fake_run_gates(
+                commands: list[GateCommand],
+                *,
+                cwd: Path,
+                timeout_s: int = 600,
+                on_start=None,
+            ) -> list[GateResult]:
                 captured.extend(commands)
                 return [
                     GateResult(command.gate_id, command.command, True, 0, "", "")
@@ -8016,11 +7980,11 @@ if (codexContext !== undefined) {
             gate_ids = [command.gate_id for command in captured]
             self.assertLess(gate_ids.index("android:build"), gate_ids.index("architecture-lint"))
             self.assertLess(gate_ids.index("react-native:android-build"), gate_ids.index("react-native:lint"))
-            self.assertLess(gate_ids.index("react-native:android-build"), gate_ids.index("android:lint"))
-            self.assertEqual(output.getvalue().strip(), "android,react-native: 8/8 gates passed")
+            self.assertLess(gate_ids.index("react-native:android-build"), gate_ids.index("architecture-lint"))
+            self.assertEqual(output.getvalue().strip(), "android,react-native: 7/7 gates passed")
 
     def test_profile_gate_commands_enforce_build_typecheck_lint_order(self) -> None:
-        from agent_flow.cli import _profile_gate_commands
+        from agent_flow.core.gate_plan import profile_gate_commands as _profile_gate_commands
 
         # BUILD -> TYPECHECK -> LINT 순서 계약은 게이트 전체 집합에 대한 것이다.
         # build 게이트는 pre-push라 기본 phase 필터에서는 보이지 않는다.
@@ -8070,7 +8034,7 @@ if (codexContext !== undefined) {
             output = io.StringIO()
             captured: list[GateCommand] = []
 
-            def fake_run_gates(commands: list[GateCommand], *, cwd: Path, timeout_s: int = 600):
+            def fake_run_gates(commands: list[GateCommand], *, cwd: Path, timeout_s: int = 600, on_start=None):
                 captured.extend(commands)
                 from agent_flow.core.gates import GateResult
 
@@ -8096,7 +8060,7 @@ if (codexContext !== undefined) {
                         ),
                         0,
                     )
-            self.assertEqual(output.getvalue().strip(), "android,react-native: 8/8 gates passed")
+            self.assertEqual(output.getvalue().strip(), "android,react-native: 7/7 gates passed")
             self.assertIn(
                 (
                     sys.executable,
@@ -11382,6 +11346,7 @@ if (codexContext !== undefined) {
                 + '  lintIgnoresTimeout: relayTimeoutForSubcommand(\n'
                 + '    "architecture-lint", ["--timeout", "900"]\n'
                 + '  ),\n'
+                + '  continueCmd: relayTimeoutForSubcommand("continue", []),\n'
                 + '  other: relayTimeoutForSubcommand("skills", []),\n'
                 + "}));\n",
                 encoding="utf-8",
@@ -11396,6 +11361,11 @@ if (codexContext !== undefined) {
         budgets = json.loads(result.stdout)
         self.assertEqual(budgets["default"], 30_000)
         self.assertEqual(budgets["other"], 30_000)
+        # `continue`는 gates phase에서 runner가 프로파일 게이트를 **이 프로세스
+        # 안에서** 돌리는 명령이다. 30초로 두면 gradle/xcodebuild 게이트가 첫
+        # 하나도 끝나기 전에 SIGKILL되고, 그 시점에는 gate-results.json이 없어
+        # cursor가 gates에 남아 다음 advance도 같은 자리에서 죽는다.
+        self.assertEqual(budgets["continueCmd"], budgets["gates"])
         # architecture-lint는 profile gate로 돌 때 gate 예산 안에 있다. node로 직접
         # 부를 때만 30초로 잘리면 같은 명령이 호출 경로에 따라 다르게 죽는다.
         # 게이트 하나치 예산이지 gates 전체 예산은 아니다.
@@ -11541,6 +11511,40 @@ if (codexContext !== undefined) {
             self.assertTrue((run_dir / "artifacts" / "gate-results.json").exists())
             self.assertFalse((checkout / ".agent-flow" / "runs").exists())
             self.assertFalse((root / ".agent-flow" / "runs").exists())
+
+
+def _declare_conditional_gate(root: Path) -> None:
+    """실패를 worktree 파일 하나로 켜고 끄는 gate를 leader profile에 선언한다.
+
+    runner가 gate를 직접 돌리므로 손으로 쓴 `gate-results.json`은 덮어써진다. gates
+    실패를 시험하려면 **진짜 실패하는 gate**가 있어야 한다. 선언은 leader에 커밋해
+    둔다 — run 중 leader를 고치면 phase 경계 tripwire가 drift로 잡는다. 켜고 끄는
+    것은 worktree의 `gate-must-fail` 파일이고, gate는 worktree를 cwd로 돌기 때문에
+    그 파일 하나가 판정을 뒤집는다.
+    """
+    declaration = root / ".agent-flow" / "profiles"
+    declaration.mkdir(parents=True, exist_ok=True)
+    path = declaration / "generic.local.yaml"
+    path.write_text(
+        "gates:\n"
+        "  - id: lint\n"
+        '    command: ["sh", "-c", "test ! -f gate-must-fail"]\n'
+        "    required: true\n"
+        "    phase: pre-commit\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ("git", "add", "-f", str(path.relative_to(root))),
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ("git", "commit", "-q", "-m", "declare conditional gate"),
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
 
 
 def _init_git_repo(root: Path) -> None:
@@ -11941,24 +11945,6 @@ def _node_review_parity_gate() -> str:
     )
 
 
-def _node_gate_nonce(run_dir) -> str:
-    """Python phase-runner meta가 소유하는 gate provenance nonce."""
-    if run_dir is None:
-        return ""
-    meta = Path(run_dir) / "meta.json"
-    if not meta.is_file():
-        return ""
-    return str(json.loads(meta.read_text(encoding="utf-8")).get("gate_nonce", ""))
-
-
-def _node_gate_results(run_dir, body: dict) -> str:
-    nonce = _node_gate_nonce(run_dir)
-    if nonce:
-        body = {**body, "produced_by": {"tool": "agent-flow gates", "nonce": nonce}}
-    return json.dumps(body, sort_keys=True) + "\n"
-
-
-
 def _capture_node_spec_source(run_dir, artifact: str) -> None:
     source_path = Path(run_dir) / "artifacts" / "prd.md"
     source_path.parent.mkdir(parents=True, exist_ok=True)
@@ -12088,16 +12074,6 @@ def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
             + "shared_understanding: reached\n"
             + "context_docs_checked: true\n"
             + "context_docs_updated: not_needed\n"
-        )
-    if phase == "gates":
-        return _node_gate_results(
-            run_dir,
-            {
-                "passed": True,
-                "results": [
-                    {"id": "test", "command": "npm test", "passed": True, "output": "ok"}
-                ],
-            },
         )
     if phase == "prd":
         return (

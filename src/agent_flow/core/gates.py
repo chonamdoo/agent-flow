@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 import os
 import re
 from dataclasses import dataclass
@@ -14,11 +15,22 @@ _LOCAL_ABSOLUTE_PATH_RE = re.compile(
 )
 
 
+# gate 하나가 이만큼을 넘기면 판정 불가로 기록한다. profile이 `gates[].timeout_s`로
+# 이 값을 올리고, 호출자가 `--timeout`으로 명시하면 그것이 둘 다를 이긴다.
+DEFAULT_GATE_TIMEOUT_S = 600
+
+
 @dataclass(frozen=True)
 class GateCommand:
     gate_id: str
     command: tuple[str, ...]
     required: bool = True
+    # profile이 선언한 이 gate만의 상한. `None`이면 `DEFAULT_GATE_TIMEOUT_S`.
+    # 하나의 flat 기본값은 두 방향으로 틀린다 — gradle/xcodebuild는 600s에 걸려
+    # timeout(=판정 불가)이 되고, ruff는 600s를 기다릴 이유가 없다. timeout은
+    # 실패가 아니라 판정 불가로 기록되므로(`core/artifacts.py`), 짧은 기본값은
+    # "빌드가 깨졌다"가 아니라 "검증이 끊겼다"를 만든다.
+    timeout_s: int | None = None
 
 
 @dataclass(frozen=True)
@@ -33,7 +45,13 @@ class GateResult:
     timed_out: bool = False
 
 
-def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateResult:
+def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int | None = None) -> GateResult:
+    # 우선순위: 호출자가 명시한 값 > profile 선언 > 기본값. `or`로 접으면 명시한
+    # 상한이 선언에 먹힌다. 그러면 `--timeout`을 낮춰도 실제 상한은 그대로여서,
+    # 그 플래그로 총예산을 계산하는 node wrapper의 예산이 실제보다 작아진다
+    # (`bin/agent-flow-kit.mjs`의 `relayTimeoutForSubcommand`).
+    if timeout_s is None:
+        timeout_s = command.timeout_s or DEFAULT_GATE_TIMEOUT_S
     executable_command = command.command
     recorded_command = _recorded_gate_command(executable_command, cwd)
     try:
@@ -82,8 +100,27 @@ def gate_results_timed_out(results: list[GateResult]) -> bool:
     return any(result.timed_out for result in results)
 
 
-def run_gates(commands: list[GateCommand], *, cwd: Path, timeout_s: int = 600) -> list[GateResult]:
-    return [run_gate(command, cwd=cwd, timeout_s=timeout_s) for command in commands]
+def run_gates(
+    commands: list[GateCommand],
+    *,
+    cwd: Path,
+    timeout_s: int | None = None,
+    on_start: Callable[[GateCommand, int, int], None] | None = None,
+) -> list[GateResult]:
+    """gate를 순차 실행한다. `on_start`는 각 gate 시작 직전에 (gate, 순번, 총수)로 불린다.
+
+    출력을 여기서 찍지 않는 이유: gate 실행은 core이고 표시는 호출자의 몫이다.
+    직접 print하면 테스트가 실행마다 출력을 뒤집어쓰고, CLI와 runner가 서로 다른
+    형식을 쓸 수 없게 된다. `subprocess.run(capture_output=True)`이라 이 콜백이
+    없으면 긴 gate가 도는 동안 관측 가능한 신호가 0이다.
+    """
+    results: list[GateResult] = []
+    total = len(commands)
+    for index, command in enumerate(commands, start=1):
+        if on_start is not None:
+            on_start(command, index, total)
+        results.append(run_gate(command, cwd=cwd, timeout_s=timeout_s))
+    return results
 
 
 def relativize_local_path(value: str, base: Path) -> str:

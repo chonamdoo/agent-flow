@@ -40,9 +40,11 @@ def write_gate_results(
         "results": serialized_results,
     }
     # 출처 표식. runner는 이 값이 run meta의 nonce와 같을 때만 green으로 라우팅한다.
-    # 이 층이 막는 것은 손으로 쓴 gate-results.json이지 적대적 위조가 아니다 —
-    # nonce도 디스크에 있으므로 읽어서 복사할 수 있다. 진짜 해법은 runner가
-    # `run_gates`를 직접 부르는 것이고, 그때까지의 임시방편이다.
+    # `gates` phase는 runner가 직접 돌리고 이 함수도 runner가 부르므로(`runner.py`의
+    # `_run_project_gates`) 정상 경로에서는 위조본이 라우팅 입력이 될 수 없다. 이
+    # 층이 남아 지키는 것은 손으로 돌린 `agent-flow gates`가 남긴 파일과, gates가
+    # 도중에 끊긴 뒤 써 넣은 파일이다 — nonce도 디스크에 있으므로 적대적 위조는
+    # 여전히 못 막는다.
     nonce = run_gate_nonce(run_dir)
     if nonce:
         # phase도 함께 남긴다. 어떤 gate가 돌았는지는 결과 목록으로 알 수 있지만

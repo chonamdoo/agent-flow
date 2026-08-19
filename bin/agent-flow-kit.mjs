@@ -939,7 +939,7 @@ const DEFAULT_RELAY_TIMEOUT_MS = 30_000;
 // 경우 전경이 영영 멈춘다.
 const DEFAULT_GATE_TIMEOUT_S = 600;
 // `--profile a,b`와 kit.json의 profiles 리스트는 여러 프로파일의 게이트를 합집합으로
-// 돌린다(`src/agent_flow/cli.py:_profile_gate_commands`). 배포 프로파일 전부를 켠
+// 돌린다(`src/agent_flow/core/gate_plan.py:profile_gate_commands`). 배포 프로파일 전부를 켠
 // 실측 최대가 20개라 그보다 위에서 자른다.
 const MAX_TOTAL_GATES = 24;
 const GATE_RELAY_SLACK_MS = 120_000;
@@ -981,6 +981,17 @@ function relayTimeoutForSubcommand(subcommand, args) {
   }
   if (subcommand === "architecture-lint") {
     return SINGLE_GATE_RELAY_TIMEOUT_MS;
+  }
+  if (subcommand === "continue") {
+    // `continue`는 phase를 전진시키는 명령이고, gates phase에서는 runner가 프로파일
+    // 게이트를 **이 프로세스 안에서** 직접 돌린다(`src/agent_flow/runner.py`의
+    // `_run_project_gates`). 30초를 주면 android/ios의 gradle·xcodebuild 게이트는
+    // 첫 하나도 끝나지 않고, SIGKILL 시점에는 gate-results.json이 아직 없어서
+    // cursor가 gates에 그대로 남는다 — 다음 `run advance`가 같은 자리에서 다시
+    // 죽어 이 진입점에서 gates를 통과할 방법이 사라진다. multi-review도 같은
+    // 프로세스에서 reviewer subprocess를 돌리므로 예산은 게이트 총량과 같이 둔다.
+    // 상한을 없애지는 않는다 — python이 시작조차 못 한 경우 전경이 영영 멈춘다.
+    return gateTimeoutSeconds(args) * 1000 * MAX_TOTAL_GATES + GATE_RELAY_SLACK_MS;
   }
   return DEFAULT_RELAY_TIMEOUT_MS;
 }
@@ -2390,9 +2401,9 @@ Implementation rules:
 - Run every phase through the runner. Do not skip review, QA, PR watch, or fix-loop phases.
 - Apply \`code-generation-discipline\` during red, green, refactor, fix-loop, and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code.
 - If review or QA fails, return to the fix phase before continuing.
-- Required review happens before completion QA. After reviewer approve, run \`agent-flow gates --phase all\`. The CLI default is \`pre-commit\` and build/test gates are declared \`pre-push\`, so only \`--phase all\` runs them; a \`pre-commit\` run is not accepted as QA evidence. If review or QA fails, fix-loop routes back through comment-authoring and review before gates run again.
+- Required review happens before completion QA. Do not run \`agent-flow gates\` as part of a phase and do not author \`gate-results.json\`: the runner runs the profile gates itself at the gates phase, at \`--phase all\`, and writes the result file. A result file you write is discarded. \`agent-flow gates\` remains available for reproducing a failure by hand. If review or QA fails, fix-loop routes back through comment-authoring and review before gates run again.
 - Code review requires at least two independent Claude/Codex reviewer subprocesses. If the changed scope spans multiple areas, run one additional reviewer subprocess in parallel. OMP and controller-session work are never reviewer providers, and every multi-review verdict requires 2+ independent reviewer verdicts with reviewer-source: sub-agent. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
-- In the default workflow, gates run as their own phase after final-review approve.
+- In the default workflow, gates run as their own runner-owned phase after final-review approve. Per-gate limits come from the active profile's \`gates[].timeout_s\`.
 
 Document size rules:
 
