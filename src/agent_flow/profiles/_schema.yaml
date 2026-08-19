@@ -90,6 +90,11 @@ optional:
       command: ["command", "argument"]
       required: true
       phase: "pre-commit | pre-push | post-merge"
+      # 이 gate만의 상한(초). 생략하면 호출자 기본값(`agent-flow gates --timeout`,
+      # 기본 600)을 쓴다. timeout은 실패가 아니라 판정 불가로 기록되므로
+      # gradle/xcodebuild처럼 분 단위인 gate는 여기서 늘려 선언한다 — 안 늘리면
+      # "빌드가 깨졌다"가 아니라 "검증이 끊겼다"가 run에 기록된다.
+      timeout_s: 600
 
   # reviewer subprocess를 어떤 model/effort로 띄우는가.
   #
@@ -175,7 +180,7 @@ optional:
     # Canonical clean architecture role mapping. Paths are platform-native,
     # but role ids remain semantic and cross-platform.
     contract: "clean-architecture-core"
-    platform: "android | react-native | react | ios | python"
+    platform: "android | flutter | react-native | react | ios | python"
     strict_when_roots_present: "optional bool; if true, deterministic lint is n/a until activation_roots exist or are changed"
     activation_roots: ["optional path roots that indicate the architecture contract is adopted"]
     roles:

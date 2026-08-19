@@ -1,6 +1,6 @@
 ---
 name: clean-architecture
-description: Compatibility alias for Clean Architecture review and design. Use clean-architecture-core as the canonical source, then load the matching platform clean architecture skill for Android, iOS, React, React Native, or Python API details.
+description: Compatibility alias for Clean Architecture review and design. Use clean-architecture-core as the canonical source, then load the matching platform clean architecture skill for Android, iOS, Flutter, React, React Native, or Python API details.
 requires:
   - clean-architecture-core
 ---
@@ -16,6 +16,7 @@ This skill is kept for existing workflows and completion markers. Treat
 2. Load exactly the platform skill needed by the current code:
    - `android-clean-architecture`
    - `ios-clean-architecture`
+   - `flutter-clean-architecture`
    - `react-clean-architecture`
    - `react-native-clean-architecture`
    - `python-api-clean-architecture`

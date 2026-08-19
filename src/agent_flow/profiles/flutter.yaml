@@ -1,0 +1,150 @@
+id: flutter
+branching:
+  strategy: trunk
+  base: main
+  integration: main
+  worktree: required
+  naming:
+    prefix: "feat/"
+    slug_style: kebab-case
+    slug_source: feature title
+    max_slug_length: 60
+gates:
+  - id: architecture-lint
+    command: ["agent-flow", "architecture-lint", "--profile", "flutter"]
+    required: true
+    phase: pre-commit
+  # `flutter analyze`가 Dart의 typecheck 자리다. Dart는 별도 타입 검사기가 없고 컴파일
+  # 오류와 `analysis_options.yaml`의 lint를 이 한 명령이 함께 보고한다. gate 순서는 id
+  # 어휘로만 정해지므로(`cli.py:2149-2172`) `analyze`로 두면 rank 4로 밀려 test 뒤에
+  # 실행된다 — 컴파일 오류를 test 실패로 먼저 보게 된다.
+  - id: typecheck
+    command: ["flutter", "analyze"]
+    required: true
+    phase: pre-commit
+  - id: lint
+    command: ["dart", "format", "--output=none", "--set-exit-if-changed", "."]
+    required: false
+    phase: pre-commit
+  - id: test
+    command: ["flutter", "test"]
+    required: true
+    phase: pre-commit
+  # build gate는 두지 않는다. `flutter build`는 Android SDK나 Xcode 툴체인을 요구하는데,
+  # Dart는 그 툴체인 없이 `flutter analyze`에서 이미 컴파일 오류를 낸다 — Gradle/Xcode와
+  # 다른 지점이다. 툴체인이 없는 checkout에서 항상 실패하는 gate를 required로 두면
+  # android profile의 `assembleDevDebug`가 냈던 실패(빌드 상태를 한 번도 관측하지 못한
+  # 채 상시 실패)를 그대로 반복한다.
+review_angles:
+  - id: architecture-design
+    prompt: templates/_shared/review/architecture-design.md
+  # `render-stability`와 `test-edge`는 각각 React/Next/RN과 Android/Kotlin 전용
+  # 템플릿이다. angle prompt는 reviewer subprocess에 그대로 인라인되므로(hosted.py:620)
+  # 그걸 빌려 쓰면 Dart 코드에 hook·coroutine·Compose 점검을 지시하게 된다.
+  - id: flutter-rebuild
+    prompt: templates/_shared/review/flutter-rebuild.md
+  - id: flutter-test-edge
+    prompt: templates/_shared/review/flutter-test-edge.md
+skills:
+  install:
+    - dart-development-guide
+    - flutter-clean-architecture
+    - flutter-clean-presentation-architecture
+    - flutter-development-guide
+  required_review:
+    # baseline과 architecture를 가른다. 한 group에 두면 문구·색상만 바꾸는 변경에도
+    # 계층 계약 문서가 required가 된다. architecture 문서는 계층 경계 경로가 실제로
+    # 바뀔 때만 요구한다 — 경로 목록은 이 profile의 `architecture.roles`에서 온다.
+    - group: profile
+      skills: [flutter-development-guide]
+      when: Flutter widget/framework files change
+      missing: "missing local profile: <skill>"
+      path_globs: ["**/*.dart", "**/pubspec.yaml"]
+    # Dart 가이드의 범위는 그 skill이 선언한 `*.dart`와 분석기 설정이다. Flutter 표의
+    # glob에 섞으면 `pubspec.yaml`만 바꿔도 언어 가이드가 required가 된다.
+    - group: dart
+      skills: [dart-development-guide]
+      when: Dart language or analyzer configuration changes
+      missing: "missing local profile: <skill>"
+      path_globs: ["**/*.dart", "**/analysis_options.yaml"]
+    - group: architecture
+      skills: [flutter-clean-architecture]
+      when: Flutter profile architecture role paths change
+      missing: "missing local profile: <skill>"
+      # 배선 자리처럼 경로로 드러나지 않는 계층 검토를 지목하는 유일한 통로다.
+      concerns: [architecture]
+      path_globs: ["**/lib/core/domain/**", "**/lib/core/data/**", "**/lib/features/**", "**/lib/core/design_system/**", "**/lib/core/ui/**", "**/lib/core/resources/**", "**/lib/core/network/**", "**/lib/core/platform/**", "**/lib/core/permission/**", "**/lib/core/navigation/api/**", "**/lib/core/navigation/impl/**"]
+architecture:
+  contract: clean-architecture-core
+  platform: flutter
+  # `lib/core/ui`처럼 core family 이름을 쓰는 role 하나만 있어도 `lib/core` 전체가
+  # managed root가 된다(`architecture_lint.py:556`). 그 상태로 상시 활성이면 이 표에
+  # 없는 `lib/core/utils` 같은 평범한 디렉터리가 "outside profile architecture role
+  # mapping"으로 필수 pre-commit gate를 막는다(실측). 계약을 채택한 저장소만 검사한다.
+  strict_when_roots_present: true
+  # 두 번째 root는 `lib/features`가 아니라 `lib/features/<feature>/api`다. domain 타입을
+  # feature 안에 두는 저장소가 영원히 `n/a`가 되는 것을 막아야 하지만, `lib/features/
+  # <feature>/presentation`은 이 kit의 규약이 아니라 흔한 community feature-first 배치라
+  # root로 쓰면 계약을 채택하지 않은 저장소까지 strict가 켜진다(실측: `presentation`·
+  # `domain`·`data`·`widgets`만 있는 트리에서 finding 5건). `api` 세그먼트가 채택의
+  # 구별 표지다. `lib/app`도 쓰지 않는다 — 거의 모든 Flutter 저장소에 있다.
+  activation_roots: ["lib/core/domain", "lib/features/<feature>/api"]
+  # Flutter 앱은 보통 단일 Dart 패키지다. 계층 경계는 build graph가 아니라 디렉터리와
+  # import 규칙이므로 `modules`/`package_suffix`를 선언하지 않는다 — 그 둘은 Gradle
+  # 좌표와 `package a.b.c;` 선언을 읽는 검사이고(`architecture_lint.py:1210,1383`),
+  # Dart 파일에는 해당 선언이 없어 매칭된 파일마다 오탐이 된다.
+  roles:
+    - id: app-shell
+      paths: ["lib/app"]
+      forbidden: ["ApiClient", "RemoteDataSource", "Dto", "Entity"]
+    - id: android-native
+      paths: ["android"]
+    - id: core-domain
+      paths: ["lib/core/domain/<context>"]
+      pair_with: core-data
+      # SDK import는 지정자로만 드러난다. `code_only`가 Dart import 지정자를 보존해서
+      # (`architecture_lint.py:648`) 이 토큰이 걸린다. 라이브러리별로 적는다 —
+      # `package:flutter` 하나로 두면 `ends_word`가 `_`를 경계로 인정해서
+      # `package:flutter_riverpod`·`flutter_bloc`까지 걸리고, 이 profile이 기본으로
+      # 삼는 Riverpod을 쓴 domain 파일이 필수 gate를 통과할 수 없다(실측).
+      # `package:flutter/`는 반대로 아무것도 매칭하지 않는다 — `/` 다음이 소문자다.
+      # 목록은 api.flutter.dev의 framework library 13개 전량이다.
+      forbidden: ["package:flutter/animation", "package:flutter/cupertino", "package:flutter/foundation",
+                  "package:flutter/gestures", "package:flutter/material", "package:flutter/painting",
+                  "package:flutter/physics", "package:flutter/rendering", "package:flutter/scheduler",
+                  "package:flutter/semantics", "package:flutter/services",
+                  "package:flutter/widget_previews", "package:flutter/widgets",
+                  "Widget", "BuildContext", "Dto", "ApiClient", "RemoteDataSource"]
+    - id: core-data
+      paths: ["lib/core/data/<context>"]
+      pair_with: core-domain
+      forbidden: ["Widget", "BuildContext"]
+    - id: feature-api
+      paths: ["lib/features/<feature>/api"]
+      pair_with: feature-presentation
+      forbidden: ["Widget", "Screen", "RepositoryImpl", "ApiClient", "RemoteDataSource"]
+    - id: feature-presentation
+      paths: ["lib/features/<feature>/presentation"]
+      pair_with: feature-api
+      forbidden: ["ApiClient", "RemoteDataSource", "Dto", "Entity"]
+    - id: core-ui
+      paths: ["lib/core/ui", "lib/core/design_system", "lib/core/resources"]
+    - id: core-network
+      paths: ["lib/core/network", "lib/core/platform", "lib/core/permission"]
+    - id: navigation-api
+      paths: ["lib/core/navigation/api"]
+    - id: navigation-impl
+      paths: ["lib/core/navigation/impl"]
+artifacts:
+  prd: optional
+  adr: optional
+  slice_plan: required
+vocabulary:
+  prd: spec
+  adr: decision-log
+commit_convention:
+  style: conventional
+  co_author: skip
+pr:
+  target_branch: main
+  merge_strategy: squash

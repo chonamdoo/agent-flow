@@ -12,7 +12,7 @@ from agent_flow.core.profiles import active_profile_ids, load_profile_payload
 from agent_flow.core.worktree_isolation import git_safe
 
 
-SOURCE_SUFFIXES = {".gradle", ".kt", ".kts", ".java", ".swift", ".py", ".ts", ".tsx", ".js", ".jsx"}
+SOURCE_SUFFIXES = {".gradle", ".kt", ".kts", ".java", ".swift", ".py", ".ts", ".tsx", ".js", ".jsx", ".dart"}
 IGNORED_PARTS = {
     ".agent-flow",
     ".git",
@@ -610,6 +610,8 @@ def validate_forbidden_tokens(rel_path: str, text: str, role: dict[str, Any]) ->
 #   dollar - `${...}`와 `$name` (Kotlin/Groovy 큰따옴표)
 #   swift  - `\(...)`
 #   fstring- `{...}`, 단 `f` 접두사가 붙은 리터럴에서만
+# Dart는 두 따옴표 모두 `dollar`이고, `r` 접두사 하나만 보간을 끈다. `dollar`를 쓰는
+# 나머지(Kotlin/Groovy)에는 `r` 문자열 접두사 문법이 없어서 그 예외를 style에 묶어 둔다.
 JS_SUFFIXES = {".ts", ".tsx", ".js", ".jsx"}
 JSX_SUFFIXES = {".tsx", ".jsx"}
 INTERPOLATION_STYLES = {
@@ -622,6 +624,7 @@ INTERPOLATION_STYLES = {
     ".gradle": ('"', "dollar"),
     ".swift": ('"', "swift"),
     ".py": ("\"'", "fstring"),
+    ".dart": ("\"'", "dollar"),
 }
 
 
@@ -630,6 +633,7 @@ class Syntax:
     """확장자 하나에서 굳어지는 문법 규칙. 파일당 한 번만 만든다."""
 
     javascript: bool
+    module_specifiers: bool
     jsx: bool
     slash_comments: bool
     hash_comments: bool
@@ -642,10 +646,14 @@ def syntax_for(suffix: str) -> Syntax:
     # `.py`만 `#` 주석이고 `SOURCE_SUFFIXES`의 나머지는 전부 `//` 계열이다. 모르는
     # 확장자도 `//` 쪽으로 둔다 - 여기 오기 전에 이미 확장자로 걸러진다.
     javascript = suffix in JS_SUFFIXES
+    # Dart의 `import`/`export`도 지정자가 문자열이다. JS와 같은 이유로 보존한다 —
+    # 지우면 `import 'package:flutter/material.dart'`의 계층 위반이 사라진다.
+    module_specifiers = javascript or suffix == ".dart"
     hash_comments = suffix == ".py"
     interpolating_marks, style = INTERPOLATION_STYLES.get(suffix, ("", ""))
     return Syntax(
         javascript=javascript,
+        module_specifiers=module_specifiers,
         jsx=suffix in JSX_SUFFIXES,
         slash_comments=not hash_comments,
         hash_comments=hash_comments,
@@ -689,7 +697,9 @@ def code_only(rel_path: str, text: str, mask_strings: bool = True) -> str:
             continue
         if text.startswith(('"""', "'''"), index):
             # 삼중 따옴표는 보간을 따로 보지 않는다. 여러 줄 문자열이라 한 줄 가드가
-            # 안 서고, 그 안의 보간까지 좇으면 스캐너가 파서가 된다.
+            # 안 서고, 그 안의 보간까지 좇으면 스캐너가 파서가 된다. 이건 언어별 예외가
+            # 아니라 보간을 가진 모든 언어(Kotlin/Python/Dart)에 같이 적용되는 의도된
+            # 한계다 — 확장자를 새로 추가할 때 빠뜨린 자리로 읽지 않는다.
             index = blank_until(out if mask_strings else None, text, index + 3, char * 3)
             continue
         if char in syntax.marks:
@@ -697,12 +707,14 @@ def code_only(rel_path: str, text: str, mask_strings: bool = True) -> str:
             # 지우고 문자열은 남긴다.
             # 모듈 지정자 판정이 먼저다. `import a from'react'`의 여는 따옴표를
             # contraction으로 건너뛰면 닫는 따옴표가 여는 따옴표로 뒤집힌다.
-            keep = not mask_strings or (syntax.javascript and is_module_specifier(text, index))
+            keep = not mask_strings or (syntax.module_specifiers and is_module_specifier(text, index))
             if not keep and syntax.jsx and is_jsx_contraction(text, index):
                 index += 1
                 continue
             style = syntax.style if char in syntax.interpolating_marks else ""
             if style == "fstring" and not has_format_prefix(text, index):
+                style = ""
+            if style == "dollar" and identifier_before(text, index) == "r":
                 style = ""
             index = blank_string(None if keep else out, text, index, style, syntax)
             continue
@@ -861,8 +873,8 @@ def blank_until(out: list[str] | None, text: str, start: int, terminator: str, k
 # 모듈 지정자는 문자열이지만 코드 참조다. 지우면 `export * from './screens'` 같은
 # 진짜 위반이 사라진다. 줄 전체를 보면 `export const CSS = '@media screen'`까지
 # 코드로 남아 없애려던 오탐이 살아난다 - 따옴표 **바로 앞**만 본다. 그래야 여러 줄
-# import(`} from './screens'`)와 `await import('./x')`도 함께 걸린다. JS에서만 쓴다 -
-# Groovy `copy { from 'src/main/screens' }`까지 보존하면 그쪽이 오탐이 된다.
+# import(`} from './screens'`)와 `await import('./x')`도 함께 걸린다. JS와 Dart에서만
+# 쓴다 - Groovy `copy { from 'src/main/screens' }`까지 보존하면 그쪽이 오탐이 된다.
 MODULE_SPECIFIER_RE = re.compile(
     r"(?:^|[^A-Za-z0-9_$])(?:from|import|export)\s*$"
     r"|(?:^|[^A-Za-z0-9_$])(?:import|require)\s*\(\s*$"

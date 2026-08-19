@@ -285,12 +285,12 @@ class CliTest(unittest.TestCase):
                 "clean-architecture: applied|n/a",
                 "project-local-skills: checked|n/a",
                 "project-local-skills-used:",
-                "presentation-skill: android|react|react-native|ios|n/a",
+                "presentation-skill: android|flutter|react|react-native|ios|n/a",
                 "presentation-state-based-development: applied|n/a",
                 "presentation-state-review: pass|fail|n/a",
                 "ui-state-modeling: explicit|n/a",
                 "presentation-mapping-boundary: domain-to-uimodel|n/a",
-                "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a",
+                "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a",
                 "regression-test:",
                 "red-observed:",
                 "test-run-evidence: verified|unavailable",
@@ -392,7 +392,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("skills/clean-architecture/SKILL.md", architecture_review_prompt)
         self.assertIn("must-avoid or failing checklist", architecture_review_prompt)
         self.assertIn("skill makes the verdict", architecture_review_prompt)
-        self.assertIn("presentation-skill: android|react|react-native|ios|n/a", phases["green"]["required_markers"])
+        self.assertIn("presentation-skill: android|flutter|react|react-native|ios|n/a", phases["green"]["required_markers"])
         self.assertIn("Android/Kotlin/Compose/KMP changes require Android profile skills", phases["green"]["prompt"])
         self.assertEqual(phases["gates"]["artifact"], "artifacts/gate-results.json")
         self.assertEqual(phases["gates"]["routes"]["green"], "commit")

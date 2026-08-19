@@ -345,6 +345,7 @@ def test_doctor_reports_an_unrouted_bundled_skill(tmp_path, monkeypatch):
 # skill frontmatter의 좁은 범위를 덮어쓰는 역전을 가드가 볼 수 없다.
 _PRESENTATION_PROFILES = {
     "android-clean-presentation-architecture": "android",
+    "flutter-clean-presentation-architecture": "flutter",
     "react-clean-presentation-architecture": "nextjs",
     "react-native-clean-presentation-architecture": "react-native",
     "ios-clean-presentation-architecture": "ios",
@@ -352,6 +353,7 @@ _PRESENTATION_PROFILES = {
 
 _PRESENTATION_CHANGES = {
     "android-clean-presentation-architecture": "feature/chat/presentation/src/main/java/io/levvels/samantha/feature/chat/presentation/ChatViewModel.kt",
+    "flutter-clean-presentation-architecture": "lib/features/chat/presentation/chat/chat_notifier.dart",
     "react-clean-presentation-architecture": "src/features/chat/presentation/ChatContainer.tsx",
     "react-native-clean-presentation-architecture": "src/features/chat/presentation/ChatScreen.tsx",
     "ios-clean-presentation-architecture": "Sources/Features/Chat/Presentation/ChatViewModel.swift",
@@ -359,6 +361,7 @@ _PRESENTATION_CHANGES = {
 
 _DATA_LAYER_CHANGES = {
     "android-clean-presentation-architecture": "core/data/chat/src/main/java/io/levvels/samantha/core/data/chat/ChatRepositoryImpl.kt",
+    "flutter-clean-presentation-architecture": "lib/core/data/chat/chat_repository_impl.dart",
     "react-clean-presentation-architecture": "src/core/data/chat/ChatRepositoryImpl.ts",
     "react-native-clean-presentation-architecture": "src/core/data/chat/ChatRepositoryImpl.ts",
     "ios-clean-presentation-architecture": "Sources/Core/Data/Chat/ChatRepositoryImpl.swift",

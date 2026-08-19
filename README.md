@@ -191,16 +191,16 @@ handoff           인수인계 문서 작성
 
 ## 스킬과 프로파일
 
-스킬 48종을 두고, 변경된 파일과 활성 프로파일을 기준으로 필요한 것만 로드합니다. 전부
+스킬 52종을 두고, 변경된 파일과 활성 프로파일을 기준으로 필요한 것만 로드합니다. 전부
 읽으면 컨텍스트 비용이 감당되지 않기 때문입니다.
 
 아키텍처(`clean-architecture-core`, `ddd-architecture`, `domain-modeling`), 플랫폼별
-(Android, iOS, React, React Native, Python), 개발 규율(`tdd`,
+(Android, iOS, React, React Native, Flutter, Python), 개발 규율(`tdd`,
 `code-generation-discipline`, `comment-authoring-discipline`), 리뷰(`code-review`,
 `architecture-reviewer`, `plan-reviewer`), 요구사항 정제(`grilling`, `to-prd`,
 `product-brief`), 운영(`agent-flow`, `push-watch`) 계열로 나뉩니다.
 
-프로파일 9종 — `android` `generic` `ios` `nextjs` `node` `python` `react-native` `spring` `typescript`
+프로파일 10종 — `android` `flutter` `generic` `ios` `nextjs` `node` `python` `react-native` `spring` `typescript`
 
 프로파일은 플랫폼별 검증 명령과 리뷰 관점을 선언합니다. 자세한 형식은
 [docs/USAGE.md](docs/USAGE.md)에 있습니다.

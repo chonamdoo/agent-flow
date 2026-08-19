@@ -222,12 +222,12 @@ phases:
       - "clean-architecture: applied|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
-      - "presentation-skill: android|react|react-native|ios|n/a"
+      - "presentation-skill: android|flutter|react|react-native|ios|n/a"
       - "presentation-state-based-development: applied|n/a"
       - "presentation-state-review: pass|fail|n/a"
       - "ui-state-modeling: explicit|n/a"
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
-      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
+      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
       - "regression-test:"
       - "red-observed:"
       - "test-run-evidence: verified|unavailable"
@@ -303,12 +303,12 @@ phases:
           clean-architecture: applied|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          presentation-skill: <android|react|react-native|ios|n/a>
+          presentation-skill: <android|flutter|react|react-native|ios|n/a>
           presentation-state-based-development: <applied|n/a>
           presentation-state-review: <pass|fail|n/a>
           ui-state-modeling: <explicit|n/a>
           presentation-mapping-boundary: <domain-to-uimodel|n/a>
-          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a>
+          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a>
           regression-test: <test id that reproduces the required behavior>
           red-observed: <exit code of the failing run>
           test-run-evidence: verified|unavailable
@@ -389,11 +389,11 @@ phases:
       - "cache-boundary-check: applied"
       - "mapping-boundary-check: applied"
       - "solid-clean-architecture-check: applied"
-      - "presentation-skill: android|react|react-native|ios|n/a"
+      - "presentation-skill: android|flutter|react|react-native|ios|n/a"
       - "presentation-state-review: pass|fail|n/a"
       - "ui-state-modeling: explicit|n/a"
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
-      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
+      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
     routes:
       approve: gates
       request-changes: fix-loop
@@ -477,14 +477,14 @@ phases:
           cache-boundary-check: applied
           mapping-boundary-check: applied
           solid-clean-architecture-check: applied
-          presentation-skill: <android|react|react-native|ios|n/a>
+          presentation-skill: <android|flutter|react|react-native|ios|n/a>
           presentation-state-review: <pass|fail|n/a>
           ui-state-modeling: <explicit|n/a>
           presentation-mapping-boundary: <domain-to-uimodel|n/a>
-          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a>
+          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a>
 
   - id: gates
-    description: Run project verification gates after final-review approve. Runner routes fail→fix-loop, pass→commit.
+    description: Runner runs the profile gates itself after final-review approve. Routes fail→fix-loop, pass→commit.
     artifact: artifacts/gate-results.json
     routes:
       green: commit
@@ -495,16 +495,16 @@ phases:
       pending: block
       default: fix-loop
     prompt: |
-      Run QA only after required reviewers approve. Run the profile gates with
-      `agent-flow gates --phase all --run-dir <run-dir>`, plus context lint.
-      `--phase all` is required: the CLI default is `pre-commit`, build and test
-      gates are declared `pre-push`, and a default run never puts them on the
-      list. The runner reads `produced_by.gate_phase` from the result file and
-      does not accept a `pre-commit` run as passing QA evidence.
-      Docs-only PRs must still run context lint. Save structured JSON with a
-      top-level `passed` boolean and a `results` array. When an explicit route
-      status is needed, also include top-level `status` as `green`, `approve`,
-      `request-changes`, `blocked`, `error`, or `pending`.
+      The runner runs this phase's gates itself and writes the result file. Do
+      not run `agent-flow gates` here and do not author the result file: the
+      verification result must not be written by the party being verified.
+      Gates come from the active profile at `--phase all`, so build and test
+      gates declared `pre-push` are included. Per-gate limits come from the
+      profile's `gates[].timeout_s`; a gate that needs longer than the default
+      declares it there rather than being recorded as a timeout, which is
+      "verification was cut off", not "the build is broken".
+      `agent-flow gates` stays available for reproducing a failure by hand; its
+      output is not what this phase routes on.
       Output: artifacts/gate-results.json.
 
   - id: fix-loop
@@ -521,12 +521,12 @@ phases:
       - "clean-architecture: applied|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
-      - "presentation-skill: android|react|react-native|ios|n/a"
+      - "presentation-skill: android|flutter|react|react-native|ios|n/a"
       - "presentation-state-based-development: applied|n/a"
       - "presentation-state-review: pass|fail|n/a"
       - "ui-state-modeling: explicit|n/a"
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
-      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
+      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
       - "regression-test:"
       - "red-observed:"
       - "test-run-evidence: verified|unavailable"
@@ -556,12 +556,12 @@ phases:
           clean-architecture: applied|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          presentation-skill: <android|react|react-native|ios|n/a>
+          presentation-skill: <android|flutter|react|react-native|ios|n/a>
           presentation-state-based-development: <applied|n/a>
           presentation-state-review: <pass|fail|n/a>
           ui-state-modeling: <explicit|n/a>
           presentation-mapping-boundary: <domain-to-uimodel|n/a>
-          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a>
+          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a>
           regression-test: <test id that reproduces the required behavior>
           red-observed: <exit code of the failing run>
           test-run-evidence: verified|unavailable

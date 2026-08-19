@@ -724,6 +724,7 @@ def test_presentation_review_marker_has_one_runtime_contract():
     assert seen
     for name in (
         "android-clean-presentation-architecture",
+        "flutter-clean-presentation-architecture",
         "ios-clean-presentation-architecture",
         "react-clean-presentation-architecture",
         "react-native-clean-presentation-architecture",
