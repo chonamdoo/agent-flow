@@ -41,6 +41,9 @@ jobs:
         shell: bash
         env:
           AGENT_FLOW_SKIP_CODEX_TRUST: "1"
+          # CI runner에는 네트워크가 있다. 릴리스 확인을 켠 채로 두면 릴리스가 나온
+          # 뒤부터 stderr에 경고 한 줄이 끼어들어 출력 대조 테스트가 붉어진다.
+          AGENT_FLOW_NO_UPDATE_CHECK: "1"
           PYTEST_K: ${{ inputs.pytest_k }}
         run: |
           started=$(date +%s)

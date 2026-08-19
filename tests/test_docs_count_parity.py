@@ -27,7 +27,7 @@ DOC_COUNT_SOURCE = "README.md"
 # 어긋나면 이 테스트가 아무것도 바꾸지 못한 채 통과하므로, 아래에서 치환
 # 결과를 확인한다.
 WORKFLOW_ROW = re.compile(r"^\|\s*`(bugfix)`\s*\|([^|]*)\|\s*(\d+)\s*\|", re.MULTILINE)
-SKILL_LINE = re.compile(r"^스킬\s+(\d+)종", re.MULTILINE)
+SKILL_LINE = re.compile(r"^(\d+)\s+skills\b", re.MULTILINE)
 
 
 def _node() -> str:
@@ -89,7 +89,7 @@ def test_parity_check_fails_on_wrong_doc_counts(
     wrong_skills = int(skills.group(1)) - 3
 
     text = text.replace(row.group(0), f"| `bugfix` |{row.group(2)}| {wrong_phases} |", 1)
-    text = text.replace(skills.group(0), f"스킬 {wrong_skills}종", 1)
+    text = text.replace(skills.group(0), f"{wrong_skills} skills", 1)
     readme.write_text(text, encoding="utf-8")
 
     result = _parity(root)
@@ -97,3 +97,29 @@ def test_parity_check_fails_on_wrong_doc_counts(
     assert result.returncode != 0, output
     assert f"has {wrong_phases} phases" in output, output
     assert f"says {wrong_skills} skills" in output, output
+
+
+def test_parity_check_fails_when_the_formula_installs_another_version(
+    installed_kit: Path, tmp_path: Path
+) -> None:
+    """반증: formula의 태그가 소스 버전과 갈라져도 통과하면, brew 사용자는
+    `agent-flow --version`이 말하는 것과 다른 kit을 받는다."""
+    root = tmp_path / "formula-kit"
+    shutil.copytree(installed_kit, root, symlinks=True)
+    formula = root / "Formula" / "agent-flow.rb"
+    text = formula.read_text(encoding="utf-8")
+    homepage = re.search(r"^ {2}homepage \".*\"$", text, re.MULTILINE)
+    assert homepage is not None, "formula에 homepage 줄이 없다"
+    stanza = (
+        '  url "https://github.com/chonamdoo/agent-flow/archive/refs/tags/v99.99.99.tar.gz"\n'
+        f'  sha256 "{"0" * 64}"'
+    )
+    formula.write_text(
+        text.replace(homepage.group(0), f"{homepage.group(0)}\n{stanza}", 1),
+        encoding="utf-8",
+    )
+
+    result = _parity(root)
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert "installs v99.99.99" in output, output

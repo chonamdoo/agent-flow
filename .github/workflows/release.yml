@@ -1,0 +1,94 @@
+name: Release
+
+# 태그 하나가 두 가지를 만든다: `brew install`이 받을 stable stanza와,
+# CLI의 업데이트 확인이 읽는 GitHub Release다. 릴리스를 만들지 않으면
+# `agent-flow update`는 비교할 대상이 없어 영원히 조용하다.
+#
+# 태그 이름은 신뢰 입력이 아니다. `${{ }}`로 `run:` 본문에 끼워 넣으면 ref 이름에 담긴
+# 셸 문법이 runner 안에서 실행되고, 그 runner는 `contents: write` 토큰과 사용자가
+# `brew install`로 실행할 formula를 함께 들고 있다. 그래서 모든 태그 값은 `env:`로만
+# 전달하고 스크립트 안에서는 인용된 변수로만 읽는다.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  brew-formula:
+    runs-on: ubuntu-latest
+    steps:
+      # 태그가 아니라 main을 받는다. formula 갱신은 태그된 커밋이 아니라 tap이
+      # 읽는 브랜치에 있어야 한다.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve the released version
+        id: release
+        run: |
+          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # main에 없는 커밋의 태그를 릴리스로 만들면, 리뷰를 통과하지 않은 트리가
+      # `/releases/latest`가 되어 설치된 모든 CLI에 업그레이드 대상으로 광고된다.
+      - name: Require the tag to be on main
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "refs/tags/${TAG}" origin/main
+
+      # sha256은 GitHub이 만드는 태그 tarball에서만 나온다. 사람이 옮겨 적지 않는다.
+      - name: Hash the tag tarball
+        id: tarball
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+          curl -fsSL "$url" -o release.tar.gz
+          echo "sha256=$(sha256sum release.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          rm release.tar.gz
+
+      # stamp가 publish보다 앞에 있어야 한다. 이 스크립트가 태그와 pyproject 버전이
+      # 같은지 보는 유일한 곳이고, 릴리스가 먼저 나가면 그 판정에서 실패해도
+      # `/releases/latest`는 이미 새 버전을 광고한다 — 설치된 모든 CLI가 아직
+      # stamp되지 않은 formula로 업그레이드하라는 말을 듣게 된다.
+      - name: Stamp Formula/agent-flow.rb
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          SHA256: ${{ steps.tarball.outputs.sha256 }}
+        run: node scripts/stamp-brew-formula.mjs --version "$VERSION" --sha256 "$SHA256"
+
+      # 사용자에게 보이는 절반은 formula 커밋보다 앞이다. push가 실패해도 릴리스는
+      # 남고, formula는 이 run을 다시 돌려 stamp할 수 있다(각 단계는 idempotent다).
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release already published"
+            exit 0
+          fi
+          gh release create "$TAG" --title "$TAG" --generate-notes
+
+      - name: Commit the formula bump
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if git diff --quiet -- Formula/agent-flow.rb; then
+            echo "formula already current"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/agent-flow.rb
+          git commit -m "chore(brew): formula가 ${TAG}를 설치한다"
+          # 릴리스 중에 main이 움직였을 수 있다. rebase 없이 밀면 non-fast-forward로
+          # 죽고, 그러면 태그는 있는데 formula는 낡은 상태가 남는다.
+          git pull --rebase origin main
+          git push origin HEAD:main

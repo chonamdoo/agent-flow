@@ -51,8 +51,8 @@ const PACKAGED_PROFILES = "src/agent_flow/profiles";
 // 대조 함수는 파일 하단에 있지만 이 상수는 최상위 호출부보다 위에 있어야 한다.
 // 아래에 두면 TDZ로 죽는다.
 const DOC_WORKFLOW_ROW = /^\|\s*`([a-z][a-z0-9-]*)`\s*\|[^|]*\|\s*(\d+)\s*\|/gm;
-const DOC_PROFILE_LINE = /^프로파일\s+(\d+)종\s*—\s*(.+)$/m;
-const DOC_SKILL_LINE = /^스킬\s+(\d+)종/m;
+const DOC_PROFILE_LINE = /^(\d+)\s+profiles\s*—\s*(.+)$/m;
+const DOC_SKILL_LINE = /^(\d+)\s+skills\b/m;
 const DOC_BACKTICK_NAME = /`([a-z][a-z0-9-]*)`/g;
 const DOC_COUNT_SOURCE = "README.md";
 const DOC_USAGE_PATH = "docs/USAGE.md";
@@ -415,6 +415,10 @@ assertAllWorkflowContracts();
 assertDocumentedCountsMatchSources();
 assertFile(DOC_USAGE_PATH);
 assertLicenseMatchesDeclaration();
+// formula가 stable 태그를 선언하면 그 태그는 이 트리가 주장하는 버전이어야 한다.
+// 어긋난 formula는 `brew install`이 다른 버전을 받아 오게 만들고, 그 사실은 설치
+// 시점에야 드러난다.
+assertBrewFormulaMatchesVersion();
 assertPackagedFilesIncludeDocs();
 // 같은 git discovery 변수 목록이 7군데에 복사되어 있고 지금까지는 주석만 "같아야
 // 한다"고 말했다. 한 군데만 밀려도 그 진입점에서만 ambient GIT_*가 살아남아 남의
@@ -2093,7 +2097,7 @@ function assertDocProfileNames(rel) {
   const match = DOC_PROFILE_LINE.exec(text);
   if (!match) {
     failures.push(
-      `${rel} has no profile roster line (expected "프로파일 <n>종 — \`android\` \`generic\` ...")`,
+      `${rel} has no profile roster line (expected "<n> profiles — \`android\` \`generic\` ...")`,
     );
     return;
   }
@@ -2137,7 +2141,7 @@ function assertDocSkillCount(rel) {
   if (text === null) return;
   const match = DOC_SKILL_LINE.exec(text);
   if (!match) {
-    failures.push(`${rel} has no skill count line (expected "스킬 <n>종")`);
+    failures.push(`${rel} has no skill count line (expected "<n> skills")`);
     return;
   }
   const skillsDir = path.join(SOURCE_ROOT, "skills");
@@ -2157,6 +2161,56 @@ function assertLicenseMatchesDeclaration() {
   if (declared && !text.includes(declared)) {
     failures.push(`LICENSE does not name the license package.json declares (${declared})`);
   }
+}
+
+// brew는 formula가 적은 태그를 받는다. 그 태그와 이 트리의 버전이 갈라지면 사용자는
+// `agent-flow --version`이 말하는 것과 다른 kit을 설치한다.
+function assertBrewFormulaMatchesVersion() {
+  const rel = "Formula/agent-flow.rb";
+  const text = readIfExists(rel);
+  if (text === null) {
+    failures.push(`${rel} is missing, so the documented brew install path has no formula`);
+    return;
+  }
+  const url = text.match(/^ {2}url "(.+)"$/m);
+  if (url === null) {
+    // 태그가 없는 동안은 head-only가 정상이다. 그때 stable 태그를 대조할 것은 없다.
+    if (!/^ {2}head ".+"/m.test(text)) {
+      failures.push(`${rel} declares neither a stable url nor head, so brew cannot install it`);
+    }
+    return;
+  }
+  const tagged = url[1].match(/\/archive\/refs\/tags\/v(.+)\.tar\.gz$/);
+  if (tagged === null) {
+    failures.push(`${rel} url is not a tag tarball: ${url[1]}`);
+    return;
+  }
+  if (!/^ {2}sha256 "[0-9a-f]{64}"$/m.test(text)) {
+    failures.push(`${rel} declares a stable url without a sha256 digest`);
+  }
+  const declared = readIfExists("pyproject.toml")?.match(/^version = "(.+)"$/m)?.[1];
+  if (declared === undefined) {
+    failures.push("pyproject.toml declares no version to compare the formula against");
+    return;
+  }
+  // 같아야 한다고 요구하지 않는다. formula는 태그가 생긴 뒤에만 stamp되므로, 버전을
+  // 올리는 PR에서는 반드시 한 릴리스 뒤처진다 — 그것을 실패로 보면 그 PR이 영구히
+  // 붉어지고 릴리스를 낼 방법이 없어진다. 막을 것은 반대 방향뿐이다: 이 트리가 아직
+  // 도달하지 않은 버전을 formula가 설치하겠다고 적은 경우.
+  if (compareVersions(tagged[1], declared) > 0) {
+    failures.push(`${rel} installs v${tagged[1]}, pyproject.toml declares ${declared}`);
+  }
+}
+
+function compareVersions(left, right) {
+  const parse = (value) => value.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const a = parse(left);
+  const b = parse(right);
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0);
+    if (difference !== 0) return difference < 0 ? -1 : 1;
+  }
+  return 0;
 }
 
 // USAGE를 README에서 떼어낸 뒤 `files`를 그대로 두면 npm tarball에서 사용법이 통째로
