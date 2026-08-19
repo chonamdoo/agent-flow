@@ -893,8 +893,18 @@ assertContains(".claude/agents/code-reviewer.md", "description:");
 
 if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/rules/workflow-contract.md", "Required review happens before completion QA");
-  assertContains(".agent-flow/rules/workflow-contract.md", "agent-flow gates --phase all");
-  assertContains(".agent-flow/rules/workflow-contract.md", "default workflow, gates run as their own phase");
+  // gates는 runner가 돌리는 phase다. 계약 문서가 host에게 `agent-flow gates` 실행을
+  // 지시하면 그 파일은 `_run_project_gates`가 덮어쓰므로 지시 자체가 거짓이 된다.
+  assertContains(
+    ".agent-flow/rules/workflow-contract.md",
+    "the runner runs the profile gates itself at the gates phase",
+  );
+  assertContains(".agent-flow/rules/workflow-contract.md", "A result file you write is discarded");
+  assertContains(
+    ".agent-flow/rules/workflow-contract.md",
+    "default workflow, gates run as their own runner-owned phase",
+  );
+  assertNotContains(".agent-flow/rules/workflow-contract.md", "After reviewer approve, run");
   assertContains(".agent-flow/rules/workflow-contract.md", "short Korean");
   assertContains(".agent-flow/rules/workflow-contract.md", "two independent Claude/Codex reviewer subprocesses");
   assertNotContains(".agent-flow/rules/workflow-contract.md", "Gemini sub-agent in Gemini");
