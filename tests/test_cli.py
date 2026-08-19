@@ -11314,6 +11314,29 @@ if (codexContext !== undefined) {
                 exit_code = main(["gates", "--root", str(root), "--profile", "generic"])
         self.assertEqual(exit_code, 1)
 
+    def test_declared_gate_timeouts_fit_inside_the_relay_budget(self) -> None:
+        """불변: 배포 profile이 선언한 gate 상한의 합이 wrapper 예산 안에 들어온다.
+
+        반증: wrapper 예산은 `gateTimeoutSeconds(args) * MAX_TOTAL_GATES`로, gate가
+        전부 기본값(600s)이라고 가정한다. `gates[].timeout_s`는 그 가정을 깰 수 있고,
+        합이 예산을 넘으면 `safeSpawnSync`가 `write_gate_results` 전에 runner를
+        SIGKILL한다 — gate는 다 돌았는데 결과 파일이 없어 cursor가 gates에 남는다.
+        JS가 profile YAML을 읽어 예산을 계산하게 만들 수는 없다(parity가 profile
+        로직의 JS 재구현을 금지한다). 그래서 여백을 여기서 고정한다.
+        """
+        from agent_flow.core.gate_plan import profile_gate_commands
+        from agent_flow.core.gates import DEFAULT_GATE_TIMEOUT_S
+
+        widest = ["android", "ios", "typescript", "react-native", "node", "flutter"]
+        commands = profile_gate_commands(widest, phase="all")
+        declared_sum = sum(
+            command.timeout_s or DEFAULT_GATE_TIMEOUT_S for command in commands
+        )
+        # wrapper의 GATE_PLAN_FLOOR_S와 같은 값. 바뀌면 이 테스트가 먼저 깨진다.
+        budget = 18_000 + 120
+        self.assertLessEqual(len(commands), 24)
+        self.assertLessEqual(declared_sum, budget)
+
     def test_gates_relay_budget_exceeds_the_default_wrapper_timeout(self) -> None:
         """반증: gates에 relay용 30초 상한을 걸면 프로파일 게이트가 끝나기 전에 죽는다.
 

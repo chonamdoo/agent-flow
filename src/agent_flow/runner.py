@@ -479,7 +479,22 @@ class Runner:
                 phase.id,
                 details={"phase_index": phase_index},
             )
-            if self._has_artifact(phase) and not self._phase_regenerates_artifact(phase, meta):
+            if phase.id in RUNNER_OWNED_PHASES:
+                # runner-owned phase는 디스크의 artifact를 라우팅 입력으로 읽지
+                # 않는다. 할 수 있는 것은 다시 만들거나, 막힌 채 멈추거나 둘뿐이다.
+                if self._runner_owned_phase_is_stuck(phase, meta):
+                    print(
+                        f"\n═══ phase '{phase.id}' is blocked. The gate result "
+                        f"cannot be edited into a pass — fix what the gates "
+                        f"reported, or `agent-flow abort`. ═══"
+                    )
+                    self._print_structured_status(
+                        status="blocked",
+                        phase=phase,
+                        reason="route_blocked",
+                    )
+                    return
+            elif self._has_artifact(phase):
                 artifact = self._existing_artifact_path(phase)
                 blocked_reason = (
                     self._stale_artifact_block_reason(artifact, meta)
@@ -1450,37 +1465,42 @@ class Runner:
         gradle/xcodebuild가 도는 수십 분 동안 관측 가능한 신호가 0이다."""
         print(f"  [gate {index}/{total}] {gate.gate_id}", flush=True)
 
-    def _phase_regenerates_artifact(self, phase: Phase, meta: dict[str, Any]) -> bool:
-        """이 phase의 artifact를 runner가 지금 다시 만들 것인가.
+    def _runner_owned_phase_is_stuck(self, phase: Phase, meta: dict[str, Any]) -> bool:
+        """사용자 개입 없이는 바뀌지 않는 자리인가.
 
-        runner-owned phase는 디스크의 artifact를 입력으로 읽지 않는다. 다만 이미
-        route로 막혀 있으면 다시 만들지 않는다 — fix-loop 상한에 걸려 멈춘 run은
-        gate를 다시 돌려도 같은 상한에 다시 걸린다. 상한 초과는 카운터를 저장하지
-        않아 상태가 안정적이므로, 걸러 내지 않으면 매 `continue`가 전체 gate
-        스위트(android 기준 수십 분)를 돌린 뒤 같은 자리에서 막히는 것을 무한히
-        반복한다.
+        runner-owned phase는 디스크의 artifact를 라우팅 입력으로 **절대** 읽지
+        않는다. 그 파일을 쓸 수 있는 것은 검증 대상 본인이고, 위조를 막던 nonce는
+        run meta에 있어 읽어 복사할 수 있다. 그래서 선택은 둘뿐이다 — 다시 만들거나,
+        막힌 채 멈추거나.
 
-        예외는 판독 불가다. `route_blocked`는 gates의 **모든** 차단 판정이 공유하는
+        fix-loop 상한에 걸려 막힌 자리는 다시 만들지 않는다. gate를 다시 돌려도 같은
+        상한에 다시 걸리는데(android 기준 수십 분) 그것을 반복하는 것은 낭비다. 그
+        자리에서 디스크의 파일을 읽어 라우팅하면 더 나쁘다: 막힌 run이 green 한 줄로
+        상한을 우회하는 통로가 되고, 그 통로를 쓸 동기가 가장 큰 것이 바로 여기서
+        막힌 agent다.
+
+        판독 불가만 예외다. `route_blocked`는 gates의 **모든** 차단 판정이 공유하는
         한 값이어서 상한 초과와 판독 불가를 구분하지 못하는데, 뒤쪽은 안정된 상태가
-        아니다 — 이 파일을 쓰는 것은 이제 runner뿐이므로 다시 돌리면 유효한 파일로
-        바뀐다. 여기서 막으면 사용자에게 남는 유일한 안내가 "artifact를 고쳐라"인데
-        같은 run의 phase prompt가 그 행위를 금지하므로 탈출구가 0이 된다.
+        아니라 재실행이 실제로 바꿀 수 있는 상태다. 막으면 사용자에게 남는 유일한
+        안내가 "artifact를 고쳐라"인데 같은 run의 phase prompt가 그 행위를 금지한다.
         """
-        if phase.id not in RUNNER_OWNED_PHASES:
+        if (
+            meta.get("current_phase") != phase.id
+            or meta.get("phase_blocked_reason") != "route_blocked"
+        ):
             return False
-        blocked_here = (
-            meta.get("current_phase") == phase.id
-            and meta.get("phase_blocked_reason") == "route_blocked"
-        )
-        if not blocked_here:
-            return True
-        return self._gate_results_are_unreadable(phase, meta)
+        return not self._gate_results_are_unreadable(phase, meta)
 
     def _gate_results_are_unreadable(self, phase: Phase, meta: dict[str, Any]) -> bool:
-        """라우팅과 **같은** 판정을 쓴다. 여기서 따로 파싱하면 두 판정이 갈린다."""
+        """라우팅과 **같은** 판정을 쓴다. 여기서 따로 파싱하면 두 판정이 갈린다.
+
+        `errors="replace"`도 라우팅과 같다(`_next_index`). 엄격하게 읽으면 깨진
+        UTF-8 바이트가 `UnicodeDecodeError`로 `continue`를 죽여, 재생성이 실제로
+        고칠 수 있는 상태에서 자동 복구가 아예 돌지 않는다.
+        """
         artifact = self._existing_artifact_path(phase)
         try:
-            text = artifact.read_text(encoding="utf-8")
+            text = artifact.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return True
         recorded_nonce = str(meta.get("gate_nonce", ""))

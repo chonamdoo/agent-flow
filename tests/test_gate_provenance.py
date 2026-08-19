@@ -495,48 +495,81 @@ def _declare_two_phase_gates(root: Path) -> None:
     )
 
 
-def test_gates_regenerates_unless_the_phase_is_already_route_blocked(tmp_path):
-    """불변: runner-owned phase는 디스크의 artifact를 입력으로 읽지 않는다. 단
-    route로 막힌 자리에서는 다시 만들지 않고, 판독 불가만 예외다.
+def test_a_route_blocked_gates_phase_stays_blocked_instead_of_routing_a_forgery(tmp_path):
+    """불변: fix-loop 상한에 막힌 gates는 멈춘 채 있고, 디스크의 파일로 라우팅하지 않는다.
 
-    반증(전자): 입력으로 읽으면 phase에 도달하기 전에 쓰인 파일이 그대로 라우팅된다.
-    그 파일을 쓸 수 있는 것은 검증 대상 본인이고, 위조를 막던 nonce는 run meta에
-    있어 읽어 복사할 수 있다.
-    반증(후자): fix-loop 상한에 걸려 멈춘 run은 gate를 다시 돌려도 같은 상한에 다시
-    걸린다. 걸러 내지 않으면 매 `continue`가 수십 분의 빌드를 돌린 뒤 같은 자리에서
-    막히는 것을 무한히 반복한다.
-    반증(예외): 판독 불가까지 막으면 그 run은 gate를 다시 돌릴 방법이 없다. 남는
-    안내는 "artifact를 고쳐라"인데 phase prompt가 그 행위를 금지한다.
+    반증: 그 자리에서 파일을 읽어 라우팅하면 막힌 run이 green 한 줄로 상한을
+    우회한다. 그 통로를 쓸 동기가 가장 큰 것이 바로 여기서 막힌 agent다. 재실행으로
+    막는 것도 답이 아니다 — 같은 상한에 다시 걸리는 데 android 기준 수십 분이 든다.
+
+    반증(예외): 판독 불가까지 멈추면 그 run은 gate를 다시 돌릴 방법이 없다. 남는
+    안내는 "artifact를 고쳐라"인데 같은 run의 phase prompt가 그 행위를 금지한다.
     """
     from agent_flow.runner import Phase, Runner
 
     run_dir = create_run(tmp_path, "default", "task")
     runner = Runner.__new__(Runner)
     runner.run_dir = run_dir
+    nonce = read_meta(run_dir)["gate_nonce"]
 
-    gates = Phase(id="gates", description="", prompt="", artifact="artifacts/gate-results.json")
-    other = Phase(id="commit", description="", prompt="")
-    blocked = {"current_phase": "gates", "phase_blocked_reason": "route_blocked"}
+    gates = Phase(
+        id="gates", description="", prompt="", artifact="artifacts/gate-results.json"
+    )
+    blocked = {
+        "current_phase": "gates",
+        "phase_blocked_reason": "route_blocked",
+        "gate_nonce": nonce,
+    }
 
-    assert runner._phase_regenerates_artifact(gates, {}) is True
-    # 다른 phase가 막혀 있는 것은 gates의 재생성과 무관하다.
+    # 막히지 않은 자리는 언제나 다시 만든다.
+    assert runner._runner_owned_phase_is_stuck(gates, {}) is False
+    # 다른 phase가 막혀 있는 것은 gates와 무관하다.
     assert (
-        runner._phase_regenerates_artifact(
+        runner._runner_owned_phase_is_stuck(
             gates, {"current_phase": "commit", "phase_blocked_reason": "route_blocked"}
         )
-        is True
+        is False
     )
-    # host가 쓰는 phase는 언제나 디스크의 artifact가 입력이다.
-    assert runner._phase_regenerates_artifact(other, {}) is False
 
     target = run_dir / "artifacts" / "gate-results.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(FORGED, encoding="utf-8")
-    assert runner._phase_regenerates_artifact(gates, blocked) is False
+    # nonce까지 맞춘 green 위조본. provenance 층은 이것을 통과시킨다.
+    target.write_text(
+        json.dumps(
+            {
+                "passed": True,
+                "status": "green",
+                "results": [
+                    {
+                        "gate_id": "forged",
+                        "command": "true",
+                        "required": True,
+                        "passed": True,
+                        "exit_code": 0,
+                    }
+                ],
+                "produced_by": {
+                    "tool": "agent-flow gates",
+                    "nonce": nonce,
+                    "gate_phase": "all",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    # 이 파일은 라우팅되면 green이다. 그래서 라우팅에 닿기 전에 멈춰야 한다.
+    assert gates_route_key(target.read_text(encoding="utf-8"), nonce=nonce) == "green"
+    assert runner._runner_owned_phase_is_stuck(gates, blocked) is True
 
-    # 판독 불가는 안정된 상태가 아니다 — 막지 않는다.
+    # 판독 불가는 안정된 상태가 아니다 — 멈추지 않고 다시 만든다.
     target.write_text("{not json", encoding="utf-8")
-    assert runner._phase_regenerates_artifact(gates, blocked) is True
+    assert runner._runner_owned_phase_is_stuck(gates, blocked) is False
+
+    # 깨진 UTF-8도 같다. 엄격하게 읽으면 여기서 UnicodeDecodeError가 나고 자동
+    # 복구가 아예 돌지 않는다.
+    target.write_bytes(b'{"passed": true, "results": [\xff\xfe]}')
+    assert runner._runner_owned_phase_is_stuck(gates, blocked) is False
 
 
 def test_runner_run_gates_overwrite_a_model_authored_result(tmp_path, monkeypatch):
