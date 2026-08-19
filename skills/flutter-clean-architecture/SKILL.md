@@ -7,8 +7,8 @@ requires:
 
 # Flutter Clean Architecture
 
-Load `clean-architecture-core` first. This skill adds Flutter layer layout,
-platform-adapter, and sample-code details only.
+Load `clean-architecture-core` first. This skill adds Flutter layer layout and
+platform-adapter details only.
 
 ## Package Shape
 
@@ -58,35 +58,6 @@ role beside the new one.
   tests, flavors, and previews instead of branching inside the graph.
 - Use `get_it` only when the repo already registers services there. Keep its
   registration at app startup and out of domain and presentation code.
-
-## Generic Sample
-
-```dart
-final homeRemoteDataSourceProvider = Provider<HomeRemoteDataSource>((ref) {
-  return HomeRemoteDataSourceImpl(ref.watch(httpClientProvider));
-});
-
-final homeRepositoryProvider = Provider<HomeRepository>((ref) {
-  return HomeRepositoryImpl(ref.watch(homeRemoteDataSourceProvider));
-});
-
-final getHomeFeedProvider = Provider<GetHomeFeedUseCase>((ref) {
-  return GetHomeFeedUseCase(ref.watch(homeRepositoryProvider));
-});
-```
-
-```dart
-void main() {
-  runApp(
-    ProviderScope(
-      overrides: [
-        platformAdaptersProvider.overrideWithValue(createFlutterPlatformAdapters()),
-      ],
-      child: const App(),
-    ),
-  );
-}
-```
 
 ## Review Additions
 

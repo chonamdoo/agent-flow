@@ -78,9 +78,10 @@ HomeRepositoryImpl -> HomeRemoteDataSource -> HomeApiService
 - Keep remote data sources in `core/data/<context>/source/remote`.
 - Keep local sources in `core/data/<context>/source/local`.
 - Keep data-to-domain mapping in `core/data/<context>/mapper`.
+- Keep repository impls in `core/data/<context>/repository`.
 - Repository impls compose sources/cache/mappers and return domain models only.
-- Do not create canonical samples where `RepositoryImpl` injects an API service
-  directly.
+- Do not make `RepositoryImpl` injecting an API service directly the default
+  production shape.
 
 ## Presentation Boundary
 
@@ -95,44 +96,6 @@ HomeRepositoryImpl -> HomeRemoteDataSource -> HomeApiService
 - UI state is immutable and explicit for loading/error/empty/offline/success
   states that can occur.
 - Domain-to-UI mapping lives in presentation mappers.
-
-## Generic Sample
-
-```kotlin
-package com.example.app.core.data.home.repository
-
-internal class HomeRepositoryImpl @Inject constructor(
-    private val remoteDataSource: HomeRemoteDataSource,
-) : HomeRepository {
-    override suspend fun getHomeFeed(): HomeFeed =
-        remoteDataSource.getHomeFeed().toDomain()
-}
-
-internal interface HomeRemoteDataSource {
-    suspend fun getHomeFeed(): HomeFeedResponse
-}
-
-internal class HomeRemoteDataSourceImpl @Inject constructor(
-    private val apiService: HomeApiService,
-) : HomeRemoteDataSource {
-    override suspend fun getHomeFeed(): HomeFeedResponse =
-        apiService.getHomeFeed()
-}
-```
-
-```kotlin
-@Module
-@InstallIn(SingletonComponent::class)
-internal abstract class HomeDataModule {
-    @Binds abstract fun bindHomeRepository(
-        impl: HomeRepositoryImpl,
-    ): HomeRepository
-
-    @Binds abstract fun bindHomeRemoteDataSource(
-        impl: HomeRemoteDataSourceImpl,
-    ): HomeRemoteDataSource
-}
-```
 
 ## Review Additions
 

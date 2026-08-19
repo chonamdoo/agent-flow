@@ -7,8 +7,8 @@ requires:
 
 # React Clean Architecture
 
-Load `clean-architecture-core` first. This skill adds React/Next.js package,
-composition-root, and sample-code details only.
+Load `clean-architecture-core` first. This skill adds React/Next.js package and
+composition-root details only.
 
 ## Package Shape
 
@@ -41,42 +41,6 @@ explicitly React-specific.
   `reflect-metadata` once before DI use.
 - Domain/usecase/data contracts must not import React, Next.js, TSyringe, fetch
   implementation, or app router details.
-
-## Generic Sample
-
-```ts
-export interface HomeRepository {
-  getHomeFeed(): Promise<HomeFeed>
-}
-
-export class HomeRepositoryImpl implements HomeRepository {
-  constructor(private readonly remoteDataSource: HomeRemoteDataSource) {}
-
-  async getHomeFeed(): Promise<HomeFeed> {
-    return toHomeFeed(await this.remoteDataSource.getHomeFeed())
-  }
-}
-
-export class HomeRemoteDataSourceImpl implements HomeRemoteDataSource {
-  constructor(private readonly apiClient: HomeApiClient) {}
-
-  getHomeFeed(): Promise<HomeFeedResponse> {
-    return this.apiClient.getHomeFeed()
-  }
-}
-```
-
-```tsx
-export function createDependencies() {
-  const homeApiClient = new HomeApiClient(fetchClient)
-  const homeRemoteDataSource = new HomeRemoteDataSourceImpl(homeApiClient)
-  const homeRepository = new HomeRepositoryImpl(homeRemoteDataSource)
-
-  return {
-    getHomeFeed: new GetHomeFeedUseCase(homeRepository),
-  }
-}
-```
 
 ## Review Additions
 

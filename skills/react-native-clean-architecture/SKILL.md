@@ -7,8 +7,8 @@ requires:
 
 # React Native Clean Architecture
 
-Load `clean-architecture-core` first. This skill adds React Native package,
-platform-adapter, and sample-code details only.
+Load `clean-architecture-core` first. This skill adds React Native package and
+platform-adapter details only.
 
 ## Package Shape
 
@@ -40,35 +40,6 @@ runtime imports unless they are explicitly RN platform or presentation packages.
 - Optional TSyringe usage stays at app shell or adapter edge.
 - If TSyringe is used with Babel, configure TypeScript metadata support and
   import `reflect-metadata` once before DI use.
-
-## Generic Sample
-
-```ts
-export function createDependencies(platform: PlatformAdapters) {
-  const homeApiClient = new HomeApiClient(platform.fetchClient)
-  const homeRemoteDataSource = new HomeRemoteDataSourceImpl(homeApiClient)
-  const homeRepository = new HomeRepositoryImpl(homeRemoteDataSource)
-
-  return {
-    getHomeFeed: new GetHomeFeedUseCase(homeRepository),
-  }
-}
-```
-
-```tsx
-export function AppShell() {
-  const dependencies = useMemo(
-    () => createDependencies(createReactNativePlatformAdapters()),
-    [],
-  )
-
-  return (
-    <DependenciesProvider value={dependencies}>
-      <RootNavigator />
-    </DependenciesProvider>
-  )
-}
-```
 
 ## Review Additions
 

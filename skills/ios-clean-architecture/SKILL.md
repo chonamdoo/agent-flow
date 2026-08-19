@@ -7,8 +7,8 @@ requires:
 
 # iOS Clean Architecture
 
-Load `clean-architecture-core` first. This skill adds iOS-specific layout, DI,
-and sample-code details only.
+Load `clean-architecture-core` first. This skill adds iOS-specific layout and DI
+details only.
 
 ## Source Shape
 
@@ -34,6 +34,9 @@ match Android paths; roles and dependency direction must match.
 
 - App shell owns the composition root.
 - Prefer local factories or a container assembled in app shell.
+- The composition root builds each shared collaborator once and hands the same
+  instance to every consumer; express that with stored lazy properties or a
+  Swinject object scope.
 - Swinject is allowed at the app shell or adapter edge.
 - Domain types, use cases, and repository protocols must not import Swinject or
   UI frameworks.
@@ -41,40 +44,6 @@ match Android paths; roles and dependency direction must match.
   constructor/init injection.
 - Data binds repository implementation to domain repository protocol in the app
   composition root or data assembly.
-
-## Generic Sample
-
-```swift
-protocol HomeRepository {
-    func homeFeed() async throws -> HomeFeed
-}
-
-final class HomeRepositoryImpl: HomeRepository {
-    private let remoteDataSource: HomeRemoteDataSource
-
-    init(remoteDataSource: HomeRemoteDataSource) {
-        self.remoteDataSource = remoteDataSource
-    }
-
-    func homeFeed() async throws -> HomeFeed {
-        try await remoteDataSource.homeFeed().toDomain()
-    }
-}
-```
-
-```swift
-final class AppContainer {
-    lazy var homeRemoteDataSource =
-        HomeRemoteDataSourceImpl(apiClient: apiClient)
-
-    lazy var homeRepository: HomeRepository =
-        HomeRepositoryImpl(remoteDataSource: homeRemoteDataSource)
-
-    func makeHomeViewModel() -> HomeViewModel {
-        HomeViewModel(getHomeFeed: GetHomeFeedUseCase(repository: homeRepository))
-    }
-}
-```
 
 ## Review Additions
 
