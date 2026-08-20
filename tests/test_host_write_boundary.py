@@ -357,6 +357,266 @@ def test_shell_reads_outside_the_worktree_stay_allowed(tmp_path: Path):
     ) is not None
 
 
+def test_shell_path_candidates_come_from_path_text_not_shell_syntax(tmp_path: Path):
+    """반증: 셸 문법을 반쯤 해석하면 명령이 건드리지도 않는 경로가 위반이 된다.
+
+    `2>/dev/null`은 fd 리다이렉션이다. 이 조각을 경로로 접어 cwd에 붙이면
+    `<cwd>/2>/dev/null`이라는 없는 경로가 생기고, cwd가 보호 경로면 무해한 빌드가
+    막힌다. 실제로 그 상태였다.
+
+    같은 테스트에 세 방향을 함께 둔다. 후보 추출을 느슨하게 만들어 오탐을 없애면
+    리다이렉션의 **실제** 대상이 함께 열리고, 반대로 조여서 판정 불가까지 막으면
+    인용부호 하나 어긋난 명령이 죽는다. 대상은 상대 경로로 쓴다 — 절대 경로는
+    `_command_literal_violation`이 후보 추출과 무관하게 잡아서, 이 규칙을 검증하지
+    못한다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first, second = statuses
+
+    redirect_noise = host_write_boundary_violation(
+        _command_payload("swift build 2>/dev/null", cwd=root),
+        root,
+    )
+    redirect_target = host_write_boundary_violation(
+        _command_payload("printf x 2> ./leaked.py", cwd=root),
+        root,
+    )
+
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    unterminated_relative = host_write_boundary_violation(
+        _command_payload(
+            f"python3 -c \"open('../{second.path.name}/leaked.py', 'w')",
+            cwd=first.path,
+        ),
+        root,
+    )
+    unterminated_absolute = host_write_boundary_violation(
+        _command_payload(
+            f"python3 -c \"open('{second.path / 'leaked.py'}', 'w')",
+            cwd=first.path,
+        ),
+        root,
+    )
+
+    assert redirect_noise is None
+    assert redirect_target is not None
+    # 판정 불가는 차단이 아니다(AGENTS.md). 인용이 닫히지 않은 명령의 상대 경로는
+    # 통과하고, 같은 명령이 보호 경로를 절대 경로로 적으면 리터럴 검사가 잡는다.
+    assert unterminated_relative is None
+    assert unterminated_absolute is not None
+
+
+def test_quoted_and_escaped_path_words_stay_whole(tmp_path: Path):
+    """반증: 인용을 무시하고 문자로만 자르면 공백이 든 경로가 판정을 빠져나간다.
+
+    셸에서 ``'../a b/x'``는 낱말 하나다. 공백에서 자르면 ``../a``와 ``b/x``가 되고,
+    둘 중 어느 것도 보호 경로 안으로 떨어지지 않아 상대 경로 참조가 통째로 열린다.
+    역슬래시로 이스케이프한 형태도 같은 낱말이다.
+
+    반대쪽도 같은 규칙에서 나온다: 인용된 ``'2>/dev/null'``은 리다이렉션이 아니라
+    ``2>`` 디렉터리 아래의 이름이므로, 그 자리가 보호 경로면 막혀야 한다. 그리고
+    ``"a\\ b"``는 ``a b``가 아니다 — `"` 안의 역슬래시는 POSIX가 정한 몇 글자
+    앞에서만 이스케이프이므로, 이름이 다른 그 경로는 막을 근거가 없다.
+    """
+    spaced = tmp_path / "a b"
+    spaced.mkdir()
+    root, statuses, runs = _setup(spaced)
+    first = statuses[0]
+
+    quoted_operator_name = host_write_boundary_violation(
+        _command_payload("touch '2>/dev/null'", cwd=root),
+        root,
+    )
+    dynamic_word = host_write_boundary_violation(
+        _command_payload("cat $ROOT/src/main.py", cwd=root),
+        root,
+    )
+
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    relative = os.path.relpath(root / "README.md", first.path)
+    # 이 테스트가 검증하는 것이 공백이므로, 경로에 공백이 있다는 사실을 우연에
+    # 맡기지 않는다.
+    assert " " in relative
+    quoted_space = host_write_boundary_violation(
+        _command_payload(f"cat '{relative}'", cwd=first.path),
+        root,
+    )
+    escaped_space = host_write_boundary_violation(
+        _command_payload(f"cat {relative.replace(' ', chr(92) + ' ')}", cwd=first.path),
+        root,
+    )
+    literal_backslash = host_write_boundary_violation(
+        _command_payload(
+            f'cat "{relative.replace(" ", chr(92) + " ")}"',
+            cwd=first.path,
+        ),
+        root,
+    )
+    escaped = relative.replace(" ", chr(92) + " ")
+    head, _, tail = escaped.partition("/")
+    continued = host_write_boundary_violation(
+        _command_payload(f"cat {head}\\\n/{tail}", cwd=first.path),
+        root,
+    )
+    quoted_assignment_name = host_write_boundary_violation(
+        _command_payload(f"touch 'x={relative}'", cwd=first.path),
+        root,
+    )
+
+    assert quoted_operator_name is not None
+    assert quoted_space is not None
+    assert escaped_space is not None
+    assert literal_backslash is None
+    # 줄 이음은 셸이 지운다. 지우지 않으면 이어진 경로가 판정을 빠져나간다.
+    assert continued is not None
+    # 인용 안의 `=`는 문법이 아니라 이름이다. 다시 자르면 없는 경로가 만들어진다.
+    assert quoted_assignment_name is None
+    # 값이 실행 시점에 정해지는 낱말은 정적으로 판정하지 않는다(tripwire 담당).
+    assert dynamic_word is None
+
+
+def test_dynamic_words_keep_their_static_prefix(tmp_path: Path):
+    """반증: 낱말에 ``$``가 있다고 통째로 버리면 이미 정해진 참조를 놓친다.
+
+    ``../feat-second/$name``은 이름을 몰라도 어느 checkout으로 가는지 정해져 있다.
+    반대로 치환 **뒤**에 붙은 조각은 실제 인수에 그대로 나타나지 않는다 —
+    ``$(printf p)../feat-second/f``의 인수는 ``p../feat-second/f``이므로, 거기서
+    잘라낸 ``../feat-second/f``는 아무도 건드리지 않는 자리다. 두 방향을 함께 두어야
+    한 쪽을 고치다 다른 쪽이 열리는 것을 막는다.
+
+    ``$'...'``는 치환이 아니라 리터럴 인용이고, 경로 이름 안의 ``=``는 문법이 아니다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first, second = statuses
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    sibling = second.path.name
+
+    static_prefix = host_write_boundary_violation(
+        _command_payload(f"cp x ../{sibling}/$name", cwd=first.path),
+        root,
+    )
+    substitution_suffix = host_write_boundary_violation(
+        _command_payload(f"printf %s $(printf p)../{sibling}/f", cwd=first.path),
+        root,
+    )
+    ansi_c_literal = host_write_boundary_violation(
+        _command_payload(f"touch $'../{sibling}/leaked.py'", cwd=first.path),
+        root,
+    )
+    equals_in_name = host_write_boundary_violation(
+        _command_payload(f"cat ../{sibling}=x/f", cwd=first.path),
+        root,
+    )
+    unquoted_assignment_name = host_write_boundary_violation(
+        _command_payload(f"touch x=../{sibling}/file", cwd=first.path),
+        root,
+    )
+    brace_expansion = host_write_boundary_violation(
+        _command_payload(f"cat ${{x:-foo>../{sibling}/file}}", cwd=first.path),
+        root,
+    )
+    flag_value = host_write_boundary_violation(
+        _command_payload(f"cmd --out=../{sibling}/f", cwd=first.path),
+        root,
+    )
+    assignment_value = host_write_boundary_violation(
+        _command_payload(f"VAR=../{sibling}/f cmd", cwd=first.path),
+        root,
+    )
+    assignment_on_second_line = host_write_boundary_violation(
+        _command_payload(f"echo hi\nVAR=../{sibling}/f cmd", cwd=first.path),
+        root,
+    )
+    empty_quote_keeps_position = host_write_boundary_violation(
+        _command_payload(f'cd ""; cat ../{sibling}/f', cwd=first.path),
+        root,
+    )
+    substitution_body = host_write_boundary_violation(
+        _command_payload(f"echo $(touch ../{sibling}/leaked.py)", cwd=first.path),
+        root,
+    )
+    comment_text = host_write_boundary_violation(
+        _command_payload(f"echo ok # ../{sibling}/file", cwd=first.path),
+        root,
+    )
+    keyword_assignment = host_write_boundary_violation(
+        _command_payload(
+            f"if VAR=../{sibling}/f cmd; then echo ok; fi",
+            cwd=first.path,
+        ),
+        root,
+    )
+    # 중첩이 깊은 치환 한 줄로 `RecursionError`가 나가면 훅이 통과로 처리되어 경계가
+    # 통째로 열린다. 판정이 비어도 되지만 예외는 안 된다.
+    deep_nesting = host_write_boundary_violation(
+        _command_payload(
+            "echo " + "$(" * 200 + f"touch ../{sibling}/f" + ")" * 200,
+            cwd=first.path,
+        ),
+        root,
+    )
+    heredoc_body = host_write_boundary_violation(
+        _command_payload(
+            f"python3 - <<'PY'\nopen('../{sibling}/f','w')\nPY\n",
+            cwd=first.path,
+        ),
+        root,
+    )
+    heredoc_redirect = host_write_boundary_violation(
+        _command_payload(
+            f"cat <<EOF > ../{sibling}/out\nx\nEOF\n",
+            cwd=first.path,
+        ),
+        root,
+    )
+    case_subject = host_write_boundary_violation(
+        _command_payload(f"case x=../{sibling}/f in *) :; esac", cwd=first.path),
+        root,
+    )
+    redirect_after_dynamic = host_write_boundary_violation(
+        _command_payload(f"printf x $name>../{sibling}/leaked.py", cwd=first.path),
+        root,
+    )
+    separator_after_dynamic = host_write_boundary_violation(
+        _command_payload(f"echo $x;cat ../{sibling}/f", cwd=first.path),
+        root,
+    )
+
+    assert static_prefix is not None
+    assert substitution_suffix is None
+    assert ansi_c_literal is not None
+    # `../feat-second=x`는 형제 checkout이 아니다. `=`에서 자르면 그 자리가 된다.
+    assert equals_in_name is None
+    # 셸은 `=`에서 인수를 자르지 않는다. 자르면 실제 인수에 없는 경로가 생긴다.
+    assert unquoted_assignment_name is None
+    # `${...}`는 낱말 하나다. 안의 `>`를 연산자로 읽으면 없는 경로가 생긴다.
+    assert brace_expansion is None
+    # 반대로 `--flag=`/`VAR=`의 값은 실제 경로다. 접두사를 떼고 판정해야 한다.
+    assert flag_value is not None
+    assert assignment_value is not None
+    # 줄바꿈 다음도 명령의 시작이다. 아니면 둘째 줄의 대입이 인수로 읽힌다.
+    assert assignment_on_second_line is not None
+    # 빈 인용도 인수 하나다. 자리를 잃으면 `cd`가 다음 낱말을 대상으로 삼는다.
+    assert empty_quote_keeps_position is not None
+    # 동적인 부분은 공백이 아니라 연산자에서도 끝난다. 셸이 거기서 낱말을 끊으므로
+    # 그 뒤의 리다이렉션 대상과 다음 명령은 정적이다.
+    assert redirect_after_dynamic is not None
+    assert separator_after_dynamic is not None
+    # 치환 안의 명령은 실제로 실행된다. 통째로 건너뛰면 그 쓰기가 판정에서 빠진다.
+    assert substitution_body is not None
+    # 주석은 인수가 아니다. 주석 글자로 위반을 만들면 무해한 명령이 막힌다.
+    assert comment_text is None
+    # 예약어는 명령 이름이 아니다. `if` 뒤도 대입 자리다.
+    assert keyword_assignment is not None
+    assert deep_nesting is None
+    # here-document 본문은 stdin 데이터다. 인수로 읽으면 무해한 스크립트가 막힌다.
+    assert heredoc_body is None
+    # 같은 줄의 리다이렉션 대상은 데이터가 아니라 열리는 경로다.
+    assert heredoc_redirect is not None
+    # `case`는 뒤에 값이 오는 예약어다. `x=`를 대입으로 보면 없는 경로가 생긴다.
+    assert case_subject is None
+
+
 def test_idle_registered_sibling_worktree_stays_protected(tmp_path: Path):
     """반증: run이 끝난 형제 checkout도 남의 작업이다.
 

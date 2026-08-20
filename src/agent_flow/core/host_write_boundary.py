@@ -71,6 +71,21 @@ _PATCH_KEYS = frozenset({"patch", "diff", "input"})
 _VIRTUAL_PATH = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _SAFE_VIRTUAL_PATH = re.compile(r"^xd://", re.IGNORECASE)
 _SHELL_PUNCTUATION = ";&|<>()`"
+# 인용 밖에서 명령을 끊는 문자. 이 뒤는 새 명령이므로 `VAR=값`이 다시 대입이다.
+# 줄바꿈도 여기 속한다 — 여러 줄 명령의 둘째 줄도 명령의 시작이다.
+_COMMAND_SEPARATORS = frozenset(";&|()\n\r")
+# 낱말만 끊는 문자. 리다이렉션은 명령을 끊지 않으므로 `cmd >out` 뒤의 인수는
+# 여전히 인수다.
+_REDIRECTIONS = frozenset("<>")
+# 치환 안을 읽는 깊이 상한. 넘으면 그 안은 읽지 않는다 — 무한 중첩 한 줄로
+# `RecursionError`가 훅 밖으로 나가면 경계가 통째로 열린다.
+_MAX_SUBSTITUTION_DEPTH = 4
+# 뒤에 **명령이 오는** 셸 예약어만. 이 뒤는 여전히 명령 앞자리이므로
+# `if VAR=../sib/f cmd; then`의 `VAR=`는 대입이다. `case`처럼 뒤에 값이 오는
+# 예약어는 넣지 않는다 — `case x=../sib/f in`의 `x=`는 대입이 아니다.
+_SHELL_KEYWORDS = frozenset({"if", "then", "elif", "else", "while", "until", "do"})
+# `"` 안에서 역슬래시가 이스케이프로 동작하는 글자. POSIX가 정한 목록이다.
+_DOUBLE_QUOTE_ESCAPES = frozenset("$`\"\\\n")
 _PATCH_PATH = re.compile(
     r"^(?:\[(?P<hashline>.+?)#[0-9A-Fa-f]{4}\]|"
     r"\*\*\* (?:Add|Update|Delete) File: (?P<apply>.+)|"
@@ -553,16 +568,19 @@ def _session_cwd(payload: object, command: str) -> Path | None:
     base = _write_base(payload)
     if not command:
         return base
-    try:
-        tokens = shlex.split(command, posix=True)
-    except ValueError:
+    # 후보 추출과 같은 낱말 규칙을 쓴다. 여기만 다른 렉서를 쓰면 한 모듈이
+    # "셸의 낱말"을 두 가지로 답하고, 후보가 붙는 기준점이 후보와 어긋난다.
+    words = _leading_command_words(command)
+    if len(words) < 2 or words[0].text not in {"cd", "pushd"}:
         return base
-    if len(tokens) < 2 or tokens[0] not in {"cd", "pushd"}:
+    target = words[1]
+    # 값의 앞부분만 아는 낱말로는 세션을 옮길 수 없다. 접두사는 자리가 아니다.
+    if target.truncated:
         return base
-    moved = _resolve_path(tokens[1], base or Path(os.sep))
+    moved = _resolve_path(target.text, base or Path(os.sep))
     if moved is None:
         return base
-    if base is None and not _is_absolute_text(tokens[1]):
+    if base is None and not _is_absolute_text(target.text):
         return None
     return moved
 
@@ -1132,43 +1150,433 @@ def _declared_command_cwd(
         return _resolve_path(explicit, base or checkout)
     if base is not None and _is_within(base, checkout):
         return base
-    try:
-        tokens = shlex.split(command, posix=True)
-    except ValueError:
-        return None
-    if len(tokens) >= 2 and tokens[0] in {"cd", "pushd"}:
-        return _resolve_path(tokens[1], base or checkout)
+    words = _leading_command_words(command)
+    if len(words) >= 2 and words[0].text in {"cd", "pushd"} and not words[1].truncated:
+        return _resolve_path(words[1].text, base or checkout)
     return None
+
+
+def _skip_substitution(command: str, index: int) -> int:
+    """``$(``를 열고 짝이 맞는 ``)`` 다음 자리. 인용과 중첩을 지나서 센다.
+
+    치환 안의 인용은 바깥 인용과 별개의 문맥이다 — ``"$(printf "x")"``의 안쪽 ``"``는
+    바깥 인용을 닫지 않는다. 인용 안의 ``)``를 닫는 괄호로 세면 치환이 일찍 끝난
+    것으로 보여, 그 뒤의 글자가 독립된 경로로 되살아난다.
+    """
+    depth = 1
+    quote = ""
+    length = len(command)
+    while index < length:
+        char = command[index]
+        index += 1
+        if quote:
+            if char == "\\" and quote == '"':
+                index += 1
+            elif char == quote:
+                quote = ""
+            continue
+        if char == "\\":
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            continue
+        if char == "(":
+            depth += 1
+            continue
+        if char == ")":
+            depth -= 1
+            if not depth:
+                return index
+    return length
+
+
+def _skip_backticks(command: str, index: int) -> int:
+    """백틱 치환이 닫히는 자리 다음. 닫히지 않으면 명령의 끝이다."""
+    length = len(command)
+    while index < length:
+        char = command[index]
+        index += 1
+        if char == "\\":
+            index += 1
+            continue
+        if char == "`":
+            return index
+    return length
+
+
+def _skip_braces(command: str, index: int) -> int:
+    """``${``를 열고 짝이 맞는 ``}`` 다음 자리.
+
+    ``${x:-foo>../sibling/f}``는 낱말 하나다. 안의 ``>``를 연산자로 읽으면 낱말이
+    끊겨, 실제 인수에 없는 ``../sibling/f``가 경로로 살아난다.
+    """
+    depth = 1
+    length = len(command)
+    while index < length:
+        char = command[index]
+        index += 1
+        if char == "\\":
+            index += 1
+            continue
+        if char == "{":
+            depth += 1
+            continue
+        if char == "}":
+            depth -= 1
+            if not depth:
+                return index
+    return length
+
+
+@dataclass(frozen=True)
+class _CommandWord:
+    """셸이 넘길 낱말 하나.
+
+    ``truncated``면 값의 앞부분만 안다(``../sib/$x`` → ``../sib/``). 경로 후보는
+    접두사만으로도 어느 checkout인지 정해지므로 쓸 수 있지만, cwd를 정하는 쪽은 쓸
+    수 없다. 자리를 유지한 채 이 표시를 함께 넘기지 않으면, 잘린 낱말을 목록에서
+    빼는 순간 ``words[1]``이 다른 낱말을 가리킨다.
+    """
+
+    # 셸이 넘기는 인수 그대로. `VAR=../sib/f`는 값만 잘라 내지 않는다 — 낱말이
+    # 인수와 달라지면 자리로 읽는 쪽이 무엇을 받았는지 알 수 없다.
+    text: str
+    truncated: bool
+    # 구분자로 끊긴 명령의 순번. `cd`의 대상을 읽는 쪽은 자기 순번 안만 본다 —
+    # `cd; cat ../other/f`에서 `cat`이 `cd`의 대상이 되면 안 된다.
+    segment: int
+    # `NAME=`/`-flag=` 접두사가 붙은 낱말인가. 값 쪽이 경로일 수 있다는 표시다.
+    prefixed: bool = False
+
+
+def _leading_command_words(command: str) -> tuple[_CommandWord, ...]:
+    """첫 명령의 낱말만. ``cd``의 대상을 읽는 쪽이 쓴다.
+
+    구분자를 넘어가면 ``cd; cat ../other/f``에서 ``cat``이 ``cd``의 대상이 된다.
+    """
+    words = _command_path_words(command)
+    return tuple(word for word in words if word.segment == 0)
+
+
+def _read_heredoc_delimiter(command: str, index: int) -> tuple[int, str]:
+    """``<<`` 다음의 종료 표식과 그 뒤 자리. 표식이 없으면 빈 문자열."""
+    length = len(command)
+    if index < length and command[index] == "-":
+        index += 1
+    while index < length and command[index] in " \t":
+        index += 1
+    quote = ""
+    if index < length and command[index] in "'\"":
+        quote = command[index]
+        index += 1
+    start = index
+    while index < length:
+        char = command[index]
+        if quote:
+            if char == quote:
+                break
+        elif char.isspace() or char in _COMMAND_SEPARATORS or char in _REDIRECTIONS:
+            break
+        index += 1
+    delimiter = command[start:index]
+    if quote and index < length:
+        index += 1
+    return index, delimiter
+
+
+def _skip_heredoc_bodies(command: str, index: int, delimiters: list[str]) -> int:
+    """here-document 본문 끝. 본문은 stdin 데이터이므로 인수가 아니다.
+
+    본문을 낱말로 읽으면 ``python3 - <<'PY'`` 안의 경로가 명령 인수로 오인되어,
+    아무것도 건드리지 않는 자리로 무해한 명령이 막힌다.
+    """
+    length = len(command)
+    for delimiter in delimiters:
+        while index < length:
+            end = command.find("\n", index)
+            line = command[index : length if end < 0 else end]
+            index = length if end < 0 else end + 1
+            if line.strip() == delimiter:
+                break
+    return index
+
+
+
+def _absorb_command(
+    body: str,
+    words: list["_CommandWord"],
+    segment: int,
+    depth: int,
+) -> int:
+    """치환 안의 명령을 같은 목록에 넣는다. 다음 순번을 돌려준다.
+
+    ``$(touch ../other/f)``의 ``../other/f``는 정적인 경로다 — 치환을 통째로 건너뛰면
+    그 쓰기가 판정에서 빠진다. 반대로 치환의 **결과**는 알 수 없으므로 바깥 낱말은
+    계속 잘린 것으로 남는다. 안쪽 낱말은 다른 순번을 받는다: ``cd`` 대상을 읽는 쪽이
+    치환 안의 낱말을 집으면 안 된다.
+
+    깊이에는 상한이 있다. 상한을 넘으면 그 안은 읽지 않는다 — 중첩이 깊은 한 줄로
+    ``RecursionError``가 훅 밖으로 나가면 ``guard-host-worktree.sh``가 2가 아닌 종료를
+    통과로 처리해서 경계가 아예 열린다. 안 읽은 자리는 절대 경로라면
+    ``_command_literal_violation``이 파서 없이 잡는다.
+    """
+    if depth >= _MAX_SUBSTITUTION_DEPTH:
+        return segment
+    inner = _command_path_words(body, depth=depth + 1)
+    base = segment + 1
+    for word in inner:
+        words.append(
+            _CommandWord(word.text, word.truncated, base + word.segment, word.prefixed)
+        )
+    return base + max((word.segment for word in inner), default=0) + 1
+
+
+def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, ...]:
+    """판정할 수 있는 낱말. 값이 정해지지 않은 부분은 빠진다.
+
+    셸이 낱말을 만드는 규칙만 따른다. 인용과 역슬래시 안의 문자는 경계가 아니라
+    이름의 일부다 — ``cat '../feat second/x'``의 공백은 경로 안에 있고,
+    ``touch '2>/dev/null'``의 ``>``는 연산자가 아니라 디렉터리 이름이다. 역슬래시와
+    줄바꿈이 붙은 자리는 셸이 지우는 줄 이음이라 여기서도 지운다.
+
+    ``=``는 자리에 따라 갈린다. 명령 앞의 ``VAR=값``과 ``--flag=값``에서는 앞이
+    접두사이므로 값만 남기고, 그 밖의 인수에서는 이름의 일부다 —
+    ``touch x=../sibling/f``는 인수 하나이므로 자르면 없는 경로가 생기고,
+    ``VAR=../sibling/f cmd``는 자르지 않으면 형제 checkout 참조를 놓친다.
+
+    값을 모르는 자리는 이렇게 다룬다.
+
+    - 인용이 닫히지 않은 명령: 아무 낱말도 내놓지 않는다. 판정 불가를 차단으로
+      접으면 인용부호 하나 어긋난 명령 때문에 무관한 작업이 죽는다. 보호 경로가
+      절대 경로로 적혀 있으면 ``_command_literal_violation``이 파서 없이 잡는다.
+    - 인용 밖의 ``$``·백틱: 그 **앞까지**가 이 낱말에서 아는 전부다. 앞을 버리면
+      ``../sibling/$name``처럼 어디로 가는지 이미 정해진 참조를 놓치고, 뒤를 살리면
+      ``$(echo x)../sibling/f``에서 실제 인수에 없는 ``../sibling/f``를 만들어 낸다.
+      그래서 앞은 판정하고, 뒤는 낱말이 끝날 때까지 버린다. 낱말은 공백에서도
+      연산자에서도 끝난다 — ``$name>../sibling/f``의 리다이렉션 대상은 정적이다.
+      ``$(...)``·``${...}``·백틱 안은 통째로 지나간다.
+
+    잘린 낱말은 목록에서 빼지 않고 ``_CommandWord.truncated``로 표시해서 넘긴다.
+    빈 인용(``cd ""``)이 만든 낱말도 자리를 지킨다 — 자리를 잃으면 ``cd`` 다음 낱말을
+    읽는 쪽이 다른 낱말을 집는다. ``segment``는 구분자로 끊긴 명령의 순번이고,
+    ``cd``를 읽는 쪽은 자기 구분자 안만 본다.
+
+    ``$'...'``와 ``$"..."``는 치환이 아니라 리터럴 인용이므로 동적으로 보지 않는다.
+    """
+    words: list[_CommandWord] = []
+    current: list[str] = []
+    dynamic = False
+    truncated = False
+    # 이 자리에 낱말이 있었는가. 빈 인용은 글자를 남기지 않지만 인수 하나다.
+    started = False
+    # 이 낱말에 `NAME=`/`-flag=` 접두사가 붙었는가.
+    prefixed = False
+    # 이 낱말이 대입(`VAR=값`)인가. 대입만 명령 앞자리를 유지한다.
+    assignment = False
+    # 명령 앞자리인가. `VAR=값`이 대입인지 그냥 인수인지는 이것으로 갈린다.
+    command_position = True
+    segment = 0
+    # 이 줄이 끝나면 본문을 건너뛸 here-document 표식들.
+    heredocs: list[str] = []
+    quote = ""
+    index = 0
+    length = len(command)
+
+    def flush(*, ends_command: bool = False) -> None:
+        nonlocal current, dynamic, truncated, started, assignment, prefixed
+        nonlocal command_position, segment
+        if started:
+            text = "".join(current)
+            words.append(_CommandWord(text, truncated, segment, prefixed))
+            # 낱말이 실제로 있었을 때만 자리를 소비한다. 빈 flush(구분자 뒤 공백)가
+            # 자리를 지우면 `true && VAR=../sib/f cmd`의 대입을 놓친다. 대입과 예약어는
+            # 명령 이름이 아니므로 그 뒤도 여전히 명령 앞자리다.
+            if not assignment and text not in _SHELL_KEYWORDS:
+                command_position = False
+        if ends_command:
+            command_position = True
+            segment += 1
+        current = []
+        dynamic = False
+        truncated = False
+        started = False
+        assignment = False
+        prefixed = False
+
+    while index < length:
+        char = command[index]
+        index += 1
+        if char == "\\" and quote != "'":
+            following = command[index] if index < length else ""
+            if following == "\n":
+                index += 1
+                continue
+            started = True
+            # `"` 안에서 역슬래시는 정해진 몇 글자 앞에서만 이스케이프다(POSIX).
+            # 그 밖에서는 역슬래시가 이름의 일부다 — `"a\ b"`는 `a b`가 아니라
+            # `a\ b`이고, 둘을 같게 보면 없는 경로로 판정한다.
+            if quote == '"' and following not in _DOUBLE_QUOTE_ESCAPES:
+                if not dynamic:
+                    current.append(char)
+                continue
+            if not dynamic:
+                current.append(following or char)
+            if following:
+                index += 1
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            elif not dynamic:
+                current.append(char)
+            continue
+        if char == "$" and index < length and command[index] == "(":
+            started = True
+            dynamic = True
+            truncated = True
+            end = _skip_substitution(command, index + 1)
+            segment = _absorb_command(
+                command[index + 1 : max(end - 1, index + 1)], words, segment, depth
+            )
+            index = end
+            continue
+        if char == "$" and index < length and command[index] == "{":
+            # 파라미터 확장은 명령이 아니다. 안을 명령으로 읽으면 없는 경로가 생긴다.
+            started = True
+            dynamic = True
+            truncated = True
+            index = _skip_braces(command, index + 1)
+            continue
+        if char == "`":
+            started = True
+            dynamic = True
+            truncated = True
+            end = _skip_backticks(command, index)
+            segment = _absorb_command(
+                command[index : max(end - 1, index)], words, segment, depth
+            )
+            index = end
+            continue
+        if char == "$":
+            if index < length and command[index] in "'\"":
+                continue
+            dynamic = True
+            truncated = True
+            started = True
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+            elif not dynamic:
+                current.append(char)
+            continue
+        if char in "'\"":
+            quote = char
+            # 빈 인용도 인수 하나다. `cd ""`의 자리를 잃으면 다음 낱말이 `cd`의
+            # 대상으로 읽힌다.
+            started = True
+            continue
+        if char in _COMMAND_SEPARATORS:
+            flush(ends_command=True)
+            if char == "\n" and heredocs:
+                index = _skip_heredoc_bodies(command, index, heredocs)
+                heredocs = []
+            continue
+        if char.isspace():
+            flush()
+            continue
+        if (
+            char == "<"
+            and index + 1 <= length
+            and command[index : index + 1] == "<"
+            and command[index + 1 : index + 2] != "<"
+        ):
+            # `<<DELIM`의 본문은 stdin 데이터다. 낱말로 읽으면 `python3 - <<'PY'`
+            # 안의 경로가 인수로 오인된다. `<<<`는 herestring이라 본문이 없다.
+            index, delimiter = _read_heredoc_delimiter(command, index + 1)
+            if delimiter:
+                heredocs.append(delimiter)
+            flush()
+            continue
+        if char in _REDIRECTIONS:
+            # 리다이렉션은 낱말만 끊는다. 명령 앞자리를 되돌리면 `cmd >out` 뒤의
+            # 인수가 대입으로 읽힌다.
+            flush()
+            continue
+        if dynamic:
+            continue
+        if char == "#" and not current and not dynamic:
+            # 인용 밖에서 낱말 맨 앞의 `#`는 주석이다. 주석 글자를 인수로 읽으면
+            # `echo ok # ../sibling/f`가 없는 참조를 만든다.
+            newline = command.find("\n", index)
+            index = length if newline < 0 else newline
+            continue
+        if char == "=" and current and not prefixed:
+            text = "".join(current)
+            if text.startswith("-"):
+                prefixed = True
+            elif command_position and _ENV_ASSIGNMENT_TOKEN.match(f"{text}="):
+                # 대입 뒤도 여전히 명령 앞자리다. 접두사는 낱말에 남긴다 — 인수를
+                # 그대로 들고 있어야 자리로 읽는 쪽이 무엇을 받았는지 안다.
+                prefixed = True
+                assignment = True
+        current.append(char)
+        started = True
+    if quote:
+        return ()
+    flush()
+    return tuple(words)
+
 
 
 def _command_path_candidates(command: str, cwd: Path) -> tuple[str, ...]:
     """명령에 리터럴로 등장한 경로 후보. 읽기 경로까지 포함한다.
 
-    파싱 실패는 거부가 아니다. 판정 불가를 전부 차단으로 접으면 인용부호 하나가
-    어긋난 명령 때문에 무관한 작업까지 죽는다. 보호 경로 리터럴은 파서 없이도
-    ``_command_literal_violation``이 잡으므로, 여기서는 빈 결과로 물러난다.
+    셸을 파싱하지 않는다. ``_command_path_words``가 준 낱말 중 경로 모양인 것이
+    후보다. 낱말 안을 다시 문법으로 읽지 않는 이유: 인용 밖 구분자는 이미 낱말을
+    끊었으니, 낱말에 남은 ``=``나 ``>``는 이름의 일부다. 그것을 또 자르면
+    ``touch 'x=../sibling/f'``의 이름 하나가 없는 경로 두 개로 쪼개지고, 인용 없는
+    ``2>/dev/null``은 반대로 ``<cwd>/2>/dev/null``이라는 아무도 건드리지 않는 자리가
+    된다. 둘 다 없는 위반을 만들어 무해한 명령을 막는다.
+
+    예외는 낱말 자신이 접두사를 달고 있다고 알려 준 경우다(``VAR=``/``--out=``).
+    그때는 ``=`` 뒤의 값만 본다 — 인수 전체를 경로로 보면 ``<cwd>/VAR=/tmp/f``라는
+    아무도 건드리지 않는 자리가 만들어진다.
+    """
+    return tuple(
+        dict.fromkeys(
+            text
+            for word in _command_path_words(command)
+            for text in _candidate_texts(word)
+            if not _VIRTUAL_PATH.match(text)
+            and ("/" in text or _is_symlink(cwd / text))
+        )
+    )
+
+
+def _candidate_texts(word: _CommandWord) -> tuple[str, ...]:
+    """이 낱말에서 경로일 수 있는 문자열.
+
+    접두사가 붙은 낱말은 값만 본다. 인수 전체(``VAR=/tmp/f``)를 경로로 보면
+    ``<cwd>/VAR=/tmp/f``라는 아무도 건드리지 않는 자리가 만들어진다.
+    """
+    if not word.prefixed or "=" not in word.text:
+        return (word.text,)
+    return (word.text.split("=", 1)[1],)
+
+
+def _is_symlink(path: Path) -> bool:
+    """심링크인가. 물어볼 수 없으면 아니라고 본다.
+
+    ``lstat``은 이름이 너무 길면(``ENAMETOOLONG``) 예외를 던진다. 그 예외가 훅 밖으로
+    나가면 ``guard-host-worktree.sh``가 2가 아닌 종료를 통과로 처리해, 경계가 판정을
+    멈춘 채 열린다.
     """
     try:
-        tokens = shlex.split(command, posix=True)
-    except ValueError:
-        return ()
-    candidates: list[str] = []
-    for token in tokens:
-        stripped = token.strip(";&|()<>")
-        if not stripped:
-            continue
-        if "=" in stripped and not stripped.startswith(("/", "./", "../", "~")):
-            _, stripped = stripped.split("=", 1)
-        if not stripped or _VIRTUAL_PATH.match(stripped):
-            continue
-        local = cwd / stripped
-        if (
-            stripped.startswith(("/", "./", "../", "~"))
-            or "/" in stripped
-            or local.is_symlink()
-        ):
-            candidates.append(stripped)
-    return tuple(candidates)
+        return path.is_symlink()
+    except (OSError, ValueError):
+        return False
 
 
 _SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&"})
@@ -1231,9 +1639,9 @@ def _shell_tokens(command: str) -> list[str]:
 def _shell_segments(command: str) -> tuple[tuple[str, ...], ...]:
     """구분자로 나눈 argv 목록. 파싱 실패는 빈 결과다.
 
-    파싱 실패를 거부로 접지 않는 이유는 ``_command_path_candidates``와 같다 —
-    보호 경로 리터럴은 파서 없이 잡히고, 판정 불가를 차단으로 바꾸면 무관한
-    명령까지 죽는다.
+    파싱 실패를 거부로 접지 않는다 — 보호 경로 리터럴은
+    ``_command_literal_violation``이 파서 없이 잡고, 판정 불가를 차단으로 바꾸면
+    무관한 명령까지 죽는다.
     """
     try:
         tokens = _shell_tokens(command)
