@@ -144,9 +144,12 @@ CANONICAL_BOOTSTRAP_TEMPLATE = KIT_ROOT / "bootstrap" / "AGENTS.md.template"
 def test_bootstrap_names_the_profile_as_the_branching_source_of_truth():
     """반증: profile은 base main인데 local skill은 release/*를 지시했다. 정본이 둘이었다."""
     text = CANONICAL_BOOTSTRAP_TEMPLATE.read_text(encoding="utf-8")
-    assert "branching과 PR 대상의 정본은 active profile의 `branching`/`pr`이다" in text
-    assert "`pr.target_branch`로 표현" in text
-    assert "`git branch -D`로 대체하지 않는다" in text
+    assert (
+        "The active profile's `branching`/`pr` is the source of truth for branching and PR target"
+        in text
+    )
+    assert "`pr.target_branch`" in text
+    assert "do not replace that with the `git branch -D`" in text
 
 
 def test_bootstrap_block_has_exactly_one_template_for_both_root_files():

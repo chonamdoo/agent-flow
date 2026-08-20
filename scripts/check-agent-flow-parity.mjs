@@ -854,18 +854,18 @@ for (const rel of [
   assertFile(rel);
   assertContains(rel, 'agent-flow run "<task>"');
   assertContains(rel, "agent-flow status");
-  assertContains(rel, "install은 프로젝트당 1회만");
+  assertContains(rel, "Install runs once per project");
   assertContains(rel, "next_command");
-  assertContains(rel, "짧은 한국어");
-  assertContains(rel, "설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수");
-  assertContains(rel, "OMP는 host/controller로만 쓰고 reviewer provider로는 쓰지 않는다");
-  assertNotContains(rel, "예: Claude/Gemini");
+  assertContains(rel, "Answer in the language the user writes in");
+  assertContains(rel, "at least two installed Claude/Codex CLI reviewer subprocesses");
+  assertContains(rel, "Use OMP as host/controller only, never as a reviewer provider");
+  assertNotContains(rel, "e.g. Claude/Gemini");
   assertContains(rel, "reviewer-source: sub-agent");
-  assertNotContains(rel, "활성 host");
+  assertNotContains(rel, "active host");
   assertContains(rel, "## Overall");
   assertContains(rel, "verdict: approve");
   assertContains(rel, "verdict: request-changes");
-  assertContains(rel, "보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일");
+  assertContains(rel, "protected-branch commit/push and on leader checkout/switch hold identically on every host");
 }
 
 // 실측된 마찰 셋을 문구로 못 박는다. 이것이 빠지면 agent는 3-6 phase짜리 짧은 workflow의
@@ -873,8 +873,8 @@ for (const rel of [
 // 깨고, gate에 없는 검증 명령을 반복한다.
 for (const needle of [
   "--workflow <name>",
-  "leader checkout에서 IDE·Gradle·build를 실행하지 않는다",
-  "build/test/lint 명령은 active profile의 `gates`에서만 가져온다",
+  "Do not run an IDE, Gradle, or a build in the leader checkout",
+  "Take build/test/lint commands only from the active profile's `gates`",
 ]) {
   assertContains("bootstrap/AGENTS.md.template", needle);
 }

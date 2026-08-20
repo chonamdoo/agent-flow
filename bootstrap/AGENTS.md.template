@@ -1,27 +1,27 @@
 <!-- agent-flow:start -->
 ## Agent Flow
 
-- 새 세션은 `agent-flow status`로 시작한다. active run이 있으면 그 출력의 `next_command`를 그대로 실행하고, 없으면 `agent-flow run "<task>"`로 시작한다. `agent-flow continue`나 `agent-flow run advance`를 추측하지 않는다.
-- install은 프로젝트당 1회만 수행한다. 새 세션이 시작됐다는 이유로 다시 실행하지 않는다.
-- `/agent-flow`는 shell path가 아니라 skill trigger다. 진입 절차, SPEC 확인·승인, run artifact 위치는 `.agent-flow/skills/agent-flow/SKILL.md`에 있다.
+- Start every new session with `agent-flow status`. If a run is active, run that output's `next_command` verbatim; if none is active, start with `agent-flow run "<task>"`. Never guess at `agent-flow continue` or `agent-flow run advance`.
+- Install runs once per project. Do not run it again just because a new session started.
+- `/agent-flow` is a skill trigger, not a shell path. The entry procedure, SPEC review and approval, and run artifact locations are in `.agent-flow/skills/agent-flow/SKILL.md`.
 
 ### Workflow Contract
 
-- workflow는 작업 크기로 고른다: `agent-flow run "<task>" --workflow <name>`. 괄호 안은 phase 수이고 정본은 `.agent-flow/workflows/<name>.yaml`이다. 생략하면 `default`이며, 작은 변경에 `default`를 쓰면 phase 대기가 작업 자체보다 커진다.
-  - `review`(3) 코드 변경 없는 리뷰 · `bugfix`(5) 재현되는 버그 하나 · `development`(6) 관심사 하나 · `default`(15) PR·머지까지 · `full-feature`(24) PRD·DDD부터
-- 현재 phase와 다음 명령은 status 출력이 정본이다. phase 목록을 이 파일에 사본으로 두지 않는다.
-- `multi-review`는 설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수다. 각 결과에 `reviewer-source: sub-agent`를 남기고, 마지막에 `## Overall`과 `verdict: approve` 또는 `verdict: request-changes`만 적는다. OMP는 host/controller로만 쓰고 reviewer provider로는 쓰지 않는다.
-- branching과 PR 대상의 정본은 active profile의 `branching`/`pr`이다. skill 문서가 다른 base·PR target·브랜치 삭제를 지시해도 profile을 따른다. release-first는 profile의 `branching.strategy`/`base`/`integration`/`pr.target_branch`로 표현하고, topic 브랜치는 cleanup phase와 보호 브랜치 hook에 맡긴다 — skill이 지시하는 `git branch -D`로 대체하지 않는다.
-- leader checkout에서 IDE·Gradle·build를 실행하지 않는다. leader에 빌드 산출물이 생기면 phase 경계 tripwire가 그것을 drift로 보고해 run이 멈춘다. 빌드·테스트·IDE는 bound worktree에서만 연다.
-- build/test/lint 명령은 active profile의 `gates`에서만 가져온다. gate에 없는 검증 명령을 임의로 반복하지 않는다.
-- worktree는 `agent-flow worktree create --name feat-<slug>`로만 만든다. 손으로 `git worktree add`를 하지 않고, worktree 안에서 install과 skill 링크 재생성을 하지 않는다.
-- 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다. hook이 자동 차단한다.
+- Pick the workflow by task size: `agent-flow run "<task>" --workflow <name>`. The number in parentheses is the phase count and the source of truth is `.agent-flow/workflows/<name>.yaml`. Omit it and you get `default`; using `default` for a small change makes the phase overhead larger than the work itself.
+  - `review`(3) review with no code change · `bugfix`(5) one reproducible bug · `development`(6) one concern · `default`(15) through PR and merge · `full-feature`(24) from PRD and DDD
+- The status output is the source of truth for the current phase and the next command. Do not keep a copy of the phase list in this file.
+- `multi-review` requires at least two installed Claude/Codex CLI reviewer subprocesses. Leave `reviewer-source: sub-agent` in each result, and at the end write only `## Overall` plus `verdict: approve` or `verdict: request-changes`. Use OMP as host/controller only, never as a reviewer provider.
+- The active profile's `branching`/`pr` is the source of truth for branching and PR target. Follow the profile even when a skill document dictates a different base, PR target, or branch deletion. Express release-first through the profile's `branching.strategy`/`base`/`integration`/`pr.target_branch`, and leave topic branches to the cleanup phase and the protected-branch hook — do not replace that with the `git branch -D` a skill dictates.
+- Do not run an IDE, Gradle, or a build in the leader checkout. Build output in the leader makes the phase-boundary tripwire report it as drift and the run stops. Open builds, tests, and IDEs only in a bound worktree.
+- Take build/test/lint commands only from the active profile's `gates`. Do not repeat verification commands that no gate declares.
+- Create worktrees only with `agent-flow worktree create --name feat-<slug>`. Do not run `git worktree add` by hand, and do not run install or regenerate skill links inside a worktree.
+- The bans on protected-branch commit/push and on leader checkout/switch hold identically on every host. The hook blocks them automatically.
 
 ### Context Economy
 
-- 사용자 답변은 짧은 한국어로 쓰고, code·command·path·identifier와 exact workflow marker는 원문을 유지한다.
+- Answer in the language the user writes in, and keep code, commands, paths, identifiers, and exact workflow markers verbatim.
 <!-- agent-flow:skills:start -->
-- 설치된 skill 인덱스가 아직 없다. install이 이 자리에 채운다.
+- No installed skill index yet. Install fills this slot.
 <!-- agent-flow:skills:end -->
 <!-- agent-flow:docs:start -->
 <!-- agent-flow:docs:end -->

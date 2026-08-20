@@ -9,25 +9,24 @@ covers actually running it.
 
 ```bash
 brew tap chonamdoo/agent-flow https://github.com/chonamdoo/agent-flow
-brew install --HEAD chonamdoo/agent-flow/agent-flow
+brew install chonamdoo/agent-flow/agent-flow
 ```
 
 The repository is not named `homebrew-*`, so the tap takes the two-argument form with the URL
 spelled out. Install by the fully qualified name: since Homebrew 6.0 a third-party tap needs
 explicit trust, and the qualified name grants it for this one formula.
 
-`--HEAD` is required while no release is tagged — the formula has no stable download yet, and
-Homebrew refuses a head-only formula without the flag. A HEAD build compiles from source, so the
-Xcode command line tools have to be present. The formula installs `node` as a runtime dependency
-because project install and every managed hook run `bin/agent-flow-kit.mjs`.
+The formula installs `node` as a runtime dependency because project install and every managed hook
+run `bin/agent-flow-kit.mjs`.
 
 ```bash
-brew upgrade --fetch-HEAD chonamdoo/agent-flow/agent-flow
+brew upgrade chonamdoo/agent-flow/agent-flow
 ```
 
-`brew upgrade` on its own never looks at the upstream commit of a HEAD install; `--fetch-HEAD`
-is what asks. Once a release is tagged, `brew install chonamdoo/agent-flow/agent-flow` and a
-plain `brew upgrade` are enough.
+`brew install --HEAD chonamdoo/agent-flow/agent-flow` builds the current `main` instead of the
+released tag; that form compiles from source, so it needs the Xcode command line tools. A HEAD keg
+only sees a newer commit through `brew upgrade --fetch-HEAD`, which is why `agent-flow update`
+prints that flag when it detects one.
 
 ### From a checkout
 
