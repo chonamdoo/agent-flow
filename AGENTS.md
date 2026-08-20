@@ -7,7 +7,7 @@
 ```text
 bin/agent-flow-kit.mjs  ← JS entry point (install, artifact validation, push-watch). It does no phase routing
 src/agent_flow/         ← Python CLI (runner, adapters, gates, multi-review, worktrees)
-src/agent_flow/workflows/  ← Source YAML (full-feature, bugfix, review, and so on). This is the only copy
+src/agent_flow/workflows/  ← Source YAML (full-feature, bugfix, review, and so on). The source of truth is this one copy
 src/agent_flow/profiles/   ← Per-stack profiles (android, nextjs, python, and so on)
 skills/                 ← Source skills (install copies them into the target .agent-flow/skills/)
 templates/              ← Review angle templates (_shared/review/)
@@ -60,7 +60,7 @@ The agent-flow block below is the canonical source for the Workflow Contract and
 
 ### Context Economy
 
-- Answer in the language the user writes in, and keep code, commands, paths, identifiers, and exact workflow markers verbatim.
+- Keep answers short and in the language the user writes in; keep code, commands, paths, identifiers, and exact workflow markers verbatim.
 <!-- agent-flow:skills:start -->
 ```text
 [agent-flow skill index]|root: .agent-flow/skills

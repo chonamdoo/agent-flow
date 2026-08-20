@@ -148,6 +148,9 @@ def test_bootstrap_names_the_profile_as_the_branching_source_of_truth():
         "The active profile's `branching`/`pr` is the source of truth for branching and PR target"
         in text
     )
+    # 토큰만 요구하면 "`pr.target_branch`를 직접 건드리지 마라" 같은 문장으로 바뀌어도
+    # 통과한다. 정본이 profile이라는 절까지 함께 고정한다.
+    assert "Express release-first through the profile's" in text
     assert "`pr.target_branch`" in text
     assert "do not replace that with the `git branch -D`" in text
 

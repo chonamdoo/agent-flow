@@ -4,7 +4,7 @@ This is the always-loaded hot context. Read long domain/workflow explanations on
 
 ## Working Rules
 
-- Answer in the language the user writes in. Keep code, commands, paths, identifiers, and exact workflow markers verbatim.
+- Keep answers short and in the language the user writes in. Keep code, commands, paths, identifiers, and exact workflow markers verbatim.
 - No refactor, documentation, or error handling that was not requested.
 - For code comment rules see `code-generation-discipline`.
 - If you do not know, read and confirm. No guessing.

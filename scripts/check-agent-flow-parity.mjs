@@ -856,10 +856,13 @@ for (const rel of [
   assertContains(rel, "agent-flow status");
   assertContains(rel, "Install runs once per project");
   assertContains(rel, "next_command");
-  assertContains(rel, "Answer in the language the user writes in");
+  // 두 절을 함께 고정한다. 언어절만 고정하면 "짧게"가 조용히 사라져도 검사가 통과한다.
+  assertContains(rel, "Keep answers short and in the language the user writes in");
   assertContains(rel, "at least two installed Claude/Codex CLI reviewer subprocesses");
   assertContains(rel, "Use OMP as host/controller only, never as a reviewer provider");
-  assertNotContains(rel, "e.g. Claude/Gemini");
+  // `tests/test_cli.py`가 쓰는 needle과 같아야 한다. 한쪽만 접두어를 요구하면
+  // "such as Claude/Gemini"가 한 검사만 통과해 두 검사가 서로 다른 답을 낸다.
+  assertNotContains(rel, "Claude/Gemini");
   assertContains(rel, "reviewer-source: sub-agent");
   assertNotContains(rel, "active host");
   assertContains(rel, "## Overall");
@@ -909,7 +912,7 @@ if (CHECK_INSTALLED_COPY) {
     "default workflow, gates run as their own runner-owned phase",
   );
   assertNotContains(".agent-flow/rules/workflow-contract.md", "After reviewer approve, run");
-  assertContains(".agent-flow/rules/workflow-contract.md", "short Korean");
+  assertContains(".agent-flow/rules/workflow-contract.md", "short and in the language the user writes in");
   assertContains(".agent-flow/rules/workflow-contract.md", "two independent Claude/Codex reviewer subprocesses");
   assertNotContains(".agent-flow/rules/workflow-contract.md", "Gemini sub-agent in Gemini");
   assertContains(".agent-flow/rules/workflow-contract.md", "reviewer-source: sub-agent");

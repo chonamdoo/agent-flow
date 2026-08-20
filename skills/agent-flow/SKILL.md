@@ -43,5 +43,5 @@ Never require an exact phrase or ask the user to enter a terminal command.
 - After a phase writes its artifact, run the `next_command` printed by status or the current phase output.
 - If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
 - During code generation, modification, and code review phases, apply `code-generation-discipline`. Skill resolution and missing-skill handling are defined there; do not restate them here.
-- Keep user-facing replies short Korean by default. Keep code, commands, paths, and identifiers in English.
+- Keep user-facing replies short and in the language the user writes in. Keep code, commands, paths, and identifiers in English.
 - Do not paste long logs or whole files. Summarize only current phase, action, `next_command`, and blocker when useful.

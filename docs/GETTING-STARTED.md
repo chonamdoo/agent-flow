@@ -30,14 +30,16 @@ is the product, not a defect; the rest of this page says where it costs you.
   authentication you already have. agent-flow manages no token of its own.
 
 Install **both** Claude Code and Codex CLI if you care about the review phases. Phases marked
-`multi_review` — `review` in the small workflows, `multi-review` and `architecture-review` in the
-large ones — run review angles only on the installed Claude and Codex CLIs, as confined
-subprocesses:
+`multi_review` — `review` in the small workflows, `multi-review`, `architecture-review`, and
+`final-review` in the large ones — run review angles only on the installed Claude and Codex CLIs,
+as confined subprocesses. How the angles are spread across the providers depends on the phase:
+`final-review` distributes every angle to both providers, while every other `multi_review` phase
+runs every angle on one primary provider, plus any additional provider that was selected.
 
-- **Both installed** — `final-review` distributes every angle to both providers, so a verdict
-  comes from two independent processes on two independent providers. That is the whole point of
-  the phase: the session that wrote the code passes its own code, so it is not allowed to review
-  it.
+- **Both installed** — `final-review`'s verdict comes from two independent processes on two
+  independent providers, and the other `multi_review` phases get a second provider on top of the
+  primary one. That is the point of having the phase at all: the session that wrote the code
+  passes its own code, so it is not allowed to review it.
 - **Only one installed** — every angle still runs as an independent subprocess, but one provider
   covers all of them. You keep process independence and lose provider independence.
 - **Neither installed** — the phase closes as a failure. The controller session cannot record the
@@ -75,6 +77,13 @@ blocked, because the installed assets belong to the repository, not to one run.
 
 Use `bugfix`. It has 5 phases — `reproduce`, `implement-fix`, `review`, `qa`, `handoff` — which
 makes it the cheapest workflow that still contains a real review and a real verification step.
+
+Issue these commands from inside a Claude Code or Codex session, not from a bare shell: agent-flow
+prints the phase prompt and waits, and the host CLI in that session is what reads the prompt, does
+the phase's work, and writes `required_artifact`. Inside a session the same steps have a
+slash-command form — `/agent-flow <task>` to start, `/agent-flow` to continue. Run the binary in a
+plain terminal instead and you are left at `status: awaiting_host` with nothing that can write the
+artifact. See [Running](USAGE.md#running) in USAGE.md.
 
 ```bash
 agent-flow run "fix the login timeout on slow networks" --workflow bugfix --worktree fix-login-timeout

@@ -2445,7 +2445,7 @@ Context rules:
 - \`CONTEXT.md\` is hot context only.
 - Current and future vocabulary must stay separated.
 - Follow the phase context map in \`.Codex/rules/context/\` for phase-specific context loading.
-- User-facing agent-flow replies must be short Korean by default. Keep code, commands, paths, and identifiers in English.
+- User-facing agent-flow replies must be short and in the language the user writes in. Keep code, commands, paths, and identifiers in English.
 - Summarize only current phase, action, \`next_command\`, and blocker when useful.
 `;
 }

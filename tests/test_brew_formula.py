@@ -127,13 +127,14 @@ def test_the_stamper_points_the_formula_at_the_declared_version(tmp_path: Path) 
 def test_the_stamper_refuses_a_version_the_tree_does_not_declare(tmp_path: Path) -> None:
     """반증: 태그와 소스 버전이 갈라진 formula는 다른 kit을 설치한다."""
     root = _kit_copy(tmp_path)
+    before = (root / "Formula" / "agent-flow.rb").read_text(encoding="utf-8")
     other = f"{_declared_version(root)}9"
     result = _stamp(root, "--version", other, "--sha256", DIGEST)
     assert result.returncode != 0
     assert "pyproject.toml declares version" in result.stderr
-    # resource 블록의 url이 아니라 최상위 stable stanza만 본다.
-    formula = (root / "Formula" / "agent-flow.rb").read_text(encoding="utf-8")
-    assert re.search(r'^ {2}url "', formula, re.M) is None
+    # 거절은 파일을 건드리지 않는다. "url이 없다"로 보면 릴리스가 한 번 stamp된 뒤에는
+    # 이미 있는 stable stanza 때문에 이 반증이 통째로 무너진다.
+    assert (root / "Formula" / "agent-flow.rb").read_text(encoding="utf-8") == before
 
 
 def test_the_stamper_refuses_a_digest_that_is_not_one(tmp_path: Path) -> None:

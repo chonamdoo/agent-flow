@@ -2155,7 +2155,7 @@ class CliTest(unittest.TestCase):
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수",
+                "requires at least two installed Claude/Codex CLI reviewer subprocesses",
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
@@ -2180,7 +2180,7 @@ class CliTest(unittest.TestCase):
             # `AGENTS.md`에는 없어야 한다 — 자기 자신을 import하는 줄이다.
             self.assertNotIn("@AGENTS.md", (project_root / "AGENTS.md").read_text(encoding="utf-8"))
             self.assertIn(
-                "설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수",
+                "requires at least two installed Claude/Codex CLI reviewer subprocesses",
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
@@ -2188,7 +2188,7 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수",
+                "requires at least two installed Claude/Codex CLI reviewer subprocesses",
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
             agent_flow_skill = (project_root / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md").read_text(

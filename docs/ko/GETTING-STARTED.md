@@ -30,13 +30,15 @@ agent에게도 허용되지 않는다. phase가 실제로 자기 일을 했는�
   물려받는다. agent-flow는 자체 토큰을 관리하지 않는다.
 
 review phase가 의미를 갖기를 원한다면 Claude Code와 Codex CLI를 **둘 다** 설치한다.
-`multi_review`로 표시된 phase — 작은 workflow의 `review`, 큰 workflow의 `multi-review`와
-`architecture-review` — 는 설치된 Claude와 Codex CLI에서만 review angle을 격리된 subprocess로
-실행한다.
+`multi_review`로 표시된 phase — 작은 workflow의 `review`, 큰 workflow의 `multi-review`,
+`architecture-review`, `final-review` — 는 설치된 Claude와 Codex CLI에서만 review angle을 격리된
+subprocess로 실행한다. angle을 provider에 어떻게 나누는지는 phase마다 다르다. `final-review`는
+모든 angle을 양쪽 provider에 배분하고, 나머지 `multi_review` phase는 모든 angle을 하나의 주
+provider에서 실행하며 추가로 선택된 provider가 있으면 그것을 더한다.
 
-- **둘 다 설치** — `final-review`가 모든 angle을 양쪽 provider에 배분하므로, 판정이 서로 독립인
-  두 프로세스와 두 provider에서 나온다. 이것이 이 phase의 전부다. 코드를 쓴 세션은 자기 코드를
-  통과시키므로 그 세션에게 review를 맡기지 않는다.
+- **둘 다 설치** — `final-review`의 판정이 서로 독립인 두 프로세스와 두 provider에서 나오고,
+  나머지 `multi_review` phase는 주 provider 위에 두 번째 provider를 더 얻는다. 이 phase를 두는
+  이유가 그것이다. 코드를 쓴 세션은 자기 코드를 통과시키므로 그 세션에게 review를 맡기지 않는다.
 - **하나만 설치** — 모든 angle이 여전히 독립 subprocess로 실행되지만 한 provider가 전부를
   담당한다. 프로세스 독립성은 남고 provider 독립성은 사라진다.
 - **둘 다 없음** — phase가 실패로 닫힌다. controller 세션이 review 판정을 대신 기록할 수 없으므로
@@ -74,6 +76,13 @@ agent-flow . --profile android --skills tdd,code-review
 
 `bugfix`를 쓴다. phase가 5개 — `reproduce`, `implement-fix`, `review`, `qa`, `handoff` — 이고,
 실제 review와 실제 검증 단계를 모두 가진 workflow 중 가장 저렴하다.
+
+이 명령들은 빈 셸이 아니라 Claude Code 또는 Codex 세션 안에서 실행한다. agent-flow는 phase
+prompt를 출력하고 기다리며, 그 prompt를 읽고 phase의 일을 하고 `required_artifact`를 쓰는 주체는
+그 세션의 호스트 CLI다. 세션 안에서는 같은 단계에 슬래시 명령 형태가 있다 — 시작은
+`/agent-flow <task>`, 계속은 `/agent-flow`. 터미널에서 바이너리만 직접 실행하면
+`status: awaiting_host`에 멈춘 채 artifact를 쓸 주체가 없다. USAGE.md의
+[Running](../USAGE.md#running)을 본다.
 
 ```bash
 agent-flow run "fix the login timeout on slow networks" --workflow bugfix --worktree fix-login-timeout

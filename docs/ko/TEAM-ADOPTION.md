@@ -34,8 +34,9 @@
   `phase`(`pre-commit | pre-push | post-merge`), `timeout_s`를 갖는다. 분 단위로 도는 gate는
   여기서 자기 상한을 선언한다. timeout은 실패가 아니라 판정 불가로 기록되기 때문이다.
 - `review_angles` — 최종 리뷰 phase에 붙는 전문 reviewer. 각 항목이 `id`와 kit root 기준
-  `prompt` 경로를 갖는다. `src/agent_flow/profiles/android.yaml`는 `architecture-design`과
-  `android-skills`를 선언한다. 기본 run에는 항상 generalist reviewer 하나가 있고 angle은 추가분이다.
+  `prompt` 경로를 갖는다. `src/agent_flow/profiles/android.yaml`는 여섯 개를 선언한다:
+  `architecture-design`, `android-skills`, `compose-stability`, `test-edge`, `sdui`, `udf`.
+  기본 run에는 항상 generalist reviewer 하나가 있고 angle은 추가분이다.
 - `branching` — `strategy`, `base`, `integration`, `worktree`, `leader_tripwire`, 에이전트가
   만드는 브랜치의 `naming.prefix`·`naming.slug_style`, 그리고 새 worktree에 필요한 gitignored
   머신 설정을 위한 `worktree_setup.copy`.
@@ -56,6 +57,12 @@
 `commit_convention`, `vocabulary`, `skills`는 저장소별로 설정할 수 없고, 바꾸려면 바뀐 profile을
 배포해야 한다. 설치된 `.agent-flow/profiles/<id>.yaml`를 직접 고치는 것은 남지 않는다. install이
 새 필드를 기존 설치본에 닿게 하려고 배포 profile을 덮어쓰기 때문이다.
+
+그 override 파일은 저장소별이 아니라 작업 사본별이다. install이 프로젝트 `.gitignore`에
+`.agent-flow/`를 쓰기 때문에(`lib/installer-shared.mjs`의 `upsertGitignore`, 호출은
+`bin/agent-flow-kit.mjs`), 평범한 `git add`는 이 파일을 잡지 못하고 다른 클론은 이 파일을 보지
+못한다. 공유하려면 `git add -f .agent-flow/profiles/<profile-id>.local.yaml`이나 `.gitignore`의
+부정 규칙이 필요하고, 그 ignore 항목은 다음 `agent-flow .`에서 다시 추가된다.
 
 ### profile 해석 순서와 `AGENT_FLOW_PROFILE`
 
@@ -115,7 +122,9 @@ profile의 `skills.required_review`는 저장소가 소유한 이름을 차단 �
 설치된 외부 skill은 절대 열거하지 않는다 — upstream 이름 변경이 어떤 이름 목록도 낡게 만들기
 때문이다. `skills`는 `.local.yaml` override에서 거부된다. 설치 대상을 정하는 쪽은 Python 런타임이
 아니라 installer이고, 열면 "선언한 목록"과 "실제 설치된 목록"이 갈려 라우팅이 빈 skill을 가리킬
-때까지 보이지 않는다. 그리고 `.agent-flow/local-skills/`는 작업 사본별이다. 팀이 커밋해야 공유된다.
+때까지 보이지 않는다. 그리고 `.agent-flow/local-skills/`는 작업 사본별이다. install이
+`.agent-flow/`를 gitignore하므로 그 디렉터리를 커밋해도 공유되지 않는다. 공유되는 drop-box는
+프로젝트 루트의 `skills/`이고, install은 그것을 ignore하지 않는다.
 
 ### 외부 `skill_sources`
 
@@ -155,9 +164,9 @@ profile이 `skill_sources`를 선언하고, `src/agent_flow/core/skill_sync.py`�
 구현되지 않았다.
 
 **저장소마다 복사되지 않고 버전이 붙어 리뷰되는 공유 규약 팩.** 지금 규약 문서는 저장소마다
-`.agent-flow/local-skills/`나 `skills/` 아래로 커밋되거나, 배포 profile에 선언된 `skill_sources`
-항목으로 닿는다. kit과 소비하는 저장소 양쪽에서 독립적으로 팀이 소유·버전·리뷰·핀하는 팩은
-구현되지 않았다.
+`skills/` 아래로 커밋되거나(`.agent-flow/local-skills/`는 gitignore된 `.agent-flow/` 아래에 있어
+작업 사본별로 남는다), 배포 profile에 선언된 `skill_sources` 항목으로 닿는다. kit과 소비하는
+저장소 양쪽에서 독립적으로 팀이 소유·버전·리뷰·핀하는 팩은 구현되지 않았다.
 
 **팀이 리뷰 기준에 합의하는 방법.** 기준은 kit root 기준 prompt 경로를 가리키는 `review_angles`
 항목이다(예: `templates/_shared/review/architecture-design.md`). `review_angles`는 `.local.yaml`
@@ -197,9 +206,10 @@ override, 그리고 `src/agent_flow/core/skill_sync.py`의 고정 ref fetch 캐�
 
 사람이 정할 것: 누가 핀을 옮길 수 있는가, 그리고 옮기는 시점에 이미 돌고 있는 run은 어떻게 되는가.
 
-버릴 조건: 팀이 저장소마다 자기 값을 갖는 편이 맞다고 결론 내릴 때. `.local.yaml` override가 이미
-`architecture`, `branching`, `execution`, `gates`, `pr`를 저장소별로 담으므로, 만들지 않아도 잃는
-것이 없다.
+버릴 조건: 팀이 작업 사본마다 자기 값을 갖는 편이 맞다고 결론 내릴 때. `.local.yaml` override가
+이미 `architecture`, `branching`, `execution`, `gates`, `pr`를 담지만 gitignore되므로, 만들지
+않으면 모든 구성원이 그 값을 손으로 다시 적거나 파일을 force-add하게 되고, 공유 선언 하나로
+해석되지는 않는다.
 
 ### 단계 B — 리뷰 담당자가 있는 버전 붙은 skill source로서의 팀 규약 팩
 
@@ -213,7 +223,7 @@ override, 그리고 `src/agent_flow/core/skill_sync.py`의 고정 ref fetch 캐�
 사람이 정할 것: 팩 변경을 누가 리뷰하는가, 그리고 팩이 기준을 offered가 아니라 required로 만들 수
 있는가. 스키마는 승격을 task 문구 밖에 두기로 정해 뒀으므로, 승격은 어느 쪽이든 사람의 결정이다.
 
-버릴 조건: 팩이 결국 저장소마다 하나로 드러날 때. `.agent-flow/local-skills/`가 이미 그것을 담고,
+버릴 조건: 팩이 결국 저장소마다 하나로 드러날 때. 프로젝트 루트의 `skills/`가 이미 그것을 담고,
 아무도 소비하지 않는 팩에 버전을 붙이는 것보다 그 디렉터리를 커밋하는 것이 싸다.
 
 ### 단계 C — 합의된 검증 계약

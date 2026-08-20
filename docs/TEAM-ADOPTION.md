@@ -35,9 +35,9 @@ A team can express:
   (`pre-commit | pre-push | post-merge`) and `timeout_s`. A gate that runs for minutes declares
   its own ceiling here, because a timeout is recorded as "not judged", not as a failure.
 - `review_angles` — the specialist reviewers added at the final review phase, each an `id` plus
-  a `prompt` path relative to the kit root. `src/agent_flow/profiles/android.yaml` declares
-  `architecture-design` and `android-skills`; the base run always has one generalist reviewer
-  and angles are extras.
+  a `prompt` path relative to the kit root. `src/agent_flow/profiles/android.yaml` declares six:
+  `architecture-design`, `android-skills`, `compose-stability`, `test-edge`, `sdui` and `udf`;
+  the base run always has one generalist reviewer and angles are extras.
 - `branching` — `strategy`, `base`, `integration`, `worktree`, `leader_tripwire`, the
   `naming.prefix` and `naming.slug_style` for agent-generated branches, and `worktree_setup.copy`
   for the gitignored machine files a new worktree needs.
@@ -60,6 +60,12 @@ silently. `review_angles`, `commit_convention`, `vocabulary` and `skills` are th
 settable per repository: changing them means shipping a changed profile. Editing the installed
 `.agent-flow/profiles/<id>.yaml` directly does not survive, because install overwrites the
 shipped profile so new fields reach existing installs.
+
+That override file is per working copy, not per repository. Install writes `.agent-flow/` into
+the project's `.gitignore` (`upsertGitignore` in `lib/installer-shared.mjs`, called from
+`bin/agent-flow-kit.mjs`), so a plain `git add` never picks the file up and another clone never
+sees it. Sharing it takes `git add -f .agent-flow/profiles/<profile-id>.local.yaml` or a
+negation rule in `.gitignore`, and the ignore entry is re-added on the next `agent-flow .`.
 
 ### Profile resolution and `AGENT_FLOW_PROFILE`
 
@@ -126,7 +132,8 @@ installed external skills are never enumerated there, because upstream renames m
 stale. `skills` is rejected in the `.local.yaml` override, since the installer, not the Python
 runtime, decides what gets installed; opening it would split "declared" from "actually
 installed" until routing pointed at nothing. And `.agent-flow/local-skills/` is per working
-copy: it is shared only if the team commits it.
+copy: install gitignores `.agent-flow/`, so committing that directory does not share it. The
+shared drop-box is `skills/` at the project root, which install never ignores.
 
 ### External `skill_sources`
 
@@ -169,10 +176,11 @@ workflows: `PROJECT_OVERRIDE_KEYS` covers profiles only, and the installed
 does not survive. A procedure for proposing and accepting a marker change is not implemented.
 
 **A shared convention pack that is versioned and reviewable rather than copied per repository.**
-Today a convention document is either committed into each repository under
-`.agent-flow/local-skills/` or `skills/`, or reached through a `skill_sources` entry declared in
-a shipped profile. A pack that a team owns, versions, reviews and pins independently of both the
-kit and the consuming repository is not implemented.
+Today a convention document is either committed into each repository under `skills/`
+(`.agent-flow/local-skills/` sits under the gitignored `.agent-flow/` and stays per working
+copy), or reached through a `skill_sources` entry declared in a shipped profile. A pack that a
+team owns, versions, reviews and pins independently of both the kit and the consuming
+repository is not implemented.
 
 **How a team agrees a review criterion.** A criterion is a `review_angles` entry pointing at a
 prompt path relative to the kit root, such as `templates/_shared/review/architecture-design.md`.
@@ -217,9 +225,10 @@ before any run uses it.
 
 People decide: who may move the pin, and what happens to a run already in flight when it moves.
 
-Drop it when: the team concludes each repository should keep its own values. The `.local.yaml`
-override already carries `architecture`, `branching`, `execution`, `gates` and `pr` per
-repository, so nothing is lost by not building this.
+Drop it when: the team concludes each working copy should keep its own values. The `.local.yaml`
+override already carries `architecture`, `branching`, `execution`, `gates` and `pr`, but it is
+gitignored, so dropping this stage leaves every member restating those values by hand — or
+force-adding the file — rather than resolving one shared declaration.
 
 ### Stage B — team convention packs as versioned skill sources with a review owner
 
@@ -235,7 +244,7 @@ People decide: who reviews a change to the pack, and whether a pack may make a c
 required rather than offered — the schema deliberately keeps promotion out of task wording, so
 promotion is a human decision either way.
 
-Drop it when: the packs turn out to be one per repository. `.agent-flow/local-skills/` already
+Drop it when: the packs turn out to be one per repository. `skills/` at the project root already
 carries those, and committing that directory is cheaper than versioning a pack nobody else
 consumes.
 

@@ -19,7 +19,7 @@
 
 ### Context Economy
 
-- Answer in the language the user writes in, and keep code, commands, paths, identifiers, and exact workflow markers verbatim.
+- Keep answers short and in the language the user writes in; keep code, commands, paths, identifiers, and exact workflow markers verbatim.
 <!-- agent-flow:skills:start -->
 - No installed skill index yet. Install fills this slot.
 <!-- agent-flow:skills:end -->

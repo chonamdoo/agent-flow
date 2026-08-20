@@ -413,7 +413,7 @@ phases:
       reviewer section must include `reviewer-source: sub-agent`. Aggregate
       findings into final-review.md with severity (must-fix /
       should-fix / note) and source angle. Cite paths as `path/to/file:line`.
-      Apply agent-flow-concise-output: one finding per line, Korean concise
+      Apply agent-flow-concise-output: one finding per line, concise
       prose, no emoji, and parser verdict markers unchanged.
       Resolve required review skills from active profile metadata,
       `.agent-flow/skills/index.json`, changed files, and task scope. Review
