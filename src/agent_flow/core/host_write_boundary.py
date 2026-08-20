@@ -1210,14 +1210,28 @@ def _skip_braces(command: str, index: int) -> int:
 
     ``${x:-foo>../sibling/f}``는 낱말 하나다. 안의 ``>``를 연산자로 읽으면 낱말이
     끊겨, 실제 인수에 없는 ``../sibling/f``가 경로로 살아난다.
+
+    인용은 ``_skip_substitution``과 같은 규칙으로 본다. 인용 안의 ``}``를 닫는
+    괄호로 세면 확장이 일찍 끝나고 남은 인용부호가 열린 인용이 되어, 그 명령의
+    낱말이 전부 사라진다.
     """
     depth = 1
+    quote = ""
     length = len(command)
     while index < length:
         char = command[index]
         index += 1
+        if quote:
+            if char == "\\" and quote == '"':
+                index += 1
+            elif char == quote:
+                quote = ""
+            continue
         if char == "\\":
             index += 1
+            continue
+        if char in "'\"":
+            quote = char
             continue
         if char == "{":
             depth += 1
@@ -1486,14 +1500,16 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
         if char.isspace():
             flush()
             continue
-        if (
-            char == "<"
-            and index + 1 <= length
-            and command[index : index + 1] == "<"
-            and command[index + 1 : index + 2] != "<"
-        ):
+        if char == "<" and command[index : index + 2] == "<<":
+            # `<<<`는 herestring이다. 본문이 없으므로 세 글자를 함께 소비하고 낱말만
+            # 끊는다. 첫 `<`에서 걸러내지 않으면 두 번째 `<`가 here-document로 읽혀,
+            # 뒤따르는 줄이 본문으로 버려진다.
+            index += 2
+            flush()
+            continue
+        if char == "<" and command[index : index + 1] == "<":
             # `<<DELIM`의 본문은 stdin 데이터다. 낱말로 읽으면 `python3 - <<'PY'`
-            # 안의 경로가 인수로 오인된다. `<<<`는 herestring이라 본문이 없다.
+            # 안의 경로가 인수로 오인된다.
             index, delimiter = _read_heredoc_delimiter(command, index + 1)
             if delimiter:
                 heredocs.append(delimiter)

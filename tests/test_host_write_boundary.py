@@ -573,6 +573,14 @@ def test_dynamic_words_keep_their_static_prefix(tmp_path: Path):
         _command_payload(f"case x=../{sibling}/f in *) :; esac", cwd=first.path),
         root,
     )
+    herestring_then_command = host_write_boundary_violation(
+        _command_payload(f"cat <<< tag\ntouch ../{sibling}/f\n", cwd=first.path),
+        root,
+    )
+    brace_with_quoted_brace = host_write_boundary_violation(
+        _command_payload(f'echo ${{x:-"}}"}} && touch ../{sibling}/f', cwd=first.path),
+        root,
+    )
     redirect_after_dynamic = host_write_boundary_violation(
         _command_payload(f"printf x $name>../{sibling}/leaked.py", cwd=first.path),
         root,
@@ -615,6 +623,11 @@ def test_dynamic_words_keep_their_static_prefix(tmp_path: Path):
     assert heredoc_redirect is not None
     # `case`는 뒤에 값이 오는 예약어다. `x=`를 대입으로 보면 없는 경로가 생긴다.
     assert case_subject is None
+    # `<<<`는 herestring이라 본문이 없다. here-document로 읽으면 뒤따르는 줄이 통째로
+    # 버려져 그 줄의 쓰기가 판정에서 사라진다.
+    assert herestring_then_command is not None
+    # 인용 안의 `}`로 확장이 일찍 닫히면 남은 인용부호 때문에 낱말이 전부 사라진다.
+    assert brace_with_quoted_brace is not None
 
 
 def test_idle_registered_sibling_worktree_stays_protected(tmp_path: Path):
