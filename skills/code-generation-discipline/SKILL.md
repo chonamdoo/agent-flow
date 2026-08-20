@@ -15,7 +15,7 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
 - Check existing patterns, helpers, APIs, and project instructions before adding a new approach.
 - Choose the smallest code path that can satisfy the request.
 - Define the verification command or observable check before editing.
-- For agent-flow user-facing updates, default to short Korean and keep code, commands, paths, and identifiers in English.
+- For agent-flow user-facing updates, default to short prose in the language the user writes in, and keep code, commands, paths, and identifiers in English.
 - For code generation, modification, and code review, resolve required skills from active profile metadata, `.agent-flow/skills/index.json`, changed files, and task scope before writing or judging code.
 - Load only the required skill union for touched profiles. Do not require unrelated platform skills.
   - Python files (`*.py`): apply the Python profile required skill group.

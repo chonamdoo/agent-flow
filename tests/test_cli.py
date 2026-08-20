@@ -2155,7 +2155,7 @@ class CliTest(unittest.TestCase):
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수",
+                "requires at least two installed Claude/Codex CLI reviewer subprocesses",
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
@@ -2180,7 +2180,7 @@ class CliTest(unittest.TestCase):
             # `AGENTS.md`에는 없어야 한다 — 자기 자신을 import하는 줄이다.
             self.assertNotIn("@AGENTS.md", (project_root / "AGENTS.md").read_text(encoding="utf-8"))
             self.assertIn(
-                "설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수",
+                "requires at least two installed Claude/Codex CLI reviewer subprocesses",
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
@@ -2188,7 +2188,7 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수",
+                "requires at least two installed Claude/Codex CLI reviewer subprocesses",
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
             agent_flow_skill = (project_root / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md").read_text(
@@ -4385,9 +4385,15 @@ if (codexContext !== undefined) {
                 (project_root / ".agent-flow" / "prompts" / "multi-review.md").read_text(encoding="utf-8"),
             )
             self.assertIn('agent-flow run "<task>"', bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("OMP는 host/controller로만 쓰고 reviewer provider로는 쓰지 않는다", bootstrap.read_text(encoding="utf-8"))
-            self.assertNotIn("예: Claude/Gemini", bootstrap.read_text(encoding="utf-8"))
+            self.assertIn(
+                "requires at least two installed Claude/Codex CLI reviewer subprocesses",
+                bootstrap.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "Use OMP as host/controller only, never as a reviewer provider",
+                bootstrap.read_text(encoding="utf-8"),
+            )
+            self.assertNotIn("Claude/Gemini", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", bootstrap.read_text(encoding="utf-8"))
             # `CLAUDE.md` 사본은 루트에 실제로 심긴 것과 같아야 한다: 계약 본문이 아니라
             # 그것을 가리키는 포인터다. 여기에 본문을 담으면 루트와 사본이 갈라진다.

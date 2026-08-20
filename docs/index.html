@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-flow documentation</title>
+<meta name="description" content="agent-flow runs AI coding agents on a development process you can verify. The runner reads the hook-recorded command log instead of trusting the agent's report.">
+<link rel="stylesheet" href="assets/agent-flow.css">
+</head>
+<body>
+<main>
+
+<header>
+<h1>agent-flow</h1>
+<p class="lede">An agent&rsquo;s self-report is not evidence. &ldquo;I wrote the tests&rdquo; proves
+nothing, so the runner reads the command log the hooks recorded and judges for itself.</p>
+</header>
+
+<h2 id="install">Install</h2>
+
+<pre><code>brew tap chonamdoo/agent-flow https://github.com/chonamdoo/agent-flow
+brew install chonamdoo/agent-flow/agent-flow
+agent-flow .</code></pre>
+
+<p class="note">The tap takes an explicit URL because this repository is not named
+<code>homebrew-*</code>. Install by the fully qualified name: since Homebrew 6.0 a third-party
+tap needs explicit trust, and the qualified name grants it for this one formula. The third line
+installs the workflow into the project in the current directory; a bare path is the install
+command, so <code>agent-flow &lt;dir&gt;</code> works without changing directory. Run it once per
+project, not once per session.</p>
+
+<h2 id="documentation">Documentation</h2>
+
+<p class="note">The first link in each row is the file sitting next to this page. GitHub Pages
+serves a <code>.md</code> file as plain text and does not resolve a path above
+<code>docs/</code>, so the second link is the same file rendered on GitHub.</p>
+
+<dl class="docs">
+
+<dt><a href="GETTING-STARTED.md">GETTING-STARTED.md</a>
+<span class="alt"><a href="https://github.com/chonamdoo/agent-flow/blob/main/docs/GETTING-STARTED.md">rendered on GitHub</a></span></dt>
+<dd>Install the tool, initialize one project, and run a workflow from the first phase to the
+last.</dd>
+
+<dt><a href="USAGE.md">USAGE.md</a>
+<span class="alt"><a href="https://github.com/chonamdoo/agent-flow/blob/main/docs/USAGE.md">rendered on GitHub</a></span></dt>
+<dd>Every command: install, project init, the update check, worktrees, the SPEC ledger, gates,
+profiles, and reviewer distribution.</dd>
+
+<dt><a href="TEAM-ADOPTION.md">TEAM-ADOPTION.md</a>
+<span class="alt"><a href="https://github.com/chonamdoo/agent-flow/blob/main/docs/TEAM-ADOPTION.md">rendered on GitHub</a></span></dt>
+<dd>How to bring this into a team: what to agree on before turning gates on, and what is still
+unsolved.</dd>
+
+<dt><a href="../README.md">README.md</a>
+<span class="alt"><a href="https://github.com/chonamdoo/agent-flow/blob/main/README.md">rendered on GitHub</a></span></dt>
+<dd>Why the tool is shaped this way, what it verifies and how, and the approaches that were
+dropped along the way.</dd>
+
+<dt><a href="ko/GETTING-STARTED.md" hreflang="ko">한국어 &middot; ko/GETTING-STARTED.md</a>
+<span class="alt"><a href="https://github.com/chonamdoo/agent-flow/blob/main/docs/ko/GETTING-STARTED.md" hreflang="ko">rendered on GitHub</a></span></dt>
+<dd lang="ko">시작하기 가이드의 한국어 번역.</dd>
+
+<dt><a href="ko/TEAM-ADOPTION.md" hreflang="ko">한국어 &middot; ko/TEAM-ADOPTION.md</a>
+<span class="alt"><a href="https://github.com/chonamdoo/agent-flow/blob/main/docs/ko/TEAM-ADOPTION.md" hreflang="ko">rendered on GitHub</a></span></dt>
+<dd lang="ko">팀 도입 계획의 한국어 번역.</dd>
+
+</dl>
+
+<h2 id="verified">What it verifies</h2>
+
+<ul class="claims">
+
+<li><b>Routing authority sits with the runner.</b> Workflow YAML only defines the phases. The
+runner decides which phase comes next and prints the <code>next_command</code>, so an agent
+cannot skip a phase on its own.</li>
+
+<li><b>Completion gate markers.</b> A phase that declares required markers advances only when
+every one of them is answered in the <code>## Completion Gate</code> block of its artifact.
+Marker values are cross-checked against the body, so a count in place of a list is
+rejected.</li>
+
+<li><b>Observation over claims.</b> A <code>PostToolUse</code> hook records every command that
+ran. The runner reads that log, so a red phase with no test command in it fails no matter what
+the artifact claims.</li>
+
+<li><b>One verification method per requirement.</b> In the workflows that carry a SPEC ledger,
+each numbered requirement declares <code>test:</code>, <code>symbol:</code>, or
+<code>manual</code>. The phase does not complete while an item is unmet, even after the
+reviewers approve.</li>
+
+<li><b>Two independent reviewers.</b> Review phases split the work across two or more sub-agent
+processes. A single <code>request-changes</code> decides the verdict, and the session that wrote
+the code cannot review in place of a failed reviewer.</li>
+
+<li><b>Protected-branch and worktree isolation.</b> Work happens in an isolated git worktree, a
+branch alone is not enough. A hook blocks commits and pushes on protected branches, a tripwire
+reports drift in the leader checkout, and a separate phase asks the user to approve the merge
+directly.</li>
+
+</ul>
+
+<footer>
+<p>MIT License.</p>
+<p><a href="https://github.com/chonamdoo/agent-flow">github.com/chonamdoo/agent-flow</a></p>
+</footer>
+
+</main>
+</body>
+</html>

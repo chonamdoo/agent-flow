@@ -11,13 +11,16 @@ agrees on and trusts together — that is written down in [Open problems](#open-
 
 ```bash
 brew tap chonamdoo/agent-flow https://github.com/chonamdoo/agent-flow
-brew install --HEAD chonamdoo/agent-flow/agent-flow
+brew install chonamdoo/agent-flow/agent-flow
 agent-flow .          # install the workflow into the project in this directory
 ```
 
-`--HEAD` is required while no release is tagged, and the tap takes an explicit URL because this
-repository is not named `homebrew-*`. The rest — a checkout install, upgrades, the daily update
-check — is in [docs/USAGE.md](docs/USAGE.md).
+The tap takes an explicit URL because this repository is not named `homebrew-*`, and installing by
+the fully qualified name is what grants a third-party tap the trust Homebrew 6.0 requires. The
+rest — a checkout install, upgrades, the daily update check — is in
+[docs/USAGE.md](docs/USAGE.md). New here? [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)
+walks through a first run; [docs/TEAM-ADOPTION.md](docs/TEAM-ADOPTION.md) covers what a team can
+express today and what is still missing.
 
 ---
 
