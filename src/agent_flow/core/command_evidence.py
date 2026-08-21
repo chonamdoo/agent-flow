@@ -33,7 +33,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from agent_flow.core.markers import completion_gate_marker_values
+from agent_flow.core.markers import (
+    completion_gate_marker_values,
+    completion_gate_marker_values_exact,
+)
+from agent_flow.core.route_verdicts import route_key
 
 COMMANDS_RUN_LOG = Path(".agent-flow") / "commands-run.jsonl"
 
@@ -47,6 +51,12 @@ COMMANDS_RUN_LOG = Path(".agent-flow") / "commands-run.jsonl"
 TEST_EVIDENCE_PHASES = frozenset({"red", "implement-fix", "implement", "fix-loop"})
 
 TEST_RUN_EVIDENCE_MARKER = "test-run-evidence: verified|unavailable"
+REGRESSION_SEAM_MARKER = "regression-seam: test|feedback-only"
+FEEDBACK_COMMAND_MARKER = "feedback-command:"
+FEEDBACK_RED_EXIT_MARKER = "feedback-red-exit:"
+FEEDBACK_GREEN_EXIT_MARKER = "feedback-green-exit:"
+FEEDBACK_RUN_EVIDENCE_MARKER = "feedback-run-evidence: verified|unavailable"
+
 
 # profile에 test gate가 없을 때의 대비책(`generic`이 그렇다). 넓게 잡아도
 # 잡으려는 것은 "아무 테스트도 안 돌렸다" 하나다.
@@ -340,6 +350,7 @@ def missing_test_evidence_markers(
     text: str,
     *,
     profile: dict | None = None,
+    required_markers: Sequence[str] = (),
     since: float | None = None,
     cwd_root: Path | None = None,
 ) -> list[str]:
@@ -366,8 +377,14 @@ def missing_test_evidence_markers(
     """
     if phase_id not in TEST_EVIDENCE_PHASES:
         return []
-    evidence = read_command_evidence(project_root, since=since, cwd_root=cwd_root)
     values = completion_gate_marker_values(text)
+    if (
+        REGRESSION_SEAM_MARKER in required_markers
+        and FEEDBACK_RUN_EVIDENCE_MARKER in required_markers
+        and values.get("regression-seam") == "feedback-only"
+    ):
+        return []
+    evidence = read_command_evidence(project_root, since=since, cwd_root=cwd_root)
     if not _observation_reaches_checkout(evidence, project_root, cwd_root=cwd_root):
         if values.get("test-run-evidence") not in {"verified", "unavailable"}:
             return [TEST_RUN_EVIDENCE_MARKER]
@@ -392,3 +409,98 @@ def missing_test_evidence_markers(
         )
         return [f"red-observed: <failing exit code> (every observed test command exited 0; {detail})"]
     return []
+
+
+def missing_feedback_evidence_markers(
+    project_root: Path,
+    text: str,
+    *,
+    required_markers: Sequence[str] = (),
+    expected_command: str | None = None,
+    recoverable_statuses: Sequence[str] = (),
+    since: float | None = None,
+    cwd_root: Path | None = None,
+) -> list[str]:
+    required = {marker.strip() for marker in required_markers}
+    if FEEDBACK_RUN_EVIDENCE_MARKER not in required:
+        return []
+    outcome = route_key(text)
+    if outcome in set(recoverable_statuses):
+        return []
+
+    values = completion_gate_marker_values_exact(text)
+    regression_status = values.get("regression-test-status", "").lower()
+    if outcome == "green" and regression_status not in {
+        "",
+        "pass",
+        "feedback-only",
+    }:
+        return ["regression-test-status: pass|feedback-only"]
+    command = values.get("feedback-command", "").strip()
+    if not command:
+        return [FEEDBACK_COMMAND_MARKER]
+    if command.lower() in {"unavailable", "n/a", "none"}:
+        return ["feedback-command: <exact executed command>"]
+    if expected_command is not None and command != expected_command.strip():
+        return [
+            "feedback-command: <exact feedback-loop command> "
+            f"(expected {expected_command.strip()!r})"
+        ]
+
+    red_exit: int | None = None
+    if FEEDBACK_RED_EXIT_MARKER in required:
+        red_exit = _exit_code(values.get("feedback-red-exit"))
+        if red_exit is None or red_exit == 0:
+            return ["feedback-red-exit: <observed non-zero exit code>"]
+
+    green_exit: int | None = None
+    if FEEDBACK_GREEN_EXIT_MARKER in required:
+        green_exit = _exit_code(values.get("feedback-green-exit"))
+        if green_exit != 0:
+            return ["feedback-green-exit: 0"]
+
+    evidence = read_command_evidence(project_root, since=since, cwd_root=cwd_root)
+    reported_evidence = values.get("feedback-run-evidence", "").lower()
+    if not _observation_reaches_checkout(
+        evidence, project_root, cwd_root=cwd_root
+    ):
+        if reported_evidence not in {"verified", "unavailable"}:
+            return [FEEDBACK_RUN_EVIDENCE_MARKER]
+        return []
+    if reported_evidence != "verified":
+        return [
+            "feedback-run-evidence: verified "
+            "(command observation is available for this checkout)"
+        ]
+
+    observed = tuple(
+        run for run in evidence.runs if run.command.strip() == command
+    )
+    if not observed:
+        return [
+            "feedback-run-evidence: verified "
+            f"(feedback command {command!r} was not observed during this phase)"
+        ]
+    observed_codes = {
+        run.exit_code for run in observed if run.exit_code is not None
+    }
+
+    if red_exit is not None and red_exit not in observed_codes:
+        return [
+            "feedback-red-exit: <observed non-zero exit code> "
+            f"(reported {red_exit}, observed {sorted(observed_codes)})"
+        ]
+    if green_exit is not None and green_exit not in observed_codes:
+        return [
+            "feedback-green-exit: 0 "
+            f"(observed exit codes {sorted(observed_codes)})"
+        ]
+
+    return []
+
+
+def _exit_code(value: str | None) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
+        return None

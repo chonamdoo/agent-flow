@@ -156,6 +156,7 @@ Pick by the size of the work. The source of truth is `src/agent_flow/workflows/<
 |---|---|---|
 | `review` | 3 | reading an existing change; no code is written |
 | `bugfix` | 5 | one reproducible bug, with a regression test that failed first |
+| `diagnosing-bugs` | 9 | a hard, intermittent, production-only, or performance bug |
 | `development` | 6 | one concern, where you already know the implementation path |
 | `default` | 15 | a change that goes through PR and merge |
 | `full-feature` | 24 | a feature that starts from requirements, PRD, and DDD modeling |
@@ -165,9 +166,10 @@ Fifteen phases each want an artifact, and a two-line fix does not have fifteen p
 decisions to record. Reach for `bugfix` or `development` and move up only when the change really
 has a PR, a review, and a merge in it.
 
-One thing the small workflows do not give you: `review`, `bugfix`, and `development` have no
-`design` or `prd` phase, so they carry no SPEC ledger. The guarantee that every instruction you
-gave survives a compacted conversation exists only in `default` and `full-feature`.
+One thing the small workflows do not give you: `review`, `bugfix`, `diagnosing-bugs`, and
+`development` have no `design` or `prd` phase, so they carry no SPEC ledger. The guarantee that
+every instruction you gave survives a compacted conversation exists only in `default` and
+`full-feature`.
 
 ## When a phase blocks you
 

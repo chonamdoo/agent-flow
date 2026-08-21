@@ -1,0 +1,215 @@
+id: diagnosing-bugs
+description: Build a tight feedback loop, diagnose a hard defect, fix it, and verify the original symptom.
+phases:
+  - id: feedback-loop
+    role: explorer
+    description: Build one red-capable command for the exact reported symptom.
+    required_markers:
+      - "feedback-command:"
+      - "feedback-red-exit:"
+      - "feedback-run-evidence: verified|unavailable"
+    routes:
+      green: reproduce-minimise
+      blocked: block
+      error: block
+      default: block
+    prompt: |
+      Build a tight pass/fail loop for the user's exact symptom before forming a
+      cause theory. Prefer a failing test, then an HTTP or CLI script, headless
+      browser script, captured replay, throwaway harness, fuzz loop, bisection,
+      differential run, or HITL script. Wrap the reproduction in one executable
+      command when possible. Record the exact executed command text, including
+      its launcher and arguments; later green phases must run that same text.
+      The command must exit non-zero while the bug is present and zero after the
+      fix, be deterministic enough to debug, finish in seconds when practical,
+      and run unattended. Keep credentials in environment variables and redact
+      secrets from artifacts.
+
+      Run the command now and record its observed failing exit code. End with:
+
+          status: green
+
+          ## Completion Gate
+          feedback-command: <exact executed command>
+          feedback-red-exit: <observed non-zero exit code>
+          feedback-run-evidence: verified|unavailable
+
+      If no loop can be built, record every attempt and the exact environment,
+      redacted capture, or instrumentation permission needed, then write
+      `status: blocked`. Do not hypothesize without the loop.
+
+          ## Completion Gate
+          feedback-command: unavailable
+          feedback-red-exit: unavailable
+          feedback-run-evidence: unavailable
+      Output: feedback-loop.md.
+
+  - id: reproduce-minimise
+    role: explorer
+    description: Reproduce the symptom and remove every non-load-bearing condition.
+    prompt: |
+      Run the feedback command until it reproduces the user's exact symptom, not a
+      nearby failure. Minimise input, callers, configuration, data, timing, and
+      steps one at a time, rerunning after each cut. Finish only when removing any
+      remaining condition makes the loop green. Record the original scenario, the
+      minimal scenario, every load-bearing condition, and the red command result.
+      Output: reproduce-minimise.md.
+
+  - id: hypotheses
+    role: explorer
+    description: Rank falsifiable root-cause hypotheses.
+    prompt: |
+      Write 3-5 ranked hypotheses from the minimal reproduction. Each hypothesis
+      must predict one observable result: if it is the cause, changing or probing
+      one named variable will remove, preserve, or worsen the bug. Discard claims
+      with no falsifiable prediction. Show the concise ranked list to the user,
+      but do not pause the run when the user is absent.
+      Output: hypotheses.md.
+
+  - id: instrument
+    role: explorer
+    description: Test one hypothesis and one variable at a time.
+    prompt: |
+      Test the ranked hypotheses one variable at a time. Prefer debugger or REPL
+      inspection, then targeted boundary logs. Tag every temporary log with one
+      unique `[DEBUG-<id>]` prefix. Never log everything. For a performance
+      regression, establish a measured baseline and use a profiler, query plan,
+      or bisection instead of broad logs. Record each probe, prediction, observed
+      result, rejected hypotheses, and the confirmed cause.
+      Output: instrument.md.
+
+  - id: implement-fix
+    role: fixer
+    skills:
+      required: [code-generation-discipline]
+    description: Lock the defect down and apply the smallest cause-level fix.
+    required_markers:
+      - "regression-seam: test|feedback-only"
+      - "regression-test:"
+      - "red-observed:"
+      - "test-run-evidence: verified|unavailable"
+      - "feedback-command:"
+      - "feedback-green-exit:"
+      - "feedback-run-evidence: verified|unavailable"
+    prompt: |
+      Fix only the confirmed cause. When a correct test seam exists, turn the
+      minimal reproduction into a regression test, run it before the fix and
+      observe failure, apply the fix, then observe it pass. When no correct test
+      seam exists, record `regression-seam: feedback-only`, explain why a shallower
+      test would give false confidence, set `regression-test: no-correct-seam`,
+      `red-observed: n/a`, and `test-run-evidence: unavailable`; the feedback
+      command remains the enforced regression harness.
+
+      In both branches, rerun the original feedback command after the fix and
+      observe exit code 0. Use the exact command recorded in feedback-loop.md.
+      End with:
+
+          ## Completion Gate
+          regression-seam: test|feedback-only
+          regression-test: <test id or no-correct-seam>
+          red-observed: <failing test exit code or n/a>
+          test-run-evidence: verified|unavailable
+          feedback-command: <exact feedback-loop command>
+          feedback-green-exit: 0
+          feedback-run-evidence: verified|unavailable
+
+  - id: diagnosis-cleanup
+    artifact: cleanup.md
+
+    role: fixer
+    skills:
+      required: [code-generation-discipline, comment-authoring-discipline]
+    description: Remove temporary diagnosis code before review.
+    required_markers:
+      - "debug-instrumentation: removed|n/a"
+      - "throwaway-artifacts: removed|retained-as-regression|n/a"
+      - "comment-authoring: applied"
+      - "comment-checker: checked|unavailable|n/a"
+    prompt: |
+      Remove every `[DEBUG-<id>]` log and temporary probe. Delete throwaway
+      harnesses other than the enforced feedback harness. Keep the exact
+      feedback command, target path, launcher, and arguments unchanged through
+      QA; retain that harness as regression coverage when it is not a framework
+      test. Keep only comments that explain a real constraint. Run the configured
+      comment checker when available. Record the removed debug prefix, removed
+      artifacts, and the unchanged feedback command location. End with:
+
+          ## Completion Gate
+          debug-instrumentation: removed|n/a
+          throwaway-artifacts: removed|retained-as-regression|n/a
+          comment-authoring: applied
+          comment-checker: checked|unavailable|n/a
+
+      Output: cleanup.md.
+
+  - id: review
+    role: reviewer
+    skills:
+      required: [code-generation-discipline]
+    parallel: true
+    replicas: 3
+    description: Review the diagnosed cause, fix, cleanup, and regression coverage.
+    multi_review: true
+    required_markers:
+      - "must-avoid-check: pass|fail|n/a"
+    routes:
+      approve: qa
+      request-changes: hypotheses
+    prompt: |
+      agent-flow already ran the reviewers as confined subprocesses on the
+      installed Claude/Codex pool. Aggregate the listed per-angle artifacts; do
+      not launch reviewer CLIs yourself. At least two independent reviewer
+      processes must cover the exact reproduced symptom, the confirmed cause,
+      fix scope, regression seam, feedback command, temporary-code cleanup, and
+      unintended behavior changes. Each reviewer section must be headed
+      `## Reviewer <name>`, include `reviewer-source: sub-agent`, and include one
+      independent `verdict: approve` or `verdict: request-changes`. Record
+      `must-avoid-check: pass|fail|n/a` in the Completion Gate. Any request makes
+      the overall verdict request-changes. End with `## Overall` followed by
+      exactly one verdict line.
+      Output: review.md.
+
+  - id: qa
+    role: qa
+    description: Verify the cleaned final state against the original symptom.
+    required_markers:
+      - "feedback-command:"
+      - "feedback-green-exit:"
+      - "feedback-run-evidence: verified|unavailable"
+      - "regression-test-status: pass|feedback-only|failed|blocked"
+    routes:
+      green: handoff
+      request-changes: hypotheses
+      blocked: block
+      error: block
+      default: block
+    prompt: |
+      Run the exact feedback command from feedback-loop.md against the cleaned
+      final state and observe exit code 0. Run the regression test when a correct
+      test seam exists, then run only the active profile gates relevant to the
+      touched stack. Record `status: green` only when the user's original symptom
+      no longer reproduces. Use `status: request-changes` when the result
+      disproves the cause or fix, and `status: blocked` or `status: error` only
+      with the exact external blocker. For any non-green status, still record the
+      exact command when known, the observed exit or `unavailable`, evidence
+      availability, and `regression-test-status: failed|blocked` in the
+      Completion Gate so routing can proceed without claiming green proof.
+
+      End with:
+
+          ## Completion Gate
+          feedback-command: <exact feedback-loop command>
+          feedback-green-exit: 0
+          feedback-run-evidence: verified|unavailable
+          regression-test-status: pass|feedback-only|failed|blocked
+
+      Output: qa.md.
+
+  - id: handoff
+    role: qa
+    description: Summarize the symptom, root cause, fix, and proof.
+    prompt: |
+      Summarize the original symptom, minimal reproduction, confirmed root cause,
+      fix, feedback command result, regression coverage, and residual risk. Keep
+      commands, paths, identifiers, and exact evidence unchanged.
+      Output: handoff.md.

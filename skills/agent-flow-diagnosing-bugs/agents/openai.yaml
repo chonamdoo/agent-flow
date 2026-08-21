@@ -1,0 +1,5 @@
+interface:
+  display_name: "Agent Flow Diagnosing Bugs"
+  short_description: "Run the isolated hard-bug diagnosis workflow"
+policy:
+  allow_implicit_invocation: false

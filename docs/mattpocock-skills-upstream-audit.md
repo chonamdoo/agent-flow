@@ -43,17 +43,16 @@
 정리: pin 이후 upstream 변경 7건 중 우리 기준으로 반영 대상은 **`codebase-design` 1건 + `domain-modeling` 부분 1건**이고,
 `grilling` 2줄은 표기, 나머지 4건은 우리 분기 때문에 이미 무효거나 우리 install에서 틀린 문장이 된다.
 
-## 2. upstream에만 있고 우리가 안 가져온 skill (27개)
+## 2. upstream에만 있고 우리가 안 가져온 skill (26개)
 
 카테고리 루트의 `README.md` 5개(`deprecated`, `engineering`, `in-progress`, `misc`,
 `productivity`)는 skill이 아니라 제외했다. `skills/deprecated/`에는 README 말고 아무것도 없다.
 
-### engineering (11)
+### engineering (10)
 
 | upstream | description 요지 |
 | --- | --- |
 | `ask-matt` | repo 내 skill 라우터 — 상황에 맞는 skill/flow를 고른다 |
-| `diagnosing-bugs` | 어려운 버그·성능 회귀 진단 루프 ("diagnose"/"debug this" trigger). pin 이후 secret redaction 추가 (`efce423`, `bda79a3`) + `scripts/hitl-loop.template.sh` |
 | `implement` | spec 또는 ticket 묶음 기준 구현 |
 | `improve-codebase-architecture` | deepening 기회 스캔 → HTML 리포트 → 고른 것 grilling |
 | `prototype` | 설계 질문 검증용 throwaway prototype |
@@ -105,5 +104,11 @@
 | `skills/code-review/SKILL.md`, `skills/to-prd/SKILL.md` | 해당 없음 | upstream이 고친 줄이 우리 사본에 없음 |
 | `skills/UPSTREAM.md` | 갱신 | pin `8b36d4fb` → `9c9f36cc`, 미기록 분기 2건(`tdd/tests.md`, `grilling` sub-agent 문장) 기록, 위 미채택 근거 기록 |
 
-2절의 upstream 전용 skill 27개는 이번에 가져오지 않았다. 판단 근거가 각기 다르므로 필요할 때
-개별로 다룬다.
+2절의 upstream 전용 skill 26개는 이번 대조에서 가져오지 않았다. 이후 채택한
+`diagnosing-bugs`는 아래에 별도로 기록한다.
+ 
+## 5. 후속 채택
+ 
+| 대상 | 기준 commit | 결정 | 내용 |
+| --- | --- | --- | --- |
+| `engineering/diagnosing-bugs` | `0ab1b63a410a03d3627979a109c8695de27af954` | 구조 적응 채택 | `agent-flow-diagnosing-bugs` lifecycle wrapper와 `diagnosing-bugs` 9-phase workflow로 분리하고, feedback command의 red/green 실행 증거를 workflow marker로 강제 |

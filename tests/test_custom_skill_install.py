@@ -89,6 +89,7 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
     host_skills = {
         "agent-flow",
+        "agent-flow-diagnosing-bugs",
         "app-shell-error-contract",
         "android-appshell-error-handling",
         "comment-authoring-discipline",
@@ -123,6 +124,14 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(
     assert matt_skill_closure <= indexed
     # host 디렉토리 link는 allowlist에 든 공통·AppShell skill로 제한한다.
     assert {link["name"] for link in index["links"]} == host_skills
+    for host_dir in (".Codex", ".claude", ".omp"):
+        assert (
+            project
+            / host_dir
+            / "skills"
+            / "agent-flow-diagnosing-bugs"
+            / "SKILL.md"
+        ).exists()
     assert (project / ".agent-flow" / "skills" / "domain-modeling" / "SKILL.md").exists()
     assert (project / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md").exists()
     for host_dir in (".Codex", ".claude"):

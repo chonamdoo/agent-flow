@@ -164,6 +164,7 @@ const AF_DIR = path.join(PROJECT, ".agent-flow");
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
 const BUNDLED_HOST_SKILL_NAMES = new Set([
   "agent-flow",
+  "agent-flow-diagnosing-bugs",
   "app-shell-error-contract",
   "android-appshell-error-handling",
   "comment-authoring-discipline",

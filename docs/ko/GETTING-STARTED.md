@@ -156,6 +156,7 @@ agent-flow abort --root /path/to/project --worktree fix-login-timeout --yes
 |---|---|---|
 | `review` | 3 | 기존 변경을 읽기만 한다. 코드는 쓰지 않는다 |
 | `bugfix` | 5 | 재현되는 버그 하나. 먼저 실패한 회귀 테스트를 동반한다 |
+| `diagnosing-bugs` | 9 | 원인이 불분명하거나 간헐적이거나 성능이 떨어진 어려운 버그 하나 |
 | `development` | 6 | 관심사 하나. 구현 경로를 이미 알고 있다 |
 | `default` | 15 | PR과 merge까지 가는 변경 |
 | `full-feature` | 24 | 요구사항, PRD, DDD 모델링에서 시작하는 기능 |
@@ -164,9 +165,9 @@ agent-flow abort --root /path/to/project --worktree fix-login-timeout --yes
 phase가 각각 artifact를 요구하는데, 두 줄 수정에는 15개 phase 몫의 결정이 없다. `bugfix`나
 `development`를 먼저 잡고, 변경 안에 PR과 review와 merge가 실제로 들어 있을 때만 올린다.
 
-작은 workflow가 주지 않는 것이 하나 있다. `review`, `bugfix`, `development`에는 `design`이나
-`prd` phase가 없어서 SPEC ledger가 없다. 사용자가 준 지시가 압축된 대화를 넘어 살아남는다는
-보장은 `default`와 `full-feature`에만 있다.
+작은 workflow가 주지 않는 것이 하나 있다. `review`, `bugfix`, `diagnosing-bugs`,
+`development`에는 `design`이나 `prd` phase가 없어서 SPEC ledger가 없다. 사용자가 준 지시가
+압축된 대화를 넘어 살아남는다는 보장은 `default`와 `full-feature`에만 있다.
 
 ## phase가 막았을 때
 

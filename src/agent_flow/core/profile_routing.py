@@ -48,6 +48,7 @@ IMPLEMENTATION_PHASES = frozenset(
         "red",
         "green",
         "refactor",
+        "diagnosis-cleanup",
         "fix-loop",
         "pr-comment-fix",
         "pr-ci-fix",

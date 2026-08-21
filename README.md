@@ -108,7 +108,7 @@ This ledger is the only carrier that survives a compacted conversation, so an in
 value missing here never reaches implementation. The runner re-verifies the ledger in the
 `final-review` and `multi-review` phases, and **the phase does not complete while any item is
 unmet, even if the reviewers approve.** The smaller workflows with no ledger (`review`,
-`bugfix`, `development`) do not carry this guarantee.
+`bugfix`, `diagnosing-bugs`, `development`) do not carry this guarantee.
 
 ### Keep the session that wrote the code from reviewing it
 
@@ -169,6 +169,7 @@ and `DDD` means domain-driven design.
 |---|---|---|
 | `review` | a review with no code change | 3 |
 | `bugfix` | one reproducible bug | 5 |
+| `diagnosing-bugs` | one hard, intermittent, or performance bug | 9 |
 | `development` | one concern | 6 |
 | `default` | through PR and merge | 15 |
 | `full-feature` | from PRD and DDD | 24 |
@@ -211,14 +212,14 @@ and after the fix, the comment pass and the reviews run again before verificatio
 
 ## Skills and profiles
 
-52 skills ship with the kit, and only the ones the changed files and the active profile call
+53 skills ship with the kit, and only the ones the changed files and the active profile call
 for are loaded. Reading all of them costs more context than the work can carry.
 
 They fall into architecture (`clean-architecture-core`, `ddd-architecture`,
 `domain-modeling`), platform (Android, iOS, React, React Native, Flutter, Python), development
 discipline (`tdd`, `code-generation-discipline`, `comment-authoring-discipline`), review
 (`code-review`, `architecture-reviewer`, `plan-reviewer`), requirement refinement (`grilling`,
-`to-prd`, `product-brief`), and operations (`agent-flow`, `push-watch`).
+`to-prd`, `product-brief`), and operations (`agent-flow`, `agent-flow-diagnosing-bugs`, `push-watch`).
 
 10 profiles — `android` `flutter` `generic` `ios` `nextjs` `node` `python` `react-native` `spring` `typescript`
 

@@ -45,6 +45,15 @@ def completion_gate_marker_values(text: str) -> dict[str, str]:
     return values
 
 
+def completion_gate_marker_values_exact(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in _completion_gate_lines(text, lowercase=False):
+        key, separator, value = line.partition(":")
+        if separator == ":":
+            values[key.strip().lower()] = value.strip()
+    return values
+
+
 def _marker_present(text: str, gate_lines: list[str], marker: str) -> bool:
     if marker.startswith("#"):
         return _heading_present(text, marker)
@@ -160,7 +169,7 @@ def _heading_present(text: str, marker: str) -> bool:
     return False
 
 
-def _completion_gate_lines(text: str) -> list[str]:
+def _completion_gate_lines(text: str, *, lowercase: bool = True) -> list[str]:
     in_gate = False
     gate_level = 0
     out: list[str] = []
@@ -182,7 +191,8 @@ def _completion_gate_lines(text: str) -> list[str]:
             if in_gate:
                 continue
         if in_gate:
-            out.append(_normalize_marker_line(stripped).lower())
+            normalized = _normalize_marker_line(stripped)
+            out.append(normalized.lower() if lowercase else normalized)
     return out
 
 

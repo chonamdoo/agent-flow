@@ -47,7 +47,10 @@ from agent_flow.artifact import (
     write_meta,
 )
 from agent_flow.cli_detect import CliInfo, REVIEW_CLI_NAMES, detect_available_clis
-from agent_flow.core.command_evidence import missing_test_evidence_markers
+from agent_flow.core.command_evidence import (
+    missing_feedback_evidence_markers,
+    missing_test_evidence_markers,
+)
 from agent_flow.core.context_contract import run_relative_path
 from agent_flow.core.observation import (
     PHASE_ENTERED as OBS_PHASE_ENTERED,
@@ -123,7 +126,11 @@ from agent_flow.core.phase_workflow import (
     load_phase_workflow_definition,
 )
 from agent_flow.core.report import write_run_report
-from agent_flow.core.markers import has_failure_markers, missing_markers
+from agent_flow.core.markers import (
+    completion_gate_marker_values_exact,
+    has_failure_markers,
+    missing_markers,
+)
 from agent_flow.core.local_skills import (
     changed_files,
     declared_concern_ids,
@@ -1552,6 +1559,46 @@ class Runner:
         write_meta(self.run_dir, meta)
         return added
 
+    def _expected_feedback_command(self, phase: Phase) -> str | None:
+        if not any(
+            marker.strip() == "feedback-green-exit:"
+            for marker in phase.required_markers
+        ):
+            return None
+        expected: str | None = None
+        for candidate in self.phases:
+            if candidate.id == phase.id:
+                break
+            if not any(
+                marker.strip() == "feedback-red-exit:"
+                for marker in candidate.required_markers
+            ):
+                continue
+            artifact = self._existing_artifact_path(candidate)
+            if not artifact.exists():
+                continue
+            command = completion_gate_marker_values_exact(
+                artifact.read_text(encoding="utf-8")
+            ).get("feedback-command")
+            if command:
+                expected = command
+        return expected
+
+    def _feedback_recoverable_statuses(self, phase: Phase) -> tuple[str, ...]:
+        """성공 증거를 생략할 수 있는 것은 차단 또는 역방향 route뿐이다."""
+        if not phase.routes:
+            return ()
+        indexes = {candidate.id: index for index, candidate in enumerate(self.phases)}
+        current = indexes[phase.id]
+        recoverable: list[str] = []
+        for status in ("request-changes", "blocked", "error"):
+            target = phase.routes.get(status)
+            if target == "block" or (
+                target is not None and indexes.get(target, current + 1) <= current
+            ):
+                recoverable.append(status)
+        return tuple(recoverable)
+
     def _missing_required_markers(self, phase: Phase) -> list[str]:
         assert self.run_dir is not None
         artifact = self._existing_artifact_path(phase)
@@ -1581,9 +1628,21 @@ class Runner:
                 phase.id,
                 text,
                 profile=self.profile,
+                required_markers=phase.required_markers,
                 since=_meta_timestamp(meta.get("phase_entered_at")),
                 # 관측 로그는 저장소 전체가 공유한다. cwd를 좁히지 않으면 형제
                 # worktree에서 돈 테스트가 이 run의 증거로 잡힌다.
+                cwd_root=self.project_root,
+            )
+        )
+        missing.extend(
+            missing_feedback_evidence_markers(
+                self.config_root,
+                text,
+                required_markers=phase.required_markers,
+                expected_command=self._expected_feedback_command(phase),
+                recoverable_statuses=self._feedback_recoverable_statuses(phase),
+                since=_meta_timestamp(meta.get("phase_entered_at")),
                 cwd_root=self.project_root,
             )
         )

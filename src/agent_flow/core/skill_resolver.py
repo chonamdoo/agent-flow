@@ -53,6 +53,7 @@ CODE_PHASES = (
     "red",
     "green",
     "refactor",
+    "diagnosis-cleanup",
     "fix-loop",
     "final-review",
     "review",

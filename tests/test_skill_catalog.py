@@ -429,11 +429,15 @@ def test_every_code_phase_declares_the_invariant_core():
     phase 목록은 `CODE_PHASES`에서 가져온다. 여기에 리터럴 이름을 적으면 새 code
     phase가 생겼을 때 이 가드가 그것을 못 본다.
     """
-    from agent_flow.core.phase_workflow import load_phase_workflow_definition
+    from agent_flow.core.phase_workflow import (
+        load_phase_workflow_definition,
+        workflow_names,
+    )
 
     missing: dict[str, list[str]] = {}
-    for workflow in ("default", "full-feature", "development", "bugfix", "review"):
-        for phase in load_phase_workflow_definition(REPO, workflow).phases:
+    workflow_root = REPO / "src" / "agent_flow"
+    for workflow in workflow_names(workflow_root):
+        for phase in load_phase_workflow_definition(workflow_root, workflow).phases:
             if phase.id not in CODE_PHASES:
                 continue
             declared = phase.skills.required if phase.skills else ()
