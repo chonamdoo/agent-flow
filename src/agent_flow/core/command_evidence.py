@@ -378,9 +378,10 @@ def missing_test_evidence_markers(
     if phase_id not in TEST_EVIDENCE_PHASES:
         return []
     values = completion_gate_marker_values(text)
+    required = {marker.strip() for marker in required_markers}
     if (
-        REGRESSION_SEAM_MARKER in required_markers
-        and FEEDBACK_RUN_EVIDENCE_MARKER in required_markers
+        REGRESSION_SEAM_MARKER in required
+        and FEEDBACK_RUN_EVIDENCE_MARKER in required
         and values.get("regression-seam") == "feedback-only"
     ):
         return []
@@ -461,9 +462,7 @@ def missing_feedback_evidence_markers(
 
     evidence = read_command_evidence(project_root, since=since, cwd_root=cwd_root)
     reported_evidence = values.get("feedback-run-evidence", "").lower()
-    if not _observation_reaches_checkout(
-        evidence, project_root, cwd_root=cwd_root
-    ):
+    if not evidence.available or not evidence.runs:
         if reported_evidence not in {"verified", "unavailable"}:
             return [FEEDBACK_RUN_EVIDENCE_MARKER]
         return []
@@ -484,6 +483,8 @@ def missing_feedback_evidence_markers(
     observed_codes = {
         run.exit_code for run in observed if run.exit_code is not None
     }
+    if not observed_codes:
+        return []
 
     if red_exit is not None and red_exit not in observed_codes:
         return [

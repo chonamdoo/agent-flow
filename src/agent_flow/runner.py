@@ -1578,7 +1578,7 @@ class Runner:
             if not artifact.exists():
                 continue
             command = completion_gate_marker_values_exact(
-                artifact.read_text(encoding="utf-8")
+                artifact.read_text(encoding="utf-8", errors="replace")
             ).get("feedback-command")
             if command:
                 expected = command

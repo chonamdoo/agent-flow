@@ -35,7 +35,7 @@ def _project(tmp_path: Path) -> Path:
 def _observe(
     root: Path,
     command: str,
-    exit_code: int,
+    exit_code: int | None,
     *,
     at: float | None = None,
     cwd: Path | None = None,
@@ -117,6 +117,27 @@ def test_feedback_red_requires_the_reported_observed_failure(tmp_path: Path) -> 
         root, wrong, required_markers=required, cwd_root=root
     )
     assert any("reported 1" in marker for marker in missing)
+
+
+def test_feedback_observation_without_exit_code_uses_reported_exit(
+    tmp_path: Path,
+) -> None:
+    root = _project(tmp_path)
+    _observe(root, "scripts/reproduce-session-loss.sh", None)
+    gate = _feedback_gate(
+        command="scripts/reproduce-session-loss.sh",
+        exit_marker="feedback-red-exit: 1",
+    )
+
+    assert missing_feedback_evidence_markers(
+        root,
+        gate,
+        required_markers=(
+            FEEDBACK_RED_EXIT_MARKER,
+            FEEDBACK_RUN_EVIDENCE_MARKER,
+        ),
+        cwd_root=root,
+    ) == []
 
 
 def test_feedback_command_match_is_exact_and_case_sensitive(tmp_path: Path) -> None:
@@ -217,6 +238,29 @@ def test_feedback_self_report_only_degrades_when_checkout_is_unobserved(
     assert any(marker.startswith("feedback-run-evidence: verified") for marker in missing)
 
 
+def test_historical_observation_does_not_trap_unobserved_phase(
+    tmp_path: Path,
+) -> None:
+    root = _project(tmp_path)
+    _observe(root, "git status", 0, at=100.0)
+    unavailable = _feedback_gate(
+        command="scripts/reproduce.sh",
+        exit_marker="feedback-red-exit: 1",
+        evidence="unavailable",
+    )
+
+    assert missing_feedback_evidence_markers(
+        root,
+        unavailable,
+        required_markers=(
+            FEEDBACK_RED_EXIT_MARKER,
+            FEEDBACK_RUN_EVIDENCE_MARKER,
+        ),
+        since=200.0,
+        cwd_root=root,
+    ) == []
+
+
 def test_feedback_only_seam_bypasses_test_gate_only_with_feedback_enforcement(
     tmp_path: Path,
 ) -> None:
@@ -227,7 +271,10 @@ def test_feedback_only_seam_bypasses_test_gate_only_with_feedback_enforcement(
         "regression-seam: feedback-only\n"
         "test-run-evidence: unavailable\n"
     )
-    required = (REGRESSION_SEAM_MARKER, FEEDBACK_RUN_EVIDENCE_MARKER)
+    required = (
+        f" {REGRESSION_SEAM_MARKER} ",
+        f"{FEEDBACK_RUN_EVIDENCE_MARKER} ",
+    )
     assert missing_test_evidence_markers(
         root,
         "implement-fix",
@@ -402,6 +449,12 @@ def test_runner_derives_green_command_from_prior_red_marker(tmp_path: Path) -> N
         runner._expected_feedback_command(green)
         == "scripts/reproduce-session-loss.sh"
     )
+    (tmp_path / "custom-red.md").write_bytes(
+        b"## Completion Gate\n"
+        b"feedback-command: scripts/Repro-\xff.sh\n"
+        b"feedback-red-exit: 1\n"
+    )
+    assert runner._expected_feedback_command(green) == "scripts/Repro-\ufffd.sh"
 
 
 def test_runner_exempts_only_blocking_or_backward_feedback_routes() -> None:
