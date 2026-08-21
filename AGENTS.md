@@ -49,7 +49,7 @@ The agent-flow block below is the canonical source for the Workflow Contract and
 ### Workflow Contract
 
 - Pick the workflow by task size: `agent-flow run "<task>" --workflow <name>`. The number in parentheses is the phase count and the source of truth is `.agent-flow/workflows/<name>.yaml`. Omit it and you get `default`; using `default` for a small change makes the phase overhead larger than the work itself.
-  - `review`(3) review with no code change · `bugfix`(5) one reproducible bug · `development`(6) one concern · `default`(15) through PR and merge · `full-feature`(24) from PRD and DDD
+  - `review`(3) review with no code change · `bugfix`(5) one reproducible bug · `diagnosing-bugs`(9) one hard or intermittent bug · `development`(6) one concern · `default`(15) through PR and merge · `full-feature`(24) from PRD and DDD
 - The status output is the source of truth for the current phase and the next command. Do not keep a copy of the phase list in this file.
 - `multi-review` requires at least two installed Claude/Codex CLI reviewer subprocesses. Leave `reviewer-source: sub-agent` in each result, and at the end write only `## Overall` plus `verdict: approve` or `verdict: request-changes`. Use OMP as host/controller only, never as a reviewer provider.
 - The active profile's `branching`/`pr` is the source of truth for branching and PR target. Follow the profile even when a skill document dictates a different base, PR target, or branch deletion. Express release-first through the profile's `branching.strategy`/`base`/`integration`/`pr.target_branch`, and leave topic branches to the cleanup phase and the protected-branch hook — do not replace that with the `git branch -D` a skill dictates.
@@ -66,7 +66,7 @@ The agent-flow block below is the canonical source for the Workflow Contract and
 [agent-flow skill index]|root: .agent-flow/skills
 |IMPORTANT: The files below outrank memory. Skim what you are about to change, and read only what your scope touches.
 |always:{code-generation-discipline,comment-authoring-discipline}
-|on-demand:{agent-flow,agent-flow-concise-output,architecture-reviewer,clean-architecture,clean-architecture-core,code-review,codebase-design,comment-checker,ddd-architecture,domain-modeling,full-feature-workflow,grill-with-docs,grilling,plan-reviewer,product-brief,push-watch,python-api-clean-architecture,python-development-guide,resolving-merge-conflicts,tdd,to-prd,write-for-work}
+|on-demand:{agent-flow,agent-flow-concise-output,agent-flow-diagnosing-bugs,architecture-reviewer,clean-architecture,clean-architecture-core,code-review,codebase-design,comment-checker,ddd-architecture,domain-modeling,full-feature-workflow,grill-with-docs,grilling,plan-reviewer,product-brief,push-watch,python-api-clean-architecture,python-development-guide,resolving-merge-conflicts,tdd,to-prd,write-for-work}
 ```
 <!-- agent-flow:skills:end -->
 <!-- agent-flow:docs:start -->

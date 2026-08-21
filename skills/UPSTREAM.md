@@ -7,6 +7,7 @@
 
 - upstream: `https://github.com/mattpocock/skills`
 - pinned commit: `9c9f36ccd3995266cd675468af71639c8dde1ec5` (2026-08-17)
+- `diagnosing-bugs` adoption source: `0ab1b63a410a03d3627979a109c8695de27af954` (2026-08-20)
 
 pin을 올릴 때는 채택한 것과 미채택한 것을 아래 표/목록에 같이 적는다. pin만 올리면 다음
 동기화가 "이미 본 변경"과 "안 본 변경"을 구별하지 못한다. 대조 근거는
@@ -20,6 +21,7 @@ upstream은 `skills/engineering|productivity/<name>/`로 묶고, 우리는 `skil
 | 우리 | upstream | 상태 |
 | --- | --- | --- |
 | `codebase-design` | `engineering/codebase-design` | 바이트 동일 |
+| `agent-flow-diagnosing-bugs` + `workflows/diagnosing-bugs.yaml` | `engineering/diagnosing-bugs` | lifecycle wrapper + 9-phase workflow + marker-driven command evidence |
 | `domain-modeling` | `engineering/domain-modeling` | description 병합 (아래) |
 | `tdd` | `engineering/tdd` | 우리 `requires` + `tests.md` 예제 재작성 + `Skill` tool 표현 미채택 (아래) |
 | `grill-with-docs` | `engineering/grill-with-docs` | 우리 `requires` + `Skill` tool 표현 미채택 (아래) |
@@ -68,17 +70,14 @@ upstream은 `skills/engineering|productivity/<name>/`로 묶고, 우리는 `skil
 ## `agents/openai.yaml`
 
 upstream은 skill마다 이 파일을 둔다(Codex picker의 `interface.display_name`/`short_description`,
-user-invoked면 `policy.allow_implicit_invocation: false`). **가져오지 않는다.**
+user-invoked면 `policy.allow_implicit_invocation: false`). Host picker에 올라가지 않는 기존
+vendored content skill에는 가져오지 않는다.
 
-bundled skill 중 host skill 디렉터리(`.claude/skills`, `.Codex/skills`, `.omp/skills`)로 링크되는
-것은 `BUNDLED_HOST_SKILL_NAMES` allowlist에 있는 것뿐이고(`bin/agent-flow-kit.mjs`, parity가
-두 installer와 대조한다), 나머지는 `.agent-flow/skills/`에만 두고 AGENTS.md 인덱스와 phase
-프롬프트로 노출한다. 여기 있는 vendored skill은 전부 allowlist 밖이라 host의 skill picker에
-올라가지 않는다 — 그래서 Codex의 `policy`도, Claude만 읽는 `disable-model-invocation`도 지금은
-소비자가 없다. 소비자 없는 metadata를 skill마다 늘리면 `SKILL.md` frontmatter와 두 번째 진실
-원천이 갈라질 뿐이다.
+`agent-flow-diagnosing-bugs`는 예외다. 이 skill은 `BUNDLED_HOST_SKILL_NAMES` allowlist에 있는
+user-invoked lifecycle wrapper라 `.claude/skills`, `.Codex/skills`, `.omp/skills`에 링크된다.
+Claude의 `disable-model-invocation: true`와 Codex의
+`policy.allow_implicit_invocation: false`를 함께 둬 host마다 호출 정책이 갈리지 않게 한다.
 
-되돌아볼 조건: vendored skill을 `BUNDLED_HOST_SKILL_NAMES`에 올리는 날. 그때는 user-invoked
-skill(`disable-model-invocation: true`인 `grill-with-docs`, `to-prd`)에 `agents/openai.yaml`의
-`policy.allow_implicit_invocation: false`를 **쌍으로** 넣어야 한다. 한쪽만 있으면 같은 skill이
-Claude에서는 사람만, Codex에서는 모델도 부를 수 있는 상태가 된다.
+나머지 bundled skill은 `.agent-flow/skills/`에만 두고 AGENTS.md 인덱스와 phase prompt로
+노출한다. 소비자가 없는 `agents/openai.yaml`을 늘리면 `SKILL.md` frontmatter와 두 번째
+진실 원천이 갈라질 뿐이다.

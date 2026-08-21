@@ -61,6 +61,7 @@ const INSTALL_ROOT = resolveInstalledRoot(process.cwd()) ?? SOURCE_ROOT;
 // 동일해야 한다. allowlist 밖 bundled skill은 host link 없이 index에만 노출된다.
 const BUNDLED_HOST_SKILL_NAMES = new Set([
   "agent-flow",
+  "agent-flow-diagnosing-bugs",
   "app-shell-error-contract",
   "android-appshell-error-handling",
   "comment-authoring-discipline",
