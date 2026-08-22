@@ -646,6 +646,62 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(evidence.validation, "invalid")
 
+    def test_review_evidence_boolean_schema_version_fails_closed(self) -> None:
+        """반증: `bool`은 `int`의 하위형이고 `True == 1`이라, 동등비교만으로는
+        JSON `true`가 `Literal[1]` 스키마를 통과한다."""
+        from agent_flow.core.review_evidence import load_review_evidence
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "final-review-review-results.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": True,
+                        "phase_id": "final-review",
+                        "outcomes": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            evidence = load_review_evidence(
+                artifact_root=root,
+                phase_id="final-review",
+                run_meta={},
+            )
+
+        self.assertEqual(evidence.validation, "invalid")
+        self.assertEqual(
+            evidence.detail,
+            "review results schema does not match",
+        )
+
+    def test_review_evidence_record_shape_rejects_boolean_schema_version(
+        self,
+    ) -> None:
+        """같은 결함이 meta 바인딩 쪽 TypeGuard에도 있었다. 여기서 통과하면
+        타입 검사기에는 `Literal[1]`이라고 보증한 값이 `True`가 된다."""
+        from agent_flow.core.review_evidence import (
+            _review_evidence_record_shape,
+        )
+
+        record = {
+            "schema_version": 1,
+            "nonce": "c" * 32,
+            "results_sha256": "d" * 64,
+            "phase_entered_at": "2026-08-21T00:00:00+00:00",
+            "observed_job_ids": ["claude-generalist"],
+            "blocking_job_ids": ["claude-generalist"],
+            "accept_any_provider": False,
+            "expected_job_ids_by_provider": {"claude": ["claude-generalist"]},
+            "complete_providers": ["claude"],
+        }
+
+        self.assertTrue(_review_evidence_record_shape(record))
+        self.assertFalse(
+            _review_evidence_record_shape({**record, "schema_version": True})
+        )
+
     def test_review_evidence_recursive_json_fails_closed(self) -> None:
         from agent_flow.core.review_evidence import load_review_evidence
 

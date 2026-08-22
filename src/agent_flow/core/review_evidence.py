@@ -257,7 +257,7 @@ def load_review_evidence(
         return ReviewEvidence("invalid", detail="review results JSON is too deeply nested")
     if (
         not isinstance(payload, dict)
-        or payload.get("schema_version") != 1
+        or not _is_schema_version_1(payload.get("schema_version"))
         or payload.get("phase_id") != phase_id
         or not isinstance(payload.get("outcomes"), list)
     ):
@@ -597,6 +597,13 @@ def _review_artifact_matches(root: Path, outcome: ReviewerOutcome) -> bool:
     )
 
 
+def _is_schema_version_1(value: object) -> bool:
+    # `bool`은 `int`의 하위형이고 `True == 1`이라, 동등비교만으로는 JSON `true`가
+    # `Literal[1]` 스키마를 통과한다. 이 값은 "리뷰어가 실제로 돌았는가"를 판정하는
+    # 신뢰 경계의 첫 관문이므로 정수 1만 인정한다.
+    return isinstance(value, int) and not isinstance(value, bool) and value == 1
+
+
 def _review_evidence_record_shape(
     value: object,
 ) -> TypeGuard[ReviewEvidenceRecord]:
@@ -612,7 +619,7 @@ def _review_evidence_record_shape(
     phase_entered_at = value.get("phase_entered_at")
     schema_version = value.get("schema_version")
     return (
-        schema_version == 1
+        _is_schema_version_1(schema_version)
         and isinstance(nonce, str)
         and re.fullmatch(r"[0-9a-f]{32}", nonce) is not None
         and isinstance(results_sha256, str)
