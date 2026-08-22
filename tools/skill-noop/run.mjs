@@ -141,12 +141,17 @@ function runOne(kase, job) {
     const t0 = Date.now();
     let settled = false;
     let child;
-    const finish = (extra) => {
+    const finish = ({ stderrRaw, ...extra }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       const row = { ...job, seconds: Math.round((Date.now() - t0) / 1000), ...extra };
       row.ok = row.code === 0 && row.verdict != null;
+      // stderr carries no signal on a good run — codex echoes the entire prompt there, which was
+      // 43% of the committed evidence. On a failed run it is the only clue, so keep it there,
+      // head and tail, because the echo pushes a startup or auth error out of a tail-only window.
+      if (!row.ok && stderrRaw)
+        row.stderr = stderrRaw.length > 1000 ? `${stderrRaw.slice(0, 500)}\n...\n${stderrRaw.slice(-500)}` : stderrRaw;
       resolve(row);
     };
     const timer = setTimeout(() => child?.kill('SIGKILL'), TIMEOUT_MS);
@@ -178,9 +183,7 @@ function runOne(kase, job) {
           .map((l) => l.trim())
           .filter((l) => FINDING_RE.test(l)),
         stdoutBytes: Buffer.byteLength(out),
-        // Head and tail: codex echoes the prompt on stderr, which pushes a startup or auth error
-        // out of a tail-only window.
-        stderr: err.length > 1000 ? `${err.slice(0, 500)}\n...\n${err.slice(-500)}` : err || undefined,
+        stderrRaw: err,
       });
     });
     child.stdin.end(prompt);
