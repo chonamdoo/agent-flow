@@ -436,7 +436,6 @@ def _write_review_input_snapshot(
     )
 
 
-
 @dataclass(frozen=True)
 class _ReviewBaseline:
     rev: str
