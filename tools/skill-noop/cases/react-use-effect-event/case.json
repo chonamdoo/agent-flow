@@ -5,7 +5,7 @@
   "lineIn": "baseline",
   "variant": {
     "deleteLines": [21, 21],
-    "expectRemoved": ["Read non-reactive values inside an Effect through `useEffectEvent`"]
+    "expectRemoved": ["When `useEffectEvent` is available, read non-reactive values inside an Effect"]
   },
   "fixtures": [{ "name": "target", "file": "fixture.diff", "expect": "request-changes" }],
   "patterns": {

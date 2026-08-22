@@ -2,7 +2,7 @@ diff --git a/src/InvoiceList.tsx b/src/InvoiceList.tsx
 new file mode 100644
 --- /dev/null
 +++ b/src/InvoiceList.tsx
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,81 @@
 +'use client';
 +
 +import { useState } from 'react';
@@ -21,14 +21,14 @@ new file mode 100644
 +  const [sortDesc, setSortDesc] = useState(true);
 +
 +  const normalized = query.trim().toLowerCase();
-+  const filtered = invoices
-+    .filter((invoice) => statusFilter === 'all' || invoice.status === statusFilter)
-+    .filter((invoice) => invoice.customerName.toLowerCase().includes(normalized))
-+    .sort((a, b) =>
-+      sortDesc
-+        ? b.dueDate.localeCompare(a.dueDate)
-+        : a.dueDate.localeCompare(b.dueDate),
-+    );
++  const matching = invoices.filter(
++    (invoice) =>
++      (statusFilter === 'all' || invoice.status === statusFilter) &&
++      invoice.customerName.toLowerCase().includes(normalized),
++  );
++  const filtered = [...matching].sort((a, b) =>
++    sortDesc ? b.dueDate.localeCompare(a.dueDate) : a.dueDate.localeCompare(b.dueDate),
++  );
 +
 +  const totalCents = filtered.reduce((sum, invoice) => sum + invoice.amountCents, 0);
 +
