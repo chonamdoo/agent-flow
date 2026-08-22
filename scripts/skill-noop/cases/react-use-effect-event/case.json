@@ -1,0 +1,16 @@
+{
+  "kind": "addition",
+  "subject": "applied line F2: read non-reactive values in an Effect through useEffectEvent. Detection of the stale callback is unchanged either way; what the line changes is the prescribed remedy, so the target is the remedy pattern.",
+  "baseline": "skills/react-development-guide/SKILL.md",
+  "lineIn": "baseline",
+  "variant": {
+    "deleteLines": [21, 21],
+    "expectRemoved": ["Read non-reactive values inside an Effect through `useEffectEvent`"]
+  },
+  "fixtures": [{ "name": "target", "file": "fixture.diff", "expect": "request-changes" }],
+  "patterns": {
+    "stale-callback": "stale closure|낡은 클로저|오래된 클로저|exhaustive-deps|eslint-disable|의존성 (목록|배열|린트)|dependency (list|array)|useEffectEvent",
+    "remedy-useeffectevent": "useEffectEvent"
+  },
+  "target": "remedy-useeffectevent"
+}

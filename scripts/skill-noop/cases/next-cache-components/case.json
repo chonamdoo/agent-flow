@@ -1,0 +1,18 @@
+{
+  "kind": "addition",
+  "subject": "candidate line F5: runtime APIs are not readable inside a `use cache` function",
+  "baseline": "skills/react-development-guide/SKILL.md",
+  "variant": {
+    "insertAfter": 28,
+    "expectAnchor": "Avoid rerender work only when there is a real changed path",
+    "text": [
+      "- In a `use cache` function, take request data as arguments. Runtime APIs such as `cookies()`, `headers()`, and `searchParams` are not readable inside it."
+    ]
+  },
+  "fixtures": [{ "name": "target", "file": "fixture.diff", "expect": "request-changes" }],
+  "patterns": {
+    "use-cache": "use cache|runtime API|런타임 API|cookies\\(\\)|캐시 함수|캐시된 함수",
+    "cache-staleness": "revalidate|stale data|캐시 무효화|오래된 데이터"
+  },
+  "target": "use-cache"
+}
