@@ -498,12 +498,13 @@ phases:
       The runner runs this phase's gates itself and writes the result file. Do
       not run `agent-flow gates` here and do not author the result file: the
       verification result must not be written by the party being verified.
-      Gates come from the active profile at `--phase all`, so build and test
-      gates declared `pre-push` are included. Per-gate limits come from the
-      profile's `gates[].timeout_s`; a gate that needs longer than the default
-      declares it there rather than being recorded as a timeout, which is
+      Gates come from the active profile at `--phase all`. Gates whose
+      `execution` is `local` run here; `execution: ci` gates are recorded as
+      deferred and must pass in the pull-request checks observed by `pr-watch`.
+      Per-gate limits come from `gates[].timeout_s`; a gate that needs longer
+      declares it there rather than being recorded as a timeout, which means
       "verification was cut off", not "the build is broken".
-      `agent-flow gates` stays available for reproducing a failure by hand; its
+      `agent-flow gates` remains available for focused reproduction; its
       output is not what this phase routes on.
       Output: artifacts/gate-results.json.
 
@@ -617,8 +618,8 @@ phases:
       Use agent-flow's built-in PR watcher. Read push-pr.md to find the PR
       number, then run:
 
-          agent-flow pr-watch <number>           # poll until actionable
-          agent-flow pr-watch <number> --once    # single fetch (debugging)
+          agent-flow pr-watch <number> --run-dir <run-dir>
+          agent-flow pr-watch <number> --run-dir <run-dir> --once
 
       The watcher returns a JSON summary with `status` ∈ {green, comments,
       has_comments, ci-failed, ci_failed, pending, merged, skipped, closed,
@@ -633,17 +634,18 @@ phases:
       - **has_comments** → for each comment in `review_comments` /
         `issue_comments`:
           * code change requested → make the change in the worktree, commit,
-            push. Re-run `agent-flow pr-watch <number>` to confirm.
+            push. Re-run `agent-flow pr-watch <number> --run-dir <run-dir>` to confirm.
           * discussion / question → reply in the PR thread without code change.
           * decline (out of scope, conflicting opinion) → reply politely
             explaining why, no code change.
         After the loop, write pr-watch.md with the per-comment resolution.
 
       - **ci_failed** → for each entry in `failed_checks`:
-          * reproduce the failure locally using the project gates
-            (profile.gates).
+          * a deferred CI gate is reachable only when the task permits a local
+            rerun: `agent-flow gates --phase all --execution ci --run-dir <run-dir>`.
+            Otherwise use the CI log as the reproduction evidence.
           * fix in the worktree, commit, push.
-          * re-run `agent-flow pr-watch <number>`.
+          * re-run `agent-flow pr-watch <number> --run-dir <run-dir>`.
         Write pr-watch.md with per-check fix log.
 
       - **closed** (not merged) → ask the user before proceeding;
@@ -672,8 +674,11 @@ phases:
     routes:
       default: pr-watch
     prompt: |
-      Reproduce failing PR checks locally, fix them, commit, push, and summarize
-      failed check names, commands, fixes, and commits. Output: pr-ci-fix.md.
+      Reproduce local gates in the worktree. For deferred CI gates, use
+      `agent-flow gates --phase all --execution ci --run-dir <run-dir>` only
+      when the task permits a local rerun; otherwise use the CI log. Fix,
+      commit, push, and summarize failed check names, commands, fixes, and
+      commits. Output: pr-ci-fix.md.
 
   - id: merge
     skills:

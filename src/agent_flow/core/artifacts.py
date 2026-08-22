@@ -3,11 +3,20 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_flow.core.atomic_io import atomic_write_text
+from agent_flow.core.atomic_io import atomic_write_text, read_bounded_regular_file
 from agent_flow.core.gates import GateResult, gate_results_timed_out, relativize_local_paths
 from agent_flow.core.report import write_run_report
+from agent_flow.core.profiles import (
+    GateExecution,
+    GatePhase,
+    GATE_PHASE_ALL,
+    require_gate_execution,
+    require_gate_phase,
+)
 from agent_flow.core.security import validate_safe_name
 from agent_flow.core.worktree_isolation import AGENT_FLOW_STATE_DIRS, write_run_subpath_text
+
+GATE_RESULTS_MAX_BYTES = 32 * 1024 * 1024
 
 
 def init_project(root: Path) -> None:
@@ -22,8 +31,12 @@ def write_gate_results(
     run_dir: Path,
     results: list[GateResult],
     cwd: Path | None = None,
-    phase: str = "",
+    phase: GatePhase,
+    execution: GateExecution = "local",
+    deferred_ci_checks: tuple[str, ...] = (),
 ) -> Path:
+    execution = require_gate_execution(execution)
+    phase = require_gate_phase(phase)
     # timeout은 "optional 실패"가 아니라 "판정 불가"다. required만 세면 검증이
     # 끊긴 실행이 green으로 기록되고, 그 상태를 읽는 shell/CI가 성공으로 본다.
     timed_out = gate_results_timed_out(results)
@@ -38,6 +51,8 @@ def write_gate_results(
         "passed": passed,
         "status": "error" if timed_out else "green" if passed else "request-changes",
         "results": serialized_results,
+        "execution": execution,
+        "deferred_ci_checks": list(deferred_ci_checks),
     }
     # 출처 표식. runner는 이 값이 run meta의 nonce와 같을 때만 green으로 라우팅한다.
     # `gates` phase는 runner가 직접 돌리고 이 함수도 runner가 부르므로(`runner.py`의
@@ -55,15 +70,65 @@ def write_gate_results(
             "tool": "agent-flow gates",
             "nonce": nonce,
             "gate_phase": phase,
+            "gate_execution": execution,
         }
-    path = run_dir / "artifacts" / "gate-results.json"
-    write_run_subpath_text(run_dir, path, f"{json.dumps(payload, indent=2, sort_keys=True)}\n")
-    legacy_path = run_dir / "gate-results.json"
-    write_run_subpath_text(
-        run_dir, legacy_path, f"{json.dumps(serialized_results, indent=2, sort_keys=True)}\n"
+    canonical = execution == "local" and phase == GATE_PHASE_ALL
+    filename = (
+        "gate-results.json"
+        if canonical
+        else f"gate-results-{execution}-{phase}.json"
     )
+    path = run_dir / "artifacts" / filename
+    write_run_subpath_text(
+        run_dir,
+        path,
+        f"{json.dumps(payload, indent=2, sort_keys=True)}\n",
+    )
+    if canonical:
+        legacy_path = run_dir / "gate-results.json"
+        write_run_subpath_text(
+            run_dir,
+            legacy_path,
+            f"{json.dumps(serialized_results, indent=2, sort_keys=True)}\n",
+        )
     write_run_report(run_dir)
     return path
+
+
+def canonical_gate_results_path(run_dir: Path) -> Path:
+    return run_dir / "artifacts" / "gate-results.json"
+
+
+def read_deferred_ci_checks(run_dir: Path) -> tuple[str, ...]:
+    path = canonical_gate_results_path(run_dir)
+    raw, _size = read_bounded_regular_file(
+        path,
+        max_bytes=GATE_RESULTS_MAX_BYTES,
+    )
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"gate results are not an object: {path}")
+    if "deferred_ci_checks" not in payload:
+        # Before CI-deferred gates existed, every declared gate ran locally.
+        return ()
+    produced_by = payload.get("produced_by")
+    if (
+        not isinstance(produced_by, dict)
+        or produced_by.get("gate_phase") != GATE_PHASE_ALL
+        or produced_by.get("gate_execution") != "local"
+    ):
+        raise ValueError(
+            f"gate results do not contain the local all-phase ledger: {path}"
+        )
+    deferred = payload["deferred_ci_checks"]
+    if not isinstance(deferred, list) or not all(
+        isinstance(check_name, str) and check_name
+        for check_name in deferred
+    ):
+        raise ValueError(
+            f"gate results have invalid deferred_ci_checks: {path}"
+        )
+    return tuple(deferred)
 
 
 def _checkout_root(run_dir: Path) -> Path:

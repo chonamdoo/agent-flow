@@ -798,7 +798,7 @@ def write_run_artifact_text(
     )
     temporary = Path(raw_temporary)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             fd = -1
             handle.write(content)
             handle.flush()

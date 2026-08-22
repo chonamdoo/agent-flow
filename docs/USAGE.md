@@ -175,6 +175,11 @@ The ceiling for a single gate comes from the profile's `gates[].timeout_s`. With
 it is 600 seconds. A timeout is recorded as undecidable rather than as a failure, so gates that
 take minutes — gradle, xcodebuild — should declare a higher ceiling in the profile.
 
+An `execution: ci` gate is omitted from the local wave and must declare `ci_check`. That value
+must match the pull-request check name exactly after case folding and whitespace trimming. If a
+matrix adds a suffix such as `pytest (3.12)`, declare that full name. A local gate must not declare
+`ci_check`.
+
 The forms below are for reproducing a failure by hand. Their output is not the routing basis for
 a run.
 
@@ -186,8 +191,9 @@ agent-flow gates --phase all
 agent-flow gates
 ```
 
-The second form is a local check that runs only the default `pre-commit`. Passing `--timeout`
-takes precedence over the profile declaration.
+The second form is a local check that runs only the default `pre-commit`. It writes
+`artifacts/gate-results-local-pre-commit.json` and leaves the canonical all-phase ledger
+unchanged. Passing `--timeout` takes precedence over the profile declaration.
 
 ### Skills
 
@@ -201,10 +207,11 @@ agent-flow skills sync
 ### PR watching
 
 ```bash
-agent-flow pr-watch <number>
+agent-flow pr-watch <number> --run-dir <run-dir>
 ```
 
-It polls until the state needs action. Add `--once` to query a single time.
+It polls until the state needs action. Add `--once` to query a single time. Outside a workflow run,
+pass `--allow-unbound` explicitly to watch without deferred CI gate evidence.
 
 It calls the `gh` CLI directly and inherits the authentication the user already has. agent-flow
 does not manage a token of its own. If `gh` is missing or unauthenticated, it says exactly that.

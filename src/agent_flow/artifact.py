@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import shutil
 import sys
@@ -40,6 +41,17 @@ from agent_flow.core.markers import missing_markers, normalize_required_markers
 from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
 from agent_flow.core.security import validate_safe_name
 from agent_flow.core.skill_resolver import PhaseSkills
+from agent_flow.core.review_evidence import (
+    review_route_needs_regeneration,
+    ReviewEvidenceBindingError,
+    ReviewEvidenceRecord,
+    review_route_evidence,
+)
+from agent_flow.core.workflow_status import (
+    print_structured_status,
+    status_value,
+    workflow_status_payload,
+)
 from agent_flow.core.worktree_isolation import (
     FileLeaseUnavailable,
     exclusive_file_lease,
@@ -51,6 +63,21 @@ RUNS_DIRNAME = ".agent-flow/runs"
 ACTIVE_MARKER = "active"
 META_FILE = "meta.json"
 ACTIVE_LOCK = "active.lock"
+
+
+@dataclass(frozen=True)
+class ReviewBinding:
+    run_id: str
+    nonce: str
+    phase_entered_at: str
+
+
+@dataclass(frozen=True)
+class PhaseArtifactContract:
+    artifact: Path | None
+    required_markers: tuple[str, ...]
+    skills: PhaseSkills | None
+    multi_review: bool
 
 
 class ActiveRunExists(RuntimeError):
@@ -75,27 +102,61 @@ class ActiveRun:
         artifacts = sorted(str(p.relative_to(self.path)) for p in self.path.rglob("*") if p.is_file())
         meta = read_meta(self.path)
         current_phase = meta.get("current_phase") or "-"
-        artifact_rel, _markers, _skills = _phase_contract(self.path, self.workflow, current_phase)
+        contract = _phase_contract(
+            self.path,
+            self.workflow,
+            current_phase,
+        )
         required_artifact = (
-            _existing_phase_artifact(self.path, current_phase, artifact_rel)
-            if current_phase != "-" and artifact_rel is not None
+            _existing_phase_artifact(
+                self.path,
+                current_phase,
+                contract.artifact,
+            )
+            if current_phase != "-" and contract.artifact is not None
             else None
         )
         structured_status = "running"
         reason = "in_progress"
         missing_markers: list[str] = []
-        if required_artifact is not None and not required_artifact.exists():
+        review_regeneration = False
+        artifact_exists = (
+            required_artifact is not None and required_artifact.exists()
+        )
+        if required_artifact is not None and not artifact_exists:
             structured_status = "awaiting_host"
             reason = "missing_phase_artifact"
-        elif required_artifact is not None:
+        elif required_artifact is not None and artifact_exists:
             structured_status = "blocked"
+            if contract.multi_review:
+                try:
+                    review_text = required_artifact.read_text(
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                except OSError:
+                    review_text = ""
+                _, review_key = review_route_evidence(
+                    self.path,
+                    current_phase,
+                    review_text,
+                    run_meta=meta,
+                )
+                review_regeneration = review_route_needs_regeneration(
+                    review_key
+                )
             persisted_reason = meta.get("phase_blocked_reason")
-            stale_reason = _stale_artifact_block_reason(self.path, required_artifact)
+            stale_reason = _stale_artifact_block_reason(
+                self.path,
+                required_artifact,
+            )
             stub_reason = _artifact_block_reason(required_artifact)
             if stale_reason:
                 reason = stale_reason
             elif stub_reason:
                 reason = stub_reason
+            elif review_regeneration:
+                reason = "review_evidence_regeneration_required"
             elif persisted_reason == "route_blocked":
                 reason = persisted_reason
             else:
@@ -111,38 +172,25 @@ class ActiveRun:
                     if missing_markers
                     else "phase_artifact_written_continue_required"
                 )
-        payload = {
-            "status": structured_status,
-            "run": f"{self.workflow}/{self.run_id}",
-            "task": self.task,
-            "current_phase": current_phase,
-            "reason": reason,
-            "required_artifact": str(required_artifact) if required_artifact is not None else None,
-            "next_command": next_command,
-            "missing_completion_markers": missing_markers,
-        }
+        payload = workflow_status_payload(
+            status=structured_status,
+            run=f"{self.workflow}/{self.run_id}",
+            task=self.task,
+            current_phase=current_phase,
+            reason=reason,
+            required_artifact=required_artifact,
+            next_command=next_command,
+            missing_completion_markers=missing_markers,
+        )
         print(f"Run id     : {self.run_id}")
         print(f"Workflow   : {self.workflow}")
-        print(f"Task       : {_status_value(self.task)}")
+        print(f"Task       : {status_value(self.task)}")
         print(f"Started at : {self.started_at}")
         print(f"Phase      : {current_phase}")
         print(f"Artifacts  : {len(artifacts)} written")
         for a in artifacts:
             print(f"  - {a}")
-        print(f"status: {_status_value(structured_status)}")
-        print(f"run: {_status_value(payload['run'])}")
-        print(f"task: {_status_value(self.task)}")
-        print(f"current_phase: {_status_value(current_phase)}")
-        print(f"reason: {_status_value(reason)}")
-        if required_artifact is not None:
-            print(f"required_artifact: {_status_value(required_artifact)}")
-        if missing_markers:
-            print(
-                "missing_completion_markers: "
-                f"{json.dumps(missing_markers, ensure_ascii=False)}"
-            )
-        print(f"next_command: {_status_value(next_command)}")
-        print(f"status_json: {json.dumps(payload, sort_keys=True)}")
+        print_structured_status(payload)
 
 
 def find_active_runs(project_root: Path) -> tuple[ActiveRun, ...]:
@@ -277,6 +325,10 @@ def create_run(
                     # 파일에 있는 값이라 복사는 가능하다 — 적대적 위조가 아니라
                     # "실수로 손으로 쓰는 것"을 막는 층이다.
                     "gate_nonce": secrets.token_hex(16),
+                    # reviewer 결과는 별도 nonce와 예상 job 원장에 묶는다. host가 쓴
+                    # 요약만으로는 실수로 review 증거가 생기지 않는다. nonce도 같은
+                    # 디스크에 있으므로 same-user 적대적 위조까지 막는 층은 아니다.
+                    "review_nonce": secrets.token_hex(16),
                 }
                 digest = _workflow_digest(workflow)
                 if digest is not None:
@@ -359,8 +411,6 @@ def read_meta(run_path: Path) -> dict[str, Any]:
         return {}
 
 
-
-
 def write_meta(run_path: Path, meta: Mapping[str, Any]) -> None:
     """Atomically replace ``meta.json`` without exposing partial state."""
     write_run_artifact_text(
@@ -368,6 +418,57 @@ def write_meta(run_path: Path, meta: Mapping[str, Any]) -> None:
         run_path.resolve() / META_FILE,
         json.dumps(meta, indent=2),
     )
+
+
+def ensure_review_binding(run_path: Path) -> ReviewBinding:
+    """Return the run identity for review evidence, backfilling old runs once."""
+    with exclusive_file_lease(run_path.parent / ACTIVE_LOCK):
+        meta = read_meta(run_path)
+        run_id = meta.get("run_id")
+        phase_entered_at = meta.get("phase_entered_at")
+        if (
+            not isinstance(run_id, str)
+            or not run_id
+            or not isinstance(phase_entered_at, str)
+            or not phase_entered_at
+        ):
+            raise ReviewEvidenceBindingError(
+                f"review evidence cannot bind to incomplete run meta at {run_path}"
+            )
+        nonce = meta.get("review_nonce")
+        if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32}", nonce):
+            nonce = secrets.token_hex(16)
+            meta["review_nonce"] = nonce
+            write_meta(run_path, meta)
+        return ReviewBinding(run_id, nonce, phase_entered_at)
+
+
+def bind_review_evidence(
+    run_path: Path,
+    *,
+    phase_id: str,
+    run_id: str,
+    nonce: str,
+    phase_entered_at: str,
+    record: ReviewEvidenceRecord,
+) -> None:
+    """Publish the result binding only while the run attempt is still current."""
+    with exclusive_file_lease(run_path.parent / ACTIVE_LOCK):
+        meta = read_meta(run_path)
+        if (
+            meta.get("run_id") != run_id
+            or meta.get("review_nonce") != nonce
+            or meta.get("phase_entered_at") != phase_entered_at
+        ):
+            raise ReviewEvidenceBindingError(
+                f"review evidence run attempt changed before binding at {run_path}"
+            )
+        evidence = meta.get("review_evidence")
+        if not isinstance(evidence, dict):
+            evidence = {}
+        evidence[phase_id] = dict(record)
+        meta["review_evidence"] = evidence
+        write_meta(run_path, meta)
 
 
 def mark_inactive(run_path: Path) -> None:
@@ -380,6 +481,29 @@ def has_artifact(run_path: Path, phase_id: str) -> bool:
     return (run_path / f"{phase_id}.md").exists()
 
 
+def phase_review_rejected(
+    run_path: Path,
+    workflow: str,
+    phase_id: str,
+    aggregate_text: str,
+    *,
+    run_meta: Mapping[str, object] | None = None,
+) -> bool:
+    contract = _phase_contract(run_path, workflow, phase_id)
+    if not contract.multi_review:
+        return False
+    meta = run_meta if run_meta is not None else read_meta(run_path)
+    return (
+        review_route_evidence(
+            run_path,
+            phase_id,
+            aggregate_text,
+            run_meta=meta,
+        )[1]
+        == "request-changes"
+    )
+
+
 def _missing_completion_markers(
     run_path: Path,
     workflow: str,
@@ -388,12 +512,24 @@ def _missing_completion_markers(
     config_root: Path | None = None,
     project_root: Path | None = None,
 ) -> list[str]:
-    artifact_rel, markers, skills = _phase_contract(run_path, workflow, phase_id)
-    artifact = _existing_phase_artifact(run_path, phase_id, artifact_rel)
+    contract = _phase_contract(
+        run_path,
+        workflow,
+        phase_id,
+    )
+    artifact = _existing_phase_artifact(
+        run_path,
+        phase_id,
+        contract.artifact,
+    )
     if not artifact.exists():
         return []
     text = artifact.read_text(encoding="utf-8")
-    missing = _missing_markers(text, markers) if markers else []
+    missing = (
+        _missing_markers(text, contract.required_markers)
+        if contract.required_markers
+        else []
+    )
     config = config_root or run_path
     project = project_root or config
     meta = read_meta(run_path)
@@ -406,7 +542,7 @@ def _missing_completion_markers(
             text,
             config,
             phase_id,
-            phase_skills=skills,
+            phase_skills=contract.skills,
             profile=profile,
             changed_files=changed_files(project),
             task_text=str(meta.get("task", "")),
@@ -424,6 +560,13 @@ def _missing_completion_markers(
             profile=profile,
             since=_parse_timestamp(meta.get("started_at")),
             evidence_root=config,
+            review_rejected=phase_review_rejected(
+                run_path,
+                workflow,
+                phase_id,
+                text,
+                run_meta=meta,
+            ),
         )
     )
     return missing
@@ -449,13 +592,12 @@ def _parse_timestamp(value: object) -> float | None:
 
 
 def _required_markers(run_path: Path, workflow: str, phase_id: str) -> tuple[str, ...]:
-    _artifact_rel, markers, _skills = _phase_contract(run_path, workflow, phase_id)
-    return markers
+    return _phase_contract(run_path, workflow, phase_id).required_markers
 
 
 def _phase_contract(
     run_path: Path, workflow: str, phase_id: str
-) -> tuple[Path | None, tuple[str, ...], PhaseSkills | None]:
+) -> PhaseArtifactContract:
     project_root = run_path.parents[2] if len(run_path.parents) >= 3 else None
     candidates: list[Path] = []
     if project_root is not None:
@@ -477,7 +619,12 @@ def _phase_contract(
         if definition is not None:
             for phase in definition.phases:
                 if phase.id == phase_id:
-                    return Path(phase.artifact), phase.required_markers, phase.skills
+                    return PhaseArtifactContract(
+                        artifact=Path(phase.artifact),
+                        required_markers=phase.required_markers,
+                        skills=phase.skills,
+                        multi_review=phase.multi_review,
+                    )
         try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except (OSError, yaml.YAMLError):
@@ -488,12 +635,20 @@ def _phase_contract(
         for phase in phases:
             if not isinstance(phase, dict) or str(phase.get("id")) != phase_id:
                 continue
-            return (
-                Path(f"{phase_id}.md"),
-                normalize_required_markers(phase.get("required_markers")),
-                None,
+            return PhaseArtifactContract(
+                artifact=Path(f"{phase_id}.md"),
+                required_markers=normalize_required_markers(
+                    phase.get("required_markers")
+                ),
+                skills=None,
+                multi_review=phase.get("multi_review") is True,
             )
-    return (Path(f"{phase_id}.md") if phase_id != "-" else None, (), None)
+    return PhaseArtifactContract(
+        artifact=Path(f"{phase_id}.md") if phase_id != "-" else None,
+        required_markers=(),
+        skills=None,
+        multi_review=False,
+    )
 
 
 def _existing_phase_artifact(run_path: Path, phase_id: str, artifact_rel: Path | None) -> Path:
@@ -506,10 +661,6 @@ def _existing_phase_artifact(run_path: Path, phase_id: str, artifact_rel: Path |
 
 def _missing_markers(text: str, markers: tuple[str, ...]) -> list[str]:
     return missing_markers(text, markers)
-
-
-def _status_value(value: object) -> str:
-    return str(value).replace("\r", "\\r").replace("\n", "\\n")
 
 
 def _stale_artifact_block_reason(run_path: Path, artifact: Path) -> str | None:

@@ -2,7 +2,6 @@ id: bugfix
 description: Reproduce, fix, review, and verify a defect.
 phases:
   - id: reproduce
-    role: explorer
     description: Reproduce the reported defect and capture the failing behavior.
     prompt: |
       Reproduce the defect. Record exact steps, observed behavior, expected behavior,
@@ -10,7 +9,6 @@ phases:
       Output: reproduce.md.
 
   - id: implement-fix
-    role: fixer
     skills:
       required: [code-generation-discipline]
     description: Fix the reproduced defect with a regression test that ran.
@@ -40,11 +38,8 @@ phases:
       Output: implement-fix.md.
 
   - id: review
-    role: reviewer
     skills:
       required: [code-generation-discipline]
-    parallel: true
-    replicas: 3
     description: Review the bug fix.
     multi_review: true
     required_markers:
@@ -70,7 +65,6 @@ phases:
       Output: review.md.
 
   - id: qa
-    role: qa
     description: Verify the fixed defect.
     routes:
       green: handoff
@@ -87,7 +81,6 @@ phases:
       Output: qa.md.
 
   - id: handoff
-    role: qa
     description: Summarize the defect fix result.
     prompt: |
       Summarize the reproduced defect, fix, verification, and any residual risk.

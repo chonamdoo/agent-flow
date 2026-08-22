@@ -637,13 +637,13 @@ phases:
       The runner runs this phase's gates itself and writes the result file. Do
       not run `agent-flow gates` here and do not author the result file: the
       verification result must not be written by the party being verified.
-      Gates come from the active profile at `--phase all`, so build and test
-      gates declared `pre-push` are included. Per-gate limits come from the
-      profile's `gates[].timeout_s`; a gate that needs longer than the default
-      declares it there rather than being recorded as a timeout, which is
+      Gates come from the active profile at `--phase all`. Gates whose
+      `execution` is `local` run here; `execution: ci` gates are recorded as
+      deferred and must pass in the pull-request checks observed by `pr-watch`.
+      Per-gate limits come from `gates[].timeout_s`; a gate that needs longer
+      declares it there rather than being recorded as a timeout, which means
       "verification was cut off", not "the build is broken".
-      `agent-flow gates` stays available for reproducing a failure by hand; its
-      output is not what this phase routes on.
+      `agent-flow gates` remains available for focused reproduction.
       Output: artifacts/gate-results.json.
 
   - id: fix-loop

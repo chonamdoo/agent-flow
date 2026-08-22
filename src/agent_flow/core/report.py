@@ -6,8 +6,11 @@ from pathlib import Path
 from agent_flow.core.phase_artifacts import PhaseArtifact, read_phase_artifact
 
 
+RUN_REPORT_FILENAME = "RUN_REPORT.md"
+
+
 def write_run_report(run_dir: Path) -> Path:
-    path = run_dir / "RUN_REPORT.md"
+    path = run_dir / RUN_REPORT_FILENAME
     artifacts = _collect_artifacts(run_dir)
     manifest = _read_json(run_dir / "manifest.json") or _read_json(run_dir / "meta.json")
     gate_results = _read_json(run_dir / "gate-results.json")

@@ -34,6 +34,12 @@ from agent_flow.core.reviewer_launch import (
     matching_reviewer_rule,
     select_launch_candidate,
 )
+from agent_flow.core.review_evidence import (
+    REVIEW_LAUNCH_DIGEST_CHARS,
+    ReviewerOutcome,
+    ReviewStatus,
+    reviewer_output_verdict,
+)
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
     assert_leader_unchanged,
@@ -60,7 +66,6 @@ FINAL_REVIEW_PHASE_ID = "final-review"
 # "선언이 없다"가 같은 모양이 된다.
 _UNSPECIFIED = "unspecified"
 _UNKNOWN = "unknown"
-_LAUNCH_DIGEST_CHARS = 16
 
 
 @dataclass
@@ -94,6 +99,15 @@ class Distribution:
     def empty(self) -> bool:
         return not self.by_cli and not self.fallback_to_generic
 
+    def expected_job_ids_by_provider(self) -> dict[str, list[str]]:
+        return {
+            provider: [
+                review_job_id(provider, job)
+                for job in jobs
+            ]
+            for provider, jobs in self.by_cli.items()
+        }
+
     def summary(self) -> str:
         if self.fallback_to_generic:
             return "no Claude/Codex reviewer CLI available (multi-review blocked)"
@@ -107,6 +121,7 @@ class Distribution:
 class ReviewExecution:
     results: tuple[SubprocessResult, ...] = ()
     skipped_providers: tuple[str, ...] = ()
+    outcomes: tuple[ReviewerOutcome, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -178,16 +193,10 @@ def distribute_final_review(
             phase_id=FINAL_REVIEW_PHASE_ID,
         )
     _assert_unique_output_paths(by_cli)
-    required_job_ids = frozenset(
-        _subprocess_job_id(cli_name, job)
-        for cli_name, assigned in by_cli.items()
-        for job in assigned
-    )
     return Distribution(
         by_cli=by_cli,
         insufficient_reviewers=not _has_sufficient_reviewer_processes(by_cli),
         host=host,
-        required_job_ids=required_job_ids,
         accept_any_provider=True,
         phase_id=FINAL_REVIEW_PHASE_ID,
     )
@@ -241,7 +250,7 @@ def distribute(
         ]
     _assert_unique_output_paths(by_cli)
     required_job_ids = frozenset(
-        _subprocess_job_id(primary_cli.name, job)
+        review_job_id(primary_cli.name, job)
         for job in jobs
     )
     return Distribution(
@@ -304,9 +313,7 @@ def _assert_unique_output_paths(
             seen[key] = (cli_name, job.angle_id)
 
 
-
-
-def _subprocess_job_id(cli_name: str, job: ReviewerJob) -> str:
+def review_job_id(cli_name: str, job: ReviewerJob) -> str:
     return f"{cli_name}-{job.angle_id}"
 
 
@@ -533,7 +540,7 @@ def run_distribution(
                 prompt=job.prompt,
                 project_root=project_root,
             )
-            sub_id = _subprocess_job_id(cli_name, job)
+            sub_id = review_job_id(cli_name, job)
             assigned.append(SubprocessJob(
                 job_id=sub_id, binary=cli.binaries[0], args=launch.argv,
                 cwd=project_root, timeout_s=timeout_s,
@@ -565,7 +572,7 @@ def run_distribution(
         available = {
             result.job_id.split("-", 1)[0]
             for result in results
-            if reviewer_result_error(result) is None
+            if reviewer_provider_error(result) is None
         }
         skipped_providers = tuple(
             cli_name
@@ -591,18 +598,34 @@ def run_distribution(
     #
     # 기록이 tripwire보다 **먼저**다. 순서를 뒤집으면 오탐 1회에 완료된
     # 리뷰어 N명의 산출물이 통째로 사라진다.
+    artifact_digests: dict[str, str] = {}
     for result in results:
         job = job_to_output.get(result.job_id)
         if job is None:
             continue
-        _write_review_artifact(
-            job,
-            _render_angle_result(
-                result,
-                launch=launch_by_job.get(result.job_id),
-                prompt=job.prompt,
+        rendered = _render_angle_result(
+            result,
+            launch=launch_by_job[result.job_id],
+            prompt=job.prompt,
+        )
+        _write_review_artifact(job, rendered)
+        artifact_digests[result.job_id] = hashlib.sha256(
+            rendered.encode("utf-8")
+        ).hexdigest()
+    outcomes = tuple(
+        _reviewer_outcome(
+            result,
+            job=job_to_output[result.job_id],
+            launch=launch_by_job[result.job_id],
+            artifact_sha256=artifact_digests[result.job_id],
+            required=(
+                not distribution.accept_any_provider
+                and result.job_id in distribution.required_job_ids
             ),
         )
+        for result in results
+        if result.job_id in artifact_digests
+    )
     if leader is not None and leader_before is not None:
         # 범위는 기록에서 되읽는다. 여기서 다시 profile을 해석하면 리뷰가 도는
         # 동안 선언이 바뀌었을 때 baseline과 관측이 서로 다른 범위가 되고, 그
@@ -617,6 +640,45 @@ def run_distribution(
     return ReviewExecution(
         results=tuple(results),
         skipped_providers=skipped_providers,
+        outcomes=outcomes,
+    )
+
+
+def _reviewer_outcome(
+    result: SubprocessResult,
+    *,
+    job: ReviewerJob,
+    launch: ResolvedLaunch,
+    artifact_sha256: str,
+    required: bool,
+) -> ReviewerOutcome:
+    error = reviewer_result_error(result)
+    status: ReviewStatus = (
+        "timeout" if result.timed_out else ("error" if error else "ok")
+    )
+    verdict = (
+        reviewer_output_verdict(result.stdout.strip())
+        if error is None
+        else None
+    )
+    # This is an internal drift tripwire: the error classifier and persisted
+    # outcome must never normalize the same stdout differently.
+    if (status == "ok") != (verdict is not None):
+        raise ValueError(
+            f"reviewer outcome status/verdict mismatch: {result.job_id}"
+        )
+    return ReviewerOutcome(
+        job_id=result.job_id,
+        provider=launch.provider,
+        model=launch.model or _UNSPECIFIED,
+        effort=launch.effort or _UNSPECIFIED,
+        status=status,
+        verdict=verdict,
+        required=required,
+        artifact=job.output_path.name,
+        artifact_sha256=artifact_sha256,
+        prompt_digest=_text_digest(job.prompt),
+        argv_digest=_argv_digest(launch.argv),
     )
 
 
@@ -636,7 +698,7 @@ def residual_host_jobs(distribution: Distribution) -> list[ReviewerJob]:
     return []
 
 
-def reviewer_result_error(result: SubprocessResult) -> str | None:
+def reviewer_provider_error(result: SubprocessResult) -> str | None:
     rate_limit = _rate_limit_payload(result)
     if rate_limit is not None:
         return f"rate limited until {rate_limit['retry_after']}"
@@ -665,18 +727,27 @@ def reviewer_result_error(result: SubprocessResult) -> str | None:
             if result.returncode is not None
             else "missing exit status"
         )
+    return None
+
+
+def reviewer_result_error(result: SubprocessResult) -> str | None:
+    provider_error = reviewer_provider_error(result)
+    if provider_error is not None:
+        return provider_error
     output = result.stdout.strip()
     if not output:
         return "empty reviewer output"
     if _REVIEWER_PROVENANCE_RE.search(output) is None:
         return "reviewer output is missing provenance marker"
+    if reviewer_output_verdict(output) is None:
+        return "reviewer output is missing one unambiguous verdict"
     return None
 
 
 def _render_angle_result(
     r: SubprocessResult,
     *,
-    launch: ResolvedLaunch | None = None,
+    launch: ResolvedLaunch,
     prompt: str | None = None,
 ) -> str:
     rate_limit = _rate_limit_payload(r)
@@ -696,9 +767,9 @@ def _render_angle_result(
         # 기존 `key: value` 줄은 파서가 읽으므로 순서를 바꾸지 않고 뒤에 붙인다.
         lines += _launch_provenance_lines(launch, prompt)
         if r.stdout.strip():
-            lines += ["", "## stdout", "", r.stdout]
+            lines += ["", "## stdout", "", *_markdown_code_block(r.stdout)]
         if r.stderr.strip():
-            lines += ["", "## stderr", "", r.stderr]
+            lines += ["", "## stderr", "", *_markdown_code_block(r.stderr)]
         return "\n".join(lines) + "\n"
     semantic_error = reviewer_result_error(r)
     status = "OK" if semantic_error is None else ("TIMEOUT" if r.timed_out else "ERROR")
@@ -715,10 +786,23 @@ def _render_angle_result(
     elif semantic_error:
         parts += ["", "## error", "", semantic_error]
     if r.stdout.strip():
-        parts += ["", "## review output", "", r.stdout]
+        parts += ["", "## review output", "", *_markdown_code_block(r.stdout)]
     if r.stderr.strip():
-        parts += ["", "## stderr", "", r.stderr]
+        parts += ["", "## stderr", "", *_markdown_code_block(r.stderr)]
+    if semantic_error is None:
+        verdict = reviewer_output_verdict(r.stdout.strip())
+        if verdict is None:
+            raise ValueError(
+                f"reviewer output lost its verdict during rendering: {r.job_id}"
+            )
+        parts += ["", "## Reviewer verdict", "", f"verdict: {verdict}"]
     return "\n".join(parts) + "\n"
+
+
+def _markdown_code_block(text: str) -> list[str]:
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return [f"{fence}text", text, fence]
 
 
 def _launch_provenance_lines(
@@ -750,7 +834,9 @@ def _argv_digest(argv: tuple[str, ...]) -> str:
 
 
 def _text_digest(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:_LAUNCH_DIGEST_CHARS]
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[
+        :REVIEW_LAUNCH_DIGEST_CHARS
+    ]
 
 
 class _RateLimitPayload(TypedDict):

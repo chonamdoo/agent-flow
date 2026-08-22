@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, cast, Literal
 
 import yaml
 
@@ -22,11 +22,43 @@ from agent_flow.core.worktree_isolation import LEADER_SWEEP_SCOPES
 
 
 # `profiles/_schema.yaml`의 gates[].phase가 선언하는 전체 집합.
-GATE_PHASES: tuple[str, ...] = ("pre-commit", "pre-push", "post-merge")
+ProfileGatePhase = Literal["pre-commit", "pre-push", "post-merge"]
+GatePhase = Literal["pre-commit", "pre-push", "post-merge", "all"]
+GATE_PHASES: tuple[ProfileGatePhase, ...] = (
+    "pre-commit",
+    "pre-push",
+    "post-merge",
+)
+GateExecution = Literal["local", "ci"]
+GATE_EXECUTIONS: tuple[GateExecution, ...] = ("local", "ci")
+
+
+def require_gate_execution(
+    value: object,
+    *,
+    label: str = "gate execution",
+    context: str = "",
+) -> GateExecution:
+    if not isinstance(value, str) or value not in GATE_EXECUTIONS:
+        suffix = f": {context}" if context else ""
+        raise ValueError(
+            f"{label} must be one of {', '.join(GATE_EXECUTIONS)}{suffix}"
+        )
+    # Membership in the closed tuple establishes the Literal at runtime.
+    return cast(GateExecution, value)
+
 # workflow상 gates는 final-review → gates → commit 사이에서 돈다(`workflows/default.yaml`).
-DEFAULT_GATE_PHASE = "pre-commit"
+DEFAULT_GATE_PHASE: ProfileGatePhase = "pre-commit"
 # phase 필터를 끄는 선택자. 실제 gate가 이 값을 phase로 선언할 수는 없다.
-GATE_PHASE_ALL = "all"
+GATE_PHASE_ALL: GatePhase = "all"
+
+
+def require_gate_phase(value: object) -> GatePhase:
+    phases: tuple[GatePhase, ...] = (*GATE_PHASES, GATE_PHASE_ALL)
+    if not isinstance(value, str) or value not in phases:
+        raise ValueError(f"gate phase must be one of {', '.join(phases)}")
+    return cast(GatePhase, value)
+
 # 프로젝트가 배포 profile 위에 얹는 파일. install이 덮지 않는 유일한 자리다.
 PROJECT_OVERRIDE_SUFFIX = ".local.yaml"
 # `flutter create`가 `dependencies:`에 쓰는 Flutter SDK 의존. 이것이 pubspec을 가진
@@ -82,8 +114,10 @@ class ProfileGate:
     gate_id: str
     command: tuple[str, ...]
     required: bool = True
-    phase: str = DEFAULT_GATE_PHASE
+    phase: ProfileGatePhase = DEFAULT_GATE_PHASE
     timeout_s: int | None = None
+    execution: GateExecution = "local"
+    ci_check: str | None = None
 
 
 @dataclass(frozen=True)
@@ -564,6 +598,17 @@ def _gate_from_payload(item: object, *, profile_id: str) -> ProfileGate:
     ):
         raise ValueError(f"profile gate command must be a non-empty string list: {profile_id}:{gate_id}")
     required = item.get("required")
+    execution = _gate_execution_from_payload(
+        item.get("execution"),
+        profile_id=profile_id,
+        gate_id=gate_id,
+    )
+    ci_check = _gate_ci_check_from_payload(
+        item.get("ci_check"),
+        execution=execution,
+        profile_id=profile_id,
+        gate_id=gate_id,
+    )
     return ProfileGate(
         gate_id=gate_id,
         command=tuple(command),
@@ -572,7 +617,30 @@ def _gate_from_payload(item: object, *, profile_id: str) -> ProfileGate:
         timeout_s=_gate_timeout_from_payload(
             item.get("timeout_s"), profile_id=profile_id, gate_id=gate_id
         ),
+        execution=execution,
+        ci_check=ci_check,
     )
+
+
+def _gate_ci_check_from_payload(
+    value: object,
+    *,
+    execution: GateExecution,
+    profile_id: str,
+    gate_id: str,
+) -> str | None:
+    if execution == "local":
+        if value is not None:
+            raise ValueError(
+                f"profile local gate must not declare ci_check: "
+                f"{profile_id}:{gate_id}"
+            )
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"profile CI gate ci_check missing: {profile_id}:{gate_id}"
+        )
+    return value.strip()
 
 
 def _gate_timeout_from_payload(value: object, *, profile_id: str, gate_id: str) -> int | None:
@@ -586,11 +654,28 @@ def _gate_timeout_from_payload(value: object, *, profile_id: str, gate_id: str) 
     return value
 
 
-def _gate_phase_from_payload(value: object, *, profile_id: str, gate_id: str) -> str:
+def _gate_execution_from_payload(
+    value: object, *, profile_id: str, gate_id: str
+) -> GateExecution:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return "local"
+    return require_gate_execution(
+        value,
+        label="profile gate execution",
+        context=f"{profile_id}:{gate_id}",
+    )
+
+
+def _gate_phase_from_payload(
+    value: object,
+    *,
+    profile_id: str,
+    gate_id: str,
+) -> ProfileGatePhase:
     if value is None or (isinstance(value, str) and not value.strip()):
         return DEFAULT_GATE_PHASE
     if isinstance(value, str) and value.strip() in GATE_PHASES:
-        return value.strip()
+        return cast(ProfileGatePhase, value.strip())
     # 오타를 기본값으로 접으면 pre-push 게이트가 조용히 pre-commit에서 돈다.
     # 죽은 설정으로 돌아가는 경로라 거부한다.
     raise ValueError(

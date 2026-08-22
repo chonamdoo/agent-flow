@@ -119,3 +119,5 @@ verdict: approve | request-changes
 
 Cite paths as `path/to/file:line`. If a category is empty, write `none`.
 Keep under 200 lines.
+
+Emit exactly one unfenced final verdict line: `verdict: approve` or `verdict: request-changes`.

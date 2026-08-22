@@ -55,3 +55,5 @@ source URL.
 The run's own `skill-availability` and `skill-use-evidence` markers already
 record which required skills were resolved and opened, so this angle adds no
 marker of its own.
+
+Emit exactly one unfenced final verdict line: `verdict: approve` or `verdict: request-changes`.

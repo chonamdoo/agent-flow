@@ -2,7 +2,6 @@ id: review
 description: Review-only workflow for existing changes.
 phases:
   - id: explore
-    role: explorer
     description: Inspect the changed files and review context.
     prompt: |
       Inspect the changed files, tests, and relevant project instructions. Record
@@ -10,11 +9,8 @@ phases:
       Output: explore.md.
 
   - id: review
-    role: reviewer
     skills:
       required: [code-generation-discipline]
-    parallel: true
-    replicas: 3
     description: Review existing changes.
     multi_review: true
     required_markers:
@@ -40,7 +36,6 @@ phases:
       Output: review.md.
 
   - id: handoff
-    role: reviewer
     description: Summarize the review verdict.
     prompt: |
       Summarize the review verdict and list only actionable findings that remain.

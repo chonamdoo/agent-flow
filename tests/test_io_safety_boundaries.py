@@ -219,6 +219,7 @@ def test_gate_results_refuse_a_symlinked_artifacts_directory(tmp_path: Path) -> 
                     stderr="",
                 )
             ],
+            phase="all",
         )
 
     assert list(outside.iterdir()) == []

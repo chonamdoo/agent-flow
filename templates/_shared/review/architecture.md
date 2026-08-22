@@ -49,6 +49,11 @@ Review for architectural soundness independent of stack-specific patterns: modul
 
 ### One thing this change got right (calibration)
 - ...
+
+### Overall
+verdict: approve | request-changes
 ```
 
 Keep total under 200 lines. Cite paths as `path/to/file:line`.
+
+Emit exactly one unfenced final verdict line: `verdict: approve` or `verdict: request-changes`.

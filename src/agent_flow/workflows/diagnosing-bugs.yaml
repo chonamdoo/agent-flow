@@ -2,7 +2,6 @@ id: diagnosing-bugs
 description: Build a tight feedback loop, diagnose a hard defect, fix it, and verify the original symptom.
 phases:
   - id: feedback-loop
-    role: explorer
     description: Build one red-capable command for the exact reported symptom.
     required_markers:
       - "feedback-command:"
@@ -45,7 +44,6 @@ phases:
       Output: feedback-loop.md.
 
   - id: reproduce-minimise
-    role: explorer
     description: Reproduce the symptom and remove every non-load-bearing condition.
     prompt: |
       Run the feedback command until it reproduces the user's exact symptom, not a
@@ -56,7 +54,6 @@ phases:
       Output: reproduce-minimise.md.
 
   - id: hypotheses
-    role: explorer
     description: Rank falsifiable root-cause hypotheses.
     prompt: |
       Write 3-5 ranked hypotheses from the minimal reproduction. Each hypothesis
@@ -67,7 +64,6 @@ phases:
       Output: hypotheses.md.
 
   - id: instrument
-    role: explorer
     description: Test one hypothesis and one variable at a time.
     prompt: |
       Test the ranked hypotheses one variable at a time. Prefer debugger or REPL
@@ -79,7 +75,6 @@ phases:
       Output: instrument.md.
 
   - id: implement-fix
-    role: fixer
     skills:
       required: [code-generation-discipline]
     description: Lock the defect down and apply the smallest cause-level fix.
@@ -116,7 +111,6 @@ phases:
   - id: diagnosis-cleanup
     artifact: cleanup.md
 
-    role: fixer
     skills:
       required: [code-generation-discipline, comment-authoring-discipline]
     description: Remove temporary diagnosis code before review.
@@ -143,11 +137,8 @@ phases:
       Output: cleanup.md.
 
   - id: review
-    role: reviewer
     skills:
       required: [code-generation-discipline]
-    parallel: true
-    replicas: 3
     description: Review the diagnosed cause, fix, cleanup, and regression coverage.
     multi_review: true
     required_markers:
@@ -170,7 +161,6 @@ phases:
       Output: review.md.
 
   - id: qa
-    role: qa
     description: Verify the cleaned final state against the original symptom.
     required_markers:
       - "feedback-command:"
@@ -206,7 +196,6 @@ phases:
       Output: qa.md.
 
   - id: handoff
-    role: qa
     description: Summarize the symptom, root cause, fix, and proof.
     prompt: |
       Summarize the original symptom, minimal reproduction, confirmed root cause,

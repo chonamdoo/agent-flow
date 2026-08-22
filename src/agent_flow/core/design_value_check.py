@@ -33,7 +33,6 @@ from agent_flow.core.design_ledger import (
     read_ledger,
 )
 from agent_flow.core.markers import completion_gate_marker_values
-from agent_flow.core.phase_workflow import overall_review_route_key
 from agent_flow.core.worktree_isolation import git_repo_state, git_safe
 
 # 구현을 판정하는 phase. 여기서 안 잡으면 gates는 build/test만 보고 통과시킨다.
@@ -55,6 +54,7 @@ def missing_spec_item_evidence(
     profile: dict | None = None,
     since: float | None = None,
     evidence_root: Path | None = None,
+    review_rejected: bool = False,
 ) -> list[str]:
     if phase_id in LEDGER_SOURCE_PHASES:
         parsed = parse_spec_item_section(text)
@@ -86,7 +86,7 @@ def missing_spec_item_evidence(
         return missing
     if phase_id not in DESIGN_VALUE_PHASES:
         return []
-    if overall_review_route_key(text) == "request-changes":
+    if review_rejected:
         return []
     ledger = read_ledger(run_dir)
     if not ledger.exists:

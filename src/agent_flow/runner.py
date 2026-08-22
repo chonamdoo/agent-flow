@@ -42,6 +42,7 @@ from agent_flow.artifact import (
     create_run,
     mark_inactive,
     read_meta,
+    phase_review_rejected,
     run_concerns,
     run_concerns_value,
     write_meta,
@@ -97,11 +98,15 @@ from agent_flow.core.route_verdicts import (
     GATE_MALFORMED,
     gate_parse_error,
     gates_route_key,
-    multi_review_route_key,
     recorded_gate_phase,
+    recorded_gate_execution,
     route_key,
 )
 from agent_flow.core.delivery_evidence import missing_delivery_evidence
+from agent_flow.core.workflow_status import (
+    print_structured_status,
+    workflow_status_payload,
+)
 from agent_flow.core.design_sections import missing_ddd_design_terms
 from agent_flow.core.host_phase_baseline import (
     BASELINE_KEY,
@@ -112,9 +117,13 @@ from agent_flow.core.host_phase_baseline import (
 )
 from agent_flow.core.atomic_io import fsync_directory
 from agent_flow.core.artifacts import write_gate_results
-from agent_flow.core.gate_plan import profile_gate_commands
+from agent_flow.core.gate_plan import deferred_check_names, profile_gate_commands
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.profiles import GATE_PHASE_ALL, active_profile_ids
+from agent_flow.core.review_evidence import (
+    review_route_needs_regeneration,
+    review_route_evidence,
+)
 from agent_flow.core.profile_resolution import resolve_profile
 from agent_flow.core.phase_workflow import (
     ACCEPT_WORKFLOW_DRIFT_FLAG,
@@ -159,6 +168,7 @@ GIT_DEPENDENT_PHASES = {
 # stale/marker 검사로 막지 않고 매번 다시 만든다.
 RUNNER_OWNED_PHASES = frozenset({"gates"})
 FIX_LOOP_MAX_ROUNDS = 3
+MAX_REVIEW_REGENERATION_ATTEMPTS = 1
 # fix collector 판정에 쓰는 rejection verdict 키. review/gate가 "다시 해라"라고
 # 되돌려 보내는 route만 상한 대상이다 — 정상 진행(default·approve·green)과 PR
 # 이벤트 루프(comments·ci-failed)는 여기 없어서 상한에서 빠진다.
@@ -534,6 +544,11 @@ class Runner:
                         required_artifact=artifact,
                     )
                     return
+                if self._regenerate_multi_review_artifact_if_needed(
+                    phase,
+                    artifact,
+                ):
+                    continue
                 missing_markers = self._missing_required_markers(phase)
                 if missing_markers:
                     print(
@@ -641,6 +656,17 @@ class Runner:
                     phase=phase,
                     reason=blocked_reason,
                     required_artifact=artifact,
+                )
+                return
+            if self._regenerate_multi_review_artifact_if_needed(
+                phase,
+                artifact,
+            ):
+                self._print_structured_status(
+                    status="awaiting_host",
+                    phase=phase,
+                    reason="review_evidence_regeneration_required",
+                    required_artifact=self._artifact_path(phase),
                 )
                 return
             grown = self._grown_skill_names(phase)
@@ -866,6 +892,7 @@ class Runner:
             return RouteDecision(current_index + 1, False, "none")
         assert self.run_dir is not None
         artifact = self._existing_artifact_path(phase)
+        key: str
         try:
             # phase artifact는 agent가 쓴 입력이다. decode 오류는 `OSError`가
             # 아니라 `ValueError`라 여기서 올리면 잘못된 바이트 하나가 사유 없는
@@ -874,29 +901,46 @@ class Runner:
             text = artifact.read_text(encoding="utf-8", errors="replace")
         except OSError:
             text = ""
+        review_evidence = None
         if phase.multi_review:
-            key = multi_review_route_key(text, phase.id)
+            review_evidence, key = review_route_evidence(
+                self.run_dir,
+                phase.id,
+                text,
+                run_meta=read_meta(self.run_dir),
+            )
         elif phase.id == "gates":
-            key = gates_route_key(text, nonce=str(read_meta(self.run_dir).get("gate_nonce", "")))
+            key = gates_route_key(
+                text,
+                nonce=str(read_meta(self.run_dir).get("gate_nonce", "")),
+            )
             if key == GATE_MALFORMED:
                 detail = gate_parse_error(text)
                 print(f"  [block] gate-results.json is unreadable: {detail}")
                 self._emit_observation(
                     OBS_VALIDATION_FAILED,
                     phase.id,
-                    details={"status": "blocked", "reason": "malformed_gate_results", "detail": detail},
+                    details={
+                        "status": "blocked",
+                        "reason": "malformed_gate_results",
+                        "detail": detail,
+                    },
                 )
                 return RouteDecision(current_index, True, key)
             if key == "default":
-                # `passed: true`인 파일이 fix-loop로 되돌려지는 이유는 결과 목록에
-                # 안 보인다. 말하지 않으면 같은 명령을 세 번 재시도하다 round cap에
-                # 걸려 run이 영구 정지한다.
-                recorded = recorded_gate_phase(text)
-                if recorded and recorded != GATE_PHASE_ALL:
+                recorded_phase = recorded_gate_phase(text)
+                recorded_execution = recorded_gate_execution(text)
+                if recorded_phase and recorded_phase != GATE_PHASE_ALL:
                     print(
-                        f"  [route] gate-results.json ran --phase {recorded}; "
+                        f"  [route] gate-results.json ran --phase {recorded_phase}; "
                         f"build and test gates are pre-push. re-run: "
                         f"agent-flow gates --phase {GATE_PHASE_ALL} --run-dir <run-dir>"
+                    )
+                elif recorded_execution and recorded_execution != "local":
+                    print(
+                        "  [route] gate-results.json records CI-only execution; "
+                        "local gates must run here. re-run `agent-flow continue`; "
+                        "deferred CI gates run after the PR is pushed."
                     )
         else:
             key = route_key(text)
@@ -908,18 +952,25 @@ class Runner:
             target = phase.routes.get("default")
         if phase.multi_review:
             if key == "missing-reviewer":
-                print("  [block] multi-review requires 1+ independent sub-agent reviewer verdict")
+                detail = review_evidence.detail if review_evidence is not None else ""
+                suffix = f": {detail}" if detail else ""
+                print(
+                    "  [block] multi-review requires a complete independent "
+                    f"sub-agent reviewer set{suffix}"
+                )
                 return RouteDecision(current_index, True, key)
             if key == "insufficient-reviewers":
                 print("  [block] multi-review requires 2+ independent sub-agent reviewer verdicts")
                 return RouteDecision(current_index, True, key)
-            if key == "invalid-verdict":
-                print("  [block] multi-review requires overall verdict approve or request-changes")
+            if key == "invalid-evidence":
+                detail = review_evidence.detail if review_evidence is not None else ""
+                suffix = f": {detail}" if detail else ""
+                print(f"  [block] runner-owned review evidence is invalid{suffix}")
                 return RouteDecision(current_index, True, key)
-            if key == "default":
+            if key == "invalid-aggregate":
                 print(
-                    "  [block] multi-review requires ## Overall with exactly one "
-                    "verdict: approve or verdict: request-changes line"
+                    "  [block] aggregate review must contain exactly one ## Overall "
+                    "verdict: approve or verdict: request-changes"
                 )
                 return RouteDecision(current_index, True, key)
         if target == "block":
@@ -1443,9 +1494,15 @@ class Runner:
             root=self.config_root,
             phase=GATE_PHASE_ALL,
         )
+        deferred = profile_gate_commands(
+            profile_ids,
+            root=self.config_root,
+            phase=GATE_PHASE_ALL,
+            execution="ci",
+        )
         print(
-            f"  [gates] {','.join(profile_ids)} — {len(commands)} gates "
-            f"(--phase {GATE_PHASE_ALL})"
+            f"  [gates] {','.join(profile_ids)} — {len(commands)} local gates "
+            f"(--phase {GATE_PHASE_ALL}); {len(deferred)} deferred to CI"
         )
         results = run_gates(
             commands,
@@ -1457,6 +1514,8 @@ class Runner:
             results=results,
             cwd=self.project_root,
             phase=GATE_PHASE_ALL,
+            execution="local",
+            deferred_ci_checks=deferred_check_names(deferred),
         )
         passed = sum(1 for result in results if result.passed)
         print(f"  [gates] {passed}/{len(results)} passed")
@@ -1512,6 +1571,63 @@ class Runner:
             return True
         recorded_nonce = str(meta.get("gate_nonce", ""))
         return gates_route_key(text, nonce=recorded_nonce) == GATE_MALFORMED
+
+    def _regenerate_multi_review_artifact_if_needed(
+        self,
+        phase: Phase,
+        artifact: Path,
+    ) -> bool:
+        if not phase.multi_review:
+            return False
+        assert self.run_dir is not None
+        try:
+            text = artifact.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            print(
+                f"  [block] cannot decode {artifact}; preserving original aggregate"
+            )
+            return False
+        except OSError:
+            print(f"  [block] cannot read {artifact}; preserving aggregate")
+            return False
+        evidence, key = review_route_evidence(
+            self.run_dir,
+            phase.id,
+            text,
+            run_meta=read_meta(self.run_dir),
+        )
+        if not review_route_needs_regeneration(key):
+            return False
+        preserved_artifacts = tuple(
+            self.run_dir.glob(f"{phase.id}-unbound-*.md")
+        )
+        if len(preserved_artifacts) >= MAX_REVIEW_REGENERATION_ATTEMPTS:
+            print(
+                f"  [block] {phase.id} automatic reviewer regeneration "
+                f"reached {MAX_REVIEW_REGENERATION_ATTEMPTS} attempt"
+            )
+            return False
+        index = 1
+        while (
+            preserved := self.run_dir / f"{phase.id}-unbound-{index}.md"
+        ).exists():
+            index += 1
+        write_run_subpath_text(self.run_dir, preserved, text)
+        try:
+            artifact.unlink()
+        except OSError:
+            print(
+                f"  [block] cannot remove {artifact}; "
+                f"preserved aggregate at {preserved.name}"
+            )
+            return False
+        suffix = f": {evidence.detail}" if evidence.detail else ""
+        print(
+            f"  [recheck] {phase.id} reviewer evidence{suffix}; "
+            f"preserved aggregate at {preserved.name}"
+        )
+        return True
+
 
     def _artifact_needs_auto_revalidation(self, phase: Phase) -> bool:
         if self.architecture != "ddd" or phase.id != "architecture-review":
@@ -1669,6 +1785,13 @@ class Runner:
                 profile=self.profile,
                 since=_meta_timestamp(meta.get("started_at")),
                 evidence_root=self.config_root,
+                review_rejected=phase_review_rejected(
+                    self.run_dir,
+                    getattr(self, "workflow_name", ""),
+                    phase.id,
+                    text,
+                    run_meta=meta,
+                ),
             )
         )
         missing.extend(
@@ -1752,19 +1875,17 @@ class Runner:
     ) -> None:
         assert self.run_dir is not None
         meta = read_meta(self.run_dir)
-        required_artifact_text = str(required_artifact) if required_artifact is not None else None
-        report_text = str(report) if report is not None else None
         next_command = "none" if status == "complete" else self.next_command
-        payload = {
-            "status": status,
-            "run": f"{self.workflow_name}/{self.run_dir.name}",
-            "task": meta.get("task", ""),
-            "current_phase": phase.id if phase is not None else "-",
-            "reason": reason,
-            "required_artifact": required_artifact_text,
-            "report": report_text,
-            "next_command": next_command,
-        }
+        payload = workflow_status_payload(
+            status=status,
+            run=f"{self.workflow_name}/{self.run_dir.name}",
+            task=str(meta.get("task", "")),
+            current_phase=phase.id if phase is not None else "-",
+            reason=reason,
+            required_artifact=required_artifact,
+            report=report,
+            next_command=next_command,
+        )
         # 사람이 읽는 blocker는 stdout으로만 나가고 사라진다. 같은 판정을
         # trace에도 남겨야 실패한 run을 나중에 재현하거나 eval로 옮길 수 있다.
         if status != "complete":
@@ -1779,17 +1900,7 @@ class Runner:
                     "required_artifact": self._run_relative(required_artifact),
                 },
             )
-        print(f"status: {_status_value(status)}")
-        print(f"run: {_status_value(payload['run'])}")
-        print(f"task: {_status_value(payload['task'])}")
-        print(f"current_phase: {phase.id if phase is not None else '-'}")
-        print(f"reason: {_status_value(reason)}")
-        if required_artifact is not None:
-            print(f"required_artifact: {_status_value(required_artifact_text)}")
-        if report is not None:
-            print(f"report: {_status_value(report_text)}")
-        print(f"next_command: {_status_value(next_command)}")
-        print(f"status_json: {json.dumps(payload, sort_keys=True)}")
+        print_structured_status(payload)
 
     def _emit_observation(
         self,
@@ -1896,10 +2007,6 @@ def _meta_timestamp(value: object) -> float | None:
 
 def _missing_markers(text: str, markers: tuple[str, ...]) -> list[str]:
     return missing_markers(text, markers)
-
-
-def _status_value(value: object) -> str:
-    return str(value).replace("\r", "\\r").replace("\n", "\\n")
 
 
 def _is_git_repo(project_root: Path) -> bool:

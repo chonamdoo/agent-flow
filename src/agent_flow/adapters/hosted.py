@@ -12,6 +12,7 @@ review flagged.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -21,13 +22,22 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from agent_flow.adapters.base import Adapter
+from agent_flow.artifact import bind_review_evidence, ensure_review_binding
 from agent_flow.core.local_skills import (
     ARCHITECTURE_CONTRACT_FAMILY,
     phase_skill_resolution,
 )
+from agent_flow.core.review_evidence import (
+    ReviewerOutcome,
+    complete_provider_names,
+    review_evidence_record,
+    review_results_path,
+    serialize_review_results,
+)
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
     git_safe,
+    validate_run_artifact_target,
     write_run_artifact_text,
 )
 from agent_flow.multi_review import (
@@ -38,6 +48,7 @@ from agent_flow.multi_review import (
     distribute,
     distribute_final_review,
     reviewer_result_error,
+    review_job_id,
     run_distribution,
 )
 from agent_flow.subprocess_pool import SubprocessResult
@@ -187,7 +198,7 @@ def _run_multi_review_distribution(
     project_root: Path,
     adapter: Adapter,
 ) -> tuple[Distribution, ReviewExecution]:
-    review_input_path = _write_review_input_snapshot(
+    review_input = _write_review_input_snapshot(
         project_root,
         run_dir,
         phase.id,
@@ -198,7 +209,7 @@ def _run_multi_review_distribution(
         run_dir,
         project_root,
         adapter,
-        review_input_path=review_input_path,
+        review_input=review_input,
     )
     # phase는 여기서만 안다. 넘기지 않으면 launch 선언의 `match.phase`는
     # final-review 밖에서 비교할 값이 없어 절대 발동하지 않는다.
@@ -216,7 +227,65 @@ def _run_multi_review_distribution(
         project_root,
         config_root=adapter.config_root_or(project_root),
     )
+    _write_review_results(distribution, execution.outcomes)
     return distribution, execution
+
+
+def _write_review_results(
+    distribution: Distribution,
+    outcomes: tuple[ReviewerOutcome, ...],
+) -> None:
+    if distribution.phase_id is None:
+        return
+    roots = {
+        job.artifact_root.resolve()
+        for jobs in distribution.by_cli.values()
+        for job in jobs
+    }
+    if not roots:
+        return
+    if len(roots) != 1:
+        raise ValueError("review result artifacts must share one run directory")
+    artifact_root = roots.pop()
+    output = review_results_path(artifact_root, distribution.phase_id)
+    validate_run_artifact_target(artifact_root, output)
+    binding = ensure_review_binding(artifact_root)
+    serialized = serialize_review_results(
+        phase_id=distribution.phase_id,
+        run_id=binding.run_id,
+        nonce=binding.nonce,
+        phase_entered_at=binding.phase_entered_at,
+        outcomes=outcomes,
+    )
+    write_run_artifact_text(artifact_root, output, serialized)
+    expected_by_provider = distribution.expected_job_ids_by_provider()
+    record = review_evidence_record(
+        nonce=binding.nonce,
+        phase_entered_at=binding.phase_entered_at,
+        serialized_results=serialized,
+        outcomes=outcomes,
+        blocking_job_ids=(
+            ()
+            if distribution.accept_any_provider
+            else distribution.required_job_ids
+        ),
+        accept_any_provider=distribution.accept_any_provider,
+        expected_job_ids_by_provider=expected_by_provider,
+    )
+    bind_review_evidence(
+        artifact_root,
+        phase_id=distribution.phase_id,
+        run_id=binding.run_id,
+        nonce=binding.nonce,
+        phase_entered_at=binding.phase_entered_at,
+        record=record,
+    )
+
+
+@dataclass(frozen=True)
+class ReviewInputSnapshot:
+    path: Path
+    digest: str
 
 
 def _write_review_input_snapshot(
@@ -225,7 +294,7 @@ def _write_review_input_snapshot(
     phase_id: str,
     *,
     base_branch: str | None = None,
-) -> Path:
+) -> ReviewInputSnapshot:
     """리뷰어가 받는 유일한 증거. 기준점은 선언된 base와의 merge-base다.
 
     `HEAD` 기준으로 찍으면 작업이 이미 커밋된 브랜치에서는 모든 섹션이 비는데,
@@ -353,14 +422,19 @@ def _write_review_input_snapshot(
         for label, result in observations
     ]
     content = "\n".join(header) + "\n\n" + "\n\n".join(sections) + "\n"
-    if len(content.encode("utf-8")) > _REVIEW_INPUT_MAX_BYTES:
+    encoded = content.encode("utf-8")
+    if len(encoded) > _REVIEW_INPUT_MAX_BYTES:
         raise WorktreeIsolationError(
             "could not precompute reviewer input: "
             f"snapshot exceeds {_REVIEW_INPUT_MAX_BYTES} bytes"
         )
     target = run_dir.resolve() / f"{phase_id}-review-input.patch"
     write_run_artifact_text(run_dir, target, content)
-    return target
+    return ReviewInputSnapshot(
+        path=target,
+        digest=hashlib.sha256(encoded).hexdigest(),
+    )
+
 
 
 @dataclass(frozen=True)
@@ -520,7 +594,7 @@ def _reviewer_jobs(
     project_root: Path,
     adapter: Adapter,
     *,
-    review_input_path: Path | None = None,
+    review_input: ReviewInputSnapshot | None = None,
 ) -> list[ReviewerJob]:
     profile_angles = adapter.profile_review_angles()
     angles = _applicable_angles(
@@ -535,24 +609,26 @@ def _reviewer_jobs(
     base_prompt = adapter.render_envelope(
         phase, run_dir, project_root, prompt_variant="reviewer-base"
     )
+    review_input_prompt = (
+        "\n\n## Precomputed review input\n\n"
+        f"Read `{review_input.path}` before judging the change. The controller "
+        "captured it immediately before launching reviewers: its header names "
+        "the diff baseline (the profile base branch's merge-base when one is "
+        "available, so changes already committed on this branch are included) "
+        "and states whether the snapshot was truncated or is a verified empty "
+        "diff. The body holds `git status --short` and that diff. Inspect "
+        "untracked files listed there directly. Do not run `git diff` inside "
+        "the reviewer sandbox. "
+        f"Its SHA-256 is `{review_input.digest}`; this digest is part of your "
+        "prompt identity."
+        if review_input is not None
+        else ""
+    )
     for item in angles:
         angle_id = str(item.get("id") or "").strip()
         if not angle_id:
             continue
         angle_output = _review_angle_output(run_dir, phase.id, angle_id)
-        review_input = (
-            "\n\n## Precomputed review input\n\n"
-            f"Read `{review_input_path}` before judging the change. The controller "
-            "captured it immediately before launching reviewers: its header names "
-            "the diff baseline (the profile base branch's merge-base when one is "
-            "available, so changes already committed on this branch are included) "
-            "and states whether the snapshot was truncated or is a verified empty "
-            "diff. The body holds `git status --short` and that diff. Inspect "
-            "untracked files listed there directly. Do not run `git diff` inside "
-            "the reviewer sandbox."
-            if review_input_path is not None
-            else ""
-        )
         angle_prompt = (
             f"{base_prompt}\n\n"
             "## Isolated reviewer process contract\n\n"
@@ -564,8 +640,11 @@ def _reviewer_jobs(
             "output with exactly these two plain lines:\n"
             "`## Reviewer`\n"
             "`reviewer-source: sub-agent`\n"
-            "Do not wrap either line in bold, a list, or a code fence."
-            f"{review_input}\n\n"
+            "Do not wrap either line in bold, a list, or a code fence. End with "
+            "exactly one unfenced plain line: `verdict: approve` or "
+            "`verdict: request-changes`. Do not write another unfenced verdict "
+            "line anywhere else."
+            f"{review_input_prompt}\n\n"
             f"## Review angle\n\n"
             f"- id: {angle_id}\n"
             f"{_review_angle_prompt(project_root, item.get('prompt', ''))}\n"
@@ -666,11 +745,23 @@ def _required_reviewer_failures(
                     failures.append(f"{job_id}: {reason}")
         return failures
 
+    expected_by_provider = distribution.expected_job_ids_by_provider()
+    successful_job_ids = {
+        result.job_id
+        for result in results
+        if reviewer_result_error(result) is None
+    }
+    if complete_provider_names(
+        expected_by_provider,
+        successful_job_ids,
+    ):
+        return []
+
     provider_failures: list[str] = []
     for cli_name, jobs in distribution.by_cli.items():
         failures = []
         for job in jobs:
-            job_id = f"{cli_name}-{job.angle_id}"
+            job_id = review_job_id(cli_name, job)
             result = by_id.get(job_id)
             reason = (
                 "missing result"
@@ -679,9 +770,8 @@ def _required_reviewer_failures(
             )
             if reason is not None:
                 failures.append(f"{job.angle_id}: {reason}")
-        if not failures:
-            return []
-        provider_failures.append(f"{cli_name}: " + ", ".join(failures))
+        if failures:
+            provider_failures.append(f"{cli_name}: " + ", ".join(failures))
     return provider_failures or ["no reviewer provider completed every angle"]
 
 
@@ -721,7 +811,7 @@ def _multi_reviewer_block(
     }
     for cli_name, jobs in distribution.by_cli.items():
         for job in jobs:
-            job_id = f"{cli_name}-{job.angle_id}"
+            job_id = review_job_id(cli_name, job)
             result = by_id.get(job_id)
             if result is None:
                 status = "skipped"

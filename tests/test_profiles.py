@@ -29,6 +29,7 @@ from agent_flow.core.profiles import (  # noqa: E402
     GATE_PHASE_ALL,
     GATE_PHASES,
     ProfileGate,
+    ProjectProfile,
     _gate_from_payload,
     load_profile,
     load_profile_payload,
@@ -108,22 +109,154 @@ def test_unknown_phase_is_rejected(phase):
         _gate(phase=phase)
 
 
+def test_profile_gate_execution_defaults_to_local():
+    assert _gate().execution == "local"
+
+
+def test_profile_gate_execution_rejects_unknown_value():
+    with pytest.raises(ValueError, match="profile gate execution must be one of"):
+        _gate(execution="remote")
+
+
+def test_ci_gate_requires_declared_check_name():
+    with pytest.raises(ValueError, match="profile CI gate ci_check missing"):
+        _gate(execution="ci")
+
+
+def test_local_gate_rejects_unused_ci_check_name():
+    with pytest.raises(
+        ValueError,
+        match="profile local gate must not declare ci_check",
+    ):
+        _gate(ci_check="pytest")
+
+
+def test_local_gate_plan_excludes_ci_gates():
+    commands = _profile_gate_commands(["python"], phase=GATE_PHASE_ALL)
+
+    assert "test" not in {command.gate_id for command in commands}
+
+
+def test_python_full_suite_gate_is_ci_deferred():
+    test_gate = next(
+        gate for gate in load_profile("python").gates if gate.gate_id == "test"
+    )
+
+    assert test_gate.execution == "ci"
+    assert test_gate.command == ("pytest", "-q")
+    assert test_gate.ci_check == "pytest"
+    assert test_gate.required is True
+    workflow = (KIT_ROOT / ".github" / "workflows" / "tests.yml").read_text(
+        encoding="utf-8"
+    )
+    workflow_payload = yaml.safe_load(workflow)
+    assert test_gate.ci_check in workflow_payload["jobs"]
+    assert "pull_request:" in workflow
+    assert "PYTHONPATH=src python3 -m pytest tests -q" in workflow
+
+
+def test_optional_ci_gate_does_not_become_required_pr_check():
+    from agent_flow.core.gate_plan import deferred_check_names
+    from agent_flow.core.gates import GateCommand
+
+    commands = [
+        GateCommand(
+            "optional",
+            ("true",),
+            required=False,
+            ci_check="optional-ci",
+        )
+    ]
+
+    assert deferred_check_names(commands) == ()
+
+
+def test_all_reviewer_templates_require_one_unfenced_verdict():
+    templates = KIT_ROOT / "templates" / "_shared" / "review"
+
+    for template in templates.glob("*.md"):
+        assert "Emit exactly one unfenced final verdict line:" in template.read_text(
+            encoding="utf-8"
+        ), template.name
+
+
+def test_new_policies_are_value_driven(monkeypatch: pytest.MonkeyPatch):
+    from agent_flow.core import gate_plan
+
+    profile = ProjectProfile(
+        profile_id="probe",
+        gates=(
+            ProfileGate("arbitrary-a", ("true",), execution="local"),
+            ProfileGate(
+                "arbitrary-b",
+                ("true",),
+                execution="ci",
+                ci_check="arbitrary-ci",
+            ),
+        ),
+        skills={},
+        architecture=None,
+    )
+    monkeypatch.setattr(gate_plan, "load_profile", lambda *_args: profile)
+
+    assert [
+        command.gate_id
+        for command in gate_plan.profile_gate_commands(["probe"])
+    ] == ["arbitrary-a"]
+    assert [
+        command.gate_id
+        for command in gate_plan.profile_gate_commands(
+            ["probe"], execution="ci"
+        )
+    ] == ["arbitrary-b"]
+
+
 def test_default_gate_run_excludes_the_pre_push_test_gate():
     commands = _profile_gate_commands(["python"])
 
-    assert [command.gate_id for command in commands] == ["type", "architecture-lint", "lint"]
-    assert not any("pytest" in part for command in commands for part in command.command)
+    assert [command.gate_id for command in commands] == [
+        "type",
+        "architecture-lint",
+        "lint",
+    ]
+    assert not any(
+        "pytest" in part
+        for command in commands
+        for part in command.command
+    )
 
 
-def test_phase_all_runs_the_pre_push_test_gate():
-    by_id = {command.gate_id: command.command for command in _profile_gate_commands(["python"], phase=GATE_PHASE_ALL)}
+def test_phase_all_runs_only_local_gates_by_default():
+    by_id = {
+        command.gate_id: command.command
+        for command in _profile_gate_commands(["python"], phase=GATE_PHASE_ALL)
+    }
 
-    assert by_id["test"] == (sys.executable, "-m", "pytest", "-q")
+    assert "test" not in by_id
     assert "architecture-lint" in by_id
 
 
-def test_explicit_phase_selects_only_that_phase():
-    assert [command.gate_id for command in _profile_gate_commands(["python"], phase="pre-push")] == ["test"]
+def test_multi_profile_ci_gate_keeps_external_check_identity():
+    commands = _profile_gate_commands(
+        ["python", "generic"],
+        phase=GATE_PHASE_ALL,
+        execution="ci",
+    )
+
+    assert [command.gate_id for command in commands] == ["python:test"]
+    assert commands[0].ci_check == "pytest"
+
+
+def test_explicit_phase_and_execution_select_one_gate_class():
+    assert _profile_gate_commands(["python"], phase="pre-push") == []
+    commands = _profile_gate_commands(
+        ["python"],
+        phase="pre-push",
+        execution="ci",
+    )
+
+    assert [command.gate_id for command in commands] == ["test"]
+    assert commands[0].ci_check == "pytest"
     assert _profile_gate_commands(["python"], phase="post-merge") == []
 
 

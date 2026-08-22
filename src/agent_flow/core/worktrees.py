@@ -845,17 +845,38 @@ def find_pending_worktree_cleanup(
             f"cannot inspect pending cleanup journals at {pending_root}"
         ) from exc
     for path in candidates:
-        journal = _load_cleanup_journal(path)
-        checkout = journal["checkout"]
-        if selector not in {
-            checkout["name"],
-            checkout["branch"],
-            checkout["identity"],
-            checkout["path"],
-        }:
+        journal = _load_cleanup_journal(path, require_checkout=False)
+        checkout = journal.get("checkout")
+        if not isinstance(checkout, dict):
             continue
-        archive = Path(journal["run"]["archive_dir"])
-        source = Path(journal["run"]["source_dir"])
+        selector_keys = ("name", "branch", "identity", "path")
+        selectors_complete = all(
+            isinstance(checkout.get(key), str) and bool(checkout.get(key))
+            for key in selector_keys
+        )
+        recorded_selectors = {
+            checkout[key]
+            for key in selector_keys
+            if isinstance(checkout.get(key), str) and checkout[key]
+        }
+        if selector not in recorded_selectors:
+            continue
+        run = journal.get("run")
+        if (
+            not selectors_complete
+            or not isinstance(run, dict)
+            or any(
+                not isinstance(run.get(key), str)
+                or not run.get(key)
+                for key in ("archive_dir", "source_dir")
+            )
+        ):
+            raise CleanupBlockedError(
+                "cleanup journal contract is incomplete; preserving checkout",
+                journal_path=path,
+            )
+        archive = Path(run["archive_dir"])
+        source = Path(run["source_dir"])
         run_dir = archive if archive.exists() else source
         if (
             journal.get("status") == "complete"
@@ -883,6 +904,72 @@ def cleanup_state_root(result: CleanupTransactionResult) -> Path:
     if run_dir.parent.name != "runs" or run_dir.parent.parent.name != ".agent-flow":
         raise CleanupBlockedError(f"invalid archived run path: {run_dir}")
     return run_dir.parent.parent.parent
+
+
+def resume_pending_worktree_cleanup(
+    *, root: Path, pending: CleanupTransactionResult
+) -> Path:
+    """Resume a journal-owned cleanup without re-entering the phase runner."""
+    journal = _load_cleanup_journal(pending.journal_path)
+    target = journal.get("target")
+    integration = journal.get("integration")
+    checkout = journal.get("checkout")
+    if (
+        not isinstance(target, dict)
+        or not isinstance(integration, dict)
+        or not isinstance(checkout, dict)
+    ):
+        raise CleanupBlockedError(
+            "cleanup journal contract is incomplete; preserving checkout"
+        )
+    target_branch = _cleanup_target_branch(target)
+    strategy = integration.get("strategy")
+    checkout_path = checkout.get("path")
+    delete_branch = checkout.get("delete_branch")
+    if (
+        strategy not in {"merge", "squash", "rebase"}
+        or not isinstance(checkout_path, str)
+        or not checkout_path
+        or not isinstance(delete_branch, bool)
+    ):
+        raise CleanupBlockedError(
+            "cleanup journal integration contract is unknown; preserving checkout"
+        )
+    result = run_worktree_cleanup_transaction(
+        root=root,
+        checkout_path=Path(checkout_path),
+        run_dir=pending.run_dir,
+        target_branch=target_branch,
+        integration_strategy=strategy,
+        delete_branch=delete_branch,
+    )
+    return complete_worktree_cleanup(result)
+
+
+def _cleanup_target_branch(target: dict[str, Any]) -> str:
+    recorded = target.get("branch")
+    if isinstance(recorded, str) and recorded:
+        validate_git_branch(recorded)
+        return recorded
+    ref = target.get("ref")
+    if isinstance(ref, str):
+        if ref.startswith("refs/heads/"):
+            branch = ref.removeprefix("refs/heads/")
+        elif ref.startswith("refs/remotes/"):
+            _remote, separator, branch = ref.removeprefix(
+                "refs/remotes/"
+            ).partition("/")
+            if not separator:
+                branch = ""
+        else:
+            branch = ""
+        if branch:
+            # Pre-upgrade journals recorded only the selected target ref.
+            validate_git_branch(branch)
+            return branch
+    raise CleanupBlockedError(
+        "cleanup journal target branch is unknown; preserving checkout"
+    )
 
 
 def _prepare_or_load_cleanup_journal(
@@ -1030,6 +1117,7 @@ def _prepare_or_load_cleanup_journal(
         "target": {
             "ref": target_ref,
             "expected_oid": target_oid,
+            "branch": target_branch,
         },
         "integration": {
             "strategy": integration_strategy,
@@ -1441,11 +1529,13 @@ def _refresh_cleanup_target_for_resume(
         if (
             journal["target"]["ref"] == candidate
             and journal["target"]["expected_oid"] == candidate_oid
+            and journal["target"].get("branch") == target_branch
         ):
             return
         journal["target"] = {
             "ref": candidate,
             "expected_oid": candidate_oid,
+            "branch": target_branch,
         }
         journal["integration"]["proof"] = "pending"
         journal["integration"]["method"] = None
@@ -2036,10 +2126,14 @@ def _valid_cleanup_repository_identity(value: object) -> bool:
     )
 
 
-def _load_cleanup_journal(path: Path) -> dict[str, Any]:
+def _load_cleanup_journal(
+    path: Path,
+    *,
+    require_checkout: bool = True,
+) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CleanupBlockedError(
             f"cleanup journal is missing or unreadable at {path}"
         ) from exc
@@ -2049,17 +2143,21 @@ def _load_cleanup_journal(path: Path) -> dict[str, Any]:
         or payload.get("status")
         not in {"cleanup_pending", "steps_complete", "complete"}
         or not _valid_cleanup_repository_identity(payload.get("repository"))
-        or not isinstance(payload.get("checkout"), dict)
-        or not isinstance(
-            payload["checkout"].get("registration_identity"), str
-        )
-        or not payload["checkout"]["registration_identity"]
         or not isinstance(payload.get("steps"), dict)
         or any(
             not isinstance(payload["steps"].get(step), dict)
             or payload["steps"][step].get("status") not in {"pending", "done"}
             for step in CLEANUP_STEPS
         )
+    ):
+        raise CleanupBlockedError(
+            f"cleanup journal schema is unknown at {path}; preserving checkout"
+        )
+    checkout = payload.get("checkout")
+    if require_checkout and (
+        not isinstance(checkout, dict)
+        or not isinstance(checkout.get("registration_identity"), str)
+        or not checkout["registration_identity"]
     ):
         raise CleanupBlockedError(
             f"cleanup journal schema is unknown at {path}; preserving checkout"

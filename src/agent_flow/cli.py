@@ -15,7 +15,9 @@ from pathlib import Path
 import yaml
 
 from agent_flow.core.artifacts import (
+    canonical_gate_results_path,
     init_project,
+    read_deferred_ci_checks,
     write_gate_results,
     write_handoff,
     write_recovery,
@@ -38,7 +40,7 @@ from agent_flow.core.design_ledger import (
     render_spec_changes,
 )
 from agent_flow.core.design_value_check import missing_spec_item_evidence
-from agent_flow.core.gate_plan import profile_gate_commands
+from agent_flow.core.gate_plan import deferred_check_names, profile_gate_commands
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.kit_digest import warn_if_installed_kit_is_stale
 from agent_flow.core.kit_install import run_project_install
@@ -52,6 +54,7 @@ from agent_flow.core.profiles import (
     DEFAULT_GATE_PHASE,
     GATE_PHASE_ALL,
     GATE_PHASES,
+    GATE_EXECUTIONS,
     active_profile_ids,
     detect_profile,
     load_profile_payload,
@@ -67,11 +70,16 @@ from agent_flow.core.local_skills import (
 from agent_flow.core import skill_catalog
 from agent_flow.core.skill_sync import parse_skill_sources, sync_skill_sources
 from agent_flow.core.review import summarize_reviews, write_review_summary
-from agent_flow.core.report import write_run_report
+from agent_flow.core.report import RUN_REPORT_FILENAME, write_run_report
 from agent_flow.core.query import explain_run, query_run
 from agent_flow.core.security import resolve_project_path
 from agent_flow.core.tool_lint import lint_tools
 from agent_flow.core.watch import write_watch_snapshot
+from agent_flow.core.workflow_status import (
+    print_structured_status,
+    status_value,
+    workflow_status_payload,
+)
 from agent_flow.core.update_check import (
     installed_version,
     print_update_report,
@@ -108,6 +116,7 @@ from agent_flow.core.team import (
     write_worker_result,
 )
 from agent_flow.core.worktrees import (
+    CleanupBlockedError,
     WorktreeLockedError,
     WorktreeAlreadyExistsError,
     WorktreeStatus,
@@ -127,6 +136,7 @@ from agent_flow.core.worktrees import (
     delegated_slug,
     run_declared_worktree_actions,
     find_pending_worktree_cleanup,
+    resume_pending_worktree_cleanup,
     existing_checkout_path,
     known_worktree_names,
     leader_dirty_paths,
@@ -171,7 +181,12 @@ from agent_flow.core.worktree_isolation import (
 )
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
-from agent_flow.artifact import find_active_run, mark_inactive, read_meta
+from agent_flow.artifact import (
+    find_active_run,
+    mark_inactive,
+    phase_review_rejected,
+    read_meta,
+)
 from agent_flow.runner import (
     ACCEPT_LEADER_DRIFT_FLAG,
     Runner,
@@ -356,6 +371,8 @@ def main(argv: list[str] | None = None) -> int:
     pr_watch_parser.add_argument("--once", action="store_true")
     pr_watch_parser.add_argument("--poll-interval", type=int, default=30)
     pr_watch_parser.add_argument("--max-polls", type=int, default=20)
+    pr_watch_parser.add_argument("--run-dir")
+    pr_watch_parser.add_argument("--allow-unbound", action="store_true")
 
     detect_parser = subparsers.add_parser("detect-profile")
     detect_parser.add_argument("--root", default=".")
@@ -378,6 +395,11 @@ def main(argv: list[str] | None = None) -> int:
         "--phase",
         default=DEFAULT_GATE_PHASE,
         choices=(*GATE_PHASES, GATE_PHASE_ALL),
+    )
+    gates_parser.add_argument(
+        "--execution",
+        default="local",
+        choices=GATE_EXECUTIONS,
     )
 
     architecture_lint_parser = subparsers.add_parser("architecture-lint")
@@ -857,9 +879,72 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "continue":
         try:
-            _assert_relay_checkout_identity(root, args.worktree, args.checkout_identity)
+            _assert_relay_checkout_identity(
+                root,
+                args.worktree,
+                args.checkout_identity,
+            )
+            cleanup_runtime_root = (
+                worktree_runtime_root(root=root, name=args.worktree)
+                if args.worktree
+                else root
+            )
+            active_before_cleanup = find_active_run(cleanup_runtime_root)
+            pending_cleanup = (
+                find_pending_worktree_cleanup(root=root, selector=args.worktree)
+                if args.worktree
+                else None
+            )
+            unrelated_active_run = False
+            if (
+                pending_cleanup is not None
+                and active_before_cleanup is not None
+            ):
+                active_meta = read_meta(active_before_cleanup.path)
+                owns_cleanup = (
+                    active_meta.get("cleanup_state") == "cleanup_pending"
+                    and active_meta.get("cleanup_journal")
+                    == str(pending_cleanup.journal_path)
+                )
+                if not owns_cleanup:
+                    pending_cleanup = None
+                    unrelated_active_run = True
+        except CleanupBlockedError as exc:
+            _print_cleanup_blocked_status(
+                exc.run_dir,
+                exc,
+                next_command=_continue_command(root, args.worktree),
+            )
+            return 2
+        except (OSError, ValueError, RuntimeError, KeyError) as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
+        if pending_cleanup is not None:
+            try:
+                completed_run = resume_pending_worktree_cleanup(
+                    root=root,
+                    pending=pending_cleanup,
+                )
+            except CleanupBlockedError as exc:
+                _print_cleanup_blocked_status(
+                    exc.run_dir or pending_cleanup.run_dir,
+                    exc,
+                    next_command=_continue_command(root, args.worktree),
+                )
+                return 2
+            except (OSError, ValueError, RuntimeError, KeyError) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
+            _print_completed_cleanup_status(completed_run)
+            return 0
+        try:
             run_root, state_root = (
-                _worktree_context(root, args.worktree, provision=True)
+                _worktree_context(
+                    root,
+                    args.worktree,
+                    provision=True,
+                    prefer_pending_cleanup=not unrelated_active_run,
+                )
                 if args.worktree
                 else (root, root)
             )
@@ -868,15 +953,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if run_root is None:
             return 1
-        pending_cleanup = (
-            find_pending_worktree_cleanup(root=root, selector=args.worktree)
-            if args.worktree
-            else None
-        )
         active = find_active_run(state_root)
-        resume_run_dir = active.path if active is not None else (
-            pending_cleanup.run_dir if pending_cleanup is not None else None
-        )
+        resume_run_dir = active.path if active is not None else None
         if resume_run_dir is None:
             if _legacy_js_state_exists(root):
                 _print_legacy_js_state_migration(root)
@@ -999,16 +1077,51 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(write_watch_snapshot(run_dir))
         return 0
-
     if args.command == "pr-watch":
+        try:
+            watch_run_dir = (
+                _resolve_run_dir(root, args.run_dir)
+                if args.run_dir
+                else None
+                if args.allow_unbound
+                else _implicit_pr_watch_run_dir()
+            )
+        except (OSError, ValueError, RuntimeError, KeyError) as exc:
+            print(f"cannot resolve workflow run for pr-watch: {exc}", file=sys.stderr)
+            return 1
+        if args.run_dir and watch_run_dir is None:
+            return 1
+        if watch_run_dir is None and not args.allow_unbound:
+            print(
+                "cannot verify deferred CI gates without an active run; "
+                "pass --run-dir or --allow-unbound",
+                file=sys.stderr,
+            )
+            return 1
+        if watch_run_dir is not None:
+            try:
+                required_checks = read_deferred_ci_checks(watch_run_dir)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                print(
+                    f"cannot verify deferred CI gates: {exc}",
+                    file=sys.stderr,
+                )
+                return 1
+        else:
+            required_checks = ()
         snapshot = (
-            fetch_pr(args.number, repo=args.repo)
+            fetch_pr(
+                args.number,
+                repo=args.repo,
+                required_checks=required_checks,
+            )
             if args.once
             else watch_pr(
                 args.number,
                 repo=args.repo,
                 poll_interval_s=args.poll_interval,
                 max_poll_count=args.max_polls,
+                required_checks=required_checks,
             )
         )
         if snapshot is None:
@@ -1030,6 +1143,17 @@ def main(argv: list[str] | None = None) -> int:
                 profile_ids,
                 root=profile_root,
                 phase=args.phase,
+                execution=args.execution,
+            )
+            deferred = (
+                profile_gate_commands(
+                    profile_ids,
+                    root=profile_root,
+                    phase=args.phase,
+                    execution="ci",
+                )
+                if args.execution == "local"
+                else []
             )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
@@ -1058,6 +1182,8 @@ def main(argv: list[str] | None = None) -> int:
                 results=results,
                 cwd=command_root,
                 phase=args.phase,
+                execution=args.execution,
+                deferred_ci_checks=deferred_check_names(deferred),
             )
             if args.phase != GATE_PHASE_ALL:
                 # runner는 이 결과를 pass 라우팅으로 받아 주지 않는다. 이유를 여기서
@@ -1187,23 +1313,34 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if args.spec_command == "markers":
                 artifact = _resolve_project_path(root, args.artifact)
+                artifact_text = artifact.read_text(encoding="utf-8")
                 project = (
                     _resolve_project_path(root, args.project_root)
                     if args.project_root
                     else root
                 )
                 context = _spec_run_context(run_dir)
+                run_meta = _read_run_state(run_dir)
+                workflow = str(run_meta.get("workflow", ""))
+                review_rejected = phase_review_rejected(
+                    run_dir,
+                    workflow,
+                    args.phase,
+                    artifact_text,
+                    run_meta=run_meta,
+                )
                 print(
                     json.dumps(
                         missing_spec_item_evidence(
                             project,
                             run_dir,
                             args.phase,
-                            artifact.read_text(encoding="utf-8"),
+                            artifact_text,
                             task_text=context["task_text"],
                             profile=resolved_profile(root),
                             since=context["since"],
                             evidence_root=root,
+                            review_rejected=review_rejected,
                         ),
                         ensure_ascii=False,
                     )
@@ -2128,6 +2265,38 @@ def _print_gate_progress(gate: GateCommand, index: int, total: int) -> None:
     print(f"[gate {index}/{total}] {gate.gate_id}", file=sys.stderr, flush=True)
 
 
+
+
+def _implicit_pr_watch_run_dir() -> Path | None:
+    checkout = Path.cwd()
+    leader = _git_common_worktree_root(checkout)
+    if leader is not None and not _same_path(leader, checkout):
+        for name in known_worktree_names(root=leader):
+            status = get_worktree_status(root=leader, name=name)
+            if not _same_path(status.path, checkout):
+                continue
+            active = find_active_run(
+                worktree_runtime_root(root=leader, name=name)
+            )
+            if active is not None:
+                if canonical_gate_results_path(active.path).is_file():
+                    return active.path
+                raise RuntimeError(
+                    "active run has no canonical gate ledger; "
+                    "complete the gates phase first"
+                )
+            return None
+    latest = _latest_run_dir(checkout)
+    if latest is not None:
+        if canonical_gate_results_path(latest).is_file():
+            return latest
+        raise RuntimeError(
+            "latest run has no canonical gate ledger; "
+            "complete the gates phase first"
+        )
+    return None
+
+
 def _resolve_run_dir(root: Path, value: str | None) -> Path | None:
     run_dir = _resolve_project_path(root, value) if value else _latest_run_dir(root)
     if run_dir is None:
@@ -2155,9 +2324,14 @@ def _worktree_context(
     *,
     provision: bool = False,
     require_checkout: bool = True,
+    prefer_pending_cleanup: bool = True,
 ) -> tuple[Path | None, Path]:
     status = get_worktree_status(root=root, name=name)
-    pending = find_pending_worktree_cleanup(root=root, selector=name)
+    pending = (
+        find_pending_worktree_cleanup(root=root, selector=name)
+        if prefer_pending_cleanup
+        else None
+    )
     if pending is not None:
         checkout_root = status.path if _worktree_checkout_exists(status) else root
         return checkout_root, cleanup_state_root(pending)
@@ -2420,6 +2594,53 @@ def _continue_command(root: Path, worktree: str | None) -> str:
     return command + f" --worktree {shlex.quote(_slug_for_hint(root, worktree))}"
 
 
+def _print_cleanup_blocked_status(
+    run_dir: Path | None,
+    error: CleanupBlockedError,
+    *,
+    next_command: str,
+) -> None:
+    meta = read_meta(run_dir) if run_dir is not None else {}
+    run = (
+        f"{meta.get('workflow', '')}/{meta.get('run_id') or run_dir.name}"
+        if run_dir is not None
+        else "-"
+    )
+    payload = workflow_status_payload(
+        status="blocked",
+        run=run,
+        task=str(meta.get("task", "")),
+        current_phase="cleanup",
+        reason="cleanup_pending",
+        detail=(
+            f"{error}; journal: {error.journal_path}"
+            if error.journal_path is not None
+            else str(error)
+        ),
+        next_command=next_command,
+    )
+    print_structured_status(payload)
+
+
+def _print_completed_cleanup_status(run_dir: Path) -> None:
+    meta = read_meta(run_dir)
+    workflow = str(meta.get("workflow", ""))
+    run_id = str(meta.get("run_id") or run_dir.name)
+    report = run_dir / RUN_REPORT_FILENAME
+    report_path = report if report.is_file() else None
+    payload = workflow_status_payload(
+        status="complete",
+        run=f"{workflow}/{run_id}",
+        task=str(meta.get("task", "")),
+        current_phase="-",
+        reason="workflow_complete",
+        report=report_path,
+        next_command="none",
+    )
+    print("\n✓ run complete.")
+    print_structured_status(payload)
+
+
 def _known_worktree_names(root: Path) -> list[str]:
     return known_worktree_names(root=root)
 
@@ -2454,10 +2675,6 @@ def _format_safe_command_error(result) -> str:
     return f"{command} failed: {detail}".strip()
 
 
-def _status_value(value: object) -> str:
-    return str(value).replace("\r", "\\r").replace("\n", "\\n")
-
-
 def _print_review_retry_status(reviewer: str, retry_after: str | None) -> None:
     retry_at = _parse_retry_after_arg(retry_after)
     retry_command = f"agent-flow review retry --reviewer {shlex.quote(reviewer)}"
@@ -2466,16 +2683,16 @@ def _print_review_retry_status(reviewer: str, retry_after: str | None) -> None:
     if retry_at is not None and retry_at > datetime.now(timezone.utc):
         print("status: blocked")
         print("reason: reviewer_rate_limited")
-        print(f"reviewer: {_status_value(reviewer)}")
-        print(f"retry_after: {_status_value(retry_after)}")
+        print(f"reviewer: {status_value(reviewer)}")
+        print(f"retry_after: {status_value(retry_after)}")
         print("required_action: wait_until_retry_after")
-        print(f"next_command: {_status_value(retry_command)}")
+        print(f"next_command: {status_value(retry_command)}")
         return
     print("status: awaiting_retry")
     print("reason: reviewer_retry_ready")
-    print(f"reviewer: {_status_value(reviewer)}")
+    print(f"reviewer: {status_value(reviewer)}")
     if retry_after is not None:
-        print(f"retry_after: {_status_value(retry_after)}")
+        print(f"retry_after: {status_value(retry_after)}")
     print("required_action: rerun_review_now")
     print("next_command: none")
 

@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Literal
 
-from agent_flow.core.markers import unfenced_markdown_text
-from agent_flow.core.phase_workflow import overall_review_route_key
 from agent_flow.core.profiles import GATE_PHASE_ALL
+
 
 
 def route_key(text: str) -> str:
@@ -92,6 +92,7 @@ def gates_route_key(text: str, *, nonce: str = "") -> str:
         _gate_results_prove_pass(payload.get("results"))
         and _gate_nonce_matches(payload, nonce)
         and _gate_phase_covers_verification(payload)
+        and _gate_execution_is_local(payload)
     )
     status = payload.get("status")
     if isinstance(status, str):
@@ -129,21 +130,7 @@ def _gate_nonce_matches(payload: dict[str, object], nonce: str) -> bool:
 
 
 def _gate_phase_covers_verification(payload: dict[str, object]) -> bool:
-    """QA gate가 build/test까지 돌렸는가.
-
-    `agent-flow gates`의 기본 phase는 `pre-commit`이고 build/test는 `pre-push`다.
-    workflow의 gates phase는 커밋 직전 마지막 검증이므로 둘 다 돌아야 한다.
-    `--phase pre-commit`으로 돈 결과는 "전부 통과"처럼 보이지만 실제로는
-    build/test가 목록에 오르지도 않은 실행이다.
-
-    `all`만 받는다. `pre-push` 단독은 lint/type/architecture-lint를 빼먹고, 부분
-    phase를 조합으로 인정하기 시작하면 "무엇이 돌았는가"를 결과 목록에서 다시
-    역산해야 한다. 번들 프로필에 post-merge gate는 아직 없다 — 생기면 `all`이
-    그것까지 커밋 전에 돌리므로 그때 이 규칙을 다시 봐야 한다.
-
-    기록이 없으면(구버전 파일, CLI 직접 사용) 대조할 기준이 없으므로 요구하지
-    않는다. nonce와 같은 규칙이다 — "없으면 위반"이 아니라 "기록과 다르면 위반".
-    """
+    """Return whether the local gate wave covered every declared gate phase."""
     produced_by = payload.get("produced_by")
     if not isinstance(produced_by, dict):
         return True
@@ -151,6 +138,17 @@ def _gate_phase_covers_verification(payload: dict[str, object]) -> bool:
     if not isinstance(recorded, str) or not recorded:
         return True
     return recorded == GATE_PHASE_ALL
+
+
+def _gate_execution_is_local(payload: dict[str, object]) -> bool:
+    """A CI-only reproduction cannot substitute for the local gate wave."""
+    produced_by = payload.get("produced_by")
+    if not isinstance(produced_by, dict):
+        return True
+    recorded = produced_by.get("gate_execution")
+    if not isinstance(recorded, str) or not recorded:
+        return True
+    return recorded == "local"
 
 
 def recorded_gate_phase(text: str) -> str:
@@ -167,23 +165,18 @@ def recorded_gate_phase(text: str) -> str:
     return recorded if isinstance(recorded, str) else ""
 
 
-def multi_review_route_key(text: str, phase_id: str = "") -> str:
-    verdicts = _independent_reviewer_verdicts(text)
-    overall = overall_review_route_key(text)
-    if not verdicts:
-        return "missing-reviewer"
-    if overall == "invalid-verdict":
-        return "invalid-verdict"
-    if "request-changes" in verdicts.values() or overall == "request-changes":
-        return "request-changes"
-    if len(verdicts) < 2:
-        return "insufficient-reviewers"
-    if overall == "default":
-        return "default"
-    has_subagent = _has_subagent_reviewer(text)
-    if overall == "approve" and has_subagent and len(verdicts) >= 2:
-        return "approve"
-    return "invalid-verdict"
+def recorded_gate_execution(text: str) -> str:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    produced_by = payload.get("produced_by")
+    if not isinstance(produced_by, dict):
+        return ""
+    recorded = produced_by.get("gate_execution")
+    return recorded if isinstance(recorded, str) else ""
 
 
 def _gate_results_prove_pass(results: object) -> bool:
@@ -216,160 +209,3 @@ def _gate_result_has_evidence(result: dict[str, object]) -> bool:
         if isinstance(value, int) and not isinstance(value, bool) and value == 0:
             return True
     return False
-
-
-
-
-def _independent_reviewer_verdict_count(text: str) -> int:
-    return len(_independent_reviewer_verdicts(text))
-
-
-def _independent_reviewer_verdicts(text: str) -> dict[str, str]:
-    reviewers: dict[str, dict[str, object]] = {}
-    current_reviewer: str | None = None
-    for line in unfenced_markdown_text(text).splitlines():
-        stripped = line.strip()
-        lowered = stripped.lower()
-        if not stripped:
-            continue
-        if stripped.startswith("#"):
-            if re.match(r"^##\s*(?:overall|final)(?:\s+verdict)?\s*$", lowered):
-                current_reviewer = None
-                continue
-            heading = re.match(r"^##\s*reviewer\s+(.+)$", lowered)
-            if heading:
-                key = _normalized_reviewer_heading_id(heading.group(1))
-                current_reviewer = key or None
-            continue
-        source_match = re.match(
-            r"^(reviewer[-_ ]?[a-z0-9-]+)\s+reviewer[-_ ]?source:\s*(.+)$",
-            lowered,
-        )
-        if source_match:
-            key = _normalized_reviewer_id(source_match.group(1))
-            if key:
-                state = reviewers.setdefault(key, {"has_source": False, "subagent": False, "verdict": None})
-                state["has_source"] = True
-                if _is_subagent_source(source_match.group(2)):
-                    state["subagent"] = True
-            continue
-        if current_reviewer is not None and _line_marks_subagent_source(lowered):
-            state = reviewers.setdefault(current_reviewer, {"has_source": False, "subagent": False, "verdict": None})
-            state["has_source"] = True
-            state["subagent"] = True
-            continue
-        if current_reviewer is not None and _line_marks_non_subagent_source(lowered):
-            reviewers.setdefault(current_reviewer, {"has_source": True, "subagent": False, "verdict": None})
-            continue
-        if "verdict:" not in lowered:
-            continue
-        verdict_match = re.match(r"^(.*?)verdict:\s*(approve|request-changes)\s*$", stripped)
-        if not verdict_match:
-            continue
-        prefix = verdict_match.group(1).strip(" -").lower()
-        verdict = verdict_match.group(2)
-        if prefix in {"overall", "overall verdict", "final", "final verdict"}:
-            continue
-        if prefix:
-            key = _normalized_reviewer_id(prefix)
-            if key:
-                reviewers.setdefault(key, {"has_source": False, "subagent": False, "verdict": None})["verdict"] = verdict
-        elif current_reviewer is not None:
-            reviewers.setdefault(current_reviewer, {"has_source": False, "subagent": False, "verdict": None})["verdict"] = verdict
-    return {
-        reviewer: str(state["verdict"])
-        for reviewer, state in reviewers.items()
-        if state["verdict"] and state["subagent"]
-    }
-
-
-def _line_marks_subagent_source(value: str) -> bool:
-    source_match = re.search(r"reviewer[-_ ]?source\s*:\s*(.+)$", value)
-    return bool(source_match and _is_subagent_source(source_match.group(1)))
-
-
-def _line_marks_non_subagent_source(value: str) -> bool:
-    source_match = re.search(r"reviewer[-_ ]?source\s*:\s*(.+)$", value)
-    return bool(source_match and not _is_subagent_source(source_match.group(1)))
-
-
-def _has_subagent_reviewer(text: str) -> bool:
-    return any(
-        _line_marks_subagent_source(line.strip().lower())
-        for line in unfenced_markdown_text(text).splitlines()
-    )
-
-
-def _is_subagent_source(value: str) -> bool:
-    normalized = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
-    return normalized in {
-        "sub agent",
-        "subagent",
-        "host sub agent",
-        "host subagent",
-        "active host sub agent",
-        "active host subagent",
-    }
-
-
-def _reviewer_key(value: str) -> str:
-    normalized = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
-    return normalized or value
-
-
-def _normalized_reviewer_id(value: str) -> str:
-    # 섹션 라벨과 종합 verdict는 독립 reviewer id로 세지 않는다.
-    key = _reviewer_key(value)
-    key = re.sub(r"^reviewer\b", "", key).strip()
-    generic_labels = {
-        "verdict",
-        "verdicts",
-        "overall",
-        "final",
-        "summary",
-        "review",
-        "reviews",
-        "feedback",
-        "report",
-        "reports",
-        "assessment",
-        "assessments",
-        "analysis",
-        "analyses",
-        "decision",
-        "decisions",
-        "conclusion",
-        "conclusions",
-        "status",
-        "statuses",
-        "approval",
-        "approvals",
-        "note",
-        "notes",
-        "finding",
-        "findings",
-        "comment",
-        "comments",
-        "output",
-        "outputs",
-        "result",
-        "results",
-        "scope",
-        "check",
-        "checks",
-        "checklist",
-        "details",
-        "detail",
-    }
-    if not key or any(part in generic_labels for part in key.split()):
-        return ""
-    return key
-
-
-def _normalized_reviewer_heading_id(value: str) -> str:
-    # Reviewer heading은 1-2 단어 id(claude, agent 1 등)만 독립 id로 인정한다.
-    # 긴 서술형 heading은 reviewer가 아니라 prose일 가능성이 높아 제외한다.
-    key = _normalized_reviewer_id(value)
-    if re.fullmatch(r"[a-z0-9]+(?: [a-z0-9]+)?", key):
-        return key
-    return ""

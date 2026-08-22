@@ -90,6 +90,8 @@ optional:
       command: ["command", "argument"]
       required: true
       phase: "pre-commit | pre-push | post-merge"
+      execution: "local | ci (default: local)"
+      ci_check: "required exact pull-request check name when execution is ci; forbidden for local"
       # 이 gate만의 상한(초). 생략하면 호출자 기본값(`agent-flow gates --timeout`,
       # 기본 600)을 쓴다. timeout은 실패가 아니라 판정 불가로 기록되므로
       # gradle/xcodebuild처럼 분 단위인 gate는 여기서 늘려 선언한다 — 안 늘리면

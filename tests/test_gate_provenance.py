@@ -12,6 +12,7 @@ gates가 도중에 끊긴 뒤(예: profile 오류로 `ValueError`) host가 더 �
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,7 +25,12 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from agent_flow.artifact import create_run, read_meta, write_meta
-from agent_flow.core.artifacts import run_gate_nonce, write_gate_results
+from agent_flow.core.artifacts import (
+    GATE_RESULTS_MAX_BYTES,
+    read_deferred_ci_checks,
+    run_gate_nonce,
+    write_gate_results,
+)
 from agent_flow.core.gates import GateCommand, GateResult, run_gate
 from agent_flow.core.route_verdicts import gates_route_key
 
@@ -56,6 +62,7 @@ def test_cli_written_results_carry_the_nonce(tmp_path):
     path = write_gate_results(
         run_dir=run_dir,
         results=[GateResult("test", ("pytest", "-q"), True, 0, "ok", "")],
+        phase="all",
     )
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["produced_by"]["nonce"] == read_meta(run_dir)["gate_nonce"]
@@ -175,6 +182,105 @@ def test_cli_written_results_record_the_gate_phase(tmp_path):
     )
 
 
+def test_gate_writer_rejects_unknown_execution(tmp_path):
+    run_dir = create_run(tmp_path, "default", "task")
+
+    with pytest.raises(ValueError, match="gate execution must be one of"):
+        write_gate_results(
+            run_dir=run_dir,
+            results=[GateResult("test", ("pytest", "-q"), True, 0, "ok", "")],
+            phase="all",
+            execution="remote",
+        )
+
+
+def test_gate_writer_rejects_unknown_phase(tmp_path):
+    run_dir = create_run(tmp_path, "default", "task")
+
+    with pytest.raises(ValueError, match="gate phase must be one of"):
+        write_gate_results(
+            run_dir=run_dir,
+            results=[GateResult("test", ("pytest", "-q"), True, 0, "ok", "")],
+            phase="everything",
+        )
+
+
+def test_legacy_gate_ledger_without_deferred_field_is_compatible(tmp_path):
+    path = tmp_path / "artifacts" / "gate-results.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"passed": true}', encoding="utf-8")
+
+    assert read_deferred_ci_checks(tmp_path) == ()
+
+
+def test_gate_ledger_reader_rejects_fifo(tmp_path):
+    path = tmp_path / "artifacts" / "gate-results.json"
+    path.parent.mkdir(parents=True)
+    os.mkfifo(path)
+
+    with pytest.raises(OSError, match="not a regular file"):
+        read_deferred_ci_checks(tmp_path)
+
+
+def test_gate_ledger_reader_rejects_oversize_file(tmp_path):
+    path = tmp_path / "artifacts" / "gate-results.json"
+    path.parent.mkdir(parents=True)
+    with path.open("wb") as handle:
+        handle.truncate(GATE_RESULTS_MAX_BYTES + 1)
+
+    with pytest.raises(OSError, match="too large"):
+        read_deferred_ci_checks(tmp_path)
+
+
+def test_ci_gate_reproduction_preserves_local_gate_ledger(tmp_path):
+    run_dir = create_run(tmp_path, "default", "task")
+    result = GateResult("pytest", ("pytest", "-q"), True, 0, "ok", "")
+    local_path = write_gate_results(
+        run_dir=run_dir,
+        results=[result],
+        execution="local",
+        phase="all",
+        deferred_ci_checks=("pytest",),
+    )
+    local_content = local_path.read_bytes()
+
+    ci_path = write_gate_results(
+        run_dir=run_dir,
+        results=[result],
+        phase="all",
+        execution="ci",
+    )
+
+    assert ci_path.name == "gate-results-ci-all.json"
+    assert local_path.read_bytes() == local_content
+    assert json.loads(local_path.read_text(encoding="utf-8"))[
+        "deferred_ci_checks"
+    ] == ["pytest"]
+
+
+def test_local_focused_reproduction_preserves_canonical_gate_ledger(tmp_path):
+    run_dir = create_run(tmp_path, "default", "task")
+    result = GateResult("lint", ("ruff", "check", "."), True, 0, "ok", "")
+    canonical_path = write_gate_results(
+        run_dir=run_dir,
+        results=[result],
+        execution="local",
+        phase="all",
+        deferred_ci_checks=("pytest",),
+    )
+    canonical_content = canonical_path.read_bytes()
+
+    focused_path = write_gate_results(
+        run_dir=run_dir,
+        results=[result],
+        execution="local",
+        phase="pre-commit",
+    )
+
+    assert focused_path.name == "gate-results-local-pre-commit.json"
+    assert canonical_path.read_bytes() == canonical_content
+
+
 @pytest.mark.parametrize(
     "phase,expected_route",
     [("all", "green"), ("pre-commit", "default")],
@@ -208,7 +314,12 @@ def test_gates_cli_records_the_phase_it_filtered_on(tmp_path, phase, expected_ro
         )
 
     assert exit_code == 0
-    text = (run_dir / "artifacts" / "gate-results.json").read_text(encoding="utf-8")
+    artifact_name = (
+        "gate-results.json"
+        if phase == "all"
+        else f"gate-results-local-{phase}.json"
+    )
+    text = (run_dir / "artifacts" / artifact_name).read_text(encoding="utf-8")
     payload = json.loads(text)
     assert payload["produced_by"]["gate_phase"] == phase
     assert (
@@ -322,6 +433,7 @@ def test_results_written_into_a_node_run_route_green(tmp_path):
                 stderr="",
             )
         ],
+        phase="all",
     )
 
     assert (
@@ -446,6 +558,7 @@ def test_written_timeout_survives_serialization_and_routes_to_error(tmp_path):
                 timed_out=True,
             ),
         ],
+        phase="all",
     )
     payload = json.loads(path.read_text(encoding="utf-8"))
 
@@ -635,9 +748,13 @@ def test_runner_gate_planning_honours_the_profile_override(tmp_path, monkeypatch
     _gates_runner(run_dir, tmp_path, tmp_path)._run_project_gates()
 
     gate_ids = seen["gate_ids"]
-    # python profile 고유 gate. generic은 architecture-lint 하나뿐이다.
+    # python profile 고유 local gate. full pytest는 PR CI에서만 돈다.
     assert "type" in gate_ids
-    assert "test" in gate_ids
+    assert "test" not in gate_ids
+    payload = json.loads(
+        (run_dir / "artifacts" / "gate-results.json").read_text(encoding="utf-8")
+    )
+    assert payload["deferred_ci_checks"] == ["pytest"]
 
 
 def test_a_declared_gate_timeout_beats_the_default(tmp_path):
