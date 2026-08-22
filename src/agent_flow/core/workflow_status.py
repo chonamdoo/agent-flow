@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 
 class WorkflowStatusPayload(TypedDict):
@@ -17,7 +17,10 @@ class WorkflowStatusPayload(TypedDict):
     required_artifact: str | None
     report: str | None
     next_command: str
-    missing_completion_markers: list[str]
+    # 빈 목록은 키째로 빠진다. `status_json`은 payload를 그대로 덮으므로 항상
+    # 싣으면, 아직 아무 marker도 요구하지 않은 blocker(skill_scope_grew 등)의
+    # 출력에까지 이 이름이 섞여 사용자는 요구받지 않은 것을 요구받았다고 읽는다.
+    missing_completion_markers: NotRequired[list[str]]
 
 
 def workflow_status_payload(
@@ -33,7 +36,7 @@ def workflow_status_payload(
     detail: str | None = None,
     missing_completion_markers: Sequence[str] = (),
 ) -> WorkflowStatusPayload:
-    return {
+    payload: WorkflowStatusPayload = {
         "status": status,
         "run": run,
         "task": task,
@@ -45,8 +48,10 @@ def workflow_status_payload(
         ),
         "report": str(report) if report is not None else None,
         "next_command": next_command,
-        "missing_completion_markers": list(missing_completion_markers),
     }
+    if missing_completion_markers:
+        payload["missing_completion_markers"] = list(missing_completion_markers)
+    return payload
 
 
 def print_structured_status(payload: WorkflowStatusPayload) -> None:
@@ -64,10 +69,11 @@ def print_structured_status(payload: WorkflowStatusPayload) -> None:
         print(f"report: {status_value(payload['report'])}")
     if payload["detail"] is not None:
         print(f"detail: {status_value(payload['detail'])}")
-    if payload["missing_completion_markers"]:
+    markers = payload.get("missing_completion_markers")
+    if markers:
         print(
             "missing_completion_markers: "
-            f"{json.dumps(payload['missing_completion_markers'], ensure_ascii=False)}"
+            f"{json.dumps(markers, ensure_ascii=False)}"
         )
     print(f"next_command: {status_value(payload['next_command'])}")
     print(f"status_json: {json.dumps(payload, sort_keys=True)}")
