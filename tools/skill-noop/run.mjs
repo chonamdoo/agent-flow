@@ -108,9 +108,9 @@ function loadCase(id) {
   // An unknown pattern name would reach `new RegExp(undefined)`, which compiles to /(?:)/ and
   // matches every finding. That prints a confident wrong decision in both directions: a typo in
   // `target` reads as NO-OP, a typo in `forbidden` reads as LOAD-BEARING.
+  if (spec.lineIn != null && !ARMS.includes(spec.lineIn)) fail(`${id}: lineIn must be one of ${ARMS.join(' | ')}`);
   if (spec.kind === 'addition') {
     if (!patterns.has(spec.target)) fail(`${id}: target "${spec.target}" is not a pattern name`);
-    if (spec.lineIn != null && !ARMS.includes(spec.lineIn)) fail(`${id}: lineIn must be one of ${ARMS.join(' | ')}`);
   } else {
     if (!spec.forbidden?.length) fail(`${id}: a deletion case needs forbidden topics`);
     for (const name of spec.forbidden) if (!patterns.has(name)) fail(`${id}: forbidden "${name}" is not a pattern name`);
@@ -125,14 +125,20 @@ function loadCase(id) {
     baselineHash,
     patterns,
     fixtureText,
-    lineIn: spec.lineIn ?? 'variant',
+    // Which arm carries the candidate lines follows from the operator: insertAfter puts them in the
+    // variant, deleteLines takes them out of it. Defaulting to a fixed arm would silently reverse
+    // the decision direction for one of the two operators.
+    lineIn: spec.lineIn ?? (spec.variant?.insertAfter != null ? 'variant' : 'baseline'),
   };
   kase.arms = { baseline: baselineText, variant: variantText(kase) };
   return kase;
 }
 
+// A string replacement expands $&, $`, $' and $$ from the replacement text. Skill text and fixture
+// diffs are arbitrary, so a diff carrying `$&` would silently render a prompt other than the one
+// the run claims to measure. A function replacement disables that expansion.
 const buildPrompt = (kase, arm, fixture) =>
-  PROMPT.replace('{{SKILL}}', kase.arms[arm]).replace('{{DIFF}}', kase.fixtureText.get(fixture));
+  PROMPT.replace('{{SKILL}}', () => kase.arms[arm]).replace('{{DIFF}}', () => kase.fixtureText.get(fixture));
 
 function runOne(kase, job) {
   const [bin, args] = INVOKE[job.provider];
@@ -295,15 +301,44 @@ function report(kase, results, providers, expectedPerCell) {
     return;
   }
   if (kase.kind === 'deletion') {
-    const offAny = kase.fixtures.some((f) => ARMS.some((arm) => bucket(f.name, arm).some((r) => r.verdict !== f.expect)));
-    const forbidden = kase.forbidden.filter((name) =>
-      usable.some((r) => r.findings.some((l) => isBlocking(l) && kase.patterns.get(name).test(l))),
-    );
-    console.log(`   verdict off-expected anywhere: ${offAny}`);
-    console.log(`   forbidden topics ever blocked: ${forbidden.length ? forbidden.join(', ') : 'none'}`);
-    console.log(
-      `   => ${!offAny && forbidden.length === 0 ? 'NO-OP (the lines change no outcome; they belong outside the skill)' : 'LOAD-BEARING (keep the lines)'}`,
-    );
+    // The decision rests on the difference between the arms, never on a deviation existing
+    // somewhere. One reviewer disagreement in each arm proves the lines changed nothing, so
+    // reporting that as LOAD-BEARING would tell maintainers to keep a line the run just failed to
+    // justify. A deviation that both arms share refuses the run instead.
+    const withLine = kase.lineIn;
+    const without = ARMS.find((a) => a !== withLine);
+    const cells = [];
+    for (const f of kase.fixtures) {
+      const w = bucket(f.name, withLine);
+      const o = bucket(f.name, without);
+      cells.push({
+        label: `${f.name} verdict off-expected`,
+        hw: w.filter((r) => r.verdict !== f.expect).length,
+        ho: o.filter((r) => r.verdict !== f.expect).length,
+        nw: w.length,
+        no: o.length,
+      });
+      for (const name of kase.forbidden)
+        cells.push({
+          label: `${f.name} forbidden ${name}`,
+          hw: hits(w, kase.patterns.get(name)),
+          ho: hits(o, kase.patterns.get(name)),
+          nw: w.length,
+          no: o.length,
+        });
+    }
+    const worse = [];
+    const shared = [];
+    for (const c of cells) {
+      const p = fisher(c.hw, c.nw - c.hw, c.ho, c.no - c.ho);
+      if (c.ho > c.hw && p < 0.05) worse.push(c.label);
+      else if (c.hw || c.ho) shared.push(c.label);
+      console.log(`   ${c.label.padEnd(34)} with-line ${c.hw}/${c.nw} vs without-line ${c.ho}/${c.no}  p=${p.toFixed(4)}`);
+    }
+    if (worse.length) console.log(`   => LOAD-BEARING (keep the lines): ${worse.join(', ')}`);
+    else if (shared.length)
+      console.log(`   => INCONCLUSIVE: ${shared.join(', ')} deviates in both arms, so the lines are not what moves it`);
+    else console.log('   => NO-OP (the lines change no outcome; they belong outside the skill)');
     return;
   }
   const re = kase.patterns.get(kase.target);
@@ -364,7 +399,16 @@ for (const kase of cases) {
   const out = path.join(kase.dir, `results-n${reps}-${[...providers].sort().join('+')}.jsonl`);
   appendFileSync(out, '');
   process.stderr.write(`\n${kase.id}: ${jobs.length} jobs -> ${path.basename(out)}\n`);
-  // Rows land on disk as they finish, so a crash keeps the runs already paid for.
-  const results = await pool(jobs, limit, (job) => runOne(kase, job), (row) => appendFileSync(out, `${JSON.stringify(row)}\n`));
+  // Rows land on disk as they finish, so a crash keeps the runs already paid for. Appending means
+  // one file can hold more than one run, so each row carries the run it came from and the skill
+  // text it was rendered against: without those a reader cannot tell two n12 runs apart, nor which
+  // baseline produced a row, while the filename still claims a single experiment.
+  const runId = new Date().toISOString();
+  const results = await pool(
+    jobs,
+    limit,
+    (job) => runOne(kase, job),
+    (row) => appendFileSync(out, `${JSON.stringify({ runId, skill: kase.baselineHash, ...row })}\n`),
+  );
   report(kase, results, providers, reps);
 }
