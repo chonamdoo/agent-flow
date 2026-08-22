@@ -156,6 +156,33 @@ def test_matching_green_check_satisfies_deferred_gate():
     assert snap.status == "green"
 
 
+def test_workflow_name_does_not_satisfy_a_declared_job_gate():
+    """반증: workflow 이름을 신원으로 인정하면 그 안의 아무 green job 하나가
+    선언된 gate를 충족한다. 여기서 선언된 job(`pytest`)은 rollup에 아예 없고
+    green인 것은 같은 workflow의 `lint`뿐이므로 판정은 pending이어야 한다."""
+    snap = _classify(
+        1,
+        {
+            "state": "OPEN",
+            "title": "x",
+            "statusCheckRollup": [
+                {
+                    "name": "lint",
+                    "workflowName": "pytest",
+                    "conclusion": "SUCCESS",
+                    "status": "COMPLETED",
+                }
+            ],
+            "reviews": [],
+            "comments": [],
+        },
+        required_checks=("pytest",),
+    )
+
+    assert snap.status == "pending"
+    assert snap.pending_checks[0]["name"] == "deferred CI gate: pytest"
+
+
 @pytest.mark.parametrize("conclusion", ["SKIPPED", "NEUTRAL", "STALE"])
 def test_terminal_non_successful_required_check_fails_ci(
     conclusion: str,

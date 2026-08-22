@@ -340,9 +340,13 @@ def _check_name_matches(check: dict[str, Any], check_name: str) -> bool:
     expected = " ".join(check_name.casefold().split())
     if not expected:
         return False
+    # `workflowName`은 신원이 아니다. 한 workflow에는 여러 job이 있어서, 그것을
+    # 인정하면 이름이 같은 workflow 안의 아무 green job 하나가 선언된 gate를
+    # 충족시킨다 — gate가 요구한 job이 skip이어도 green으로 보고된다. 표시용
+    # 이름은 `to_summary`가 따로 fallback하므로(:59, :68) pending 분류는 그대로다.
     names = [
         " ".join(value.casefold().split())
-        for key in ("name", "context", "workflowName")
+        for key in ("name", "context")
         if isinstance((value := check.get(key)), str)
     ]
     return any(name == expected for name in names)

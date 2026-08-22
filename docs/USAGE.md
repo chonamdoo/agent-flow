@@ -180,6 +180,10 @@ must match the pull-request check name exactly after case folding and whitespace
 matrix adds a suffix such as `pytest (3.12)`, declare that full name. A local gate must not declare
 `ci_check`.
 
+That check name is the **job** name, not the workflow name. A workflow holds several jobs, so
+accepting the workflow name would let any green job in it satisfy the gate. Declare `pytest`, not
+the `Tests` workflow that contains it; a workflow name never matches and stays pending forever.
+
 The forms below are for reproducing a failure by hand. Their output is not the routing basis for
 a run.
 
