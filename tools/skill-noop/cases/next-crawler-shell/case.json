@@ -1,0 +1,16 @@
+{
+  "kind": "addition",
+  "subject": "applied line F6: the shell must render from data a plain request can obtain. Removing it must lose blocking findings.",
+  "baseline": "skills/react-development-guide/SKILL.md",
+  "lineIn": "baseline",
+  "variant": {
+    "deleteLines": [26, 26],
+    "expectRemoved": ["Render the shell from data a plain request can obtain"]
+  },
+  "fixtures": [{ "name": "target", "file": "fixture.diff", "expect": "request-changes" }],
+  "patterns": {
+    "cold-shell": "crawler|크롤러|\\bbot\\b|봇|prerender|프리렌더|module (state|scope|level)|모듈 (상태|스코프|수준)|cold start|콜드|empty (shell|document|page)|빈 (문서|셸|화면|페이지)|null을 반환|returns null",
+    "cache-staleness": "revalidate|캐시 무효화|stale data|오래된 데이터"
+  },
+  "target": "cold-shell"
+}

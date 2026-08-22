@@ -1,0 +1,38 @@
+diff --git a/app/dashboard/page.tsx b/app/dashboard/page.tsx
+new file mode 100644
+--- /dev/null
++++ b/app/dashboard/page.tsx
+@@ -0,0 +1,36 @@
++import { cookies } from 'next/headers';
++
++type Dashboard = { greeting: string; widgets: { id: string; title: string }[] };
++
++async function getDashboard(userId: string): Promise<Dashboard> {
++  'use cache';
++
++  const jar = await cookies();
++  const locale = jar.get('locale')?.value ?? 'en';
++
++  const response = await fetch(
++    `https://api.example.com/dashboard/${userId}?locale=${locale}`,
++  );
++  if (!response.ok) throw new Error('dashboard fetch failed');
++  return response.json();
++}
++
++export default async function DashboardPage() {
++  const jar = await cookies();
++  const userId = jar.get('uid')?.value ?? 'anonymous';
++  const dashboard = await getDashboard(userId);
++
++  return (
++    <main>
++      <h1>{dashboard.greeting}</h1>
++      <ul>
++        {dashboard.widgets.map((widget) => (
++          <li key={widget.id}>{widget.title}</li>
++        ))}
++      </ul>
++    </main>
++  );
++}

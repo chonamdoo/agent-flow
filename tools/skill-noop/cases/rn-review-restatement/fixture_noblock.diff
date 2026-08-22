@@ -1,0 +1,76 @@
+diff --git a/screens/NotificationSettingsScreen.tsx b/screens/NotificationSettingsScreen.tsx
+new file mode 100644
+--- /dev/null
++++ b/screens/NotificationSettingsScreen.tsx
+@@ -0,0 +1,71 @@
++import { useState } from 'react';
++import { FlatList, StyleSheet, Switch, Text, View } from 'react-native';
++
++type NotificationType = { id: string; title: string; description: string };
++
++const NOTIFICATION_TYPES: NotificationType[] = [
++  { id: 'order-updates', title: 'Order updates', description: 'Status changes for your orders' },
++  { id: 'delivery', title: 'Delivery reminders', description: 'Reminders on delivery day' },
++  { id: 'promotions', title: 'Promotions', description: 'Occasional offers' },
++];
++
++export function NotificationSettingsScreen() {
++  const [enabled, setEnabled] = useState<Record<string, boolean>>({
++    'order-updates': true,
++    delivery: true,
++    promotions: false,
++  });
++
++  const onToggle = (id: string, value: boolean) => {
++    setEnabled((previous) => ({ ...previous, [id]: value }));
++  };
++
++  const enabledCount = NOTIFICATION_TYPES.filter((type) => enabled[type.id]).length;
++
++  return (
++    <View style={styles.root}>
++      <Text style={styles.heading}>Notifications</Text>
++      <Text style={styles.summary}>
++        {enabledCount} of {NOTIFICATION_TYPES.length} enabled
++      </Text>
++
++      <FlatList
++        data={NOTIFICATION_TYPES}
++        extraData={enabled}
++        keyExtractor={(item) => item.id}
++        ListEmptyComponent={<Text>No notification types available.</Text>}
++        renderItem={({ item }) => (
++          <View style={styles.row}>
++            <View style={styles.rowText}>
++              <Text style={styles.rowTitle}>{item.title}</Text>
++              <Text style={styles.rowDescription}>{item.description}</Text>
++            </View>
++            <Switch
++              value={enabled[item.id] ?? false}
++              onValueChange={(value) => onToggle(item.id, value)}
++              accessibilityRole="switch"
++              accessibilityLabel={`${item.title} notifications`}
++              accessibilityState={{ checked: enabled[item.id] ?? false }}
++            />
++          </View>
++        )}
++      />
++    </View>
++  );
++}
++
++const styles = StyleSheet.create({
++  root: { flex: 1, padding: 16 },
++  heading: { fontSize: 22, marginBottom: 4 },
++  summary: { fontSize: 14, marginBottom: 12 },
++  row: {
++    flexDirection: 'row',
++    alignItems: 'center',
++    justifyContent: 'space-between',
++    minHeight: 48,
++    paddingVertical: 8,
++  },
++  rowText: { flexShrink: 1, paddingRight: 12 },
++  rowTitle: { fontSize: 16 },
++  rowDescription: { fontSize: 13 },
++});

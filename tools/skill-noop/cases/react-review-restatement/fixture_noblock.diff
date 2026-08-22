@@ -1,0 +1,86 @@
+diff --git a/src/InvoiceList.tsx b/src/InvoiceList.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/InvoiceList.tsx
+@@ -0,0 +1,81 @@
++'use client';
++
++import { useState } from 'react';
++
++type Invoice = {
++  id: string;
++  customerName: string;
++  amountCents: number;
++  status: 'draft' | 'sent' | 'paid' | 'void';
++  dueDate: string;
++};
++
++export function InvoiceList({ invoices }: { invoices: Invoice[] }) {
++  const [query, setQuery] = useState('');
++  const [statusFilter, setStatusFilter] = useState<Invoice['status'] | 'all'>('all');
++  const [sortDesc, setSortDesc] = useState(true);
++
++  const normalized = query.trim().toLowerCase();
++  const matching = invoices.filter(
++    (invoice) =>
++      (statusFilter === 'all' || invoice.status === statusFilter) &&
++      invoice.customerName.toLowerCase().includes(normalized),
++  );
++  const filtered = [...matching].sort((a, b) =>
++    sortDesc ? b.dueDate.localeCompare(a.dueDate) : a.dueDate.localeCompare(b.dueDate),
++  );
++
++  const totalCents = filtered.reduce((sum, invoice) => sum + invoice.amountCents, 0);
++
++  return (
++    <section style={{ padding: 16, fontFamily: 'system-ui', color: '#222' }}>
++      <h2 style={{ fontSize: 20, marginBottom: 12 }}>Invoices</h2>
++
++      <label htmlFor="invoice-search">Search customer</label>
++      <input
++        id="invoice-search"
++        value={query}
++        onChange={(event) => setQuery(event.target.value)}
++        style={{ display: 'block', marginBottom: 8, padding: 6, border: '1px solid #ccc' }}
++      />
++
++      <label htmlFor="invoice-status">Status</label>
++      <select
++        id="invoice-status"
++        value={statusFilter}
++        onChange={(event) => setStatusFilter(event.target.value as Invoice['status'] | 'all')}
++        style={{ display: 'block', marginBottom: 8, padding: 6 }}
++      >
++        <option value="all">All</option>
++        <option value="draft">Draft</option>
++        <option value="sent">Sent</option>
++        <option value="paid">Paid</option>
++        <option value="void">Void</option>
++      </select>
++
++      <button type="button" onClick={() => setSortDesc((previous) => !previous)}>
++        Sort by due date: {sortDesc ? 'newest first' : 'oldest first'}
++      </button>
++
++      {filtered.length === 0 ? (
++        <p>No invoices match this filter.</p>
++      ) : (
++        <ul style={{ listStyle: 'none', padding: 0, marginTop: 12 }}>
++          {filtered.map((invoice) => (
++            <li key={invoice.id} style={{ borderBottom: '1px solid #eee', padding: '8px 0' }}>
++              <span style={{ fontWeight: 600 }}>{invoice.customerName}</span>
++              <span style={{ marginLeft: 8 }}>{invoice.status}</span>
++              <span style={{ float: 'right' }}>
++                {(invoice.amountCents / 100).toFixed(2)}
++              </span>
++            </li>
++          ))}
++        </ul>
++      )}
++
++      <p style={{ marginTop: 12 }}>
++        Total: {(totalCents / 100).toFixed(2)} across {filtered.length} invoices
++      </p>
++    </section>
++  );
++}

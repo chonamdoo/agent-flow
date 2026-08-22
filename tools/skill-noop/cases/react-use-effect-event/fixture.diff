@@ -1,0 +1,35 @@
+diff --git a/src/PollingStatus.tsx b/src/PollingStatus.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/PollingStatus.tsx
+@@ -0,0 +1,34 @@
++'use client';
++
++import { useEffect, useState } from 'react';
++
++type Props = { jobId: string; onDone: (jobId: string) => void };
++
++export function PollingStatus({ jobId, onDone }: Props) {
++  const [status, setStatus] = useState('pending');
++
++  useEffect(() => {
++    const timer = setInterval(async () => {
++      const response = await fetch(`/api/jobs/${jobId}`);
++      const next = await response.json();
++      setStatus(next.status);
++      if (next.status === 'done') {
++        clearInterval(timer);
++        onDone(jobId);
++      }
++    }, 2000);
++
++    return () => clearInterval(timer);
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [jobId]);
++
++  return (
++    <p role="status" aria-live="polite">
++      Job {jobId}: {status}
++    </p>
++  );
++}

@@ -1,0 +1,30 @@
+{
+  "kind": "deletion",
+  "subject": "react-native-development-guide: three lines that restate the closed Blocking-only list were removed. Re-adding them must change nothing.",
+  "baseline": "skills/react-native-development-guide/SKILL.md",
+  "variant": {
+    "insertAfter": 38,
+    "expectAnchor": "Blocking only: crash risk",
+    "text": [
+      "- Best practice 일반론으로 blocking하지 말 것.",
+      "- Do not block on theoretical architecture, optional memoization, preferred navigation style, native-layer preferences, or TypeScript generalities.",
+      "- Treat generic React Native best practice comments as suggestions unless they prevent a concrete failure."
+    ]
+  },
+  "fixtures": [
+    { "name": "block", "file": "fixture_block.diff", "expect": "request-changes" },
+    { "name": "noblock", "file": "fixture_noblock.diff", "expect": "approve" }
+  ],
+  "patterns": {
+    "permission": "permission|권한",
+    "nav-param": "param|파라미터|route type|ShotDetail|라우트",
+    "list-key": "keyExtractor|index|extraData|인덱스",
+    "a11y-touch": "a11y|accessib|접근성|accessibilityLabel|touch target|터치|hit ?slop",
+    "offline-error": "offline|오프라인|error state|에러 상태|catch|실패",
+    "memo-taste": "useMemo|useCallback|memoiz|메모이제이션",
+    "layout-arch": "folder|directory|폴더|디렉터리|컴포넌트로 분리|extract .*component|architecture|아키텍처",
+    "nav-style": "navigation style|선호하는 네비게이션|typed navigator|네비게이션 스타일",
+    "ts-generality": "TypeScript 일반|type generality|타입 취향"
+  },
+  "forbidden": ["memo-taste", "layout-arch", "nav-style", "ts-generality"]
+}

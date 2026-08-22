@@ -1,0 +1,50 @@
+diff --git a/src/TeamPanel.tsx b/src/TeamPanel.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/TeamPanel.tsx
+@@ -0,0 +1,46 @@
++'use client';
++
++import { useEffect, useState } from 'react';
++
++type Member = { id: string; name: string; role: string };
++
++export function TeamPanel({ teamId, showRoles }: { teamId: string; showRoles: boolean }) {
++  const [members, setMembers] = useState<Member[]>([]);
++  const [filter, setFilter] = useState('');
++
++  if (showRoles) {
++    const [expanded, setExpanded] = useState(false);
++    useEffect(() => {
++      setExpanded(true);
++    }, []);
++  }
++
++  useEffect(() => {
++    let active = true;
++    fetch(`/api/teams/${teamId}/members`)
++      .then((response) => response.json())
++      .then((data) => {
++        if (active) setMembers(data);
++      });
++    return () => {
++      active = false;
++    };
++  }, [teamId, members]);
++
++  const visible = members.filter((member) => member.name.includes(filter));
++
++  return (
++    <div>
++      <input value={filter} onChange={(event) => setFilter(event.target.value)} />
++      <ul>
++        {visible.map((member, index) => (
++          <li key={index}>
++            <span onClick={() => console.log(member.id)}>{member.name}</span>
++            {showRoles ? <em>{member.role}</em> : null}
++          </li>
++        ))}
++      </ul>
++    </div>
++  );
++}
