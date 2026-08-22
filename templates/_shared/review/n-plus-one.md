@@ -54,3 +54,5 @@ verdict: approve | request-changes
 ```
 
 Cite paths as `path/to/file:line`. Keep total under 150 lines.
+
+Emit exactly one unfenced final verdict line: `verdict: approve` or `verdict: request-changes`.

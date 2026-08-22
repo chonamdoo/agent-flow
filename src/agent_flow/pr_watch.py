@@ -63,6 +63,15 @@ class PRSnapshot:
                 for c in self.failed_checks
             ],
             "pending_checks_count": len(self.pending_checks),
+            "pending_checks": [
+                {
+                    "name": c.get("name") or c.get("workflowName"),
+                    "status": c.get("status") or c.get("state"),
+                    "conclusion": c.get("conclusion"),
+                    "url": c.get("detailsUrl") or c.get("targetUrl"),
+                }
+                for c in self.pending_checks
+            ],
             "review_comments": [
                 {
                     "author": c.get("author", {}).get("login"),
@@ -76,7 +85,12 @@ class PRSnapshot:
         }
 
 
-def fetch_pr(number: int, repo: str | None = None) -> PRSnapshot | None:
+def fetch_pr(
+    number: int,
+    repo: str | None = None,
+    *,
+    required_checks: tuple[str, ...] = (),
+) -> PRSnapshot | None:
     """Fetch a single PR snapshot via `gh pr view --json`.
 
     Returns None if the gh subprocess fails (gh not installed, auth missing,
@@ -124,14 +138,19 @@ def fetch_pr(number: int, repo: str | None = None) -> PRSnapshot | None:
             number=number, title="", state="UNKNOWN", status="error",
             error=f"gh output not JSON: {e}",
         )
-    return _classify(number, data)
+    return _classify(number, data, required_checks=required_checks)
 
 
-def watch_pr(number: int, repo: str | None = None,
-             project_root: Path | None = None,
-             poll_interval_s: int = 30,
-             max_poll_count: int = 120,
-             max_interval_s: int = 300) -> PRSnapshot | None:
+def watch_pr(
+    number: int,
+    repo: str | None = None,
+    project_root: Path | None = None,
+    poll_interval_s: int = 30,
+    max_poll_count: int = 120,
+    max_interval_s: int = 300,
+    *,
+    required_checks: tuple[str, ...] = (),
+) -> PRSnapshot | None:
     """Poll a PR until status leaves `pending` or max_poll_count exceeded.
 
     Backoff: each failed/pending poll grows the interval by 1.5×, capped at
@@ -150,7 +169,7 @@ def watch_pr(number: int, repo: str | None = None,
     elapsed = 0.0
 
     for i in range(max_poll_count):
-        snap = fetch_pr(number, repo)
+        snap = fetch_pr(number, repo, required_checks=required_checks)
         last = snap
         if snap is None:
             time.sleep(interval)
@@ -182,7 +201,20 @@ def watch_pr(number: int, repo: str | None = None,
 # ─────────────────────────── helpers ────────────────────────────────
 
 
-def _classify(number: int, data: dict[str, Any]) -> PRSnapshot:
+def _classify(
+    number: int,
+    data: dict[str, Any],
+    *,
+    required_checks: tuple[str, ...] = (),
+) -> PRSnapshot:
+    if (
+        not isinstance(required_checks, tuple)
+        or not all(
+            isinstance(check_name, str) and check_name.strip()
+            for check_name in required_checks
+        )
+    ):
+        raise TypeError("required_checks must be a tuple of non-empty check names")
     state = str(data.get("state", "UNKNOWN"))
     title = str(data.get("title", ""))
 
@@ -196,70 +228,128 @@ def _classify(number: int, data: dict[str, Any]) -> PRSnapshot:
         )
 
     rollup = data.get("statusCheckRollup") or []
-    # GitHub returns two distinct check shapes:
-    #   1. CheckRun (Actions, custom apps): {status, conclusion, name, ...}
-    #      conclusion ∈ {SUCCESS, FAILURE, NEUTRAL, CANCELLED, SKIPPED, ...}
-    #      status     ∈ {QUEUED, IN_PROGRESS, COMPLETED, ...}
-    #   2. StatusContext (commit-status protocol, external CI like CircleCI):
-    #      {state, context, ...}; state ∈ {PENDING, SUCCESS, FAILURE, ERROR}
-    # Treat any rollup entry without a terminal SUCCESS-like outcome as
-    # pending; any FAILURE/ERROR-like signal as failed.
-    def _is_failure(c: dict) -> bool:
+    # GitHub returns Actions/custom check runs and external commit statuses.
+    # Any nonterminal result is pending; explicit failure signals win.
+    def _is_failure(check: dict[str, Any]) -> bool:
         return (
-            c.get("conclusion") in ("FAILURE", "TIMED_OUT", "CANCELLED")
-            or c.get("status") == "FAILURE"
-            or c.get("state") in ("FAILURE", "ERROR")
+            check.get("conclusion") in ("FAILURE", "TIMED_OUT", "CANCELLED")
+            or check.get("status") == "FAILURE"
+            or check.get("state") in ("FAILURE", "ERROR")
         )
 
-    def _is_pending(c: dict) -> bool:
-        if c.get("status") in ("IN_PROGRESS", "PENDING", "QUEUED"):
-            return c.get("conclusion") in (None, "")
-        if c.get("state") in ("PENDING", "EXPECTED"):
+    def _is_pending(check: dict[str, Any]) -> bool:
+        if check.get("status") in ("IN_PROGRESS", "PENDING", "QUEUED"):
+            return check.get("conclusion") in (None, "")
+        if check.get("state") in ("PENDING", "EXPECTED"):
             return True
-        # Rollup entry with no terminal success signal — treat as pending.
-        if (c.get("conclusion") in (None, "")
-                and c.get("state") in (None, "")
-                and c.get("status") not in ("COMPLETED",)):
-            return True
-        return False
+        return (
+            check.get("conclusion") in (None, "")
+            and check.get("state") in (None, "")
+            and check.get("status") not in ("COMPLETED",)
+        )
 
-    failed = [c for c in rollup if isinstance(c, dict) and _is_failure(c)]
-    pending = [c for c in rollup if isinstance(c, dict) and _is_pending(c)]
+    failed = [
+        check
+        for check in rollup
+        if isinstance(check, dict) and _is_failure(check)
+    ]
+    pending = [
+        check
+        for check in rollup
+        if isinstance(check, dict) and _is_pending(check)
+    ]
+    for check_name in required_checks:
+        matching = [
+            check
+            for check in rollup
+            if isinstance(check, dict)
+            and _check_name_matches(check, check_name)
+        ]
+        if any(_check_matches_gate(check, check_name) for check in matching):
+            continue
+        if any(_is_pending(check) for check in matching):
+            continue
+        if matching:
+            failed.extend(
+                check for check in matching if check not in failed
+            )
+            continue
+        pending.append(
+            {
+                "name": f"deferred CI gate: {check_name}",
+                "status": "EXPECTED",
+                "conclusion": None,
+            }
+        )
 
     reviews = data.get("reviews") or []
     review_comments = [
-        r for r in reviews
-        if isinstance(r, dict)
-        and r.get("state") in ("COMMENTED", "CHANGES_REQUESTED")
+        review
+        for review in reviews
+        if isinstance(review, dict)
+        and review.get("state") in ("COMMENTED", "CHANGES_REQUESTED")
     ]
-    # bot 코멘트(codecov[bot], CI 리포터 등)는 사람이 해소할 수 없으므로
-    # pr-comment-fix로 라우팅하면 has_comments에서 영원히 못 빠져나온다.
+    # Bot summaries and CI reporters are not actionable review feedback.
     issue_comments = [
-        c for c in (data.get("comments") or [])
-        if isinstance(c, dict) and not _is_bot_comment(c)
+        comment
+        for comment in (data.get("comments") or [])
+        if isinstance(comment, dict) and not _is_bot_comment(comment)
     ]
 
     if failed:
         return PRSnapshot(
-            number=number, title=title, state=state, status="ci_failed",
+            number=number,
+            title=title,
+            state=state,
+            status="ci_failed",
             failed_checks=failed,
             review_comments=review_comments,
             issue_comments=issue_comments,
         )
     if review_comments or issue_comments:
         return PRSnapshot(
-            number=number, title=title, state=state, status="has_comments",
+            number=number,
+            title=title,
+            state=state,
+            status="has_comments",
             review_comments=review_comments,
             issue_comments=issue_comments,
         )
     if pending:
         return PRSnapshot(
-            number=number, title=title, state=state, status="pending",
+            number=number,
+            title=title,
+            state=state,
+            status="pending",
             pending_checks=pending,
         )
     return PRSnapshot(
         number=number, title=title, state=state, status="green",
     )
+
+
+def _check_matches_gate(check: dict[str, Any], check_name: str) -> bool:
+    succeeded = (
+        check.get("conclusion") == "SUCCESS"
+        or check.get("state") == "SUCCESS"
+    )
+    return succeeded and _check_name_matches(check, check_name)
+
+
+def _check_name_matches(check: dict[str, Any], check_name: str) -> bool:
+    expected = " ".join(check_name.casefold().split())
+    if not expected:
+        return False
+    # `workflowName`은 신원이 아니다. 한 workflow에는 여러 job이 있어서, 그것을
+    # 인정하면 이름이 같은 workflow 안의 아무 green job 하나가 선언된 gate를
+    # 충족시킨다 — gate가 요구한 job이 skip이어도 green으로 보고된다. 표시용
+    # 이름은 `to_summary`가 따로 fallback하므로(:59, :68) pending 분류는 그대로다.
+    names = [
+        " ".join(value.casefold().split())
+        for key in ("name", "context")
+        if isinstance((value := check.get(key)), str)
+    ]
+    return any(name == expected for name in names)
 
 
 def _is_bot_comment(comment: dict[str, Any]) -> bool:

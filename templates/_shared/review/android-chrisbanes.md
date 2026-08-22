@@ -12,3 +12,5 @@ load duplicate skills from other host paths. If a required local skill is
 missing, request installation from the profile source URL. Reviewer host paths
 are Codex `~/.codex/skills/{skill}/SKILL.md` and Claude
 `~/.claude/skills/{skill}/SKILL.md`. Cite the skill paths used in Calibration.
+
+Emit exactly one unfenced final verdict line: `verdict: approve` or `verdict: request-changes`.

@@ -22,10 +22,25 @@ if str(SRC_ROOT) not in sys.path:
 from agent_flow.adapters.hosted import (  # noqa: E402
     HostedAdapter,
     _profile_base_branch,
-    _write_review_input_snapshot,
+    _write_review_input_snapshot as _capture_review_input_snapshot,
 )
 from agent_flow.core.commands import SafeCommandResult  # noqa: E402
 from agent_flow.core.worktree_isolation import WorktreeIsolationError  # noqa: E402
+
+
+def _write_review_input_snapshot(
+    project: Path,
+    run_dir: Path,
+    phase_id: str,
+    *,
+    base_branch: str | None = None,
+) -> Path:
+    return _capture_review_input_snapshot(
+        project,
+        run_dir,
+        phase_id,
+        base_branch=base_branch,
+    ).path
 
 
 def _git(project: Path, *args: str) -> str:
@@ -170,7 +185,7 @@ def test_snapshot_reports_truncation_instead_of_failing_the_round(
 
     snapshot = hosted._write_review_input_snapshot(
         tmp_path, _run_dir(tmp_path), "review"
-    )
+    ).path
 
     content = snapshot.read_text(encoding="utf-8")
     assert "- note: truncated at" in content

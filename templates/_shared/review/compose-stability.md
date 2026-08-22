@@ -34,3 +34,5 @@ Review Jetpack Compose code for recomposition correctness and stability.
 Same structure as other angles (Must-fix / Should-fix / Notes / Calibration).
 
 Keep under 200 lines.
+
+Emit exactly one unfenced final verdict line: `verdict: approve` or `verdict: request-changes`.

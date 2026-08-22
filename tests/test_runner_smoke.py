@@ -11,6 +11,7 @@ Covers:
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -28,6 +29,15 @@ KIT_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = KIT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
+
+from agent_flow.artifact import bind_review_evidence, ensure_review_binding
+from agent_flow.core.review_evidence import (
+    ReviewerOutcome,
+    review_evidence_record,
+    review_results_path,
+    serialize_review_results,
+)
+from agent_flow.core.worktree_isolation import write_run_subpath_text
 
 from agent_flow.core.worktrees import (
     legacy_managed_root as _legacy_managed,
@@ -84,6 +94,71 @@ def _worktree_runtime_root(project: Path, name: str) -> Path:
     return worktree_runtime_root(root=project, name=name)
 
 
+def _write_stub_review_evidence(run_dir: Path, phase_id: str) -> None:
+    binding = ensure_review_binding(run_dir)
+    outcomes: list[ReviewerOutcome] = []
+    job_ids: list[str] = []
+    for index in (1, 2):
+        job_id = f"generic:stub-{index}"
+        artifact_name = f"{phase_id}-generic-stub-{index}.md"
+        content = (
+            f"# {phase_id} generic stub {index}\n\n"
+            "reviewer-source: sub-agent\n\n"
+            "## Reviewer verdict\n"
+            "verdict: approve\n"
+        )
+        write_run_subpath_text(run_dir, run_dir / artifact_name, content)
+        outcomes.append(
+            ReviewerOutcome(
+                job_id=job_id,
+                provider="generic",
+                model="stub-success",
+                effort="stub-success",
+                status="ok",
+                verdict="approve",
+                required=True,
+                artifact=artifact_name,
+                artifact_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                prompt_digest=hashlib.sha256(
+                    f"{job_id}:prompt".encode("utf-8")
+                ).hexdigest()[:16],
+                argv_digest=hashlib.sha256(
+                    f"{job_id}:argv".encode("utf-8")
+                ).hexdigest()[:16],
+            )
+        )
+        job_ids.append(job_id)
+    serialized = serialize_review_results(
+        phase_id=phase_id,
+        run_id=binding.run_id,
+        nonce=binding.nonce,
+        phase_entered_at=binding.phase_entered_at,
+        outcomes=outcomes,
+    )
+    write_run_subpath_text(
+        run_dir,
+        review_results_path(run_dir, phase_id),
+        serialized,
+    )
+    record = review_evidence_record(
+        nonce=binding.nonce,
+        phase_entered_at=binding.phase_entered_at,
+        serialized_results=serialized,
+        outcomes=outcomes,
+        blocking_job_ids=job_ids,
+        accept_any_provider=False,
+        expected_job_ids_by_provider={"generic": job_ids},
+    )
+    bind_review_evidence(
+        run_dir,
+        phase_id=phase_id,
+        run_id=binding.run_id,
+        nonce=binding.nonce,
+        phase_entered_at=binding.phase_entered_at,
+        record=record,
+    )
+
+
 def test_full_cycle(tmp_path: Path):
     project = tmp_path / "proj"
     project.mkdir()
@@ -115,7 +190,11 @@ def test_full_cycle(tmp_path: Path):
 
     r2 = _run_cli(["continue", "--worktree", plan.name], project)
     assert r2.returncode == 0, r2.stderr
-    assert "run complete" in r2.stdout
+    assert "current_phase: final-review" in r2.stdout
+    _write_stub_review_evidence(run_dir, "final-review")
+    r3 = _run_cli(["continue", "--worktree", plan.name], project)
+    assert r3.returncode == 0, r3.stderr
+    assert "run complete" in r3.stdout
 
     # 계약 변경: 완주하면 cleanup이 worktree를 제거하고 run을 archive로 옮긴다.
     # 따라서 완주 후 아티팩트는 cleanup journal이 가리키는 archive_dir에서 본다.
@@ -330,7 +409,11 @@ def test_worktree_run_continue_status_abort(tmp_path: Path):
 
     r_continue = _run_cli(["continue", "--worktree", "long-press"], project)
     assert r_continue.returncode == 0, r_continue.stderr
-    assert "run complete" in r_continue.stdout
+    assert "current_phase: final-review" in r_continue.stdout
+    _write_stub_review_evidence(run_dir, "final-review")
+    r_complete = _run_cli(["continue", "--worktree", "long-press"], project)
+    assert r_complete.returncode == 0, r_complete.stderr
+    assert "run complete" in r_complete.stdout
     assert not worktree.exists()
     assert not run_dir.exists()
 
@@ -2397,6 +2480,81 @@ def test_invalid_workflow_yaml_clear_error(tmp_path: Path):
         _load_workflow(dup, "x")
 
 
+def test_phase_workflow_rejects_unknown_phase_keys(tmp_path: Path) -> None:
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.phase_workflow import load_phase_workflow_definition
+
+    kit = tmp_path / "kit"
+    (kit / "workflows").mkdir(parents=True)
+    (kit / "workflows" / "strict.yaml").write_text(
+        "id: strict\n"
+        "phases:\n"
+        "  - id: design\n"
+        "    multi-review: true\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"phase design has unknown key\(s\): multi-review",
+    ) as error:
+        load_phase_workflow_definition(kit, "strict")
+
+    (kit / "workflows" / "strict.yaml").write_text(
+        "id: strict\n"
+        "phases:\n"
+        "  - id: design\n"
+        "    on: true\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"phase design has non-string key"):
+        load_phase_workflow_definition(kit, "strict")
+
+    (kit / "workflows" / "strict.yaml").write_text(
+        "id: strict\n"
+        "phases:\n"
+        "  - id: ../design\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="invalid workflow phase id"):
+        load_phase_workflow_definition(kit, "strict")
+    assert "agent-flow-kit install" in str(error.value)
+
+
+def test_preserve_existing_workflow_runtime_contracts() -> None:
+    from agent_flow.core.phase_workflow import load_phase_workflow_definition
+    from agent_flow.runner import FIX_LOOP_MAX_ROUNDS, RUNNER_OWNED_PHASES
+
+    workflow = load_phase_workflow_definition(KIT_ROOT, "default")
+    phases = {phase.id: phase for phase in workflow.phases}
+
+    assert tuple(phases) == (
+        "design",
+        "slice-plan",
+        "worktree",
+        "implement",
+        "comment-authoring",
+        "final-review",
+        "gates",
+        "fix-loop",
+        "commit",
+        "push-pr",
+        "pr-watch",
+        "pr-comment-fix",
+        "pr-ci-fix",
+        "merge",
+        "cleanup",
+    )
+    assert phases["final-review"].multi_review is True
+    assert phases["final-review"].routes == {
+        "approve": "gates",
+        "request-changes": "fix-loop",
+    }
+    assert phases["gates"].routes["green"] == "commit"
+    assert RUNNER_OWNED_PHASES == frozenset({"gates"})
+    assert FIX_LOOP_MAX_ROUNDS == 3
+
+
 def test_route_block_returns_without_loop(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.runner import Phase, Runner
@@ -2418,30 +2576,192 @@ def test_route_block_returns_without_loop(tmp_path: Path):
     assert runner._next_index(0, runner.phases[0])[:2] == (0, True)
 
 
-def test_default_final_review_request_changes_routes_to_fix_loop(tmp_path: Path):
+def test_default_final_review_request_changes_routes_to_fix_loop(
+    tmp_path: Path,
+) -> None:
+
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.runner import Phase, Runner
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
+    review_output = run_dir / "review-generalist.md"
+    review_output.write_text(
+        "## Reviewer\n"
+        "reviewer-source: sub-agent\n"
+        "verdict: request-changes\n",
+        encoding="utf-8",
+    )
     (run_dir / "final-review.md").write_text(
-        "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n\n"
-        "## Overall\nverdict: request-changes\n",
+        "## Overall\nverdict: approve\n",
+        encoding="utf-8",
+    )
+    nonce = "c" * 32
+    phase_entered_at = "2026-08-21T00:00:00+00:00"
+    payload = {
+        "schema_version": 1,
+        "phase_id": "final-review",
+        "produced_by": {
+            "run_id": "r1",
+            "nonce": nonce,
+            "phase_entered_at": phase_entered_at,
+        },
+        "outcomes": [
+            {
+                "job_id": "claude-generalist",
+                "provider": "claude",
+                "model": "test-model",
+                "effort": "xhigh",
+                "status": "ok",
+                "verdict": "request-changes",
+                "required": True,
+                "artifact": review_output.name,
+                "artifact_sha256": hashlib.sha256(
+                    review_output.read_bytes()
+                ).hexdigest(),
+                "prompt_digest": "a" * 16,
+                "argv_digest": "b" * 16,
+            }
+        ],
+    }
+    results_path = run_dir / "final-review-review-results.json"
+    results_path.write_text(json.dumps(payload), encoding="utf-8")
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": "r1",
+                "review_nonce": nonce,
+                "phase_entered_at": phase_entered_at,
+                "review_evidence": {
+                    "final-review": {
+                        "schema_version": 1,
+                        "nonce": nonce,
+                        "phase_entered_at": phase_entered_at,
+                        "results_sha256": hashlib.sha256(
+                            results_path.read_bytes()
+                        ).hexdigest(),
+                        "observed_job_ids": ["claude-generalist"],
+                        "blocking_job_ids": ["claude-generalist"],
+                        "accept_any_provider": False,
+                        "expected_job_ids_by_provider": {
+                            "claude": ["claude-generalist"]
+                        },
+                        "complete_providers": ["claude"],
+                    }
+                },
+            }
+        ),
+
         encoding="utf-8",
     )
 
     runner = Runner.__new__(Runner)
     runner.run_dir = run_dir
     runner.phases = [
-        Phase(id="final-review", description="", multi_review=True, routes={"approve": "commit", "request-changes": "fix-loop"}),
+        Phase(
+            id="final-review",
+            description="",
+            multi_review=True,
+            routes={"approve": "commit", "request-changes": "fix-loop"},
+        ),
         Phase(id="fix-loop", description=""),
         Phase(id="commit", description=""),
     ]
 
     assert runner._next_index(0, runner.phases[0])[:2] == (1, False)
 
-    (run_dir / "final-review.md").write_text("verdict: request-changes\n", encoding="utf-8")
-    assert runner._next_index(0, runner.phases[0])[:2] == (0, True)
+
+def test_multi_review_artifact_with_missing_evidence_is_regenerated(
+    tmp_path: Path,
+) -> None:
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    artifact = run_dir / "final-review.md"
+    artifact.write_text(
+        "## Overall\nverdict: approve\n",
+        encoding="utf-8",
+    )
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    phase = Phase(
+        id="final-review",
+        description="",
+        multi_review=True,
+    )
+
+    assert runner._regenerate_multi_review_artifact_if_needed(
+        phase,
+        artifact,
+    )
+    assert not artifact.exists()
+    assert (run_dir / "final-review-unbound-1.md").read_text(
+        encoding="utf-8"
+    ) == "## Overall\nverdict: approve\n"
+    artifact.write_text(
+        "## Overall\nverdict: approve\nsecond\n",
+        encoding="utf-8",
+    )
+    assert not runner._regenerate_multi_review_artifact_if_needed(
+        phase,
+        artifact,
+    )
+    assert artifact.exists()
+    assert (run_dir / "final-review-unbound-1.md").read_text(
+        encoding="utf-8"
+    ) == "## Overall\nverdict: approve\n"
+    assert not (run_dir / "final-review-unbound-2.md").exists()
+
+
+def test_multi_review_regeneration_preserves_invalid_utf8(
+    tmp_path: Path,
+) -> None:
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    artifact = run_dir / "final-review.md"
+    artifact.write_bytes(b"\xff")
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    phase = Phase(id="final-review", description="", multi_review=True)
+
+    assert not runner._regenerate_multi_review_artifact_if_needed(
+        phase,
+        artifact,
+    )
+    assert artifact.read_bytes() == b"\xff"
+
+
+def test_multi_review_regeneration_handles_unlink_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    artifact = run_dir / "final-review.md"
+    artifact.write_text("## Overall\nverdict: approve\n", encoding="utf-8")
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    phase = Phase(id="final-review", description="", multi_review=True)
+    original_unlink = Path.unlink
+
+    def fail_artifact_unlink(path: Path, *args, **kwargs):
+        if path == artifact:
+            raise PermissionError("read-only")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_artifact_unlink)
+
+    assert not runner._regenerate_multi_review_artifact_if_needed(
+        phase,
+        artifact,
+    )
+    assert artifact.exists()
+    assert (run_dir / "final-review-unbound-1.md").exists()
 
 
 def test_review_fail_marker_overrides_approve_verdict(tmp_path: Path):
@@ -2462,7 +2782,7 @@ def test_review_fail_marker_overrides_approve_verdict(tmp_path: Path):
     runner = Runner.__new__(Runner)
     runner.run_dir = run_dir
     runner.phases = [
-        Phase(id="final-review", description="", multi_review=True, routes={"approve": "commit", "request-changes": "fix-loop"}),
+        Phase(id="final-review", description="", routes={"approve": "commit", "request-changes": "fix-loop"}),
         Phase(id="fix-loop", description=""),
         Phase(id="commit", description=""),
     ]
@@ -2488,7 +2808,7 @@ def test_missing_required_profile_skills_marker_overrides_approve_verdict(tmp_pa
     runner = Runner.__new__(Runner)
     runner.run_dir = run_dir
     runner.phases = [
-        Phase(id="final-review", description="", multi_review=True, routes={"approve": "commit", "request-changes": "fix-loop"}),
+        Phase(id="final-review", description="", routes={"approve": "commit", "request-changes": "fix-loop"}),
         Phase(id="fix-loop", description=""),
         Phase(id="commit", description=""),
     ]
@@ -2511,7 +2831,7 @@ def test_route_key_requires_exact_status_or_verdict_lines():
 
 
 def test_overall_review_verdict_ignores_code_fences_and_body_prose():
-    from agent_flow.core.phase_workflow import overall_review_route_key
+    from agent_flow.core.review_evidence import overall_review_route_key
 
     assert overall_review_route_key(
         "```markdown\n## Overall\nverdict: approve\n```\n"
@@ -2524,15 +2844,6 @@ def test_overall_review_verdict_ignores_code_fences_and_body_prose():
         "## Overall\nverdict: approve\n"
     ) == "approve"
 
-    from agent_flow.core.route_verdicts import multi_review_route_key
-
-    assert multi_review_route_key(
-        "```markdown\n"
-        "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n"
-        "## Reviewer 2\nreviewer-source: sub-agent\nverdict: approve\n"
-        "```\n"
-        "## Overall\nverdict: approve\n"
-    ) == "missing-reviewer"
 
 
 def test_route_without_target_blocks_instead_of_falling_through(tmp_path: Path):
@@ -2811,11 +3122,46 @@ def test_status_uses_normalized_artifact_path(tmp_path: Path, capsys):
     assert "artifacts/domain-grill.md" in output
 
 
+def test_status_reports_review_evidence_regeneration(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    from agent_flow.artifact import ActiveRun, write_meta
+
+    run_dir = tmp_path / "project" / ".agent-flow" / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "final-review.md").write_text(
+        "## Overall\nverdict: approve\n",
+        encoding="utf-8",
+    )
+    write_meta(
+        run_dir,
+        {
+            "workflow": "default",
+            "task": "demo",
+            "current_phase": "final-review",
+            "started_at": "2026-05-20T00:00:00+00:00",
+        },
+    )
+
+    ActiveRun(
+        path=run_dir,
+        run_id="r1",
+        workflow="default",
+        task="demo",
+        started_at="2026-05-20T00:00:00+00:00",
+    ).print_status()
+
+    output = capsys.readouterr().out
+    assert "status: blocked" in output
+    assert "reason: review_evidence_regeneration_required" in output
+
+
 def test_render_angle_result_marks_claude_rate_limit_as_blocker(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from datetime import datetime, timezone
 
-    from agent_flow.multi_review import _render_angle_result
+    from agent_flow.multi_review import ResolvedLaunch, _render_angle_result
     from agent_flow.subprocess_pool import SubprocessResult
 
     result = SubprocessResult(
@@ -2824,7 +3170,10 @@ def test_render_angle_result_marks_claude_rate_limit_as_blocker(tmp_path: Path):
         returncode=1,
     )
 
-    artifact = _render_angle_result(result)
+    artifact = _render_angle_result(
+        result,
+        launch=ResolvedLaunch("claude", None, None, (), "test"),
+    )
 
     assert "status: blocked" in artifact
     assert "reason: reviewer_rate_limited" in artifact
@@ -2849,12 +3198,15 @@ def test_render_angle_result_marks_provider_rate_limits_as_blockers(
     reviewer: str,
 ):
     sys.path.insert(0, str(KIT_ROOT / "src"))
-    from agent_flow.multi_review import _render_angle_result
+    from agent_flow.multi_review import ResolvedLaunch, _render_angle_result
     from agent_flow.subprocess_pool import SubprocessResult
 
     result = SubprocessResult(job_id=job_id, stderr=stderr, returncode=1)
 
-    artifact = _render_angle_result(result)
+    artifact = _render_angle_result(
+        result,
+        launch=ResolvedLaunch(reviewer, None, None, (), "test"),
+    )
 
     assert "status: blocked" in artifact
     assert "reason: reviewer_rate_limited" in artifact
@@ -3439,6 +3791,7 @@ def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
         assert "`## Reviewer`" in job.prompt
         assert "`reviewer-source: sub-agent`" in job.prompt
         assert "Do not wrap either line" in job.prompt
+        assert "exactly one unfenced plain line" in job.prompt
 
 
 def test_multi_review_precomputes_diff_outside_reviewer_sandbox(tmp_path: Path):
@@ -3461,7 +3814,7 @@ def test_multi_review_precomputes_diff_outside_reviewer_sandbox(tmp_path: Path):
 
     snapshot = _write_review_input_snapshot(project, run_dir, "final-review")
 
-    snapshot_text = snapshot.read_text(encoding="utf-8")
+    snapshot_text = snapshot.path.read_text(encoding="utf-8")
     assert " M README.md" in snapshot_text
     assert "?? new.txt" in snapshot_text
     assert "-test" in snapshot_text
@@ -3482,11 +3835,12 @@ def test_multi_review_precomputes_diff_outside_reviewer_sandbox(tmp_path: Path):
         run_dir,
         project,
         adapter,
-        review_input_path=snapshot,
+        review_input=snapshot,
     )
     for job in jobs:
-        assert str(snapshot) in job.prompt
+        assert str(snapshot.path) in job.prompt
         assert "Do not run `git diff`" in job.prompt
+        assert snapshot.digest in job.prompt
 
 
 def test_review_input_snapshot_uses_extended_git_timeout(
@@ -3566,7 +3920,7 @@ def test_review_input_snapshot_supports_unborn_head(tmp_path: Path):
     run_dir = project / ".agent-flow" / "run"
     run_dir.mkdir(parents=True)
 
-    snapshot = _write_review_input_snapshot(project, run_dir, "review")
+    snapshot = _write_review_input_snapshot(project, run_dir, "review").path
 
     content = snapshot.read_text(encoding="utf-8")
     assert snapshot.name == "review-review-input.patch"
@@ -3585,8 +3939,10 @@ def test_review_input_snapshots_are_phase_scoped(tmp_path: Path):
     run_dir = project / ".agent-flow" / "run"
     run_dir.mkdir(parents=True)
 
-    review = _write_review_input_snapshot(project, run_dir, "review")
-    final_review = _write_review_input_snapshot(project, run_dir, "final-review")
+    review = _write_review_input_snapshot(project, run_dir, "review").path
+    final_review = _write_review_input_snapshot(
+        project, run_dir, "final-review"
+    ).path
 
     assert review != final_review
     assert review.is_file()

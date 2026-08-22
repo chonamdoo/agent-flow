@@ -133,6 +133,7 @@ def test_cleanup_uses_remote_tracking_target_when_local_branch_is_absent(
     assert journal["target"] == {
         "ref": "refs/remotes/upstream/release",
         "expected_oid": integrated_oid,
+        "branch": "release",
     }
     result = W.run_worktree_cleanup_transaction(
         root=root,
@@ -192,6 +193,7 @@ def test_cleanup_selects_the_remote_that_contains_the_merged_head(
     assert journal["target"] == {
         "ref": "refs/remotes/upstream/release",
         "expected_oid": integrated_oid,
+        "branch": "release",
     }
     result = W.run_worktree_cleanup_transaction(
         root=root,
@@ -257,9 +259,16 @@ def test_cleanup_resume_reselects_the_remote_that_later_contains_the_head(
     assert journal["target"] == {
         "ref": "refs/remotes/upstream/release",
         "expected_oid": integrated_oid,
+        "branch": "release",
     }
     W.complete_worktree_cleanup(resumed)
     assert not status.path.exists()
+
+def test_legacy_remote_cleanup_target_recovers_branch() -> None:
+    assert W._cleanup_target_branch(
+        {"ref": "refs/remotes/origin/release"}
+    ) == "release"
+
 
 
 def test_cleanup_rejects_a_stale_remote_target_when_refresh_fails(
@@ -937,6 +946,80 @@ def test_cleanup_resume_rejects_tampered_checkout_identity(
     assert pending.journal_path.exists()
 
 
+def test_cleanup_selector_completeness_checks_keys_not_unique_values(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "duplicate-selector-value")
+
+    def crash_after_archive(step: str) -> None:
+        if step == "archive":
+            raise RuntimeError("crash after archive")
+
+    with pytest.raises(RuntimeError, match="crash after archive"):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+            after_step=crash_after_archive,
+        )
+
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    journal["checkout"]["branch"] = journal["checkout"]["name"]
+    pending.journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    assert W.find_pending_worktree_cleanup(
+        root=root,
+        selector=status.name,
+    ) is not None
+
+
+def test_cleanup_journal_invalid_utf8_uses_blocked_error(tmp_path: Path) -> None:
+    journal = tmp_path / "cleanup.json"
+    journal.write_bytes(b"\xff")
+
+    with pytest.raises(W.CleanupBlockedError, match="missing or unreadable"):
+        W._load_cleanup_journal(journal)
+
+
+def test_corrupt_cleanup_for_other_worktree_does_not_block_selector(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "corrupt-other")
+
+    def crash_after_archive(step: str) -> None:
+        if step == "archive":
+            raise RuntimeError("crash after archive")
+
+    with pytest.raises(RuntimeError, match="crash after archive"):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+            after_step=crash_after_archive,
+        )
+
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    journal["checkout"] = "corrupt"
+    pending.journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    assert W.find_pending_worktree_cleanup(
+        root=root,
+        selector="unrelated-worktree",
+    ) is None
+
+
 def test_cleanup_archives_inactive_run_history_before_metadata_removal(
     tmp_path: Path,
 ) -> None:
@@ -1012,6 +1095,181 @@ def test_status_prefers_pending_cleanup_runtime_while_checkout_still_exists(
     ) == 0
     assert "run-cleanup" in capsys.readouterr().out
 
+
+def test_continue_resumes_pending_cleanup_before_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "pending-continue")
+    blocker = status.path / "generated.tmp"
+    blocker.write_text("remove before retry\n", encoding="utf-8")
+
+    with pytest.raises(W.CleanupBlockedError, match="checkout is dirty"):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+    blocker.unlink()
+
+    runner_called = False
+
+    class RunnerSpy:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run(self, *_args, **_kwargs) -> None:
+            nonlocal runner_called
+            runner_called = True
+
+    monkeypatch.setattr(cli_module, "Runner", RunnerSpy)
+
+    result = cli_module.main(
+        ["continue", "--root", str(root), "--worktree", status.name]
+    )
+
+    assert result == 0
+    assert runner_called is False
+    assert not status.path.exists()
+    assert "status: complete" in capsys.readouterr().out
+
+
+def test_continue_prefers_unrelated_active_run_over_stale_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, owner_run = _managed_run(root, "stale-cleanup")
+    blocker = status.path / "generated.tmp"
+    blocker.write_text("keep dirty\n", encoding="utf-8")
+
+    with pytest.raises(W.CleanupBlockedError, match="checkout is dirty"):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=owner_run,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    mark_inactive(owner_run)
+    state_root = W.worktree_runtime_root(root=root, name=status.name)
+    other_run = create_run(
+        state_root,
+        "default",
+        "new task",
+        run_id="run-new",
+        checkout_identity=f"worktree:{status.name}",
+        checkout_registration_identity=status.registration_identity,
+    )
+    runner_called = False
+
+    class RunnerSpy:
+        def __init__(self, *_args, **kwargs) -> None:
+            assert kwargs["run_dir"] == other_run
+
+        def run(self, *_args, **_kwargs) -> None:
+            nonlocal runner_called
+            runner_called = True
+
+    monkeypatch.setattr(cli_module, "Runner", RunnerSpy)
+
+    result = cli_module.main(
+        ["continue", "--root", str(root), "--worktree", status.name]
+    )
+
+    assert result == 0
+    assert runner_called is True
+    assert pending.journal_path.exists()
+
+
+
+def test_pending_cleanup_resume_rejects_non_boolean_branch_deletion(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "pending-delete-branch")
+    blocker = status.path / "generated.tmp"
+    blocker.write_text("remove before retry\n", encoding="utf-8")
+
+    with pytest.raises(W.CleanupBlockedError, match="checkout is dirty"):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    journal["checkout"]["delete_branch"] = "false"
+    pending.journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    blocker.unlink()
+
+    with pytest.raises(
+        W.CleanupBlockedError,
+        match="cleanup journal integration contract is unknown",
+    ):
+        W.resume_pending_worktree_cleanup(root=root, pending=pending)
+
+    assert status.path.exists()
+    result = cli_module.main(
+        ["continue", "--root", str(root), "--worktree", status.name]
+    )
+    output = capsys.readouterr().out
+
+    assert result == 2
+    assert "status: blocked" in output
+    assert "reason: cleanup_pending" in output
+    assert "next_command: agent-flow continue" in output
+
+
+def test_continue_resumes_cleanup_after_checkout_metadata_removal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "removed-before-continue")
+
+    def crash_after_metadata(step: str) -> None:
+        if step == "metadata_cleanup":
+            raise RuntimeError("crash after metadata cleanup")
+
+    with pytest.raises(RuntimeError, match="crash after metadata cleanup"):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+            after_step=crash_after_metadata,
+        )
+    assert not status.path.exists()
+
+    class RunnerMustNotRun:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pytest.fail("phase runner must not resume cleanup")
+
+    monkeypatch.setattr(cli_module, "Runner", RunnerMustNotRun)
+
+    result = cli_module.main(
+        ["continue", "--root", str(root), "--worktree", status.name]
+    )
+
+    assert result == 0
+    assert "status: complete" in capsys.readouterr().out
 
 
 def test_cleanup_resume_rejects_archive_payload_tampering(tmp_path: Path) -> None:

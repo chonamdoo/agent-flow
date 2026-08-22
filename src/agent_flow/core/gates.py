@@ -31,6 +31,7 @@ class GateCommand:
     # 실패가 아니라 판정 불가로 기록되므로(`core/artifacts.py`), 짧은 기본값은
     # "빌드가 깨졌다"가 아니라 "검증이 끊겼다"를 만든다.
     timeout_s: int | None = None
+    ci_check: str | None = None
 
 
 @dataclass(frozen=True)

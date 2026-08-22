@@ -15,7 +15,7 @@ import stat
 import uuid
 from pathlib import Path
 
-__all__ = ["atomic_write_text", "fsync_directory"]
+__all__ = ["atomic_write_text", "fsync_directory", "read_bounded_regular_file"]
 
 # 신규 파일 생성 mode. 커널이 umask를 걸어 실제 권한을 정한다.
 _CREATE_MODE = 0o666
@@ -57,6 +57,39 @@ def atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> N
             os.close(fd)
         temporary.unlink(missing_ok=True)
     fsync_directory(directory)
+
+
+def read_bounded_regular_file(
+    path: Path,
+    *,
+    max_bytes: int,
+) -> tuple[bytes, int]:
+    """Read one regular file without following links or exceeding a byte cap."""
+    if max_bytes <= 0:
+        raise ValueError("max_bytes must be positive")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        identity = os.fstat(descriptor)
+        if not stat.S_ISREG(identity.st_mode):
+            raise OSError(f"path is not a regular file: {path}")
+        if identity.st_size > max_bytes:
+            raise OSError(f"file is too large: {path}")
+        chunks: list[bytes] = []
+        total = 0
+        while chunk := os.read(descriptor, 64 * 1024):
+            total += len(chunk)
+            if total > max_bytes:
+                raise OSError(f"file is too large: {path}")
+            chunks.append(chunk)
+        return b"".join(chunks), identity.st_size
+    finally:
+        os.close(descriptor)
 
 
 def _existing_mode(path: Path) -> int | None:

@@ -540,6 +540,24 @@ class CliTest(unittest.TestCase):
             ),
             "green",
         )
+        ci_only = {
+            "passed": True,
+            "results": [
+                {
+                    "command": "python -m pytest -q",
+                    "passed": True,
+                    "exit_code": 0,
+                    "required": True,
+                }
+            ],
+            "produced_by": {
+                "gate_phase": "all",
+                "gate_execution": "ci",
+            },
+        }
+        self.assertEqual(gates_route_key(json.dumps(ci_only)), "default")
+        ci_only["produced_by"]["gate_execution"] = "local"
+        self.assertEqual(gates_route_key(json.dumps(ci_only)), "green")
         self.assertEqual(
             gates_route_key('{"passed": true, "status": "approve", "results": [{"command": "npm test", "passed": true, "output": "ok"}]}'),
             "approve",
@@ -570,6 +588,178 @@ class CliTest(unittest.TestCase):
         # fix-loop가 근거 없이 돌기 시작한다.
         self.assertEqual(gates_route_key("status: pass"), "malformed-results")
 
+    def test_multi_review_route_policy_is_pure(self) -> None:
+        from agent_flow.core.review_evidence import (
+            ReviewEvidence,
+            ReviewerOutcome,
+            multi_review_route_key,
+        )
+
+        def outcome(job_id: str, verdict: str) -> ReviewerOutcome:
+            return ReviewerOutcome(
+                job_id=job_id,
+                provider=job_id.split("-", 1)[0],
+                model="test-model",
+                effort="xhigh",
+                status="ok",
+                verdict=verdict,
+                required=True,
+                artifact=f"{job_id}.md",
+                artifact_sha256="a" * 64,
+                prompt_digest="b" * 16,
+                argv_digest="c" * 16,
+            )
+
+        approve = ReviewEvidence(
+            "verified",
+            (
+                outcome("claude-generalist", "approve"),
+                outcome("codex-generalist", "approve"),
+            ),
+        )
+        request_changes = ReviewEvidence(
+            "verified",
+            (
+                outcome("claude-generalist", "approve"),
+                outcome("codex-generalist", "request-changes"),
+            ),
+        )
+
+        self.assertEqual(multi_review_route_key(approve), "approve")
+        self.assertEqual(
+            multi_review_route_key(request_changes),
+            "request-changes",
+        )
+
+    def test_review_evidence_invalid_utf8_fails_closed(self) -> None:
+        from agent_flow.core.review_evidence import load_review_evidence
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "final-review-review-results.json").write_bytes(b"\xff")
+
+            evidence = load_review_evidence(
+                artifact_root=root,
+                phase_id="final-review",
+                run_meta={},
+            )
+
+        self.assertEqual(evidence.validation, "invalid")
+
+    def test_review_evidence_boolean_schema_version_fails_closed(self) -> None:
+        """반증: `bool`은 `int`의 하위형이고 `True == 1`이라, 동등비교만으로는
+        JSON `true`가 `Literal[1]` 스키마를 통과한다."""
+        from agent_flow.core.review_evidence import load_review_evidence
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "final-review-review-results.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": True,
+                        "phase_id": "final-review",
+                        "outcomes": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            evidence = load_review_evidence(
+                artifact_root=root,
+                phase_id="final-review",
+                run_meta={},
+            )
+
+        self.assertEqual(evidence.validation, "invalid")
+        self.assertEqual(
+            evidence.detail,
+            "review results schema does not match",
+        )
+
+    def test_review_evidence_record_shape_rejects_boolean_schema_version(
+        self,
+    ) -> None:
+        """같은 결함이 meta 바인딩 쪽 TypeGuard에도 있었다. 여기서 통과하면
+        타입 검사기에는 `Literal[1]`이라고 보증한 값이 `True`가 된다."""
+        from agent_flow.core.review_evidence import (
+            _review_evidence_record_shape,
+        )
+
+        record = {
+            "schema_version": 1,
+            "nonce": "c" * 32,
+            "results_sha256": "d" * 64,
+            "phase_entered_at": "2026-08-21T00:00:00+00:00",
+            "observed_job_ids": ["claude-generalist"],
+            "blocking_job_ids": ["claude-generalist"],
+            "accept_any_provider": False,
+            "expected_job_ids_by_provider": {"claude": ["claude-generalist"]},
+            "complete_providers": ["claude"],
+        }
+
+        self.assertTrue(_review_evidence_record_shape(record))
+        self.assertFalse(
+            _review_evidence_record_shape({**record, "schema_version": True})
+        )
+
+    def test_review_evidence_recursive_json_fails_closed(self) -> None:
+        from agent_flow.core.review_evidence import load_review_evidence
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "final-review-review-results.json").write_text(
+                "{}",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "agent_flow.core.review_evidence.json.loads",
+                side_effect=RecursionError,
+            ):
+                evidence = load_review_evidence(
+                    artifact_root=root,
+                    phase_id="final-review",
+                    run_meta={},
+                )
+
+        self.assertEqual(evidence.validation, "invalid")
+
+    def test_review_evidence_fifo_fails_closed_without_blocking(self) -> None:
+        from agent_flow.core.review_evidence import load_review_evidence
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            os.mkfifo(root / "final-review-review-results.json")
+
+            evidence = load_review_evidence(
+                artifact_root=root,
+                phase_id="final-review",
+                run_meta={},
+            )
+
+        self.assertEqual(evidence.validation, "invalid")
+
+    def test_review_evidence_oversize_file_fails_closed(self) -> None:
+        from agent_flow.core.review_evidence import load_review_evidence
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "final-review-review-results.json").write_text(
+                "{}",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "agent_flow.core.review_evidence.REVIEW_EVIDENCE_MAX_BYTES",
+                1,
+            ):
+                evidence = load_review_evidence(
+                    artifact_root=root,
+                    phase_id="final-review",
+                    run_meta={},
+                )
+
+        self.assertEqual(evidence.validation, "invalid")
+        self.assertIn("cannot be read safely", evidence.detail)
+
     def test_host_multi_review_requires_confined_reviewer_processes(self) -> None:
         from agent_flow.adapters.hosted import HostedAdapter, _multi_reviewer_block
 
@@ -599,7 +789,7 @@ class CliTest(unittest.TestCase):
             SubprocessResult(
                 job_id="codex-a",
                 returncode=0,
-                stdout="reviewer-source: sub-agent\nNo findings",
+                stdout="reviewer-source: sub-agent\nNo findings\nverdict: approve",
             ),
             SubprocessResult(job_id="codex-b", returncode=1),
             SubprocessResult(job_id="claude-a-extra", returncode=1),
@@ -613,11 +803,15 @@ class CliTest(unittest.TestCase):
         self.assertEqual(missing, ["codex-b: missing result"])
 
         invalid = [
-            SubprocessResult(job_id="codex-a", returncode=0, stdout="No findings"),
+            SubprocessResult(
+                job_id="codex-a",
+                returncode=0,
+                stdout="No findings\nverdict: approve",
+            ),
             SubprocessResult(
                 job_id="codex-b",
                 returncode=0,
-                stdout="reviewer-source: sub-agent\nNo findings",
+                stdout="reviewer-source: sub-agent\nNo findings\nverdict: approve",
             ),
         ]
         self.assertEqual(
@@ -629,12 +823,12 @@ class CliTest(unittest.TestCase):
             SubprocessResult(
                 job_id="codex-a",
                 returncode=0,
-                stdout="**reviewer-source: sub-agent**\nNo findings",
+                stdout="**reviewer-source: sub-agent**\nNo findings\nverdict: approve",
             ),
             SubprocessResult(
                 job_id="codex-b",
                 returncode=0,
-                stdout="reviewer-source: sub-agent\nNo findings",
+                stdout="reviewer-source: sub-agent\nNo findings\nverdict: approve",
             ),
         ]
         self.assertEqual(
@@ -807,7 +1001,7 @@ class CliTest(unittest.TestCase):
 
             self.assertEqual(tuple(distribution.by_cli), ("claude", "codex"))
             self.assertTrue(distribution.accept_any_provider)
-            self.assertEqual(len(distribution.required_job_ids), 4)
+            self.assertEqual(distribution.required_job_ids, frozenset())
             self.assertTrue(all(
                 "-omp" not in str(job.output_path)
                 for assigned in distribution.by_cli.values()
@@ -928,7 +1122,10 @@ class CliTest(unittest.TestCase):
                 self.assertTrue(distribution.insufficient_reviewers)
 
     def test_final_review_stops_failed_provider_after_probe(self) -> None:
-        from agent_flow.adapters.hosted import _required_reviewer_failures
+        from agent_flow.adapters.hosted import (
+            _required_reviewer_failures,
+            _write_review_results,
+        )
         from agent_flow.cli_detect import CliInfo
         from agent_flow.multi_review import Distribution, ReviewerJob, run_distribution
         from agent_flow.subprocess_pool import SubprocessResult
@@ -955,11 +1152,22 @@ class CliTest(unittest.TestCase):
                     for job in jobs
                 }),
                 accept_any_provider=True,
+                phase_id="final-review",
             )
             clis = {
                 "claude": CliInfo("claude", ("claude",), ("-p",)),
                 "codex": CliInfo("codex", ("codex",), ("exec",)),
             }
+            (root / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "r1",
+                        "review_nonce": "c" * 32,
+                        "phase_entered_at": "2026-08-21T00:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
             launches: list[list[str]] = []
 
             def fake_parallel(jobs):
@@ -971,7 +1179,7 @@ class CliTest(unittest.TestCase):
                         SubprocessResult(
                             job_id="claude-generalist",
                             returncode=0,
-                            stdout="reviewer-source: sub-agent\nclean",
+                            stdout="reviewer-source: sub-agent\nclean\nverdict: approve",
                             stderr='+ stderr="sandbox-exec: sandbox_apply: Operation not permitted"',
                         ),
                         # 실제 sandbox 실패. CLI가 실행되지 못해 provenance가 없다.
@@ -985,7 +1193,7 @@ class CliTest(unittest.TestCase):
                     SubprocessResult(
                         job_id=job.job_id,
                         returncode=0,
-                        stdout="reviewer-source: sub-agent\nclean",
+                        stdout="reviewer-source: sub-agent\nclean\nverdict: approve",
                     )
                     for job in jobs
                 ]
@@ -1008,7 +1216,23 @@ class CliTest(unittest.TestCase):
                 ),
             ):
                 execution = run_distribution(distribution, root)
+            _write_review_results(distribution, execution.outcomes)
             self.assertEqual(execution.skipped_providers, ("codex",))
+            result_payload = json.loads(
+                (root / "final-review-review-results.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertTrue(
+                all(
+                    outcome["required"] is False
+                    for outcome in result_payload["outcomes"]
+                )
+            )
+            evidence = json.loads(
+                (root / "meta.json").read_text(encoding="utf-8")
+            )["review_evidence"]["final-review"]
+            self.assertEqual(evidence.get("complete_providers"), ["claude"])
 
             self.assertEqual(
                 launches,
@@ -1039,6 +1263,7 @@ class CliTest(unittest.TestCase):
                 "reviewer-source: sub-agent\n"
                 "- note, src/agent_flow/multi_review.py:42, "
                 "'sandbox_apply: Operation not permitted' 문자열을 실패 신호로 쓴다\n"
+                "verdict: approve\n"
             ),
         )
         real_failure = SubprocessResult(
@@ -1198,7 +1423,7 @@ class CliTest(unittest.TestCase):
             prompt,
         )
 
-    def test_python_multi_review_approve_requires_subagent_reviewer(self) -> None:
+    def test_multi_review_route_uses_runner_owned_outcomes(self) -> None:
         from agent_flow.runner import Phase, Runner
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1207,7 +1432,10 @@ class CliTest(unittest.TestCase):
                 id="multi-review",
                 description="",
                 multi_review=True,
-                routes={"approve": "architecture-review", "request-changes": "fix-loop"},
+                routes={
+                    "approve": "architecture-review",
+                    "request-changes": "fix-loop",
+                },
             )
             runner = Runner.__new__(Runner)
             runner.run_dir = run_dir
@@ -1216,278 +1444,162 @@ class CliTest(unittest.TestCase):
                 Phase(id="fix-loop", description=""),
                 Phase(id="architecture-review", description=""),
             ]
-
             (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
-                "## Overall\nverdict: approve\n",
+                "## Reviewer fake-a\n"
+                "reviewer-source: sub-agent\n"
+                "verdict: approve\n\n"
+                "## Reviewer fake-b\n"
+                "reviewer-source: sub-agent\n"
+                "verdict: approve\n\n"
+                "## Overall\n"
+                "verdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
+            outcomes = []
+            for job_id, verdict in (
+                ("claude-generalist", "request-changes"),
+                ("codex-generalist", "approve"),
+            ):
+                artifact = run_dir / f"{job_id}.md"
+                artifact.write_text(
+                    "## Reviewer\n"
+                    "reviewer-source: sub-agent\n"
+                    f"verdict: {verdict}\n",
+                    encoding="utf-8",
+                )
+                outcomes.append(
+                    {
+                        "job_id": job_id,
+                        "provider": job_id.split("-", 1)[0],
+                        "model": "test-model",
+                        "effort": "xhigh",
+                        "status": "ok",
+                        "verdict": verdict,
+                        "required": job_id.startswith("claude"),
+                        "artifact": artifact.name,
+                        "artifact_sha256": hashlib.sha256(
+                            artifact.read_bytes()
+                        ).hexdigest(),
+                        "prompt_digest": "a" * 16,
+                        "argv_digest": "b" * 16,
+                    }
+                )
+            results_path = run_dir / "multi-review-review-results.json"
+            review_nonce = "c" * 32
+            phase_entered_at = "2026-08-21T00:00:00+00:00"
 
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: APPROVE\n\n"
-                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: APPROVE\n\n"
-                "## Overall\nverdict: APPROVE\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
+            def write_results(selected):
+                payload = {
+                    "schema_version": 1,
+                    "phase_id": "multi-review",
+                    "produced_by": {
+                        "run_id": "r1",
+                        "nonce": review_nonce,
+                        "phase_entered_at": phase_entered_at,
+                    },
+                    "outcomes": selected,
+                }
+                results_path.write_text(json.dumps(payload), encoding="utf-8")
 
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: codex sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Reviewer 2\nreviewer-source: claude sub-agent\nreviewer-2 verdict: approve\n\n"
-                "## Overall\nverdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
+            def bind_results(selected):
+                (run_dir / "meta.json").write_text(
+                    json.dumps(
+                        {
+                            "run_id": "r1",
+                            "review_nonce": review_nonce,
+                            "phase_entered_at": phase_entered_at,
+                            "review_evidence": {
+                                "multi-review": {
+                                    "schema_version": 1,
+                                    "nonce": review_nonce,
+                                    "phase_entered_at": phase_entered_at,
+                                    "results_sha256": hashlib.sha256(
+                                        results_path.read_bytes()
+                                    ).hexdigest(),
+                                    "observed_job_ids": [
+                                        outcome["job_id"] for outcome in selected
+                                    ],
+                                    "blocking_job_ids": [
+                                        outcome["job_id"]
+                                        for outcome in selected
+                                        if outcome["required"]
+                                    ],
+                                    "accept_any_provider": False,
+                                    "expected_job_ids_by_provider": {
+                                        outcome["provider"]: [
+                                            outcome["job_id"]
+                                        ]
+                                        for outcome in outcomes
+                                    },
+                                    "complete_providers": [
+                                        outcome["provider"]
+                                        for outcome in selected
+                                    ],
+                                }
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
 
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: non-sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Overall\nverdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
-
-            (run_dir / "multi-review.md").write_text(
-                "reviewer-1 source: non-sub-agent\n"
-                "reviewer-1 verdict: approve\n\n"
-                "## Overall\nverdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
-
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n",
-                encoding="utf-8",
-            )
+            write_results(outcomes)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
-            self.assertIn("requires 2+ independent sub-agent reviewer verdicts", output.getvalue())
+            self.assertIn("runner-owned review evidence", output.getvalue())
 
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n",
-                encoding="utf-8",
-            )
+            bind_results(outcomes)
             self.assertEqual(runner._next_index(0, phase)[:2], (1, False))
 
-            for legacy_status in ("verdict: request-changes\n", "status: failed\n", "status: fail\n"):
-                (run_dir / "multi-review.md").write_text(legacy_status, encoding="utf-8")
+            outcomes[0]["verdict"] = "approve"
+            write_results(outcomes)
+            bind_results(outcomes)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
                 self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
+            self.assertIn("runner-owned review evidence", output.getvalue())
 
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\n\nreviewer-source: sub-agent\nverdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
-
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\n### Findings\nverdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
-
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Overall\nstatus: passed\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
-
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Overall\nverdict: approve\nverdict: request-changes\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
-
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Overall\nverdict: request-changes\n\n## Overall\nverdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
-
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Final\nverdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
-
-            (run_dir / "multi-review.md").write_text(
-                "reviewer verdict: approve\n## Reviewer\nverdict: approve\nverdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
-
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer Verdicts\nverdict: approve\n\n"
-                "reviewer-1 source: sub-agent\n"
-                "reviewer-1 verdict: approve\n\n"
-                "## Overall\n"
+            first_artifact = run_dir / outcomes[0]["artifact"]
+            first_artifact.write_text(
+                "## Reviewer\n"
+                "reviewer-source: sub-agent\n"
                 "verdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
+            outcomes[0]["artifact_sha256"] = hashlib.sha256(
+                first_artifact.read_bytes()
+            ).hexdigest()
+            write_results(outcomes)
+            bind_results(outcomes)
 
+            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
             (run_dir / "multi-review.md").write_text(
-                "## Reviewer Notes\nverdict: approve\n\n"
-                "reviewer-1 source: sub-agent\n"
-                "reviewer-1 verdict: approve\n\n"
-                "## Overall\n"
-                "verdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
-
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer Feedback\nverdict: approve\n\n"
-                "reviewer-1 reviewer-source: sub-agent\n"
-                "reviewer-1 verdict: approve\n\n"
-                "reviewer-2 reviewer-source: sub-agent\n"
-                "reviewer-2 verdict: approve\n\n"
-                "## Overall\n"
-                "verdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
-
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nverdict: lgtm\n\n"
-                "## Reviewer 2\nverdict: lgtm\n\n"
-                "Overall verdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
-
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Reviewer 2\nverdict: lgtm\n\n"
-                "## Overall\n"
-                "verdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
-
-            (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n## Overall\nverdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
-
-    def test_python_final_review_approve_requires_subagent_reviewer(self) -> None:
-        from agent_flow.runner import Phase, Runner
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            run_dir = Path(temp_dir)
-            phase = Phase(
-                id="final-review",
-                description="",
-                multi_review=True,
-                routes={"approve": "commit", "request-changes": "fix-loop"},
-            )
-            runner = Runner.__new__(Runner)
-            runner.run_dir = run_dir
-            runner.phases = [
-                phase,
-                Phase(id="fix-loop", description=""),
-                Phase(id="commit", description=""),
-            ]
-
-            (run_dir / "final-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
-                "## Overall\nverdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
-
-            (run_dir / "final-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (1, False))
-
-            (run_dir / "final-review.md").write_text(
-                "reviewer verdict: approve\n## Reviewer\nverdict: approve\nverdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
-
-            (run_dir / "final-review.md").write_text(
-                "## Reviewer Verdicts\nverdict: approve\n\n"
-                "reviewer-1 reviewer-source: sub-agent\n"
-                "reviewer-1 verdict: approve\n\n"
-                "reviewer-2 reviewer-source: sub-agent\n"
-                "reviewer-2 verdict: approve\n\n"
-                "## Overall\n"
-                "verdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
-
-            (run_dir / "final-review.md").write_text(
-                "## Reviewer Notes\nverdict: approve\n\n"
-                "reviewer-1 reviewer-source: sub-agent\n"
-                "reviewer-1 verdict: approve\n\n"
-                "reviewer-2 reviewer-source: sub-agent\n"
-                "reviewer-2 verdict: approve\n\n"
-                "## Overall\n"
-                "verdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
-
-            (run_dir / "final-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n## Overall\nverdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
-
-    def test_python_architecture_review_requires_two_active_host_reviewers(self) -> None:
-        from agent_flow.runner import Phase, Runner
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            run_dir = Path(temp_dir)
-            phase = Phase(
-                id="architecture-review",
-                description="",
-                multi_review=True,
-                routes={"approve": "gates", "request-changes": "refactor"},
-            )
-            runner = Runner.__new__(Runner)
-            runner.run_dir = run_dir
-            runner.phases = [
-                phase,
-                Phase(id="refactor", description=""),
-                Phase(id="gates", description=""),
-            ]
-
-            (run_dir / "architecture-review.md").write_text(
-                "## Reviewer A\nreviewer-source: sub-agent\nverdict: approve\n\n"
-                "## Reviewer B\nreviewer-source: sub-agent\nverdict: approve\n\n"
-                "## Overall\nverdict: approve\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
-
-            (run_dir / "architecture-review.md").write_text(
-                "## Reviewer A\nreviewer-source: sub-agent\nverdict: approve\n\n"
-                "## Reviewer B\nreviewer-source: sub-agent\nverdict: request-changes\n\n"
                 "## Overall\nverdict: request-changes\n",
                 encoding="utf-8",
             )
             self.assertEqual(runner._next_index(0, phase)[:2], (1, False))
 
-            (run_dir / "architecture-review.md").write_text(
-                "## Reviewer A\nreviewer-source: sub-agent\nverdict: approve\n\n"
-                "## Overall\nverdict: approve\n",
-                encoding="utf-8",
+            write_results(outcomes[:1])
+            bind_results(outcomes[:1])
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
+            self.assertIn(
+                "requires 2+ independent sub-agent reviewer verdicts",
+                output.getvalue(),
             )
-            self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
+
+            results_path.unlink()
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
+            self.assertIn(
+                "requires a complete independent sub-agent reviewer set",
+                output.getvalue(),
+            )
+
+
+
 
     def test_architecture_lint_validates_android_roles_and_packages(self) -> None:
         from agent_flow.core.architecture_lint import changed_files, lint_profiles, lint_project
@@ -1968,6 +2080,8 @@ class CliTest(unittest.TestCase):
                     "generic",
                     "--run-dir",
                     str(run_dir),
+                    "--phase",
+                    "all",
                 ),
                 cwd=project_root,
                 env=runtime_env,
@@ -6013,6 +6127,11 @@ if (codexContext !== undefined) {
                 _node_phase_content("architecture-review").replace("verdict: approve", "verdict: request-changes"),
                 encoding="utf-8",
             )
+            _write_node_review_results(
+                run_dir,
+                "architecture-review",
+                ("approve", "request-changes"),
+            )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -6056,6 +6175,8 @@ if (codexContext !== undefined) {
                 self.assertIn(f"reason: {expected_reason}", missing_artifact.stdout)
 
                 artifact.write_text(_node_phase_content(phase, prefix="updated "), encoding="utf-8")
+                if phase == "multi-review":
+                    _write_node_review_results(run_dir, phase)
                 advanced = subprocess.run(
                     (node, cli, "run", "advance"),
                     cwd=plan.path,
@@ -6077,6 +6198,7 @@ if (codexContext !== undefined) {
             self.assertIn("reason: generic_stub_artifact", missing_architecture_review.stdout)
 
             architecture_review.write_text(_node_phase_content("architecture-review"), encoding="utf-8")
+            _write_node_review_results(run_dir, "architecture-review")
             # architecture-review approve → gates. runner가 gates를 직접 돌리므로 이
             # advance 하나가 gates까지 통과해 commit에 선다. 예전에는 여기서 멈추고
             # host가 gate 결과 파일을 써 줄 때까지 기다렸다.
@@ -6165,7 +6287,10 @@ if (codexContext !== undefined) {
             self.assertIn("current_phase: multi-review", result.stdout)
 
             multi_review = run_dir / _node_phase_artifact("multi-review")
-            multi_review.write_text(_node_phase_content("multi-review"), encoding="utf-8")
+            multi_review.write_text(
+                _node_phase_content("multi-review", run_dir=run_dir),
+                encoding="utf-8",
+            )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -6177,7 +6302,10 @@ if (codexContext !== undefined) {
             self.assertIn("current_phase: architecture-review", result.stdout)
 
             architecture_review = run_dir / _node_phase_artifact("architecture-review")
-            architecture_review.write_text(_node_phase_content("architecture-review"), encoding="utf-8")
+            architecture_review.write_text(
+                _node_phase_content("architecture-review", run_dir=run_dir),
+                encoding="utf-8",
+            )
             # 같은 gate를 통과로 돌린다. 결과 파일을 손으로 고치는 것이 아니라 gate가
             # 보는 상태를 고친다 — runner가 돌리는 판정을 밖에서 바꿀 방법은 그것뿐이다.
             (plan.path / "gate-must-fail").unlink()
@@ -6241,6 +6369,11 @@ if (codexContext !== undefined) {
             ),
                 encoding="utf-8",
             )
+            _write_node_review_results(
+                run_dir,
+                "multi-review",
+                ("approve", "request-changes"),
+            )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -6286,6 +6419,7 @@ if (codexContext !== undefined) {
             ) + "dependency-rule: fail\n",
                 encoding="utf-8",
             )
+            _write_node_review_results(run_dir, "multi-review")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -6323,6 +6457,7 @@ if (codexContext !== undefined) {
             ),
                 encoding="utf-8",
             )
+            _write_node_review_results(run_dir, "multi-review")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -6333,7 +6468,7 @@ if (codexContext !== undefined) {
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("current_phase: architecture-review", result.stdout)
 
-    def test_node_default_final_review_uses_multi_review_rules(self) -> None:
+    def test_node_default_final_review_uses_runner_owned_results(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -6360,27 +6495,10 @@ if (codexContext !== undefined) {
             _record_node_test_evidence(run_dir, exit_code=0)
             final_artifact.parent.mkdir(parents=True, exist_ok=True)
             final_artifact.write_text(_with_final_review_gate("verdict: approve\n"), encoding="utf-8")
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(
-                "multi-review requires 1+ independent sub-agent reviewer verdict",
-                result.stdout,
-            )
-
-            final_artifact.write_text(
-                _with_final_review_gate(
-                    "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
-                    "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
-                    "## Overall\nverdict: approve\n",
-                    dependency_rule="fail",
-                ),
-                encoding="utf-8",
+            _write_node_review_results(
+                run_dir,
+                "final-review",
+                ("approve", "request-changes"),
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
@@ -6510,6 +6628,11 @@ if (codexContext !== undefined) {
                 _node_phase_content("architecture-review").replace("verdict: approve", "verdict: request-changes"),
                 encoding="utf-8",
             )
+            _write_node_review_results(
+                run_dir,
+                "architecture-review",
+                ("approve", "request-changes"),
+            )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -6519,386 +6642,6 @@ if (codexContext !== undefined) {
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("current_phase: refactor", result.stdout)
-
-    @mock.patch.dict(
-        os.environ,
-        {"AGENT_FLOW_ADAPTER": "generic", "AGENT_FLOW_GENERIC_MODE": "emit"},
-        clear=False,
-    )
-    def test_node_multi_review_requires_subagent_reviewer(self) -> None:
-        """multi-review artifact에 독립 sub-agent reviewer가 없으면 차단."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            project_root = Path(temp_dir) / "project"
-            project_root.mkdir()
-            node = _node_executable()
-            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
-            _init_git_repo(project_root)
-            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
-            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
-            plan = plan_worktree(root=project_root, name="demo")
-            self.assertEqual(
-                subprocess.run(
-                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
-                    cwd=project_root,
-                    check=False,
-                ).returncode,
-                0,
-            )
-            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
-            for phase in [
-                "domain-grill", "product-brief", "prd",
-                "slice-plan", "plan-review", "ddd-design", "worktree",
-                "run-start", "red", "green", "refactor", "comment-authoring",
-            ]:
-                artifact = run_dir / _node_phase_artifact(phase)
-                artifact.parent.mkdir(parents=True, exist_ok=True)
-                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
-                artifact.write_text(content, encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
-            _record_node_test_evidence(run_dir, exit_code=0)
-
-            mr_artifact = run_dir / _node_phase_artifact("multi-review")
-            mr_artifact.write_text(_with_skills_gate(
-                "reviewer verdict: approve\n## Reviewer\nverdict: approve\nverdict: approve\n",
-            ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(
-                "multi-review requires 1+ independent sub-agent reviewer verdict",
-                result.stdout,
-            )
-
-            mr_artifact.write_text(
-                _with_skills_gate(
-                    "```markdown\n"
-                    "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n\n"
-                    "## Reviewer 2\nreviewer-source: sub-agent\nverdict: approve\n\n"
-                    "## Overall\nverdict: approve\n"
-                    "```\n"
-                ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(
-                "multi-review requires 1+ independent sub-agent reviewer verdict",
-                result.stdout,
-            )
-
-            mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer Notes\nverdict: approve\n\nverdict: approve\n",
-            ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(
-                "multi-review requires 1+ independent sub-agent reviewer verdict",
-                result.stdout,
-            )
-
-            mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer 1\nverdict: lgtm\n\n"
-                "verdict: approve\n",
-            ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(
-                "multi-review requires 1+ independent sub-agent reviewer verdict",
-                result.stdout,
-            )
-
-            mr_artifact.write_text(_with_skills_gate(
-                "Reviewer verdict: approve\nReviewer verdict: approve\n"
-                "verdict: approve\n",
-            ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(
-                "multi-review requires 1+ independent sub-agent reviewer verdict",
-                result.stdout,
-            )
-
-            for legacy_status in ("verdict: request-changes\n", "status: failed\n", "status: fail\n"):
-                mr_artifact.write_text(_with_skills_gate(legacy_status), encoding="utf-8")
-                result = subprocess.run(
-                    (node, cli, "run", "advance"),
-                    cwd=plan.path,
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(
-                    "multi-review requires 1+ independent sub-agent reviewer verdict",
-                    result.stdout,
-                )
-
-            for bad_source in (
-                "## Reviewer 1\nreviewer-source: non-sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Overall\nverdict: approve\n",
-                "reviewer-1 source: non-sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Overall\nverdict: approve\n",
-                "reviewer-1 source: sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Overall\nverdict: approve\n",
-                "## Reviewer 1\nsource: sub-agent\nverdict: approve\n\n"
-                "## Overall\nverdict: approve\n",
-            ):
-                mr_artifact.write_text(_with_skills_gate(bad_source), encoding="utf-8")
-                result = subprocess.run(
-                    (node, cli, "run", "advance"),
-                    cwd=plan.path,
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(
-                    "multi-review requires 1+ independent sub-agent reviewer verdict",
-                    result.stdout,
-                )
-
-            mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n",
-            ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(
-                "multi-review requires 2+ independent sub-agent reviewer verdicts",
-                result.stdout,
-            )
-
-            mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: APPROVE\n\n"
-                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: APPROVE\n\n"
-                "## Overall\nverdict: APPROVE\n",
-            ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(
-                "multi-review requires 1+ independent sub-agent reviewer verdict",
-                result.stdout,
-            )
-
-            mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer 1\n\nreviewer-source: sub-agent\nverdict: approve\n",
-            ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(
-                "multi-review requires 2+ independent sub-agent reviewer verdicts",
-                result.stdout,
-            )
-
-            mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer 1\nreviewer-source: sub-agent\n### Findings\nverdict: approve\n",
-            ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(
-                "multi-review requires 2+ independent sub-agent reviewer verdicts",
-                result.stdout,
-            )
-
-            mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer 1\nreviewer-source: sub-agent\n# Code Review\nverdict: approve\n",
-            ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(
-                "multi-review requires 2+ independent sub-agent reviewer verdicts",
-                result.stdout,
-            )
-
-            mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Overall\nstatus: passed\n",
-            ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(
-                "multi-review requires 2+ independent sub-agent reviewer verdicts",
-                result.stdout,
-            )
-
-            mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Overall\nverdict: approve\nverdict: request-changes\n",
-            ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(
-                "multi-review requires overall verdict approve or request-changes",
-                result.stdout,
-            )
-
-            mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Overall\nverdict: request-changes\n\n## Overall\nverdict: approve\n",
-            ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(
-                "multi-review requires overall verdict approve or request-changes",
-                result.stdout,
-            )
-
-            mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Final\nverdict: approve\n",
-            ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            # ## Final은 overall alias로 인정되므로 reviewer 수 부족이 정확한 차단 사유다.
-            self.assertIn(
-                "multi-review requires 2+ independent sub-agent reviewer verdicts",
-                result.stdout,
-            )
-
-            mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer 1\nreviewer-source: codex sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Reviewer 2\nreviewer-source: claude sub-agent\nreviewer-2 verdict: approve\n\n"
-                "## Overall\nverdict: approve\n",
-            ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(
-                "multi-review requires 1+ independent sub-agent reviewer verdict",
-                result.stdout,
-            )
-
-            mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer 1\nreviewer-source: active-host sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
-                "## Overall\nverdict: approve\n",
-            ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
 
     @mock.patch.dict(
         os.environ,
@@ -6943,6 +6686,11 @@ if (codexContext !== undefined) {
                 "## Overall\nverdict: request-changes\n",
             ),
                 encoding="utf-8",
+            )
+            _write_node_review_results(
+                run_dir,
+                "multi-review",
+                ("request-changes",),
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
@@ -7847,7 +7595,7 @@ if (codexContext !== undefined) {
         python_gates = {gate.gate_id: gate for gate in load_profile("python").gates}
         self.assertFalse(python_gates["type"].required)
         self.assertFalse(python_gates["lint"].required)
-        self.assertFalse(python_gates["test"].required)
+        self.assertTrue(python_gates["test"].required)
         android = load_profile("android")
         self.assertEqual(android.profile_id, "android")
         android_required = android.skills["required_review"]
@@ -7877,10 +7625,151 @@ if (codexContext !== undefined) {
         snapshot = PRSnapshot(number=4, title="demo", state="OPEN", status="green")
         with mock.patch("agent_flow.cli.fetch_pr", return_value=snapshot):
             with contextlib.redirect_stdout(output):
-                self.assertEqual(main(["pr-watch", "4", "--once"]), 0)
+                self.assertEqual(
+                    main(["pr-watch", "4", "--once", "--allow-unbound"]),
+                    0,
+                )
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["number"], 4)
         self.assertEqual(payload["status"], "green")
+
+    def test_pr_watch_cli_fails_closed_without_run_context(self) -> None:
+        error = io.StringIO()
+        with (
+            mock.patch(
+                "agent_flow.cli._implicit_pr_watch_run_dir",
+                return_value=None,
+            ),
+            mock.patch("agent_flow.cli.fetch_pr") as fetch,
+            contextlib.redirect_stderr(error),
+        ):
+            exit_code = main(["pr-watch", "4", "--once"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("pass --run-dir or --allow-unbound", error.getvalue())
+        fetch.assert_not_called()
+
+    def test_pr_watch_cli_fails_closed_when_run_resolution_errors(self) -> None:
+        error = io.StringIO()
+        with (
+            mock.patch(
+                "agent_flow.cli._implicit_pr_watch_run_dir",
+                side_effect=RuntimeError("ambiguous worktree"),
+            ),
+            mock.patch("agent_flow.cli.fetch_pr") as fetch,
+            contextlib.redirect_stderr(error),
+        ):
+            exit_code = main(["pr-watch", "4", "--once"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("cannot resolve workflow run", error.getvalue())
+        fetch.assert_not_called()
+
+    def test_pr_watch_cli_explains_missing_gate_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            error = io.StringIO()
+            with (
+                mock.patch(
+                    "agent_flow.cli._implicit_pr_watch_run_dir",
+                    side_effect=RuntimeError(
+                        "active run has no canonical gate ledger; "
+                        "complete the gates phase first"
+                    ),
+                ),
+                mock.patch("agent_flow.cli.fetch_pr") as fetch,
+                contextlib.redirect_stderr(error),
+            ):
+                exit_code = main(["pr-watch", "4", "--once"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("complete the gates phase first", error.getvalue())
+        fetch.assert_not_called()
+
+    def test_pr_watch_cli_requires_declared_deferred_ci_checks(self) -> None:
+        from agent_flow.pr_watch import PRSnapshot
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            gate_results = run_dir / "artifacts" / "gate-results.json"
+            gate_results.parent.mkdir(parents=True)
+            gate_results.write_text(
+                json.dumps(
+                    {
+                        "deferred_ci_checks": ["pytest"],
+                        "produced_by": {
+                            "gate_phase": "all",
+                            "gate_execution": "local",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            snapshot = PRSnapshot(
+                number=4,
+                title="demo",
+                state="OPEN",
+                status="pending",
+            )
+            with (
+                mock.patch(
+                    "agent_flow.cli._resolve_run_dir",
+                    return_value=run_dir,
+                ),
+                mock.patch(
+                    "agent_flow.cli.fetch_pr",
+                    return_value=snapshot,
+                ) as fetch,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(
+                    main(
+                        [
+                            "pr-watch",
+                            "4",
+                            "--once",
+                            "--run-dir",
+                            str(run_dir),
+                        ]
+                    ),
+                    0,
+                )
+
+        fetch.assert_called_once_with(
+            4,
+            repo=None,
+            required_checks=("pytest",),
+        )
+
+    def test_pr_watch_cli_fails_closed_on_unreadable_gate_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            gate_results = run_dir / "artifacts" / "gate-results.json"
+            gate_results.parent.mkdir(parents=True)
+            gate_results.write_text("{", encoding="utf-8")
+            error = io.StringIO()
+            with (
+                mock.patch(
+                    "agent_flow.cli._resolve_run_dir",
+                    return_value=run_dir,
+                ),
+                mock.patch("agent_flow.cli.fetch_pr") as fetch,
+                contextlib.redirect_stderr(error),
+            ):
+                exit_code = main(
+                    [
+                        "pr-watch",
+                        "4",
+                        "--once",
+                        "--run-dir",
+                        str(run_dir),
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("cannot verify deferred CI gates", error.getvalue())
+        fetch.assert_not_called()
+
 
     def test_run_gate_reports_success(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -7914,12 +7803,18 @@ if (codexContext !== undefined) {
                     0,
                 )
             self.assertEqual(output.getvalue().strip(), "generic: 1/1 gates passed")
-            gate_payload = json.loads((run_dir / "artifacts" / "gate-results.json").read_text(encoding="utf-8"))
+            gate_payload = json.loads(
+                (
+                    run_dir
+                    / "artifacts"
+                    / "gate-results-local-pre-commit.json"
+                ).read_text(encoding="utf-8")
+            )
             self.assertTrue(gate_payload["passed"])
             self.assertIsInstance(gate_payload["results"], list)
             results_by_command = {result["command"]: result for result in gate_payload["results"]}
             self.assertIn("agent_flow.core.architecture_lint", " ".join(results_by_command))
-            self.assertTrue((run_dir / "gate-results.json").is_file())
+            self.assertFalse((run_dir / "gate-results.json").exists())
 
     def test_gate_results_allow_optional_failures(self) -> None:
         from agent_flow.core.artifacts import write_gate_results
@@ -7933,11 +7828,50 @@ if (codexContext !== undefined) {
                     GateResult("build", ("npm", "run", "build"), True, 0, "ok", ""),
                     GateResult("lint", ("ruff", "check", "."), False, None, "", "missing", required=False),
                 ],
+                phase="all",
             )
             payload = json.loads((run_dir / "artifacts" / "gate-results.json").read_text(encoding="utf-8"))
             self.assertTrue(payload["passed"])
             self.assertEqual(payload["status"], "green")
             self.assertFalse(payload["results"][1]["required"])
+
+    def test_gate_result_reports_deferred_ci_gates_without_claiming_pass(
+        self,
+    ) -> None:
+        from agent_flow.core.artifacts import write_gate_results
+        from agent_flow.core.gates import GateResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            write_gate_results(
+                run_dir=run_dir,
+                results=[
+                    GateResult(
+                        "architecture-lint",
+                        ("agent-flow", "architecture-lint"),
+                        True,
+                        0,
+                        "ok",
+                        "",
+                    )
+                ],
+                phase="all",
+                execution="local",
+                deferred_ci_checks=("pytest",),
+            )
+
+            payload = json.loads(
+                (run_dir / "artifacts" / "gate-results.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertTrue(payload["passed"])
+            self.assertEqual(payload["execution"], "local")
+            self.assertEqual(payload["deferred_ci_checks"], ["pytest"])
+            self.assertNotIn(
+                "pytest",
+                {result["gate_id"] for result in payload["results"]},
+            )
 
     def test_gates_cli_uses_installed_profile_union_when_auto(self) -> None:
         from agent_flow.core.gates import GateResult
@@ -8212,7 +8146,9 @@ if (codexContext !== undefined) {
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("generic: 1/1 gates passed", result.stdout)
-            gate_payload_text = (run_dir / "artifacts" / "gate-results.json").read_text(encoding="utf-8")
+            gate_payload_text = (
+                run_dir / "artifacts" / "gate-results-local-pre-commit.json"
+            ).read_text(encoding="utf-8")
             self.assertNotIn(str(root), gate_payload_text)
 
     def test_gates_cli_resolves_relative_run_dir_against_root(self) -> None:
@@ -8242,10 +8178,36 @@ if (codexContext !== undefined) {
                 )
             finally:
                 os.chdir(old_cwd)
-            self.assertTrue((root / ".agent-flow" / "runs" / "manual" / "artifacts" / "gate-results.json").is_file())
-            self.assertTrue((root / ".agent-flow" / "runs" / "manual" / "gate-results.json").is_file())
-            self.assertFalse((cwd / ".agent-flow" / "runs" / "manual" / "gate-results.json").exists())
-            self.assertFalse((cwd / ".agent-flow" / "runs" / "manual" / "artifacts" / "gate-results.json").exists())
+            focused = "gate-results-local-pre-commit.json"
+            self.assertTrue(
+                (
+                    root
+                    / ".agent-flow"
+                    / "runs"
+                    / "manual"
+                    / "artifacts"
+                    / focused
+                ).is_file()
+            )
+            self.assertFalse(
+                (
+                    root
+                    / ".agent-flow"
+                    / "runs"
+                    / "manual"
+                    / "gate-results.json"
+                ).exists()
+            )
+            self.assertFalse(
+                (
+                    cwd
+                    / ".agent-flow"
+                    / "runs"
+                    / "manual"
+                    / "artifacts"
+                    / focused
+                ).exists()
+            )
 
     def test_handoff_writes_run_and_project_index_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -8336,6 +8298,11 @@ if (codexContext !== undefined) {
                 "verdict: request-changes\n",
                 encoding="utf-8",
             )
+            _write_node_review_results(
+                run_dir,
+                "final-review",
+                ("request-changes",),
+            )
             self.assertEqual(runner._next_index(0, phase)[:2], (1, False))
 
             (run_dir / "final-review.md").write_text(
@@ -8345,6 +8312,11 @@ if (codexContext !== undefined) {
                 "verdict: request-changes\n",
                 encoding="utf-8",
             )
+            _write_node_review_results(
+                run_dir,
+                "final-review",
+                ("request-changes", "approve"),
+            )
             self.assertEqual(runner._next_index(0, phase)[:2], (1, False))
 
             (run_dir / "final-review.md").write_text(
@@ -8353,6 +8325,11 @@ if (codexContext !== undefined) {
                 "## Overall\n"
                 "verdict: approve\n",
                 encoding="utf-8",
+            )
+            _write_node_review_results(
+                run_dir,
+                "final-review",
+                ("approve", "approve"),
             )
             self.assertEqual(runner._next_index(0, phase)[:2], (2, False))
 
@@ -8374,18 +8351,40 @@ if (codexContext !== undefined) {
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
+            _write_node_review_results(
+                run_dir,
+                "final-review",
+                ("approve",),
+            )
 
             self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
     def test_provider_rate_limits_render_retry_status(self) -> None:
-        from agent_flow.multi_review import _render_angle_result, reviewer_result_error
+        from agent_flow.multi_review import (
+            ResolvedLaunch,
+            _render_angle_result,
+            reviewer_result_error,
+        )
         from agent_flow.subprocess_pool import SubprocessResult
 
         cases = [
             ("codex-generalist", "429 too many requests; rate limit resets in 5 minutes", "codex"),
         ]
         for job_id, stderr, reviewer in cases:
-            artifact = _render_angle_result(SubprocessResult(job_id=job_id, stderr=stderr, returncode=1))
+            artifact = _render_angle_result(
+                SubprocessResult(
+                    job_id=job_id,
+                    stderr=stderr,
+                    returncode=1,
+                ),
+                launch=ResolvedLaunch(
+                    reviewer,
+                    None,
+                    None,
+                    (),
+                    "test",
+                ),
+            )
             self.assertIn("reason: reviewer_rate_limited", artifact)
             self.assertIn(f"reviewer: {reviewer}", artifact)
             self.assertIn(f"next_command: agent-flow review retry --reviewer {reviewer}", artifact)
@@ -8395,7 +8394,8 @@ if (codexContext !== undefined) {
             returncode=0,
             stdout=(
                 "reviewer-source: sub-agent\n"
-                "The API rate limit is enforced correctly. No findings."
+                "The API rate limit is enforced correctly. No findings.\n"
+                "verdict: approve"
             ),
         )
         self.assertIsNone(reviewer_result_error(legitimate))
@@ -11537,7 +11537,13 @@ if (codexContext !== undefined) {
                     ]
                 )
 
-            self.assertTrue((run_dir / "artifacts" / "gate-results.json").exists())
+            self.assertTrue(
+                (
+                    run_dir
+                    / "artifacts"
+                    / "gate-results-local-pre-commit.json"
+                ).exists()
+            )
             self.assertFalse((checkout / ".agent-flow" / "runs").exists())
             self.assertFalse((root / ".agent-flow" / "runs").exists())
 
@@ -12024,13 +12030,104 @@ def _node_spec_gate(run_dir) -> str:
     return spec_block
 
 
+def _write_node_review_results(
+    run_dir: Path,
+    phase_id: str,
+    verdicts: tuple[str, ...] = ("approve", "approve"),
+) -> None:
+    outcomes = []
+    for index, verdict in enumerate(verdicts, start=1):
+        provider = "claude" if index % 2 else "codex"
+        artifact = run_dir / f"{phase_id}-fixture-{index}.md"
+        artifact.write_text(
+            "## Reviewer\n"
+            "reviewer-source: sub-agent\n"
+            f"verdict: {verdict}\n",
+            encoding="utf-8",
+        )
+        outcomes.append(
+            {
+                "job_id": f"{provider}-fixture-{index}",
+                "provider": provider,
+                "model": "test-model",
+                "effort": "xhigh",
+                "status": "ok",
+                "verdict": verdict,
+                "required": True,
+                "artifact": artifact.name,
+                "artifact_sha256": hashlib.sha256(
+                    artifact.read_bytes()
+                ).hexdigest(),
+                "prompt_digest": "a" * 16,
+                "argv_digest": "b" * 16,
+            }
+        )
+    meta_path = run_dir / "meta.json"
+    meta = (
+        json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta_path.is_file()
+        else {"run_id": run_dir.name}
+    )
+    nonce = meta.get("review_nonce")
+    if not isinstance(nonce, str) or len(nonce) != 32:
+        nonce = "c" * 32
+        meta["review_nonce"] = nonce
+    phase_entered_at = meta.get("phase_entered_at")
+    if not isinstance(phase_entered_at, str) or not phase_entered_at:
+        phase_entered_at = "2026-08-21T00:00:00+00:00"
+        meta["phase_entered_at"] = phase_entered_at
+    payload = {
+        "schema_version": 1,
+        "phase_id": phase_id,
+        "produced_by": {
+            "run_id": str(meta.get("run_id") or run_dir.name),
+            "nonce": nonce,
+            "phase_entered_at": phase_entered_at,
+        },
+        "outcomes": outcomes,
+    }
+    serialized = json.dumps(payload)
+    results_path = run_dir / f"{phase_id}-review-results.json"
+    results_path.write_text(serialized, encoding="utf-8")
+    evidence = meta.get("review_evidence")
+    if not isinstance(evidence, dict):
+        evidence = {}
+    evidence[phase_id] = {
+        "schema_version": 1,
+        "nonce": nonce,
+        "phase_entered_at": phase_entered_at,
+        "results_sha256": hashlib.sha256(
+            serialized.encode("utf-8")
+        ).hexdigest(),
+        "observed_job_ids": [outcome["job_id"] for outcome in outcomes],
+        "blocking_job_ids": [
+            outcome["job_id"] for outcome in outcomes if outcome["required"]
+        ],
+        "accept_any_provider": False,
+        "expected_job_ids_by_provider": {
+            outcome["provider"]: [outcome["job_id"]]
+            for outcome in outcomes
+        },
+        "complete_providers": [
+            outcome["provider"] for outcome in outcomes
+        ],
+    }
+    meta["review_evidence"] = evidence
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+
 def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
     content = f"{prefix}{phase}\n"
-    if run_dir is not None and phase in {"final-review", "multi-review"}:
-        _record_node_test_evidence(Path(run_dir), exit_code=0)
     if run_dir is not None and phase in {"implement", "fix-loop"}:
         _record_node_test_evidence(Path(run_dir), exit_code=1)
         _record_node_test_evidence(Path(run_dir), exit_code=0)
+    if run_dir is not None and phase in {
+        "final-review",
+        "multi-review",
+        "architecture-review",
+    }:
+        _record_node_test_evidence(Path(run_dir), exit_code=0)
+        _write_node_review_results(Path(run_dir), phase)
     skills_gate = (
         "## Completion Gate\n"
         "skills_checked: true\n"
@@ -12296,6 +12393,8 @@ def _set_node_phase(
     run_dir.mkdir(parents=True, exist_ok=True)
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
     (run_dir / "active").touch()
+    if phase.multi_review:
+        _write_node_review_results(run_dir, phase_id)
     return run_dir / phase.artifact
 
 

@@ -49,6 +49,7 @@ def test_gate_output_absolute_paths_become_repo_relative(tmp_path):
                 f"tmp_path = PosixPath('{outside}')\n",
             )
         ],
+        phase="all",
     )
 
     recorded = json.loads(path.read_text(encoding="utf-8"))["results"][0]
@@ -75,6 +76,7 @@ def test_explicit_gate_cwd_overrides_the_derived_base(tmp_path):
         run_dir=run_dir,
         results=[GateResult("lint", ("node", "x.mjs"), False, 1, f"cannot read {leaked}\n", "")],
         cwd=checkout,
+        phase="all",
     )
 
     stdout = json.loads(path.read_text(encoding="utf-8"))["results"][0]["stdout"]

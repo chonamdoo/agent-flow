@@ -40,6 +40,198 @@ def test_green():
     assert snap.status == "green"
 
 
+def test_empty_checks_remain_pending_when_deferred_ci_is_required():
+    snap = _classify(
+        1,
+        {
+            "state": "OPEN",
+            "title": "x",
+            "statusCheckRollup": [],
+            "reviews": [],
+            "comments": [],
+        },
+        required_checks=("pytest",),
+    )
+
+    assert snap.status == "pending"
+    assert snap.pending_checks == [
+        {
+            "name": "deferred CI gate: pytest",
+            "status": "EXPECTED",
+            "conclusion": None,
+        }
+    ]
+    assert snap.to_summary()["pending_checks"][0]["name"] == (
+        "deferred CI gate: pytest"
+    )
+
+
+def test_unrelated_green_check_does_not_satisfy_deferred_gate():
+    snap = _classify(
+        1,
+        {
+            "state": "OPEN",
+            "title": "x",
+            "statusCheckRollup": [
+                {
+                    "name": "parity",
+                    "conclusion": "SUCCESS",
+                    "status": "COMPLETED",
+                }
+            ],
+            "reviews": [],
+            "comments": [],
+        },
+        required_checks=("pytest",),
+    )
+
+    assert snap.status == "pending"
+    assert snap.pending_checks[0]["name"] == "deferred CI gate: pytest"
+
+
+@pytest.mark.parametrize(
+    "check_name",
+    ["pytest-old", "not-pytest", "py-test", "Py Test"],
+)
+def test_similar_green_check_does_not_satisfy_deferred_gate(check_name: str):
+    snap = _classify(
+        1,
+        {
+            "state": "OPEN",
+            "title": "x",
+            "statusCheckRollup": [
+                {
+                    "name": check_name,
+                    "conclusion": "SUCCESS",
+                    "status": "COMPLETED",
+                }
+            ],
+            "reviews": [],
+            "comments": [],
+        },
+        required_checks=("pytest",),
+    )
+
+    assert snap.status == "pending"
+    assert snap.pending_checks[0]["name"] == "deferred CI gate: pytest"
+
+
+def test_required_checks_rejects_bare_string():
+    with pytest.raises(TypeError, match="must be a tuple"):
+        _classify(
+            1,
+            {"state": "OPEN", "title": "x"},
+            required_checks="pytest",
+        )
+
+
+def test_required_checks_rejects_non_string_elements():
+    with pytest.raises(TypeError, match="non-empty check names"):
+        _classify(
+            1,
+            {"state": "OPEN", "title": "x"},
+            required_checks=(1, 2),
+        )
+
+
+def test_matching_green_check_satisfies_deferred_gate():
+    snap = _classify(
+        1,
+        {
+            "state": "OPEN",
+            "title": "x",
+            "statusCheckRollup": [
+                {
+                    "name": "pytest",
+                    "conclusion": "SUCCESS",
+                    "status": "COMPLETED",
+                }
+            ],
+            "reviews": [],
+            "comments": [],
+        },
+        required_checks=("pytest",),
+    )
+
+    assert snap.status == "green"
+
+
+def test_workflow_name_does_not_satisfy_a_declared_job_gate():
+    """반증: workflow 이름을 신원으로 인정하면 그 안의 아무 green job 하나가
+    선언된 gate를 충족한다. 여기서 선언된 job(`pytest`)은 rollup에 아예 없고
+    green인 것은 같은 workflow의 `lint`뿐이므로 판정은 pending이어야 한다."""
+    snap = _classify(
+        1,
+        {
+            "state": "OPEN",
+            "title": "x",
+            "statusCheckRollup": [
+                {
+                    "name": "lint",
+                    "workflowName": "pytest",
+                    "conclusion": "SUCCESS",
+                    "status": "COMPLETED",
+                }
+            ],
+            "reviews": [],
+            "comments": [],
+        },
+        required_checks=("pytest",),
+    )
+
+    assert snap.status == "pending"
+    assert snap.pending_checks[0]["name"] == "deferred CI gate: pytest"
+
+
+@pytest.mark.parametrize("conclusion", ["SKIPPED", "NEUTRAL", "STALE"])
+def test_terminal_non_successful_required_check_fails_ci(
+    conclusion: str,
+):
+    snap = _classify(
+        1,
+        {
+            "state": "OPEN",
+            "title": "x",
+            "statusCheckRollup": [
+                {
+                    "name": "pytest",
+                    "conclusion": conclusion,
+                    "status": "COMPLETED",
+                }
+            ],
+            "reviews": [],
+            "comments": [],
+        },
+        required_checks=("pytest",),
+    )
+    assert snap.status == "ci_failed"
+    assert snap.failed_checks[0]["name"] == "pytest"
+
+
+
+def test_running_required_check_is_not_duplicated():
+    snap = _classify(
+        1,
+        {
+            "state": "OPEN",
+            "title": "x",
+            "statusCheckRollup": [
+                {
+                    "name": "pytest",
+                    "conclusion": None,
+                    "status": "IN_PROGRESS",
+                }
+            ],
+            "reviews": [],
+            "comments": [],
+        },
+        required_checks=("pytest",),
+    )
+
+    assert snap.status == "pending"
+    assert [check["name"] for check in snap.pending_checks] == ["pytest"]
+
+
 def test_pending_no_failure():
     snap = _classify(1, {
         "state": "OPEN", "title": "x",

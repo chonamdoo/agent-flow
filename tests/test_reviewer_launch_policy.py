@@ -9,6 +9,8 @@ model/effort는 아무도 지정하지 않았으며, artifact에도 남지 않�
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -252,7 +254,7 @@ def test_artifact_records_identity_but_not_raw_argv_or_prompt(
             SubprocessResult(
                 job_id=job.job_id,
                 returncode=0,
-                stdout="reviewer-source: sub-agent\nverdict: pass",
+                stdout="reviewer-source: sub-agent\nverdict: approve",
             )
             for job in jobs
         ]
@@ -272,6 +274,16 @@ def test_artifact_records_identity_but_not_raw_argv_or_prompt(
         phase_id="final-review",
     )
 
+    (tmp_path / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": "r1",
+                "phase_entered_at": "2026-08-21T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
     multi_review.run_distribution(distribution, tmp_path)
 
     assert launched and "--model" in launched[0]
@@ -288,8 +300,206 @@ def test_artifact_records_identity_but_not_raw_argv_or_prompt(
     assert str(tmp_path) not in artifact
     # 기존 marker 파서가 읽는 줄은 그대로다.
     assert "reviewer-source: sub-agent" in artifact
-    assert "verdict: pass" in artifact
+    assert "verdict: approve" in artifact
     assert artifact.startswith("# claude-generalist\n")
+
+
+def test_review_outcome_artifact_records_launch_and_content_digests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_flow.cli_detect import CliInfo
+    from agent_flow.adapters.hosted import _write_review_results
+    from agent_flow.core.review_evidence import load_review_evidence
+    from agent_flow.subprocess_pool import SubprocessResult
+
+    monkeypatch.setattr(
+        multi_review, "assert_managed_hooks_registered", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(multi_review, "leader_root_for", lambda _root: None)
+    cli = CliInfo("claude", ("claude",), ("-p",))
+    monkeypatch.setattr(multi_review, "cli_by_name", lambda _name: cli)
+
+    def fake_run_parallel(jobs):
+        verdicts = ("approve", "request-changes")
+        return [
+            SubprocessResult(
+                job_id=job.job_id,
+                returncode=0,
+                stdout=(
+                    "## Reviewer\n"
+                    "reviewer-source: sub-agent\n"
+                    "## stderr\n"
+                    "quoted heading in reviewer body\n"
+                    f"verdict: {verdict}\n"
+                ),
+                stderr="verdict: request-changes",
+            )
+            for job, verdict in zip(jobs, verdicts)
+        ]
+
+    monkeypatch.setattr(multi_review, "run_parallel", fake_run_parallel)
+    jobs = [
+        multi_review.ReviewerJob(
+            angle,
+            f"review {angle}",
+            tmp_path / f"review-{angle}.md",
+            tmp_path,
+        )
+        for angle in ("generalist", "architecture-design")
+    ]
+    distribution = multi_review.Distribution(
+        by_cli={"claude": jobs},
+        phase_id="review",
+        required_job_ids=frozenset(
+            f"claude-{job.angle_id}" for job in jobs
+        ),
+    )
+    (tmp_path / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": "r1",
+                "phase_entered_at": "2026-08-21T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    execution = multi_review.run_distribution(distribution, tmp_path)
+    _write_review_results(distribution, execution.outcomes)
+
+    results_path = tmp_path / "review-review-results.json"
+    assert results_path.is_file()
+    payload = json.loads(results_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 1
+    assert payload["phase_id"] == "review"
+    assert [item["verdict"] for item in payload["outcomes"]] == [
+        "approve",
+        "request-changes",
+    ]
+    for item in payload["outcomes"]:
+        artifact = tmp_path / item["artifact"]
+        assert item["artifact_sha256"] == hashlib.sha256(
+            artifact.read_bytes()
+        ).hexdigest()
+        assert item["prompt_digest"]
+        assert item["argv_digest"]
+    run_meta = json.loads(
+        (tmp_path / "meta.json").read_text(encoding="utf-8")
+    )
+    assert len(run_meta["review_nonce"]) == 32
+    evidence = run_meta["review_evidence"]["review"]
+    assert evidence["observed_job_ids"] == [
+        "claude-generalist",
+        "claude-architecture-design",
+    ]
+    assert evidence["blocking_job_ids"] == [
+        "claude-architecture-design",
+        "claude-generalist",
+    ]
+    assert evidence["results_sha256"] == hashlib.sha256(
+        results_path.read_bytes()
+    ).hexdigest()
+
+    validated = load_review_evidence(
+        artifact_root=tmp_path,
+        phase_id="review",
+        run_meta=run_meta,
+    )
+    assert validated.validation == "verified"
+
+
+def test_accept_any_provider_keeps_running_after_a_malformed_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_flow.core.review_evidence import load_review_evidence
+    from agent_flow.adapters.hosted import _write_review_results
+    from agent_flow.subprocess_pool import SubprocessResult
+
+    monkeypatch.setattr(
+        multi_review,
+        "assert_managed_hooks_registered",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(multi_review, "leader_root_for", lambda _root: None)
+    monkeypatch.setattr(multi_review, "cli_by_name", lambda _name: _CLAUDE)
+    launches: list[list[str]] = []
+
+    def fake_run_parallel(jobs):
+        launches.append([job.job_id for job in jobs])
+        if len(launches) == 1:
+            return [
+                SubprocessResult(
+                    job_id=jobs[0].job_id,
+                    returncode=0,
+                    stdout="reviewer-source: sub-agent\nmissing verdict\n",
+                )
+            ]
+        return [
+            SubprocessResult(
+                job_id=job.job_id,
+                returncode=0,
+                stdout="reviewer-source: sub-agent\nverdict: approve\n",
+            )
+            for job in jobs
+        ]
+
+    monkeypatch.setattr(multi_review, "run_parallel", fake_run_parallel)
+    jobs = [
+        multi_review.ReviewerJob(
+            angle,
+            f"review {angle}",
+            tmp_path / f"review-{angle}.md",
+            tmp_path,
+        )
+        for angle in ("generalist", "types")
+    ]
+    distribution = multi_review.Distribution(
+        by_cli={"claude": jobs},
+        phase_id="review",
+        required_job_ids=frozenset(
+            f"claude-{job.angle_id}" for job in jobs
+        ),
+        accept_any_provider=True,
+    )
+    (tmp_path / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": "r1",
+                "phase_entered_at": "2026-08-21T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    execution = multi_review.run_distribution(distribution, tmp_path)
+    _write_review_results(distribution, execution.outcomes)
+
+    assert execution.skipped_providers == ()
+    assert launches == [["claude-generalist"], ["claude-types"]]
+    run_meta = json.loads(
+        (tmp_path / "meta.json").read_text(encoding="utf-8")
+    )
+    evidence = load_review_evidence(
+        artifact_root=tmp_path,
+        phase_id="review",
+        run_meta=run_meta,
+    )
+    assert evidence.validation == "incomplete"
+    assert evidence.detail == "no provider completed every expected review"
+
+
+def test_reviewer_verdict_normalization_matches_outcome_parser() -> None:
+    from agent_flow.subprocess_pool import SubprocessResult
+
+    result = SubprocessResult(
+        job_id="claude-generalist",
+        returncode=0,
+        stdout="\n    verdict: approve\nreviewer-source: sub-agent\n",
+    )
+
+    assert multi_review.reviewer_result_error(result) is None
+    assert multi_review.reviewer_output_verdict(result.stdout.strip()) == "approve"
 
 
 def test_unspecified_identity_is_named_not_blank(tmp_path: Path):
@@ -460,7 +670,7 @@ def test_declaration_is_read_from_the_config_root_not_the_worker_checkout(
             SubprocessResult(
                 job_id=job.job_id,
                 returncode=0,
-                stdout="reviewer-source: sub-agent\nverdict: pass",
+                stdout="reviewer-source: sub-agent\nverdict: approve",
             )
             for job in jobs
         ]
@@ -475,6 +685,16 @@ def test_declaration_is_read_from_the_config_root_not_the_worker_checkout(
             ]
         },
         phase_id="review",
+    )
+
+    (checkout / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": "r1",
+                "phase_entered_at": "2026-08-21T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
     )
 
     multi_review.run_distribution(
@@ -524,7 +744,12 @@ def test_review_phases_carry_their_phase_id_into_the_launch_policy(
         return multi_review.ReviewExecution()
 
     monkeypatch.setattr(
-        hosted, "_write_review_input_snapshot", lambda *a, **k: tmp_path / "input.md"
+        hosted,
+        "_write_review_input_snapshot",
+        lambda *a, **k: hosted.ReviewInputSnapshot(
+            tmp_path / "input.md",
+            "a" * 64,
+        ),
     )
     monkeypatch.setattr(hosted, "_reviewer_jobs", lambda *a, **k: jobs)
     monkeypatch.setattr(hosted, "distribute", fake_distribute)
@@ -617,7 +842,12 @@ def test_final_review_dispatch_reads_the_shared_phase_id_constant(
 
     chosen: list[str] = []
     monkeypatch.setattr(
-        hosted, "_write_review_input_snapshot", lambda *a, **k: tmp_path / "input.md"
+        hosted,
+        "_write_review_input_snapshot",
+        lambda *a, **k: hosted.ReviewInputSnapshot(
+            tmp_path / "input.md",
+            "a" * 64,
+        ),
     )
     monkeypatch.setattr(hosted, "_reviewer_jobs", lambda *a, **k: [])
     monkeypatch.setattr(

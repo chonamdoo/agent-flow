@@ -2,7 +2,6 @@ id: development
 description: Personal subagent-first development workflow.
 phases:
   - id: explore
-    role: explorer
     description: Inspect the task and existing code before editing.
     prompt: |
       Inspect the relevant files and existing patterns. Record the chosen smallest
@@ -10,7 +9,6 @@ phases:
       Output: explore.md.
 
   - id: implement
-    role: implementer
     skills:
       required: [code-generation-discipline]
     description: Implement the requested change.
@@ -20,11 +18,8 @@ phases:
       Output: implement.md.
 
   - id: review
-    role: reviewer
     skills:
       required: [code-generation-discipline]
-    parallel: true
-    replicas: 3
     description: Review the implementation.
     multi_review: true
     required_markers:
@@ -50,7 +45,6 @@ phases:
       Output: review.md.
 
   - id: qa
-    role: qa
     description: Run focused verification.
     routes:
       green: handoff
@@ -67,7 +61,6 @@ phases:
       Output: qa.md.
 
   - id: fix-loop
-    role: fixer
     skills:
       required: [code-generation-discipline]
     description: Fix review or QA findings.
@@ -79,7 +72,6 @@ phases:
       Output: fix-loop.md.
 
   - id: handoff
-    role: qa
     description: Summarize the completed change.
     prompt: |
       Summarize the change, verification result, and any follow-up risk.

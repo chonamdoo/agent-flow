@@ -51,3 +51,5 @@ You are reviewing this change through a **DDD lens**. The code under review is p
 ```
 
 Cite file paths as `path/to/file:line`. If no findings in a category, write "none". Keep total under 250 lines.
+
+Emit exactly one unfenced final verdict line: `verdict: approve` or `verdict: request-changes`.

@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -434,10 +435,79 @@ def test_spec_markers_uses_the_supplied_run_context(
     assert json.loads(capsys.readouterr().out) == []
 
 
-def test_request_changes_routes_even_when_spec_evidence_is_missing(project, run_dir):
+def test_request_changes_routes_even_when_spec_evidence_is_missing(
+    project,
+    run_dir,
+    capsys: pytest.CaptureFixture[str],
+):
     _capture_spec_ledger(run_dir, "manual")
     review = "## Overall\nverdict: request-changes\n"
     (run_dir / "final-review.md").write_text(review, encoding="utf-8")
+    reviewer = run_dir / "final-review-fixture.md"
+    reviewer.write_text(
+        "## Reviewer\nreviewer-source: sub-agent\nverdict: request-changes\n",
+        encoding="utf-8",
+    )
+    nonce = "c" * 32
+    entered_at = "2026-08-21T00:00:00+00:00"
+    payload = {
+        "schema_version": 1,
+        "phase_id": "final-review",
+        "produced_by": {
+            "run_id": "r1",
+            "nonce": nonce,
+            "phase_entered_at": entered_at,
+        },
+        "outcomes": [
+            {
+                "job_id": "claude-generalist",
+                "provider": "claude",
+                "model": "test-model",
+                "effort": "xhigh",
+                "status": "ok",
+                "verdict": "request-changes",
+                "required": True,
+                "artifact": reviewer.name,
+                "artifact_sha256": hashlib.sha256(
+                    reviewer.read_bytes()
+                ).hexdigest(),
+                "prompt_digest": "a" * 16,
+                "argv_digest": "b" * 16,
+            }
+        ],
+    }
+    serialized = json.dumps(payload)
+    results = run_dir / "final-review-review-results.json"
+    results.write_text(serialized, encoding="utf-8")
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": "r1",
+                "workflow": "default",
+                "task": "",
+                "review_nonce": nonce,
+                "phase_entered_at": entered_at,
+                "review_evidence": {
+                    "final-review": {
+                        "schema_version": 1,
+                        "nonce": nonce,
+                        "results_sha256": hashlib.sha256(
+                            serialized.encode("utf-8")
+                        ).hexdigest(),
+                        "phase_entered_at": entered_at,
+                        "observed_job_ids": ["claude-generalist"],
+                        "blocking_job_ids": ["claude-generalist"],
+                        "accept_any_provider": False,
+                        "expected_job_ids_by_provider": {
+                            "claude": ["claude-generalist"]
+                        },
+                        "complete_providers": ["claude"],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     runner = Runner(project, run_dir=run_dir)
 
     assert missing_spec_item_evidence(
@@ -445,10 +515,36 @@ def test_request_changes_routes_even_when_spec_evidence_is_missing(project, run_
         run_dir,
         "final-review",
         review,
+    ) == ["SPEC-1: manual (no user approval record)"]
+    assert missing_spec_item_evidence(
+        project,
+        run_dir,
+        "final-review",
+        review,
+        review_rejected=True,
     ) == []
     assert runner._missing_required_markers(
-        Phase(id="final-review", description="")
+        Phase(id="final-review", description="", multi_review=True)
     ) == []
+    exit_code = main(
+        [
+            "spec",
+            "markers",
+            "--root",
+            str(project),
+            "--run-dir",
+            str(run_dir),
+            "--project-root",
+            str(project),
+            "--phase",
+            "final-review",
+            "--artifact",
+            str(run_dir / "final-review.md"),
+        ]
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out) == []
 
 
 def test_missing_canonical_ledger_fails_closed(project, run_dir):

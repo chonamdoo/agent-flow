@@ -12,7 +12,13 @@ import sys
 from pathlib import Path
 
 from agent_flow.core.gates import GateCommand
-from agent_flow.core.profiles import DEFAULT_GATE_PHASE, GATE_PHASE_ALL, load_profile
+from agent_flow.core.profiles import (
+    DEFAULT_GATE_PHASE,
+    GateExecution,
+    GATE_PHASE_ALL,
+    load_profile,
+    require_gate_execution,
+)
 
 
 def profile_gate_commands(
@@ -20,7 +26,9 @@ def profile_gate_commands(
     *,
     root: Path | None = None,
     phase: str = DEFAULT_GATE_PHASE,
+    execution: GateExecution = "local",
 ) -> list[GateCommand]:
+    execution = require_gate_execution(execution)
     commands: list[tuple[int, GateCommand]] = []
     seen: set[tuple[str, ...]] = set()
     multi_profile = len(profile_ids) > 1
@@ -31,6 +39,8 @@ def profile_gate_commands(
         profile = load_profile(profile_id, root)
         for gate in profile.gates:
             if phase != GATE_PHASE_ALL and gate.phase != phase:
+                continue
+            if gate.execution != execution:
                 continue
             command = _normalize_profile_gate_command(
                 profile.profile_id,
@@ -59,7 +69,16 @@ def profile_gate_commands(
                 continue
             seen.add(command)
             commands.append(
-                (order, GateCommand(gate_id, command, required=required, timeout_s=timeout_s))
+                (
+                    order,
+                    GateCommand(
+                        gate_id,
+                        command,
+                        required=required,
+                        timeout_s=timeout_s,
+                        ci_check=gate.ci_check,
+                    ),
+                )
             )
             order += 1
     return [
@@ -69,6 +88,20 @@ def profile_gate_commands(
             key=lambda item: (*gate_order_key(item[1]), item[0]),
         )
     ]
+
+
+def deferred_check_names(commands: list[GateCommand]) -> tuple[str, ...]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for command in commands:
+        if not command.required:
+            continue
+        if not command.ci_check:
+            raise ValueError(f"CI gate {command.gate_id!r} is missing ci_check")
+        if command.ci_check not in seen:
+            names.append(command.ci_check)
+            seen.add(command.ci_check)
+    return tuple(names)
 
 
 def is_architecture_lint_gate(gate_id: str, command: tuple[str, ...]) -> bool:

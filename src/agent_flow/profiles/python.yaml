@@ -24,7 +24,9 @@ gates:
     phase: pre-commit
   - id: test
     command: ["pytest", "-q"]
-    required: false
+    required: true
+    execution: ci
+    ci_check: pytest
     phase: pre-push
 execution:
   reviewers:
