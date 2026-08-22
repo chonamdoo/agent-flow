@@ -18,7 +18,7 @@ Use this as a secondary checklist after user request, repo instructions, existin
 - Keep component responsibility narrow and aligned with existing repo patterns.
 - Follow Rules of Hooks: call hooks only at the top level of components or custom hooks, never inside conditions, loops, callbacks, async functions, or after early returns.
 - Minimize effects. Use effects for external systems, not for derivable render state.
-- Read non-reactive values inside an Effect through `useEffectEvent`, and keep the dependency list complete.
+- When `useEffectEvent` is available, read non-reactive values inside an Effect through it and keep the dependency list complete.
 - Avoid derived state when a value can be computed from props/state during render.
 - Preserve loading, empty, error, and success states when touching async or user-visible flows.
 - Keep server/client component boundaries explicit. Do not move browser-only logic into server components.
