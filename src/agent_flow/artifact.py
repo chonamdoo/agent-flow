@@ -641,7 +641,11 @@ def _phase_contract(
                     phase.get("required_markers")
                 ),
                 skills=None,
-                multi_review=phase.get("multi_review") is True,
+                # 이 fallback은 canonical loader가 **거부한** YAML만 본다. 거기서
+                # route 관련 flag를 유도하면 strict 검증이 막은 정의가 우회로로
+                # 되살아난다. marker 목록은 그 자리에서 사람이 읽는 값이라 남기고,
+                # 라우팅에 닿는 값은 여기서 만들지 않는다.
+                multi_review=False,
             )
     return PhaseArtifactContract(
         artifact=Path(f"{phase_id}.md") if phase_id != "-" else None,
