@@ -1,0 +1,28 @@
+{
+  "kind": "deletion",
+  "subject": "react-development-guide: three lines that restate the closed Blocking-only list were removed. Re-adding them must change nothing.",
+  "baseline": "skills/react-development-guide/SKILL.md",
+  "variant": {
+    "insertAfter": 39,
+    "expectAnchor": "Blocking only: hook rule violation",
+    "text": [
+      "- Best practice 일반론으로 blocking하지 말 것.",
+      "- Do not block on theoretical cleaner architecture, preferred folder layout, CSS taste, or optional memoization.",
+      "- Treat generic React best practice comments as suggestions unless they prevent a concrete failure."
+    ]
+  },
+  "fixtures": [
+    { "name": "block", "file": "fixture_block.diff", "expect": "request-changes" },
+    { "name": "noblock", "file": "fixture_noblock.diff", "expect": "approve" }
+  ],
+  "patterns": {
+    "hook-rule": "rules? of hooks|conditional hook|조건부|훅 규칙|hook rule|조건문 안",
+    "effect-loop": "infinite|effect loop|dependency|의존성|무한|반복 (fetch|요청)|재요청",
+    "index-key": "key=\\{index\\}|array index|index as (a )?key|인덱스|index를 key",
+    "a11y": "a11y|accessib|접근성|aria|키보드|keyboard|touch target|터치",
+    "memo-taste": "useMemo|useCallback|memoiz|메모이제이션",
+    "layout-arch": "folder|directory|폴더|디렉터리|extract .*component|컴포넌트로 분리|architecture|아키텍처",
+    "css-taste": "\\bCSS\\b|inline style|스타일 취향|flexbox"
+  },
+  "forbidden": ["memo-taste", "layout-arch", "css-taste"]
+}

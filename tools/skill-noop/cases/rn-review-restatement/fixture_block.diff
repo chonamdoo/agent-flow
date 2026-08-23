@@ -1,0 +1,62 @@
+diff --git a/navigation/types.ts b/navigation/types.ts
+--- a/navigation/types.ts
++++ b/navigation/types.ts
+@@ -1,5 +1,6 @@
+ export type RootStackParamList = {
+   Home: undefined;
++  ShotDetail: { id: string };
+ };
+diff --git a/screens/CameraCaptureScreen.tsx b/screens/CameraCaptureScreen.tsx
+new file mode 100644
+--- /dev/null
++++ b/screens/CameraCaptureScreen.tsx
+@@ -0,0 +1,58 @@
++import { useEffect, useState } from 'react';
++import { FlatList, Image, Text, TouchableOpacity, View } from 'react-native';
++import { Camera } from 'expo-camera';
++import { useNavigation } from '@react-navigation/native';
++
++type Shot = { id: string; uri: string; label: string };
++
++export function CameraCaptureScreen() {
++  const navigation = useNavigation();
++  const [shots, setShots] = useState<Shot[]>([]);
++  const [selectedId, setSelectedId] = useState<string | null>(null);
++
++  useEffect(() => {
++    Camera.requestCameraPermissionsAsync();
++  }, []);
++
++  useEffect(() => {
++    fetch('https://api.example.com/shots')
++      .then((response) => response.json())
++      .then((data) => setShots(data));
++  }, []);
++
++  return (
++    <View style={{ flex: 1 }}>
++      <Text>Captured shots</Text>
++      <FlatList
++        data={shots}
++        keyExtractor={(_, index) => String(index)}
++        renderItem={({ item }) => (
++          <TouchableOpacity
++            style={{
++              width: 20,
++              height: 20,
++              borderWidth: 1,
++              borderColor: selectedId === item.id ? 'blue' : 'gray',
++            }}
++            onPress={() => {
++              setSelectedId(item.id);
++              navigation.navigate('ShotDetail', { shotId: item.id });
++            }}
++          >
++            <Image source={{ uri: item.uri }} style={{ width: 20, height: 20 }} />
++            <Text>{item.label}</Text>
++          </TouchableOpacity>
++        )}
++      />
++    </View>
++  );
++}

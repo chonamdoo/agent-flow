@@ -36,9 +36,6 @@ Use this as a secondary checklist after user request, repo instructions, existin
 ## Review
 
 - Blocking only: crash risk, broken permission flow, navigation param mismatch, platform-specific regression, list performance cliff, accessibility/touch target regression, offline/error state that breaks a user flow, test/type/lint failure, or project-rule violation.
-- Best practice 일반론으로 blocking하지 말 것.
-- Do not block on theoretical architecture, optional memoization, preferred navigation style, native-layer preferences, or TypeScript generalities.
-- Treat generic React Native best practice comments as suggestions unless they prevent a concrete failure.
 
 ## Sources
 

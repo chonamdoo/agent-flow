@@ -18,10 +18,12 @@ Use this as a secondary checklist after user request, repo instructions, existin
 - Keep component responsibility narrow and aligned with existing repo patterns.
 - Follow Rules of Hooks: call hooks only at the top level of components or custom hooks, never inside conditions, loops, callbacks, async functions, or after early returns.
 - Minimize effects. Use effects for external systems, not for derivable render state.
+- When `useEffectEvent` is available, read non-reactive values inside an Effect through it and keep the dependency list complete.
 - Avoid derived state when a value can be computed from props/state during render.
 - Preserve loading, empty, error, and success states when touching async or user-visible flows.
 - Keep server/client component boundaries explicit. Do not move browser-only logic into server components.
 - Avoid hydration mismatch sources such as nondeterministic render output, browser-only values during server render, and inconsistent server/client markup.
+- Render the shell from data a plain request can obtain. A first-visit or crawler request that misses build-warmed state must still receive the shell.
 - Use stable list keys from domain IDs. Do not use array indexes when reorder, insert, delete, or filtering can happen.
 - Avoid rerender work only when there is a real changed path or measured risk. Do not add memoization by default.
 
@@ -35,9 +37,6 @@ Use this as a secondary checklist after user request, repo instructions, existin
 ## Review
 
 - Blocking only: hook rule violation, stale closure or effect loop, hydration/server-client boundary break, broken user flow, accessibility regression, clear performance regression, test/type/lint failure, or project-rule violation.
-- Best practice 일반론으로 blocking하지 말 것.
-- Do not block on theoretical cleaner architecture, preferred folder layout, CSS taste, or optional memoization.
-- Treat generic React best practice comments as suggestions unless they prevent a concrete failure.
 
 ## Sources
 
