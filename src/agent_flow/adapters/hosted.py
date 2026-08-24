@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import NamedTuple, TYPE_CHECKING
 
 from agent_flow.adapters.base import Adapter
 from agent_flow.artifact import bind_review_evidence, ensure_review_binding
@@ -36,6 +36,7 @@ from agent_flow.core.review_evidence import (
 )
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
+    git_proves_ancestor,
     git_safe,
     validate_run_artifact_target,
     write_run_artifact_text,
@@ -331,6 +332,8 @@ def _write_review_input_snapshot(
         max_output_bytes=observation_max_bytes,
     )
     notes: list[str] = []
+    if baseline.note:
+        notes.append(baseline.note)
     diff_observations = []
     if _is_unborn_head_failure(diff):
         notes.append(
@@ -443,6 +446,8 @@ class _ReviewBaseline:
     # 선언된 base가 있는데 그걸 기준으로 삼지 못한 상태. 이때의 빈 diff는
     # "변경 없음"의 증거가 될 수 없다.
     base_unresolved: bool = False
+    # 기준점을 그 후보에서 잡은 근거. 선언된 base를 쓰지 못한 경우에만 채운다.
+    note: str = ""
 
 
 def _resolve_review_baseline(
@@ -469,7 +474,10 @@ def _resolve_review_baseline(
             base_unresolved=True,
         )
     diagnostic = "no common ancestor"
-    for candidate in (base_branch, f"origin/{base_branch}"):
+    resolved: list[_BaseCandidate] = []
+    for candidate in _base_candidate_refs(
+        project_root, base_branch, max_output_bytes=max_output_bytes
+    ):
         result = git_safe(
             "merge-base",
             "HEAD",
@@ -481,14 +489,8 @@ def _resolve_review_baseline(
         )
         oid = result.stdout.strip() if result.ok else ""
         if _OID_PATTERN.fullmatch(oid):
-            return _ReviewBaseline(
-                rev=oid,
-                detail=(
-                    f"`git merge-base HEAD {candidate}` = {oid} — every change "
-                    "from the base through the current working tree is below, "
-                    "committed and uncommitted alike"
-                ),
-            )
+            resolved.append(_BaseCandidate(ref=candidate, oid=oid))
+            continue
         if not result.ok:
             stderr = result.stderr.strip()
             diagnostic = (
@@ -496,14 +498,130 @@ def _resolve_review_baseline(
                 if stderr
                 else result.error or f"git exited {result.returncode}"
             )
+    if not resolved:
+        return _ReviewBaseline(
+            rev="HEAD",
+            detail=(
+                f"{fallback} (declared base `{base_branch}` could not be used: "
+                f"{diagnostic})"
+            ),
+            base_unresolved=True,
+        )
+    choice = _newest_review_baseline(project_root, resolved)
     return _ReviewBaseline(
-        rev="HEAD",
+        rev=choice.oid,
         detail=(
-            f"{fallback} (declared base `{base_branch}` could not be used: "
-            f"{diagnostic})"
+            f"`git merge-base HEAD {choice.candidate}` = {choice.oid} — every "
+            "change from the base through the current working tree is below, "
+            "committed and uncommitted alike"
         ),
-        base_unresolved=True,
+        note=choice.note,
     )
+
+
+def _base_candidate_refs(
+    project_root: Path,
+    base_branch: str,
+    *,
+    max_output_bytes: int,
+) -> tuple[str, ...]:
+    """선언된 base와, 그 base가 실제로 추적하는 remote ref.
+
+    `origin/`을 정본으로 두면 fork나 다중 remote 체크아웃에서 틀린 기준점을 고른다 —
+    선언된 `main`이 `upstream/main`을 추적하는데 `origin/main`을 기준으로 잡으면,
+    origin에만 있는 커밋이 선언된 base 대비 변경인데도 diff에서 조용히 빠진다.
+    추적 설정이 없으면 `origin/<base>`로 내려간다. 그 경우가 단일 remote 체크아웃이다.
+    """
+    result = git_safe(
+        "rev-parse",
+        "--symbolic-full-name",
+        f"{base_branch}@{{upstream}}",
+        cwd=project_root,
+        optional_locks=False,
+        timeout_s=_REVIEW_INPUT_TIMEOUT_S,
+        max_output_bytes=max_output_bytes,
+    )
+    tracked = result.stdout.strip() if result.ok else ""
+    prefix = "refs/remotes/"
+    remote_ref = tracked[len(prefix):] if tracked.startswith(prefix) else ""
+    # git이 준 값도 argv에 그대로 들어간다. 선언된 base와 같은 검사를 통과해야 한다.
+    if not remote_ref or not _is_usable_base_ref(remote_ref):
+        remote_ref = f"origin/{base_branch}"
+    if remote_ref == base_branch:
+        return (base_branch,)
+    return (base_branch, remote_ref)
+
+
+class _BaseCandidate(NamedTuple):
+    """base ref 하나와 그 merge-base. 두 칸이 모두 `str`이라 위치로 두면 조용히 섞인다."""
+
+    ref: str
+    oid: str
+
+
+class _BaselineChoice(NamedTuple):
+    """어느 후보에서 기준점을 잡았는가. 세 칸이 모두 `str`이라 위치로 두면 조용히 섞인다."""
+
+    candidate: str
+    oid: str
+    note: str
+
+
+def _newest_review_baseline(
+    project_root: Path,
+    resolved: Sequence[_BaseCandidate],
+) -> _BaselineChoice:
+    """후보 중 가장 descendant인 merge-base와 그 선택의 근거. `resolved`는 비어 있지 않다.
+
+    먼저 resolve된 후보를 쓰면 뒤처진 로컬 base ref가 항상 이긴다. 로컬 base는
+    아무도 전진시키지 않는다(킷의 유일한 fetch는 cleanup 전용이고 remote-tracking
+    ref만 갱신한다). 그러면 스냅샷에 이미 upstream에 머지된 커밋이 들어가고,
+    리뷰어는 그것을 이 브랜치의 변경으로 읽어 코드로는 지울 수 없는
+    request-changes를 낸다.
+
+    순서를 정하지 못한 두 기준점 중에서는 뒤에 선언된 후보(remote-tracking)를
+    쓴다. 둘 다 HEAD의 조상이지만 서로를 포함하지 않는 상태에서 하나를 골라야
+    하고, 이미 통합된 쪽을 기준으로 삼는 것이 리뷰 범위에 대한 사실에 가깝다.
+    그때 다른 후보에서만 닿는 커밋은 diff에 남는다 — rev 하나로는 두 base를
+    동시에 뺄 수 없으므로, 그 사실을 note에 적는다.
+
+    note는 비교마다 **누적한다**. 후보가 셋 이상일 때 뒤 비교가 앞의 인정을 덮으면
+    머리말은 깨끗한 기준점을 주장하면서 diff에 남은 커밋을 숨긴다 — 이 변경이
+    지우려는 실패가 그 자리에서 그대로 돌아온다.
+    """
+    best = resolved[0]
+    notes: list[str] = []
+    for candidate in resolved[1:]:
+        if candidate.oid == best.oid:
+            continue
+        if git_proves_ancestor(
+            root=project_root,
+            ancestor=best.oid,
+            descendant=candidate.oid,
+            timeout_s=_REVIEW_INPUT_TIMEOUT_S,
+        ):
+            notes.append(
+                f"declared base `{best.ref}` is behind `{candidate.ref}`, so its "
+                "merge-base still carries commits that are already merged upstream; "
+                f"the baseline above is the `{candidate.ref}` merge-base and those "
+                "commits are not in the diff below"
+            )
+        elif git_proves_ancestor(
+            root=project_root,
+            ancestor=candidate.oid,
+            descendant=best.oid,
+            timeout_s=_REVIEW_INPUT_TIMEOUT_S,
+        ):
+            continue
+        else:
+            notes.append(
+                f"`{best.ref}` and `{candidate.ref}` merge-bases could not be "
+                "ordered, so the baseline above is the remote-tracking one "
+                f"(`{candidate.ref}`); commits reachable only from `{best.ref}` are "
+                "still in the diff below"
+            )
+        best = candidate
+    return _BaselineChoice(candidate=best.ref, oid=best.oid, note="; ".join(notes))
 
 
 def _profile_base_branch(adapter: Adapter) -> str | None:
@@ -612,10 +730,13 @@ def _reviewer_jobs(
         "\n\n## Precomputed review input\n\n"
         f"Read `{review_input.path}` before judging the change. The controller "
         "captured it immediately before launching reviewers: its header names "
-        "the diff baseline (the profile base branch's merge-base when one is "
-        "available, so changes already committed on this branch are included) "
-        "and states whether the snapshot was truncated or is a verified empty "
-        "diff. The body holds `git status --short` and that diff. Inspect "
+        "the diff baseline — the merge-base of the declared base branch when one "
+        "is available, or of its remote-tracking counterpart when the declared "
+        "base is behind, so changes already committed on this branch are "
+        "included — and states in `- note:` lines whether the baseline skipped a "
+        "stale declared base, whether the snapshot was truncated, and whether it "
+        "is a verified empty diff. The body holds `git status --short` and that "
+        "diff. Inspect "
         "untracked files listed there directly. Do not run `git diff` inside "
         "the reviewer sandbox. "
         f"Its SHA-256 is `{review_input.digest}`; this digest is part of your "
