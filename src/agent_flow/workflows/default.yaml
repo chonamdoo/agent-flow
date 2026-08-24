@@ -257,8 +257,9 @@ phases:
           skills, `android-code-review`, and the skills this phase prompt lists
           for the change; React Native `android/` native changes also apply
           Android profile mapping. If required skills are missing for this host,
-          record `skill-availability: degraded` and the declared
-          `missing local <group>: <skill>` marker, then continue with the skills available.
+          record `skill-availability: degraded`, put their bare names in
+          `missing-required-profile-skills:`, and keep the declared
+          `missing local <group>: <skill>` sentence and source URL in prose/Calibration.
       7. Honor SOLID principles from the design's SOLID section.
       8. For any data layer work, enforce the repository boundary from
          `.agent-flow/skills/clean-architecture/SKILL.md`:
@@ -543,8 +544,10 @@ phases:
       `android-code-review`, and the skills this phase prompt lists for the
       change; React Native `android/` native fixes also apply Android profile
       mapping. If a required local skill is missing for this host, record
-      `skill-availability: degraded` and the declared `missing local <group>: <skill>`
-      marker, then complete the artifact with the skills available.
+      `skill-availability: degraded`, put its bare name in
+      `missing-required-profile-skills:`, keep the declared
+      `missing local <group>: <skill>` sentence and source URL in prose/Calibration,
+      then complete the artifact with the skills available.
       End with:
 
           ## Completion Gate

@@ -883,11 +883,6 @@ def test_final_review_dispatch_reads_the_shared_phase_id_constant(
 def test_host_and_reviewer_envelopes_are_observed_under_distinct_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """multi-review phase는 envelope를 reviewer provider마다 한 번, host에게 한 번
-    렌더한다. 둘이 같은 payload 이름으로 관측되면 trace 독자는 host가 실제로 받은
-    것이 어느 쪽인지 sha를 다시 계산하지 않고는 고를 수 없다. 관측의 목적이 "주입된
-    프롬프트 재현"이므로 이름이 provider까지 갈려야 한다.
-    """
     from types import SimpleNamespace
 
     from agent_flow.adapters import hosted

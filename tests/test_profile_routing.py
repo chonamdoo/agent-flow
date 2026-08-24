@@ -401,12 +401,6 @@ def test_prompt_contract_lists_every_marker_the_gate_demands(tmp_path):
 
 
 def test_matched_skill_reports_only_the_path_its_host_can_open(tmp_path, monkeypatch):
-    """카탈로그/어휘 매칭도 host-owned root를 먼저 좁힌다.
-
-    Claude 홈에서 발견한 path를 Codex prompt에 넣으면 Codex는 열 수 없다. 예전
-    테스트는 그 cross-host path를 두 host 모두에게 주는 것을 정답으로 고정했고,
-    그 거짓 사실이 이번 수렴 불가 verdict의 다른 입구였다.
-    """
     project = _android_project(tmp_path)
     home = tmp_path / "home"
     installed = _install(home, "edge-to-edge", "Use when the status bar or insets overlap content.")

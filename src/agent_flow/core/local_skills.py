@@ -221,11 +221,6 @@ def phase_skill_resolution(
     concerns: Sequence[str] = (),
     host: str | None = None,
 ) -> SkillResolution:
-    """`host`를 주면 그 host의 skill 경로로만 해석한다. 생략하면 실행 host를 추정한다.
-
-    reviewer subprocess는 컨트롤러와 다른 host에서 돈다. 컨트롤러 기준으로 해석한
-    목록을 그 프롬프트에 넣으면, 리뷰어가 열 수 없는 경로를 사실로 받는다.
-    """
     return resolve_phase_skills(
         project_root=project_root,
         phase_id=phase_id,

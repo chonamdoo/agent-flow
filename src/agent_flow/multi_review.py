@@ -71,9 +71,6 @@ _UNKNOWN = "unknown"
 @dataclass
 class ReviewerJob:
     angle_id: str           # e.g. "architecture-design", "compose-stability"
-    # Exactly one representation is authoritative:
-    # - unbound: prompt="" + provider map
-    # - bound/manual: prompt text + empty provider map
     prompt: str
     output_path: Path       # artifact target
     artifact_root: Path
@@ -93,10 +90,10 @@ class ReviewerJob:
         return self.base_angle_id or self.angle_id
 
     def prompt_for(self, cli_name: str) -> str:
-        """이 provider가 실제로 받을 프롬프트.
+        """Return the prompt for the assigned provider.
 
-        provider map이 있으면 unknown 이름을 fail-closed로 막는다. 정상 경로의 이름과
-        map key는 같은 `REVIEW_CLI_NAMES`에서 나오므로 실패는 선언 drift다.
+        An unknown provider is a declaration drift: normal provider names and map keys
+        both come from `REVIEW_CLI_NAMES`.
         """
         if not self.prompt_by_provider:
             return self.prompt
@@ -176,6 +173,16 @@ def _configured_reviewer_names() -> set[str] | None:
     if not os.environ.get("AGENT_FLOW_REVIEWERS"):
         return None
     return {cli.name for cli in resolve_review_clis()}
+
+def eligible_reviewer_names() -> tuple[str, ...]:
+    narrowed = _configured_reviewer_names()
+    available = {
+        cli.name
+        for cli in detect_available_clis()
+        if cli.name in REVIEW_CLI_NAMES
+        and (narrowed is None or cli.name in narrowed)
+    }
+    return tuple(name for name in REVIEW_CLI_NAMES if name in available)
 
 
 def _has_sufficient_reviewer_processes(
@@ -296,11 +303,6 @@ def _bound_reviewer_job(
     *,
     cli_name: str,
 ) -> ReviewerJob:
-    """배정된 provider의 프롬프트로 고정한 job. artifact 이름은 그대로다.
-
-    배정 이후의 모든 소비자(`launch`, artifact 머리말, prompt digest)는 `prompt`
-    하나만 본다. 여기서 고정하지 않으면 그 셋이 배정과 다른 문자열을 가리킨다.
-    """
     return replace(
         job,
         prompt=job.prompt_for(cli_name),

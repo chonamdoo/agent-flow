@@ -250,9 +250,6 @@ def resolve_phase_skills(
     from agent_flow.core.skill_matching import match_external
 
     roots = skill_roots(project_root, profile=profile, host=host, env=env)
-    # reviewer는 컨트롤러와 다른 host에서 돈다. catalog/의존성/어휘 매칭까지 같은
-    # host-owned root 집합을 써야 한다. 최종 이름 해석만 좁히면 catalog가 이미
-    # 다른 host의 절대경로를 matched에 넣어 필터를 우회한다.
     resolved_host = active_host(env) if host is None else host
     resolved_roots = active_host_roots(roots, resolved_host)
     declared = phase_skills or PhaseSkills()
@@ -295,8 +292,6 @@ def resolve_phase_skills(
         if routed.name not in required_names:
             required_names.append(routed.name)
 
-    # 어휘 조인도 host-filtered catalog만 본다. 다른 host 홈의 match를 먼저
-    # required로 올리면 최종 resolver를 좁혀도 절대경로가 matched에서 그대로 샌다.
     matched: dict[str, ResolvedSkill] = {}
     for match in match_external(
         profile,

@@ -117,8 +117,6 @@ class Adapter(ABC):
             changed_files=self._changed_files,
             task_text=self._task_text,
             concerns=self._concerns,
-            # reviewer envelope는 배정된 provider의 host로 해석한다. 생략하면
-            # 이 프로세스(컨트롤러)의 host가 쓰인다.
             host=skill_host,
         )
         # 이전 phase의 수치는 대화 컨텍스트가 아니라 여기로만 건너온다.

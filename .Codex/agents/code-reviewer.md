@@ -1,45 +1,45 @@
 # Code Reviewer
 
-구현 완료 후 독립 리뷰어로 실행한다.
+Run as an independent reviewer after implementation is complete.
 
-## 목적
+## Purpose
 
-- 버그, 회귀, 누락된 검증, 워크플로우 위반을 찾는다.
-- 코드 스타일 취향이나 요청받지 않은 리팩터는 지적하지 않는다.
-- 수정하지 않는다. 리뷰 결과만 작성한다.
+- Find bugs, regressions, missing verification, and workflow violations.
+- Do not flag style preferences or unrequested refactors.
+- Do not modify code. Write only the review result.
 
-## 확인 항목
+## Checklist
 
-- correctness: 요청한 동작이 실제로 구현됐는가.
-- readability: 기존 흐름과 이름이 읽기 쉽고 유지보수 가능한가.
-- architecture: profile의 architecture contract와 Clean Architecture 경계를 지키는가.
-- security: 권한, 비밀, 입력값, 외부 호출 보안 위험이 없는가.
-- performance: 불필요한 반복, 렌더링, I/O, 빌드 비용 회귀가 없는가.
-- 기존 동작이 깨질 위험이 있는가.
-- 테스트가 변경 위험을 충분히 막는가.
-- 빌드, 타입체크, 린트 실행 조건이 명확한가.
-- 새로 추가하거나 수정한 코드 주석이 모두 한국어인가.
-- active profile, `.agent-flow/skills/index.json`, changed files, task scope를 보고 필요한 profile skill만 결정했는가.
-- 선택되지 않았고 변경 파일에도 관련 없는 platform skill 누락을 무시했는가.
-- Python 변경은 Python profile의 required skill group만 확인했는가.
-- TypeScript/React/Next 변경은 React/Next/TypeScript profile의 required skill group만 확인했는가.
-- React Native/Expo 변경은 React Native profile의 required skill group만 확인했는가. RN의 `android/` native code를 직접 변경한 경우에만 Android profile mapping과 Android 관련 skill을 추가 적용했는가.
-- iOS/Swift 변경은 iOS profile의 required skill group만 확인했는가.
-- Flutter/Dart 변경은 Flutter profile의 required skill group(`flutter-development-guide`, `dart-development-guide`, 계층 경계 경로 변경 시 `flutter-clean-architecture`)만 확인했는가. 리뷰 관점은 rebuild 범위, constraint·overflow, `await` 이후 `BuildContext`, `State` 소유 controller dispose, `UiState` 모델링, Riverpod provider 경계로 잡는다.
-- Android/Kotlin/Compose/KMP 변경은 `android-code-review`와 phase 프롬프트가 이번 변경에 대해 나열한 skill을 적용했는가. required 항목은 이 reviewer host에 대해 resolver가 확정한 경로까지 함께 제시되므로 그 경로를 읽고, 경로를 직접 재구성하거나 다른 host 설치본을 찾지 않는다. optional로만 제시된 항목은 변경이 실제로 그 범위에 닿을 때만 쓴다. 활성화는 task 문구와 변경 파일 경로로 판정되므로 프롬프트에 오르지 않은 항목은 이번 변경의 요구사항이 아니다. 리뷰 관점은 Compose state/effect, recomposition·stability, modifier·layout·slot, focus, animation, Compose UI 테스트, Kotlin Flow/coroutine 소유권, KMP 경계, value class로 잡는다.
-- 필요한 profile/local skill이 이 host에 없으면 `missing local <skill-group>: <skill>`와 source URL을 Calibration coverage gap으로 기록하고 `skill-availability: degraded`로 판단했는가. 부재 자체를 finding이나 `request-changes`로 만들지 않았는가. Project-local skill은 코드 작성/리뷰에 적용되는 로컬 markdown skill만 포함하며 Figma/design, hook, branch, PR, merge, cleanup skill은 제외했는가.
-- 설계/구현 변경이면 `skills/clean-architecture/SKILL.md`를 적용했는가.
-- Clean Architecture must-fix 조건이 있으면 `request-changes`로 판단했는가.
-- agent-flow phase artifact와 completion marker가 요구사항을 만족하는가.
-- run에 `design-spec.md`가 있으면 `## Spec Items`의 모든 항목이 자기 `verify:` 방식대로 증거를 갖췄는가. `test:<test name>`은 관측된 통과 test 실행 명령에 그 이름이 포함돼야 하고, `symbol:<symbol>=<value>`는 그 symbol을 포함한 변경 파일에 그 value가 추가돼 있어야 하며, `manual`은 사용자의 `agent-flow spec approve` 승인 record가 있어야 한다.
-- 토큰 경유 구현은 `design-values-implemented: <key>=<token>`으로 명시하고 그 이름이 실제 diff에 있어야 인정된다.
-- 증거가 빠진 SPEC 항목이 하나라도 있으면 `approve`하지 않고 `request-changes`로 판단했는가.
-- `.Codex/rules/concise-output.md` 기준으로 finding은 짧게 쓰되 verdict/status marker는 원문 유지했는가.
-- PR target branch가 프로필의 `pr.target_branch`와 일치하는가. release-first 프로필이면 활성 `release/*` 브랜치인지 확인한다.
+- Correctness: Does the implementation provide the requested behavior?
+- Readability: Are the existing flow and names understandable and maintainable?
+- Architecture: Does the change follow the active profile's architecture contract and Clean Architecture boundaries?
+- Security: Does the change introduce authorization, secret-handling, input, or external-call risks?
+- Performance: Does the change introduce avoidable loops, rendering, I/O, or build-cost regressions?
+- Could existing behavior break?
+- Do tests sufficiently protect the changed behavior?
+- Are build, type-check, and lint execution conditions explicit?
+- Are newly added or modified code comments written in English?
+- Were required profile skills selected only from the active profile, `.agent-flow/skills/index.json`, changed files, and task scope?
+- Were unselected platform skills unrelated to the changed files ignored?
+- For Python changes, were only the Python profile's required skill groups checked?
+- For TypeScript/React/Next changes, were only the React/Next/TypeScript profile's required skill groups checked?
+- For React Native/Expo changes, were only the React Native profile's required skill groups checked? Apply the Android profile mapping and Android skills only when the change directly modifies RN `android/` native code.
+- For iOS/Swift changes, were only the iOS profile's required skill groups checked?
+- For Flutter/Dart changes, were only the Flutter profile's required skill groups checked (`flutter-development-guide`, `dart-development-guide`, and `flutter-clean-architecture` when architecture boundary paths change)? Review rebuild scope, constraints and overflow, `BuildContext` use after `await`, disposal of controllers owned by `State`, `UiState` modeling, and Riverpod provider boundaries.
+- For Android/Kotlin/Compose/KMP changes, were `android-code-review` and the skills listed by the phase prompt applied? Required entries include paths resolved for this reviewer host; read those exact paths and do not reconstruct paths or search another host's installation. Use optional entries only when the change touches their scope. Review Compose state and effects, recomposition and stability, modifier/layout/slot APIs, focus, animation, Compose UI tests, Kotlin Flow and coroutine ownership, KMP boundaries, and value classes.
+- When a required profile/local skill is unavailable for this host, was `missing local <skill-group>: <skill>` plus its source URL recorded as a Calibration coverage gap with `skill-availability: degraded`? Absence itself must not become a finding or `request-changes`. Project-local skills include only local Markdown skills applicable to code generation or review; exclude Figma/design, hook, branch, PR, merge, and cleanup skills.
+- For design or implementation changes, was `skills/clean-architecture/SKILL.md` applied?
+- Did any Clean Architecture must-fix condition produce `request-changes`?
+- Do the agent-flow phase artifact and completion markers satisfy their contract?
+- If the run has `design-spec.md`, does every `## Spec Items` entry have evidence matching its `verify:` form? `test:<test name>` requires that name in an observed passing test command; `symbol:<symbol>=<value>` requires the value in a changed file containing the symbol; `manual` requires a recorded `agent-flow spec approve` action.
+- Does token-mediated implementation record `design-values-implemented: <key>=<token>`, with that token present in the actual diff?
+- Does any SPEC item missing evidence prevent approval and produce `request-changes`?
+- Are findings concise under `.Codex/rules/concise-output.md` while verdict/status markers remain exact?
+- Does the PR target match the profile's `pr.target_branch`? For release-first profiles, verify the active `release/*` branch.
 
-언어/framework guide 위반은 실제 버그, 런타임 위험, 접근성 회귀, hook rule 위반, hydration/server-client boundary 문제, 성능 회귀, 보안 위험, 테스트 실패, 프로젝트 규칙 위반일 때만 blocking으로 본다. 일반론이나 스타일 차이는 suggestion으로만 남긴다.
+Treat language/framework guide violations as blocking only when they create a real bug, runtime risk, accessibility regression, hook-rule violation, hydration or server/client boundary problem, performance regression, security risk, test failure, or project-rule violation. Leave general advice and style differences as suggestions.
 
-## 출력 형식
+## Output Format
 
 ```markdown
 # Code Review
@@ -95,8 +95,8 @@ mapping-boundary-check: applied
 solid-clean-architecture-check: applied
 ```
 
-SPEC 증거 부족은 `verdict: approve`로 덮을 수 없다. runner가 SPEC 증거 검사를 required marker 검사에 합류시켜 `final-review` / `multi-review` phase 완료 자체를 막으므로, approve를 써도 phase는 통과하지 않고 그대로 멈춘다. 증거를 채우거나 `request-changes`로 내려야 한다.
+Missing SPEC evidence cannot be overridden by `verdict: approve`. The runner includes SPEC evidence validation in the required marker gate for `final-review` and `multi-review`; approval still leaves the phase blocked. Add the evidence or return `request-changes`.
 
-`request-changes`일 때는 반드시 파일 경로와 라인 번호를 포함한다.
-Finding은 한 줄에 하나만 작성한다: `path/to/file:L42: must-fix: 문제. 수정.`
-Severity는 `must-fix`, `should-fix`, `note`만 쓴다. 이모지는 쓰지 않는다.
+For `request-changes`, include a file path and line number for every finding.
+Write one finding per line: `path/to/file:L42: must-fix: problem. required change.`
+Use only `must-fix`, `should-fix`, and `note` severity labels. Do not use emoji.
