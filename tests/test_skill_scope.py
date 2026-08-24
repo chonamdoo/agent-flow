@@ -488,10 +488,12 @@ def test_gated_angles_use_only_eligible_reviewer_providers(tmp_path, monkeypatch
         skills=None,
     )
 
-    monkeypatch.setenv("AGENT_FLOW_REVIEWERS", "claude")
-    claude_only = hosted._reviewer_jobs(phase, run_dir, project, adapter)
-    monkeypatch.setenv("AGENT_FLOW_REVIEWERS", "codex")
-    codex_only = hosted._reviewer_jobs(phase, run_dir, project, adapter)
+    claude_only = hosted._reviewer_jobs(
+        phase, run_dir, project, adapter, providers=("claude",)
+    )
+    codex_only = hosted._reviewer_jobs(
+        phase, run_dir, project, adapter, providers=("codex",)
+    )
 
     assert "clean-architecture" not in {job.angle_id for job in claude_only}
     assert "clean-architecture" in {job.angle_id for job in codex_only}

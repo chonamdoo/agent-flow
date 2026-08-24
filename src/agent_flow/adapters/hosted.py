@@ -213,6 +213,7 @@ def _run_multi_review_distribution(
         project_root,
         adapter,
         review_input=review_input,
+        providers=eligible_reviewer_names(),
     )
     # phase는 여기서만 안다. 넘기지 않으면 launch 선언의 `match.phase`는
     # final-review 밖에서 비교할 값이 없어 절대 발동하지 않는다.
@@ -713,8 +714,9 @@ def _reviewer_jobs(
     adapter: Adapter,
     *,
     review_input: ReviewInputSnapshot | None = None,
+    providers: Sequence[str] | None = None,
 ) -> list[ReviewerJob]:
-    providers = eligible_reviewer_names()
+    providers = REVIEW_CLI_NAMES if providers is None else tuple(providers)
     profile_angles = adapter.profile_review_angles()
     angles = _applicable_angles(
         _merge_review_angles(_BASE_REVIEW_ANGLES, profile_angles),
