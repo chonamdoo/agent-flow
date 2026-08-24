@@ -279,3 +279,175 @@ def test_the_shipped_cli_registers_the_concern_option_on_every_lifecycle_command
             main([command, "--help"])
         assert caught.value.code == 0, command
         assert "--concern" in capsys.readouterr().out, command
+
+
+HOST_SCOPED_SKILL = "probe-host-skill"
+
+
+def _host_scoped_profile() -> dict:
+    return {
+        "id": "probe",
+        "skills": {
+            "required_review": [
+                {
+                    "group": "profile",
+                    "skills": [HOST_SCOPED_SKILL],
+                    "when": "kotlin files change",
+                    "missing": "missing local profile: <skill>",
+                    "path_globs": ["**/*.kt"],
+                }
+            ]
+        },
+    }
+
+
+def test_each_reviewer_prompt_resolves_skills_against_its_own_host(tmp_path, monkeypatch):
+    """리뷰어는 자기 host에서 열 수 있는 경로만 사실로 받아야 한다.
+
+    컨트롤러 host로 해석한 목록 하나를 모든 리뷰어에게 복사하면, 그 skill이 없는
+    host의 리뷰어는 프롬프트가 가리킨 경로를 열 수 없고 같은 부재를 코드 결함으로
+    판정한다. 그 verdict는 리뷰 대상 코드로 지울 수 없어서 라운드가 수렴하지 않는다.
+    """
+    from types import SimpleNamespace
+
+    from agent_flow import multi_review
+    from agent_flow.adapters import hosted
+    from agent_flow.cli_detect import CliInfo
+
+    home = tmp_path / "home"
+    installed = home / ".claude" / "skills" / HOST_SCOPED_SKILL / "SKILL.md"
+    installed.parent.mkdir(parents=True)
+    installed.write_text(
+        f"---\nname: {HOST_SCOPED_SKILL}\ndescription: probe skill.\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    project = tmp_path / "proj"
+    (project / ".agent-flow").mkdir(parents=True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    # 컨트롤러 host를 고정한다. 실행 환경의 흔적으로 추정되면 대조가 흔들린다 —
+    # 보고된 조건은 "OMP가 컨트롤러, codex가 리뷰어"다.
+    monkeypatch.setenv("AGENT_FLOW_HOST", "omp")
+    adapter = hosted.HostedAdapter("omp")
+    adapter._profile_snapshot = _host_scoped_profile()
+    adapter._changed_files = ("app/src/main/Main.kt",)
+    phase = SimpleNamespace(
+        id="review",
+        description="d",
+        prompt="p",
+        artifact=None,
+        multi_review=True,
+        required_markers=(),
+        skills=None,
+    )
+
+    jobs = hosted._reviewer_jobs(phase, run_dir, project, adapter)
+
+    assert jobs
+    claude_prompt = jobs[0].prompt_for("claude")
+    codex_prompt = jobs[0].prompt_for("codex")
+    # claude에는 깔려 있다: 열 수 있는 절대경로가 사실로 들어간다.
+    assert str(installed) in claude_prompt
+    assert "Not installed for this host" not in claude_prompt
+    # codex에는 없다: 경로를 주지 않고, 부재를 위반이 아닌 것으로 알린다.
+    assert str(installed) not in codex_prompt
+    assert f"Not installed for this host: {HOST_SCOPED_SKILL}" in codex_prompt
+    assert "never make it a verdict" in codex_prompt
+    # 결합의 출처를 함께 고정한다: host를 주지 않으면 컨트롤러(omp) 기준으로 해석되어
+    # claude가 열 수 있는 skill조차 부재로 보인다. 그 렌더를 모든 리뷰어에게 복사한
+    # 것이 이 변경 이전의 동작이다.
+    controller_prompt = adapter.render_envelope(
+        phase, run_dir, project, prompt_variant="probe-controller"
+    )
+    assert str(installed) not in controller_prompt
+    # provider 배정 이후의 실제 job.prompt까지 같은 렌더로 고정된다. launch argv,
+    # artifact header, prompt digest는 이 필드 하나를 공유한다.
+    monkeypatch.setattr(
+        multi_review,
+        "detect_available_clis",
+        lambda: [CliInfo("codex", ("codex",), ("exec",))],
+    )
+    monkeypatch.delenv("AGENT_FLOW_REVIEWERS", raising=False)
+    distribution = multi_review.distribute(jobs, host="codex", phase_id="review")
+    bound = distribution.by_cli["codex"][0]
+    assert bound.prompt == codex_prompt
+    assert not bound.prompt_by_provider
+    # 실제 사고 경로: Claude primary + Codex fan-out extra. Optional helper가 codex
+    # 렌더를 고정하지 않으면 다시 Claude 절대경로가 Codex subprocess로 간다.
+    monkeypatch.setattr(
+        multi_review,
+        "detect_available_clis",
+        lambda: [
+            CliInfo("claude", ("claude",), ("-p",)),
+            CliInfo("codex", ("codex",), ("exec",)),
+        ],
+    )
+    fanout = multi_review.distribute(jobs, host="claude", phase_id="review")
+    assert fanout.by_cli["claude"][0].prompt == claude_prompt
+    codex_extra = fanout.by_cli["codex"][0]
+    assert codex_extra.prompt == codex_prompt
+    assert codex_extra.angle_id.endswith("-codex-extra")
+    assert not codex_extra.prompt_by_provider
+
+
+def test_phase_declared_skill_is_also_scoped_to_the_reviewer_host(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_flow.adapters import hosted
+    from agent_flow.core.skill_resolver import PhaseSkills
+
+    home = tmp_path / "home"
+    installed = home / ".claude" / "skills" / HOST_SCOPED_SKILL / "SKILL.md"
+    installed.parent.mkdir(parents=True)
+    installed.write_text(
+        f"---\nname: {HOST_SCOPED_SKILL}\ndescription: phase skill.\n---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    project = tmp_path / "proj"
+    project.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    adapter = hosted.HostedAdapter("omp")
+    phase = SimpleNamespace(
+        id="review",
+        description="d",
+        prompt="p",
+        artifact=None,
+        multi_review=True,
+        required_markers=(),
+        skills=PhaseSkills(required=(HOST_SCOPED_SKILL,)),
+    )
+
+    job = hosted._reviewer_jobs(phase, run_dir, project, adapter)[0]
+
+    assert str(installed) in job.prompt_for("claude")
+    assert str(installed) not in job.prompt_for("codex")
+    assert f"Not installed for this host: {HOST_SCOPED_SKILL}" in job.prompt_for("codex")
+
+
+def test_frontmatter_catalog_is_scoped_before_external_matching(tmp_path, monkeypatch):
+    from agent_flow.core.local_skills import phase_skill_resolution
+
+    home = tmp_path / "home"
+    installed = home / ".claude" / "skills" / "probe-external" / "SKILL.md"
+    installed.parent.mkdir(parents=True)
+    installed.write_text(
+        "---\nname: probe-external\ndescription: external probe.\n"
+        "workflowPhases: [review]\ntaskTerms: [provider-probe]\n---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    project = tmp_path / "proj"
+    project.mkdir()
+
+    claude = phase_skill_resolution(
+        project, "review", task_text="provider-probe", host="claude"
+    )
+    codex = phase_skill_resolution(
+        project, "review", task_text="provider-probe", host="codex"
+    )
+
+    assert any(skill.path == installed for skill in (*claude.required, *claude.optional))
+    assert all(skill.name != "probe-external" for skill in (*codex.required, *codex.optional))

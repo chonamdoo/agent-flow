@@ -6,17 +6,17 @@ change.
 
 ## Required routing
 
-Before approving, read the skills the phase prompt lists — required ones with
-paths, in-scope ones by name. Use an in-scope one only when the diff actually
-touches it. Resolve them through the current active host only:
+The phase prompt already resolved this run's skills against **your** host: required
+ones are listed with the absolute path you can open, in-scope ones by name, and
+anything not installed here is named as not installed. Treat that list as the fact —
+do not re-resolve it, do not construct host home-directory paths, and do not search
+another host's installation. Use an in-scope skill only when the diff actually touches
+it.
 
-- Codex: `~/.codex/skills/{skill}/SKILL.md`
-- Claude: `~/.claude/skills/{skill}/SKILL.md`
-
-Read selected `SKILL.md` files as plain text. Do not install, copy, link, or
-vendor Android skills. Do not load the same skill from multiple host paths. If a
-required local skill is missing from the current host path, stop approval and
-report `missing local <group>: <skill>` with the profile source URL.
+Read selected `SKILL.md` files as plain text. Do not install, copy, link, or vendor
+Android skills. A skill the prompt reports as not installed is not a finding: record
+`skill-availability: degraded` and judge the change with the skills you do have. Never
+make absence a verdict — the code under review cannot fix this machine's installation.
 If no Android/Kotlin/Compose/KMP files changed, mark the completion gate `n/a`.
 
 ## Review focus
@@ -49,8 +49,8 @@ If no Android/Kotlin/Compose/KMP files changed, mark the completion gate `n/a`.
 ## Output
 
 Use the standard review angle output. Cite local skill paths used in Calibration.
-If a required local skill is missing, request changes with the missing skill and
-source URL.
+When the prompt reported a required skill as not installed here, name it in
+Calibration as a coverage gap and keep the verdict on the code.
 
 The run's own `skill-availability` and `skill-use-evidence` markers already
 record which required skills were resolved and opened, so this angle adds no

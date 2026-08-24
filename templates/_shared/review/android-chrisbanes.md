@@ -3,14 +3,14 @@
 Compatibility alias for older profiles. Use
 `templates/_shared/review/android-skills.md` as the canonical review angle.
 
-Before approving Android, Kotlin, Jetpack Compose, or KMP changes, read the
-skills the phase prompt matched to the change — required ones with paths,
-in-scope ones by name — covering Compose state/effects, recomposition and
-stability, modifier/layout/slot APIs, focus, animation, Compose UI testing,
-Kotlin coroutine and Flow ownership, KMP boundaries, and value class fit. Do not
-load duplicate skills from other host paths. If a required local skill is
-missing, request installation from the profile source URL. Reviewer host paths
-are Codex `~/.codex/skills/{skill}/SKILL.md` and Claude
-`~/.claude/skills/{skill}/SKILL.md`. Cite the skill paths used in Calibration.
+Before reviewing Android, Kotlin, Jetpack Compose, or KMP changes, use the skill
+facts the phase prompt already resolved against **your** host — required ones with
+absolute paths, in-scope ones by name, and anything not installed here named as
+not installed. Do not re-resolve host paths or load another host's copy. Cover
+Compose state/effects, recomposition and stability, modifier/layout/slot APIs,
+focus, animation, Compose UI testing, Kotlin coroutine and Flow ownership, KMP
+boundaries, and value class fit. A missing skill is a Calibration coverage gap,
+not a finding: record `skill-availability: degraded`, cite paths actually read,
+and keep the verdict on the code.
 
 Emit exactly one unfenced final verdict line: `verdict: approve` or `verdict: request-changes`.

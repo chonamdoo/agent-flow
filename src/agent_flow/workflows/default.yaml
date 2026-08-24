@@ -256,9 +256,9 @@ phases:
           skill union. Android/Kotlin/Compose/KMP files require Android profile
           skills, `android-code-review`, and the skills this phase prompt lists
           for the change; React Native `android/` native changes also apply
-          Android profile mapping. If required skills are missing, report
-          `missing local <group>: <skill>` with the source URL and do not claim
-          completion without user override.
+          Android profile mapping. If required skills are missing for this host,
+          record `skill-availability: degraded` and the declared
+          `missing local <group>: <skill>` marker, then continue with the skills available.
       7. Honor SOLID principles from the design's SOLID section.
       8. For any data layer work, enforce the repository boundary from
          `.agent-flow/skills/clean-architecture/SKILL.md`:
@@ -425,10 +425,9 @@ phases:
       Android/Kotlin/Compose/KMP changes require Android profile skills,
       `android-code-review`, and the skills this phase prompt lists for the
       change; React Native `android/` native changes also apply Android profile
-      mapping. If required skills are missing, report
-      `missing local <group>: <skill>` with the source URL and use
-      `verdict: request-changes`. Unrelated platform skill absence must not
-      block.
+      mapping. The skill list above was resolved against your own host; a skill
+      it names as not installed is a coverage gap, not a finding. Record
+      `skill-availability: degraded` and keep the verdict on the code.
       The markers below are not the whole completion contract. The runner also
       verifies this run's `design-spec.md` ledger at this phase, and
       `verdict: approve` does not override it — an unmet item blocks phase
@@ -543,8 +542,9 @@ phases:
       Android/Kotlin/Compose/KMP fixes require Android profile skills,
       `android-code-review`, and the skills this phase prompt lists for the
       change; React Native `android/` native fixes also apply Android profile
-      mapping. If a required local skill is missing, do not complete this
-      artifact; report `missing local <group>: <skill>` with the source URL.
+      mapping. If a required local skill is missing for this host, record
+      `skill-availability: degraded` and the declared `missing local <group>: <skill>`
+      marker, then complete the artifact with the skills available.
       End with:
 
           ## Completion Gate

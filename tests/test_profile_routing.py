@@ -400,9 +400,13 @@ def test_prompt_contract_lists_every_marker_the_gate_demands(tmp_path):
     assert missing_local_skill_markers(artifact, project, "implement", **common) == []
 
 
-def test_matched_skill_reports_the_path_it_was_discovered_at(tmp_path, monkeypatch):
-    """카탈로그는 설치된 것만 담는다. 이름으로 다시 해석하면 활성 host 필터가
-    설치돼 있는 skill을 "없다"고 보고한다 — 그 거짓 진술이 게이트를 degraded로 만든다."""
+def test_matched_skill_reports_only_the_path_its_host_can_open(tmp_path, monkeypatch):
+    """카탈로그/어휘 매칭도 host-owned root를 먼저 좁힌다.
+
+    Claude 홈에서 발견한 path를 Codex prompt에 넣으면 Codex는 열 수 없다. 예전
+    테스트는 그 cross-host path를 두 host 모두에게 주는 것을 정답으로 고정했고,
+    그 거짓 사실이 이번 수렴 불가 verdict의 다른 입구였다.
+    """
     project = _android_project(tmp_path)
     home = tmp_path / "home"
     installed = _install(home, "edge-to-edge", "Use when the status bar or insets overlap content.")
@@ -416,16 +420,13 @@ def test_matched_skill_reports_the_path_it_was_discovered_at(tmp_path, monkeypat
         concerns=["ui-insets-systembars"],
     )
 
-    def matched(host: str):
-        resolution = resolve_phase_skills(host=host, **common)
-        return next(
-            skill for skill in resolution.required if skill.name == "edge-to-edge"
-        )
+    claude = resolve_phase_skills(host="claude", **common)
+    codex = resolve_phase_skills(host="codex", **common)
+    found = next(skill for skill in claude.required if skill.name == "edge-to-edge")
 
-    for host in ("claude", "codex"):
-        skill = matched(host)
-        assert skill.exists is True, host
-        assert skill.path == installed, host
+    assert found.exists is True
+    assert found.path == installed
+    assert all(skill.name != "edge-to-edge" for skill in (*codex.required, *codex.optional))
 
 
 def test_a_declared_bundled_name_still_resolves_from_the_active_host_only(tmp_path, monkeypatch):

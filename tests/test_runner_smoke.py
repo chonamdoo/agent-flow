@@ -3783,15 +3783,16 @@ def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
 
     jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
     assert [job.angle_id for job in jobs] == ["generalist", "architecture-design", "clean-architecture"]
-    assert "Review Angle" in jobs[0].prompt
-    assert "Architecture Design" in jobs[1].prompt
-    assert "Clean Architecture" in jobs[2].prompt
-    for job in jobs:
-        assert "Start your output with exactly these two plain lines:" in job.prompt
-        assert "`## Reviewer`" in job.prompt
-        assert "`reviewer-source: sub-agent`" in job.prompt
-        assert "Do not wrap either line" in job.prompt
-        assert "exactly one unfenced plain line" in job.prompt
+    prompts = [job.prompt_for("claude") for job in jobs]
+    assert "Review Angle" in prompts[0]
+    assert "Architecture Design" in prompts[1]
+    assert "Clean Architecture" in prompts[2]
+    for prompt in prompts:
+        assert "Start your output with exactly these two plain lines:" in prompt
+        assert "`## Reviewer`" in prompt
+        assert "`reviewer-source: sub-agent`" in prompt
+        assert "Do not wrap either line" in prompt
+        assert "exactly one unfenced plain line" in prompt
 
 
 def test_multi_review_precomputes_diff_outside_reviewer_sandbox(tmp_path: Path):
@@ -3838,9 +3839,10 @@ def test_multi_review_precomputes_diff_outside_reviewer_sandbox(tmp_path: Path):
         review_input=snapshot,
     )
     for job in jobs:
-        assert str(snapshot.path) in job.prompt
-        assert "Do not run `git diff`" in job.prompt
-        assert snapshot.digest in job.prompt
+        prompt = job.prompt_for("claude")
+        assert str(snapshot.path) in prompt
+        assert "Do not run `git diff`" in prompt
+        assert snapshot.digest in prompt
 
 
 def test_review_input_snapshot_uses_extended_git_timeout(
@@ -4048,7 +4050,7 @@ def test_multi_review_profile_can_override_baseline_prompt(tmp_path: Path):
 
     jobs = _reviewer_jobs(phase, run_dir, project, adapter)
     assert [job.angle_id for job in jobs] == ["generalist", "architecture-design", "clean-architecture"]
-    assert "custom prompt body" in jobs[0].prompt
+    assert "custom prompt body" in jobs[0].prompt_for("claude")
 
 
 def test_multi_review_missing_prompt_file_fails_loudly(tmp_path: Path):
@@ -4182,7 +4184,7 @@ def test_multi_review_packaged_prompt_survives_project_templates_dir(tmp_path: P
 
     jobs = _reviewer_jobs(phase, run_dir, project, adapter)
     assert [job.angle_id for job in jobs] == ["generalist", "architecture-design", "clean-architecture"]
-    assert "Review Angle" in jobs[0].prompt
+    assert "Review Angle" in jobs[0].prompt_for("claude")
 
 
 def _packaged_profiles() -> list[Path]:

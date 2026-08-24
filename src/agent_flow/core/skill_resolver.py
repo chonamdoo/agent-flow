@@ -250,11 +250,16 @@ def resolve_phase_skills(
     from agent_flow.core.skill_matching import match_external
 
     roots = skill_roots(project_root, profile=profile, host=host, env=env)
+    # reviewer는 컨트롤러와 다른 host에서 돈다. catalog/의존성/어휘 매칭까지 같은
+    # host-owned root 집합을 써야 한다. 최종 이름 해석만 좁히면 catalog가 이미
+    # 다른 host의 절대경로를 matched에 넣어 필터를 우회한다.
+    resolved_host = active_host(env) if host is None else host
+    resolved_roots = active_host_roots(roots, resolved_host)
     declared = phase_skills or PhaseSkills()
     required_names: list[str] = list(declared.required)
     optional_names: list[str] = list(declared.optional)
 
-    catalog = discover_skill_catalog(project_root, roots)
+    catalog = discover_skill_catalog(project_root, resolved_roots)
     # task 문구로만 켜져 offered로 내려간 이름. 명시된 concern이 그것을 다시 required로
     # 올릴 수 있어야 한다 — 그러지 않으면 강등을 되돌리라고 만든 탈출구가 정확히
     # 강등 대상에만 듣지 않는다.
@@ -278,7 +283,6 @@ def resolve_phase_skills(
     # 부재 안내는 표의 source URL로 한다 — root의 일반 install hint로는
     # 어느 저장소에서 받아야 하는지 알 수 없다.
     routed_hints: dict[str, str] = {}
-    routed_only: set[str] = set()
     for routed in routed_profile_skills(
         profile,
         phase_id=phase_id,
@@ -290,11 +294,9 @@ def resolve_phase_skills(
             routed_hints.setdefault(routed.name, routed.source)
         if routed.name not in required_names:
             required_names.append(routed.name)
-            routed_only.add(routed.name)
 
-    # 어휘 조인으로 붙는 설치 skill. 카탈로그가 이미 실제 경로를 아는 것만 담으므로
-    # 이름으로 다시 해석하지 않는다 — host 필터로 재해석하면 다른 host 홈에 설치된
-    # skill을 매칭해 required로 올린 뒤 "설치돼 있지 않다"고 보고한다.
+    # 어휘 조인도 host-filtered catalog만 본다. 다른 host 홈의 match를 먼저
+    # required로 올리면 최종 resolver를 좁혀도 절대경로가 matched에서 그대로 샌다.
     matched: dict[str, ResolvedSkill] = {}
     for match in match_external(
         profile,
@@ -326,18 +328,13 @@ def resolve_phase_skills(
     required_names = expand_dependencies(required_names, catalog)
     optional_names = [name for name in optional_names if name not in required_names]
 
-    # 우리가 이름으로 선언한 skill만 활성 host로 좁힌다. 그 이름은 미설치일 수 있고,
-    # 다른 host의 사본으로 충족시키면 프롬프트가 엉뚱한 파일을 가리킨다.
-    resolved_host = active_host(env) if host is None else host
-    routed_roots = active_host_roots(roots, resolved_host)
-
     def resolve(name: str) -> ResolvedSkill:
         found = matched.get(name)
         if found is not None:
             return found
         return resolve_skill(
             name,
-            routed_roots if name in routed_only else roots,
+            resolved_roots,
             install_hint=routed_hints.get(name, ""),
         )
 
@@ -461,9 +458,11 @@ def skill_prompt_block(
     if resolution.missing:
         missing = ", ".join(skill.name for skill in resolution.missing)
         lines.append(
-            f"Not installed on this machine: {missing}. This is not a violation — "
+            f"Not installed for this host: {missing}. This is not a violation — "
             "record `skill-availability: degraded` and continue with the skills you do have. "
-            "Do not ask the user to install anything mid-run; `agent-flow skills sync` owns that."
+            "If you are reviewing, that absence is a coverage gap, not a finding: never make "
+            "it a verdict. Do not ask the user to install anything mid-run; "
+            "`agent-flow skills sync` owns that."
         )
         lines.append("")
     return "\n".join(lines)

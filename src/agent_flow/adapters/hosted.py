@@ -43,6 +43,7 @@ from agent_flow.core.worktree_isolation import (
 from agent_flow.multi_review import (
     Distribution,
     FINAL_REVIEW_PHASE_ID,
+    REVIEW_CLI_NAMES,
     ReviewerJob,
     ReviewExecution,
     distribute,
@@ -554,25 +555,31 @@ def _applicable_angles(
     project_root: Path,
     adapter: Adapter,
 ) -> list[dict[str, str]]:
-    """`requires`를 선언한 angle은 그 skill이 required일 때만 남긴다.
+    """`requires`를 선언한 angle은 reviewer provider union이 그 skill을 요구할 때 남긴다.
 
-    판정은 writer prompt와 **같은 resolver 호출**로 한다. 여기서 조건을 다시 쓰면
-    reviewer가 작성자보다 넓거나 좁은 기준을 받고, 그게 agent-flow가 지키겠다는
-    성질이다.
+    catalog/frontmatter 활성화도 host-scoped라 provider마다 required 이름이 다를 수 있다.
+    컨트롤러 하나만 보면 OMP에는 없고 Claude에만 있는 계약 skill 때문에 angle 자체가
+    사라진다. 실제 reviewer provider들의 required 이름을 합쳐 scope를 정하고, 각
+    provider envelope는 자기 catalog에서 해석한 path만 준다. Profile/workflow가
+    이름으로 요구한 skill은 미설치 host에서도 missing으로 남고 degraded를 기록한다;
+    다른 host catalog에서만 발견된 external skill은 그 host의 Calibration에만 보인다.
     """
     gated = [angle for angle in angles if angle.get("requires")]
     if not gated:
         return list(angles)
-    resolution = phase_skill_resolution(
-        adapter.config_root_or(project_root),
-        phase.id,
-        phase_skills=getattr(phase, "skills", None),
-        profile=adapter._profile_snapshot,
-        changed_files=adapter._changed_files,
-        task_text=adapter._task_text,
-        concerns=adapter._concerns,
-    )
-    required = {skill.name for skill in resolution.required}
+    required: set[str] = set()
+    for provider in REVIEW_CLI_NAMES:
+        resolution = phase_skill_resolution(
+            adapter.config_root_or(project_root),
+            phase.id,
+            phase_skills=getattr(phase, "skills", None),
+            profile=adapter._profile_snapshot,
+            changed_files=adapter._changed_files,
+            task_text=adapter._task_text,
+            concerns=adapter._concerns,
+            host=provider,
+        )
+        required.update(skill.name for skill in resolution.required)
     return [
         angle
         for angle in angles
@@ -605,9 +612,20 @@ def _reviewer_jobs(
     jobs: list[ReviewerJob] = []
     # host가 받는 envelope와 다른 렌더다(host_hint 없음). 관측 이름을 갈라
     # trace에서 둘을 sha 재계산 없이 구분한다.
-    base_prompt = adapter.render_envelope(
-        phase, run_dir, project_root, prompt_variant="reviewer-base"
-    )
+    #
+    # provider마다 따로 렌더한다. skill 경로는 host마다 다르고, 컨트롤러 기준으로
+    # 해석한 목록을 모든 리뷰어에게 복사하면 자기 host에 없는 경로를 사실로 받은
+    # 리뷰어가 그것을 부재로 판정한다 — 코드로는 지울 수 없는 verdict가 거기서 나온다.
+    base_prompt_by_provider = {
+        provider: adapter.render_envelope(
+            phase,
+            run_dir,
+            project_root,
+            prompt_variant=f"reviewer-base-{provider}",
+            skill_host=provider,
+        )
+        for provider in REVIEW_CLI_NAMES
+    }
     review_input_prompt = (
         "\n\n## Precomputed review input\n\n"
         f"Read `{review_input.path}` before judging the change. The controller "
@@ -628,9 +646,8 @@ def _reviewer_jobs(
         if not angle_id:
             continue
         angle_output = _review_angle_output(run_dir, phase.id, angle_id)
-        angle_prompt = (
-            f"{base_prompt}\n\n"
-            "## Isolated reviewer process contract\n\n"
+        angle_contract = (
+            "\n\n## Isolated reviewer process contract\n\n"
             "You are one read-only reviewer subprocess. Do not invoke "
             "`agent-flow status`, do not continue the workflow, and do not "
             "write the aggregate phase artifact named above. Return only this "
@@ -650,9 +667,13 @@ def _reviewer_jobs(
         )
         jobs.append(ReviewerJob(
             angle_id=angle_id,
-            prompt=angle_prompt,
+            prompt="",
             output_path=angle_output,
             artifact_root=run_dir.resolve(),
+            prompt_by_provider={
+                provider: prompt + angle_contract
+                for provider, prompt in base_prompt_by_provider.items()
+            },
         ))
     return jobs
 

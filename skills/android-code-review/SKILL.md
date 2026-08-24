@@ -44,7 +44,7 @@ them:
 
 Resolve every required skill through the phase prompt and installed skill index. Read the exact path the resolver supplies; do not construct host home-directory paths or search another host's installation.
 
-If a required skill is unresolved, stop approval and report `missing local <group>: <skill>` with the configured source URL. Record the resolved paths actually read in the review artifact's `Calibration` section.
+A skill the prompt reports as not installed for this host is not a violation: record `skill-availability: degraded`, put its **bare skill name** in the comma-separated `missing-required-profile-skills:` marker, and write `missing local <group>: <skill>` only in prose/Calibration. Judge the change with the skills you do have. Do not turn absence into `verdict: request-changes` — installation is not something the code under review can change. Record the resolved paths actually read in the review artifact's `Calibration` section.
 
 ## Review Order
 
