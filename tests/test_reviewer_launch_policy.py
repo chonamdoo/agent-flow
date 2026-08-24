@@ -883,11 +883,6 @@ def test_final_review_dispatch_reads_the_shared_phase_id_constant(
 def test_host_and_reviewer_envelopes_are_observed_under_distinct_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """multi-review phase는 envelope를 두 번 렌더한다 — host에게 출력하는 것과
-    reviewer subprocess prompt의 바탕. 둘이 같은 payload 이름으로 관측되면 trace
-    독자는 host가 실제로 받은 것이 어느 쪽인지 sha를 다시 계산하지 않고는 고를 수
-    없다. 관측의 목적이 "주입된 프롬프트 재현"이므로 이름이 갈려야 한다.
-    """
     from types import SimpleNamespace
 
     from agent_flow.adapters import hosted
@@ -916,10 +911,14 @@ def test_host_and_reviewer_envelopes_are_observed_under_distinct_names(
 
     assert jobs
     names = [name for _, name, _ in observed]
-    assert names == ["prompt-final-review-reviewer-base", "prompt-final-review"]
+    assert names == [
+        "prompt-final-review-reviewer-base-claude",
+        "prompt-final-review-reviewer-base-codex",
+        "prompt-final-review",
+    ]
     assert {phase_id for phase_id, _, _ in observed} == {"final-review"}
     # 이름이 갈릴 뿐 아니라 실제로 다른 텍스트다 — host hint는 reviewer 바탕에 없다.
     reviewer_envelope = observed[0][2]
     assert "host guidance" in host_envelope
     assert "host guidance" not in reviewer_envelope
-    assert reviewer_envelope in jobs[0].prompt
+    assert reviewer_envelope in jobs[0].prompt_for("claude")

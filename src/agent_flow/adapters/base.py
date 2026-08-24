@@ -92,7 +92,8 @@ class Adapter(ABC):
 
     def render_envelope(self, phase: "Phase", run_dir: Path,
                         project_root: Path, host_hint: str = "",
-                        *, prompt_variant: str = "") -> str:
+                        *, prompt_variant: str = "",
+                        skill_host: str | None = None) -> str:
         """Render the prompt envelope shared by all AI adapters."""
         artifact = self.artifact_path(phase, run_dir)
         relative_artifact = (
@@ -116,6 +117,7 @@ class Adapter(ABC):
             changed_files=self._changed_files,
             task_text=self._task_text,
             concerns=self._concerns,
+            host=skill_host,
         )
         # 이전 phase의 수치는 대화 컨텍스트가 아니라 여기로만 건너온다.
         # 렌더러가 넣으므로 agent가 빼거나 잊을 수 없다.

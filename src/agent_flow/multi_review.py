@@ -12,7 +12,7 @@ import os
 import re
 import shlex
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -71,16 +71,38 @@ _UNKNOWN = "unknown"
 @dataclass
 class ReviewerJob:
     angle_id: str           # e.g. "architecture-design", "compose-stability"
-    prompt: str             # full angle prompt text (rendered)
+    prompt: str
     output_path: Path       # artifact target
     artifact_root: Path
     # fan-out으로 파생된 job은 angle_id에 provider 접미사가 붙는다. launch 선언은
     # 파생 이름이 아니라 사람이 선언한 angle을 가리키므로 원본을 함께 들고 간다.
     base_angle_id: str | None = None
+    prompt_by_provider: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if bool(self.prompt) == bool(self.prompt_by_provider):
+            raise ValueError(
+                "reviewer job must carry exactly one of prompt or prompt_by_provider"
+            )
 
     @property
     def match_angle_id(self) -> str:
         return self.base_angle_id or self.angle_id
+
+    def prompt_for(self, cli_name: str) -> str:
+        """Return the prompt for the assigned provider.
+
+        An unknown provider is a declaration drift: normal provider names and map keys
+        both come from `REVIEW_CLI_NAMES`.
+        """
+        if not self.prompt_by_provider:
+            return self.prompt
+        try:
+            return self.prompt_by_provider[cli_name]
+        except KeyError as exc:
+            raise ReviewerLaunchError(
+                f"reviewer prompt has no provider render for {cli_name!r}"
+            ) from exc
 
 
 @dataclass
@@ -151,6 +173,16 @@ def _configured_reviewer_names() -> set[str] | None:
     if not os.environ.get("AGENT_FLOW_REVIEWERS"):
         return None
     return {cli.name for cli in resolve_review_clis()}
+
+def eligible_reviewer_names() -> tuple[str, ...]:
+    narrowed = _configured_reviewer_names()
+    available = {
+        cli.name
+        for cli in detect_available_clis()
+        if cli.name in REVIEW_CLI_NAMES
+        and (narrowed is None or cli.name in narrowed)
+    }
+    return tuple(name for name in REVIEW_CLI_NAMES if name in available)
 
 
 def _has_sufficient_reviewer_processes(
@@ -237,7 +269,11 @@ def distribute(
             phase_id=phase_id,
         )
 
-    by_cli = {primary_cli.name: list(jobs)}
+    by_cli = {
+        primary_cli.name: [
+            _bound_reviewer_job(job, cli_name=primary_cli.name) for job in jobs
+        ]
+    }
     optional = {
         cli_name: cli
         for cli_name, cli in available.items()
@@ -251,7 +287,7 @@ def distribute(
     _assert_unique_output_paths(by_cli)
     required_job_ids = frozenset(
         review_job_id(primary_cli.name, job)
-        for job in jobs
+        for job in by_cli[primary_cli.name]
     )
     return Distribution(
         by_cli=by_cli,
@@ -259,6 +295,18 @@ def distribute(
         host=host,
         required_job_ids=required_job_ids,
         phase_id=phase_id,
+    )
+
+
+def _bound_reviewer_job(
+    job: ReviewerJob,
+    *,
+    cli_name: str,
+) -> ReviewerJob:
+    return replace(
+        job,
+        prompt=job.prompt_for(cli_name),
+        prompt_by_provider={},
     )
 
 
@@ -270,11 +318,12 @@ def _optional_reviewer_job(
     output = job.output_path.with_name(
         f"{job.output_path.stem}-extra-{cli_name}{job.output_path.suffix}"
     )
-    return ReviewerJob(
+    return replace(
+        job,
         angle_id=f"{job.angle_id}-{cli_name}-extra",
-        prompt=job.prompt,
+        prompt=job.prompt_for(cli_name),
+        prompt_by_provider={},
         output_path=output,
-        artifact_root=job.artifact_root,
         base_angle_id=job.match_angle_id,
     )
 
@@ -287,11 +336,11 @@ def _reviewer_job_for_cli(
     output = job.output_path.with_name(
         f"{job.output_path.stem}-{cli_name}{job.output_path.suffix}"
     )
-    return ReviewerJob(
-        angle_id=job.angle_id,
-        prompt=job.prompt,
+    return replace(
+        job,
+        prompt=job.prompt_for(cli_name),
+        prompt_by_provider={},
         output_path=output,
-        artifact_root=job.artifact_root,
         base_angle_id=job.match_angle_id,
     )
 

@@ -219,6 +219,7 @@ def phase_skill_resolution(
     changed_files: Sequence[str] = (),
     task_text: str = "",
     concerns: Sequence[str] = (),
+    host: str | None = None,
 ) -> SkillResolution:
     return resolve_phase_skills(
         project_root=project_root,
@@ -228,6 +229,7 @@ def phase_skill_resolution(
         changed_files=changed_files,
         task_text=task_text,
         concerns=concerns,
+        host=host,
     )
 
 
@@ -240,6 +242,7 @@ def local_skill_prompt_block(
     changed_files: Sequence[str] = (),
     task_text: str = "",
     concerns: Sequence[str] = (),
+    host: str | None = None,
 ) -> str:
     resolution = phase_skill_resolution(
         project_root,
@@ -249,6 +252,7 @@ def local_skill_prompt_block(
         changed_files=changed_files,
         task_text=task_text,
         concerns=concerns,
+        host=host,
     )
     # 강제 지점과 같은 조건을 쓴다. 둘이 갈라지면 프롬프트가 다시 거짓말한다.
     enforced = skill_markers_enforced(phase_id)
