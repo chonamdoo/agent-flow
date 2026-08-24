@@ -21,6 +21,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from agent_flow.adapters.hosted import (  # noqa: E402
     HostedAdapter,
+    _base_candidate_refs,
     _profile_base_branch,
     _write_review_input_snapshot as _capture_review_input_snapshot,
 )
@@ -113,6 +114,34 @@ def _local_ahead_repo(project: Path) -> None:
     _git(project, "commit", "-m", "my change")
 
 
+def _fork_tracking_repo(project: Path) -> None:
+    """fork 체크아웃. 선언된 `main`은 `upstream/main`을 추적하고 `origin`은 fork다.
+
+    `origin/main`은 fork에만 있는 커밋을 담아 더 앞서 있다. 그 커밋은 선언된 base
+    대비 변경이므로 diff에 남아야 한다.
+    """
+    _init_repo(project)
+    upstream = project.parent / "upstream.git"
+    fork = project.parent / "fork.git"
+    _git(project, "init", "--bare", "-q", str(upstream))
+    _git(project, "init", "--bare", "-q", str(fork))
+    _git(project, "remote", "add", "upstream", str(upstream))
+    _git(project, "remote", "add", "origin", str(fork))
+    _git(project, "push", "-q", "-u", "upstream", "main")
+    _git(project, "checkout", "-q", "-b", "fork-work")
+    (project / "fork-only.txt").write_text("fork only\n", encoding="utf-8")
+    _git(project, "add", ".")
+    _git(project, "commit", "-m", "fork only")
+    _git(project, "push", "-q", "origin", "fork-work:main")
+    _git(project, "checkout", "-q", "main")
+    _git(project, "branch", "-D", "fork-work")
+    _git(project, "checkout", "-q", "-b", "feat-x")
+    _git(project, "merge", "-q", "--no-edit", "origin/main")
+    (project / "app.py").write_text("mine\n", encoding="utf-8")
+    _git(project, "add", ".")
+    _git(project, "commit", "-m", "my change")
+
+
 def _diverged_bases_repo(project: Path) -> None:
     """로컬 `main`과 `origin/main`이 갈라지고 브랜치가 둘 다 머지한 상태.
 
@@ -198,6 +227,29 @@ def test_snapshot_keeps_the_local_base_when_it_is_ahead_of_the_remote(tmp_path: 
     assert "+mine" in content
     # 로컬 base가 이미 담고 있는 커밋은 diff에 없다.
     assert "shared.txt" not in content
+
+
+def test_snapshot_follows_the_declared_base_upstream_not_origin(tmp_path: Path):
+    project = tmp_path / "project"
+    _fork_tracking_repo(project)
+
+    # 후보는 선언된 base가 추적하는 remote다. `origin`은 fork라 정본이 아니다.
+    assert _base_candidate_refs(project, "main", max_output_bytes=1 << 20) == (
+        "main",
+        "upstream/main",
+    )
+
+    snapshot = _write_review_input_snapshot(
+        project, _run_dir(project), "final-review", base_branch="main"
+    )
+
+    content = snapshot.read_text(encoding="utf-8")
+    assert "git merge-base HEAD origin/main" not in content
+    assert "+mine" in content
+    # fork에만 있는 커밋은 선언된 base 대비 변경이므로 diff에 남아야 한다.
+    # `origin/`을 정본으로 두면 그 커밋의 merge-base가 기준점이 되어 조용히 빠진다.
+    assert "fork-only.txt" in content
+
 
 
 def test_snapshot_admits_what_an_unordered_baseline_cannot_exclude(tmp_path: Path):

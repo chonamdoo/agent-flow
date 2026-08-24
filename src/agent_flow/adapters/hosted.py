@@ -475,7 +475,9 @@ def _resolve_review_baseline(
         )
     diagnostic = "no common ancestor"
     resolved: list[_BaseCandidate] = []
-    for candidate in (base_branch, f"origin/{base_branch}"):
+    for candidate in _base_candidate_refs(
+        project_root, base_branch, max_output_bytes=max_output_bytes
+    ):
         result = git_safe(
             "merge-base",
             "HEAD",
@@ -515,6 +517,39 @@ def _resolve_review_baseline(
         ),
         note=choice.note,
     )
+
+
+def _base_candidate_refs(
+    project_root: Path,
+    base_branch: str,
+    *,
+    max_output_bytes: int,
+) -> tuple[str, ...]:
+    """선언된 base와, 그 base가 실제로 추적하는 remote ref.
+
+    `origin/`을 정본으로 두면 fork나 다중 remote 체크아웃에서 틀린 기준점을 고른다 —
+    선언된 `main`이 `upstream/main`을 추적하는데 `origin/main`을 기준으로 잡으면,
+    origin에만 있는 커밋이 선언된 base 대비 변경인데도 diff에서 조용히 빠진다.
+    추적 설정이 없으면 `origin/<base>`로 내려간다. 그 경우가 단일 remote 체크아웃이다.
+    """
+    result = git_safe(
+        "rev-parse",
+        "--symbolic-full-name",
+        f"{base_branch}@{{upstream}}",
+        cwd=project_root,
+        optional_locks=False,
+        timeout_s=_REVIEW_INPUT_TIMEOUT_S,
+        max_output_bytes=max_output_bytes,
+    )
+    tracked = result.stdout.strip() if result.ok else ""
+    prefix = "refs/remotes/"
+    remote_ref = tracked[len(prefix):] if tracked.startswith(prefix) else ""
+    # git이 준 값도 argv에 그대로 들어간다. 선언된 base와 같은 검사를 통과해야 한다.
+    if not remote_ref or not _is_usable_base_ref(remote_ref):
+        remote_ref = f"origin/{base_branch}"
+    if remote_ref == base_branch:
+        return (base_branch,)
+    return (base_branch, remote_ref)
 
 
 class _BaseCandidate(NamedTuple):
