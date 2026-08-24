@@ -1733,7 +1733,12 @@ def _head_drift_kind(
         return "branch"
     if before.head == observed.head:
         return None
-    if not _is_ancestor(leader_root, before.head, observed.head):
+    if not git_proves_ancestor(
+        root=leader_root,
+        ancestor=before.head,
+        descendant=observed.head,
+        timeout_s=_TRIPWIRE_TIMEOUT_S,
+    ):
         return "non-fast-forward"
     if not _head_moved_inside_leader(leader_root, observed.head):
         return _EXTERNAL_HEAD_DRIFT
@@ -2607,22 +2612,32 @@ def _leader_head_sha(root) -> Optional[str]:
     return result.stdout.strip() or None
 
 
-def _is_ancestor(leader_root, old: str, new: str) -> bool:
-    """``old``가 ``new``의 조상인가. 판정 불가는 **아니다**로 접는다.
+def git_proves_ancestor(
+    *,
+    root: Path,
+    ancestor: str,
+    descendant: str,
+    timeout_s: int,
+) -> bool:
+    """``ancestor``가 ``descendant``의 조상이라고 **git이 답했는가**. 판정 불가는 아니다.
 
-    이 답은 "HEAD 이동을 정상 전진으로 볼 수 있는가"의 근거다. 모르는 것을
-    "그렇다"로 접으면 `reset --hard`나 force-push로 사라진 커밋 위에서 런이
-    계속된다. exit 1(조상 아님)과 exit 128(객체 없음)은 둘 다 "아니다"다.
+    HEAD 이동을 정상 전진으로 볼 근거이자, 리뷰 스냅샷이 두 base 후보의 순서를
+    정하는 근거다. 모르는 것을 "그렇다"로 접으면 `reset --hard`나 force-push로
+    사라진 커밋 위에서 런이 계속된다. exit 1(조상 아님)과 exit 128(객체 없음)은
+    둘 다 "아니다"다.
+
+    호출부가 `timeout_s`를 넘긴다. tripwire와 리뷰 스냅샷은 예산이 다르고, 한쪽
+    상수를 다른 쪽이 물려받으면 그 자리에서 예산이 조용히 바뀐다.
     """
-    if not old or not new:
+    if not ancestor or not descendant:
         return False
     result = git_safe(
         "merge-base",
         "--is-ancestor",
-        old,
-        new,
-        cwd=leader_root,
-        timeout_s=_TRIPWIRE_TIMEOUT_S,
+        ancestor,
+        descendant,
+        cwd=root,
+        timeout_s=timeout_s,
         optional_locks=False,
     )
     if result.timed_out or result.error is not None:

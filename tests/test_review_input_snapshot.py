@@ -75,6 +75,68 @@ def _committed_feature_repo(project: Path) -> None:
     _git(project, "commit", "-m", "feature")
 
 
+def _push_initial_main(project: Path) -> None:
+    remote = project.parent / "remote.git"
+    _git(project, "init", "--bare", "-q", str(remote))
+    _git(project, "remote", "add", "origin", str(remote))
+    _git(project, "push", "-q", "-u", "origin", "main")
+
+
+def _remote_ahead_repo(project: Path) -> None:
+    """upstream이 앞선 상태. 로컬 `main`은 분기 지점에 멈춰 있다."""
+    _init_repo(project)
+    _push_initial_main(project)
+    _git(project, "checkout", "-q", "-b", "upstream-work")
+    (project / "upstream.txt").write_text("merged upstream\n", encoding="utf-8")
+    _git(project, "add", ".")
+    _git(project, "commit", "-m", "upstream work")
+    _git(project, "push", "-q", "origin", "upstream-work:main")
+    _git(project, "checkout", "-q", "main")
+    _git(project, "branch", "-D", "upstream-work")
+    _git(project, "checkout", "-q", "-b", "feat-x")
+    _git(project, "merge", "-q", "--no-edit", "origin/main")
+    (project / "app.py").write_text("mine\n", encoding="utf-8")
+    _git(project, "add", ".")
+    _git(project, "commit", "-m", "my change")
+
+
+def _local_ahead_repo(project: Path) -> None:
+    """로컬 `main`이 remote보다 앞선 상태. remote merge-base는 과거다."""
+    _init_repo(project)
+    _push_initial_main(project)
+    (project / "shared.txt").write_text("local base advance\n", encoding="utf-8")
+    _git(project, "add", ".")
+    _git(project, "commit", "-m", "local base advance")
+    _git(project, "checkout", "-q", "-b", "feat-x")
+    (project / "app.py").write_text("mine\n", encoding="utf-8")
+    _git(project, "add", ".")
+    _git(project, "commit", "-m", "my change")
+
+
+def _diverged_bases_repo(project: Path) -> None:
+    """로컬 `main`과 `origin/main`이 갈라지고 브랜치가 둘 다 머지한 상태.
+
+    두 merge-base는 서로의 조상이 아니다 — rev 하나로는 둘 다 뺄 수 없다.
+    """
+    _init_repo(project)
+    _push_initial_main(project)
+    _git(project, "checkout", "-q", "-b", "upstream-work")
+    (project / "upstream.txt").write_text("merged upstream\n", encoding="utf-8")
+    _git(project, "add", ".")
+    _git(project, "commit", "-m", "upstream work")
+    _git(project, "push", "-q", "origin", "upstream-work:main")
+    _git(project, "checkout", "-q", "main")
+    _git(project, "branch", "-D", "upstream-work")
+    (project / "local-only.txt").write_text("local base only\n", encoding="utf-8")
+    _git(project, "add", ".")
+    _git(project, "commit", "-m", "local base only")
+    _git(project, "checkout", "-q", "-b", "feat-x")
+    _git(project, "merge", "-q", "--no-edit", "origin/main")
+    (project / "app.py").write_text("mine\n", encoding="utf-8")
+    _git(project, "add", ".")
+    _git(project, "commit", "-m", "my change")
+
+
 def test_snapshot_carries_committed_work_of_the_branch(tmp_path: Path):
     project = tmp_path / "project"
     _committed_feature_repo(project)
@@ -103,6 +165,76 @@ def test_snapshot_carries_uncommitted_work_alongside_committed(tmp_path: Path):
     assert "+committed" in content
     assert "+dirty" in content
     assert "?? new.txt" in content
+
+
+def test_snapshot_excludes_commits_already_merged_upstream(tmp_path: Path):
+    project = tmp_path / "project"
+    _remote_ahead_repo(project)
+
+    snapshot = _write_review_input_snapshot(
+        project, _run_dir(project), "final-review", base_branch="main"
+    )
+
+    content = snapshot.read_text(encoding="utf-8")
+    assert "git merge-base HEAD origin/main" in content
+    assert "+mine" in content
+    # 이미 upstream에 머지된 작업은 이 브랜치의 변경이 아니다.
+    assert "upstream.txt" not in content
+    # 기준점이 왜 로컬 base가 아닌지 리뷰어가 읽을 수 있어야 한다.
+    assert "is behind `origin/main`" in content
+
+
+def test_snapshot_keeps_the_local_base_when_it_is_ahead_of_the_remote(tmp_path: Path):
+    project = tmp_path / "project"
+    _local_ahead_repo(project)
+
+    snapshot = _write_review_input_snapshot(
+        project, _run_dir(project), "final-review", base_branch="main"
+    )
+
+    content = snapshot.read_text(encoding="utf-8")
+    assert "git merge-base HEAD main" in content
+    assert "origin/main" not in content
+    assert "+mine" in content
+    # 로컬 base가 이미 담고 있는 커밋은 diff에 없다.
+    assert "shared.txt" not in content
+
+
+def test_snapshot_admits_what_an_unordered_baseline_cannot_exclude(tmp_path: Path):
+    project = tmp_path / "project"
+    _diverged_bases_repo(project)
+
+    snapshot = _write_review_input_snapshot(
+        project, _run_dir(project), "final-review", base_branch="main"
+    )
+
+    content = snapshot.read_text(encoding="utf-8")
+    assert "git merge-base HEAD origin/main" in content
+    assert "could not be ordered" in content
+    # rev 하나로 두 base를 동시에 뺄 수 없다. 남는 쪽을 머리말이 인정해야 한다.
+    assert "commits reachable only from `main` are still in the diff below" in content
+    assert "local-only.txt" in content
+
+
+def test_snapshot_prefers_the_remote_base_when_ordering_cannot_be_proven(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from agent_flow.adapters import hosted
+
+    project = tmp_path / "project"
+    _remote_ahead_repo(project)
+    monkeypatch.setattr(hosted, "git_proves_ancestor", lambda **kwargs: False)
+
+    snapshot = _write_review_input_snapshot(
+        project, _run_dir(project), "final-review", base_branch="main"
+    )
+
+    content = snapshot.read_text(encoding="utf-8")
+    # 순서를 증명하지 못한 상태의 안전한 방향은 이미 통합된 쪽이다.
+    assert "git merge-base HEAD origin/main" in content
+    assert "could not be ordered" in content
+
 
 
 def test_snapshot_names_the_head_fallback_when_base_is_absent(tmp_path: Path):
