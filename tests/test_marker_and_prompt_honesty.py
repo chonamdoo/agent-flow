@@ -34,6 +34,19 @@ def _gate(body: str) -> str:
     return f"# artifact\n\n## Completion Gate\n\n{body}\n"
 
 
+def test_codex_reviewer_missing_skill_policy_matches_canonical():
+    canonical = (
+        REPO / "skills" / "code-generation-discipline" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    reviewer = (REPO / ".Codex" / "agents" / "code-reviewer.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "never turn absence into `verdict: request-changes`" in canonical
+    assert "non-blocking coverage gap" in reviewer
+    assert "never changes the verdict" in reviewer
+
+
 # --- P7 -----------------------------------------------------------------
 
 

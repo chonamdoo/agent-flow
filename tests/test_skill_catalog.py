@@ -447,6 +447,26 @@ def test_every_code_phase_declares_the_invariant_core():
     assert missing == {}
 
 
+def test_code_generation_discipline_covers_requested_principles():
+    discipline = (
+        REPO / "skills" / "code-generation-discipline" / "SKILL.md"
+    ).read_text(encoding="utf-8").casefold()
+
+    assert {
+        "single responsibility",
+        "side effects",
+        "do not repeat yourself",
+        "parameter grouping",
+        "fail fast",
+        "guard clauses",
+        "single level of abstraction",
+        "explicit receiver",
+    } <= {
+        line.strip().removeprefix("- ").split(" — ", 1)[0]
+        for line in discipline.splitlines()
+    }
+
+
 def test_every_profile_install_name_is_activation_reachable(tmp_path, monkeypatch):
     """설치와 활성화는 다른 층이다. 실측으로 install 25개 중 4개만 활성화 가능했고,
     나머지 21개는 어느 phase에도 붙지 않았다. 이 테스트가 그 드리프트의 재발 가드다.

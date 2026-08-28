@@ -43,6 +43,15 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
 - Do not add unrelated refactors, formatting churn, docs, or error handling.
 - Prefer existing local patterns and helpers over new abstractions.
 - Add a new abstraction only when it removes real duplication or matches an existing pattern.
+- Single Responsibility — keep one concrete reason to change in each function, class, or module.
+- Side Effects — isolate necessary effects at named boundaries; keep computation pure where practical.
+- Do Not Repeat Yourself — share repeated policy or logic, not coincidental syntax.
+- Parameter Grouping — group values that travel and change together; do not create a type for unrelated arguments.
+- Fail Fast — reject invalid state at the earliest boundary that has enough context to explain it.
+- Guard Clauses — use early exits when they remove nesting without hiding the main path.
+- Single Level of Abstraction — keep one function's steps at one conceptual level; delegate lower-level detail behind named operations.
+- Explicit Receiver — make the owner of state or collaborator behavior clear at the call site without requiring language-specific receiver syntax.
+- Treat these as blocking only when the code creates a concrete correctness, data-loss, contract, testability, or high-risk maintainability defect. Style differences alone are non-blocking.
 - Use the selected language-specific guides as secondary checklists. Repo patterns and task scope stay first.
 - Default to no new comments during implementation. Apply `comment-authoring-discipline` as the semantic source for warranted comments and the final comment-quality pass.
 - Remove unused imports, variables, functions, and files created by the change.

@@ -1029,6 +1029,136 @@ def test_omp_provider_uses_consistent_private_state_snapshot(tmp_path):
         assert stat.S_IMODE((isolated / name).stat().st_mode) == 0o600
 
 
+def test_omp_provider_snapshot_includes_committed_wal_rows(tmp_path):
+    source = tmp_path / "omp-agent"
+    source.mkdir()
+    writer = sqlite3.connect(source / "agent.db")
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("CREATE TABLE seed (value INTEGER)")
+    writer.commit()
+    writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    writer.execute("INSERT INTO seed VALUES (42)")
+    writer.commit()
+    assert writer.execute("SELECT value FROM seed").fetchone() == (42,)
+    assert (source / "agent.db-wal").stat().st_size > 0
+
+    scratch = tmp_path / "omp-scratch"
+    scratch.mkdir()
+    env = {"HOME": str(tmp_path), "PI_CODING_AGENT_DIR": str(source)}
+    try:
+        PROVIDER_PROCESS._prepare_provider_state(
+            argv=("omp", "-p"),
+            env=env,
+            scratch=scratch,
+        )
+        isolated = Path(env["PI_CODING_AGENT_DIR"])
+        snapshot = sqlite3.connect(isolated / "agent.db")
+        try:
+            assert snapshot.execute("SELECT value FROM seed").fetchone() == (42,)
+        finally:
+            snapshot.close()
+    finally:
+        writer.close()
+
+
+def test_sqlite_backup_rejects_oversized_wal_before_target_creation(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "agent.db"
+    writer = sqlite3.connect(source)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("CREATE TABLE seed (value BLOB)")
+    writer.commit()
+    writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    max_size = source.stat().st_size
+    writer.execute("INSERT INTO seed VALUES (?)", (b"x" * (max_size * 4),))
+    writer.commit()
+    target = tmp_path / "snapshot.db"
+    target_opened = False
+    real_open = os.open
+
+    def track_target(path, flags, mode=0o777):
+        nonlocal target_opened
+        if Path(path) == target:
+            target_opened = True
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(PROVIDER_PROCESS.os, "open", track_target)
+    try:
+        with pytest.raises(WorktreeIsolationError, match="copy limit"):
+            PROVIDER_PROCESS._backup_owned_sqlite_file(
+                source,
+                target,
+                max_size=max_size,
+            )
+    finally:
+        writer.close()
+
+    assert not target_opened
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("unlink_fails", [False, True])
+def test_sqlite_backup_closes_failed_target_before_unlink(
+    tmp_path,
+    monkeypatch,
+    unlink_fails,
+):
+    source = tmp_path / "agent.db"
+    connection = sqlite3.connect(source)
+    connection.execute("CREATE TABLE seed (value INTEGER)")
+    connection.execute("INSERT INTO seed VALUES (1)")
+    connection.commit()
+    connection.close()
+    target = tmp_path / "snapshot.db"
+    opened_connections = []
+    real_connect = sqlite3.connect
+    real_identity_check = PROVIDER_PROCESS._assert_same_file_identity
+    identity_checks = 0
+
+    def track_connect(*args, **kwargs):
+        opened = real_connect(*args, **kwargs)
+        opened_connections.append(opened)
+        return opened
+
+    def fail_after_backup(*args, **kwargs):
+        nonlocal identity_checks
+        identity_checks += 1
+        if identity_checks == 2:
+            raise WorktreeIsolationError("injected post-backup failure")
+        return real_identity_check(*args, **kwargs)
+
+    real_unlink = Path.unlink
+
+    def assert_closed_before_unlink(path, *args, **kwargs):
+        if path == target:
+            with pytest.raises(sqlite3.ProgrammingError):
+                opened_connections[1].execute("SELECT 1")
+            if unlink_fails:
+                raise OSError("injected unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(PROVIDER_PROCESS.sqlite3, "connect", track_connect)
+    monkeypatch.setattr(
+        PROVIDER_PROCESS,
+        "_assert_same_file_identity",
+        fail_after_backup,
+    )
+    monkeypatch.setattr(Path, "unlink", assert_closed_before_unlink)
+
+    with pytest.raises(WorktreeIsolationError, match="injected post-backup failure"):
+        PROVIDER_PROCESS._backup_owned_sqlite_file(
+            source,
+            target,
+            max_size=1024 * 1024,
+        )
+
+    assert target.exists() is unlink_fails
+
+
+
 def test_reaped_provider_process_still_cleans_its_process_group(monkeypatch):
     from agent_flow import subprocess_pool
 

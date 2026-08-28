@@ -39,6 +39,7 @@ from agent_flow.adapters.generic import STUB_SENTINEL
 from agent_flow.artifact import (
     ACTIVE_LOCK,
     META_FILE,
+    RUNS_DIRNAME,
     create_run,
     mark_inactive,
     read_meta,
@@ -81,6 +82,7 @@ from agent_flow.core.worktrees import (
 )
 from agent_flow.core.worktree_isolation import (
     STATUS_DRIFT_KIND,
+    FileLeaseUnavailable,
     LeaderDrift,
     LeaderDriftError,
     LeaderSnapshot,
@@ -177,10 +179,10 @@ _FIX_COLLECTOR_ROUTE_KEYS = frozenset({"request-changes", "blocked", "error", "f
 # 대상은 workflow가 선언한 artifact뿐이고, 이 파일이 그 범위에 들면 복구 근거가
 # 복구 대상과 함께 사라진다.
 TRANSITIONS_FILE = "transitions.jsonl"
-# 전이 lease는 새 lock을 만들지 않고 run 생성이 이미 쓰는 lifecycle lease를 그대로
-# 잡는다. run 하나의 생성과 전이는 시간상 겹치지 않고, 같은 state root에서 동시에
-# 도는 run은 활성 run 가드가 이미 막는다. run_dir 안에 lock 파일을 새로 만들면
-# cleanup의 run 트리 검사와 산출물 목록에 그 파일이 섞인다.
+RUN_LIFECYCLE_LOCK = "lifecycle.lock"
+# Resume/advance는 run별 lease를 잡아 서로 다른 run을 막지 않는다. START는 run
+# 디렉터리가 생기기 전이라 runs 루트 lease를 쓰며, create_run의 active-run
+# 검증과 함께 새 run publication을 직렬화한다.
 ACCEPT_LEADER_DRIFT_FLAG = "--accept-leader-drift"
 
 
@@ -369,6 +371,15 @@ class Runner:
         # 첫 `capture_leader_snapshot`보다 먼저 돈다. 뒤에서 돌면 이미 오염된
         # 상태를 tripwire 기준선으로 굳혀 격리 검증 전체가 무의미해진다.
         assert_managed_hooks_registered(self.project_root, self.config_root)
+        try:
+            with exclusive_file_lease(self._lifecycle_lock_path()):
+                self._run_lifecycle(mode, task)
+        except FileLeaseUnavailable as exc:
+            raise WorktreeIsolationError(
+                "another lifecycle command is active for this run"
+            ) from exc
+
+    def _run_lifecycle(self, mode: ResumeMode, task: str) -> None:
         if mode == ResumeMode.START:
             activation = (
                 worktree_run_activation(
@@ -1065,6 +1076,18 @@ class Runner:
         """
         assert self.run_dir is not None
         with exclusive_file_lease(self._transition_lock_path()):
+            meta = read_meta(self.run_dir)
+            current_index = meta.get("phase_index")
+            current_phase = meta.get("current_phase")
+            if (
+                type(current_index) is not int
+                or current_index != transition.from_index
+                or current_phase != transition.from_phase
+            ):
+                raise WorktreeIsolationError(
+                    f"stale transition from {transition.from_phase}; "
+                    f"current phase is {current_phase or 'complete'}"
+                )
             self._append_transition_journal(transition)
             if not self._apply_transition(transition):
                 # 여기서 걸리는 것은 workflow가 선언한 artifact 경로가 run 밖을
@@ -1075,7 +1098,6 @@ class Runner:
                     f"{transition.to_phase or 'complete'} names an artifact path "
                     f"outside the run directory"
                 )
-            meta = read_meta(self.run_dir)
             self._advance_phase(meta, transition.to_index, transition.blocked)
             write_meta(self.run_dir, meta)
         self._emit_observation(
@@ -1089,6 +1111,11 @@ class Runner:
             },
         )
         return meta
+
+    def _lifecycle_lock_path(self) -> Path:
+        if self.run_dir is not None:
+            return self.run_dir / RUN_LIFECYCLE_LOCK
+        return self.state_root / RUNS_DIRNAME / RUN_LIFECYCLE_LOCK
 
     def _transition_lock_path(self) -> Path:
         assert self.run_dir is not None

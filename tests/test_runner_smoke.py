@@ -30,7 +30,7 @@ SRC_ROOT = KIT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from agent_flow.artifact import bind_review_evidence, ensure_review_binding
+from agent_flow.artifact import bind_review_evidence, ensure_review_binding, write_meta
 from agent_flow.core.review_evidence import (
     ReviewerOutcome,
     review_evidence_record,
@@ -3285,6 +3285,7 @@ def test_backward_route_invalidates_target_artifact(tmp_path: Path):
         Phase(id="pr-watch", description="", routes={"comments": "pr-comment-fix"}, artifact="artifacts/pr-watch.md"),
         Phase(id="pr-comment-fix", description="", routes={"default": "pr-watch"}, artifact="artifacts/pr-comment-fix.md"),
     ]
+    write_meta(run_dir, {"phase_index": 1, "current_phase": "pr-comment-fix"})
 
     transition = runner._plan_transition(1, runner.phases[1])
     assert (transition.to_index, transition.blocked) == (0, False)
@@ -3315,6 +3316,7 @@ def test_backward_route_invalidates_intermediate_fresh_artifacts(tmp_path: Path)
     runner.run_dir = run_dir
     runner.config_root = tmp_path
     runner.phases = phases
+    write_meta(run_dir, {"phase_index": 3, "current_phase": "architecture-review"})
 
     transition = runner._plan_transition(3, phases[3])
     assert (transition.to_index, transition.blocked) == (0, False)
@@ -3793,6 +3795,73 @@ def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
         assert "`reviewer-source: sub-agent`" in prompt
         assert "Do not wrap either line" in prompt
         assert "exactly one unfenced plain line" in prompt
+
+
+def test_state_integrity_angle_covers_required_risks():
+    template = KIT_ROOT / "templates" / "_shared" / "review" / "state-integrity.md"
+
+    assert template.is_file()
+    contract = template.read_text(encoding="utf-8").casefold()
+    for required in (
+        "race condition",
+        "partial write",
+        "atomic update",
+        "transaction",
+        "rollback",
+        "row lock",
+        "idempotency key",
+    ):
+        assert required in contract
+
+
+def test_state_integrity_angle_uses_high_signal_selectors_only(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.runner import Phase
+
+    adapter = HostedAdapter("codex")
+    adapter._profile_snapshot = {"review_angles": []}
+    phase = Phase(id="final-review", description="", multi_review=True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    adapter._changed_files = ("src/ui/Copy.tsx",)
+    adapter._task_text = "change button wording"
+    unrelated = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    assert [job.angle_id for job in unrelated] == [
+        "generalist",
+        "architecture-design",
+    ]
+
+    adapter._changed_files = ("migrations/20260828_add_orders.sql",)
+    adapter._task_text = ""
+    persistent_path = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    assert [job.angle_id for job in persistent_path] == [
+        "generalist",
+        "architecture-design",
+        "state-integrity",
+    ]
+
+    adapter._changed_files = ("src/ui/Copy.tsx",)
+    adapter._task_text = "prevent duplicate payment charge"
+    persistent_task = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    assert [job.angle_id for job in persistent_task] == [
+        "generalist",
+        "architecture-design",
+        "state-integrity",
+    ]
+
+
+def test_state_integrity_template_requires_concrete_blocking_evidence():
+    template = KIT_ROOT / "templates" / "_shared" / "review" / "state-integrity.md"
+
+    assert template.is_file()
+    contract = template.read_text(encoding="utf-8").casefold()
+    assert "style differences" in contract
+    assert "non-blocking" in contract
+    assert "concrete evidence" in contract
+    assert "data loss" in contract
+    assert "duplicate side effect" in contract
 
 
 def test_multi_review_precomputes_diff_outside_reviewer_sandbox(tmp_path: Path):

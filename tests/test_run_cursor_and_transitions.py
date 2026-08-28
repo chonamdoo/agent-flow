@@ -34,6 +34,7 @@ from agent_flow.core.worktree_isolation import (
     HOST_PHASE_LEADER_BASELINE_KEY,
     LeaderSnapshot,
     WorktreeIsolationError,
+    exclusive_file_lease,
     leader_snapshot_payload,
     leader_sweep_scope,
     real_path,
@@ -353,6 +354,47 @@ def test_backward_route_journals_what_it_invalidated_and_keeps_the_journal(
     assert journal.is_file()
     assert (runner.run_dir / "explore.md").is_file()
     assert read_meta(runner.run_dir)["current_phase"] == "review"
+
+
+def test_concurrent_resume_cannot_commit_stale_transition(tmp_path: Path):
+    runner, phases = _development_runner(tmp_path)
+    ids = [phase.id for phase in phases]
+    fix_index = ids.index("fix-loop")
+    review_index = ids.index("review")
+    write_meta(
+        runner.run_dir,
+        {"phase_index": fix_index, "current_phase": "fix-loop"},
+    )
+    stale = runner._plan_transition(fix_index, phases[fix_index])
+    write_meta(
+        runner.run_dir,
+        {"phase_index": review_index, "current_phase": "review"},
+    )
+
+    assert hasattr(runner, "_lifecycle_lock_path")
+    assert runner._lifecycle_lock_path().name == "lifecycle.lock"
+    with pytest.raises(WorktreeIsolationError, match="stale transition"):
+        runner._commit_transition(stale)
+
+    current = read_meta(runner.run_dir)
+    assert current["phase_index"] == review_index
+    assert current["current_phase"] == "review"
+
+def test_independent_runs_have_independent_lifecycle_leases(tmp_path: Path):
+    definition = _development()
+    phases = _phases_from_definition(definition)
+    first_dir = tmp_path / ".agent-flow" / "runs" / "r1"
+    second_dir = tmp_path / ".agent-flow" / "runs" / "r2"
+    first_dir.mkdir(parents=True)
+    second_dir.mkdir(parents=True)
+    first = _runner(first_dir, phases)
+    second = _runner(second_dir, phases)
+
+    assert first._lifecycle_lock_path() == first_dir / "lifecycle.lock"
+    assert second._lifecycle_lock_path() == second_dir / "lifecycle.lock"
+    with exclusive_file_lease(first._lifecycle_lock_path()):
+        with exclusive_file_lease(second._lifecycle_lock_path()):
+            assert first._lifecycle_lock_path() != second._lifecycle_lock_path()
 
 
 def test_an_interrupted_transition_is_completed_on_the_next_run_and_is_idempotent(

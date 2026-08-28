@@ -11,6 +11,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -6783,6 +6784,373 @@ if (codexContext !== undefined) {
             watch_text = watch.read_text(encoding="utf-8")
             self.assertIn("status: ci-failed", watch_text)
             self.assertIn("https://github.com/acme/demo/pull/7", watch_text)
+
+    def test_push_watch_tick_replays_incomplete_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(
+                subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
+                0,
+            )
+            run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                "cat <<'JSON'\n"
+                '{"url":"https://github.com/acme/demo/pull/7",'
+                '"reviewDecision":"REVIEW_REQUIRED",'
+                '"statusCheckRollup":[{"name":"test","status":"COMPLETED",'
+                '"conclusion":"FAILURE"}]}\n'
+                "JSON\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+
+            first = subprocess.run(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=checkout,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            state_path = project_root / ".agent-flow" / "state" / "push-watch.json"
+            artifact = run_dir / _node_phase_artifact("pr-watch")
+            captured_state = json.loads(state_path.read_text(encoding="utf-8"))
+            captured_artifact = artifact.read_text(encoding="utf-8")
+            self.assertIn("observation_id", captured_state)
+            self.assertEqual(captured_state["iterations"], 1)
+
+            intent = project_root / ".agent-flow" / "state" / "push-watch-intent.json"
+            intent.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "run_id": captured_state["run_id"],
+                        "run_dir": captured_state["run_dir"],
+                        "observation_id": captured_state["observation_id"],
+                        "artifact": captured_artifact,
+                        "state": captured_state,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_path.write_text(
+                json.dumps({"status": "watching", "iterations": 0}),
+                encoding="utf-8",
+            )
+            artifact.write_text("status: stale\n", encoding="utf-8")
+
+            replay = subprocess.run(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=checkout,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+
+            self.assertEqual(replay.returncode, 0, replay.stderr)
+            self.assertEqual(
+                json.loads(state_path.read_text(encoding="utf-8")),
+                captured_state,
+            )
+            self.assertEqual(artifact.read_text(encoding="utf-8"), captured_artifact)
+            self.assertFalse(intent.exists())
+
+    def test_push_watch_tick_restores_unchanged_observation_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(
+                subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
+                0,
+            )
+            run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                "cat <<'JSON'\n"
+                '{"url":"https://github.com/acme/demo/pull/7",'
+                '"reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[]}\n'
+                "JSON\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+            first = subprocess.run(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=checkout,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            state_path = project_root / ".agent-flow" / "state" / "push-watch.json"
+            artifact = run_dir / _node_phase_artifact("pr-watch")
+            expected_artifact = artifact.read_text(encoding="utf-8")
+            artifact.unlink()
+
+            unchanged = subprocess.run(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=checkout,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+
+            self.assertEqual(unchanged.returncode, 0, unchanged.stderr)
+            self.assertEqual(artifact.read_text(encoding="utf-8"), expected_artifact)
+            self.assertEqual(
+                json.loads(state_path.read_text(encoding="utf-8"))["iterations"],
+                1,
+            )
+
+    def test_push_watch_tick_rejects_intent_from_another_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(
+                subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
+                0,
+            )
+            run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                "cat <<'JSON'\n"
+                '{"url":"https://github.com/acme/demo/pull/7",'
+                '"reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[]}\n'
+                "JSON\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            artifact = run_dir / _node_phase_artifact("pr-watch")
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("status: current\n", encoding="utf-8")
+            former_run_dir = Path(temp_dir) / "foreign" / "former-run"
+            former_run_dir.mkdir(parents=True)
+            (former_run_dir / "active").touch()
+            intent = project_root / ".agent-flow" / "state" / "push-watch-intent.json"
+            intent.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "run_id": "former-run",
+                        "run_dir": str(former_run_dir),
+                        "observation_id": "former-observation",
+                        "artifact": "status: former\n",
+                        "state": {
+                            "run_id": "former-run",
+                            "run_dir": str(former_run_dir),
+                            "observation_id": "former-observation",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            replay = subprocess.run(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=checkout,
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+            )
+
+            self.assertEqual(replay.returncode, 1)
+            self.assertIn("push-watch intent belongs to another active run", replay.stderr)
+            self.assertEqual(artifact.read_text(encoding="utf-8"), "status: current\n")
+            self.assertTrue(intent.is_file())
+
+    def test_push_watch_tick_retires_intent_from_finished_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(
+                subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
+                0,
+            )
+            run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                "cat <<'JSON'\n"
+                '{"url":"https://github.com/acme/demo/pull/7",'
+                '"reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[]}\n'
+                "JSON\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            finished_run_dir = run_dir.parent / "finished-run"
+            finished_run_dir.mkdir()
+            intent = project_root / ".agent-flow" / "state" / "push-watch-intent.json"
+            intent.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "run_id": "finished-run",
+                        "run_dir": str(finished_run_dir),
+                        "observation_id": "finished-observation",
+                        "artifact": "status: former\n",
+                        "state": {
+                            "run_id": "finished-run",
+                            "run_dir": str(finished_run_dir),
+                            "observation_id": "finished-observation",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            replay = subprocess.run(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=checkout,
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+            )
+
+            self.assertEqual(replay.returncode, 0, replay.stderr)
+            self.assertFalse(intent.exists())
+            self.assertNotEqual(
+                (run_dir / _node_phase_artifact("pr-watch")).read_text(encoding="utf-8"),
+                "status: former\n",
+            )
+
+    def test_push_watch_tick_excludes_concurrent_replayer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(
+                subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
+                0,
+            )
+            run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            ready = Path(temp_dir) / "gh-ready"
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                'touch \"$PUSH_WATCH_TEST_READY\"\n'
+                "sleep 1\n"
+                "cat <<'JSON'\n"
+                '{"url":"https://github.com/acme/demo/pull/7",'
+                '"reviewDecision":"REVIEW_REQUIRED",'
+                '"statusCheckRollup":[{"name":"test","status":"COMPLETED",'
+                '"conclusion":"FAILURE"}]}\n'
+                "JSON\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                "PUSH_WATCH_TEST_READY": str(ready),
+            }
+            first = subprocess.Popen(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=checkout,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+            deadline = time.monotonic() + 10
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists())
+
+            second = subprocess.run(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=checkout,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            first_stdout, first_stderr = first.communicate(timeout=10)
+
+            self.assertEqual(first.returncode, 0, first_stdout + first_stderr)
+            self.assertEqual(second.returncode, 1)
+            self.assertIn("push-watch tick is already active", second.stderr)
+            state = json.loads(
+                (
+                    project_root / ".agent-flow" / "state" / "push-watch.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(state["iterations"], 1)
+            self.assertTrue((run_dir / _node_phase_artifact("pr-watch")).is_file())
+
+    def test_push_watch_stale_lock_reclaim_preserves_generation_tombstone(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(
+                subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
+                0,
+            )
+            _, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                "cat <<'JSON'\n"
+                '{"url":"https://github.com/acme/demo/pull/7",'
+                '"reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[]}\n'
+                "JSON\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            token = "a" * 32
+            lock = project_root / ".agent-flow" / "state" / "push-watch.lock"
+            lock.mkdir(parents=True)
+            (lock / "owner.json").write_text(
+                json.dumps({"pid": 999_999_999, "token": token}),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=checkout,
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            retired = lock.with_name(f"{lock.name}.retired-{token}")
+            self.assertTrue((retired / "owner.json").is_file())
 
     def test_node_push_watch_tick_blocks_before_pr_watch_phase(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

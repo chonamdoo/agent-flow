@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from types import MappingProxyType
-from typing import NamedTuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from agent_flow.adapters.base import Adapter
 from agent_flow.artifact import bind_review_evidence, ensure_review_binding
@@ -34,6 +34,7 @@ from agent_flow.core.review_evidence import (
     review_results_path,
     serialize_review_results,
 )
+from agent_flow.core.skill_resolver import selector_matches
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
     git_proves_ancestor,
@@ -42,20 +43,19 @@ from agent_flow.core.worktree_isolation import (
     write_run_artifact_text,
 )
 from agent_flow.multi_review import (
-    Distribution,
     FINAL_REVIEW_PHASE_ID,
     REVIEW_CLI_NAMES,
+    Distribution,
     ReviewerJob,
     ReviewExecution,
     distribute,
     distribute_final_review,
     eligible_reviewer_names,
-    reviewer_result_error,
     review_job_id,
+    reviewer_result_error,
     run_distribution,
 )
 from agent_flow.subprocess_pool import SubprocessResult
-
 
 if TYPE_CHECKING:
     from agent_flow.runner import Phase
@@ -74,7 +74,7 @@ _BASE_REF_CHARS = frozenset(
 # angle 수 × provider 수만큼 늘어난다. 계층 계약을 요구하지 않는 변경에서 그 angle을
 # 그대로 띄우면 resolver 쪽 축소가 review phase에서 전부 사라진다 — 이 template이
 # `clean-architecture-core/SKILL.md`를 읽으라고 직접 지시하기 때문이다.
-_BASE_REVIEW_ANGLES: tuple[dict[str, str], ...] = (
+_BASE_REVIEW_ANGLES: tuple[dict[str, object], ...] = (
     {
         "id": "generalist",
         "prompt": "templates/_shared/review/architecture.md",
@@ -82,6 +82,41 @@ _BASE_REVIEW_ANGLES: tuple[dict[str, str], ...] = (
     {
         "id": "architecture-design",
         "prompt": "templates/_shared/review/architecture-design.md",
+    },
+    {
+        "id": "state-integrity",
+        "prompt": "templates/_shared/review/state-integrity.md",
+        "task_terms": (
+            "database",
+            "db transaction",
+            "sql",
+            "orm",
+            "migration",
+            "payment",
+            "billing",
+            "inventory",
+            "stock",
+            "persistent state",
+            "race condition",
+            "partial write",
+            "row lock",
+            "idempotency",
+        ),
+        "path_globs": (
+            "**/*.sql",
+            "**/migration/**",
+            "**/migrations/**",
+            "**/database/**",
+            "**/db/**",
+            "**/dao/**",
+            "**/payment/**",
+            "**/payments/**",
+            "**/billing/**",
+            "**/inventory/**",
+            "**/stock/**",
+            "**/persistence/**",
+            "**/storage/**",
+        ),
     },
     {
         "id": "clean-architecture",
@@ -670,34 +705,62 @@ def _is_unborn_head_failure(result) -> bool:
 
 
 def _applicable_angles(
-    angles: list[dict[str, str]] | tuple[dict[str, str], ...],
+    angles: list[dict[str, object]] | tuple[dict[str, object], ...],
     phase: Phase,
     project_root: Path,
     adapter: Adapter,
     *,
     providers: Sequence[str],
-) -> list[dict[str, str]]:
-    gated = [angle for angle in angles if angle.get("requires")]
-    if not gated:
-        return list(angles)
+) -> list[dict[str, object]]:
+    skill_gated = [angle for angle in angles if angle.get("requires")]
     required: set[str] = set()
-    for provider in providers:
-        resolution = phase_skill_resolution(
-            adapter.config_root_or(project_root),
-            phase.id,
-            phase_skills=getattr(phase, "skills", None),
-            profile=adapter._profile_snapshot,
-            changed_files=adapter._changed_files,
-            task_text=adapter._task_text,
-            concerns=adapter._concerns,
-            host=provider,
-        )
-        required.update(skill.name for skill in resolution.required)
+    if skill_gated:
+        for provider in providers:
+            resolution = phase_skill_resolution(
+                adapter.config_root_or(project_root),
+                phase.id,
+                phase_skills=getattr(phase, "skills", None),
+                profile=adapter._profile_snapshot,
+                changed_files=adapter._changed_files,
+                task_text=adapter._task_text,
+                concerns=adapter._concerns,
+                host=provider,
+            )
+            required.update(skill.name for skill in resolution.required)
     return [
         angle
         for angle in angles
-        if not angle.get("requires") or _angle_requirement_met(angle["requires"], required)
+        if (
+            not angle.get("requires")
+            or _angle_requirement_met(str(angle["requires"]), required)
+        )
+        and _angle_selectors_match(angle, adapter)
     ]
+
+
+def _angle_selectors_match(angle: Mapping[str, object], adapter: Adapter) -> bool:
+    if "task_terms" not in angle and "path_globs" not in angle:
+        return True
+    return selector_matches(
+        task_terms=_angle_selector_values(angle, "task_terms"),
+        path_globs=_angle_selector_values(angle, "path_globs"),
+        changed_files=adapter._changed_files,
+        task_text=adapter._task_text,
+    )
+
+
+def _angle_selector_values(
+    angle: Mapping[str, object], key: str
+) -> tuple[str, ...]:
+    raw = angle.get(key, ())
+    if not isinstance(raw, (list, tuple)) or any(
+        not isinstance(value, str) or not value.strip() for value in raw
+    ):
+        angle_id = str(angle.get("id") or "<unknown>")
+        raise ValueError(
+            f"review angle {angle_id!r} {key} must be a list of non-empty strings"
+        )
+    return tuple(value.strip() for value in raw)
 
 
 def _angle_requirement_met(requirement: str, required: set[str]) -> bool:
@@ -821,7 +884,7 @@ def _review_angle_output(run_dir: Path, phase_id: str, angle_id: str) -> Path:
 
 
 def _merge_review_angles(
-    baseline: tuple[dict[str, str], ...],
+    baseline: Sequence[Mapping[str, object]],
     profile_angles: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
     merged: dict[str, dict[str, object]] = {

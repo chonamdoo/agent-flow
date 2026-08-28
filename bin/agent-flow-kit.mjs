@@ -59,6 +59,7 @@ import {
   PRUNE_BACKUP_VERSIONED,
   PRUNE_NOTICE_PREFIX,
   pruneRetiredHooks,
+  isSymlinkPath,
   pruneRetiredHookScripts,
   pruneRetiredManagedScripts,
   pruneUninstalledProfiles,
@@ -87,6 +88,7 @@ import {
   SKILL_INDEX_END,
   SKILL_INDEX_START,
   skillIndexBlock,
+  SYMLINK_SKIP_NOTICE_PREFIX,
   syncRecordedKitAssets,
   tomlBasicString,
   uniqueStrings,
@@ -462,29 +464,17 @@ function runWorkflowCommand(args) {
 
   if (subcommand === "push-watch-tick") {
     assertInstalled(root);
-    const state = readCurrentRun(root);
-    if (state.phase !== "pr-watch") {
-      throw new Error(`blocked: push-watch-tick requires current phase pr-watch, got ${state.phase}`);
-    }
-    const runDir = resolveRunDir(root, state.run_dir);
-    const pr = readPullRequestStatus(process.cwd());
-    const watchStatus = pullRequestWatchStatus(pr);
-    const artifact = path.join(runDir, "artifacts", "pr-watch.md");
-    writeManagedFile(
-      artifact,
-      [`status: ${watchStatus}`, `pr: ${pr.url ?? "unknown"}`, `recorded_at: ${new Date().toISOString()}`, ""].join("\n"),
-    );
-    const previous = fs.existsSync(pushWatchStatePath(root))
-      ? JSON.parse(fs.readFileSync(pushWatchStatePath(root), "utf8"))
-      : {};
-    writeJson(pushWatchStatePath(root), {
-      ...previous,
-      status: watchStatus,
-      pr: pr.url ?? null,
-      iterations: Number(previous.iterations ?? 0) + 1,
-      updated_at: new Date().toISOString(),
+    withPushWatchLock(root, () => {
+      const state = readCurrentRun(root);
+      if (state.phase !== "pr-watch") {
+        throw new Error(`blocked: push-watch-tick requires current phase pr-watch, got ${state.phase}`);
+      }
+      const runDir = resolveRunDir(root, state.run_dir);
+      const pr = readPullRequestStatus(process.cwd());
+      const watchStatus = pullRequestWatchStatus(pr);
+      commitPushWatchObservation(root, runDir, state.run_id, pr, watchStatus);
+      console.log(`push-watch status=${watchStatus}`);
     });
-    console.log(`push-watch status=${watchStatus}`);
     return;
   }
 
@@ -1358,6 +1348,258 @@ function pushWatchStatePath(root) {
   return path.join(root, ".agent-flow", "state", "push-watch.json");
 }
 
+
+function pushWatchIntentPath(root) {
+  return path.join(root, ".agent-flow", "state", "push-watch-intent.json");
+}
+
+
+function pushWatchLockPath(root) {
+  return path.join(root, ".agent-flow", "state", "push-watch.lock");
+}
+
+
+function withPushWatchLock(root, operation) {
+  const ownership = acquirePushWatchLock(root);
+  try {
+    return operation();
+  } finally {
+    releasePushWatchLock(ownership);
+  }
+}
+
+
+function acquirePushWatchLock(root) {
+  const lock = pushWatchLockPath(root);
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  const token = randomBytes(16).toString("hex");
+  const pending = `${lock}.${process.pid}.${token}.pending`;
+  fs.mkdirSync(pending, { mode: 0o700 });
+  atomicWriteFileSync(
+    path.join(pending, "owner.json"),
+    `${JSON.stringify({ pid: process.pid, token }, null, 2)}\n`,
+    { mode: 0o600, durable: true },
+  );
+  try {
+    fs.renameSync(pending, lock);
+    fsyncParentDirectory(lock);
+    return { lock, token };
+  } catch (error) {
+    fs.rmSync(pending, { recursive: true, force: true });
+    if (error?.code !== "EEXIST" && error?.code !== "ENOTEMPTY") {
+      throw error;
+    }
+    if (reclaimStalePushWatchLock(lock)) {
+      return acquirePushWatchLock(root);
+    }
+    throw new Error("blocked: push-watch tick is already active");
+  }
+}
+
+
+function reclaimStalePushWatchLock(lock) {
+  let owner;
+  try {
+    owner = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8"));
+  } catch {
+    return false;
+  }
+  if (
+    !Number.isInteger(owner?.pid)
+    || typeof owner?.token !== "string"
+    || !/^[0-9a-f]{32}$/.test(owner.token)
+  ) {
+    return false;
+  }
+  if (processIsAlive(owner.pid)) {
+    return false;
+  }
+  const retired = `${lock}.retired-${owner.token}`;
+  try {
+    fs.renameSync(lock, retired);
+  } catch (error) {
+    if (
+      error?.code === "ENOENT"
+      || error?.code === "EEXIST"
+      || error?.code === "ENOTEMPTY"
+    ) {
+      return false;
+    }
+    throw error;
+  }
+  fsyncParentDirectory(lock);
+  return true;
+}
+
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") {
+      return false;
+    }
+    if (error?.code === "EPERM") {
+      return true;
+    }
+    throw error;
+  }
+}
+
+
+function releasePushWatchLock({ lock, token }) {
+  const owner = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8"));
+  if (owner?.token !== token) {
+    throw new Error("blocked: push-watch lock ownership changed");
+  }
+  fs.rmSync(lock, { recursive: true });
+  fsyncParentDirectory(lock);
+}
+
+
+
+function pushWatchArtifact(status, prUrl, recordedAt) {
+  return [
+    `status: ${status}`,
+    `pr: ${prUrl ?? "unknown"}`,
+    `recorded_at: ${recordedAt}`,
+    "",
+  ].join("\n");
+}
+
+
+function commitPushWatchObservation(root, runDir, runId, pr, watchStatus) {
+  if (typeof runId !== "string" || !runId) {
+    throw new Error("blocked: active push-watch run has no run id");
+  }
+  const observationId = crypto
+    .createHash("sha256")
+    .update(JSON.stringify({ runId, pr, watchStatus }))
+    .digest("hex");
+  while (true) {
+    replayPushWatchIntent(root, runDir, runId);
+    const previous = fs.existsSync(pushWatchStatePath(root))
+      ? JSON.parse(fs.readFileSync(pushWatchStatePath(root), "utf8"))
+      : {};
+    const prUrl = pr.url ?? null;
+    if (previous.observation_id === observationId) {
+      writeManagedFile(
+        path.join(runDir, "artifacts", "pr-watch.md"),
+        pushWatchArtifact(watchStatus, prUrl, previous.updated_at),
+        { durable: true },
+      );
+      return previous;
+    }
+    const recordedAt = new Date().toISOString();
+    const artifact = pushWatchArtifact(watchStatus, prUrl, recordedAt);
+    const state = {
+      ...previous,
+      run_id: runId,
+      run_dir: runDir,
+      status: watchStatus,
+      pr: prUrl,
+      observation_id: observationId,
+      iterations: Number(previous.iterations ?? 0) + 1,
+      updated_at: recordedAt,
+    };
+    if (!publishPushWatchIntent(root, {
+      version: 1,
+      run_id: runId,
+      run_dir: runDir,
+      observation_id: observationId,
+      artifact,
+      state,
+    })) {
+      continue;
+    }
+    replayPushWatchIntent(root, runDir, runId);
+    return state;
+  }
+}
+
+
+function publishPushWatchIntent(root, payload) {
+  const intent = pushWatchIntentPath(root);
+  fs.mkdirSync(path.dirname(intent), { recursive: true });
+  const pending = `${intent}.${process.pid}.${randomBytes(8).toString("hex")}.pending`;
+  atomicWriteFileSync(pending, `${JSON.stringify(payload, null, 2)}\n`, {
+    mode: 0o600,
+    durable: true,
+  });
+  try {
+    fs.linkSync(pending, intent);
+    fsyncParentDirectory(intent);
+    return true;
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      return false;
+    }
+    throw error;
+  } finally {
+    fs.rmSync(pending, { force: true });
+  }
+}
+
+
+function replayPushWatchIntent(root, runDir, runId) {
+  const intent = pushWatchIntentPath(root);
+  if (!fs.existsSync(intent)) {
+    return null;
+  }
+  const payload = JSON.parse(fs.readFileSync(intent, "utf8"));
+  if (
+    payload?.version !== 1
+    || typeof payload.run_id !== "string"
+    || typeof payload.run_dir !== "string"
+    || !path.isAbsolute(payload.run_dir)
+    || path.basename(payload.run_dir) !== payload.run_id
+    || typeof payload.observation_id !== "string"
+    || typeof payload.artifact !== "string"
+    || !payload.state
+    || payload.state.run_id !== payload.run_id
+    || payload.state.run_dir !== payload.run_dir
+    || payload.state.observation_id !== payload.observation_id
+  ) {
+    throw new Error("blocked: push-watch intent is malformed");
+  }
+  if (payload.run_id !== runId || !samePath(payload.run_dir, runDir)) {
+    if (fs.existsSync(path.join(payload.run_dir, "active"))) {
+      throw new Error(
+        `blocked: push-watch intent belongs to another active run (${payload.run_dir}); `
+        + "finish or abort that run before retrying push-watch",
+      );
+    }
+    fs.rmSync(intent);
+    fsyncParentDirectory(intent);
+    return null;
+  }
+  writeManagedFile(
+    path.join(runDir, "artifacts", "pr-watch.md"),
+    payload.artifact,
+    { durable: true },
+  );
+  writeJson(pushWatchStatePath(root), payload.state, { durable: true });
+  fs.rmSync(intent, { force: true });
+  fsyncParentDirectory(intent);
+  return payload.state;
+}
+
+
+function fsyncParentDirectory(pathName) {
+  let descriptor = null;
+  try {
+    descriptor = fs.openSync(path.dirname(pathName), "r");
+    fs.fsyncSync(descriptor);
+  } catch {
+    // Directory fsync is not portable; file publication is still atomic.
+  } finally {
+    if (descriptor !== null) {
+      fs.closeSync(descriptor);
+    }
+  }
+}
+
 function currentBranch(root) {
   const result = safeSpawnSync("git", ["branch", "--show-current"], {
     cwd: root,
@@ -1424,9 +1666,8 @@ function optionValue(args, name) {
   return args[index + 1];
 }
 
-function writeJson(pathName, payload) {
-  fs.mkdirSync(path.dirname(pathName), { recursive: true });
-  fs.writeFileSync(pathName, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+function writeJson(pathName, payload, options = {}) {
+  atomicWriteFileSync(pathName, `${JSON.stringify(payload, null, 2)}\n`, options);
 }
 
 function readExistingKit(agentFlowDir) {
@@ -1448,9 +1689,8 @@ function writeFileIfMissing(pathName, content) {
   }
 }
 
-function writeManagedFile(pathName, content) {
-  fs.mkdirSync(path.dirname(pathName), { recursive: true });
-  fs.writeFileSync(pathName, content, "utf8");
+function writeManagedFile(pathName, content, options = {}) {
+  atomicWriteFileSync(pathName, content, options);
 }
 
 function writeManagedFileIfMissingOrSame(pathName, content, force = false) {
@@ -1490,6 +1730,13 @@ function copyBundledDirIfMissingOrSame(
     sourceNames.add(entry.name);
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
+    // 대상 자리가 링크면 여기서 끝난다. 제거 분기로 보내면 링크(혹은 링크 너머의
+    // 실제 디렉터리)를 지우고, 복사 분기로 보내면 링크 너머 - 대개 프로젝트 밖 -
+    // 에 번들 파일을 만든다. 둘 다 우리가 소유를 증명하지 못한 자리다.
+    if (isSymlinkPath(destPath)) {
+      console.log(`${SYMLINK_SKIP_NOTICE_PREFIX}${destPath}`);
+      continue;
+    }
     if (entry.isDirectory()) {
       if (isRoot && allowedRootDirs && !allowedRootDirs.has(entry.name)) {
         removeManagedDirIfSame(srcPath, destPath, force);

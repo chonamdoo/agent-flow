@@ -66,6 +66,7 @@ import {
   pruneRetiredManagedScripts,
   BOOTSTRAP_ADOPTED_NOTICE_PREFIX,
   BOOTSTRAP_KEPT_NOTICE_PREFIX,
+  isSymlinkPath,
   pruneUninstalledProfiles,
   pathHasSymlink,
   READ_TOOL_MATCHER,
@@ -93,6 +94,7 @@ import {
   SKILL_UPGRADE_NOTICE_PREFIX,
   skillIndexBlock,
   SYMLINK_FOLLOW_NOTICE_PREFIX,
+  SYMLINK_SKIP_NOTICE_PREFIX,
   syncRecordedKitAssets,
   tomlBasicString,
   uniqueStrings,
@@ -334,6 +336,11 @@ function copyDir(
     sourceNames.add(entry.name);
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
+    if (isSymlinkPath(destPath)) {
+      console.log(`${SYMLINK_SKIP_NOTICE_PREFIX}${destPath}`);
+      skipped += 1;
+      continue;
+    }
     if (entry.isDirectory()) {
       if (isRoot && allowedRootDirs && !allowedRootDirs.has(entry.name)) {
         const r = removeDirIfSame(srcPath, destPath, force);
