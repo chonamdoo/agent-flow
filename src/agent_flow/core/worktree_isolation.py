@@ -524,7 +524,7 @@ def _ensure_lease_parent(path: Path) -> None:
 
 
 @contextlib.contextmanager
-def exclusive_file_lease(path: Path) -> Iterator[None]:
+def exclusive_file_lease(path: Path, *, wait: bool = False) -> Iterator[None]:
     """Hold a crash-released exclusive lease on one regular file."""
     try:
         _ensure_lease_parent(path)
@@ -535,7 +535,8 @@ def exclusive_file_lease(path: Path) -> Iterator[None]:
         ) from exc
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            operation = fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB
+            fcntl.flock(fd, operation)
             _assert_lock_file_binding(path, fd)
         except WorktreeIsolationError as exc:
             raise FileLeaseUnavailable(

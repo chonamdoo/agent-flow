@@ -5,6 +5,7 @@
 phase 엔벨로프에 실리고, agent가 그것을 끌 수 없다.
 """
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor
 
 import hashlib
 import json
@@ -20,13 +21,15 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from agent_flow.adapters.generic import GenericAdapter
-from agent_flow.core import design_value_check
+from agent_flow.core import design_ledger as DESIGN_LEDGER, design_value_check
 from agent_flow.core.design_ledger import (
     LEDGER_FILE,
     MANUAL_SPEC_APPROVALS_FILE,
     SPEC_CAPTURE_FILE,
+    SPEC_CONFIRMATION_FILE,
     capture_design_ledger,
     confirm_current_spec_changes,
+    manual_spec_approval_statement,
     ledger_prompt_block,
     missing_design_value_markers,
     parse_declared_concerns,
@@ -35,6 +38,7 @@ from agent_flow.core.design_ledger import (
     pending_spec_changes_for_run,
     read_ledger,
     read_manual_spec_approvals,
+    record_manual_spec_approval,
     render_spec_changes,
 )
 from agent_flow.runner import Phase
@@ -402,6 +406,59 @@ verify: manual
 
     assert "For a manual verification, ask the user in this chat." in prompt
     assert "agent-flow spec approve <SPEC-ID> --run-dir <run-dir>" in prompt
+
+
+def test_concurrent_manual_spec_approvals_preserve_both(tmp_path):
+    artifact = "## Spec Items\n\n" + "\n".join(
+        f"SPEC-{index}: Confirm item {index}.\nverify: manual"
+        for index in range(1, 17)
+    )
+    _capture(tmp_path, "design", artifact)
+    approvals = [
+        (
+            f"SPEC-{index}",
+            manual_spec_approval_statement(tmp_path, f"SPEC-{index}"),
+        )
+        for index in range(1, 17)
+    ]
+
+    def approve(item: tuple[str, str]) -> None:
+        spec_id, statement = item
+        record_manual_spec_approval(tmp_path, spec_id, statement)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(approve, approvals))
+
+    assert read_manual_spec_approvals(tmp_path) == frozenset(
+        spec_id for spec_id, _ in approvals
+    )
+
+
+@pytest.mark.parametrize("failing_writer", ["write_ledger", "_write_capture_state"])
+def test_spec_confirmation_replays_after_each_intent_step(
+    tmp_path, monkeypatch, failing_writer
+):
+    _capture(tmp_path, "design", SPEC_ARTIFACT)
+    changed = SPEC_ARTIFACT.replace(
+        "Empty search results show the empty state.",
+        "Empty search results show a retry action.",
+    )
+    (tmp_path / "design.md").write_text(changed, encoding="utf-8")
+    original = getattr(DESIGN_LEDGER, failing_writer)
+
+    def interrupt(*args, **kwargs):
+        raise OSError("injected interruption")
+
+    monkeypatch.setattr(DESIGN_LEDGER, failing_writer, interrupt)
+    with pytest.raises(OSError, match="injected interruption"):
+        confirm_current_spec_changes(tmp_path)
+    monkeypatch.setattr(DESIGN_LEDGER, failing_writer, original)
+
+    confirmation = confirm_current_spec_changes(tmp_path)
+
+    assert confirmation == tmp_path / SPEC_CONFIRMATION_FILE
+    assert pending_spec_changes_for_run(tmp_path) == ()
+    assert read_ledger(tmp_path).errors == ()
 
 def test_source_spec_items_require_one_valid_verifier(tmp_path):
     artifact = """## Spec Items

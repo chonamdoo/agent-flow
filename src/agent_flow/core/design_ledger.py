@@ -20,11 +20,13 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent_flow.core.atomic_io import atomic_write_text, fsync_directory
 from agent_flow.core.command_evidence import is_concrete_test_selector
 from agent_flow.core.markers import (
     completion_gate_marker_values,
     unfenced_markdown_text,
 )
+from agent_flow.core.worktree_isolation import exclusive_file_lease
 
 LEDGER_FILE = "design-spec.md"
 LEDGER_SECTION = "design values"
@@ -35,6 +37,8 @@ CONCERN_MARKER = "concerns:"
 MANUAL_SPEC_APPROVALS_FILE = "spec-manual-approvals.json"
 SPEC_CAPTURE_FILE = "spec-capture.json"
 SPEC_CONFIRMATION_FILE = "spec-confirmed.json"
+SPEC_MUTATION_INTENT_FILE = "spec-mutation-intent.json"
+SPEC_MUTATION_LOCK_FILE = ".spec-mutation.lock"
 
 # 원장을 만드는 phase. 여기서만 값이 들어오고, 나머지 phase는 읽기만 한다.
 LEDGER_SOURCE_PHASES = frozenset({"design", "prd"})
@@ -304,10 +308,7 @@ def write_ledger(run_dir: Path, ledger: DesignLedger) -> Path:
     lines.extend(f"{key}: {value}" for key, value in ledger.values)
     if not ledger.values:
         lines.append("(none recorded)")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pending = path.with_suffix(f"{path.suffix}.tmp")
-    pending.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    pending.replace(path)
+    atomic_write_text(path, "\n".join(lines) + "\n")
     return path
 
 
@@ -434,29 +435,34 @@ def record_manual_spec_approval(
     spec_id: str,
     statement: str,
 ) -> Path:
-    item = _manual_spec_item(run_dir, spec_id)
-    expected_statement = _manual_approval_statement(item)
-    if statement.strip() != expected_statement:
-        raise ValueError(f"approval statement must be: {expected_statement}")
-    approved = read_manual_spec_approvals(run_dir) | {item.spec_id}
-    ledger = read_ledger(run_dir)
-    manual_items = {
-        candidate.spec_id: candidate
-        for candidate in ledger.spec_items
-        if candidate.verification.strip().lower() == "manual"
-    }
-    approvals = [
-        {
-            "spec_id": approved_id,
-            "spec_fingerprint": _spec_fingerprint(manual_items[approved_id]),
-            "statement": _manual_approval_statement(manual_items[approved_id]),
+    with exclusive_file_lease(
+        run_dir / SPEC_MUTATION_LOCK_FILE,
+        wait=True,
+    ):
+        _resume_spec_confirmation_intent(run_dir)
+        item = _manual_spec_item(run_dir, spec_id)
+        expected_statement = _manual_approval_statement(item)
+        if statement.strip() != expected_statement:
+            raise ValueError(f"approval statement must be: {expected_statement}")
+        approved = read_manual_spec_approvals(run_dir) | {item.spec_id}
+        ledger = read_ledger(run_dir)
+        manual_items = {
+            candidate.spec_id: candidate
+            for candidate in ledger.spec_items
+            if candidate.verification.strip().lower() == "manual"
         }
-        for approved_id in sorted(approved)
-        if approved_id in manual_items
-    ]
-    path = run_dir / MANUAL_SPEC_APPROVALS_FILE
-    _write_json_atomic(path, {"approvals": approvals})
-    return path
+        approvals = [
+            {
+                "spec_id": approved_id,
+                "spec_fingerprint": _spec_fingerprint(manual_items[approved_id]),
+                "statement": _manual_approval_statement(manual_items[approved_id]),
+            }
+            for approved_id in sorted(approved)
+            if approved_id in manual_items
+        ]
+        path = run_dir / MANUAL_SPEC_APPROVALS_FILE
+        _write_json_atomic(path, {"approvals": approvals})
+        return path
 
 
 def spec_set_digest(items: tuple[SpecItem, ...]) -> str:
@@ -598,6 +604,17 @@ def pending_spec_changes_for_run(run_dir: Path) -> tuple[SpecChange, ...]:
 
 
 def confirm_current_spec_changes(run_dir: Path) -> Path:
+    with exclusive_file_lease(
+        run_dir / SPEC_MUTATION_LOCK_FILE,
+        wait=True,
+    ):
+        resumed = _resume_spec_confirmation_intent(run_dir)
+        if resumed is not None:
+            return resumed
+        return _confirm_current_spec_changes_locked(run_dir)
+
+
+def _confirm_current_spec_changes_locked(run_dir: Path) -> Path:
     phase_id, source_path, parsed = current_spec_source(run_dir)
     if not parsed.items:
         raise ValueError("SPEC source artifact has no items")
@@ -624,7 +641,6 @@ def confirm_current_spec_changes(run_dir: Path) -> Path:
         detail = "; ".join(blocking_errors)
         raise ValueError(f"cannot confirm SPEC changes: {detail}")
     source_values = parse_design_values(source_text)
-    confirmation_path = record_spec_confirmation(run_dir, parsed.items)
     updated = DesignLedger(
         exists=True,
         source_phase=ledger.source_phase,
@@ -634,16 +650,21 @@ def confirm_current_spec_changes(run_dir: Path) -> Path:
         spec_digest=spec_set_digest(parsed.items),
         task_digest=ledger.task_digest,
     )
-    write_ledger(run_dir, updated)
-    _write_capture_state(
-        run_dir,
-        updated,
-        source_items=parsed.items,
-        unconfirmed_design_values=(
-            source_values if source_values != ledger.values else None
+    unconfirmed_design_values = (
+        source_values if source_values != ledger.values else None
+    )
+    _write_json_atomic(
+        run_dir / SPEC_MUTATION_INTENT_FILE,
+        _spec_confirmation_intent(
+            updated,
+            source_items=parsed.items,
+            unconfirmed_design_values=unconfirmed_design_values,
         ),
     )
-    return confirmation_path
+    resumed = _resume_spec_confirmation_intent(run_dir)
+    if resumed is None:
+        raise RuntimeError("SPEC confirmation intent disappeared before replay")
+    return resumed
 
 
 def render_spec_changes(changes: tuple[SpecChange, ...]) -> str:
@@ -763,6 +784,172 @@ def _write_capture_state(
     )
 
 
+def _spec_confirmation_intent(
+    ledger: DesignLedger,
+    *,
+    source_items: tuple[SpecItem, ...],
+    unconfirmed_design_values: tuple[tuple[str, str], ...] | None,
+) -> dict[str, object]:
+    return {
+        "version": 1,
+        "operation": "confirm",
+        "ledger": {
+            "source_phase": ledger.source_phase,
+            "values": [list(item) for item in ledger.values],
+            "spec_items": [_spec_item_payload(item) for item in ledger.spec_items],
+            "source_digest": ledger.source_digest,
+            "spec_digest": ledger.spec_digest,
+            "task_digest": ledger.task_digest,
+        },
+        "source_items": [_spec_item_payload(item) for item in source_items],
+        "unconfirmed_design_values": (
+            [list(item) for item in unconfirmed_design_values]
+            if unconfirmed_design_values is not None
+            else None
+        ),
+    }
+
+
+def _resume_spec_confirmation_intent(run_dir: Path) -> Path | None:
+    intent_path = run_dir / SPEC_MUTATION_INTENT_FILE
+    payload = _read_json(intent_path)
+    if payload is None:
+        if intent_path.exists():
+            raise ValueError("SPEC confirmation intent is malformed")
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != 1
+        or payload.get("operation") != "confirm"
+    ):
+        raise ValueError("SPEC confirmation intent is malformed")
+    ledger = _ledger_from_intent(payload.get("ledger"))
+    source_items = _spec_items_from_intent(
+        payload.get("source_items"),
+        label="source_items",
+    )
+    unconfirmed_design_values = _values_from_intent(
+        payload.get("unconfirmed_design_values"),
+        label="unconfirmed_design_values",
+        optional=True,
+    )
+    confirmation_path = record_spec_confirmation(run_dir, ledger.spec_items)
+    write_ledger(run_dir, ledger)
+    _write_capture_state(
+        run_dir,
+        ledger,
+        source_items=source_items,
+        unconfirmed_design_values=unconfirmed_design_values,
+    )
+    intent_path.unlink()
+    fsync_directory(run_dir)
+    return confirmation_path
+
+
+def _ledger_from_intent(raw: object) -> DesignLedger:
+    if not isinstance(raw, dict):
+        raise ValueError("SPEC confirmation intent ledger is malformed")
+    source_phase = raw.get("source_phase")
+    source_digest = raw.get("source_digest")
+    spec_digest = raw.get("spec_digest")
+    task_digest = raw.get("task_digest")
+    if (
+        not isinstance(source_phase, str)
+        or source_phase not in LEDGER_SOURCE_PHASES
+        or not isinstance(source_digest, str)
+        or not isinstance(spec_digest, str)
+        or not isinstance(task_digest, str)
+    ):
+        raise ValueError("SPEC confirmation intent ledger is malformed")
+    spec_items = _spec_items_from_intent(
+        raw.get("spec_items"),
+        label="ledger.spec_items",
+    )
+    if spec_digest != spec_set_digest(spec_items):
+        raise ValueError("SPEC confirmation intent ledger digest is invalid")
+    return DesignLedger(
+        exists=True,
+        source_phase=source_phase,
+        values=_required_values_from_intent(
+            raw.get("values"),
+            label="ledger.values",
+        ),
+        spec_items=spec_items,
+        source_digest=source_digest,
+        spec_digest=spec_digest,
+        task_digest=task_digest,
+    )
+
+
+def _spec_items_from_intent(raw: object, *, label: str) -> tuple[SpecItem, ...]:
+    if not isinstance(raw, list):
+        raise ValueError(f"SPEC confirmation intent {label} is malformed")
+    items: list[SpecItem] = []
+    seen: set[str] = set()
+    for value in raw:
+        if not isinstance(value, dict):
+            raise ValueError(f"SPEC confirmation intent {label} is malformed")
+        spec_id = value.get("spec_id")
+        requirement = value.get("requirement")
+        verification = value.get("verification")
+        if (
+            not isinstance(spec_id, str)
+            or re.fullmatch(r"SPEC-[1-9]\d*", spec_id) is None
+            or spec_id in seen
+            or not isinstance(requirement, str)
+            or not requirement.strip()
+            or not isinstance(verification, str)
+            or not _valid_spec_verification(verification)
+        ):
+            raise ValueError(f"SPEC confirmation intent {label} is malformed")
+        seen.add(spec_id)
+        items.append(
+            SpecItem(
+                spec_id=spec_id,
+                requirement=requirement.strip(),
+                verification=verification.strip(),
+            )
+        )
+    return tuple(items)
+
+
+def _required_values_from_intent(
+    raw: object,
+    *,
+    label: str,
+) -> tuple[tuple[str, str], ...]:
+    values = _values_from_intent(raw, label=label)
+    if values is None:
+        raise ValueError(f"SPEC confirmation intent {label} is malformed")
+    return values
+
+
+def _values_from_intent(
+    raw: object,
+    *,
+    label: str,
+    optional: bool = False,
+) -> tuple[tuple[str, str], ...] | None:
+    if raw is None and optional:
+        return None
+    if not isinstance(raw, list) or any(
+        not isinstance(item, list)
+        or len(item) != 2
+        or not all(isinstance(value, str) for value in item)
+        for item in raw
+    ):
+        raise ValueError(f"SPEC confirmation intent {label} is malformed")
+    return tuple((item[0], item[1]) for item in raw)
+
+
+def _spec_item_payload(item: SpecItem) -> dict[str, str]:
+    return {
+        "spec_id": item.spec_id,
+        "requirement": item.requirement,
+        "verification": item.verification,
+    }
+
+
 def _ledger_header(text: str, name: str) -> str:
     prefix = f"{name}:".lower()
     for line in text.splitlines():
@@ -787,13 +974,10 @@ def _read_json(path: Path) -> object:
 
 
 def _write_json_atomic(path: Path, payload: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pending = path.with_suffix(f"{path.suffix}.tmp")
-    pending.write_text(
+    atomic_write_text(
+        path,
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
-    pending.replace(path)
 
 
 def _source_artifact_exists(run_dir: Path) -> bool:
