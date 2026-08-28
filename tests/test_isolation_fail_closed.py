@@ -1100,6 +1100,65 @@ def test_sqlite_backup_rejects_oversized_wal_before_target_creation(
     assert not target.exists()
 
 
+@pytest.mark.parametrize("unlink_fails", [False, True])
+def test_sqlite_backup_closes_failed_target_before_unlink(
+    tmp_path,
+    monkeypatch,
+    unlink_fails,
+):
+    source = tmp_path / "agent.db"
+    connection = sqlite3.connect(source)
+    connection.execute("CREATE TABLE seed (value INTEGER)")
+    connection.execute("INSERT INTO seed VALUES (1)")
+    connection.commit()
+    connection.close()
+    target = tmp_path / "snapshot.db"
+    opened_connections = []
+    real_connect = sqlite3.connect
+    real_identity_check = PROVIDER_PROCESS._assert_same_file_identity
+    identity_checks = 0
+
+    def track_connect(*args, **kwargs):
+        opened = real_connect(*args, **kwargs)
+        opened_connections.append(opened)
+        return opened
+
+    def fail_after_backup(*args, **kwargs):
+        nonlocal identity_checks
+        identity_checks += 1
+        if identity_checks == 2:
+            raise WorktreeIsolationError("injected post-backup failure")
+        return real_identity_check(*args, **kwargs)
+
+    real_unlink = Path.unlink
+
+    def assert_closed_before_unlink(path, *args, **kwargs):
+        if path == target:
+            with pytest.raises(sqlite3.ProgrammingError):
+                opened_connections[1].execute("SELECT 1")
+            if unlink_fails:
+                raise OSError("injected unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(PROVIDER_PROCESS.sqlite3, "connect", track_connect)
+    monkeypatch.setattr(
+        PROVIDER_PROCESS,
+        "_assert_same_file_identity",
+        fail_after_backup,
+    )
+    monkeypatch.setattr(Path, "unlink", assert_closed_before_unlink)
+
+    with pytest.raises(WorktreeIsolationError, match="injected post-backup failure"):
+        PROVIDER_PROCESS._backup_owned_sqlite_file(
+            source,
+            target,
+            max_size=1024 * 1024,
+        )
+
+    assert target.exists() is unlink_fails
+
+
+
 def test_reaped_provider_process_still_cleans_its_process_group(monkeypatch):
     from agent_flow import subprocess_pool
 

@@ -729,7 +729,12 @@ def _backup_owned_sqlite_file(
                     f"provider state seed exceeded its copy limit: {source}"
                 )
     except Exception:
-        target.unlink(missing_ok=True)
+        if target_connection is not None:
+            with contextlib.suppress(sqlite3.Error):
+                target_connection.close()
+            target_connection = None
+        with contextlib.suppress(OSError):
+            target.unlink(missing_ok=True)
         raise
     finally:
         if target_connection is not None:
