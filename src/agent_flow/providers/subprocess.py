@@ -660,42 +660,123 @@ def _snapshot_omp_state(source_home: Path, target_home: Path) -> None:
         missing_ok=True,
     )
     for name in ("models.db", "agent.db"):
-        source = source_home / name
-        snapshot_path = target_home / f".{name}.snapshot"
-        copied = _copy_owned_regular_file(
-            source,
-            snapshot_path,
+        _backup_owned_sqlite_file(
+            source_home / name,
+            target_home / name,
             max_size=128 * 1024 * 1024,
-            require_private=False,
             missing_ok=True,
         )
-        if not copied:
-            continue
-        target_path = target_home / name
-        source_connection: sqlite3.Connection | None = None
-        target_connection: sqlite3.Connection | None = None
-        try:
+
+
+def _backup_owned_sqlite_file(
+    source: Path,
+    target: Path,
+    *,
+    max_size: int,
+    missing_ok: bool = False,
+) -> bool:
+    attested = _open_owned_regular_file(
+        source,
+        max_size=max_size,
+        require_private=False,
+        missing_ok=missing_ok,
+    )
+    if attested is None:
+        return False
+    source_connection: sqlite3.Connection | None = None
+    target_connection: sqlite3.Connection | None = None
+    try:
+        with attested:
+            identity = os.fstat(attested.fileno())
+            source_connection = sqlite3.connect(
+                f"{source.absolute().as_uri()}?mode=ro", uri=True
+            )
+            _assert_same_file_identity(source, identity)
+            page_size = _sqlite_pragma_int(source_connection, "page_size", source)
+            page_count = _sqlite_pragma_int(source_connection, "page_count", source)
+            _assert_sqlite_size_limit(
+                source,
+                page_size=page_size,
+                page_count=page_count,
+                max_size=max_size,
+            )
             target_fd = os.open(
-                target_path,
+                target,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                 0o600,
             )
             os.close(target_fd)
-            source_connection = sqlite3.connect(
-                f"{snapshot_path.resolve().as_uri()}?mode=ro", uri=True
+            target_connection = sqlite3.connect(target)
+
+            def enforce_size(
+                _status: int, _remaining: int, total: int
+            ) -> None:
+                _assert_sqlite_size_limit(
+                    source,
+                    page_size=page_size,
+                    page_count=total,
+                    max_size=max_size,
+                )
+
+            source_connection.backup(
+                target_connection,
+                pages=256,
+                progress=enforce_size,
             )
-            target_connection = sqlite3.connect(target_path)
-            source_connection.backup(target_connection)
-        except Exception:
-            target_path.unlink(missing_ok=True)
-            raise
-        finally:
-            if target_connection is not None:
-                target_connection.close()
-            if source_connection is not None:
-                source_connection.close()
-            snapshot_path.unlink(missing_ok=True)
-        target_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            _assert_same_file_identity(source, identity)
+            if target.stat().st_size > max_size:
+                raise WorktreeIsolationError(
+                    f"provider state seed exceeded its copy limit: {source}"
+                )
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    finally:
+        if target_connection is not None:
+            target_connection.close()
+        if source_connection is not None:
+            source_connection.close()
+    target.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    return True
+
+
+def _sqlite_pragma_int(
+    connection: sqlite3.Connection,
+    name: str,
+    source: Path,
+) -> int:
+    row = connection.execute(f"PRAGMA {name}").fetchone()
+    if row is None or type(row[0]) is not int or row[0] <= 0:
+        raise WorktreeIsolationError(
+            f"provider state seed has invalid SQLite {name}: {source}"
+        )
+    return row[0]
+
+
+def _assert_sqlite_size_limit(
+    source: Path,
+    *,
+    page_size: int,
+    page_count: int,
+    max_size: int,
+) -> None:
+    if page_size * page_count > max_size:
+        raise WorktreeIsolationError(
+            f"provider state seed exceeded its copy limit: {source}"
+        )
+
+
+def _assert_same_file_identity(source: Path, expected: os.stat_result) -> None:
+    try:
+        current = source.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise WorktreeIsolationError(
+            f"provider state seed changed while snapshotting: {source}"
+        ) from exc
+    if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+        raise WorktreeIsolationError(
+            f"provider state seed changed while snapshotting: {source}"
+        )
 
 
 def _open_owned_regular_file(

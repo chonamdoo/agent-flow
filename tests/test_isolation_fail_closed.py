@@ -1029,6 +1029,77 @@ def test_omp_provider_uses_consistent_private_state_snapshot(tmp_path):
         assert stat.S_IMODE((isolated / name).stat().st_mode) == 0o600
 
 
+def test_omp_provider_snapshot_includes_committed_wal_rows(tmp_path):
+    source = tmp_path / "omp-agent"
+    source.mkdir()
+    writer = sqlite3.connect(source / "agent.db")
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("CREATE TABLE seed (value INTEGER)")
+    writer.commit()
+    writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    writer.execute("INSERT INTO seed VALUES (42)")
+    writer.commit()
+    assert writer.execute("SELECT value FROM seed").fetchone() == (42,)
+    assert (source / "agent.db-wal").stat().st_size > 0
+
+    scratch = tmp_path / "omp-scratch"
+    scratch.mkdir()
+    env = {"HOME": str(tmp_path), "PI_CODING_AGENT_DIR": str(source)}
+    try:
+        PROVIDER_PROCESS._prepare_provider_state(
+            argv=("omp", "-p"),
+            env=env,
+            scratch=scratch,
+        )
+        isolated = Path(env["PI_CODING_AGENT_DIR"])
+        snapshot = sqlite3.connect(isolated / "agent.db")
+        try:
+            assert snapshot.execute("SELECT value FROM seed").fetchone() == (42,)
+        finally:
+            snapshot.close()
+    finally:
+        writer.close()
+
+
+def test_sqlite_backup_rejects_oversized_wal_before_target_creation(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "agent.db"
+    writer = sqlite3.connect(source)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("CREATE TABLE seed (value BLOB)")
+    writer.commit()
+    writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    max_size = source.stat().st_size
+    writer.execute("INSERT INTO seed VALUES (?)", (b"x" * (max_size * 4),))
+    writer.commit()
+    target = tmp_path / "snapshot.db"
+    target_opened = False
+    real_open = os.open
+
+    def track_target(path, flags, mode=0o777):
+        nonlocal target_opened
+        if Path(path) == target:
+            target_opened = True
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(PROVIDER_PROCESS.os, "open", track_target)
+    try:
+        with pytest.raises(WorktreeIsolationError, match="copy limit"):
+            PROVIDER_PROCESS._backup_owned_sqlite_file(
+                source,
+                target,
+                max_size=max_size,
+            )
+    finally:
+        writer.close()
+
+    assert not target_opened
+    assert not target.exists()
+
+
 def test_reaped_provider_process_still_cleans_its_process_group(monkeypatch):
     from agent_flow import subprocess_pool
 
