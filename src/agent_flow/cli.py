@@ -135,6 +135,8 @@ from agent_flow.core.worktrees import (
     describe_slug,
     delegated_slug,
     run_declared_worktree_actions,
+    CleanupTransactionResult,
+    abort_pending_worktree_cleanup,
     find_pending_worktree_cleanup,
     resume_pending_worktree_cleanup,
     existing_checkout_path,
@@ -884,31 +886,11 @@ def main(argv: list[str] | None = None) -> int:
                 args.worktree,
                 args.checkout_identity,
             )
-            cleanup_runtime_root = (
-                worktree_runtime_root(root=root, name=args.worktree)
-                if args.worktree
-                else root
-            )
-            active_before_cleanup = find_active_run(cleanup_runtime_root)
             pending_cleanup = (
-                find_pending_worktree_cleanup(root=root, selector=args.worktree)
+                _pending_cleanup_for_checkout(root, args.worktree)
                 if args.worktree
                 else None
             )
-            unrelated_active_run = False
-            if (
-                pending_cleanup is not None
-                and active_before_cleanup is not None
-            ):
-                active_meta = read_meta(active_before_cleanup.path)
-                owns_cleanup = (
-                    active_meta.get("cleanup_state") == "cleanup_pending"
-                    and active_meta.get("cleanup_journal")
-                    == str(pending_cleanup.journal_path)
-                )
-                if not owns_cleanup:
-                    pending_cleanup = None
-                    unrelated_active_run = True
         except CleanupBlockedError as exc:
             _print_cleanup_blocked_status(
                 exc.run_dir,
@@ -921,7 +903,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if pending_cleanup is not None:
             try:
-                completed_run = resume_pending_worktree_cleanup(
+                resume_result = resume_pending_worktree_cleanup(
                     root=root,
                     pending=pending_cleanup,
                 )
@@ -935,7 +917,10 @@ def main(argv: list[str] | None = None) -> int:
             except (OSError, ValueError, RuntimeError, KeyError) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
-            _print_completed_cleanup_status(completed_run)
+            if resume_result.aborted:
+                _print_replayed_abort_status(resume_result.run_dir)
+            else:
+                _print_completed_cleanup_status(resume_result.run_dir)
             return 0
         try:
             run_root, state_root = (
@@ -943,7 +928,7 @@ def main(argv: list[str] | None = None) -> int:
                     root,
                     args.worktree,
                     provision=True,
-                    prefer_pending_cleanup=not unrelated_active_run,
+                    prefer_pending_cleanup=True,
                 )
                 if args.worktree
                 else (root, root)
@@ -986,12 +971,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "abort":
         try:
+            # cleanup journal이 있어도 archive 사본을 보지 않는다. abort가 걷어낼
+            # active 표식은 살아 있는 run에만 있고, checkout 회수를 막는 것도 그것이다.
+            # archive를 보면 봉인된 사본만 고쳐 쓴 채 데드락이 그대로 남는다.
             run_root, state_root = (
-                _worktree_context(root, args.worktree, require_checkout=False)
+                _worktree_context(
+                    root,
+                    args.worktree,
+                    require_checkout=False,
+                    prefer_pending_cleanup=False,
+                )
                 if args.worktree
                 else (root, root)
             )
-        except ValueError as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
         if run_root is None:
@@ -1000,7 +993,15 @@ def main(argv: list[str] | None = None) -> int:
         if active is None:
             print("진행 중인 run 없음 — abort할 대상이 없습니다.")
             return 0
-        mark_inactive(active.path)
+        try:
+            if not (
+                args.worktree
+                and abort_pending_worktree_cleanup(root=root, run_dir=active.path)
+            ):
+                mark_inactive(active.path)
+        except (CleanupBlockedError, OSError, ValueError) as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
         print(f"aborted: {active.run_id} (artifacts preserved at {active.path})")
         return 0
 
@@ -1023,7 +1024,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.worktree
                 else (root, root)
             )
-        except ValueError as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
         if run_root is None:
@@ -2318,6 +2319,13 @@ def _worktree_root(root: Path, name: str) -> Path | None:
     return None
 
 
+def _pending_cleanup_for_checkout(
+    root: Path, name: str
+) -> CleanupTransactionResult | None:
+    """core가 검증한 살아 있는 owner 또는 terminal-resume journal을 돌려준다."""
+    return find_pending_worktree_cleanup(root=root, selector=name)
+
+
 def _worktree_context(
     root: Path,
     name: str,
@@ -2328,9 +2336,7 @@ def _worktree_context(
 ) -> tuple[Path | None, Path]:
     status = get_worktree_status(root=root, name=name)
     pending = (
-        find_pending_worktree_cleanup(root=root, selector=name)
-        if prefer_pending_cleanup
-        else None
+        _pending_cleanup_for_checkout(root, name) if prefer_pending_cleanup else None
     )
     if pending is not None:
         checkout_root = status.path if _worktree_checkout_exists(status) else root
@@ -2619,6 +2625,22 @@ def _print_cleanup_blocked_status(
         ),
         next_command=next_command,
     )
+    print_structured_status(payload)
+
+
+def _print_replayed_abort_status(run_dir: Path) -> None:
+    meta = read_meta(run_dir)
+    workflow = str(meta.get("workflow", ""))
+    run_id = str(meta.get("run_id") or run_dir.name)
+    payload = workflow_status_payload(
+        status="aborted",
+        run=f"{workflow}/{run_id}",
+        task=str(meta.get("task", "")),
+        current_phase="-",
+        reason="run_aborted",
+        next_command="none",
+    )
+    print(f"aborted: {run_id} (artifacts preserved at {run_dir})")
     print_structured_status(payload)
 
 

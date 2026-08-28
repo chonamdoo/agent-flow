@@ -77,6 +77,7 @@ from agent_flow.core.leader_tripwire import leader_sweep_include_ignored
 from agent_flow.core.worktrees import (
     CleanupBlockedError,
     complete_worktree_cleanup,
+    run_tree_is_sealed,
     run_worktree_cleanup_transaction,
     worktree_run_activation,
 )
@@ -316,6 +317,10 @@ def _phase_available_clis(clis: list[CliInfo], phase: Phase | None) -> list[CliI
 
 
 class Runner:
+    # cleanup이 run tree의 digest를 뜨기 전까지 trace는 run이 소유한다. 기본값을
+    # 클래스에 두어야 __init__을 건너뛴 부분 인스턴스도 같은 답을 준다.
+    run_dir_sealed: bool = False
+
     def __init__(
         self,
         project_root: Path,
@@ -753,10 +758,14 @@ class Runner:
                     integration_strategy=integration_strategy,
                 )
                 self.run_dir = complete_worktree_cleanup(cleanup)
+                self.run_dir_sealed = run_tree_is_sealed(self.run_dir)
                 report_path = self.run_dir / report_path.name
             except CleanupBlockedError as exc:
                 if exc.run_dir is not None and exc.run_dir.exists():
                     self.run_dir = exc.run_dir
+                # digest가 이미 기록된 뒤라면 이 tree는 증거지 로그가 아니다. 그
+                # 전에 막힌 것이면 run tree는 살아 있고 판정도 여기 남아야 한다.
+                self.run_dir_sealed = run_tree_is_sealed(self.run_dir)
                 print(f"\n═══ cleanup is pending. {exc} ═══")
                 self._print_structured_status(
                     status="blocked",
@@ -1938,7 +1947,7 @@ class Runner:
         payload: str | None = None,
         payload_name: str | None = None,
     ) -> None:
-        if self.run_dir is None:
+        if self.run_dir is None or self.run_dir_sealed:
             return
         record_observation(
             run_dir=self.run_dir,
