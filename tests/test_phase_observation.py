@@ -16,6 +16,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
+from agent_flow.artifact import write_meta  # noqa: E402
 from agent_flow.core.context_contract import offload_tool_output  # noqa: E402
 from agent_flow.core.observation import (  # noqa: E402
     PHASE_ENTERED,
@@ -212,6 +213,7 @@ def test_committing_a_transition_records_why_it_moved(tmp_path: Path):
         Phase(id="fix", description="", routes={"default": "review"}),
         Phase(id="review", description="", routes={"request-changes": "fix"}),
     ]
+    write_meta(run_dir, {"phase_index": 1, "current_phase": "review"})
 
     transition = runner._plan_transition(1, runner.phases[1])
     runner._commit_transition(transition)

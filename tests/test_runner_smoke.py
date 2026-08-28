@@ -30,7 +30,7 @@ SRC_ROOT = KIT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from agent_flow.artifact import bind_review_evidence, ensure_review_binding
+from agent_flow.artifact import bind_review_evidence, ensure_review_binding, write_meta
 from agent_flow.core.review_evidence import (
     ReviewerOutcome,
     review_evidence_record,
@@ -3285,6 +3285,7 @@ def test_backward_route_invalidates_target_artifact(tmp_path: Path):
         Phase(id="pr-watch", description="", routes={"comments": "pr-comment-fix"}, artifact="artifacts/pr-watch.md"),
         Phase(id="pr-comment-fix", description="", routes={"default": "pr-watch"}, artifact="artifacts/pr-comment-fix.md"),
     ]
+    write_meta(run_dir, {"phase_index": 1, "current_phase": "pr-comment-fix"})
 
     transition = runner._plan_transition(1, runner.phases[1])
     assert (transition.to_index, transition.blocked) == (0, False)
@@ -3315,6 +3316,7 @@ def test_backward_route_invalidates_intermediate_fresh_artifacts(tmp_path: Path)
     runner.run_dir = run_dir
     runner.config_root = tmp_path
     runner.phases = phases
+    write_meta(run_dir, {"phase_index": 3, "current_phase": "architecture-review"})
 
     transition = runner._plan_transition(3, phases[3])
     assert (transition.to_index, transition.blocked) == (0, False)
