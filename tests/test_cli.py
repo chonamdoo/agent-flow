@@ -6865,6 +6865,60 @@ if (codexContext !== undefined) {
             self.assertEqual(artifact.read_text(encoding="utf-8"), captured_artifact)
             self.assertFalse(intent.exists())
 
+    def test_push_watch_tick_restores_unchanged_observation_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(
+                subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
+                0,
+            )
+            run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                "cat <<'JSON'\n"
+                '{"url":"https://github.com/acme/demo/pull/7",'
+                '"reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[]}\n'
+                "JSON\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+            first = subprocess.run(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=checkout,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            state_path = project_root / ".agent-flow" / "state" / "push-watch.json"
+            artifact = run_dir / _node_phase_artifact("pr-watch")
+            expected_artifact = artifact.read_text(encoding="utf-8")
+            artifact.unlink()
+
+            unchanged = subprocess.run(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=checkout,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+
+            self.assertEqual(unchanged.returncode, 0, unchanged.stderr)
+            self.assertEqual(artifact.read_text(encoding="utf-8"), expected_artifact)
+            self.assertEqual(
+                json.loads(state_path.read_text(encoding="utf-8"))["iterations"],
+                1,
+            )
+
     def test_push_watch_tick_rejects_intent_from_another_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
