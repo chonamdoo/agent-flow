@@ -168,6 +168,33 @@ def test_install_publishes_host_read_config_by_rename(tmp_path: Path, binary: st
         assert json_or_text_is_complete(project / relative), f"{relative}가 잘린 채 남았다"
 
 
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_root_context_update_is_atomic_and_follows_managed_symlink(
+    tmp_path: Path, binary: str
+) -> None:
+    project = tmp_path / f"project-{binary}"
+    project.mkdir()
+    _observed_writes(project, binary)
+    agents = project / "AGENTS.md"
+    shared = tmp_path / f"shared-{binary}.md"
+    shared.write_text(agents.read_text(encoding="utf-8"), encoding="utf-8")
+    agents.unlink()
+    agents.symlink_to(shared)
+    skill = project / "skills" / "demo" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: demo\ndescription: Demo skill.\n---\n\n# Demo\n",
+        encoding="utf-8",
+    )
+
+    observed = _observed_writes(project, binary)
+
+    assert agents.is_symlink()
+    assert "writeFileSync" not in observed.get(str(agents), set())
+    assert "renameSync" in observed.get(str(shared), set())
+    assert "demo" in shared.read_text(encoding="utf-8")
+
+
 def json_or_text_is_complete(target: Path) -> bool:
     text = target.read_text(encoding="utf-8")
     if target.suffix == ".json":
