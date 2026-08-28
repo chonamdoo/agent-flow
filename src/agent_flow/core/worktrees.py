@@ -19,7 +19,13 @@ from typing import Any
 
 import yaml
 
-from agent_flow.artifact import ACTIVE_MARKER, find_active_runs, read_meta, write_meta
+from agent_flow.artifact import (
+    ACTIVE_MARKER,
+    find_active_runs,
+    mark_inactive,
+    read_meta,
+    write_meta,
+)
 from agent_flow.core.hook_integrity import (
     JSON_REGISTRATION_FILES,
     OMP_REGISTRATION_FILE,
@@ -93,6 +99,12 @@ class CleanupBlockedError(WorktreeIsolationError):
 class CleanupTransactionResult:
     journal_path: Path
     run_dir: Path
+
+
+@dataclass(frozen=True)
+class CleanupResumeResult:
+    run_dir: Path
+    aborted: bool
 
 
 
@@ -717,6 +729,34 @@ def run_worktree_cleanup_transaction(
     runtime_root = Path(journal["run"]["source_state_root"])
     lock_root = runtime_root if runtime_root.exists() else Path(journal["run"]["archive_state_root"])
     with _cleanup_lease(root, checkout_path) as cleanup_lease:
+        # journal은 lease 밖에서 읽은 cache가 아니다. abort가 먼저 terminal intent를
+        # publish했다면 여기서 반드시 최신 상태를 보고 destructive step을 재개하지 않는다.
+        journal = _load_cleanup_journal(journal_path, require_checkout=False)
+        if journal.get("status") == "aborted":
+            raise CleanupBlockedError(
+                "cleanup was aborted; destructive steps will not resume",
+                journal_path=journal_path,
+                run_dir=run_dir,
+            )
+        if journal.get("status") == "complete":
+            return CleanupTransactionResult(
+                journal_path=journal_path,
+                run_dir=Path(journal["run"]["archive_dir"]),
+            )
+        _validate_cleanup_resume(
+            root=root,
+            run_dir=run_dir,
+            target_branch=target_branch,
+            journal_path=journal_path,
+            journal=journal,
+            checkout_path=checkout_path,
+        )
+        _refresh_cleanup_target_for_resume(
+            root=root,
+            journal_path=journal_path,
+            journal=journal,
+            target_branch=target_branch,
+        )
         journal["leases"]["cleanup"] = {
             "path": str(cleanup_lease),
             "state": "held",
@@ -919,6 +959,29 @@ def find_pending_worktree_cleanup(
             )
         ):
             continue
+        # abort된 owner의 journal은 증거로 보존하되 pending 선택 대상에서는 뺀다.
+        # source가 사라졌다면 cleanup 마지막 구간이므로 journal만이 복구 소유자다.
+        if source.is_dir():
+            source_meta = read_meta(source)
+            owner_active = (source / ACTIVE_MARKER).is_file()
+            owner_matches = (
+                source_meta.get("cleanup_state") == "cleanup_pending"
+                and source_meta.get("cleanup_journal") == str(path)
+            )
+            if not owner_active:
+                # 0.2.6과 수동 복구는 journal을 terminal로 만들기 전에 marker부터
+                # 걷었다. 그 legacy state를 영구 blocker로 만들지 않고 증거만 남긴다.
+                continue
+            if not owner_matches:
+                raise CleanupBlockedError(
+                    "cleanup journal owner metadata is mismatched; preserving checkout",
+                    journal_path=path,
+                    run_dir=source,
+                )
+        elif journal.get("status") == "aborted":
+            # marker 제거 전 crash면 source owner가 위 분기에서 journal을 계속 대변한다.
+            # source가 이미 사라진 terminal 증거만 pending selector에서 제외한다.
+            continue
         matches.append(
             CleanupTransactionResult(
                 journal_path=path,
@@ -939,11 +1002,224 @@ def cleanup_state_root(result: CleanupTransactionResult) -> Path:
     return run_dir.parent.parent.parent
 
 
+def run_tree_is_sealed(run_dir: Path | None) -> bool:
+    """cleanup journal이 이 run tree의 digest를 기록한 뒤부터 참이다.
+
+    그 시점부터 source와 archive 사본은 같은 해시 하나로 묶인다 - 어느 쪽에 한 줄만
+    더해도 다음 resume이 그 바이트를 오염으로 읽고 정리를 영구히 막는다. digest가
+    아직 없으면 run tree는 살아 있고, 기록은 그대로 run이 가져간다.
+    """
+    if run_dir is None:
+        return False
+    try:
+        meta = read_meta(run_dir)
+    except (OSError, ValueError):
+        # 비필수 trace보다 archive 무결성이 우선이다. metadata를 읽지 못해 봉인
+        # 여부가 불명확하면 쓰지 않는다.
+        return True
+    if not meta:
+        # read_meta는 누락·손상을 예외 대신 빈 mapping으로 돌려준다. 유효한 run
+        # metadata가 하나도 없으면 봉인 여부를 증명할 수 없으므로 쓰지 않는다.
+        return True
+    journal_path = meta.get("cleanup_journal")
+    if not isinstance(journal_path, str) or not journal_path:
+        return False
+    try:
+        journal = _load_cleanup_journal(Path(journal_path))
+    except (CleanupBlockedError, OSError, ValueError):
+        # journal이 있다고 기록돼 있는데 읽을 수 없다면 봉인 여부는 불명확하다.
+        # observation append가 복구 가능한 읽기 실패를 영구 checksum 불일치로
+        # 바꾸지 않게 fail-closed한다.
+        return True
+    run = journal.get("run")
+    return isinstance(run, dict) and isinstance(run.get("archive_digest"), str)
+
+
+def _abort_cleanup_context(
+    *,
+    root: Path,
+    run_dir: Path,
+    journal_path: Path,
+    journal: dict[str, Any],
+) -> tuple[Path, Path, Path]:
+    """abort가 lock을 만들기 전에 journal 경로와 살아 있는 owner를 검증한다."""
+    checkout = journal.get("checkout")
+    run = journal.get("run")
+    runtime_root = run_dir.parent.parent.parent
+    archive = Path(run["archive_dir"]) if isinstance(run, dict) and isinstance(
+        run.get("archive_dir"), str
+    ) else None
+    archive_state = (
+        Path(run["archive_state_root"])
+        if isinstance(run, dict) and isinstance(run.get("archive_state_root"), str)
+        else None
+    )
+    state_root = real_path(_agent_flow_state_dir(root))
+    if (
+        not isinstance(checkout, dict)
+        or not isinstance(checkout.get("name"), str)
+        or not isinstance(checkout.get("identity"), str)
+        or not isinstance(checkout.get("path"), str)
+        or not isinstance(checkout.get("registration_identity"), str)
+        or not isinstance(run, dict)
+        or not isinstance(run.get("source_state_root"), str)
+        or not isinstance(run.get("source_dir"), str)
+        or archive is None
+        or archive_state is None
+        or real_path(journal_path.parent) != real_path(_cleanup_pending_root(root))
+        or journal.get("repository") != _cleanup_repository_identity(root)
+        or journal.get("run_id") != run_dir.name
+        or run_dir.parent.name != "runs"
+        or run_dir.parent.parent.name != ".agent-flow"
+        or not real_path(runtime_root).is_relative_to(state_root)
+        or real_path(Path(run["source_state_root"])) != real_path(runtime_root)
+        or real_path(Path(run["source_dir"])) != real_path(run_dir)
+        or archive.name != run_dir.name
+        or archive.parent.name != "runs"
+        or archive.parent.parent.name != ".agent-flow"
+        or real_path(archive.parent.parent.parent) != real_path(archive_state)
+        or not real_path(archive_state).is_relative_to(state_root)
+    ):
+        raise CleanupBlockedError(
+            "cleanup journal does not belong to the active run",
+            journal_path=journal_path,
+            run_dir=run_dir,
+        )
+    status = get_worktree_status(root=root, name=checkout["name"])
+    meta = read_meta(run_dir)
+    registration_matches = (
+        status.registration_identity == checkout["registration_identity"]
+        if status.exists
+        else status.registration_identity
+        in {None, checkout["registration_identity"]}
+    )
+    digest = hashlib.sha256(
+        f"{worktree_path_key(_git_common_dir(root))}\0"
+        f"{worktree_path_key(status.path)}".encode()
+    ).hexdigest()[:16]
+    expected_archive_state = (
+        _agent_flow_state_dir(root)
+        / "archive"
+        / "worktrees"
+        / f"{_safe_component(status.name)}-{digest}"
+    )
+    expected_archive = (
+        expected_archive_state / ".agent-flow" / "runs" / run_dir.name
+    )
+    if (
+        status.name != checkout["name"]
+        or real_path(status.path) != real_path(Path(checkout["path"]))
+        or not registration_matches
+        or meta.get("checkout_identity") != checkout["identity"]
+        or archive_state != expected_archive_state
+        or archive != expected_archive
+        or _has_symlinked_component(state_root, archive)
+        or meta.get("checkout_registration_identity")
+        != checkout["registration_identity"]
+        or meta.get("cleanup_state") != "cleanup_pending"
+        or meta.get("cleanup_journal") != str(journal_path)
+    ):
+        raise CleanupBlockedError(
+            "cleanup journal owner metadata is mismatched",
+            journal_path=journal_path,
+            run_dir=run_dir,
+        )
+    return status.path, runtime_root, archive
+
+
+def abort_pending_worktree_cleanup(*, root: Path, run_dir: Path) -> bool:
+    """살아 있는 cleanup owner와 그 journal을 하나의 회수 전이로 종결한다.
+
+    journal을 먼저 terminal로 publish한다. 그 뒤 active marker 제거가 실패해도
+    `abort` 재시도가 같은 journal을 다시 읽고 marker 제거를 끝낼 수 있다.
+    """
+    meta = read_meta(run_dir)
+    journal_value = meta.get("cleanup_journal")
+    if (
+        meta.get("cleanup_state") != "cleanup_pending"
+        or not isinstance(journal_value, str)
+        or not journal_value
+    ):
+        return False
+    journal_path = Path(journal_value)
+    try:
+        journal = _load_cleanup_journal(journal_path, require_checkout=False)
+        checkout_path, runtime_root, archive_run = _abort_cleanup_context(
+            root=root,
+            run_dir=run_dir,
+            journal_path=journal_path,
+            journal=journal,
+        )
+    except (CleanupBlockedError, OSError, ValueError):
+        # 신뢰할 수 없는 journal로 파일을 쓰지는 않는다. False는 CLI가 source의
+        # active marker만 걷는 비파괴적 legacy escape를 실행하라는 뜻이다.
+        return False
+    with _cleanup_lease(root, checkout_path), _run_start_exclusion(runtime_root):
+        journal = _load_cleanup_journal(journal_path, require_checkout=False)
+        _, _, archive_run = _abort_cleanup_context(
+            root=root,
+            run_dir=run_dir,
+            journal_path=journal_path,
+            journal=journal,
+        )
+        status = journal.get("status")
+        steps = journal.get("steps")
+        destructive_started = isinstance(steps, dict) and any(
+            isinstance(steps.get(step), dict)
+            and steps[step].get("status") == "done"
+            for step in ("checkout_removal", "branch_ref_cas", "metadata_cleanup")
+        )
+        if status in {"steps_complete", "complete"} or destructive_started:
+            raise CleanupBlockedError(
+                "cleanup already removed checkout state; run agent-flow continue",
+                journal_path=journal_path,
+                run_dir=run_dir,
+            )
+        if status == "cleanup_pending":
+            now = _utc_now()
+            journal["status"] = "aborted"
+            journal["aborted_at"] = now
+            journal["updated_at"] = now
+            cleanup_lease = journal.get("leases", {}).get("cleanup")
+            if isinstance(cleanup_lease, dict):
+                cleanup_lease["state"] = "released"
+            _write_cleanup_journal(journal_path, journal)
+        elif status != "aborted":
+            raise CleanupBlockedError(
+                f"cleanup journal has invalid abort state: {status!r}",
+                journal_path=journal_path,
+                run_dir=run_dir,
+            )
+        if archive_run.is_dir():
+            mark_inactive(archive_run)
+        mark_inactive(run_dir)
+    return True
+
+
 def resume_pending_worktree_cleanup(
     *, root: Path, pending: CleanupTransactionResult
-) -> Path:
+) -> CleanupResumeResult:
     """Resume a journal-owned cleanup without re-entering the phase runner."""
     journal = _load_cleanup_journal(pending.journal_path)
+    if journal.get("status") == "aborted":
+        run = journal.get("run")
+        if not isinstance(run, dict) or not isinstance(run.get("source_dir"), str):
+            raise CleanupBlockedError(
+                "aborted cleanup journal contract is incomplete",
+                journal_path=pending.journal_path,
+                run_dir=pending.run_dir,
+            )
+        source = Path(run["source_dir"])
+        if source.is_dir():
+            if not abort_pending_worktree_cleanup(root=root, run_dir=source):
+                raise CleanupBlockedError(
+                    "aborted cleanup owner validation failed; "
+                    "run agent-flow abort --worktree to retire its live marker",
+                    journal_path=pending.journal_path,
+                    run_dir=source,
+                )
+            return CleanupResumeResult(run_dir=source, aborted=True)
+        return CleanupResumeResult(run_dir=pending.run_dir, aborted=True)
     target = journal.get("target")
     integration = journal.get("integration")
     checkout = journal.get("checkout")
@@ -976,7 +1252,10 @@ def resume_pending_worktree_cleanup(
         integration_strategy=strategy,
         delete_branch=delete_branch,
     )
-    return complete_worktree_cleanup(result)
+    return CleanupResumeResult(
+        run_dir=complete_worktree_cleanup(result),
+        aborted=False,
+    )
 
 
 def _cleanup_target_branch(target: dict[str, Any]) -> str:
@@ -1026,12 +1305,6 @@ def _prepare_or_load_cleanup_journal(
             journal_path=journal_path,
             journal=journal,
             checkout_path=checkout_path,
-        )
-        _refresh_cleanup_target_for_resume(
-            root=root,
-            journal_path=journal_path,
-            journal=journal,
-            target_branch=target_branch,
         )
         return journal_path, journal
 
@@ -1302,6 +1575,16 @@ def _archive_historical_runs(
                 f"historical run changed after cleanup preparation: {source}"
             )
         if destination.exists():
+            # 0.2.6의 abort는 source marker만 걷었다. owner archive digest는 active를
+            # 제외하므로, 다음 cleanup lease 아래에서 그 lifecycle marker만 맞춘다.
+            # 이후 full digest를 다시 비교해 meta나 payload 차이는 그대로 차단한다.
+            if (
+                not (source / ACTIVE_MARKER).exists()
+                and (destination / ACTIVE_MARKER).exists()
+                and _run_tree_digest(source)
+                == _run_tree_digest(destination)
+            ):
+                mark_inactive(destination)
             if _run_tree_digest(destination, exclude_lifecycle=False) != digest:
                 raise CleanupBlockedError(
                     f"historical run archive checksum mismatch: {destination}"
@@ -2177,7 +2460,7 @@ def _load_cleanup_journal(
         not isinstance(payload, dict)
         or payload.get("version") != CLEANUP_JOURNAL_VERSION
         or payload.get("status")
-        not in {"cleanup_pending", "steps_complete", "complete"}
+        not in {"cleanup_pending", "steps_complete", "complete", "aborted"}
         or not _valid_cleanup_repository_identity(payload.get("repository"))
         or not isinstance(payload.get("steps"), dict)
         or any(
