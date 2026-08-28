@@ -1174,7 +1174,7 @@ def test_continue_prefers_unrelated_active_run_over_stale_cleanup(
         )
     pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
     assert pending is not None
-    mark_inactive(owner_run)
+    assert W.abort_pending_worktree_cleanup(root=root, run_dir=owner_run) is True
     state_root = W.worktree_runtime_root(root=root, name=status.name)
     other_run = create_run(
         state_root,
@@ -1203,6 +1203,27 @@ def test_continue_prefers_unrelated_active_run_over_stale_cleanup(
     assert result == 0
     assert runner_called is True
     assert pending.journal_path.exists()
+
+
+def test_pending_cleanup_with_legacy_inactive_owner_is_ignored(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, owner_run = _managed_run(root, "inactive-owner")
+    blocker = status.path / "generated.tmp"
+    blocker.write_text("keep dirty\n", encoding="utf-8")
+    with pytest.raises(W.CleanupBlockedError, match="checkout is dirty"):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=owner_run,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+    mark_inactive(owner_run)
+
+    assert W.find_pending_worktree_cleanup(root=root, selector=status.name) is None
 
 
 
@@ -1645,3 +1666,662 @@ def test_cli_remove_preserves_active_checkout(
     assert "active run" in capsys.readouterr().err
     assert status.path.exists()
     assert (run_dir / "active").exists()
+
+
+def _blocked_cleanup_runner(
+    root: Path, name: str, monkeypatch: pytest.MonkeyPatch
+) -> tuple[W.WorktreeStatus, Path, Runner, Path]:
+    """워크플로를 끝낸 run이 dirty checkout 때문에 cleanup에서 막힌 상태를 만든다."""
+    status, run_dir = _managed_run(root, name)
+    blocker = status.path / "generated.tmp"
+    blocker.write_text("remove before retry\n", encoding="utf-8")
+    runner = Runner(
+        status.path,
+        state_root=W.worktree_runtime_root(root=root, name=status.name),
+        config_root=root,
+        workflow="default",
+        run_dir=run_dir,
+        checkout_identity=f"worktree:{status.name}",
+    )
+    meta = read_meta(run_dir)
+    meta["phase_index"] = len(runner.phases)
+    meta["current_phase"] = None
+    write_meta(run_dir, meta)
+
+    class Adapter:
+        name = "generic"
+
+    monkeypatch.setattr(
+        runner_module, "assert_managed_hooks_registered", lambda *_args: None
+    )
+    monkeypatch.setattr(runner_module, "detect_adapter", lambda: Adapter())
+    monkeypatch.setattr(runner_module, "detect_available_clis", list)
+
+    def write_report(path: Path) -> Path:
+        report = path / "run-report.md"
+        report.write_text("report\n", encoding="utf-8")
+        return report
+
+    monkeypatch.setattr(runner_module, "write_run_report", write_report)
+    runner.run(ResumeMode.RESUME)
+    return status, run_dir, runner, blocker
+
+
+def test_blocked_cleanup_leaves_the_archived_run_resumable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """반증: cleanup이 한 번 막히면 그 run은 어떤 명령으로도 끝낼 수 없었다.
+
+    archive는 digest로 봉인된 증거다. 막힌 사실을 그 안에 적으면 다음 resume이
+    자기 자신이 쓴 바이트를 오염으로 읽고 영구히 blocked가 된다.
+    """
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, _, _, blocker = _blocked_cleanup_runner(root, "blocked-archive", monkeypatch)
+
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    archive = Path(journal["run"]["archive_dir"])
+    assert W._run_tree_digest(archive) == journal["run"]["archive_digest"]
+
+    blocker.unlink()
+    resume_result = W.resume_pending_worktree_cleanup(root=root, pending=pending)
+
+    assert resume_result.aborted is False
+    assert read_meta(resume_result.run_dir)["cleanup_state"] == "complete"
+    assert not status.path.exists()
+
+
+def test_abort_during_pending_cleanup_retires_the_live_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """반증: cleanup journal이 있으면 abort가 archive 사본만 건드려, 살아 있는 run이
+    영원히 active로 남고 checkout을 걷어낼 방법이 사라졌다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir, _, blocker = _blocked_cleanup_runner(
+        root, "abort-live", monkeypatch
+    )
+    assert (run_dir / "active").exists()
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+
+    assert (
+        cli_module.main(
+            ["abort", "--root", str(root), "--worktree", status.name, "--yes"]
+        )
+        == 0
+    )
+
+    assert not (run_dir / "active").exists()
+    aborted = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    assert aborted["status"] == "aborted"
+    assert aborted["leases"]["cleanup"]["state"] == "released"
+    archive = Path(aborted["run"]["archive_dir"])
+    assert not (archive / "active").exists()
+    # 회수된 run의 journal은 그 이름을 더 이상 대변하지 않는다. 계속 앞세우면 새 run이
+    # 죽은 archive 사본에 가려지고 resume은 owner가 없어 영원히 막힌다.
+    assert cli_module._pending_cleanup_for_checkout(root, status.name) is None
+    assert (
+        cli_module.main(
+            ["continue", "--root", str(root), "--worktree", status.name]
+        )
+        == 0
+    )
+    blocker.unlink()
+    removed = W.remove_worktree(
+        root=root,
+        status=W.get_worktree_status(root=root, name=status.name),
+    )
+    assert removed is not None
+    assert not status.path.exists()
+
+    recreated = W.create_worktree(
+        root=root, plan=W.plan_worktree(root=root, name=status.name)
+    )
+    recreated_state = W.worktree_runtime_root(root=root, name=recreated.name)
+    second_run = create_run(
+        recreated_state,
+        "default",
+        "second cleanup",
+        run_id="run-second",
+        checkout_identity=f"worktree:{recreated.name}",
+        checkout_registration_identity=recreated.registration_identity,
+    )
+    second_blocker = recreated.path / "second.tmp"
+    second_blocker.write_text("keep dirty\n", encoding="utf-8")
+    with pytest.raises(W.CleanupBlockedError, match="checkout is dirty"):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=recreated.path,
+            run_dir=second_run,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+    second_pending = W.find_pending_worktree_cleanup(
+        root=root, selector=recreated.name
+    )
+    assert second_pending is not None
+    assert read_meta(second_pending.run_dir)["run_id"] == "run-second"
+
+
+def test_abort_keeps_same_checkout_historical_archive_reusable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, first_run, _, blocker = _blocked_cleanup_runner(
+        root, "abort-same-checkout", monkeypatch
+    )
+    assert (
+        cli_module.main(
+            ["abort", "--root", str(root), "--worktree", status.name, "--yes"]
+        )
+        == 0
+    )
+    blocker.unlink()
+    second_run = create_run(
+        W.worktree_runtime_root(root=root, name=status.name),
+        "default",
+        "second run",
+        run_id="run-second",
+        checkout_identity=f"worktree:{status.name}",
+        checkout_registration_identity=status.registration_identity,
+    )
+
+    cleanup = W.run_worktree_cleanup_transaction(
+        root=root,
+        checkout_path=status.path,
+        run_dir=second_run,
+        target_branch="main",
+        integration_strategy="merge",
+    )
+    archived_second = W.complete_worktree_cleanup(cleanup)
+
+    assert read_meta(archived_second)["cleanup_state"] == "complete"
+    assert not status.path.exists()
+    first_archive = archived_second.parent / first_run.name
+    assert first_archive.is_dir()
+    assert not (first_archive / "active").exists()
+
+
+def test_legacy_source_only_abort_does_not_poison_next_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, first_run, _, blocker = _blocked_cleanup_runner(
+        root, "legacy-source-abort", monkeypatch
+    )
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    first_archive = Path(journal["run"]["archive_dir"])
+    assert (first_archive / "active").exists()
+    mark_inactive(first_run)
+    blocker.unlink()
+    second_run = create_run(
+        W.worktree_runtime_root(root=root, name=status.name),
+        "default",
+        "second run",
+        run_id="run-second",
+        checkout_identity=f"worktree:{status.name}",
+        checkout_registration_identity=status.registration_identity,
+    )
+
+    cleanup = W.run_worktree_cleanup_transaction(
+        root=root,
+        checkout_path=status.path,
+        run_dir=second_run,
+        target_branch="main",
+        integration_strategy="merge",
+    )
+    archived_second = W.complete_worktree_cleanup(cleanup)
+
+    assert read_meta(archived_second)["cleanup_state"] == "complete"
+    assert not (archived_second.parent / first_run.name / "active").exists()
+
+
+def test_cleanup_blocked_before_the_digest_keeps_the_live_run_trace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """반증: archive 이전에 막힌 판정까지 함께 사라졌다.
+
+    digest가 없으면 run tree는 아직 살아 있다. 그 구간의 blocked 사유는 journal이
+    아니라 run이 가져가야 한다 - journal조차 없는 실패가 있기 때문이다.
+    """
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "pre-archive-block")
+    runner = Runner(
+        status.path,
+        state_root=W.worktree_runtime_root(root=root, name=status.name),
+        config_root=root,
+        workflow="default",
+        run_dir=run_dir,
+        checkout_identity=f"worktree:{status.name}",
+    )
+    meta = read_meta(run_dir)
+    meta["phase_index"] = len(runner.phases)
+    meta["current_phase"] = None
+    write_meta(run_dir, meta)
+
+    class Adapter:
+        name = "generic"
+
+    monkeypatch.setattr(
+        runner_module, "assert_managed_hooks_registered", lambda *_args: None
+    )
+    monkeypatch.setattr(runner_module, "detect_adapter", lambda: Adapter())
+    monkeypatch.setattr(runner_module, "detect_available_clis", list)
+    monkeypatch.setattr(
+        runner_module,
+        "run_worktree_cleanup_transaction",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            W.CleanupBlockedError("integration proof is unknown")
+        ),
+    )
+
+    runner.run(ResumeMode.RESUME)
+
+    events = (run_dir / "context" / "events.jsonl").read_text(encoding="utf-8")
+    assert "cleanup_pending" in events
+    assert runner.run_dir_sealed is False
+
+
+def test_unknown_run_tree_seal_state_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """비필수 observation은 봉인 여부를 읽지 못할 때 archive를 추측해 쓰지 않는다."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    write_meta(
+        run_dir,
+        {"cleanup_journal": str(tmp_path / "missing-cleanup-journal.json")},
+    )
+    assert W.run_tree_is_sealed(run_dir) is True
+    (run_dir / "meta.json").write_text("{", encoding="utf-8")
+    assert W.run_tree_is_sealed(run_dir) is True
+
+    def unreadable_meta(_run_dir: Path) -> dict[str, object]:
+        raise OSError("metadata unavailable")
+
+    monkeypatch.setattr(W, "read_meta", unreadable_meta)
+    assert W.run_tree_is_sealed(run_dir) is True
+
+
+def test_abort_never_overwrites_steps_complete_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """cleanup terminal 전이는 단조롭다. abort가 steps_complete를 뒤로 돌리지 않는다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir, _, _ = _blocked_cleanup_runner(
+        root, "abort-monotonic", monkeypatch
+    )
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    journal["status"] = "steps_complete"
+    W._write_cleanup_journal(pending.journal_path, journal)
+
+    assert (
+        cli_module.main(
+            ["abort", "--root", str(root), "--worktree", status.name, "--yes"]
+        )
+        == 2
+    )
+
+    after = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    assert after["status"] == "steps_complete"
+    assert (run_dir / "active").exists()
+    assert "run agent-flow continue" in capsys.readouterr().err
+
+
+def test_abort_refuses_after_checkout_removal_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir, _, _ = _blocked_cleanup_runner(
+        root, "abort-after-remove", monkeypatch
+    )
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    journal["steps"]["checkout_removal"]["status"] = "done"
+    W._write_cleanup_journal(pending.journal_path, journal)
+
+    assert (
+        cli_module.main(
+            ["abort", "--root", str(root), "--worktree", status.name, "--yes"]
+        )
+        == 2
+    )
+
+    after = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    assert after["status"] == "cleanup_pending"
+    assert (run_dir / "active").exists()
+    assert "run agent-flow continue" in capsys.readouterr().err
+
+
+def test_abort_rejects_external_runtime_root_before_writing_a_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mutable journal path가 repository 밖 active.lock 쓰기 채널이 되지 않는다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir, _, _ = _blocked_cleanup_runner(
+        root, "abort-path", monkeypatch
+    )
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    external = tmp_path / "external-runtime"
+    journal["run"]["source_state_root"] = str(external)
+    W._write_cleanup_journal(pending.journal_path, journal)
+
+    assert (
+        W.abort_pending_worktree_cleanup(root=root, run_dir=run_dir) is False
+    )
+
+    assert not external.exists()
+    assert (run_dir / "active").exists()
+
+    journal["run"]["source_state_root"] = str(
+        W.worktree_runtime_root(root=root, name=status.name)
+    )
+    journal["checkout"]["path"] = str(tmp_path / "other-checkout")
+    W._write_cleanup_journal(pending.journal_path, journal)
+    assert (
+        W.abort_pending_worktree_cleanup(root=root, run_dir=run_dir) is False
+    )
+
+    assert (run_dir / "active").exists()
+
+    journal["checkout"]["path"] = str(status.path)
+    archive = Path(journal["run"]["archive_dir"])
+    other_run = tmp_path / "other-run"
+    other_run.mkdir()
+    (other_run / "active").touch()
+    shutil.rmtree(archive)
+    archive.symlink_to(other_run, target_is_directory=True)
+    W._write_cleanup_journal(pending.journal_path, journal)
+    assert (
+        W.abort_pending_worktree_cleanup(root=root, run_dir=run_dir) is False
+    )
+
+    assert (other_run / "active").exists()
+    assert (run_dir / "active").exists()
+
+
+def test_continue_replays_abort_after_journal_publish_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """aborted journal publish 뒤 marker 제거 전 crash가 cleanup을 재진입시키지 않는다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir, _, _ = _blocked_cleanup_runner(
+        root, "abort-intent-replay", monkeypatch
+    )
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    journal["status"] = "aborted"
+    journal["aborted_at"] = W._utc_now()
+    W._write_cleanup_journal(pending.journal_path, journal)
+    assert (run_dir / "active").exists()
+
+    assert (
+        cli_module.main(
+            ["continue", "--root", str(root), "--worktree", status.name]
+        )
+        == 0
+    )
+
+    assert not (run_dir / "active").exists()
+    assert status.path.exists()
+    assert W.worktree_branch_exists(root=root, branch=status.branch)
+    after = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    assert after["status"] == "aborted"
+    output = capsys.readouterr().out
+    assert "status: aborted" in output
+    assert "reason: run_aborted" in output
+    assert "run complete" not in output
+
+
+def test_continue_blocks_when_abort_replay_owner_validation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir, _, _ = _blocked_cleanup_runner(
+        root, "abort-replay-invalid", monkeypatch
+    )
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    journal["status"] = "aborted"
+    archive = Path(journal["run"]["archive_dir"])
+    other_run = tmp_path / "other-run"
+    other_run.mkdir()
+    (other_run / "active").touch()
+    shutil.rmtree(archive)
+    archive.symlink_to(other_run, target_is_directory=True)
+    W._write_cleanup_journal(pending.journal_path, journal)
+
+    assert (
+        cli_module.main(
+            ["continue", "--root", str(root), "--worktree", status.name]
+        )
+        == 2
+    )
+
+    assert "abort --worktree" in capsys.readouterr().out
+    assert (run_dir / "active").exists()
+    assert (other_run / "active").exists()
+
+
+def test_abort_reports_cleanup_transition_failure_without_retiring_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """core의 fail-closed 판정을 CLI가 traceback 대신 exit 2로 보존한다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "abort-error")
+
+    def blocked_abort(**_kwargs: object) -> bool:
+        raise W.CleanupBlockedError("cleanup lease is busy")
+
+    monkeypatch.setattr(
+        cli_module, "abort_pending_worktree_cleanup", blocked_abort
+    )
+
+    assert (
+        cli_module.main(
+            ["abort", "--root", str(root), "--worktree", status.name, "--yes"]
+        )
+        == 2
+    )
+    assert "cleanup lease is busy" in capsys.readouterr().err
+    assert (run_dir / "active").exists()
+
+
+def test_abort_closes_live_state_when_checkout_is_already_gone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir, _, _ = _blocked_cleanup_runner(
+        root, "abort-gone", monkeypatch
+    )
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    _git("worktree", "remove", "--force", str(status.path), cwd=root)
+
+    assert (
+        cli_module.main(
+            ["abort", "--root", str(root), "--worktree", status.name, "--yes"]
+        )
+        == 0
+    )
+
+    assert not (run_dir / "active").exists()
+    assert "closing its run state only" in capsys.readouterr().err
+    assert W.find_pending_worktree_cleanup(root=root, selector=status.name) is None
+    journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    assert journal["status"] == "aborted"
+
+
+def test_checkout_gone_abort_uses_the_cleanup_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir, _, _ = _blocked_cleanup_runner(
+        root, "abort-gone-race", monkeypatch
+    )
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    _git("worktree", "remove", "--force", str(status.path), cwd=root)
+
+    with W._cleanup_lease(root, status.path):
+        assert (
+            cli_module.main(
+                ["abort", "--root", str(root), "--worktree", status.name, "--yes"]
+            )
+            == 2
+        )
+        assert (run_dir / "active").exists()
+        journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+        assert journal["status"] == "cleanup_pending"
+
+    capsys.readouterr()
+    assert (
+        cli_module.main(
+            ["abort", "--root", str(root), "--worktree", status.name, "--yes"]
+        )
+        == 0
+    )
+    assert not (run_dir / "active").exists()
+    journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    assert journal["status"] == "aborted"
+
+
+def test_cleanup_reloads_abort_published_while_waiting_for_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir, _, blocker = _blocked_cleanup_runner(
+        root, "abort-before-lease", monkeypatch
+    )
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    original_lease = W._cleanup_lease
+
+    class AbortBeforeLease:
+        def __enter__(self) -> Path:
+            journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+            journal["status"] = "aborted"
+            journal["aborted_at"] = W._utc_now()
+            W._write_cleanup_journal(pending.journal_path, journal)
+            return tmp_path / "lease"
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(W, "_cleanup_lease", lambda *_args: AbortBeforeLease())
+    with pytest.raises(W.CleanupBlockedError, match="cleanup was aborted"):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+    monkeypatch.setattr(W, "_cleanup_lease", original_lease)
+
+    assert status.path.exists()
+    assert blocker.exists()
+    journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    assert journal["status"] == "aborted"
+
+
+def test_status_reports_pending_owner_mismatch_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir, _, _ = _blocked_cleanup_runner(
+        root, "status-error", monkeypatch
+    )
+    meta = read_meta(run_dir)
+    meta["cleanup_journal"] = str(tmp_path / "wrong-journal.json")
+    write_meta(run_dir, meta)
+
+    assert (
+        cli_module.main(
+            ["status", "--root", str(root), "--worktree", status.name]
+        )
+        == 2
+    )
+
+    assert "owner metadata is mismatched" in capsys.readouterr().err
+
+    assert (
+        cli_module.main(
+            ["abort", "--root", str(root), "--worktree", status.name, "--yes"]
+        )
+        == 0
+    )
+    assert not (run_dir / "active").exists()
+
+
+def test_continue_finishes_cleanup_after_source_metadata_is_removed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """source가 사라진 terminal-resume 구간은 journal만으로 continue할 수 있다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "terminal-cli-resume")
+
+    def crash_after_metadata(step: str) -> None:
+        if step == "metadata_cleanup":
+            raise RuntimeError("crash after metadata cleanup")
+
+    with pytest.raises(RuntimeError, match="crash after metadata cleanup"):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+            after_step=crash_after_metadata,
+        )
+    assert not W.worktree_runtime_root(root=root, name=status.name).exists()
+
+    assert (
+        cli_module.main(
+            ["continue", "--root", str(root), "--worktree", status.name]
+        )
+        == 0
+    )
+    assert "status: complete" in capsys.readouterr().out
