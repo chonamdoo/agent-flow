@@ -435,6 +435,21 @@ def test_creating_one_checkout_does_not_block_retiring_another(
     assert created.path.exists()
 
 
+def test_same_checkout_create_is_excluded_during_remove(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    plan = W.plan_worktree(root=root, name="same-target")
+    status = W.create_worktree(root=root, plan=plan)
+
+    with W._cleanup_lease(root, status.path):
+        with pytest.raises(W.CleanupBlockedError, match="being retired"):
+            W.create_worktree(root=root, plan=plan)
+        with pytest.raises(W.CleanupBlockedError, match="being retired"):
+            W.attach_worktree(root=root, selector=status.name)
+        with pytest.raises(W.CleanupBlockedError, match="being retired"):
+            W.adopt_worktree(root=root, path=status.path)
+
+
 def test_retiring_a_checkout_excludes_a_second_retirement_of_the_same_one(
     tmp_path: Path,
 ) -> None:

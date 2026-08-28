@@ -71,6 +71,7 @@ CLEANUP_STEPS = (
     "branch_ref_cas",
     "metadata_cleanup",
 )
+_RUN_COORDINATION_FILES = frozenset({"active.lock", "lifecycle.lock"})
 
 
 class CleanupBlockedError(WorktreeIsolationError):
@@ -174,7 +175,7 @@ def create_worktree(
     allow_dirty: bool = False,
     reuse_existing: bool = True,
 ) -> WorktreeStatus:
-    with worktree_creation_lock(root):
+    with _checkout_activity_lease(root, plan.path), worktree_creation_lock(root):
         return _create_worktree(
             root=root,
             plan=plan,
@@ -309,6 +310,28 @@ def attach_worktree(
     registered = resolve_worktree(root=root, selector=selector)
     if registered is None:
         return None
+    with _checkout_activity_lease(root, registered.path):
+        return _attach_registered_worktree(
+            root=root,
+            selector=selector,
+            registered=registered,
+            branch=branch,
+            allow_dirty=allow_dirty,
+            expected_registration_identity=expected_registration_identity,
+            adopt=adopt,
+        )
+
+
+def _attach_registered_worktree(
+    *,
+    root: Path,
+    selector: str,
+    registered: RegisteredWorktree,
+    branch: str | None,
+    allow_dirty: bool,
+    expected_registration_identity: str | None,
+    adopt: bool,
+) -> WorktreeStatus | None:
     if registered.registration_identity is None:
         raise WorktreeIsolationError(
             f"worktree registration identity is unavailable: {registered.path}"
@@ -441,35 +464,45 @@ def adopt_worktree(
     terminal cleanup은 checkout만 제거하고 브랜치는 보존한다.
     """
     checkout = real_path(path)
-    status = attach_worktree(
-        root=root,
-        selector=str(checkout),
-        allow_dirty=allow_dirty,
-        adopt=True,
-    )
-    if status is None:
+    registered = resolve_worktree(root=root, selector=str(checkout))
+    if registered is None:
         raise ValueError(
             f"no linked worktree of {root} is registered at {path}; "
             "create it with `git worktree add` first"
         )
-    # 기록은 manifest가 아니라 워커 쓰기 구역 밖의 `adopted/`에 남긴다. 이후의 모든
-    # 인가 판정(`adopted_worktree_parent`, `trusted_checkout_paths`)이 이 파일을 본다.
-    try:
-        record_adopted_checkout(
+    with _checkout_activity_lease(root, registered.path):
+        status = _attach_registered_worktree(
             root=root,
-            name=status.name,
-            path=status.path,
-            registration_identity=status.registration_identity,
+            selector=str(checkout),
+            registered=registered,
+            branch=None,
+            allow_dirty=allow_dirty,
+            expected_registration_identity=None,
+            adopt=True,
         )
-    except (OSError, WorktreeIsolationError) as exc:
-        # attach는 이미 끝났다. 그 사실을 말하지 않으면 사용자는 "채택하라"는 안내와
-        # 원시 errno 사이에서 지금 상태가 무엇인지 알 수 없다.
-        raise WorktreeIsolationError(
-            f"attached {status.path} but could not record the adoption: {exc}. "
-            "That checkout is still unadopted — clear the cause and run the same "
-            "command again"
-        ) from exc
-    return status
+        if status is None:
+            raise ValueError(
+                f"no linked worktree of {root} is registered at {path}; "
+                "create it with `git worktree add` first"
+            )
+        # 기록은 manifest가 아니라 워커 쓰기 구역 밖의 `adopted/`에 남긴다. 이후의 모든
+        # 인가 판정(`adopted_worktree_parent`, `trusted_checkout_paths`)이 이 파일을 본다.
+        try:
+            record_adopted_checkout(
+                root=root,
+                name=status.name,
+                path=status.path,
+                registration_identity=status.registration_identity,
+            )
+        except (OSError, WorktreeIsolationError) as exc:
+            # attach는 이미 끝났다. 그 사실을 말하지 않으면 사용자는 "채택하라"는 안내와
+            # 원시 errno 사이에서 지금 상태가 무엇인지 알 수 없다.
+            raise WorktreeIsolationError(
+                f"attached {status.path} but could not record the adoption: {exc}. "
+                "That checkout is still unadopted — clear the cause and run the same "
+                "command again"
+            ) from exc
+        return status
 
 
 def _adopted(*, root: Path, path: Path) -> bool:
@@ -1243,7 +1276,10 @@ def _archive_historical_runs(
             raise CleanupBlockedError(
                 f"cannot inspect historical run: {source}"
             ) from exc
-        if source.name == "active.lock" and stat.S_ISREG(identity.st_mode):
+        if (
+            source.name in _RUN_COORDINATION_FILES
+            and stat.S_ISREG(identity.st_mode)
+        ):
             continue
         if not stat.S_ISDIR(identity.st_mode) or stat.S_ISLNK(identity.st_mode):
             raise CleanupBlockedError(
@@ -2283,6 +2319,19 @@ def worktree_run_activation(
         raise WorktreeIsolationError(
             f"repository cleanup is active or unsafe at {lock_path}; "
             "run activation is blocked"
+        ) from exc
+
+
+@contextmanager
+def _checkout_activity_lease(root: Path, checkout_path: Path) -> Iterator[None]:
+    lock_path = _checkout_lease_path(root, checkout_path)
+    try:
+        with shared_file_lease(lock_path):
+            yield
+    except FileLeaseUnavailable as exc:
+        raise CleanupBlockedError(
+            f"checkout {checkout_path} is being retired or its lease is unsafe; "
+            "preserving checkout"
         ) from exc
 
 
