@@ -1,6 +1,6 @@
 {
   "name": "agent-flow-kit",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Project-agnostic AI workflow kit. Single entry, AI-driven phase progression. Works with Claude and Codex.",
   "scripts": {
     "parity:check": "node scripts/check-agent-flow-parity.mjs",
