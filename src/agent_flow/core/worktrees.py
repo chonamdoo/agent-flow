@@ -1581,8 +1581,16 @@ def _archive_historical_runs(
             if (
                 not (source / ACTIVE_MARKER).exists()
                 and (destination / ACTIVE_MARKER).exists()
-                and _run_tree_digest(source)
-                == _run_tree_digest(destination)
+                and _run_tree_digest(
+                    source,
+                    exclude_lifecycle=False,
+                    exclude_active_marker=True,
+                )
+                == _run_tree_digest(
+                    destination,
+                    exclude_lifecycle=False,
+                    exclude_active_marker=True,
+                )
             ):
                 mark_inactive(destination)
             if _run_tree_digest(destination, exclude_lifecycle=False) != digest:
@@ -1697,8 +1705,13 @@ def _assert_archived_run_identity(
         )
 
 
-def _run_tree_digest(root: Path, *, exclude_lifecycle: bool = True) -> str:
-    """Hash immutable run payload while excluding lifecycle publication files."""
+def _run_tree_digest(
+    root: Path,
+    *,
+    exclude_lifecycle: bool = True,
+    exclude_active_marker: bool = False,
+) -> str:
+    """Hash a run tree while excluding only the requested publication files."""
     try:
         root_identity = root.lstat()
     except OSError as exc:
@@ -1712,7 +1725,11 @@ def _run_tree_digest(root: Path, *, exclude_lifecycle: bool = True) -> str:
         raise CleanupBlockedError(f"cannot enumerate run archive: {root}") from exc
     for path in paths:
         relative = path.relative_to(root).as_posix()
-        if exclude_lifecycle and relative in {"active", "meta.json"}:
+        if relative == ACTIVE_MARKER and (
+            exclude_lifecycle or exclude_active_marker
+        ):
+            continue
+        if exclude_lifecycle and relative == "meta.json":
             continue
         try:
             identity = path.lstat()

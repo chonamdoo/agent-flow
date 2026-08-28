@@ -984,7 +984,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.worktree
                 else (root, root)
             )
-        except (CleanupBlockedError, ValueError) as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
         if run_root is None:
