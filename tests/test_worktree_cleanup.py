@@ -1883,6 +1883,46 @@ def test_legacy_source_only_abort_does_not_poison_next_cleanup(
     assert not (archived_second.parent / first_run.name / "active").exists()
 
 
+def test_legacy_marker_reconciliation_never_mutates_mismatched_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, first_run, _, blocker = _blocked_cleanup_runner(
+        root, "legacy-meta-mismatch", monkeypatch
+    )
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    first_archive = Path(journal["run"]["archive_dir"])
+    archive_meta = read_meta(first_archive)
+    archive_meta["task"] = "tampered archive metadata"
+    write_meta(first_archive, archive_meta)
+    mark_inactive(first_run)
+    blocker.unlink()
+    second_run = create_run(
+        W.worktree_runtime_root(root=root, name=status.name),
+        "default",
+        "second run",
+        run_id="run-second",
+        checkout_identity=f"worktree:{status.name}",
+        checkout_registration_identity=status.registration_identity,
+    )
+
+    with pytest.raises(
+        W.CleanupBlockedError, match="historical run archive checksum mismatch"
+    ):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=second_run,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+
+    assert (first_archive / "active").exists()
+
+
 def test_cleanup_blocked_before_the_digest_keeps_the_live_run_trace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2129,6 +2169,28 @@ def test_continue_blocks_when_abort_replay_owner_validation_fails(
     assert "abort --worktree" in capsys.readouterr().out
     assert (run_dir / "active").exists()
     assert (other_run / "active").exists()
+
+
+def test_abort_reports_worktree_context_io_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+
+    def unavailable_context(*_args: object, **_kwargs: object) -> tuple[None, Path]:
+        raise OSError("worktree status unavailable")
+
+    monkeypatch.setattr(cli_module, "_worktree_context", unavailable_context)
+
+    assert (
+        cli_module.main(
+            ["abort", "--root", str(root), "--worktree", "feat-missing", "--yes"]
+        )
+        == 2
+    )
+    assert "worktree status unavailable" in capsys.readouterr().err
 
 
 def test_abort_reports_cleanup_transition_failure_without_retiring_run(
