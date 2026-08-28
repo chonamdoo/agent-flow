@@ -27,6 +27,7 @@ from agent_flow.core.design_ledger import (
     MANUAL_SPEC_APPROVALS_FILE,
     SPEC_CAPTURE_FILE,
     SPEC_CONFIRMATION_FILE,
+    SPEC_MUTATION_INTENT_FILE,
     capture_design_ledger,
     confirm_current_spec_changes,
     manual_spec_approval_statement,
@@ -356,6 +357,14 @@ def test_ledger_tampering_or_missing_capture_state_fails_closed(tmp_path):
 
     with pytest.raises(RuntimeError, match="design-spec.md is invalid"):
         ledger_prompt_block(tmp_path)
+    (tmp_path / SPEC_MUTATION_INTENT_FILE).write_text(
+        '{"version": 1, "operation": "confirm", "ledger": {}}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError) as malformed_intent:
+        ledger_prompt_block(tmp_path)
+    assert "agent-flow spec confirm" not in str(malformed_intent.value)
+    (tmp_path / SPEC_MUTATION_INTENT_FILE).unlink()
 
     ledger_path.write_text(original, encoding="utf-8")
     (tmp_path / SPEC_CAPTURE_FILE).unlink()
@@ -434,7 +443,10 @@ def test_concurrent_manual_spec_approvals_preserve_both(tmp_path):
     )
 
 
-@pytest.mark.parametrize("failing_writer", ["write_ledger", "_write_capture_state"])
+@pytest.mark.parametrize(
+    "failing_writer",
+    ["record_spec_confirmation", "write_ledger", "_write_capture_state"],
+)
 def test_spec_confirmation_replays_after_each_intent_step(
     tmp_path, monkeypatch, failing_writer
 ):
@@ -452,6 +464,9 @@ def test_spec_confirmation_replays_after_each_intent_step(
     monkeypatch.setattr(DESIGN_LEDGER, failing_writer, interrupt)
     with pytest.raises(OSError, match="injected interruption"):
         confirm_current_spec_changes(tmp_path)
+    if failing_writer == "write_ledger":
+        with pytest.raises(RuntimeError, match="agent-flow spec confirm"):
+            ledger_prompt_block(tmp_path)
     monkeypatch.setattr(DESIGN_LEDGER, failing_writer, original)
 
     confirmation = confirm_current_spec_changes(tmp_path)

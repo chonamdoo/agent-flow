@@ -19,6 +19,7 @@ import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from agent_flow.core.atomic_io import atomic_write_text, fsync_directory
 from agent_flow.core.command_evidence import is_concrete_test_selector
@@ -810,7 +811,15 @@ def _spec_confirmation_intent(
     }
 
 
-def _resume_spec_confirmation_intent(run_dir: Path) -> Path | None:
+class _SpecConfirmationIntent(NamedTuple):
+    ledger: DesignLedger
+    source_items: tuple[SpecItem, ...]
+    unconfirmed_design_values: tuple[tuple[str, str], ...] | None
+
+
+def _parse_spec_confirmation_intent(run_dir: Path) -> _SpecConfirmationIntent | None:
+    """intent를 부작용 없이 읽는다. 재생과 안내가 같은 판정을 써야, 안내한 명령이
+    바로 malformed로 죽는 상태를 "복구 가능"이라고 말하지 않는다."""
     intent_path = run_dir / SPEC_MUTATION_INTENT_FILE
     payload = _read_json(intent_path)
     if payload is None:
@@ -823,25 +832,33 @@ def _resume_spec_confirmation_intent(run_dir: Path) -> Path | None:
         or payload.get("operation") != "confirm"
     ):
         raise ValueError("SPEC confirmation intent is malformed")
-    ledger = _ledger_from_intent(payload.get("ledger"))
-    source_items = _spec_items_from_intent(
-        payload.get("source_items"),
-        label="source_items",
+    return _SpecConfirmationIntent(
+        ledger=_ledger_from_intent(payload.get("ledger")),
+        source_items=_spec_items_from_intent(
+            payload.get("source_items"),
+            label="source_items",
+        ),
+        unconfirmed_design_values=_values_from_intent(
+            payload.get("unconfirmed_design_values"),
+            label="unconfirmed_design_values",
+            optional=True,
+        ),
     )
-    unconfirmed_design_values = _values_from_intent(
-        payload.get("unconfirmed_design_values"),
-        label="unconfirmed_design_values",
-        optional=True,
-    )
-    confirmation_path = record_spec_confirmation(run_dir, ledger.spec_items)
-    write_ledger(run_dir, ledger)
+
+
+def _resume_spec_confirmation_intent(run_dir: Path) -> Path | None:
+    intent = _parse_spec_confirmation_intent(run_dir)
+    if intent is None:
+        return None
+    confirmation_path = record_spec_confirmation(run_dir, intent.ledger.spec_items)
+    write_ledger(run_dir, intent.ledger)
     _write_capture_state(
         run_dir,
-        ledger,
-        source_items=source_items,
-        unconfirmed_design_values=unconfirmed_design_values,
+        intent.ledger,
+        source_items=intent.source_items,
+        unconfirmed_design_values=intent.unconfirmed_design_values,
     )
-    intent_path.unlink()
+    (run_dir / SPEC_MUTATION_INTENT_FILE).unlink()
     fsync_directory(run_dir)
     return confirmation_path
 
@@ -1041,6 +1058,25 @@ def _run_task_text(run_dir: Path) -> str:
     return read_run_task_record(run_dir).text
 
 
+def _pending_spec_intent_explains_baseline_mismatch(
+    run_dir: Path,
+    ledger: DesignLedger,
+) -> bool:
+    if "SPEC baseline snapshot does not match design-spec.md" not in ledger.errors:
+        return False
+    try:
+        intent = _parse_spec_confirmation_intent(run_dir)
+    except ValueError:
+        return False
+    if intent is None:
+        return False
+    confirmed = read_confirmed_spec_items(run_dir)
+    return (
+        intent.ledger.spec_items == confirmed
+        and ledger.spec_items != intent.ledger.spec_items
+    )
+
+
 def ledger_prompt_block(run_dir: Path) -> str:
     """전 phase 엔벨로프에 실리는 블록. agent가 끌 수 없다."""
     ledger = read_ledger(run_dir)
@@ -1049,6 +1085,16 @@ def ledger_prompt_block(run_dir: Path) -> str:
             raise RuntimeError("design-spec.md is missing after the source phase")
         return ""
     if ledger.errors:
+        if _pending_spec_intent_explains_baseline_mismatch(run_dir, ledger):
+            command = (
+                "agent-flow spec confirm "
+                f"--run-dir {shlex.quote(str(run_dir))}"
+            )
+            raise RuntimeError(
+                f"design-spec.md is invalid: {'; '.join(ledger.errors)}. "
+                "A pending SPEC confirmation intent can recover this state: "
+                f"retry `{command}`."
+            )
         raise RuntimeError(
             f"design-spec.md is invalid: {'; '.join(ledger.errors)}. "
             "This block is injected into every phase prompt, so the run cannot "
