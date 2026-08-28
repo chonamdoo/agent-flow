@@ -59,6 +59,7 @@ import {
   PRUNE_BACKUP_VERSIONED,
   PRUNE_NOTICE_PREFIX,
   pruneRetiredHooks,
+  isSymlinkPath,
   pruneRetiredHookScripts,
   pruneRetiredManagedScripts,
   pruneUninstalledProfiles,
@@ -87,6 +88,7 @@ import {
   SKILL_INDEX_END,
   SKILL_INDEX_START,
   skillIndexBlock,
+  SYMLINK_SKIP_NOTICE_PREFIX,
   syncRecordedKitAssets,
   tomlBasicString,
   uniqueStrings,
@@ -1456,6 +1458,17 @@ function releasePushWatchLock({ lock, token }) {
 }
 
 
+
+function pushWatchArtifact(status, prUrl, recordedAt) {
+  return [
+    `status: ${status}`,
+    `pr: ${prUrl ?? "unknown"}`,
+    `recorded_at: ${recordedAt}`,
+    "",
+  ].join("\n");
+}
+
+
 function commitPushWatchObservation(root, runDir, runId, pr, watchStatus) {
   if (typeof runId !== "string" || !runId) {
     throw new Error("blocked: active push-watch run has no run id");
@@ -1469,22 +1482,23 @@ function commitPushWatchObservation(root, runDir, runId, pr, watchStatus) {
     const previous = fs.existsSync(pushWatchStatePath(root))
       ? JSON.parse(fs.readFileSync(pushWatchStatePath(root), "utf8"))
       : {};
+    const prUrl = pr.url ?? null;
     if (previous.observation_id === observationId) {
+      writeManagedFile(
+        path.join(runDir, "artifacts", "pr-watch.md"),
+        pushWatchArtifact(watchStatus, prUrl, previous.updated_at),
+        { durable: true },
+      );
       return previous;
     }
     const recordedAt = new Date().toISOString();
-    const artifact = [
-      `status: ${watchStatus}`,
-      `pr: ${pr.url ?? "unknown"}`,
-      `recorded_at: ${recordedAt}`,
-      "",
-    ].join("\n");
+    const artifact = pushWatchArtifact(watchStatus, prUrl, recordedAt);
     const state = {
       ...previous,
       run_id: runId,
       run_dir: runDir,
       status: watchStatus,
-      pr: pr.url ?? null,
+      pr: prUrl,
       observation_id: observationId,
       iterations: Number(previous.iterations ?? 0) + 1,
       updated_at: recordedAt,
@@ -1551,7 +1565,10 @@ function replayPushWatchIntent(root, runDir, runId) {
   }
   if (payload.run_id !== runId || !samePath(payload.run_dir, runDir)) {
     if (fs.existsSync(path.join(payload.run_dir, "active"))) {
-      throw new Error("blocked: push-watch intent belongs to another active run");
+      throw new Error(
+        `blocked: push-watch intent belongs to another active run (${payload.run_dir}); `
+        + "finish or abort that run before retrying push-watch",
+      );
     }
     fs.rmSync(intent);
     fsyncParentDirectory(intent);
@@ -1713,6 +1730,13 @@ function copyBundledDirIfMissingOrSame(
     sourceNames.add(entry.name);
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
+    // 대상 자리가 링크면 여기서 끝난다. 제거 분기로 보내면 링크(혹은 링크 너머의
+    // 실제 디렉터리)를 지우고, 복사 분기로 보내면 링크 너머 - 대개 프로젝트 밖 -
+    // 에 번들 파일을 만든다. 둘 다 우리가 소유를 증명하지 못한 자리다.
+    if (isSymlinkPath(destPath)) {
+      console.log(`${SYMLINK_SKIP_NOTICE_PREFIX}${destPath}`);
+      continue;
+    }
     if (entry.isDirectory()) {
       if (isRoot && allowedRootDirs && !allowedRootDirs.has(entry.name)) {
         removeManagedDirIfSame(srcPath, destPath, force);

@@ -2651,6 +2651,30 @@ def test_reinstall_upgrades_an_untouched_bundled_skill(tmp_path: Path, binary: s
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_reinstall_skips_a_symlinked_bundled_skill(tmp_path: Path, binary: str) -> None:
+    project = tmp_path / f"project-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    installed = project / ".agent-flow" / "skills" / _UPGRADE_PROBE_SKILL / "SKILL.md"
+    old_content = "---\nname: old\n---\n\n# 옛 판본\n"
+    installed.write_text(old_content, encoding="utf-8")
+    _record_installed_hash(project, _UPGRADE_PROBE_SKILL)
+    external = tmp_path / f"external-{binary}"
+    external.mkdir()
+    (external / "SKILL.md").write_text(old_content, encoding="utf-8")
+    shutil.rmtree(installed.parent)
+    installed.parent.symlink_to(external, target_is_directory=True)
+
+    result = _install_with(binary, project)
+
+    assert result.returncode == 0, result.stderr
+    assert installed.parent.is_symlink()
+    assert sorted(path.name for path in external.iterdir()) == ["SKILL.md"]
+    assert (external / "SKILL.md").read_text(encoding="utf-8") == old_content
+
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_reinstall_keeps_a_user_edited_bundled_skill(tmp_path: Path, binary: str) -> None:
     """불변: 갱신이 사용자 편집을 덮으면 그 자리에 둔 프로젝트 규칙이 사라진다.
 
