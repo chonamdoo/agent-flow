@@ -1402,13 +1402,29 @@ function reclaimStalePushWatchLock(lock) {
   } catch {
     return false;
   }
-  if (!Number.isInteger(owner?.pid) || typeof owner?.token !== "string") {
+  if (
+    !Number.isInteger(owner?.pid)
+    || typeof owner?.token !== "string"
+    || !/^[0-9a-f]{32}$/.test(owner.token)
+  ) {
     return false;
   }
   if (processIsAlive(owner.pid)) {
     return false;
   }
-  fs.rmSync(lock, { recursive: true, force: true });
+  const retired = `${lock}.retired-${owner.token}`;
+  try {
+    fs.renameSync(lock, retired);
+  } catch (error) {
+    if (
+      error?.code === "ENOENT"
+      || error?.code === "EEXIST"
+      || error?.code === "ENOTEMPTY"
+    ) {
+      return false;
+    }
+    throw error;
+  }
   fsyncParentDirectory(lock);
   return true;
 }
@@ -1466,6 +1482,7 @@ function commitPushWatchObservation(root, runDir, runId, pr, watchStatus) {
     const state = {
       ...previous,
       run_id: runId,
+      run_dir: runDir,
       status: watchStatus,
       pr: pr.url ?? null,
       observation_id: observationId,
@@ -1475,6 +1492,7 @@ function commitPushWatchObservation(root, runDir, runId, pr, watchStatus) {
     if (!publishPushWatchIntent(root, {
       version: 1,
       run_id: runId,
+      run_dir: runDir,
       observation_id: observationId,
       artifact,
       state,
@@ -1519,16 +1537,25 @@ function replayPushWatchIntent(root, runDir, runId) {
   if (
     payload?.version !== 1
     || typeof payload.run_id !== "string"
+    || typeof payload.run_dir !== "string"
+    || !path.isAbsolute(payload.run_dir)
+    || path.basename(payload.run_dir) !== payload.run_id
     || typeof payload.observation_id !== "string"
     || typeof payload.artifact !== "string"
     || !payload.state
     || payload.state.run_id !== payload.run_id
+    || payload.state.run_dir !== payload.run_dir
     || payload.state.observation_id !== payload.observation_id
   ) {
     throw new Error("blocked: push-watch intent is malformed");
   }
-  if (payload.run_id !== runId) {
-    throw new Error("blocked: push-watch intent belongs to another run");
+  if (payload.run_id !== runId || !samePath(payload.run_dir, runDir)) {
+    if (fs.existsSync(path.join(payload.run_dir, "active"))) {
+      throw new Error("blocked: push-watch intent belongs to another active run");
+    }
+    fs.rmSync(intent);
+    fsyncParentDirectory(intent);
+    return null;
   }
   writeManagedFile(
     path.join(runDir, "artifacts", "pr-watch.md"),
