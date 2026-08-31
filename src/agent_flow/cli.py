@@ -445,6 +445,8 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--since", type=float, default=None)
         if name == "scan":
             sub.add_argument("--no-write", action="store_true")
+        if name == "doctor":
+            sub.add_argument("--strict", action="store_true")
 
 
     spec_parser = subparsers.add_parser("spec")
@@ -3223,7 +3225,12 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
         declared = _workflow_declarations()
         for error in declared.errors:
             print(error, file=sys.stderr)
-        result = skill_catalog.scan(root, profile=merged, workflow_skills=declared.names)
+        result = skill_catalog.scan(
+            root,
+            profile=merged,
+            profile_ids=profile_ids,
+            workflow_skills=declared.names,
+        )
         sources = ", ".join(
             f"{source} {count}" for source, count in sorted(result.by_source().items())
         )
@@ -3241,8 +3248,6 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
                 f"degraded: workflow declarations incomplete "
                 f"({len(declared.errors)} workflow(s) unreadable); unrouted findings may be false"
             )
-        if args.skills_command == "scan" and not getattr(args, "no_write", False):
-            print(f"lock: {skill_catalog.write_lock(root, result).relative_to(root)}")
         for finding in findings:
             line = f"{finding.kind} {finding.name}"
             if finding.detail:
@@ -3250,6 +3255,19 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
             print(line)
             if finding.fix:
                 print(f"  Fix: {finding.fix}")
+        if args.skills_command == "scan" and not getattr(args, "no_write", False):
+            try:
+                written = skill_catalog.write_lock(root, result)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            print(f"lock: {written.relative_to(root)}")
+        if (
+            args.skills_command == "doctor"
+            and getattr(args, "strict", False)
+            and (declared.errors or skill_catalog.strict_findings(findings))
+        ):
+            return 1
         return 0
 
     if args.skills_command in {"resolve", "prompt", "markers"}:

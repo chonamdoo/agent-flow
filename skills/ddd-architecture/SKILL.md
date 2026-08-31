@@ -1,7 +1,7 @@
 ---
 name: ddd-architecture
 description: Domain-Driven Design skill for agent-flow design and final-review phases. Use when modeling bounded contexts, ubiquitous language, entities, value objects, aggregates, domain events, domain invariants, and domain flows; apply clean-architecture afterward when layer boundaries or dependency direction are involved.
-version: 2
+version: 2.0.0
 trigger:
   - "design"
   - "architecture"

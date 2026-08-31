@@ -66,7 +66,6 @@ class RoutedSkill:
 
     name: str
     group: str
-    source: str = ""
     missing_report: str = ""
 
 
@@ -145,7 +144,10 @@ def _group_skills(
     if phase_id not in IMPLEMENTATION_PHASES and phase_id not in REVIEW_PHASES:
         return []
     missing_report = str(group.get("missing", "")).strip()
-    return [RoutedSkill(name, group_id, "", missing_report) for name in literal]
+    return [
+        RoutedSkill(name=name, group=group_id, missing_report=missing_report)
+        for name in literal
+    ]
 
 
 def _has_selectors(declaration: dict) -> bool:

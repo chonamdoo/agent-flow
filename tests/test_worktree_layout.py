@@ -264,6 +264,7 @@ def test_creation_refuses_a_symlink_planted_after_path_selection(tmp_path: Path)
     attacker = tmp_path / "attacker"
     attacker.mkdir()
     planted = managed_worktrees_root(root)
+    planted.parent.mkdir(parents=True, exist_ok=True)
     planted.symlink_to(attacker)
 
     with pytest.raises(WorktreeIsolationError, match="unsafe parent"):

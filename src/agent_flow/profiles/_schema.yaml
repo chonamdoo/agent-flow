@@ -133,6 +133,7 @@ optional:
     # The base run always includes one generalist reviewer; angles are extras.
     - id: "stable angle id"
       prompt: "path (relative to kit root) to the prompt template"
+      requires: "optional required skill name or name family inherited from a baseline angle"
       task_terms: ["optional lowercase term matched against the run task"]
       path_globs: ["optional changed-file glob"]
       # If either selector key is present, at least one selector must match.

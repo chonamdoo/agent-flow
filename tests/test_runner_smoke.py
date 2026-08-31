@@ -3784,17 +3784,41 @@ def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
     run_dir.mkdir()
 
     jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
-    assert [job.angle_id for job in jobs] == ["generalist", "architecture-design", "clean-architecture"]
+    assert [job.angle_id for job in jobs] == [
+        "generalist",
+        "types",
+        "architecture-design",
+        "clean-architecture",
+    ]
     prompts = [job.prompt_for("claude") for job in jobs]
     assert "Review Angle" in prompts[0]
-    assert "Architecture Design" in prompts[1]
-    assert "Clean Architecture" in prompts[2]
+    assert "Types" in prompts[1]
+    assert "Architecture Design" in prompts[2]
+    assert "Clean Architecture" in prompts[3]
     for prompt in prompts:
         assert "Start your output with exactly these two plain lines:" in prompt
         assert "`## Reviewer`" in prompt
         assert "`reviewer-source: sub-agent`" in prompt
         assert "Do not wrap either line" in prompt
         assert "exactly one unfenced plain line" in prompt
+
+
+def test_architecture_design_angle_uses_provider_resolved_skill_paths():
+    template = KIT_ROOT / "templates" / "_shared" / "review" / "architecture-design.md"
+    contract = template.read_text(encoding="utf-8")
+
+    assert ".agent-flow/skills/" not in contract
+    assert "skills listed as required in this reviewer prompt" in contract
+
+
+def test_types_angle_contract_is_language_neutral():
+    template = KIT_ROOT / "templates" / "_shared" / "review" / "types.md"
+    contract = template.read_text(encoding="utf-8")
+
+    assert "# Review Angle: Types and Data Contracts" in contract
+    assert "Apply only checks relevant to the language or languages in the diff" in contract
+    for language in ("Python", "TypeScript", "Kotlin", "Swift", "Dart", "Java"):
+        assert language in contract
 
 
 def test_state_integrity_angle_covers_required_risks():
@@ -3828,17 +3852,14 @@ def test_state_integrity_angle_uses_high_signal_selectors_only(tmp_path: Path):
     adapter._changed_files = ("src/ui/Copy.tsx",)
     adapter._task_text = "change button wording"
     unrelated = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
-    assert [job.angle_id for job in unrelated] == [
-        "generalist",
-        "architecture-design",
-    ]
+    assert [job.angle_id for job in unrelated] == ["generalist", "types"]
 
     adapter._changed_files = ("migrations/20260828_add_orders.sql",)
     adapter._task_text = ""
     persistent_path = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
     assert [job.angle_id for job in persistent_path] == [
         "generalist",
-        "architecture-design",
+        "types",
         "state-integrity",
     ]
 
@@ -3847,7 +3868,7 @@ def test_state_integrity_angle_uses_high_signal_selectors_only(tmp_path: Path):
     persistent_task = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
     assert [job.angle_id for job in persistent_task] == [
         "generalist",
-        "architecture-design",
+        "types",
         "state-integrity",
     ]
 
@@ -4083,10 +4104,126 @@ def test_multi_review_jobs_dedupe_profile_baseline(tmp_path: Path):
     jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
     assert [job.angle_id for job in jobs] == [
         "generalist",
+        "types",
         "architecture-design",
         "clean-architecture",
         "compose-stability",
     ]
+
+def test_multi_review_profile_override_keeps_baseline_angle_gate(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.runner import Phase
+
+    adapter = HostedAdapter("codex")
+    adapter._profile_snapshot = {
+        "review_angles": [
+            {
+                "id": "architecture-design",
+                "prompt": "templates/_shared/review/architecture-design.md",
+            },
+        ]
+    }
+    phase = Phase(id="final-review", description="", multi_review=True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+
+    assert [job.angle_id for job in jobs] == ["generalist", "types"]
+
+
+def test_multi_review_profile_override_does_not_inherit_baseline_selectors():
+    from agent_flow.adapters.hosted import _merge_review_angles
+
+    merged = _merge_review_angles(
+        (
+            {
+                "id": "state-integrity",
+                "prompt": "templates/_shared/review/state-integrity.md",
+                "requires": "clean-architecture",
+                "task_terms": ("database",),
+                "path_globs": ("**/*.sql",),
+            },
+        ),
+        (
+            {
+                "id": "state-integrity",
+                "prompt": "templates/_shared/review/types.md",
+            },
+        ),
+    )
+
+    assert merged == [
+        {
+            "id": "state-integrity",
+            "prompt": "templates/_shared/review/types.md",
+            "requires": "clean-architecture",
+        }
+    ]
+
+
+def test_multi_review_profile_cannot_gate_unconditional_baseline_angles(
+    tmp_path: Path,
+):
+    from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.runner import Phase
+
+    adapter = HostedAdapter("codex")
+    adapter._profile_snapshot = {
+        "review_angles": [
+            {
+                "id": angle_id,
+                "prompt": prompt,
+                "requires": "missing-skill",
+                "task_terms": ["never matches"],
+                "path_globs": ["never/**"],
+            }
+            for angle_id, prompt in (
+                ("generalist", "templates/_shared/review/architecture.md"),
+                ("types", "templates/_shared/review/types.md"),
+            )
+        ]
+    }
+    phase = Phase(id="final-review", description="", multi_review=True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+
+    assert [job.angle_id for job in jobs] == ["generalist", "types"]
+
+@pytest.mark.parametrize("requires", [None, False, 0, "", [], ["clean-architecture-core"]])
+def test_multi_review_rejects_invalid_angle_requirement(
+    tmp_path: Path, requires: object
+):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.core.skill_resolver import PhaseSkills
+    from agent_flow.runner import Phase
+
+    adapter = HostedAdapter("codex")
+    adapter._profile_snapshot = {
+        "review_angles": [
+            {
+                "id": "architecture-design",
+                "prompt": "templates/_shared/review/architecture-design.md",
+                "requires": requires,
+            },
+        ]
+    }
+    phase = Phase(
+        id="final-review",
+        description="",
+        multi_review=True,
+        skills=PhaseSkills(required=("clean-architecture-core",)),
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    with pytest.raises(ValueError, match="requires must be a non-empty string"):
+        _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+
 
 
 def test_multi_review_profile_can_override_baseline_prompt(tmp_path: Path):
@@ -4118,7 +4255,12 @@ def test_multi_review_profile_can_override_baseline_prompt(tmp_path: Path):
     run_dir.mkdir()
 
     jobs = _reviewer_jobs(phase, run_dir, project, adapter)
-    assert [job.angle_id for job in jobs] == ["generalist", "architecture-design", "clean-architecture"]
+    assert [job.angle_id for job in jobs] == [
+        "generalist",
+        "types",
+        "architecture-design",
+        "clean-architecture",
+    ]
     assert "custom prompt body" in jobs[0].prompt_for("claude")
 
 
@@ -4252,7 +4394,12 @@ def test_multi_review_packaged_prompt_survives_project_templates_dir(tmp_path: P
     run_dir.mkdir()
 
     jobs = _reviewer_jobs(phase, run_dir, project, adapter)
-    assert [job.angle_id for job in jobs] == ["generalist", "architecture-design", "clean-architecture"]
+    assert [job.angle_id for job in jobs] == [
+        "generalist",
+        "types",
+        "architecture-design",
+        "clean-architecture",
+    ]
     assert "Review Angle" in jobs[0].prompt_for("claude")
 
 
@@ -4685,7 +4832,7 @@ def test_a_review_angle_is_dropped_when_its_skill_is_not_required(tmp_path: Path
 
     jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
 
-    assert [job.angle_id for job in jobs] == ["generalist", "architecture-design"]
+    assert [job.angle_id for job in jobs] == ["generalist", "types"]
 
 
 def test_the_angle_gate_and_the_writer_gate_agree_on_a_routed_but_missing_skill(

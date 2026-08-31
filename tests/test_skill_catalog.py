@@ -129,6 +129,26 @@ def test_catalog_keeps_upstream_keywords_when_present(tmp_path):
     entry = next(item for item in catalog if item.name == "camerax")
     assert entry.keywords == ("camerax", "camera2")
 
+def test_catalog_keeps_skill_release_governance_metadata(tmp_path):
+    host = tmp_path / "host"
+    _write_skill(
+        host,
+        "governed",
+        "---\nname: governed\ndescription: Governed skill.\n"
+        "version: 1.2.3\nowner: platform\nlifecycle: active\n"
+        "approval: approved\nprovenance: internal\n---\n",
+    )
+
+    catalog = discover_skill_catalog(tmp_path, (_host_root(host),))
+
+    entry = next(item for item in catalog if item.name == "governed")
+    assert entry.version == "1.2.3"
+    assert entry.owner == "platform"
+    assert entry.lifecycle == "active"
+    assert entry.approval == "approved"
+    assert entry.provenance == "internal"
+
+
 
 def test_host_skill_in_catalog_does_not_become_required(tmp_path, monkeypatch):
     """카탈로그를 여는 변경이 required 집합을 건드리지 않는다는 증명."""
@@ -195,16 +215,13 @@ def test_symlinked_duplicate_is_catalogued_once(tmp_path):
     assert [item.name for item in catalog].count("shepherd") == 1
 
 
-def test_lock_roundtrip_and_version_mismatch_is_discarded(tmp_path, monkeypatch):
-    """스키마가 바뀌면 옛 lock을 읽고 죽는 대신 버린다."""
+def test_lock_schema_mismatch_is_strict_until_scan_migrates_it(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
     project = tmp_path / "app"
-    host = tmp_path / "host"
-    _upstream_skill(host, "diagnose", "Use when debugging.")
     result = skill_catalog.scan(project, profile=None, host="claude")
     skill_catalog.write_lock(project, result)
-
-    assert skill_catalog.read_lock(project)["version"] == skill_catalog.LOCK_VERSION
 
     path = skill_catalog.lock_path(project)
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -212,6 +229,619 @@ def test_lock_roundtrip_and_version_mismatch_is_discarded(tmp_path, monkeypatch)
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     assert skill_catalog.read_lock(project) == {}
+    stale = skill_catalog.scan(project, profile=None, host="claude")
+    stale_findings = [
+        finding
+        for finding in stale.findings
+        if finding.kind == skill_catalog.LOCK_STALE
+    ]
+    assert len(stale_findings) == 1
+    assert skill_catalog.strict_findings(stale_findings) == tuple(stale_findings)
+
+    skill_catalog.write_lock(project, stale)
+    assert skill_catalog.read_lock(project)["version"] == skill_catalog.LOCK_VERSION
+
+def test_lock_tracks_reference_content_drift_per_host_profile_view(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    reference = project / "skills" / "governed" / "references" / "contract.md"
+    reference.parent.mkdir(parents=True)
+    _write_skill(
+        project / "skills",
+        "governed",
+        "---\nname: governed\ndescription: Governed skill.\n---\n",
+    )
+    reference.write_text("first\n", encoding="utf-8")
+    profile = {"id": "python"}
+    first = skill_catalog.scan(
+        project,
+        profile=profile,
+        profile_ids=("python",),
+        host="claude",
+    )
+    skill_catalog.write_lock(project, first)
+    payload = skill_catalog.read_lock(project)
+    view = next(iter(payload["views"].values()))
+    first_digest = view["skills"]["governed"]["observedContentDigest"]
+
+    reference.write_text("second\n", encoding="utf-8")
+    second = skill_catalog.scan(
+        project,
+        profile=profile,
+        profile_ids=("python",),
+        host="claude",
+    )
+
+    assert any(
+        finding.kind == skill_catalog.CONTENT_CHANGED
+        and finding.name == "governed"
+        for finding in second.findings
+    )
+    skill_catalog.write_lock(project, second)
+    updated_view = next(iter(skill_catalog.read_lock(project)["views"].values()))
+    assert (
+        updated_view["skills"]["governed"]["observedContentDigest"]
+        != first_digest
+    )
+
+
+def test_lock_preserves_independent_host_profile_views(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    _upstream_skill(project / "skills", "governed", "Governed skill.")
+
+    claude = skill_catalog.scan(
+        project,
+        profile={"id": "python"},
+        profile_ids=("python",),
+        host="claude",
+    )
+    skill_catalog.write_lock(project, claude)
+    codex = skill_catalog.scan(
+        project,
+        profile={"id": "generic"},
+        profile_ids=("generic",),
+        host="codex",
+    )
+
+    assert [finding.kind for finding in codex.findings].count(
+        skill_catalog.NEW_VIEW
+    ) == 1
+    skill_catalog.write_lock(project, codex)
+    payload = skill_catalog.read_lock(project)
+
+    assert len(payload["views"]) == 2
+    assert {view["host"] for view in payload["views"].values()} == {
+        "claude",
+        "codex",
+    }
+
+
+def test_lock_write_lease_spans_view_merge_and_atomic_replace(
+    tmp_path, monkeypatch
+):
+    from agent_flow.core.worktree_isolation import (
+        FileLeaseUnavailable,
+        shared_file_lease,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    result = skill_catalog.scan(project, profile=None, host="claude")
+    lease_path = project / skill_catalog.LOCK_WRITE_LEASE_RELATIVE
+    observed = {"load": False, "write": False}
+    original_load = skill_catalog._load_lock
+    original_write = skill_catalog.atomic_write_text
+
+    def assert_lease_held(label):
+        with pytest.raises(FileLeaseUnavailable), shared_file_lease(lease_path):
+            pass
+        observed[label] = True
+
+    def guarded_load(root):
+        assert_lease_held("load")
+        return original_load(root)
+
+    def guarded_write(path, content):
+        assert_lease_held("write")
+        return original_write(path, content)
+
+    monkeypatch.setattr(skill_catalog, "_load_lock", guarded_load)
+    monkeypatch.setattr(skill_catalog, "atomic_write_text", guarded_write)
+
+    skill_catalog.write_lock(project, result)
+
+    assert observed == {"load": True, "write": True}
+
+
+def test_unreadable_lock_is_distinct_and_not_overwritten(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    path = skill_catalog.lock_path(project)
+    path.parent.mkdir(parents=True)
+    path.write_text("{}\n", encoding="utf-8")
+
+    def deny_read(*_args, **_kwargs):
+        raise PermissionError("read denied")
+
+    monkeypatch.setattr(skill_catalog, "read_bounded_regular_file", deny_read)
+    result = skill_catalog.scan(project, host="claude")
+
+    unreadable = [
+        finding
+        for finding in result.findings
+        if finding.kind == skill_catalog.LOCK_UNREADABLE
+    ]
+    assert len(unreadable) == 1
+    assert skill_catalog.strict_findings(unreadable) == tuple(unreadable)
+    with pytest.raises(ValueError, match="catalog lock is unreadable"):
+        skill_catalog.write_lock(project, result)
+    assert path.read_text(encoding="utf-8") == "{}\n"
+
+
+def test_corrupt_lock_is_reported_and_not_overwritten(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    path = skill_catalog.lock_path(project)
+    path.parent.mkdir(parents=True)
+    path.write_text("{", encoding="utf-8")
+
+    result = skill_catalog.scan(project, host="claude")
+
+    assert any(
+        finding.kind == skill_catalog.LOCK_INVALID
+        for finding in result.findings
+    )
+    with pytest.raises(ValueError, match="catalog lock"):
+        skill_catalog.write_lock(project, result)
+    assert path.read_text(encoding="utf-8") == "{"
+
+
+
+def test_current_lock_schema_corruption_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    path = skill_catalog.lock_path(project)
+    path.parent.mkdir(parents=True)
+    payload = {
+        "version": skill_catalog.LOCK_VERSION,
+        "views": {
+            json.dumps(["claude"], separators=(",", ":")): {
+                "host": "claude",
+                "profiles": [],
+                "stamp": "",
+                "sources": {},
+                "skills": {"broken": "not-a-record"},
+            }
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = skill_catalog.scan(project, host="claude")
+
+    assert any(
+        finding.kind == skill_catalog.LOCK_INVALID
+        for finding in result.findings
+    )
+    with pytest.raises(ValueError, match="catalog lock"):
+        skill_catalog.write_lock(project, result)
+
+
+def test_cli_doctor_strict_fails_only_for_hard_findings(
+    tmp_path, monkeypatch
+):
+    from agent_flow import cli
+    from agent_flow.core.phase_workflow import DeclaredPhaseSkills
+
+    monkeypatch.setattr(cli, "active_profile_ids", lambda root, selected: ("generic",))
+    monkeypatch.setattr(
+        cli,
+        "load_profile_payload",
+        lambda profile_id, root: {"id": profile_id},
+    )
+    monkeypatch.setattr(
+        cli,
+        "_workflow_declarations",
+        lambda: DeclaredPhaseSkills((), ()),
+    )
+    advisory = skill_catalog.CatalogScan(
+        stamp="advisory",
+        findings=(
+            skill_catalog.CatalogFinding(skill_catalog.UNROUTED, "optional"),
+        ),
+    )
+    monkeypatch.setattr(skill_catalog, "scan", lambda *args, **kwargs: advisory)
+
+    assert (
+        cli.main(
+            ["skills", "doctor", "--root", str(tmp_path), "--strict"]
+        )
+        == 0
+    )
+
+    hard = skill_catalog.CatalogScan(
+        stamp="hard",
+        findings=(
+            skill_catalog.CatalogFinding(
+                skill_catalog.CONTENT_CHANGED, "governed"
+            ),
+        ),
+    )
+    monkeypatch.setattr(skill_catalog, "scan", lambda *args, **kwargs: hard)
+
+    assert (
+        cli.main(
+            ["skills", "doctor", "--root", str(tmp_path), "--strict"]
+        )
+        == 1
+    )
+
+
+def test_cli_doctor_strict_fails_when_workflow_declarations_are_incomplete(
+    tmp_path, monkeypatch
+):
+    from agent_flow import cli
+    from agent_flow.core.phase_workflow import DeclaredPhaseSkills
+
+    monkeypatch.setattr(cli, "active_profile_ids", lambda root, selected: ("generic",))
+    monkeypatch.setattr(
+        cli,
+        "load_profile_payload",
+        lambda profile_id, root: {"id": profile_id},
+    )
+    monkeypatch.setattr(
+        cli,
+        "_workflow_declarations",
+        lambda: DeclaredPhaseSkills((), ("workflow broken: invalid YAML",)),
+    )
+    monkeypatch.setattr(
+        skill_catalog,
+        "scan",
+        lambda *args, **kwargs: skill_catalog.CatalogScan(stamp="degraded"),
+    )
+
+    assert cli.main(["skills", "doctor", "--root", str(tmp_path)]) == 0
+    assert (
+        cli.main(["skills", "doctor", "--root", str(tmp_path), "--strict"])
+        == 1
+    )
+
+def test_strict_findings_exclude_advisory_routing_observations():
+    advisory = (
+        skill_catalog.CatalogFinding(skill_catalog.UNROUTED, "optional"),
+        skill_catalog.CatalogFinding(skill_catalog.SHADOWED, "alias"),
+    )
+    hard = (
+        *advisory,
+        skill_catalog.CatalogFinding(
+            skill_catalog.CONTENT_CHANGED, "governed"
+        ),
+    )
+
+    assert skill_catalog.strict_findings(advisory) == ()
+    assert [finding.kind for finding in skill_catalog.strict_findings(hard)] == [
+        skill_catalog.CONTENT_CHANGED
+    ]
+
+
+def test_doctor_reports_invalid_and_disallowed_routed_governance(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    _write_skill(
+        project / ".agent-flow" / "local-skills",
+        "retired",
+        "---\nname: retired\ndescription: Retired skill.\nversion: release\n"
+        "lifecycle: retired\napproval: approved\n---\n",
+    )
+    _write_skill(
+        project / ".agent-flow" / "local-skills",
+        "pending",
+        "---\nname: pending\ndescription: Pending skill.\n"
+        "lifecycle: active\napproval: pending\n---\n",
+    )
+
+    result = skill_catalog.scan(project, host="claude")
+
+    assert {
+        (finding.kind, finding.name)
+        for finding in result.findings
+    } >= {
+        (skill_catalog.INVALID_GOVERNANCE, "retired"),
+        (skill_catalog.RETIRED_ROUTED, "retired"),
+        (skill_catalog.UNAPPROVED_ROUTED, "pending"),
+    }
+
+def test_governance_view_excludes_inactive_hosts_and_external_invalid_is_advisory(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    claude_root = tmp_path / "claude-skills"
+    _write_skill(
+        claude_root,
+        "foreign",
+        "---\nname: foreign\ndescription: Foreign skill.\nversion: release\n"
+        "lifecycle: retired\napproval: pending\nworkflowPhases:\n  - implementation\n"
+        "pathGlobs:\n  - '**/*.py'\n---\n",
+    )
+    roots = (
+        SkillRoot("project", str(project / "skills" / "{skill}" / "SKILL.md")),
+        SkillRoot(
+            "host",
+            str(claude_root / "{skill}" / "SKILL.md"),
+            host="claude",
+        ),
+    )
+    monkeypatch.setattr(skill_catalog, "skill_roots", lambda *args, **kwargs: roots)
+
+    codex = skill_catalog.scan(project, host="codex")
+    claude = skill_catalog.scan(project, host="claude")
+
+    assert {entry.name for entry in codex.entries} == {"foreign"}
+    assert "foreign" not in codex.skills
+    assert not any(
+        finding.kind == skill_catalog.INVALID_GOVERNANCE
+        for finding in codex.findings
+    )
+    governance = [
+        finding
+        for finding in claude.findings
+        if finding.kind
+        in {
+            skill_catalog.INVALID_GOVERNANCE,
+            skill_catalog.RETIRED_ROUTED,
+            skill_catalog.UNAPPROVED_ROUTED,
+        }
+    ]
+    assert {(finding.kind, finding.name) for finding in governance} == {
+        (skill_catalog.INVALID_GOVERNANCE, "foreign"),
+        (skill_catalog.RETIRED_ROUTED, "foreign"),
+        (skill_catalog.UNAPPROVED_ROUTED, "foreign"),
+    }
+    assert skill_catalog.strict_findings(governance) == ()
+
+
+def test_owned_governance_rejects_numeric_prerelease_leading_zero(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    _write_skill(
+        project / ".agent-flow" / "local-skills",
+        "candidate",
+        "---\nname: candidate\ndescription: Candidate skill.\n"
+        "version: 1.2.3-01\napproval: approved\n---\n",
+    )
+
+    result = skill_catalog.scan(project, host="claude")
+    invalid = [
+        finding
+        for finding in result.findings
+        if finding.kind == skill_catalog.INVALID_GOVERNANCE
+    ]
+
+    assert [finding.name for finding in invalid] == ["candidate"]
+    assert skill_catalog.strict_findings(invalid) == tuple(invalid)
+
+
+def test_owned_governance_rejects_structured_scalars(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    _write_skill(
+        project / ".agent-flow" / "local-skills",
+        "structured",
+        "---\nname: structured\ndescription: Structured governance.\n"
+        "version:\n  - 1.2.3\nowner: [platform]\n"
+        "lifecycle:\n  status: active\napproval: [approved]\n"
+        "provenance:\n  source: internal\n---\n",
+    )
+
+    result = skill_catalog.scan(project, host="claude")
+    invalid = [
+        finding
+        for finding in result.findings
+        if finding.kind == skill_catalog.INVALID_GOVERNANCE
+    ]
+
+    assert [finding.name for finding in invalid] == ["structured"]
+    assert all(
+        f"{field}=structured" in invalid[0].detail
+        for field in ("version", "owner", "lifecycle", "approval", "provenance")
+    )
+    assert skill_catalog.strict_findings(invalid) == tuple(invalid)
+
+
+def test_owned_governance_uses_the_final_duplicate_value(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    _write_skill(
+        project / ".agent-flow" / "local-skills",
+        "duplicate",
+        "---\nname: duplicate\ndescription: Duplicate governance.\n"
+        "approval: approved\napproval: [rejected]\n---\n",
+    )
+
+    result = skill_catalog.scan(project, host="claude")
+    invalid = [
+        finding
+        for finding in result.findings
+        if finding.kind == skill_catalog.INVALID_GOVERNANCE
+    ]
+
+    assert [finding.name for finding in invalid] == ["duplicate"]
+    assert "approval=structured" in invalid[0].detail
+    assert skill_catalog.strict_findings(invalid) == tuple(invalid)
+
+
+@pytest.mark.parametrize(
+    "frontmatter",
+    (
+        "---\nname: malformed\napproval: [\n---\n",
+        "---\n- name\n- malformed\n---\n",
+    ),
+)
+def test_owned_governance_rejects_malformed_frontmatter(
+    frontmatter, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    _write_skill(
+        project / ".agent-flow" / "local-skills",
+        "malformed",
+        frontmatter,
+    )
+
+    result = skill_catalog.scan(project, host="claude")
+    invalid = [
+        finding
+        for finding in result.findings
+        if finding.kind == skill_catalog.INVALID_GOVERNANCE
+    ]
+
+    assert [finding.name for finding in invalid] == ["malformed"]
+    assert "approval=frontmatter-invalid" in invalid[0].detail
+    assert skill_catalog.strict_findings(invalid) == tuple(invalid)
+
+
+def test_unreadable_content_preserves_the_previous_lock_baseline(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    _upstream_skill(project / "skills", "broken", "Broken skill.")
+    initial = skill_catalog.scan(project, host="claude")
+    skill_catalog.write_lock(project, initial)
+    path = skill_catalog.lock_path(project)
+    baseline = path.read_text(encoding="utf-8")
+
+    def fail_digest(_directory):
+        raise OSError("read denied")
+
+    monkeypatch.setattr(
+        skill_catalog,
+        "skill_observed_content_digest",
+        fail_digest,
+    )
+
+    result = skill_catalog.scan(project, host="claude")
+    unreadable = [
+        finding
+        for finding in result.findings
+        if finding.kind == skill_catalog.CONTENT_UNREADABLE
+    ]
+
+    assert [finding.name for finding in unreadable] == ["broken"]
+    assert "broken" not in result.skills
+    assert skill_catalog.strict_findings(unreadable) == tuple(unreadable)
+    assert not any(
+        finding.kind == skill_catalog.REMOVED and finding.name == "broken"
+        for finding in result.findings
+    )
+    with pytest.raises(ValueError, match="unreadable skill content"):
+        skill_catalog.write_lock(project, result)
+    assert path.read_text(encoding="utf-8") == baseline
+
+
+def test_profile_id_string_is_one_view_component(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+
+    result = skill_catalog.scan(
+        tmp_path / "app",
+        profile_ids="python",
+        host="claude",
+    )
+
+    assert result.profile_ids == ("python",)
+    assert result.view_id == '["claude","python"]'
+
+def test_lock_records_moving_ref_and_resolved_source_sha(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    monkeypatch.setattr(
+        skill_catalog,
+        "cached_source_sha",
+        lambda source, env=None: "abc123",
+    )
+    project = tmp_path / "app"
+    profile = {
+        "id": "python",
+        "skill_sources": [
+            {
+                "id": "upstream",
+                "kind": "fetch",
+                "url": "https://example.invalid/skills.git",
+                "ref": "main",
+                "layout": "skills/{skill}/SKILL.md",
+            }
+        ],
+    }
+
+    result = skill_catalog.scan(
+        project,
+        profile=profile,
+        profile_ids=("python",),
+        host="claude",
+    )
+    skill_catalog.write_lock(project, result)
+    view = next(iter(skill_catalog.read_lock(project)["views"].values()))
+
+    assert view["sources"]["upstream"] == {
+        "kind": "fetch",
+        "url": "https://example.invalid/skills.git",
+        "ref": "main",
+        "resolvedSha": "abc123",
+    }
+
+
+def test_catalog_content_and_source_sha_share_the_explicit_cache_env(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    cache = tmp_path / "custom-cache"
+    _upstream_skill(
+        cache / "upstream" / "main" / "skills",
+        "cached",
+        "Skill from the explicit cache.",
+    )
+    env = {"AGENT_FLOW_SKILL_CACHE": str(cache)}
+    observed_envs = []
+
+    def source_sha(_source, env=None):
+        observed_envs.append(env)
+        return "custom-cache-sha"
+
+    monkeypatch.setattr(skill_catalog, "cached_source_sha", source_sha)
+    profile = {
+        "id": "python",
+        "skill_sources": [
+            {
+                "id": "upstream",
+                "kind": "fetch",
+                "url": "https://example.invalid/skills.git",
+                "ref": "main",
+                "layout": "skills/{skill}/SKILL.md",
+            }
+        ],
+    }
+
+    result = skill_catalog.scan(
+        project,
+        profile=profile,
+        profile_ids=("python",),
+        host="claude",
+        env=env,
+    )
+
+    assert result.skills["cached"]["source"] == "fetched"
+    assert result.sources["upstream"]["resolvedSha"] == "custom-cache-sha"
+    assert observed_envs == [env]
+
 
 
 def test_doctor_names_a_declared_skill_that_is_not_installed(tmp_path, monkeypatch):
@@ -239,6 +869,40 @@ def test_doctor_names_a_declared_skill_that_is_not_installed(tmp_path, monkeypat
         if finding.kind == skill_catalog.DEAD_DECLARATION
     ]
     assert dead == ["camera1-to-camerax"]
+
+
+def test_declared_skill_installed_only_for_another_host_is_missing(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    _upstream_skill(
+        home / ".codex" / "skills",
+        "codex-only",
+        "Only the Codex host can load this skill.",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    project = tmp_path / "app"
+    project.mkdir()
+    profile = {
+        "skills": {
+            "required_review": [
+                {
+                    "group": "profile",
+                    "skills": ["codex-only"],
+                    "task_terms": ["review"],
+                }
+            ]
+        }
+    }
+
+    result = skill_catalog.scan(project, profile=profile, host="claude")
+
+    assert [
+        finding.name
+        for finding in result.findings
+        if finding.kind == skill_catalog.DEAD_DECLARATION
+    ] == ["codex-only"]
+    assert skill_catalog.strict_findings(result.findings)
 
 
 def test_doctor_reports_an_installed_skill_that_no_declaration_routes(tmp_path, monkeypatch):
@@ -316,6 +980,29 @@ def test_doctor_reports_a_project_skill_that_shadows_an_installed_one(tmp_path, 
         finding.name for finding in result.findings if finding.kind == skill_catalog.COLLISION
     ]
     assert collisions == ["edge-to-edge"]
+
+
+def test_cross_host_skill_copies_do_not_collide(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _upstream_skill(
+        home / ".claude" / "skills",
+        "shared-name",
+        "Claude-owned copy.",
+    )
+    _upstream_skill(
+        home / ".codex" / "skills",
+        "shared-name",
+        "Codex-owned copy.",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    project = tmp_path / "app"
+    project.mkdir()
+
+    result = skill_catalog.scan(project, profile={}, host="claude")
+
+    assert not any(
+        finding.kind == skill_catalog.COLLISION for finding in result.findings
+    )
 
 
 def test_doctor_reports_an_unrouted_bundled_skill(tmp_path, monkeypatch):

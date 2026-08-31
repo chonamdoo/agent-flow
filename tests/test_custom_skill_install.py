@@ -522,6 +522,54 @@ def test_skill_hash_updates_and_local_skills_are_gitignored(tmp_path: Path) -> N
     gitignore = (project / ".gitignore").read_text(encoding="utf-8")
     assert ".agent-flow/" in gitignore or ".agent-flow/local-skills/" in gitignore
 
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_skill_index_separates_manifest_ownership_from_observed_content(
+    tmp_path: Path, binary: str
+) -> None:
+    project = tmp_path / f"project-{binary}"
+    project.mkdir()
+    skill_dir = project / "skills" / "governed"
+    references = skill_dir / "references"
+    references.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: governed\ndescription: Governed skill.\nversion: 1.2.3\n"
+        "owner: platform\nlifecycle: active\napproval: approved\n"
+        "provenance: internal\n---\n",
+        encoding="utf-8",
+    )
+    reference = references / "contract.md"
+    reference.write_text("first\n", encoding="utf-8")
+
+    first_result = _install_with(binary, project)
+    assert first_result.returncode == 0, first_result.stderr
+    first_index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    first = next(skill for skill in first_index["skills"] if skill["name"] == "governed")
+
+    reference.write_text("second\n", encoding="utf-8")
+    second_result = _install_with(binary, project)
+    assert second_result.returncode == 0, second_result.stderr
+    second_index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    second = next(skill for skill in second_index["skills"] if skill["name"] == "governed")
+
+    assert first["governance"] == {
+        "version": "1.2.3",
+        "owner": "platform",
+        "lifecycle": "active",
+        "approval": "approved",
+        "provenance": "internal",
+    }
+    assert second["hash"] == first["hash"]
+    assert second["observedContentDigest"] != first["observedContentDigest"]
+
+
 
 def test_skill_frontmatter_name_cannot_escape_host_skill_directory(tmp_path: Path) -> None:
     project = tmp_path / "project"
