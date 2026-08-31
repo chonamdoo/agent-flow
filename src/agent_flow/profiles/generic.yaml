@@ -15,8 +15,8 @@ gates:
     required: true
     phase: pre-commit
 review_angles:
-  # Mandatory for every project: DDD + Clean Arch + SOLID + CQRS + Google Repo + Vertical Slices.
-  # Profile additions append after this baseline.
+  # Added when the phase requires a Clean Architecture contract. Profile fields
+  # overlay the gated baseline rather than replacing it.
   - id: architecture-design
     prompt: templates/_shared/review/architecture-design.md
 artifacts:

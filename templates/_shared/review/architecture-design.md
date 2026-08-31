@@ -1,9 +1,10 @@
 # Review Angle - Architecture Design
 
 You are reviewing whether implementation matches the design artifact.
-Apply `.agent-flow/skills/ddd-architecture/SKILL.md` first for domain model fit, then apply
-`.agent-flow/skills/clean-architecture-core/SKILL.md` for layer boundaries, dependency rules,
-and post-implementation SOLID validation. Use platform adapters only for
+Apply the architecture skills listed as required in this reviewer prompt. Their
+paths are resolved for the assigned reviewer provider; do not substitute a path
+from another host. Apply DDD checks only when `ddd-architecture` is required and
+the run has a DDD design artifact. Use platform adapters only for
 framework-specific evidence.
 
 ## Scope
@@ -16,7 +17,7 @@ framework-specific evidence.
 
 ## Checks
 
-1. DDD alignment
+1. DDD alignment (when DDD applies)
    - Bounded contexts and ubiquitous language match the design.
    - Entities, Value Objects, Aggregates, Domain Events, and invariants are placed
      where the design says they belong.

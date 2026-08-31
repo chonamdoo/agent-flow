@@ -1,34 +1,52 @@
-# Review Angle: Types (Python)
+# Review Angle: Types and Data Contracts
 
-Check type contracts, schema drift, nullable handling, and unsafe casts.
+Check language-appropriate type contracts, schema drift, nullability, and unsafe
+casts. Apply only checks relevant to the language or languages in the diff; do
+not impose Python, TypeScript, Kotlin, Swift, Dart, or Java conventions on a
+different stack.
 
 ## What to verify
 
-1. **Annotations**
-   - Public functions / dataclasses fully annotated.
-   - No bare `Any` in public surface; if used, justified inline.
-   - Generic types parameterized (`list[str]`, not bare `list`).
+1. **Public contracts**
+   - Public functions, methods, models, and exported values expose enough type
+     information for callers to use them safely.
+   - Generic/container types preserve their element types instead of falling
+     back to raw or broadly dynamic values.
+   - Broad escape hatches such as `Any`, `any`, `dynamic`, raw Java types, or
+     untyped maps do not leak through public boundaries without justification.
 
-2. **Optional / None**
-   - Optional return types match callers' assumptions (no silent KeyError).
-   - `Optional[X]` differs from `X | None`; consistent style chosen.
-   - Defaults not mutable (`def f(items=[])` is a bug).
+2. **Nullability and absence**
+   - Nullable/optional declarations match caller assumptions and runtime
+     behavior (`None`, `null`, `nil`, optional values, or platform equivalents).
+   - Missing, explicit null, and defaulted values are not silently conflated
+     when the distinction affects behavior.
+   - Defaults do not share mutable state between calls or instances.
 
-3. **Dataclass / TypedDict / Pydantic boundaries**
-   - External JSON parsed into a typed container at the boundary, not
-     accessed as `dict[str, Any]` deep inside the code.
-   - Schema validation errors surface as the project's own exception type,
-     not raw `ValidationError`.
+3. **Structured boundaries**
+   - External JSON, database rows, configuration, and IPC payloads become a
+     typed or validated representation at the boundary instead of remaining
+     unstructured deep inside the application.
+   - Validation and decoding failures surface through the project's established
+     error contract rather than leaking framework-specific errors unexpectedly.
 
-4. **Casts / `typing.cast`**
-   - Unavoidable casts are commented with why; no `cast` to silence mypy
-     when the actual code can be fixed.
-   - `# type: ignore` carries the specific rule and a justification.
+4. **Casts and suppressions**
+   - Forced casts and assertions are justified by a checked invariant, not used
+     to silence the compiler or analyzer.
+   - Suppressions are narrow and specific: examples include Python
+     `typing.cast`/`# type: ignore`, TypeScript `as`/`@ts-ignore`,
+     Kotlin/Swift forced casts, Dart `dynamic`, and Java unchecked casts.
 
 5. **Schema drift**
-   - DB / API response shape changes propagated through the dataclass /
-     Pydantic model — no `getattr(resp, "new_field", None)` shims that
-     defer the failure.
+   - API, database, event, and configuration shape changes propagate through
+     models, decoders, adapters, and callers.
+   - Compatibility handling is explicit and intentional; reflective or
+     fallback access does not merely defer a predictable failure.
+
+6. **Tool alignment**
+   - Findings use the active stack's compiler, analyzer, or schema validator as
+     evidence when available.
+   - Do not request a language-specific annotation style when the repository
+     uses a different established convention.
 
 ## Output format
 
@@ -38,7 +56,7 @@ Check type contracts, schema drift, nullable handling, and unsafe casts.
 verdict: approve | request-changes
 
 ### Must-fix
-- <severity:high> [path:line] <statement>. Mypy or runtime risk.
+- <severity:high> [path:line] <statement>. Compiler/analyzer or runtime risk.
 
 ### Should-fix
 - <severity:med> ...

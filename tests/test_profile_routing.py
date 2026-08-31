@@ -448,7 +448,9 @@ def test_a_declared_bundled_name_still_resolves_from_the_active_host_only(tmp_pa
 
 
 def test_missing_report_uses_the_declared_wording():
-    skill = RoutedSkill("android-code-review", "profile", "", "missing local profile: <skill>")
+    skill = RoutedSkill(
+        "android-code-review", "profile", "missing local profile: <skill>"
+    )
 
     assert missing_routed_report(skill) == "missing local profile: android-code-review"
 

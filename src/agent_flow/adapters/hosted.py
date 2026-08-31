@@ -80,8 +80,13 @@ _BASE_REVIEW_ANGLES: tuple[dict[str, object], ...] = (
         "prompt": "templates/_shared/review/architecture.md",
     },
     {
+        "id": "types",
+        "prompt": "templates/_shared/review/types.md",
+    },
+    {
         "id": "architecture-design",
         "prompt": "templates/_shared/review/architecture-design.md",
+        "requires": ARCHITECTURE_CONTRACT_FAMILY,
     },
     {
         "id": "state-integrity",
@@ -128,6 +133,7 @@ _BASE_REVIEW_ANGLES: tuple[dict[str, object], ...] = (
         "requires": ARCHITECTURE_CONTRACT_FAMILY,
     },
 )
+_UNCONDITIONAL_REVIEW_ANGLE_IDS = frozenset({"generalist", "types"})
 _BASE_REVIEW_PROMPTS = {
     str(item["prompt"])
     for item in _BASE_REVIEW_ANGLES
@@ -712,7 +718,7 @@ def _applicable_angles(
     *,
     providers: Sequence[str],
 ) -> list[dict[str, object]]:
-    skill_gated = [angle for angle in angles if angle.get("requires")]
+    skill_gated = [angle for angle in angles if "requires" in angle]
     required: set[str] = set()
     if skill_gated:
         for provider in providers:
@@ -731,8 +737,8 @@ def _applicable_angles(
         angle
         for angle in angles
         if (
-            not angle.get("requires")
-            or _angle_requirement_met(str(angle["requires"]), required)
+            "requires" not in angle
+            or _angle_requirement_met(_angle_requirement_value(angle), required)
         )
         and _angle_selectors_match(angle, adapter)
     ]
@@ -761,6 +767,16 @@ def _angle_selector_values(
             f"review angle {angle_id!r} {key} must be a list of non-empty strings"
         )
     return tuple(value.strip() for value in raw)
+
+
+def _angle_requirement_value(angle: Mapping[str, object]) -> str:
+    raw = angle.get("requires")
+    if not isinstance(raw, str) or not raw.strip():
+        angle_id = str(angle.get("id") or "<unknown>")
+        raise ValueError(
+            f"review angle {angle_id!r} requires must be a non-empty string"
+        )
+    return raw.strip()
 
 
 def _angle_requirement_met(requirement: str, required: set[str]) -> bool:
@@ -899,7 +915,18 @@ def _merge_review_angles(
             continue
         if angle_id not in merged:
             order.append(angle_id)
-        merged[angle_id] = dict(item)
+        profile_item = dict(item)
+        if angle_id in _UNCONDITIONAL_REVIEW_ANGLE_IDS:
+            for selector in ("requires", "task_terms", "path_globs"):
+                profile_item.pop(selector, None)
+        baseline_item = merged.get(angle_id)
+        if (
+            baseline_item is not None
+            and "requires" in baseline_item
+            and "requires" not in profile_item
+        ):
+            profile_item["requires"] = baseline_item["requires"]
+        merged[angle_id] = profile_item
     return [merged[angle_id] for angle_id in order]
 
 

@@ -11,11 +11,10 @@ import { fileURLToPath } from "node:url";
 import { mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
 import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
 import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
-import { parseSimpleYaml, splitFrontmatter } from "../lib/frontmatter.mjs";
+import { observeSkillContent, parseSkillMetadata } from "../lib/skill-metadata.mjs";
 import {
   activeInstallProfileIds,
   AGENT_FLOW_COMMAND,
-  arrayValue,
   assertInstallRootIsFinal,
   assertKnownInstallArgs,
   atomicWriteFileSync,
@@ -81,7 +80,6 @@ import {
   ROOT_CONTEXT_FILES,
   rootBootstrapBlock,
   retiredHookScripts,
-  safeSkillName,
   samePath,
   shellQuote,
   reportRootBootstrapBlocks,
@@ -91,7 +89,6 @@ import {
   SYMLINK_SKIP_NOTICE_PREFIX,
   syncRecordedKitAssets,
   tomlBasicString,
-  uniqueStrings,
   unquoteShellWord,
   upsertGitExclude,
   upgradeBundledSkills,
@@ -1941,11 +1938,12 @@ function discoverSkills(baseDir, source, root, ignoredNames = new Set(), allowed
       continue;
     }
     const text = fs.readFileSync(skillPath, "utf8");
-    const metadata = parseSkillMetadata(text, entry.name);
+    const metadata = parseSkillMetadata(text, entry.name, PROJECT_SKILL_HOSTS, source);
     if (ignoredNames.has(metadata.name)) {
       continue;
     }
     const relativePath = path.relative(root, skillPath);
+    const contentObservation = observeSkillContent(path.dirname(skillPath));
     skills.push({
       id: metadata.id,
       name: metadata.name,
@@ -1969,63 +1967,21 @@ function discoverSkills(baseDir, source, root, ignoredNames = new Set(), allowed
       description: metadata.description,
       trigger: metadata.trigger,
       triggers: metadata.triggers,
+      governance: metadata.governance,
+      observedContentDigest: contentObservation.digest,
       hash: crypto.createHash("sha256").update(text).digest("hex"),
       priority,
-      warnings: metadata.warnings.map((message) => `${relativePath}: ${message}`),
+      warnings: [
+        ...metadata.warnings.map((message) => `${relativePath}: ${message}`),
+        ...(contentObservation.warning
+          ? [`${relativePath}: ${contentObservation.warning}`]
+          : []),
+      ],
     });
   }
   return skills;
 }
 
-function parseSkillMetadata(text, fallbackName) {
-  const frontmatter = splitFrontmatter(text);
-  const metadata = frontmatter ? parseSimpleYaml(frontmatter) : {};
-  const warnings = [];
-  const parsedName = String(metadata.name || fallbackName);
-  const name = safeSkillName(parsedName);
-  if (name !== parsedName) {
-    warnings.push(`unsafe skill name ignored: ${parsedName}`);
-  }
-  const hostValues = Array.isArray(metadata.hosts) ? metadata.hosts : [];
-  const knownHosts = new Set(PROJECT_SKILL_HOSTS);
-  const hosts = [];
-  for (const host of hostValues) {
-    const normalized = String(host).trim().toLowerCase();
-    if (knownHosts.has(normalized)) {
-      hosts.push(normalized);
-    } else if (normalized) {
-      warnings.push(`unknown host ignored: ${normalized}`);
-    }
-  }
-  const body = text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
-  const useWhen = body.split(/\r?\n/).find((line) => /^\s*use when\b/i.test(line));
-  return {
-    id: String(metadata.id || name),
-    name,
-    title: String(metadata.title || ""),
-    description: String(metadata.description || useWhen || ""),
-    hosts: hostValues.length > 0 ? [...new Set(hosts)] : [...PROJECT_SKILL_HOSTS],
-    tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
-    trigger: String(metadata.trigger || metadata.description || useWhen || ""),
-    triggers: arrayValue(metadata.triggers),
-    platforms: arrayValue(metadata.platforms),
-    stacks: arrayValue(metadata.stacks),
-    dependencies: uniqueStrings([...arrayValue(metadata.dependencies), ...arrayValue(metadata.requires)]),
-    requires: uniqueStrings([...arrayValue(metadata.dependencies), ...arrayValue(metadata.requires)]),
-    optionalDependencies: arrayValue(metadata.optionalDependencies),
-    references: arrayValue(metadata.references),
-    hostSupport: arrayValue(metadata.hostSupport),
-    workflowPhases: arrayValue(metadata.workflowPhases),
-    reviewAngles: arrayValue(metadata.reviewAngles),
-    installGroup: String(metadata.installGroup || ""),
-    // 전달 방식. `passive`는 "항상 적용되는 규범"이라 AGENTS.md 인덱스의 always 줄에
-    // 오르고, 나머지는 phase나 사용자 요청이 부를 때만 열린다. 선언이 없으면
-    // on-demand다 — 안 쓰는 skill을 상시 노출하면 잡음이 되어 결과가 나빠진다.
-    delivery: String(metadata.delivery || "on-demand"),
-    excludes: arrayValue(metadata.excludes || metadata.conflicts),
-    warnings,
-  };
-}
 
 
 

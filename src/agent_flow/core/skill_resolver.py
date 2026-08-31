@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 import yaml
+from yaml.nodes import MappingNode, ScalarNode
 
 # 우선순위 순서다. 앞쪽 root가 이기고, 같은 skill을 두 host에서 중복 로드하지 않는다.
 _DEFAULT_PROJECT_TEMPLATES = (
@@ -144,6 +145,56 @@ class SkillCatalogEntry:
     phase_declared: bool = False
     description: str = ""
     keywords: tuple[str, ...] = ()
+    version: str = ""
+    owner: str = ""
+    lifecycle: str = "active"
+    approval: str = "unattested"
+    provenance: str = ""
+
+
+_CONTENT_EXCLUDED_NAMES = {
+    ".agent-flow",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+}
+
+
+def skill_observed_content_digest(skill_directory: Path) -> str:
+    """SKILL.md와 함께 배포되는 일반 파일 전체의 관측 digest."""
+    root = skill_directory.resolve(strict=True)
+    pending = [root]
+    files: list[Path] = []
+    while pending:
+        directory = pending.pop()
+        for child in directory.iterdir():
+            if child.name in _CONTENT_EXCLUDED_NAMES or child.name.endswith(".pyc"):
+                continue
+            if child.is_symlink():
+                continue
+            if child.is_dir():
+                pending.append(child)
+            elif child.is_file():
+                files.append(child)
+
+    digest = hashlib.sha256()
+    for file_path in sorted(
+        files,
+        key=lambda item: item.relative_to(root).as_posix().encode("utf-8"),
+    ):
+        digest.update(file_path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        file_digest = hashlib.sha256()
+        with file_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                file_digest.update(chunk)
+        digest.update(file_digest.hexdigest().encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def active_host(env: dict[str, str] | None = None) -> str:
@@ -182,7 +233,7 @@ def skill_roots(
             for template in _HOST_TEMPLATES[name]
         )
     roots.extend(SkillRoot(source="shared", template=template) for template in _SHARED_TEMPLATES)
-    roots.extend(_profile_skill_source_roots(profile))
+    roots.extend(_profile_skill_source_roots(profile, env=env))
     return tuple(_dedupe_roots(roots))
 
 
@@ -197,13 +248,11 @@ def active_host_roots(roots: Sequence[SkillRoot], host: str) -> tuple[SkillRoot,
     return tuple(root for root in roots if not root.host or root.host == host)
 
 
-def resolve_skill(
-    name: str, roots: Sequence[SkillRoot], *, install_hint: str = ""
-) -> ResolvedSkill:
+def resolve_skill(name: str, roots: Sequence[SkillRoot]) -> ResolvedSkill:
     """첫 매치가 이긴다. 어디에도 없으면 exists=False와 설치 안내를 담아 돌려준다."""
     if not _is_safe_skill_name(name):
         return ResolvedSkill(name=name, path=None, source="", exists=False, install_hint="")
-    hints: list[str] = [install_hint] if install_hint else []
+    hints: list[str] = []
     for root in roots:
         match = _match_template(root.template, name)
         if match is not None:
@@ -276,10 +325,7 @@ def resolve_phase_skills(
         else:
             required_names.append(entry.name)
 
-    # profile 표로 붙는 skill은 upstream 파일이라 frontmatter 선언이 없다.
-    # 부재 안내는 표의 source URL로 한다 — root의 일반 install hint로는
-    # 어느 저장소에서 받아야 하는지 알 수 없다.
-    routed_hints: dict[str, str] = {}
+    # profile 표로 붙는 skill은 upstream 파일이라 frontmatter 선언이 없어도 required다.
     for routed in routed_profile_skills(
         profile,
         phase_id=phase_id,
@@ -287,8 +333,6 @@ def resolve_phase_skills(
         task_text=task_text,
         concerns=concerns,
     ):
-        if routed.source:
-            routed_hints.setdefault(routed.name, routed.source)
         if routed.name not in required_names:
             required_names.append(routed.name)
 
@@ -327,11 +371,7 @@ def resolve_phase_skills(
         found = matched.get(name)
         if found is not None:
             return found
-        return resolve_skill(
-            name,
-            resolved_roots,
-            install_hint=routed_hints.get(name, ""),
-        )
+        return resolve_skill(name, resolved_roots)
 
     return SkillResolution(
         required=tuple(resolve(name) for name in _stable_unique(required_names)),
@@ -499,7 +539,9 @@ def skill_summary(skill_path: Path) -> str:
     return summary
 
 
-def _profile_skill_source_roots(profile: dict | None) -> list[SkillRoot]:
+def _profile_skill_source_roots(
+    profile: dict | None, *, env: dict[str, str] | None = None
+) -> list[SkillRoot]:
     # 지연 import: skill_sync가 core.commands/security를 끌어와 import 그래프를 넓힌다.
     from agent_flow.core.skill_sync import cache_root, parse_skill_sources
 
@@ -517,7 +559,7 @@ def _profile_skill_source_roots(profile: dict | None) -> list[SkillRoot]:
             for template in source.roots
         )
         if source.kind == "fetch" and source.layout:
-            checkout = cache_root() / source.id / (source.ref or "HEAD")
+            checkout = cache_root(env) / source.id / (source.ref or "HEAD")
             roots.append(
                 SkillRoot(
                     source="fetched",
@@ -626,7 +668,28 @@ def _catalog_entry(name: str, skill_path: Path, source: str) -> SkillCatalogEntr
         phase_declared=bool(phases),
         description=str(frontmatter.get("description") or "").strip(),
         keywords=keywords,
+        version=_governance_scalar(frontmatter.get("version"), ""),
+        owner=_governance_scalar(frontmatter.get("owner"), ""),
+        lifecycle=_governance_scalar(
+            frontmatter.get("lifecycle"), "active"
+        ).lower(),
+        approval=_governance_scalar(
+            frontmatter.get("approval"), "unattested"
+        ).lower(),
+        provenance=_governance_scalar(
+            frontmatter.get("provenance"), _canonical_provenance(source)
+        ),
     )
+
+
+def _governance_scalar(value: object, fallback: str) -> str:
+    if not isinstance(value, str):
+        return fallback
+    return value.strip() or fallback
+
+
+def _canonical_provenance(source: str) -> str:
+    return "local" if source == "project-local" else source
 
 
 def _read_frontmatter(skill_path: Path) -> dict | None:
@@ -639,11 +702,24 @@ def _read_frontmatter(skill_path: Path) -> dict | None:
     match = re.match(r"\A---\r?\n(?P<body>[\s\S]*?)\r?\n---", text)
     if not match:
         return None
+    body = match.group("body")
     try:
-        parsed = yaml.safe_load(match.group("body"))
+        parsed = yaml.safe_load(body)
+        document = yaml.compose(body, Loader=yaml.SafeLoader)
     except yaml.YAMLError:
         return None
-    return parsed if isinstance(parsed, dict) else None
+    if not isinstance(parsed, dict):
+        return None
+    if isinstance(document, MappingNode):
+        governance_keys = {"version", "owner", "lifecycle", "approval", "provenance"}
+        for key_node, value_node in document.value:
+            if (
+                isinstance(key_node, ScalarNode)
+                and key_node.value in governance_keys
+                and isinstance(value_node, ScalarNode)
+            ):
+                parsed[key_node.value] = value_node.value
+    return parsed
 
 
 def selector_matches(

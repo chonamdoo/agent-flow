@@ -695,6 +695,207 @@ def test_frontmatter_parser_is_single_source():
         f"parseSimpleYaml()을 정의하는 파일이 하나가 아니다: {definers}"
     )
 
+def test_skill_metadata_parser_is_single_source():
+    definers = [
+        name
+        for name, text in _js_sources().items()
+        if "function parseSkillMetadata(" in text
+    ]
+    assert definers == ["lib/skill-metadata.mjs"], (
+        f"parseSkillMetadata()을 정의하는 파일이 하나가 아니다: {definers}"
+    )
+
+
+def _skill_metadata_parse(text: str, source: str = "") -> dict:
+    module = KIT_ROOT / "lib" / "skill-metadata.mjs"
+    return json.loads(
+        subprocess.run(
+            (
+                _node(),
+                "--input-type=module",
+                "-e",
+                "import { parseSkillMetadata } from "
+                f"{json.dumps(str(module))};"
+                "let raw = '';"
+                "process.stdin.on('data', (chunk) => { raw += chunk; });"
+                "process.stdin.on('end', () => process.stdout.write(JSON.stringify("
+                "parseSkillMetadata(raw, 'fallback', ['claude', 'codex', 'omp'], "
+                "process.argv[1]))));",
+                source,
+            ),
+            input=text,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=60,
+        ).stdout
+    )
+
+
+def test_skill_governance_metadata_matches_python():
+    text = (
+        "---\nname: governed\ndescription: Governed skill.\nversion: 1.2.3\n"
+        "owner: platform\nlifecycle: active\napproval: approved\n"
+        "provenance: internal\n---\n"
+    )
+
+    parsed = _skill_metadata_parse(text)
+    expected = yaml.safe_load(text.split("---\n", 2)[1])
+
+    assert parsed["governance"] == {
+        "version": expected["version"],
+        "owner": expected["owner"],
+        "lifecycle": expected["lifecycle"],
+        "approval": expected["approval"],
+        "provenance": expected["provenance"],
+    }
+
+def test_skill_governance_defaults_match_python_catalog(tmp_path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.skill_resolver import SkillRoot, discover_skill_catalog
+
+    text = "---\nname: governed\ndescription: Governed skill.\n---\n"
+    path = tmp_path / "governed" / "SKILL.md"
+    path.parent.mkdir()
+    path.write_text(text, encoding="utf-8")
+    entry = discover_skill_catalog(
+        tmp_path,
+        (SkillRoot("project-local", str(tmp_path / "{skill}" / "SKILL.md")),),
+    )[0]
+
+    assert _skill_metadata_parse(text, "local")["governance"] == {
+        "version": entry.version,
+        "owner": entry.owner,
+        "lifecycle": entry.lifecycle,
+        "approval": entry.approval,
+        "provenance": entry.provenance,
+    }
+
+
+def test_skill_governance_scalar_coercion_matches_python_catalog(tmp_path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.skill_resolver import SkillRoot, discover_skill_catalog
+
+    text = (
+        "---\nname: governed\ndescription: Governed skill.\n"
+        "version: 2.10\napproval: no\n---\n"
+    )
+    path = tmp_path / "governed" / "SKILL.md"
+    path.parent.mkdir()
+    path.write_text(text, encoding="utf-8")
+    entry = discover_skill_catalog(
+        tmp_path,
+        (SkillRoot("project", str(tmp_path / "{skill}" / "SKILL.md")),),
+    )[0]
+    governance = _skill_metadata_parse(text, "project")["governance"]
+
+    assert governance["version"] == entry.version == "2.10"
+    assert governance["approval"] == entry.approval == "no"
+
+
+@pytest.mark.parametrize(
+    "scalar_lines",
+    [
+        "version:\nowner:\nlifecycle:\napproval:\nprovenance:\n",
+        "version: ' '\nowner: ' '\nlifecycle: ' '\napproval: ' '\nprovenance: ' '\n",
+    ],
+    ids=["empty", "quoted-whitespace"],
+)
+def test_blank_skill_governance_scalars_match_python_defaults(
+    tmp_path, scalar_lines
+):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.skill_resolver import SkillRoot, discover_skill_catalog
+
+    text = (
+        "---\nname: governed\ndescription: Governed skill.\n"
+        f"{scalar_lines}---\n"
+    )
+    path = tmp_path / "governed" / "SKILL.md"
+    path.parent.mkdir()
+    path.write_text(text, encoding="utf-8")
+    entry = discover_skill_catalog(
+        tmp_path,
+        (SkillRoot("project", str(tmp_path / "{skill}" / "SKILL.md")),),
+    )[0]
+
+    assert _skill_metadata_parse(text, "project")["governance"] == {
+        "version": entry.version,
+        "owner": entry.owner,
+        "lifecycle": entry.lifecycle,
+        "approval": entry.approval,
+        "provenance": entry.provenance,
+    }
+
+def test_skill_observed_content_digest_matches_python_and_tracks_references(tmp_path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.skill_resolver import skill_observed_content_digest
+
+    skill = tmp_path / "governed"
+    references = skill / "references"
+    references.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: governed\n---\n", encoding="utf-8")
+    reference = references / "contract.md"
+    reference.write_text("first\n", encoding="utf-8")
+    (skill / "references.md").write_text("sibling\n", encoding="utf-8")
+    module = KIT_ROOT / "lib" / "skill-metadata.mjs"
+
+    def js_digest() -> str:
+        return subprocess.run(
+            (
+                _node(),
+                "--input-type=module",
+                "-e",
+                "import { skillObservedContentDigest } from "
+                f"{json.dumps(str(module))};"
+                "process.stdout.write(skillObservedContentDigest(process.argv[1]));",
+                str(skill),
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=60,
+        ).stdout
+
+    first = skill_observed_content_digest(skill)
+    assert js_digest() == first
+
+    reference.write_text("second\n", encoding="utf-8")
+    second = skill_observed_content_digest(skill)
+
+    assert second != first
+    assert js_digest() == second
+
+
+def test_skill_content_observation_reports_read_failure_without_aborting(tmp_path):
+    module = KIT_ROOT / "lib" / "skill-metadata.mjs"
+    missing = tmp_path / "missing-skill"
+    observed = json.loads(
+        subprocess.run(
+            (
+                _node(),
+                "--input-type=module",
+                "-e",
+                "import { observeSkillContent } from "
+                f"{json.dumps(str(module))};"
+                "process.stdout.write(JSON.stringify("
+                "observeSkillContent(process.argv[1])));",
+                str(missing),
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=60,
+        ).stdout
+    )
+
+    assert observed["digest"] == ""
+    assert observed["warning"].startswith("content digest unavailable:")
+
+
 
 def test_frontmatter_folded_scalar_matches_python():
     """반증: `description: >`가 `\">\"` 한 글자로 기록되면 JS와 Python이 갈라진다."""
