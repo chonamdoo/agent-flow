@@ -12,7 +12,7 @@ import re
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
+from typing import AbstractSet, Sequence
 
 from agent_flow.core.atomic_io import atomic_write_text, read_bounded_regular_file
 from agent_flow.core.profile_routing import routable_group_skills
@@ -484,7 +484,7 @@ def _lock_findings(
     current: dict[str, dict[str, object]],
     current_sources: dict[str, dict[str, str]],
     *,
-    unreadable_names: set[str] = frozenset(),
+    unreadable_names: AbstractSet[str] = frozenset(),
 ) -> list[CatalogFinding]:
     if previous.status in {"corrupt", "unreadable"}:
         kind = LOCK_INVALID if previous.status == "corrupt" else LOCK_UNREADABLE

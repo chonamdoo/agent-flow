@@ -528,6 +528,7 @@ def test_doctor_reports_invalid_and_disallowed_routed_governance(
 def test_governance_view_excludes_inactive_hosts_and_external_invalid_is_advisory(
     tmp_path, monkeypatch
 ):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
     project = tmp_path / "app"
     claude_root = tmp_path / "claude-skills"
     _write_skill(
