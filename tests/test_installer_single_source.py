@@ -872,6 +872,36 @@ def test_structured_skill_governance_stays_invalid_across_parsers(tmp_path):
     } == {INVALID_GOVERNANCE_SCALAR}
 
 
+
+@pytest.mark.parametrize(
+    ("governance_yaml", "expected"),
+    (
+        ("approval: approved\napproval: [rejected]\n", "<invalid-structured-value>"),
+        ("approval: [rejected]\napproval: approved\n", "approved"),
+    ),
+)
+def test_duplicate_governance_keys_use_final_value_across_parsers(
+    governance_yaml, expected, tmp_path
+):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.skill_resolver import SkillRoot, discover_skill_catalog
+
+    text = (
+        "---\nname: governed\ndescription: Governed skill.\n"
+        f"{governance_yaml}---\n"
+    )
+    root = tmp_path / "skills"
+    path = root / "governed" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(text, encoding="utf-8")
+    entry = discover_skill_catalog(
+        tmp_path,
+        (SkillRoot("project", str(root / "{skill}" / "SKILL.md")),),
+    )[0]
+
+    assert _skill_metadata_parse(text, "project")["governance"]["approval"] == expected
+    assert entry.approval == expected
+
 def test_governance_comment_only_lines_match_python(tmp_path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.core.skill_resolver import (

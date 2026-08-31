@@ -19,6 +19,7 @@ from agent_flow.core.profile_routing import routable_group_skills
 from agent_flow.core.skill_matching import routable_names
 from agent_flow.core.skill_resolver import (
     INVALID_GOVERNANCE_SCALAR,
+    INVALID_FRONTMATTER,
     OWNED_SOURCES,
     SkillCatalogEntry,
     active_host,
@@ -628,21 +629,25 @@ def _governance_findings(
     for entry in entries:
         invalid: list[str] = []
         for field_name in ("version", "owner", "lifecycle", "approval", "provenance"):
-            if getattr(entry, field_name) == INVALID_GOVERNANCE_SCALAR:
+            value = getattr(entry, field_name)
+            if value == INVALID_GOVERNANCE_SCALAR:
                 invalid.append(f"{field_name}=structured")
+            elif value == INVALID_FRONTMATTER:
+                invalid.append(f"{field_name}=frontmatter-invalid")
+        invalid_values = (INVALID_GOVERNANCE_SCALAR, INVALID_FRONTMATTER)
         if (
-            entry.version != INVALID_GOVERNANCE_SCALAR
+            entry.version not in invalid_values
             and entry.version
             and not _valid_semver(entry.version)
         ):
             invalid.append(f"version={entry.version}")
         if (
-            entry.lifecycle != INVALID_GOVERNANCE_SCALAR
+            entry.lifecycle not in invalid_values
             and entry.lifecycle not in _LIFECYCLES
         ):
             invalid.append(f"lifecycle={entry.lifecycle}")
         if (
-            entry.approval != INVALID_GOVERNANCE_SCALAR
+            entry.approval not in invalid_values
             and entry.approval not in _APPROVALS
         ):
             invalid.append(f"approval={entry.approval}")

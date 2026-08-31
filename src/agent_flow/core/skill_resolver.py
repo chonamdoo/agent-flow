@@ -153,6 +153,10 @@ class SkillCatalogEntry:
 
 
 INVALID_GOVERNANCE_SCALAR = "<invalid-structured-value>"
+INVALID_FRONTMATTER = "<invalid-frontmatter>"
+_GOVERNANCE_KEYS = frozenset(
+    {"version", "owner", "lifecycle", "approval", "provenance"}
+)
 
 _CONTENT_EXCLUDED_NAMES = {
     ".agent-flow",
@@ -711,25 +715,30 @@ def _read_frontmatter(skill_path: Path) -> dict | None:
     # name/description/requires가 통째로 비고, JS 쪽 파서와 결과가 갈린다.
     match = re.match(r"\A---\r?\n(?P<body>[\s\S]*?)\r?\n---", text)
     if not match:
-        return None
+        return _invalid_frontmatter() if re.match(r"\A---(?:\r?\n|\Z)", text) else None
     body = match.group("body")
     try:
         parsed = yaml.safe_load(body)
         document = yaml.compose(body, Loader=yaml.SafeLoader)
     except yaml.YAMLError:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    if isinstance(document, MappingNode):
-        governance_keys = {"version", "owner", "lifecycle", "approval", "provenance"}
-        for key_node, value_node in document.value:
-            if (
-                isinstance(key_node, ScalarNode)
-                and key_node.value in governance_keys
-                and isinstance(value_node, ScalarNode)
-            ):
-                parsed[key_node.value] = value_node.value
+        return _invalid_frontmatter()
+    if not isinstance(parsed, dict) or not isinstance(document, MappingNode):
+        return _invalid_frontmatter()
+    governance_nodes = {}
+    for key_node, value_node in document.value:
+        if isinstance(key_node, ScalarNode) and key_node.value in _GOVERNANCE_KEYS:
+            governance_nodes[key_node.value] = value_node
+    for key, value_node in governance_nodes.items():
+        parsed[key] = (
+            value_node.value
+            if isinstance(value_node, ScalarNode)
+            else INVALID_GOVERNANCE_SCALAR
+        )
     return parsed
+
+
+def _invalid_frontmatter() -> dict[str, str]:
+    return {key: INVALID_FRONTMATTER for key in _GOVERNANCE_KEYS}
 
 
 def selector_matches(

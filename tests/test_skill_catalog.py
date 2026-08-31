@@ -478,6 +478,36 @@ def test_cli_doctor_strict_fails_only_for_hard_findings(
         == 1
     )
 
+
+def test_cli_doctor_strict_fails_when_workflow_declarations_are_incomplete(
+    tmp_path, monkeypatch
+):
+    from agent_flow import cli
+    from agent_flow.core.phase_workflow import DeclaredPhaseSkills
+
+    monkeypatch.setattr(cli, "active_profile_ids", lambda root, selected: ("generic",))
+    monkeypatch.setattr(
+        cli,
+        "load_profile_payload",
+        lambda profile_id, root: {"id": profile_id},
+    )
+    monkeypatch.setattr(
+        cli,
+        "_workflow_declarations",
+        lambda: DeclaredPhaseSkills((), ("workflow broken: invalid YAML",)),
+    )
+    monkeypatch.setattr(
+        skill_catalog,
+        "scan",
+        lambda *args, **kwargs: skill_catalog.CatalogScan(stamp="degraded"),
+    )
+
+    assert cli.main(["skills", "doctor", "--root", str(tmp_path)]) == 0
+    assert (
+        cli.main(["skills", "doctor", "--root", str(tmp_path), "--strict"])
+        == 1
+    )
+
 def test_strict_findings_exclude_advisory_routing_observations():
     advisory = (
         skill_catalog.CatalogFinding(skill_catalog.UNROUTED, "optional"),
@@ -622,6 +652,58 @@ def test_owned_governance_rejects_structured_scalars(tmp_path, monkeypatch):
         f"{field}=structured" in invalid[0].detail
         for field in ("version", "owner", "lifecycle", "approval", "provenance")
     )
+    assert skill_catalog.strict_findings(invalid) == tuple(invalid)
+
+
+def test_owned_governance_uses_the_final_duplicate_value(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    _write_skill(
+        project / ".agent-flow" / "local-skills",
+        "duplicate",
+        "---\nname: duplicate\ndescription: Duplicate governance.\n"
+        "approval: approved\napproval: [rejected]\n---\n",
+    )
+
+    result = skill_catalog.scan(project, host="claude")
+    invalid = [
+        finding
+        for finding in result.findings
+        if finding.kind == skill_catalog.INVALID_GOVERNANCE
+    ]
+
+    assert [finding.name for finding in invalid] == ["duplicate"]
+    assert "approval=structured" in invalid[0].detail
+    assert skill_catalog.strict_findings(invalid) == tuple(invalid)
+
+
+@pytest.mark.parametrize(
+    "frontmatter",
+    (
+        "---\nname: malformed\napproval: [\n---\n",
+        "---\n- name\n- malformed\n---\n",
+    ),
+)
+def test_owned_governance_rejects_malformed_frontmatter(
+    frontmatter, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    _write_skill(
+        project / ".agent-flow" / "local-skills",
+        "malformed",
+        frontmatter,
+    )
+
+    result = skill_catalog.scan(project, host="claude")
+    invalid = [
+        finding
+        for finding in result.findings
+        if finding.kind == skill_catalog.INVALID_GOVERNANCE
+    ]
+
+    assert [finding.name for finding in invalid] == ["malformed"]
+    assert "approval=frontmatter-invalid" in invalid[0].detail
     assert skill_catalog.strict_findings(invalid) == tuple(invalid)
 
 

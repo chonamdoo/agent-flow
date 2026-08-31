@@ -3265,7 +3265,7 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
         if (
             args.skills_command == "doctor"
             and getattr(args, "strict", False)
-            and skill_catalog.strict_findings(findings)
+            and (declared.errors or skill_catalog.strict_findings(findings))
         ):
             return 1
         return 0
