@@ -216,6 +216,7 @@ def scan(
     roots = skill_roots(project_root, profile=profile, host=resolved_host, env=env)
     view_roots = active_host_roots(roots, resolved_host)
     files = catalog_files(roots)
+    view_files = catalog_files(view_roots)
     entries = discover_skill_catalog(project_root, roots)
     view_entries = discover_skill_catalog(project_root, view_roots)
     stamp = catalog_stamp(files)
@@ -240,10 +241,10 @@ def scan(
     )
     reachable = _reachable_names(profile, entries, workflow_skills)
     view_reachable = _reachable_names(profile, view_entries, workflow_skills)
-    findings.extend(_declaration_findings(profile, entries))
+    findings.extend(_declaration_findings(profile, view_entries))
     findings.extend(_unrouted_findings(entries, reachable))
     findings.extend(_governance_findings(view_entries, view_reachable))
-    findings.extend(_collision_findings(files, entries))
+    findings.extend(_collision_findings(view_files, view_entries))
     findings.extend(_unowned_adapter_findings(Path.home() if home is None else home))
     if shadowed:
         findings.append(

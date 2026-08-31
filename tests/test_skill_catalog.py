@@ -871,6 +871,40 @@ def test_doctor_names_a_declared_skill_that_is_not_installed(tmp_path, monkeypat
     assert dead == ["camera1-to-camerax"]
 
 
+def test_declared_skill_installed_only_for_another_host_is_missing(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    _upstream_skill(
+        home / ".codex" / "skills",
+        "codex-only",
+        "Only the Codex host can load this skill.",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    project = tmp_path / "app"
+    project.mkdir()
+    profile = {
+        "skills": {
+            "required_review": [
+                {
+                    "group": "profile",
+                    "skills": ["codex-only"],
+                    "task_terms": ["review"],
+                }
+            ]
+        }
+    }
+
+    result = skill_catalog.scan(project, profile=profile, host="claude")
+
+    assert [
+        finding.name
+        for finding in result.findings
+        if finding.kind == skill_catalog.DEAD_DECLARATION
+    ] == ["codex-only"]
+    assert skill_catalog.strict_findings(result.findings)
+
+
 def test_doctor_reports_an_installed_skill_that_no_declaration_routes(tmp_path, monkeypatch):
     """디스크에 있고 선언에 없는 것 — 오늘 영구히 안 보이는 12개가 이 종류다."""
     home = tmp_path / "home"
@@ -946,6 +980,29 @@ def test_doctor_reports_a_project_skill_that_shadows_an_installed_one(tmp_path, 
         finding.name for finding in result.findings if finding.kind == skill_catalog.COLLISION
     ]
     assert collisions == ["edge-to-edge"]
+
+
+def test_cross_host_skill_copies_do_not_collide(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _upstream_skill(
+        home / ".claude" / "skills",
+        "shared-name",
+        "Claude-owned copy.",
+    )
+    _upstream_skill(
+        home / ".codex" / "skills",
+        "shared-name",
+        "Codex-owned copy.",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    project = tmp_path / "app"
+    project.mkdir()
+
+    result = skill_catalog.scan(project, profile={}, host="claude")
+
+    assert not any(
+        finding.kind == skill_catalog.COLLISION for finding in result.findings
+    )
 
 
 def test_doctor_reports_an_unrouted_bundled_skill(tmp_path, monkeypatch):
