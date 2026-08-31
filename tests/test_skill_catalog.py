@@ -597,6 +597,33 @@ def test_owned_governance_rejects_numeric_prerelease_leading_zero(
     assert skill_catalog.strict_findings(invalid) == tuple(invalid)
 
 
+def test_owned_governance_rejects_structured_scalars(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    _write_skill(
+        project / ".agent-flow" / "local-skills",
+        "structured",
+        "---\nname: structured\ndescription: Structured governance.\n"
+        "version:\n  - 1.2.3\nowner: [platform]\n"
+        "lifecycle:\n  status: active\napproval: [approved]\n"
+        "provenance:\n  source: internal\n---\n",
+    )
+
+    result = skill_catalog.scan(project, host="claude")
+    invalid = [
+        finding
+        for finding in result.findings
+        if finding.kind == skill_catalog.INVALID_GOVERNANCE
+    ]
+
+    assert [finding.name for finding in invalid] == ["structured"]
+    assert all(
+        f"{field}=structured" in invalid[0].detail
+        for field in ("version", "owner", "lifecycle", "approval", "provenance")
+    )
+    assert skill_catalog.strict_findings(invalid) == tuple(invalid)
+
+
 def test_unreadable_content_preserves_the_previous_lock_baseline(
     tmp_path, monkeypatch
 ):

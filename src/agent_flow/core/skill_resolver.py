@@ -152,6 +152,8 @@ class SkillCatalogEntry:
     provenance: str = ""
 
 
+INVALID_GOVERNANCE_SCALAR = "<invalid-structured-value>"
+
 _CONTENT_EXCLUDED_NAMES = {
     ".agent-flow",
     ".git",
@@ -175,6 +177,7 @@ def skill_observed_content_digest(skill_directory: Path) -> str:
             if child.name in _CONTENT_EXCLUDED_NAMES or child.name.endswith(".pyc"):
                 continue
             if child.is_symlink():
+                files.append(child)
                 continue
             if child.is_dir():
                 pending.append(child)
@@ -189,9 +192,14 @@ def skill_observed_content_digest(skill_directory: Path) -> str:
         digest.update(file_path.relative_to(root).as_posix().encode("utf-8"))
         digest.update(b"\0")
         file_digest = hashlib.sha256()
-        with file_path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                file_digest.update(chunk)
+        if file_path.is_symlink():
+            file_digest.update(b"symlink\0")
+            target = os.readlink(file_path)
+            file_digest.update(target.encode("utf-8", errors="surrogateescape"))
+        else:
+            with file_path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    file_digest.update(chunk)
         digest.update(file_digest.hexdigest().encode("ascii"))
         digest.update(b"\0")
     return digest.hexdigest()
@@ -683,8 +691,10 @@ def _catalog_entry(name: str, skill_path: Path, source: str) -> SkillCatalogEntr
 
 
 def _governance_scalar(value: object, fallback: str) -> str:
-    if not isinstance(value, str):
+    if value is None:
         return fallback
+    if not isinstance(value, str):
+        return INVALID_GOVERNANCE_SCALAR
     return value.strip() or fallback
 
 

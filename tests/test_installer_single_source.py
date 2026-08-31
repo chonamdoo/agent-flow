@@ -773,6 +773,16 @@ def test_skill_governance_defaults_match_python_catalog(tmp_path):
     }
 
 
+@pytest.mark.parametrize("field", ["excludes", "conflicts"])
+def test_skill_metadata_preserves_exclusion_aliases(field):
+    text = (
+        "---\nname: governed\ndescription: Governed skill.\n"
+        f"{field}: [legacy-one, legacy-two]\n---\n"
+    )
+
+    assert _skill_metadata_parse(text)["excludes"] == ["legacy-one", "legacy-two"]
+
+
 def test_skill_governance_scalar_coercion_matches_python_catalog(tmp_path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.core.skill_resolver import SkillRoot, discover_skill_catalog
@@ -828,6 +838,76 @@ def test_blank_skill_governance_scalars_match_python_defaults(
         "provenance": entry.provenance,
     }
 
+
+def test_structured_skill_governance_stays_invalid_across_parsers(tmp_path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.skill_resolver import (
+        INVALID_GOVERNANCE_SCALAR,
+        SkillRoot,
+        discover_skill_catalog,
+    )
+
+    text = (
+        "---\nname: governed\ndescription: Governed skill.\n"
+        "version:\n  - 1.2.3\nowner: [platform]\n"
+        "lifecycle:\n  status: active\napproval: [approved]\n"
+        "provenance:\n  source: internal\n---\n"
+    )
+    path = tmp_path / "governed" / "SKILL.md"
+    path.parent.mkdir()
+    path.write_text(text, encoding="utf-8")
+    entry = discover_skill_catalog(
+        tmp_path,
+        (SkillRoot("project", str(tmp_path / "{skill}" / "SKILL.md")),),
+    )[0]
+    governance = _skill_metadata_parse(text, "project")["governance"]
+
+    assert set(governance.values()) == {INVALID_GOVERNANCE_SCALAR}
+    assert {
+        entry.version,
+        entry.owner,
+        entry.lifecycle,
+        entry.approval,
+        entry.provenance,
+    } == {INVALID_GOVERNANCE_SCALAR}
+
+
+def test_governance_comment_only_lines_match_python(tmp_path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.skill_resolver import (
+        INVALID_GOVERNANCE_SCALAR,
+        SkillRoot,
+        discover_skill_catalog,
+    )
+
+    cases = (
+        (
+            "lifecycle:\n  # keep the default\n# still blank\napproval: approved\n",
+            "active",
+        ),
+        (
+            "lifecycle: # mapping follows\n# explanation\n  status: active\n",
+            INVALID_GOVERNANCE_SCALAR,
+        ),
+    )
+    for index, (governance_yaml, expected) in enumerate(cases):
+        text = (
+            "---\nname: governed\ndescription: Governed skill.\n"
+            f"{governance_yaml}---\n"
+        )
+        root = tmp_path / str(index)
+        path = root / "governed" / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(text, encoding="utf-8")
+        entry = discover_skill_catalog(
+            root,
+            (SkillRoot("project", str(root / "{skill}" / "SKILL.md")),),
+        )[0]
+
+        assert _skill_metadata_parse(text, "project")["governance"]["lifecycle"] == expected
+        assert entry.lifecycle == expected
+
+
 def test_skill_observed_content_digest_matches_python_and_tracks_references(tmp_path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.core.skill_resolver import skill_observed_content_digest
@@ -867,6 +947,25 @@ def test_skill_observed_content_digest_matches_python_and_tracks_references(tmp_
 
     assert second != first
     assert js_digest() == second
+
+    external_a = tmp_path / "external-a.md"
+    external_b = tmp_path / "external-b.md"
+    external_a.write_text("outside\n", encoding="utf-8")
+    external_b.write_text("outside\n", encoding="utf-8")
+    linked = references / "linked.md"
+    linked.symlink_to(external_a)
+    linked_first = skill_observed_content_digest(skill)
+    assert js_digest() == linked_first
+
+    linked.unlink()
+    linked.symlink_to(external_b)
+    linked_second = skill_observed_content_digest(skill)
+
+    assert linked_second != linked_first
+    assert js_digest() == linked_second
+    external_b.write_text("changed outside\n", encoding="utf-8")
+    assert skill_observed_content_digest(skill) == linked_second
+    assert js_digest() == linked_second
 
 
 def test_skill_content_observation_reports_read_failure_without_aborting(tmp_path):
