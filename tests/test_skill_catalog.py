@@ -1232,6 +1232,30 @@ def _shipped_catalog():
     return discover_skill_catalog(REPO, (root,))
 
 
+def test_flutter_development_guide_defines_contextual_responsive_layout_contract():
+    guide = (
+        SHIPPED_SKILLS / "flutter-development-guide" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    required_decisions = (
+        "linear single-run",
+        "bounded main axis",
+        "direct child",
+        "`Wrap` when items may reflow",
+        "lazy `ListView`, `GridView`, or slivers",
+        "`Flex.spacing`",
+        "`TextScaler`",
+        "`MediaQuery.sizeOf`",
+        "`LayoutBuilder`",
+        "`Padding`",
+        "`SafeArea`",
+    )
+
+    missing = [decision for decision in required_decisions if decision not in guide]
+    assert missing == []
+    assert "hardware type or top-level orientation" in guide
+    assert "blanket ban" in guide
+
+
 def test_alias_expands_to_clean_architecture_core():
     """반증: JS 표에만 있으면 Python 런타임은 alias 한 벌만 읽고 정본을 놓친다."""
     from agent_flow.core.skill_resolver import expand_dependencies
