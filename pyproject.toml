@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-flow"
-version = "0.2.8"
+version = "0.2.9"
 description = "Project-agnostic AI workflow kit"
 requires-python = ">=3.10"
 dependencies = [
