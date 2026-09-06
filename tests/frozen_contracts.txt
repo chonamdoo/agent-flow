@@ -1,0 +1,112 @@
+# frozen contracts — the regression inventory CI runs.
+#
+# Format, one per line:
+#   <pr-number> <pytest node id>          a contract and the test that keeps it
+#   uncovered <pr-number> <reason>        a recorded regression with no deterministic test
+#
+# `#` comments and blank lines are ignored. The `frozen-invariants` CI job
+# passes every node id here to pytest verbatim. A stale id is a collection error.
+# Freeze policy: docs/IDENTITY-AND-FREEZE-POLICY.md.
+#
+# Adding a line is how a contract enters the freeze set. Removing one requires
+# either a replacement line or an `uncovered` line stating why.
+
+# pr #89 — a hard boundary comparison left a marker behind and deadlocked resume.
+# Recovery must stay reachable from inside the boundary it created.
+89 tests/test_host_write_boundary.py::test_unbound_lifecycle_command_is_allowed_to_establish_binding
+89 tests/test_host_write_boundary.py::test_a_normal_leader_pull_does_not_stop_the_worker
+89 tests/test_host_write_boundary.py::test_recovery_command_passes_in_every_blocked_state
+
+# pr #140 — a run journal is bound to the repository and checkout that created
+# it, and a lifecycle lookalike cannot mint its own permission.
+140 tests/test_worktree_cleanup.py::test_cleanup_resume_rejects_journal_replayed_into_recreated_repository
+140 tests/test_host_write_boundary.py::test_compound_lifecycle_command_cannot_bypass_an_unbound_session
+140 tests/test_host_write_boundary.py::test_unbound_session_does_not_trust_lifecycle_lookalike_executables
+
+# pr #146 — pre-proving arbitrary shell write targets only grew exceptions.
+# The tripwire watches writes after the fact instead of guessing them up front.
+146 tests/test_worktree_tripwire.py::test_tripwire_fires_on_leader_write
+146 tests/test_worktree_tripwire.py::test_command_substitution_passes_static_check
+
+# pr #165 — the leader HEAD relaxation holds only when all three conditions hold:
+# same branch, ancestor relationship, and the leader's own reflog record.
+165 tests/test_worktree_isolation.py::test_tripwire_accepts_a_same_branch_advance_the_leader_recorded
+165 tests/test_worktree_isolation.py::test_tripwire_detects_leader_branch_switch
+165 tests/test_worktree_isolation.py::test_tripwire_detects_a_leader_reset_even_though_the_leader_recorded_it
+165 tests/test_worktree_isolation.py::test_tripwire_detects_a_head_move_the_leader_never_recorded
+165 tests/test_host_write_boundary.py::test_worker_writes_into_the_leader_are_still_caught
+165 tests/test_host_write_boundary.py::test_pre_block_surface_stays_two_rules
+165 tests/test_host_write_boundary.py::test_lifecycle_exemption_stays_narrow
+165 tests/test_host_write_boundary.py::test_a_binding_with_a_legacy_snapshot_rebinds_instead_of_blocking
+
+# pr #172 — an unreadable ownership receipt is not an absent one; it stops the overwrite.
+172 tests/test_custom_skill_install.py::test_a_corrupt_receipt_stops_the_overwrite
+
+# pr #172 — the leader re-baseline is bounded: `continue --accept-leader-drift`
+# accepts exactly the reported status-axis state, and HEAD-axis drift never is.
+172 tests/test_runner_smoke.py::test_acknowledged_leader_drift_rebaselines_the_reported_state
+172 tests/test_runner_smoke.py::test_head_axis_drift_is_never_acknowledgeable
+
+# pr #176 — an unrecorded asset outside .agent-flow is not kit-owned, and a
+# symlinked path is never written through.
+176 tests/test_custom_skill_install.py::test_unrecorded_assets_outside_agent_flow_are_left_alone
+176 tests/test_custom_skill_install.py::test_a_symlinked_asset_path_is_never_written_through
+
+# pr #177 — managed hooks run through the portable launcher and the pinned
+# isolated interpreter, never a hardcoded /usr/bin/python3 or /bin/bash.
+177 tests/test_cli.py::CliTest::test_managed_hooks_route_through_portable_launcher
+
+# pr #178 — every rejection collector is capped per target, legacy counters
+# migrate, and the legitimate pr-watch loop stays uncapped.
+178 tests/test_cli.py::CliTest::test_python_runner_fix_loop_cap_counts_all_rejection_routes_to_collector
+178 tests/test_cli.py::CliTest::test_python_runner_fix_loop_cap_bounds_renamed_loops_and_skips_pr_loop
+178 tests/test_cli.py::CliTest::test_python_runner_fix_loop_cap_migrates_legacy_integer_count
+
+# pr #181 — pruning needs durable byte-exact backup evidence, and an
+# undecidable asset is never deletion evidence.
+181 tests/test_installer_kit_asset_prune.py::test_prune_backup_reaches_the_disk_before_the_original_is_removed
+181 tests/test_installer_kit_asset_prune.py::test_prune_backup_keeps_bytes_that_are_not_valid_utf8
+181 tests/test_installer_kit_asset_prune.py::test_prune_keeps_the_asset_when_every_backup_slot_is_taken
+181 tests/test_installer_kit_asset_prune.py::test_one_unreadable_asset_does_not_stop_the_install
+
+# pr #193 — the runner owns gate execution and results; an agent-authored gate
+# artifact is never routing input.
+193 tests/test_gate_provenance.py::test_a_route_blocked_gates_phase_stays_blocked_instead_of_routing_a_forgery
+193 tests/test_gate_provenance.py::test_runner_run_gates_overwrite_a_model_authored_result
+
+# pr #206 — workflow parsing is strict, review evidence is sealed to the run
+# attempt, and unbound aggregation cannot approve.
+206 tests/test_runner_smoke.py::test_phase_workflow_rejects_unknown_phase_keys
+206 tests/test_runner_smoke.py::test_preserve_existing_workflow_runtime_contracts
+206 tests/test_runner_smoke.py::test_multi_review_artifact_with_missing_evidence_is_regenerated
+206 tests/test_cli.py::CliTest::test_review_evidence_invalid_utf8_fails_closed
+206 tests/test_reviewer_launch_policy.py::test_review_outcome_artifact_records_launch_and_content_digests
+
+# pr #208 — the review baseline follows the declared branch's actual upstream
+# and picks the most descendant usable merge-base.
+208 tests/test_review_input_snapshot.py::test_snapshot_follows_the_declared_base_upstream_not_origin
+208 tests/test_review_input_snapshot.py::test_snapshot_excludes_commits_already_merged_upstream
+
+# pr #210 — state publication is atomic/replayable, concurrent mutations are
+# serialized at their owner, and OMP's SQLite snapshot includes committed WAL rows.
+210 tests/test_cli.py::CliTest::test_push_watch_tick_replays_incomplete_observation
+210 tests/test_design_ledger.py::test_concurrent_manual_spec_approvals_preserve_both
+210 tests/test_run_cursor_and_transitions.py::test_concurrent_resume_cannot_commit_stale_transition
+210 tests/test_isolation_fail_closed.py::test_omp_provider_snapshot_includes_committed_wal_rows
+
+# pr #211 — cleanup archives stay resumable, abort is monotonic and owner-bound,
+# and a crash between journal publication and cleanup replay cannot deadlock resume.
+211 tests/test_worktree_cleanup.py::test_blocked_cleanup_leaves_the_archived_run_resumable
+211 tests/test_worktree_cleanup.py::test_abort_never_overwrites_steps_complete_cleanup
+211 tests/test_worktree_cleanup.py::test_abort_rejects_external_runtime_root_before_writing_a_lock
+211 tests/test_worktree_cleanup.py::test_continue_replays_abort_after_journal_publish_crash
+
+# pr #212 — governance metadata fails closed, strict findings stay hard, and
+# declaration checks are scoped to the active host.
+212 tests/test_skill_catalog.py::test_owned_governance_rejects_malformed_frontmatter
+212 tests/test_skill_catalog.py::test_cli_doctor_strict_fails_when_workflow_declarations_are_incomplete
+212 tests/test_skill_catalog.py::test_strict_findings_exclude_advisory_routing_observations
+212 tests/test_skill_catalog.py::test_declared_skill_installed_only_for_another_host_is_missing
+
+# Recorded but deliberately not pinned here.
+uncovered 164 the closed shared-hook-runtime attempt failed on an active-run marker race and on host-specific interpreter paths; neither reproduces deterministically in-process, so claiming coverage would be false comfort. The standing defense is the policy ban on another runtime/installer centralization.
