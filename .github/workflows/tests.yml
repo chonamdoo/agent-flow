@@ -89,6 +89,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # 이 계약들은 node installer와 git fixture를 실제로 띄운다.
       - uses: actions/setup-node@v4
         with:
