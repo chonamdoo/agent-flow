@@ -102,10 +102,13 @@ Use it inside a Claude or Codex session.
 /agent-flow abort                         # cancel
 ```
 
+The slash form takes no workflow, so it starts the compatibility `default`. To run a smaller
+workflow, start from the CLI with `--workflow`.
+
 The same thing straight from the CLI:
 
 ```bash
-agent-flow run "add a user profile page"
+agent-flow run "add a user profile page" --workflow default
 ```
 
 ```bash
@@ -116,11 +119,16 @@ agent-flow status --worktree "feat-user-profile"
 agent-flow continue --worktree "feat-user-profile"
 ```
 
-Add `--workflow` to pick a workflow. Omitted, it is `default`.
+Add `--workflow` to pick the smallest workflow that fits. Omitted, the CLI falls back to `default`
+for compatibility, but policy-compliant starts name the workflow explicitly.
 
 ```bash
 agent-flow run "<task>" --workflow bugfix
 ```
+
+Which workflow fits which task, the optional `Source-URL` / `Source-Revision`
+task-text convention, and the subsystems that change only through a reproduced
+bug are in [IDENTITY-AND-FREEZE-POLICY.md](IDENTITY-AND-FREEZE-POLICY.md).
 
 ### worktree
 
