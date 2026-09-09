@@ -4982,7 +4982,8 @@ def test_profile_gate_union_rejects_conflicting_execution_limits(tmp_path, monke
 
 
 @pytest.mark.parametrize("mutation", ["tracked", "untracked", "committed"])
-def test_pr_fix_refreshes_review_for_code_changes_not_discussion(tmp_path, mutation):
+@pytest.mark.parametrize("fix_phase", ["pr-comment-fix", "pr-ci-fix"])
+def test_pr_fix_refreshes_review_for_code_changes_not_discussion(tmp_path, mutation, fix_phase):
     from agent_flow.core.command_evidence import test_code_baseline
     from agent_flow.artifact import read_meta
     from agent_flow.runner import Phase, Runner
@@ -4993,10 +4994,17 @@ def test_pr_fix_refreshes_review_for_code_changes_not_discussion(tmp_path, mutat
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     phases = [
-        Phase(id="review", description="", routes={"approve": "gates"}),
+        Phase(
+            id="multi-review", description="", multi_review=True,
+            routes={"approve": "architecture-review"},
+        ),
+        Phase(
+            id="architecture-review", description="", multi_review=True,
+            routes={"approve": "gates"},
+        ),
         Phase(id="gates", description="", routes={"green": "pr-watch"}),
         Phase(id="pr-watch", description=""),
-        Phase(id="pr-comment-fix", description="", routes={"default": "pr-watch"}),
+        Phase(id=fix_phase, description="", routes={"default": "pr-watch"}),
     ]
     runner = Runner.__new__(Runner)
     runner.project_root = project
@@ -5004,26 +5012,25 @@ def test_pr_fix_refreshes_review_for_code_changes_not_discussion(tmp_path, mutat
     runner.phases = phases
     baseline = test_code_baseline(project)
     write_meta(run_dir, {
-        "phase_index": 3, "current_phase": "pr-comment-fix", "phase_entered_at": "attempt",
+        "phase_index": 4, "current_phase": fix_phase, "phase_entered_at": "attempt",
         "pr_fix_baseline": baseline,
     })
-    artifact = run_dir / "pr-comment-fix.md"
+    artifact = run_dir / f"{fix_phase}.md"
     artifact.write_text("discussion answered\n", encoding="utf-8")
-    assert runner._next_index(3, phases[3]).to_index == 2
+    assert runner._next_index(4, phases[4]).to_index == 3
     path = project / ("new.py" if mutation == "untracked" else "README.md")
     path.write_text("changed code\n", encoding="utf-8")
     if mutation == "committed":
         for args in (("add", "."), ("commit", "-m", "fix")):
             subprocess.run(("git", *args), cwd=project, check=True, capture_output=True)
-    transition = runner._plan_transition(3, phases[3])
-    assert transition.to_phase == "review"
-    (run_dir / "review.md").write_text("old approval\n", encoding="utf-8")
-    (run_dir / "gates.md").write_text('{"passed":true}', encoding="utf-8")
-    transition = runner._plan_transition(3, phases[3])
+    for name in ("multi-review", "architecture-review", "gates"):
+        (run_dir / f"{name}.md").write_text("old approval\n", encoding="utf-8")
+    transition = runner._plan_transition(4, phases[4])
+    assert transition.to_phase == "multi-review"
     runner._commit_transition(transition)
-    assert read_meta(run_dir)["current_phase"] == "review"
-    assert not (run_dir / "review.md").exists()
-    assert not (run_dir / "gates.md").exists()
+    assert read_meta(run_dir)["current_phase"] == "multi-review"
+    for name in ("multi-review", "architecture-review", "gates"):
+        assert not (run_dir / f"{name}.md").exists()
 
 
 def test_pause_for_approval_preserves_racing_accepted_identity(tmp_path, monkeypatch):

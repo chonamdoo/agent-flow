@@ -1065,7 +1065,7 @@ class Runner:
                 ]
                 if not reviews:
                     raise ValueError("PR code changes require a preceding review phase")
-                target = reviews[-1]
+                target = reviews[0]
         for i, candidate in enumerate(self.phases):
             if candidate.id == target:
                 # 상한은 리터럴 이름("fix-loop")이 아니라 "fix collector"로 판정한다.

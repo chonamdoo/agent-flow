@@ -3208,6 +3208,58 @@ def test_copied_host_reference_edits_survive_reinstall_and_retirement(tmp_path: 
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("edited_reference", [False, True])
+def test_counted_copy_receipt_allows_only_unchanged_retirement(
+    tmp_path: Path, binary: str, edited_reference: bool,
+) -> None:
+    canonical = tmp_path / "skills/demo"
+    _skill(canonical, "SOURCE", hosts="[codex]")
+    (canonical / "references").mkdir()
+    (canonical / "references/policy.md").write_text("source policy\n", encoding="utf-8")
+    first = _install_with(binary, tmp_path)
+    assert first.returncode == 0, first.stderr
+    host = tmp_path / ".Codex/skills/demo"
+    if host.is_symlink():
+        host.unlink()
+    else:
+        shutil.rmtree(host)
+    shutil.copytree(canonical, host)
+    index_path = tmp_path / ".agent-flow/skills/index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    skill = next(item for item in index["skills"] if item["name"] == "demo")
+    script = (
+        "import { recordSkillLinkReceipt } from "
+        f"{json.dumps((KIT_ROOT / 'lib/skill-metadata.mjs').as_uri())};\n"
+        "const skill = JSON.parse(process.argv[1]);\n"
+        "console.log(JSON.stringify(recordSkillLinkReceipt({"
+        'name: "demo", host: "codex", path: ".Codex/skills/demo", status: "copied:2:0"'
+        "}, skill, null)));\n"
+    )
+    receipt = subprocess.run(
+        (_node(), "--input-type=module", "-e", script, json.dumps(skill)),
+        cwd=tmp_path, text=True, capture_output=True, check=False, timeout=30,
+    )
+    assert receipt.returncode == 0, receipt.stderr
+    index["links"] = [
+        json.loads(receipt.stdout) if link["name"] == "demo" and link["host"] == "codex" else link
+        for link in index["links"]
+    ]
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    reference = host / "references/policy.md"
+    if edited_reference:
+        reference.write_text("user policy\n", encoding="utf-8")
+    shutil.rmtree(canonical)
+
+    retired = _install_with(binary, tmp_path)
+
+    assert retired.returncode == 0, retired.stderr
+    if edited_reference:
+        assert reference.read_text(encoding="utf-8") == "user policy\n"
+    else:
+        assert not host.exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 @pytest.mark.parametrize("run_location", ["leader", "worktree-runtime"])
 def test_active_run_blocks_install_before_any_project_write(
     tmp_path: Path, binary: str, run_location: str,
@@ -3337,8 +3389,9 @@ def test_delegated_install_safety_failure_stops_parent_writes(tmp_path: Path) ->
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 @pytest.mark.parametrize("edited_reference", [False, True])
+@pytest.mark.parametrize("copy_status", ["copied", "copied:2:0"])
 def test_legacy_host_copy_upgrade_requires_unchanged_content(
-    tmp_path: Path, binary: str, edited_reference: bool,
+    tmp_path: Path, binary: str, edited_reference: bool, copy_status: str,
 ) -> None:
     assert _install_with(binary, tmp_path).returncode == 0
     name = "comment-authoring-discipline"
@@ -3356,7 +3409,7 @@ def test_legacy_host_copy_upgrade_requires_unchanged_content(
     index = json.loads(index_path.read_text(encoding="utf-8"))
     for link in index["links"]:
         if link["name"] == name and link["host"] == "codex":
-            link["status"] = "copied"
+            link["status"] = copy_status
             link.pop("installedContentDigest", None)
     index_path.write_text(json.dumps(index), encoding="utf-8")
     reference = host / "references/team-policy.txt"
@@ -3377,7 +3430,10 @@ def test_legacy_host_copy_upgrade_requires_unchanged_content(
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_unverified_retired_copy_keeps_explicit_recovery_path(tmp_path: Path, binary: str) -> None:
+@pytest.mark.parametrize("copy_status", ["copied", "copied:2:0"])
+def test_unverified_retired_copy_keeps_explicit_recovery_path(
+    tmp_path: Path, binary: str, copy_status: str,
+) -> None:
     canonical = tmp_path / "skills/demo"
     _skill(canonical, "previous source", hosts="[codex]")
     assert _install_with(binary, tmp_path).returncode == 0
@@ -3389,7 +3445,7 @@ def test_unverified_retired_copy_keeps_explicit_recovery_path(tmp_path: Path, bi
     index = json.loads(index_path.read_text(encoding="utf-8"))
     for link in index["links"]:
         if link["name"] == "demo":
-            link["status"] = "copied"
+            link["status"] = copy_status
             link.pop("installedContentDigest", None)
     index_path.write_text(json.dumps(index), encoding="utf-8")
     (host / "policy.txt").write_text("user policy\n", encoding="utf-8")

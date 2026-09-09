@@ -68,7 +68,7 @@ The agent-flow block below is the canonical source for the Workflow Contract and
 [agent-flow skill index]|root: .agent-flow/skills
 |IMPORTANT: The files below outrank memory. Skim what you are about to change, and read only what your scope touches.
 |always:{code-generation-discipline,comment-authoring-discipline}
-|on-demand:{agent-flow,agent-flow-concise-output,agent-flow-diagnosing-bugs,architecture-reviewer,clean-architecture,clean-architecture-core,code-review,codebase-design,comment-checker,ddd-architecture,domain-modeling,full-feature-workflow,grill-with-docs,grilling,plan-reviewer,product-brief,push-watch,python-api-clean-architecture,python-development-guide,resolving-merge-conflicts,tdd,to-prd,write-for-work}
+|on-demand:{agent-flow,agent-flow-concise-output,agent-flow-diagnosing-bugs,architecture-reviewer,clean-architecture,clean-architecture-core,code-review,codebase-design,comment-checker,ddd-architecture,domain-modeling,full-feature-workflow,grill-with-docs,grilling,llm-tool-development,plan-reviewer,product-brief,push-watch,python-api-clean-architecture,python-development-guide,resolving-merge-conflicts,tdd,to-prd,write-for-work}
 ```
 <!-- agent-flow:skills:end -->
 <!-- agent-flow:docs:start -->
