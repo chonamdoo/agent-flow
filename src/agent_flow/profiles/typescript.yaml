@@ -1,4 +1,5 @@
 id: typescript
+capabilities: [react-web]
 branching:
   strategy: trunk
   base: main
@@ -40,12 +41,19 @@ review_angles:
 skills:
   install:
     - typescript-development-guide
+    - llm-tool-development
   required_review:
     - group: profile
       skills: [typescript-development-guide]
       when: TypeScript files change
       missing: "missing local profile: <skill>"
       path_globs: ["**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"]
+    - group: llm-tool-development
+      skills: [llm-tool-development]
+      task_terms: ["tool calling", "function calling", "mcp server", "mcp adapter", "툴콜", "mcp 서버"]
+      path_globs: ["**/tool-dispatcher.*", "**/mcp-server.*"]
+      concerns: [llm-tool-development]
+      missing: "missing local LLM tool development: <skill>"
 artifacts:
   prd: optional
   adr: optional

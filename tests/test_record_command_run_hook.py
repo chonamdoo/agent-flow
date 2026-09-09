@@ -176,3 +176,39 @@ def test_evidence_reader_does_not_call_a_missing_exit_code_a_failure(tmp_path):
     root = _project(tmp_path)
     _bash(root, "pytest -q")
     assert read_command_evidence(root).failed("pytest") is False
+
+
+@pytest.mark.parametrize(
+    ("command", "captures_baseline"),
+    [("git show missing-ref", False), ("./check-domain run", True)],
+)
+def test_failed_command_baseline_follows_configured_test_gates(
+    tmp_path: Path, command: str, captures_baseline: bool,
+) -> None:
+    from agent_flow.core.command_evidence import test_code_baseline
+
+    root = _project(tmp_path)
+    (root / ".agent-flow/kit.json").write_text(
+        '{"profiles":["python"]}', encoding="utf-8",
+    )
+    override = root / ".agent-flow/profiles/python.local.yaml"
+    override.parent.mkdir()
+    override.write_text(
+        "gates:\n  - id: domain-test\n    command: [./check-domain, run]\n",
+        encoding="utf-8",
+    )
+    (root / "subject.py").write_text("answer = 42\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(
+        [
+            "git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+            "commit", "--allow-empty", "--no-gpg-sign", "-qm", "fixture",
+        ],
+        cwd=root, check=True,
+    )
+    expected = test_code_baseline(root) if captures_baseline else ""
+
+    result = _bash(root, command, exit_code=1)
+
+    assert result.returncode == 0, result.stderr
+    assert _log(root)[0]["code_baseline"] == expected

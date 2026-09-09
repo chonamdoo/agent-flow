@@ -116,20 +116,15 @@ Lifetime and tests:
 - If resolutions can cross threads, resolve through `container.synchronize()` as a `Resolver`; direct `Container.resolve` is not thread safe.
 - Treat circular dependencies as a design smell. If unavoidable, make one side property-based and wire it with `initCompleted`.
 
-## Package Shape
+## Presentation Boundaries
 
-Feature presentation packages should stay screen-oriented:
-- `Features/<Feature>/Presentation/<Screen>/<Screen>View.swift`
-- `Features/<Feature>/Presentation/<Screen>/<Screen>ViewModel.swift`
-- `Features/<Feature>/Presentation/<Screen>/Model/<Screen>UiState.swift`
-- `Features/<Feature>/Presentation/<Screen>/Model/<Screen>UiAction.swift`
-- `Features/<Feature>/Presentation/<Screen>/Model/<Screen>UiEvent.swift`
-- `Features/<Feature>/Presentation/<Screen>/Model/<Screen>UiModel.swift`
-- `Features/<Feature>/Presentation/<Screen>/Mapper/*Mapper.swift`
-- `Features/<Feature>/Presentation/<Screen>/Components/*`
+Discover the project's adopted screen/state-holder, UI-value, mapping, and
+component boundaries and actual architecture role mappings. Preserve existing
+packages and names rather than generating a fixed folder tree.
 
-Presentation mappers must convert domain data into presentation models before state reaches SwiftUI views or UIKit view controllers.
-Presentation model types must use the `UiModel` postfix, for example `<Screen>ItemUiModel`.
+Project domain/application values to the UI contract. An already safe immutable
+shape may use identity projection; do not require an identical copy or forwarding
+mapper. `UiModel` describes a responsibility, not a suffix whose absence fails review.
 
 ## State Holder Rule
 
@@ -142,7 +137,8 @@ State patterns:
 - expose explicit `UiState`, preferably an enum with associated data
 - model `notReady`, `loading`, `refreshing`, `placeholder`, `empty`, `error`, `success`, `offline`, and `permissionRequired` cases when they can occur
 - do not use fake domain sentinel values as initial UI state
-- keep pagination cursors, selected ids, cancellation handles, optimistic updates, and retry state private in the state holder
+- keep cancellation handles and rollback bookkeeping private; expose rendered
+  selection, optimistic results, and retry status through observable state
 - keep UI-only focus, scroll, animation, sheet, and text editing state local unless it drives domain work
 - all UI state mutation should happen on `MainActor`
 - use SwiftUI `@State` for view-local transient state, `Binding` for child write access to an existing source of truth, and `Environment` for shared observable dependencies when that is the project pattern
@@ -176,7 +172,8 @@ Split state-holder wiring from rendering:
 - `UiState` is an enum or equivalent explicit type and covers not-ready/loading/refreshing/placeholder/empty/error/success/offline/permission states that can occur
 - `UiAction`, `UiEvent`, and `UiState` roles are explicit for branchy screens
 - domain data is mapped to `UiModel` before rendering
-- `UiModel` postfix is used for presentation models
+- presentation values follow adopted naming conventions; suffix or file count
+  alone does not fail the state or architecture contract
 - state holder owns async orchestration and exposes callbacks/events
 - UI state mutation is `MainActor` safe
 - views stay render-focused and receive plain state/callbacks
@@ -200,7 +197,9 @@ Apply these iOS-specific decisions:
 - `presentation-state-based-development`: use `applied` when presentation code was created or changed under this contract. Use `n/a` for review-only work or when no presentation code changed.
 - `presentation-state-review`: use `pass` when every applicable checklist item passes, `fail` when any applicable item fails, and `n/a` only when no iOS presentation code is in scope.
 - `ui-state-modeling`: use `explicit` when the screen's durable states are modeled explicitly. Use `n/a` only when no screen state is in scope.
-- `presentation-mapping-boundary`: use `domain-to-uimodel` when domain/application data crosses into presentation through a mapper. Use `n/a` only when no such data crosses the boundary.
+- `presentation-mapping-boundary`: use `domain-to-uimodel` for domain/application
+  values projected to the UI contract, including safe identity projection;
+  no separate mapper file is required. Use `n/a` only when no such boundary exists.
 - `di-boundary`: use `swift-environment`, `factory`, `swift-dependencies`, `swinject`, `needle`, `direct`, or `existing` for the verified iOS composition path. Use `n/a` only when the change neither creates nor reviews dependency wiring.
 
 A `fail` result is actionable: record the failed criterion and return to the workflow's fix path before approval.

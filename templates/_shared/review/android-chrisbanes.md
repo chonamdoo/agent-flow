@@ -3,7 +3,7 @@
 Compatibility alias for older profiles. Use
 `templates/_shared/review/android-skills.md` as the canonical review angle.
 
-Before reviewing Android, Kotlin, Jetpack Compose, or KMP changes, use the skill
+For Android/Compose or Android-targeted Kotlin/KMP changes, use the skill
 facts the phase prompt already resolved against **your** host — required ones with
 absolute paths, in-scope ones by name, and anything not installed here named as
 not installed. Do not re-resolve host paths or load another host's copy. Cover

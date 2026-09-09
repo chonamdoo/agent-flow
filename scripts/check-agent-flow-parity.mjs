@@ -22,7 +22,7 @@ import {
   SKILL_INDEX_START,
   skillIndexBlock,
 } from "../lib/installer-shared.mjs";
-import { resolveInstallSelection } from "../lib/skill-selection.mjs";
+import { BUNDLED_HOST_SKILL_NAMES, resolveInstallSelection } from "../lib/skill-selection.mjs";
 
 // Python `LEAKY_GIT_ENV_VARS`(`src/agent_flow/core/worktree_isolation.py`) 및 두
 // installer와 같은 목록이다. ambient discovery 변수가 남아 있으면 이 검사가 검사
@@ -57,19 +57,6 @@ const DOC_BACKTICK_NAME = /`([a-z][a-z0-9-]*)`/g;
 const DOC_COUNT_SOURCE = "README.md";
 const DOC_USAGE_PATH = "docs/USAGE.md";
 const INSTALL_ROOT = resolveInstalledRoot(process.cwd()) ?? SOURCE_ROOT;
-// bin/agent-flow-install.mjs / bin/agent-flow-kit.mjs의 BUNDLED_HOST_SKILL_NAMES와
-// 동일해야 한다. allowlist 밖 bundled skill은 host link 없이 index에만 노출된다.
-const BUNDLED_HOST_SKILL_NAMES = new Set([
-  "agent-flow",
-  "agent-flow-diagnosing-bugs",
-  "app-shell-error-contract",
-  "android-appshell-error-handling",
-  "comment-authoring-discipline",
-  "comment-checker",
-  "ios-app-shell-error-handling",
-  "react-app-shell-error-handling",
-  "react-native-app-shell-error-handling",
-]);
 const failures = [];
 const missingFiles = new Set();
 const workflowExportCache = new Map();

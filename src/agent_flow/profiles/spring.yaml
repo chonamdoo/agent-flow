@@ -26,6 +26,34 @@ gates:
     command: ["./gradlew", "check"]
     required: false
     phase: pre-commit
+gate_variants:
+  - tool: gradle
+    any_files: ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"]
+    gates:
+      - {id: architecture-lint, command: ["agent-flow", "architecture-lint", "--profile", "spring"], required: true, phase: pre-commit}
+      - {id: build, command: ["gradle", "build", "-x", "test"], required: true, phase: pre-commit}
+      - {id: test, command: ["gradle", "test"], required: true, phase: pre-push}
+      - {id: lint, command: ["gradle", "check"], required: false, phase: pre-commit}
+  - tool: gradle
+    requires_files: ["gradlew"]
+    any_files: ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"]
+    gates:
+      - {id: architecture-lint, command: ["agent-flow", "architecture-lint", "--profile", "spring"], required: true, phase: pre-commit}
+      - {id: build, command: ["./gradlew", "build", "-x", "test"], required: true, phase: pre-commit}
+      - {id: test, command: ["./gradlew", "test"], required: true, phase: pre-push}
+      - {id: lint, command: ["./gradlew", "check"], required: false, phase: pre-commit}
+  - tool: maven
+    requires_files: ["pom.xml"]
+    gates:
+      - {id: architecture-lint, command: ["agent-flow", "architecture-lint", "--profile", "spring"], required: true, phase: pre-commit}
+      - {id: build, command: ["mvn", "-DskipTests", "package"], required: true, phase: pre-commit}
+      - {id: test, command: ["mvn", "verify"], required: true, phase: pre-push}
+  - tool: maven
+    requires_files: ["pom.xml", "mvnw"]
+    gates:
+      - {id: architecture-lint, command: ["agent-flow", "architecture-lint", "--profile", "spring"], required: true, phase: pre-commit}
+      - {id: build, command: ["./mvnw", "-DskipTests", "package"], required: true, phase: pre-commit}
+      - {id: test, command: ["./mvnw", "verify"], required: true, phase: pre-push}
 review_angles:
   - id: architecture-design
     prompt: templates/_shared/review/architecture-design.md
@@ -33,6 +61,49 @@ review_angles:
     prompt: templates/_shared/review/transactions.md
   - id: n-plus-one
     prompt: templates/_shared/review/n-plus-one.md
+skills:
+  install:
+    - kotlin-backend-development-guide
+    - spring-boot-development-guide
+    - llm-tool-development
+  required_review:
+    - group: kotlin-backend
+      skills: [kotlin-backend-development-guide]
+      path_globs: ["**/*.kt", "**/*.kts"]
+      task_terms: ["kotlin server", "kotlin backend", "kotlin 서버", "코틀린 서버"]
+      concerns: [kotlin-backend]
+      missing: "missing local Kotlin backend: <skill>"
+    - group: spring-boot
+      skills: [spring-boot-development-guide]
+      path_globs: ["**/*.kt", "**/*.java", "**/*.gradle", "**/*.gradle.kts", "**/pom.xml", "**/application*.yaml", "**/application*.yml", "**/application*.properties"]
+      task_terms: ["spring boot", "spring security", "스프링"]
+      concerns: [spring-boot]
+      missing: "missing local Spring Boot: <skill>"
+    - group: llm-tool-development
+      skills: [llm-tool-development]
+      task_terms: ["tool calling", "function calling", "mcp server", "mcp adapter", "툴콜", "mcp 서버"]
+      concerns: [llm-tool-development]
+      missing: "missing local LLM tool development: <skill>"
+architecture:
+  contract: clean-architecture-core
+  platform: kotlin-backend
+  strict_when_roots_present: true
+  activation_roots: ["src/main/kotlin/**/domain", "src/main/java/**/domain", "src/main/kotlin/**/application", "src/main/java/**/application"]
+  roles:
+    - id: app-shell
+      paths: ["src/main/kotlin", "src/main/java"]
+    - id: core-domain
+      paths: ["src/main/kotlin/**/domain", "src/main/java/**/domain"]
+      forbidden: ["org.springframework", "io.ktor", "jakarta.persistence", "javax.persistence", "kotlinx.serialization"]
+    - id: application
+      paths: ["src/main/kotlin/**/application", "src/main/java/**/application"]
+      forbidden: ["org.springframework", "io.ktor", "jakarta.persistence", "javax.persistence"]
+    - id: inbound-adapter
+      paths: ["src/main/kotlin/**/api", "src/main/java/**/api", "src/main/kotlin/**/adapter/in", "src/main/java/**/adapter/in"]
+      forbidden: ["jakarta.persistence.EntityManager", "javax.persistence.EntityManager", "org.springframework.data.repository", "org.springframework.data.jpa.repository"]
+    - id: core-data
+      paths: ["src/main/kotlin/**/data", "src/main/java/**/data", "src/main/kotlin/**/adapter/out", "src/main/java/**/adapter/out"]
+      forbidden: ["@RestController", "io.ktor.server.routing"]
 artifacts:
   prd: optional
   adr: required        # Spring backends benefit from explicit decision logs

@@ -75,7 +75,7 @@ skills:
       missing: "missing local profile: <skill>"
       # 배선 자리처럼 경로로 드러나지 않는 계층 검토를 지목하는 유일한 통로다.
       concerns: [architecture]
-      path_globs: ["**/lib/core/domain/**", "**/lib/core/data/**", "**/lib/features/**", "**/lib/core/design_system/**", "**/lib/core/ui/**", "**/lib/core/resources/**", "**/lib/core/network/**", "**/lib/core/platform/**", "**/lib/core/permission/**", "**/lib/core/navigation/api/**", "**/lib/core/navigation/impl/**"]
+      path_globs: ["**/lib/core/domain/**", "**/lib/core/data/**", "**/lib/core/presentation/**", "**/lib/features/**", "**/lib/core/design_system/**", "**/lib/core/ui/**", "**/lib/core/resources/**", "**/lib/core/network/**", "**/lib/core/platform/**", "**/lib/core/permission/**", "**/lib/core/navigation/api/**", "**/lib/core/navigation/impl/**"]
 architecture:
   contract: clean-architecture-core
   platform: flutter
@@ -90,7 +90,7 @@ architecture:
   # root로 쓰면 계약을 채택하지 않은 저장소까지 strict가 켜진다(실측: `presentation`·
   # `domain`·`data`·`widgets`만 있는 트리에서 finding 5건). `api` 세그먼트가 채택의
   # 구별 표지다. `lib/app`도 쓰지 않는다 — 거의 모든 Flutter 저장소에 있다.
-  activation_roots: ["lib/core/domain", "lib/features/<feature>/api"]
+  activation_roots: ["lib/core/domain", "lib/core/presentation", "lib/features/<feature>/api"]
   # Flutter 앱은 보통 단일 Dart 패키지다. 계층 경계는 build graph가 아니라 디렉터리와
   # import 규칙이므로 `modules`/`package_suffix`를 선언하지 않는다 — 그 둘은 Gradle
   # 좌표와 `package a.b.c;` 선언을 읽는 검사이고(`architecture_lint.py:1210,1383`),
@@ -129,6 +129,9 @@ architecture:
       paths: ["lib/features/<feature>/presentation"]
       pair_with: feature-api
       forbidden: ["ApiClient", "RemoteDataSource", "Dto", "Entity"]
+    - id: shared-presentation-contract
+      paths: ["lib/core/presentation"]
+      forbidden: ["ApiClient", "RemoteDataSource", "Dto", "Entity", "RepositoryImpl", "package:flutter/", "Widget", "BuildContext"]
     - id: core-ui
       paths: ["lib/core/ui", "lib/core/design_system", "lib/core/resources"]
     - id: core-network

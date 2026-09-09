@@ -17,12 +17,17 @@ Review persistent-state mutations for concrete concurrency, crash-safety, and re
    - Do not assume a database rollback can undo an external payment, message, or network side effect; require provider idempotency, outbox, saga, or compensation as applicable.
 
 4. **Row lock or equivalent lease**
-   - Use a row lock, optimistic version, advisory lock, `flock`, lease, or `O_EXCL` claim only when an atomic update cannot express the invariant.
+   - Prefer an atomic update when it cleanly expresses the invariant; a correct existing row lock, optimistic version, advisory lock, `flock`, lease, or `O_EXCL` claim is also valid. Judge its protection and lifecycle rather than requiring a different strategy.
    - Lock identity, ordering, ownership, crash release, and contention behavior are explicit.
 
 5. **Idempotency key**
    - Claim the key before the irreversible side effect under a unique constraint or equivalent atomic claim.
-   - Bind the key to a request hash and persist the completed result so a retry returns it instead of applying the effect again.
+   - Scope the key to tenant and operation, bind it to a canonical request fingerprint, reject mismatched reuse, and persist completed outcomes for the supported retry window so a retry returns the prior result.
+   - Keep pending/unknown distinct from completed. Recover a crash after external success but before local result recording; a pending flag alone does not prevent duplicate effects.
+
+6. **Unknown write outcome**
+   - Timeout, cancellation, connection loss, or a tool error flag is not proof of rollback. Separate the result/error payload from confirmed not-started, not-committed, committed, or unknown effect state.
+   - Reconcile operation status, ledger, or durable provider replay before retrying an unknown write. Retry only at a safe unit with established backend idempotency; provider call IDs and stream event IDs are not business idempotency keys.
 
 ## Blocking calibration
 

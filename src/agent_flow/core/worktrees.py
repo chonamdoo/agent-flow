@@ -20,7 +20,6 @@ from typing import Any
 import yaml
 
 from agent_flow.artifact import (
-    ACTIVE_MARKER,
     find_active_runs,
     mark_inactive,
     read_meta,
@@ -32,6 +31,11 @@ from agent_flow.core.hook_integrity import (
     managed_path_hook_name,
 )
 from agent_flow.core.profiles import active_profile_ids, load_profile_payload
+from agent_flow.core.run_storage import (
+    ACTIVE_MARKER,
+    repository_state_dir,
+    worktree_runtime_directory,
+)
 from agent_flow.core.security import validate_git_branch
 from agent_flow.core.worktree_isolation import (
     FileLeaseUnavailable,
@@ -2417,7 +2421,7 @@ def _cleanup_pending_root(root: Path) -> Path:
 
 
 def _git_common_dir(root: Path) -> Path:
-    return real_path(_agent_flow_git_dir(root).parent)
+    return real_path(repository_state_dir(root).parent)
 
 
 def _agent_flow_state_dir(root: Path) -> Path:
@@ -3320,7 +3324,7 @@ def known_worktree_names(*, root: Path) -> list[str]:
     # layout root는 따라가지 않는다.
     for checkout_root in _trusted_existing_creation_layout_roots(root):
         names.update(path.name for path in checkout_root.iterdir() if path.is_dir())
-    runtime_root = _agent_flow_git_dir(root) / "worktrees"
+    runtime_root = worktree_runtime_directory(root)
     if runtime_root.exists():
         names.update(path.name for path in runtime_root.iterdir() if path.is_dir())
     # 디렉터리 스캔은 agent-flow가 만든 자리만 본다. 사용자가 raw git으로 만든
@@ -3709,31 +3713,13 @@ def existing_checkout_path(*, root: Path, name: str) -> Path:
 
 
 def _runtime_state_root(*, root: Path, name: str) -> Path:
-    return _agent_flow_git_dir(root) / "worktrees" / name
+    return worktree_runtime_directory(root) / name
 
 
 def _worktree_manifest_path(*, root: Path, name: str) -> Path:
     return _runtime_state_root(root=root, name=_feature_worktree_name(name)) / "manifest.json"
 
 
-def _agent_flow_git_dir(root: Path) -> Path:
-    result = git_safe("rev-parse", "--git-common-dir", cwd=root)
-    if not result.ok:
-        # git 저장소인데 common dir을 못 읽으면 state root가 leader 안으로
-        # 들어와 워커 상태가 leader에 쌓인다. 위치를 확정하지 못하면 멈춘다.
-        # 애초에 git 저장소가 아니면 지킬 leader가 없으므로 root/.agent-flow가
-        # 옳은 자리다 — 이 경로까지 막으면 non-git 프로젝트와 복구 명령이 죽는다.
-        if git_repo_state(root) == "non-repo":
-            return root / ".agent-flow"
-        raise RuntimeError(
-            f"cannot resolve the git common dir for {root}; "
-            f"refusing to place agent-flow state inside the leader checkout: "
-            f"{result.stderr.strip() or 'git did not answer'}"
-        )
-    git_common = Path(result.stdout.strip())
-    if not git_common.is_absolute():
-        git_common = root / git_common
-    return git_common / "agent-flow"
 
 
 def _is_agent_flow_status_line(line: str) -> bool:

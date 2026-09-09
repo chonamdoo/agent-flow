@@ -1,4 +1,5 @@
 id: node
+capabilities: [react-web]
 branching:
   strategy: trunk
   base: main
@@ -33,6 +34,16 @@ review_angles:
     prompt: templates/_shared/review/types.md
   - id: io-safety
     prompt: templates/_shared/review/io-safety.md
+skills:
+  install:
+    - llm-tool-development
+  required_review:
+    - group: llm-tool-development
+      skills: [llm-tool-development]
+      task_terms: ["tool calling", "function calling", "mcp server", "mcp adapter", "툴콜", "mcp 서버"]
+      path_globs: ["**/tool-dispatcher.*", "**/mcp-server.*"]
+      concerns: [llm-tool-development]
+      missing: "missing local LLM tool development: <skill>"
 artifacts:
   prd: optional
   adr: optional

@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 # 여러 운영체제의 로컬 절대 경로를 같은 기준으로 가려 artifact에 개발자 경로가 남지 않게 한다.
 _LOCAL_ABSOLUTE_PATH_RE = re.compile(
     r"(?<![\w.-])"
-    r"(?:/Users/|/home/|/private/var/|/workspace/|/tmp/|/var/|/opt/|/mnt/|[A-Za-z]:[\\/])"
+    r"(?:/Users/|/home/|/private/|/workspace/|/tmp/|/var/|/opt/|/mnt/|[A-Za-z]:[\\/])"
     r"[^\s\"'<>|,;)\]}]*"
 )
 

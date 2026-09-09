@@ -58,18 +58,19 @@ def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
 
 
 class _BoundedCapture:
-    __slots__ = ("data", "total")
+    __slots__ = ("data", "total", "limit")
 
-    def __init__(self) -> None:
+    def __init__(self, limit: int = MAX_HOST_OUTPUT_BYTES) -> None:
         self.data = bytearray()
         self.total = 0
+        self.limit = limit
 
     def consume(self, stream) -> None:
         try:
             while chunk := stream.read(8192):
                 self.total += len(chunk)
                 self.data.extend(chunk)
-                overflow = len(self.data) - MAX_HOST_OUTPUT_BYTES
+                overflow = len(self.data) - self.limit
                 if overflow > 0:
                     del self.data[:overflow]
         except (OSError, ValueError):
@@ -91,6 +92,8 @@ def _invoke_host(
     command: tuple[str, ...],
     project: Path,
     timeout_s: float,
+    *,
+    output_limit: int = MAX_HOST_OUTPUT_BYTES,
 ) -> tuple[int | None, bool, str, str, bool]:
     process = subprocess.Popen(
         command,
@@ -102,8 +105,8 @@ def _invoke_host(
     )
     assert process.stdout is not None
     assert process.stderr is not None
-    stdout_capture = _BoundedCapture()
-    stderr_capture = _BoundedCapture()
+    stdout_capture = _BoundedCapture(output_limit)
+    stderr_capture = _BoundedCapture(output_limit)
     readers = [
         threading.Thread(
             target=stdout_capture.consume,

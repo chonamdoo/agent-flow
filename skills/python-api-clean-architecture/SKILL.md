@@ -10,36 +10,31 @@ requires:
 Load `clean-architecture-core` first. This skill adds Python API-service layout
 and DI details only.
 
-## Package Shape
+## Source Boundaries
 
-```text
-apps/api/
-src/example_app/
-  app/
-    api/
-    container.py
-  core/
-    domain/home/
-    data/home/
-    network/
-    platform/
-    routing/
-tests/{unit,integration,architecture}/
-```
+Discover existing packages, app factories, entry adapters, imports, and active
+architecture role mappings. Keep the adopted layout; semantic roles do not
+prescribe a folder tree or require separate files for every responsibility.
 
-Small services may collapse folders, but the import boundary must remain
-explicit.
+`app-shell` owns composition, `inbound-adapter` owns HTTP/tool schemas and response
+mapping, `application` owns actions/ports, `core-domain` owns pure policy, and
+`core-data` owns persistence/outbound adapters. A server without UI needs no
+presentation state holder or shared UI error queue.
 
 ## DI Shape
 
 - FastAPI/Django/Flask dependency mechanisms belong at app/API adapter edge.
 - Domain, use case, and repository contracts must not import framework DI.
-- Declare repository and data-source contracts as `typing.Protocol` so an
-  implementation conforms structurally without inheriting the contract.
-- App shell owns factory/provider construction in `app/container.py`,
-  `app/di.py`, or equivalent.
-- API handlers call use cases and map domain/application results to response
-  models at the adapter boundary.
+- Use the project's protocol convention for repository/application ports;
+  `typing.Protocol` supports structural conformance without inheritance.
+- App shell owns factory/provider construction. Framework dependency resolution
+  belongs to the API/composition edge, not pure domain policy.
+- API handlers map inbound schemas to application commands and map results/errors
+  to responses. Outbound provider DTOs and ORM entities stay in driven adapters.
+- Use cases may consume Clock, payment, transaction, and other stable ports.
+  Keep raw framework/client exceptions behind the adapter's error contract.
+- Apply the core's recorded simple-adapter exception: a DB-only repository needs
+  no invented remote source, cache, or forwarding mapper.
 
 ## Review Additions
 

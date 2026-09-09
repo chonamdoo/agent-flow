@@ -6,35 +6,27 @@ hot paths.
 ## What to verify
 
 1. **JPA fetch strategy**
-   - `@OneToMany` / `@ManyToMany` default to LAZY; `@ManyToOne` /
-     `@OneToOne` default to EAGER. Endpoints that serialize the parent +
-     children must eagerly fetch via `JOIN FETCH` or entity graph; otherwise
-     each child triggers a separate query.
-   - `@EntityGraph` declared on repository method or `@NamedEntityGraph`.
+   - JPA to-many associations default to LAZY and to-one associations to EAGER, but these defaults do not establish the actual query count or join shape. Trace traversal, serialization, session lifetime, and generated SQL.
+   - Choose fetch joins, entity graphs, batching, projections, or bounded secondary queries for the actual data need. Collection fetch joins with pagination can change cardinality or cause in-memory paging; a healthy page query plus bounded association query is valid.
 
 2. **Repository methods returning collections**
-   - `findAll()` over a large table without pagination is a smell — use
-     `Pageable` or a streaming `Slice`.
-   - Methods that traverse associations (`order.getItems()` then
-     `item.getProduct()`) in a loop generate N+1; load with a single
-     join query.
+   - Bound large result sets with pagination or the actual streaming/cursor API and its resource lifetime. `Slice` is a pagination result without a total-count contract, not a streaming API.
+   - Association traversal in a loop is a fan-out risk, not proof of N+1 without considering fetch strategy, batching, and cache. Preserve page/order semantics rather than forcing one join.
 
 3. **Native queries / Spring Data**
-   - Custom `@Query` joins the necessary associations explicitly.
-   - `@Query(countQuery=...)` provided for paginated results so the count
-     doesn't hit the join.
+   - Check actual generated/native SQL and requested associations. A join is not mandatory if a bounded alternative satisfies the contract.
+   - Require an explicit `countQuery` when the requested total-count contract or generated count SQL needs it; preserve distinct/cardinality semantics rather than adding one to every paginated method.
 
 4. **DTO projection**
-   - Read-only endpoints project directly to a DTO via constructor
-     expression or interface projection, not load full entities.
+   - Use projections when they reduce unnecessary data/materialization. Read-only entity loading is valid when it fits the consumer and measured cost; DTO projection is not mandatory.
 
 5. **Batch operations**
-   - `saveAll` / `deleteAllInBatch` used for bulk writes (vs per-row `save`).
-   - `hibernate.jdbc.batch_size` and `order_inserts` tuned where relevant.
+   - `saveAll` does not guarantee JDBC batching; check provider settings, statement shape, identifier generation, and flush behavior where relevant.
+   - Bulk DML/deletes can bypass entity callbacks/cascades/version checks and leave the persistence context stale. Preserve these semantics before replacing per-entity writes; lifecycle-dependent deletion can legitimately remain per-entity.
 
 6. **Verification**
-   - Logs include the actual SQL count (`spring.jpa.show-sql` or `p6spy`).
-   - Integration test asserts query count for the hot path.
+   - For an observed performance finding, cite actual SQL/count/cardinality and representative input size from authorized evidence. Without execution, label the specific static fan-out risk; never invent an observed count.
+   - Use active authorized gates and existing query evidence. Do not impose a new test or logging library, a universal one-query target, or production SQL logging that exposes secrets.
 
 ## Output format
 
@@ -44,7 +36,7 @@ hot paths.
 verdict: approve | request-changes
 
 ### Must-fix
-- <severity:high> [path:line] <statement>. Expected 1 query, observed N.
+- <severity:high> [path:line] <trigger and query/cardinality evidence, or explicitly labeled static risk>. Impact: <latency/resource/contract consequence>.
 
 ### Should-fix
 - <severity:med> ...

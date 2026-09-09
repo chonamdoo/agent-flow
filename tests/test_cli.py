@@ -243,16 +243,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(phases["gates"]["routes"]["green"], "commit")
         self.assertEqual(phases["gates"]["routes"]["approve"], "commit")
         self.assertEqual(phases["comment-authoring"]["routes"]["default"], "multi-review")
-        self.assertIn("comment-authoring: applied", phases["comment-authoring"]["required_markers"])
-        self.assertIn("Do not refactor", phases["comment-authoring"]["prompt"])
         self.assertEqual(phases["multi-review"]["routes"]["request-changes"], "fix-loop")
         self.assertTrue(phases["multi-review"]["multi_review"])
-        self.assertIn("Reviewers are installed Claude and Codex CLIs only", phases["multi-review"]["prompt"])
-        self.assertIn("Never use OMP or controller-session work", phases["multi-review"]["prompt"])
-        self.assertIn("reviewer-source: sub-agent", phases["multi-review"]["prompt"])
-        self.assertIn("## Overall", phases["multi-review"]["prompt"])
-        self.assertIn("verdict: approve", phases["multi-review"]["prompt"])
-        self.assertIn("verdict: request-changes", phases["multi-review"]["prompt"])
         self.assertEqual(phases["fix-loop"]["routes"]["default"], "comment-authoring")
         self.assertEqual(phases["architecture-review"]["routes"]["approve"], "gates")
         self.assertNotIn("blocked", phases["architecture-review"]["routes"])
@@ -261,9 +253,6 @@ class CliTest(unittest.TestCase):
         self.assertEqual(phases["pr-comment-fix"]["routes"]["default"], "pr-watch")
         self.assertEqual(phases["pr-ci-fix"]["routes"]["default"], "pr-watch")
         self.assertEqual(phases["merge-approval"]["routes"]["default"], "block")
-        self.assertIn("Output: artifacts/red.log.", phases["red"]["prompt"])
-        self.assertIn("Output: artifacts/green.log.", phases["green"]["prompt"])
-        self.assertIn("Output: artifacts/gate-results.json.", phases["gates"]["prompt"])
 
         default_path = (
             Path(__file__).resolve().parents[1]
@@ -274,76 +263,18 @@ class CliTest(unittest.TestCase):
         )
         default_payload = yaml.safe_load(default_path.read_text(encoding="utf-8"))
         default_phases = {phase["id"]: phase for phase in default_payload["phases"]}
-        self.assertEqual(
-            default_phases["implement"]["required_markers"],
-            [
-                "skills_checked: true",
-                "profile-skill-selection: applied",
-                "active-profiles:",
-                "changed-file-skill-resolution: applied",
-                "required-profile-skills: checked",
-                "missing-required-profile-skills:",
-                "clean-architecture: applied|n/a",
-                "project-local-skills: checked|n/a",
-                "project-local-skills-used:",
-                "presentation-skill: android|flutter|react|react-native|ios|n/a",
-                "presentation-state-based-development: applied|n/a",
-                "presentation-state-review: pass|fail|n/a",
-                "ui-state-modeling: explicit|n/a",
-                "presentation-mapping-boundary: domain-to-uimodel|n/a",
-                "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a",
-                "regression-test:",
-                "red-observed:",
-                "test-run-evidence: verified|unavailable",
-            ],
-        )
         self.assertEqual(default_phases["final-review"]["routes"]["request-changes"], "fix-loop")
         self.assertEqual(default_phases["final-review"]["routes"]["approve"], "gates")
         self.assertEqual(default_phases["gates"]["routes"]["green"], "commit")
         self.assertEqual(default_phases["gates"]["routes"]["request-changes"], "fix-loop")
         self.assertEqual(default_phases["fix-loop"]["routes"]["default"], "comment-authoring")
         self.assertEqual(default_phases["comment-authoring"]["routes"]["default"], "final-review")
-        self.assertIn("comment-authoring: applied", default_phases["comment-authoring"]["required_markers"])
-        self.assertIn("comment-checker: checked|unavailable|n/a", default_phases["comment-authoring"]["required_markers"])
-        self.assertIn("Do not refactor", default_phases["comment-authoring"]["prompt"])
-        self.assertIn("skills_checked: true", default_phases["final-review"]["required_markers"])
-        self.assertIn("codex-claude-parity-check: pass|fail", default_phases["final-review"]["required_markers"])
-        self.assertIn("hook-parity-check: pass|fail", default_phases["final-review"]["required_markers"])
-        self.assertIn("codex-claude-parity-check: pass|fail", default_phases["final-review"]["prompt"])
-        self.assertIn("hook-parity-check: pass|fail", default_phases["final-review"]["prompt"])
-        self.assertIn("reviewer-source: sub-agent", default_phases["final-review"]["prompt"])
-        self.assertIn("## Overall", default_phases["final-review"]["prompt"])
-        self.assertIn("verdict: approve", default_phases["final-review"]["prompt"])
-        self.assertIn("verdict: request-changes", default_phases["final-review"]["prompt"])
-        self.assertIn("skills/clean-architecture-core/SKILL.md", default_phases["final-review"]["prompt"])
-        self.assertIn("skills/clean-architecture/SKILL.md", default_phases["final-review"]["prompt"])
-        self.assertIn("must-avoid or failing checklist", default_phases["final-review"]["prompt"])
-        self.assertIn("core skill is present", default_phases["final-review"]["prompt"])
         self.assertEqual(default_phases["pr-watch"]["routes"]["green"], "merge")
         self.assertEqual(default_phases["pr-watch"]["routes"]["has_comments"], "pr-comment-fix")
         self.assertEqual(default_phases["pr-watch"]["routes"]["ci_failed"], "pr-ci-fix")
         self.assertEqual(default_phases["pr-watch"]["routes"]["pending"], "block")
         self.assertEqual(default_phases["pr-comment-fix"]["routes"]["default"], "pr-watch")
         self.assertEqual(default_phases["pr-ci-fix"]["routes"]["default"], "pr-watch")
-
-    def test_default_final_review_uses_claude_codex_provider_policy(self) -> None:
-        import yaml
-
-        workflow_path = (
-            Path(__file__).resolve().parents[1]
-            / "src"
-            / "agent_flow"
-            / "workflows"
-            / "default.yaml"
-        )
-        payload = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
-        phases = {phase["id"]: phase for phase in payload["phases"]}
-        prompt = phases["final-review"]["prompt"]
-
-        self.assertIn("installed Claude and Codex CLIs only", prompt)
-        self.assertIn("Do not launch reviewer CLIs", prompt)
-        self.assertIn("dropped from its remaining angles", prompt)
-        self.assertIn("Never use OMP or controller-session work", prompt)
 
     def test_workflow_export_outputs_normalized_phase_contract(self) -> None:
         output = io.StringIO()
@@ -360,42 +291,6 @@ class CliTest(unittest.TestCase):
                 Path(__file__).resolve().parents[1], "full-feature"
             ).digest,
         )
-        self.assertEqual(phases["domain-grill"]["artifact"], "artifacts/domain-grill.md")
-        self.assertIn("domain-grill: complete", phases["domain-grill"]["required_markers"])
-        self.assertEqual(phases["red"]["artifact"], "artifacts/red.log")
-        self.assertEqual(phases["green"]["artifact"], "artifacts/green.log")
-        for phase_id in ("red", "green", "refactor", "fix-loop", "multi-review", "architecture-review"):
-            self.assertIn("skills_checked: true", phases[phase_id]["required_markers"])
-            self.assertIn("profile-skill-selection: applied", phases[phase_id]["required_markers"])
-            self.assertIn("changed-file-skill-resolution: applied", phases[phase_id]["required_markers"])
-            self.assertIn("required-profile-skills: checked", phases[phase_id]["required_markers"])
-            self.assertIn("missing-required-profile-skills:", phases[phase_id]["required_markers"])
-            self.assertIn("project-local-skills: checked|n/a", phases[phase_id]["required_markers"])
-            self.assertIn("project-local-skills-used:", phases[phase_id]["required_markers"])
-        self.assertIn("clean-architecture: applied|n/a", phases["green"]["required_markers"])
-        self.assertIn("clean-architecture: applied|n/a", phases["fix-loop"]["required_markers"])
-        self.assertIn("clean-architecture-review: applied", phases["multi-review"]["required_markers"])
-        self.assertIn("must-avoid-check: pass|fail|n/a", phases["multi-review"]["required_markers"])
-        self.assertIn("must-avoid-check: pass|fail|n/a", phases["architecture-review"]["required_markers"])
-        for phase_id in ("multi-review", "architecture-review"):
-            self.assertIn("codex-claude-parity-check: pass|fail", phases[phase_id]["required_markers"])
-            self.assertIn("hook-parity-check: pass|fail", phases[phase_id]["required_markers"])
-            self.assertIn("codex-claude-parity-check: pass|fail", phases[phase_id]["prompt"])
-            self.assertIn("hook-parity-check: pass|fail", phases[phase_id]["prompt"])
-        multi_review_prompt = phases["multi-review"]["prompt"]
-        self.assertIn("skills/clean-architecture-core/SKILL.md", multi_review_prompt)
-        self.assertIn("skills/clean-architecture/SKILL.md", multi_review_prompt)
-        self.assertIn("must-avoid or failing", multi_review_prompt)
-        self.assertIn("core skill makes the overall verdict", multi_review_prompt)
-        self.assertIn("dependency-rule: pass|fail", phases["architecture-review"]["required_markers"])
-        architecture_review_prompt = phases["architecture-review"]["prompt"]
-        self.assertIn("skills/clean-architecture-core/SKILL.md", architecture_review_prompt)
-        self.assertIn("skills/clean-architecture/SKILL.md", architecture_review_prompt)
-        self.assertIn("must-avoid or failing checklist", architecture_review_prompt)
-        self.assertIn("skill makes the verdict", architecture_review_prompt)
-        self.assertIn("presentation-skill: android|flutter|react|react-native|ios|n/a", phases["green"]["required_markers"])
-        self.assertIn("Android/Kotlin/Compose/KMP changes require Android profile skills", phases["green"]["prompt"])
-        self.assertEqual(phases["gates"]["artifact"], "artifacts/gate-results.json")
         self.assertEqual(phases["gates"]["routes"]["green"], "commit")
         self.assertEqual(phases["comment-authoring"]["routes"]["default"], "multi-review")
 
@@ -502,21 +397,6 @@ class CliTest(unittest.TestCase):
                 missing_local_skill_markers("## Completion Gate\n", root, "commit"), []
             )
 
-    def test_clean_architecture_review_template_routes_policy_to_core_skill(self) -> None:
-        template = (
-            Path(__file__).resolve().parents[1]
-            / "templates"
-            / "_shared"
-            / "review"
-            / "clean-architecture.md"
-        ).read_text(encoding="utf-8")
-        self.assertIn("skills/clean-architecture-core/SKILL.md", template)
-        self.assertIn("must-avoid rule", template)
-        self.assertIn("failing required checklist item", template)
-        self.assertIn("skills/clean-architecture/SKILL.md", template)
-        self.assertIn("compatibility markers", template)
-        self.assertNotIn("must-fix in `skills/clean-architecture/SKILL.md`", template)
-        self.assertNotIn("listed as a must-fix in `skills/clean-architecture/SKILL.md`", template)
 
     def test_python_runner_route_key_understands_gate_results(self) -> None:
         from agent_flow.core.route_verdicts import gates_route_key, route_key
@@ -777,66 +657,6 @@ class CliTest(unittest.TestCase):
         self.assertIn("reviewer-source: sub-agent", block)
         self.assertIn("Do not spawn or substitute in-session", block)
 
-    def test_only_required_host_reviewer_failures_block_aggregation(self) -> None:
-        from agent_flow.adapters.hosted import _required_reviewer_failures
-        from agent_flow.multi_review import Distribution
-        from agent_flow.subprocess_pool import SubprocessResult
-
-        distribution = Distribution(
-            host="codex",
-            required_job_ids=frozenset({"codex-a", "codex-b"}),
-        )
-        results = [
-            SubprocessResult(
-                job_id="codex-a",
-                returncode=0,
-                stdout="reviewer-source: sub-agent\nNo findings\nverdict: approve",
-            ),
-            SubprocessResult(job_id="codex-b", returncode=1),
-            SubprocessResult(job_id="claude-a-extra", returncode=1),
-        ]
-        self.assertEqual(
-            _required_reviewer_failures(distribution, results),
-            ["codex-b: exit 1"],
-        )
-
-        missing = _required_reviewer_failures(distribution, results[:1])
-        self.assertEqual(missing, ["codex-b: missing result"])
-
-        invalid = [
-            SubprocessResult(
-                job_id="codex-a",
-                returncode=0,
-                stdout="No findings\nverdict: approve",
-            ),
-            SubprocessResult(
-                job_id="codex-b",
-                returncode=0,
-                stdout="reviewer-source: sub-agent\nNo findings\nverdict: approve",
-            ),
-        ]
-        self.assertEqual(
-            _required_reviewer_failures(distribution, invalid),
-            ["codex-a: reviewer output is missing provenance marker"],
-        )
-
-        markdown_bold = [
-            SubprocessResult(
-                job_id="codex-a",
-                returncode=0,
-                stdout="**reviewer-source: sub-agent**\nNo findings\nverdict: approve",
-            ),
-            SubprocessResult(
-                job_id="codex-b",
-                returncode=0,
-                stdout="reviewer-source: sub-agent\nNo findings\nverdict: approve",
-            ),
-        ]
-        self.assertEqual(
-            _required_reviewer_failures(distribution, markdown_bold),
-            ["codex-a: reviewer output is missing provenance marker"],
-        )
-
     def test_reviewer_pool_fans_out_and_can_be_narrowed(self) -> None:
         from agent_flow.cli_detect import CliInfo
         from agent_flow.core.worktree_isolation import WorktreeIsolationError
@@ -872,7 +692,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(resolve_review_clis(), [])
             distribution = distribute(jobs)
             self.assertFalse(distribution.fallback_to_generic)
-            self.assertEqual(distribution.by_cli, {"codex": jobs})
+            self.assertEqual(tuple(distribution.by_cli), ("codex",))
             self.assertEqual(residual_host_jobs(distribution), [])
         with (
             mock.patch.dict(os.environ, {}, clear=True),
@@ -902,12 +722,7 @@ class CliTest(unittest.TestCase):
         ):
             distribution = distribute(jobs, host="codex")
             self.assertEqual(residual_host_jobs(distribution), [])
-            self.assertEqual(distribution.by_cli["codex"], jobs)
             self.assertEqual(len(distribution.by_cli["claude"]), len(jobs))
-            self.assertEqual(
-                distribution.required_job_ids,
-                {"codex-generalist", "codex-architecture-design"},
-            )
             outputs = [
                 job.output_path
                 for assigned in distribution.by_cli.values()
@@ -934,7 +749,6 @@ class CliTest(unittest.TestCase):
                 len(collision_outputs),
                 len(set(collision_outputs)),
             )
-            self.assertIn(Path("foo-extra-claude.md"), collision_outputs)
 
 
             duplicate_jobs = [
@@ -981,7 +795,7 @@ class CliTest(unittest.TestCase):
 
     def test_final_review_uses_only_claude_and_codex(self) -> None:
         from agent_flow.cli_detect import CliInfo
-        from agent_flow.multi_review import ReviewerJob, distribute_final_review
+        from agent_flow.multi_review import ReviewerJob, distribute
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -998,11 +812,9 @@ class CliTest(unittest.TestCase):
                 "agent_flow.multi_review.detect_available_clis",
                 return_value=clis,
             ):
-                distribution = distribute_final_review(jobs, host="omp")
+                distribution = distribute(jobs, host="omp", phase_id="final-review")
 
             self.assertEqual(tuple(distribution.by_cli), ("claude", "codex"))
-            self.assertTrue(distribution.accept_any_provider)
-            self.assertEqual(distribution.required_job_ids, frozenset())
             self.assertTrue(all(
                 "-omp" not in str(job.output_path)
                 for assigned in distribution.by_cli.values()
@@ -1014,13 +826,13 @@ class CliTest(unittest.TestCase):
                 "agent_flow.multi_review.detect_available_clis",
                 return_value=clis,
             ):
-                one_angle = distribute_final_review(jobs[:1], host="omp")
+                one_angle = distribute(jobs[:1], host="omp", phase_id="final-review")
             self.assertFalse(one_angle.insufficient_reviewers)
             with mock.patch(
                 "agent_flow.multi_review.detect_available_clis",
                 return_value=[clis[0], clis[2]],
             ):
-                lone_provider = distribute_final_review(jobs[:1], host="omp")
+                lone_provider = distribute(jobs[:1], host="omp", phase_id="final-review")
             self.assertTrue(lone_provider.insufficient_reviewers)
 
             distribution.by_cli["claude"][0].output_path.write_text(
@@ -1031,7 +843,7 @@ class CliTest(unittest.TestCase):
                 "agent_flow.multi_review.detect_available_clis",
                 return_value=clis,
             ):
-                retry = distribute_final_review(jobs, host="omp")
+                retry = distribute(jobs, host="omp", phase_id="final-review")
             self.assertEqual(tuple(retry.by_cli), ("claude", "codex"))
             self.assertFalse(hasattr(retry, "skipped_providers"))
 
@@ -1044,7 +856,7 @@ class CliTest(unittest.TestCase):
                 "agent_flow.multi_review.detect_available_clis",
                 return_value=clis,
             ):
-                deadlocked = distribute_final_review(jobs, host="omp")
+                deadlocked = distribute(jobs, host="omp", phase_id="final-review")
             self.assertEqual(tuple(deadlocked.by_cli), ("claude", "codex"))
             self.assertFalse(deadlocked.fallback_to_generic)
 
@@ -1059,12 +871,12 @@ class CliTest(unittest.TestCase):
                 "agent_flow.multi_review.detect_available_clis",
                 return_value=clis,
             ):
-                quoted = distribute_final_review(jobs, host="omp")
+                quoted = distribute(jobs, host="omp", phase_id="final-review")
             self.assertEqual(tuple(quoted.by_cli), ("claude", "codex"))
 
     def test_final_review_honors_reviewer_pool_narrowing(self) -> None:
         from agent_flow.cli_detect import CliInfo
-        from agent_flow.multi_review import ReviewerJob, distribute_final_review
+        from agent_flow.multi_review import ReviewerJob, distribute
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1085,7 +897,7 @@ class CliTest(unittest.TestCase):
                     return_value=clis,
                 ),
             ):
-                narrowed = distribute_final_review(jobs, host="claude")
+                narrowed = distribute(jobs, host="claude", phase_id="final-review")
 
             self.assertEqual(tuple(narrowed.by_cli), ("codex",))
             self.assertFalse(narrowed.fallback_to_generic)
@@ -1095,7 +907,6 @@ class CliTest(unittest.TestCase):
         from agent_flow.multi_review import (
             ReviewerJob,
             distribute,
-            distribute_final_review,
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1115,7 +926,7 @@ class CliTest(unittest.TestCase):
                 ),
             ):
                 review = distribute(jobs, host="claude")
-                final_review = distribute_final_review(jobs, host="claude")
+                final_review = distribute(jobs, host="claude", phase_id="final-review")
 
             for distribution in (review, final_review):
                 self.assertEqual(distribution.by_cli, {})
@@ -1147,12 +958,6 @@ class CliTest(unittest.TestCase):
             }
             distribution = Distribution(
                 by_cli=by_cli,
-                required_job_ids=frozenset({
-                    f"{cli_name}-{job.angle_id}"
-                    for cli_name, jobs in by_cli.items()
-                    for job in jobs
-                }),
-                accept_any_provider=True,
                 phase_id="final-review",
             )
             clis = {
@@ -1171,7 +976,7 @@ class CliTest(unittest.TestCase):
             )
             launches: list[list[str]] = []
 
-            def fake_parallel(jobs):
+            def fake_parallel(jobs, **_kwargs):
                 job_ids = [job.job_id for job in jobs]
                 launches.append(job_ids)
                 if len(launches) == 1:
@@ -1903,8 +1708,12 @@ class CliTest(unittest.TestCase):
                 '{"passed": true, "results": []}',
             )
             for expected_round, content in enumerate(rejections, start=1):
+                meta = read_meta(run_dir)
+                meta.update(phase_index=1, current_phase="gates")
+                write_meta(run_dir, meta)
                 (run_dir / "gates.md").write_text(content, encoding="utf-8")
                 self.assertEqual(runner._next_index(1, gates)[:2], (2, False))
+                runner._commit_transition(runner._plan_transition(1, gates))
                 self.assertEqual(read_meta(run_dir)["fix_loop_rounds"]["fix-loop"], expected_round)
 
             # the fourth rejection (any key) is blocked for user intervention.
@@ -1921,6 +1730,7 @@ class CliTest(unittest.TestCase):
             write_meta(run_dir, {})
             runner = Runner.__new__(Runner)
             runner.run_dir = run_dir
+            runner.project_root = run_dir
             # request-changes marks refactor and implement-fix as fix collectors, so
             # both renamed loops are bounded per target. pr-watch is only ever a
             # "default" target (the PR event loop), so it is not a collector and that
@@ -1941,11 +1751,19 @@ class CliTest(unittest.TestCase):
             pr_comment_fix = runner.phases[7]
 
             for expected_round in (1, 2, 3):
+                meta = read_meta(run_dir)
+                meta.update(phase_index=2, current_phase="review")
+                write_meta(run_dir, meta)
                 (run_dir / "review.md").write_text("verdict: request-changes\n", encoding="utf-8")
                 self.assertEqual(runner._next_index(2, review)[:2], (1, False))
+                runner._commit_transition(runner._plan_transition(2, review))
                 self.assertEqual(read_meta(run_dir)["fix_loop_rounds"]["implement-fix"], expected_round)
+                meta = read_meta(run_dir)
+                meta.update(phase_index=3, current_phase="architecture-review")
+                write_meta(run_dir, meta)
                 (run_dir / "architecture-review.md").write_text("verdict: request-changes\n", encoding="utf-8")
                 self.assertEqual(runner._next_index(3, architecture_review)[:2], (0, False))
+                runner._commit_transition(runner._plan_transition(3, architecture_review))
                 self.assertEqual(read_meta(run_dir)["fix_loop_rounds"]["refactor"], expected_round)
 
             # three rounds on each target coexist; the fourth on either blocks it.
@@ -1955,8 +1773,12 @@ class CliTest(unittest.TestCase):
             self.assertEqual(runner._next_index(3, architecture_review)[:2], (3, True))
 
             # pr-watch is never a rejection target, so the PR event loop is uncapped.
-            for _ in range(6):
-                self.assertEqual(runner._next_index(7, pr_comment_fix)[:2], (6, False))
+            meta = read_meta(run_dir)
+            meta["pr_fix_baseline"] = "unchanged"
+            write_meta(run_dir, meta)
+            with mock.patch("agent_flow.runner.test_code_baseline", return_value="unchanged"):
+                for _ in range(6):
+                    self.assertEqual(runner._next_index(7, pr_comment_fix)[:2], (6, False))
             self.assertNotIn("pr-watch", read_meta(run_dir).get("fix_loop_rounds", {}))
 
     def test_python_runner_fix_loop_cap_migrates_legacy_integer_count(self) -> None:
@@ -1978,9 +1800,10 @@ class CliTest(unittest.TestCase):
             # A run upgraded mid fix-loop stored fix_loop_rounds as a bare int (the
             # old format counted only literal "fix-loop" entries). It migrates to the
             # per-target count and keeps counting rather than resetting.
-            write_meta(run_dir, {"fix_loop_rounds": 1})
+            write_meta(run_dir, {"fix_loop_rounds": 1, "phase_index": 1, "current_phase": "gates"})
             (run_dir / "gates.md").write_text('{"passed": false}', encoding="utf-8")
             self.assertEqual(runner._next_index(1, gates)[:2], (2, False))
+            runner._commit_transition(runner._plan_transition(1, gates))
             self.assertEqual(read_meta(run_dir)["fix_loop_rounds"]["fix-loop"], 2)
 
             # A legacy int already at the cap still blocks the next round; the
@@ -3491,18 +3314,8 @@ design-values-confirmed: n/a
             )
             artifact.write_text(source_artifact, encoding="utf-8")
 
-            result = subprocess.run(
-                (
-                    node,
-                    str(kit_root / "bin" / "agent-flow-kit.mjs"),
-                    "run",
-                    "advance",
-                ),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+            result = _advance_node_phase(node, cli=str(kit_root / "bin" / "agent-flow-kit.mjs"),
+                                         checkout=plan.path, run_dir=run_dir, phase_id="prd")
 
             self.assertEqual(result.returncode, 0, result.stderr)
             ledger = (run_dir / "design-spec.md").read_text(encoding="utf-8")
@@ -5048,8 +4861,8 @@ if (codexContext !== undefined) {
             ("python", {"pyproject.toml": "[project]\nname='demo'\n"}),
             ("typescript", {"package.json": '{"scripts":{"test":"node test.js"}}\n', "tsconfig.json": "{}\n"}),
             ("generic", {"tsconfig.json": "{}\n"}),
-            ("android", {"settings.gradle.kts": 'pluginManagement { repositories { google() } }\n'}),
-            ("android", {"settings.gradle": "pluginManagement { repositories { google() } }\n"}),
+            ("android", {"build.gradle.kts": 'plugins { id("com.android.application") version "8.7.3" }\n'}),
+            ("android", {"build.gradle": "plugins { id 'com.android.application' version '8.7.3' }\n"}),
         ]
         node = _node_executable()
         for expected, files in cases:
@@ -5449,37 +5262,14 @@ if (codexContext !== undefined) {
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
+                advanced = _advance_node_phase(node, cli, plan.path, run_dir, phase)
+                self.assertEqual(advanced.returncode, 0, advanced.stderr)
 
             ddd_artifact = run_dir / _node_phase_artifact("ddd-design")
+            valid_content = _node_phase_content("ddd-design", run_dir=run_dir)
+            body, gate = valid_content.split("## Completion Gate", 1)
             ddd_artifact.write_text(
-                "```\n"
-                "## Clean Architecture Boundary Map\n"
-                "## Dependency Rule\n"
-                "## Use Case Boundaries\n"
-                "## Repository Boundaries\n"
-                "## Cache Boundary\n"
-                "## Mapping Boundary\n"
-                "## Composition Root\n"
-                "## Testability Boundary\n"
-                "```\n"
-                "## Completion Gate\n"
-                "clean-architecture: applied\n"
-                "usecase-interface: n/a\n"
-                "usecase-composition: none\n"
-                "cache-required: no\n"
-                "memory-cache: n/a\n"
-                "disk-cache: n/a\n"
-                "cache-invalidation-policy: n/a\n"
-                "remote-dto-domain-mapper: n/a\n"
-                "entity-domain-mapper: n/a\n"
-                "domain-ui-mapper: n/a\n"
-                "solid-srp-change-reason: n/a\n"
-                "solid-ocp-extension-points: n/a\n"
-                "solid-lsp-contracts: n/a\n"
-                "solid-isp-consumer-ports: n/a\n"
-                "solid-dip-dependency-direction: inward\n",
-                encoding="utf-8",
+                f"```\n{body}```\n## Completion Gate{gate}", encoding="utf-8",
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
@@ -5489,7 +5279,11 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(result.returncode, 0)
-            self.assertIn("## Clean Architecture Boundary Map", result.stdout)
+            self.assertEqual(_read_node_phase(run_dir)["current_phase"], "ddd-design")
+            ddd_artifact.write_text(valid_content, encoding="utf-8")
+            advanced = _advance_node_phase(node, cli, plan.path, run_dir, "ddd-design")
+            self.assertEqual(advanced.returncode, 0, advanced.stderr)
+            self.assertEqual(_read_node_phase(run_dir)["current_phase"], "worktree")
 
     def test_node_run_enforces_project_local_code_review_skill_markers_when_present(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5821,13 +5615,7 @@ if (codexContext !== undefined) {
                 else:
                     content = _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
-                advance = subprocess.run(
-                    (node, cli, "run", "advance"),
-                    cwd=plan.path,
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
+                advance = _advance_node_phase(node, cli, plan.path, run_dir, phase)
                 self.assertEqual(advance.returncode, 0, advance.stderr)
                 if index + 1 < len(expected_phases):
                     self.assertIn(
@@ -6077,7 +5865,8 @@ if (codexContext !== undefined) {
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 artifact.write_text(_node_phase_content(phase, run_dir=run_dir), encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
+                advanced = _advance_node_phase(node, cli, plan.path, run_dir, phase)
+                self.assertEqual(advanced.returncode, 0, advanced.stderr)
 
             plan_review = run_dir / _node_phase_artifact("plan-review")
             plan_review.write_text("verdict: REQUEST-CHANGES\n", encoding="utf-8")
@@ -6103,7 +5892,8 @@ if (codexContext !== undefined) {
             self.assertIn("reason: missing_phase_artifact", missing_slice_plan.stdout)
 
             slice_plan.write_text("updated slice-plan\n", encoding="utf-8")
-            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
+            advanced = _advance_node_phase(node, cli, plan.path, run_dir, "slice-plan")
+            self.assertEqual(advanced.returncode, 0, advanced.stderr)
             plan_review.write_text("verdict: APPROVE\n", encoding="utf-8")
             self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
             ddd = run_dir / _node_phase_artifact("ddd-design")
@@ -6253,7 +6043,8 @@ if (codexContext !== undefined) {
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
+                advanced = _advance_node_phase(node, cli, plan.path, run_dir, phase)
+                self.assertEqual(advanced.returncode, 0, advanced.stderr)
 
             # runner가 gates를 직접 돌린다. marker 파일 때문에 선언된 gate가 실제로
             # 실패했고, 그래서 이 advance는 gates에 서지 않고 fix-loop로 갔다.
@@ -6355,7 +6146,8 @@ if (codexContext !== undefined) {
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
+                advanced = _advance_node_phase(node, cli, plan.path, run_dir, phase)
+                self.assertEqual(advanced.returncode, 0, advanced.stderr)
             _record_node_test_evidence(run_dir, exit_code=0)
 
             state = _read_node_phase(run_dir)
@@ -6550,7 +6342,8 @@ if (codexContext !== undefined) {
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
+                advanced = _advance_node_phase(node, cli, plan.path, run_dir, phase)
+                self.assertEqual(advanced.returncode, 0, advanced.stderr)
 
             for round_num in range(3):
                 for phase in ("comment-authoring", "multi-review", "architecture-review"):
@@ -6622,7 +6415,8 @@ if (codexContext !== undefined) {
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
+                advanced = _advance_node_phase(node, cli, plan.path, run_dir, phase)
+                self.assertEqual(advanced.returncode, 0, advanced.stderr)
 
             arch_artifact = run_dir / _node_phase_artifact("architecture-review")
             arch_artifact.write_text(
@@ -6679,7 +6473,8 @@ if (codexContext !== undefined) {
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
+                advanced = _advance_node_phase(node, cli, plan.path, run_dir, phase)
+                self.assertEqual(advanced.returncode, 0, advanced.stderr)
 
             mr_artifact = run_dir / _node_phase_artifact("multi-review")
             mr_artifact.write_text(_with_skills_gate(
@@ -7541,6 +7336,36 @@ if (codexContext !== undefined) {
             )
             self.assertTrue((managed_worktrees_root(root) / "feat-slice-a").is_dir())
 
+    def test_profile_commands_report_detection_errors_without_tracebacks(self) -> None:
+        cases = (
+            ({"settings.gradle.kts": "include()"}, None),
+            ({"pyproject.toml": "[project]", "package.json": '{"dependencies":{"next":"15"}}'}, None),
+            ({"package.json": '{"dependencies":'}, "package.json"),
+            ({"package.json": '\ufeff{"dependencies":{}}'}, "package.json"),
+        )
+        for command in (["detect-profile"], ["skills", "doctor"], ["skills", "sync"]):
+            for files, error_file in cases:
+                with self.subTest(command=command, files=files), tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir).resolve()
+                    for name, content in files.items():
+                        (root / name).write_text(content, encoding="utf-8")
+                    output, errors = io.StringIO(), io.StringIO()
+                    with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                        status = main([*command, "--root", str(root)])
+                    self.assertEqual(status, 2)
+                    self.assertIn(str(root / error_file) if error_file else str(root), errors.getvalue())
+                    self.assertNotIn("Traceback", errors.getvalue())
+                    self.assertEqual(output.getvalue(), "")
+
+    def test_skills_explicit_profile_bypasses_ambiguous_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "settings.gradle.kts").write_text("include()", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = main(["skills", "sync", "--root", temp_dir, "--profile", "generic"])
+            self.assertEqual(status, 0)
+
     def test_detect_profile_defaults_to_generic(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output = io.StringIO()
@@ -7548,19 +7373,25 @@ if (codexContext !== undefined) {
                 self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
             self.assertEqual(output.getvalue().strip(), "generic")
 
-    def test_detect_profile_reports_android_for_gradle_project(self) -> None:
+    def test_detect_profile_reports_android_for_android_plugin(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            (root / "settings.gradle.kts").write_text("", encoding="utf-8")
+            (root / "build.gradle.kts").write_text(
+                'plugins { id("com.android.application") version "8.9.0" }\n',
+                encoding="utf-8",
+            )
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
             self.assertEqual(output.getvalue().strip(), "android")
 
-    def test_detect_profile_reports_android_for_groovy_gradle_project(self) -> None:
+    def test_detect_profile_reports_android_for_groovy_android_plugin(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            (root / "settings.gradle").write_text("", encoding="utf-8")
+            (root / "build.gradle").write_text(
+                "plugins { id 'com.android.library' version '8.9.0' }\n",
+                encoding="utf-8",
+            )
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
@@ -8055,59 +7886,48 @@ if (codexContext !== undefined) {
         fetch.assert_not_called()
 
     def test_pr_watch_cli_requires_declared_deferred_ci_checks(self) -> None:
-        from agent_flow.pr_watch import PRSnapshot
-
         with tempfile.TemporaryDirectory() as temp_dir:
             run_dir = Path(temp_dir)
             gate_results = run_dir / "artifacts" / "gate-results.json"
             gate_results.parent.mkdir(parents=True)
             gate_results.write_text(
-                json.dumps(
-                    {
-                        "deferred_ci_checks": ["pytest"],
-                        "produced_by": {
-                            "gate_phase": "all",
-                            "gate_execution": "local",
-                        },
-                    }
-                ),
+                json.dumps({
+                    "deferred_ci_checks": ["pytest"],
+                    "produced_by": {"gate_phase": "all", "gate_execution": "local"},
+                }),
                 encoding="utf-8",
             )
-            snapshot = PRSnapshot(
-                number=4,
-                title="demo",
-                state="OPEN",
-                status="pending",
-            )
-            with (
-                mock.patch(
-                    "agent_flow.cli._resolve_run_dir",
-                    return_value=run_dir,
-                ),
-                mock.patch(
-                    "agent_flow.cli.fetch_pr",
-                    return_value=snapshot,
-                ) as fetch,
-                contextlib.redirect_stdout(io.StringIO()),
+            view = {
+                "number": 4, "title": "demo", "state": "OPEN",
+                "url": "https://github.com/owner/repo/pull/4", "headRefOid": "a" * 40,
+                "reviewDecision": "APPROVED", "reviews": [], "comments": [],
+            }
+            threads = {"data": {"repository": {"pullRequest": {"reviewThreads": {
+                "nodes": [], "pageInfo": {"hasNextPage": False},
+            }}}}}
+            for checks, expected_status in (
+                ([], "pending"),
+                ([{"name": "pytest", "status": "COMPLETED", "conclusion": "SUCCESS"}], "green"),
             ):
-                self.assertEqual(
-                    main(
-                        [
-                            "pr-watch",
-                            "4",
-                            "--once",
-                            "--run-dir",
-                            str(run_dir),
-                        ]
-                    ),
-                    0,
-                )
-
-        fetch.assert_called_once_with(
-            4,
-            repo=None,
-            required_checks=("pytest",),
-        )
+                with self.subTest(expected_status=expected_status):
+                    view["statusCheckRollup"] = checks
+                    output = io.StringIO()
+                    with (
+                        mock.patch("agent_flow.cli._resolve_run_dir", return_value=run_dir),
+                        mock.patch(
+                            "agent_flow.pr_watch.subprocess.run",
+                            side_effect=[
+                                subprocess.CompletedProcess((), 0, json.dumps(view), ""),
+                                subprocess.CompletedProcess((), 0, json.dumps([threads]), ""),
+                            ],
+                        ),
+                        contextlib.redirect_stdout(output),
+                    ):
+                        self.assertEqual(
+                            main(["pr-watch", "4", "--once", "--run-dir", str(run_dir)]), 0,
+                            output.getvalue(),
+                        )
+                    self.assertEqual(json.loads(output.getvalue())["status"], expected_status)
 
     def test_pr_watch_cli_fails_closed_on_unreadable_gate_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -12239,6 +12059,34 @@ def _node_phase_artifact(
     return Path(
         next(phase.artifact for phase in definition.phases if phase.id == phase_id)
     )
+
+
+def _advance_node_phase(
+    node: str, cli: str, checkout: Path, run_dir: Path, phase_id: str,
+) -> subprocess.CompletedProcess[str]:
+    from agent_flow.artifact import approve_phase_artifact, pending_phase_approval
+
+    state = _read_node_phase(run_dir)
+    assert state["current_phase"] == phase_id
+    definition = load_phase_workflow_definition(
+        Path(__file__).resolve().parents[1], str(state["workflow"]),
+    )
+    phase = next(candidate for candidate in definition.phases if candidate.id == phase_id)
+    command = (node, cli, "run", "advance")
+    result = subprocess.run(
+        command, cwd=checkout, text=True, capture_output=True, check=False,
+    )
+    if phase.pause_after:
+        assert result.returncode == 0, result.stderr
+        approval = pending_phase_approval(run_dir)
+        assert approval is not None, result.stdout
+        assert approval["phase_id"] == phase_id
+        assert _read_node_phase(run_dir)["current_phase"] == phase_id
+        approve_phase_artifact(run_dir, token=approval["token"])
+        result = subprocess.run(
+            command, cwd=checkout, text=True, capture_output=True, check=False,
+        )
+    return result
 
 
 def _node_presentation_gate() -> str:

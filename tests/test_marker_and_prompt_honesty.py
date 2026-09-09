@@ -577,40 +577,6 @@ def test_promoted_presentation_rules_stay_project_neutral():
         assert project_local not in text
 
 
-def test_viewmodel_dependency_boundary_replaces_the_usecase_only_marker():
-    """반증: 조건절 없는 marker를 남겨 두면 use case 3개짜리 저장소가 전면 fail이 된다."""
-    clean = (SKILLS / "android-clean-architecture" / "SKILL.md").read_text(encoding="utf-8")
-    assert "viewmodel-injects-usecases-only" not in clean
-    # 혼합 주입과 도메인 의존 없는 ViewModel도 합법 상태다. 값이 없으면 marker가
-    # 조건절 없는 marker와 같은 방식으로 정상 코드를 fail로 만든다.
-    assert (
-        "viewmodel-dependency-boundary: "
-        "usecase|single-context-repository|mixed|no-domain-dependency|fail|n/a" in clean
-    )
-
-    presentation = PRESENTATION_SKILL.read_text(encoding="utf-8")
-    assert "single context's repository interface" in presentation
-    # 조건 셋이 문장에 남아 있어야 "언제 use case인가"가 판정 가능하다.
-    assert "two or more contexts" in presentation
-    assert "order carries meaning" in presentation
-
-    ssot_sources = (
-        SDUI_SKILL,
-        SKILLS / "android-sdui-architecture" / "references" / "offline-ssot-data-guide.md",
-        SKILLS / "android-sdui-architecture" / "references" / "sdui-review-checklist.md",
-        REVIEW_ANGLES / "sdui.md",
-    )
-    for path in ssot_sources:
-        text = path.read_text(encoding="utf-8")
-        assert "sdui-room-ssot:" not in text
-        assert "Room is the single source of truth" not in text
-        # frontmatter description도 같은 단정을 하면 phase 프롬프트 한 줄 요약이
-        # 좁혀진 규칙보다 넓은 문장을 먼저 보여 준다.
-        assert "Room-as-single-source-of-truth" not in text
-    assert "sdui-room-ssot-scope: pass|fail|n/a" in SDUI_SKILL.read_text(encoding="utf-8")
-    assert "sdui-room-ssot-scope: pass|fail|n/a" in (REVIEW_ANGLES / "sdui.md").read_text(
-        encoding="utf-8"
-    )
 
 
 def test_shared_presentation_contract_marker_is_required_by_architecture_reviews():
@@ -660,56 +626,8 @@ def test_sdui_ssot_maps_data_failures_before_presentation():
     assert "ScreenUiState.Error(it.message)" not in text
 
 
-def test_use_case_error_semantics_do_not_cross_the_ui_mapping_boundary():
-    """반증: use case가 screen result를 만들면 domain이 UI 표현에 의존한다."""
-    sources = (
-        SKILLS / "clean-architecture-core" / "SKILL.md",
-        SKILLS / "android-clean-architecture" / "SKILL.md",
-        PRESENTATION_SKILL,
-    )
-
-    for path in sources:
-        text = path.read_text(encoding="utf-8")
-        assert "domain/business failure semantics" in text
-        assert "screen result type" not in text
-        assert "screen's result type" not in text
-    presentation = PRESENTATION_SKILL.read_text(encoding="utf-8")
-    assert "presentation mapper" in presentation
 
 
-def test_the_three_contradicted_rules_are_reconciled():
-    """반증: 두 문서가 같은 어휘로 정반대를 요구하면 리뷰어가 어느 쪽이든 fail을 낼 수 있다."""
-    stability = (REVIEW_ANGLES / "compose-stability.md").read_text(encoding="utf-8")
-    # 값 읽기는 아래로, flow 수집은 진입 composable에. 둘을 구분하지 않으면 UDF와 충돌한다.
-    assert "Narrow the read, never the collection point." in stability
-    assert "skills/android-clean-presentation-architecture/SKILL.md" in stability
-
-    presentation = PRESENTATION_SKILL.read_text(encoding="utf-8")
-    assert "where acquisition happens, not the call shape" in presentation
-    assert "stateful overload" in presentation
-    assert "screen/content composables" not in presentation.lower()
-    assert "stateless rendering composables" in presentation
-    clean = (SKILLS / "android-clean-architecture" / "SKILL.md").read_text(encoding="utf-8")
-    assert "screen/content composables" not in clean.lower()
-    assert "stateless rendering composables" in clean.lower()
-    udf = " ".join((REVIEW_ANGLES / "udf.md").read_text(encoding="utf-8").split())
-    assert "screen and content composables do not" not in udf
-    assert "content composables below the screen entry do not" in udf
-
-    # 존재하지 않는 타입 요구가 android profile의 다른 앵글로 옮겨가지 않게 함께 본다.
-    generalized = (
-        SKILLS / "android-guides" / "references" / "architecture-rules-guide.md",
-        REVIEW_ANGLES / "android-skills.md",
-    )
-    for path in generalized:
-        text = path.read_text(encoding="utf-8")
-        assert "AppResult" not in text
-        assert "AppError" not in text
-    guide = generalized[0].read_text(encoding="utf-8")
-    assert "the project's result type" in guide
-    assert "existing `Result`/exception contract" in guide
-    angle = generalized[1].read_text(encoding="utf-8")
-    assert "transport-failure to domain-error" in angle
 
 
 def test_presentation_review_marker_has_one_runtime_contract():

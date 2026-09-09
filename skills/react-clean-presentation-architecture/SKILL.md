@@ -31,9 +31,9 @@ For AppShell-owned global error hosts, queue acknowledgement, or root navigation
 ## Architecture Rule
 
 - `presentation` owns screens, components, state-holder hooks, UI events, presentation models, and mappers.
-- `domain` owns entities, use cases, repository interfaces, and pure business rules.
-- `data` or `infrastructure` implements repository interfaces and HTTP/storage clients.
-- Presentation code depends on domain use cases or ports, not concrete API clients or repository implementations.
+- Pure domain policy owns entities, invariants, and business language; application owns use cases and ports under `clean-architecture-core`. Existing packages may colocate these semantic roles.
+- `data` or `infrastructure` implements outbound ports and HTTP/storage clients; inbound server adapters own HTTP/tool request and response schemas.
+- Presentation code consumes typed domain/application ports, not concrete API clients or repository implementations. The core's single-context state-holder repository-interface exception remains valid; it does not authorize HTTP controllers to call ORM implementations directly.
 - Components should receive plain props and callbacks; they should not construct domain/data dependencies.
 - Browser APIs, analytics, storage, routing, and other external systems should be wrapped behind ports/adapters before reaching state-holder hooks.
 
@@ -43,11 +43,10 @@ For AppShell-owned global error hosts, queue acknowledgement, or root navigation
   and browser API details stay in `data`, `infrastructure`, or server adapters.
 - Transport/storage failure types are raw diagnostics until mapped by repository
   implementations or data mappers into domain error/result types.
-- Use cases return domain result/error types and add only business-rule errors.
+- Use cases return normalized domain/application result and error contracts, adding business-rule errors where needed.
 - Components receive presentation state, events, and `UiModel`/error UI models,
   not DTOs, `Response` objects, raw HTTP errors, or storage errors.
-- Presentation mappers convert domain models and domain errors into UI models
-  before state reaches components.
+- At the presentation boundary, project domain/application data and errors into the render contract. Convert shapes where their meaning differs; an already suitable immutable shape may use an identity projection without a copying model or mapper file.
 - Effects synchronize with external systems only; do not move domain-to-UI
   derivation or error mapping into `useEffect`.
 
@@ -56,7 +55,7 @@ For AppShell-owned global error hosts, queue acknowledgement, or root navigation
 React has no Hilt-equivalent official DI framework. Use this priority:
 
 1. Prefer explicit props for local dependencies.
-2. Use React `Context` providers for app-level dependencies such as use cases, repositories, API clients, feature flags, analytics, and configuration.
+2. Use React `Context` providers for app-level typed use cases/ports, feature flags, and configuration. Raw clients and implementations are created inside the composition root, not exposed through feature dependency hooks. Analytics/storage/browser capabilities reach state holders as typed ports.
 3. Use an external DI container only when the project already has class-heavy domain/application services or an existing container.
 4. If introducing a TypeScript DI container is justified, prefer the current repo standard. If none exists, `tsyringe` is the default candidate because current npm usage is higher than common alternatives.
 
@@ -68,29 +67,20 @@ Provider rules:
 - throw a clear error when a required provider is missing
 - do not hide mutable UI state inside dependency providers
 
-## Package Shape
+## Responsibility and Placement
 
-Feature presentation packages should stay screen-oriented:
-- `features/<feature>/presentation/<screen>/<Screen>.tsx`
-- `features/<feature>/presentation/<screen>/use<Screen>ViewModel.ts`
-- `features/<feature>/presentation/<screen>/model/<Screen>UiState.ts`
-- `features/<feature>/presentation/<screen>/model/<Screen>UiAction.ts`
-- `features/<feature>/presentation/<screen>/model/<Screen>UiEvent.ts`
-- `features/<feature>/presentation/<screen>/model/<Screen>UiModel.ts`
-- `features/<feature>/presentation/<screen>/mapper/*Mapper.ts`
-- `features/<feature>/presentation/<screen>/components/*`
+Discover the existing feature, route, dependency-provider, and model conventions before placing code. Keep screen wiring, render contracts, state-holder logic, and necessary boundary mapping near their consumers; separate files or packages only when a real responsibility or dependency boundary needs them.
 
-Presentation mappers must convert domain data into presentation models before state reaches React components.
-Presentation model types must use the `UiModel` postfix, for example `<Screen>ItemUiModel`.
+`UiState`, `UiModel`, and `use<Screen>ViewModel` describe roles, not a mandatory folder tree or file count. Preserve project naming conventions; an existing `OrderRowProps` render contract need not be renamed just to acquire a suffix. Domain-to-presentation mapping remains explicit in meaning, but equal shapes do not require copying models or forwarding mappers.
 
 ## State Holder Rule
 
-Use a custom hook as the screen state holder:
-- name it `use<Screen>ViewModel`
-- inject use cases/dependencies through props, parameters, or dependency hooks
-- expose `uiState` as an explicit discriminated union
+For interactive client screens that need orchestration, use the existing state-holder hook pattern:
+- use `use<Screen>ViewModel` when it matches project naming
+- inject typed use cases/ports through props, parameters, or dependency hooks
+- expose durable screen states explicitly; use a discriminated union for mutually exclusive branches
 - expose user actions as named callbacks
-- keep async orchestration inside the hook
+- keep client async orchestration inside the state holder; Server Components retain server data fetching and composition
 - keep rendering inside components
 - do not force a single `Action` reducer shape unless the repo already uses reducer/action patterns
 
@@ -99,8 +89,10 @@ State patterns:
 - define `UiState` as a discriminated union, normally by `status` or `type`, instead of multiple booleans that can contradict each other
 - do not use fake domain sentinel values as initial UI state
 - derive render-only values during render instead of duplicating state
-- keep request ids, abort controllers, pagination cursors, and selected ids private in the state holder
+- keep request ids, abort controllers, internal pagination cursors, and rollback bookkeeping private; expose selected values, visible pagination state, and optimistic displayed results through observable props/state rather than hiding them in refs
 - preserve cancellation with `AbortController` or the project’s existing request cancellation pattern
+- let RHF own form values, dirty/touched state, and field errors once; keep server data in its RSC/query-cache boundary and shareable filters in the URL. Do not mirror draft state into `uiState`. Custom hooks share logic, not state instances; Context does not guarantee state lifetime or render isolation.
+- when RHF draft, validation, reset, field adapters, or submit behavior changes, read `react-hook-form-zod`
 
 `UiState`, `UiAction`, and `UiEvent` roles:
 - `UiState` is durable render data. It must be enough to redraw the screen from props/state.
@@ -121,27 +113,29 @@ Event patterns:
 
 ## Component Rule
 
-Split state-holder wiring from rendering:
-- route/page component obtains dependencies and calls `use<Screen>ViewModel`
-- route/page component performs external effects such as navigation, toast, modal, analytics, and focus coordination
+Split client state-holder wiring from rendering where that responsibility exists:
+- in Next App Router, the Server page/layout retains server data fetching, metadata, and composition; only an interactive Client wrapper obtains client dependencies and calls the state-holder hook
+- pass React-supported serializable values and supported Server Action references across the RSC boundary, not repository/client instances or arbitrary closures
+- a server-only view needs neither an empty hook nor a `'use client'` conversion
+- the client wrapper owns browser effects such as navigation, toast, modal, analytics, and focus coordination; non-RSC routes use their existing client wiring boundary
 - screen component receives plain `uiState` and callbacks
 - child components receive only the data/callbacks they need
 - presentational components should not import use cases, repositories, API clients, or DI containers
-- keep form input, focus, hover, selection, and animation state local unless it drives business work
+- keep form input, focus, hover, selection, and animation state at their appropriate owner; RHF field adapters may use `control`, `useWatch`, `useFormState`, and `useController` within presentation without lifting every field into a parent state holder
 
 ## Review Checklist
 
 - dependency flow uses props or `Context` providers; external DI is justified or already present
-- `uiState` is a discriminated union and covers not-ready, loading, refreshing, placeholder, empty, error, success, offline, and permission states that can occur
+- durable screen states are explicit; discriminated unions cover mutually exclusive not-ready, loading, refreshing, placeholder, empty, error, success, offline, and permission branches that can occur
 - `uiState` has no contradictory booleans or duplicated derived fields
 - `UiAction`, `UiEvent`, and `UiState` roles are explicit for branchy screens
-- domain data is mapped to `UiModel` before rendering
-- `UiModel` postfix is used for presentation models
-- state-holder hook owns async orchestration and exposes callbacks
-- components stay render-focused and receive plain props
+- domain/application data crosses an explicit presentation projection, with conversion where semantics differ and no pointless same-shape copies
+- project naming is preserved; suffixes, hook names, and file counts alone do not fail review
+- interactive state holders own client orchestration and callbacks; server-only views retain server data/composition without artificial hooks
+- render components receive narrow props; RHF adapters may consume the form's own state
 - reducer logic, when present, is pure and side-effect free
 - effects are only for external systems, not derivable state
-- route/page wiring owns dependency lookup and external effects; screen/content components do not import DI containers or domain/data dependencies
+- composition roots own implementation creation; client wiring consumes typed ports and owns browser effects; Server pages retain metadata and respect RSC serialization
 - one-shot effects are not modeled as durable UI state
 - review output includes the required markers below
 
@@ -162,10 +156,10 @@ Apply these React-specific decisions:
 - `presentation-state-based-development`: use `applied` when presentation code was created or changed under this contract. Use `n/a` for review-only work or when no presentation code changed.
 - `presentation-state-review`: use `pass` when every applicable checklist item passes, `fail` when any applicable item fails, and `n/a` only when no React Web presentation code is in scope.
 - `ui-state-modeling`: use `explicit` when the screen's durable states are modeled explicitly. Use `n/a` only when no screen state is in scope.
-- `presentation-mapping-boundary`: use `domain-to-uimodel` when domain/application data crosses into presentation through a mapper. Use `n/a` only when no such data crosses the boundary.
+- `presentation-mapping-boundary`: use `domain-to-uimodel` when domain/application data crosses an explicit presentation projection, including an intentional identity projection of an already suitable shape. Use `n/a` only when no such data crosses the boundary; a separate mapper file is not required.
 - `di-boundary`: use `context-provider`, `tsyringe`, `direct`, or `existing` for the verified React composition path. Use `n/a` only when the change neither creates nor reviews dependency wiring.
 
-A `fail` result is actionable: record the failed criterion and return to the workflow's fix path before approval.
+A `fail` result is actionable: record the concrete failed contract or adopted project rule and return to the workflow's fix path before approval. Naming preferences, extra file expectations, and absent client hooks on server-only views are not independent failures.
 
 ## Sources
 
@@ -174,3 +168,6 @@ A `fail` result is actionable: record the failed criterion and return to the wor
 - React useEffect and event separation docs
 - TSyringe README
 - npm package metadata API
+- [Next Server and Client Components](https://nextjs.org/docs/app/getting-started/server-and-client-components)
+- [Next metadata server ownership](https://nextjs.org/docs/app/api-reference/functions/generate-metadata)
+- [React serializable Client Component props](https://react.dev/reference/rsc/use-client#serializable-types-returned-by-server-components)

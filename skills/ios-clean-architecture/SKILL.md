@@ -10,25 +10,18 @@ requires:
 Load `clean-architecture-core` first. This skill adds iOS-specific layout and DI
 details only.
 
-## Source Shape
+## Source Boundaries
 
-```text
-App/
-Sources/CoreUI/
-Sources/CoreDesignSystem/
-Sources/CoreResources/
-Sources/CorePlatform/
-Sources/CoreNetwork/
-Sources/CoreNavigationAPI/
-Sources/CoreNavigationImpl/
-Sources/CoreDomain<Home>/
-Sources/CoreData<Home>/
-Sources/Feature<Home>API/
-Sources/Feature<Home>Presentation/
-```
+Discover actual Xcode targets, Swift packages, source roots, imports, and active
+architecture role mappings. Preserve adopted boundaries; role names do not
+prescribe a folder tree. Include the source roots actually used before claiming
+architecture-lint coverage.
 
-Package names express the semantic boundary. Exact folder strings do not need to
-match Android paths; roles and dependency direction must match.
+Map neutral common-error notifier/queue interfaces as
+`shared-presentation-contract`. AppShell and feature presentation may depend on
+it; it imports neither UIKit/SwiftUI nor AppShell, feature, transport, or storage
+implementations. Application ports can represent time, payment, transactions,
+and platform capabilities without pretending to be repositories.
 
 ## DI Shape
 

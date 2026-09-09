@@ -1,5 +1,6 @@
 id: development
 description: Personal subagent-first development workflow.
+completion_disposition: local-handoff
 phases:
   - id: explore
     description: Inspect the task and existing code before editing.

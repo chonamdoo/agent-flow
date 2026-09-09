@@ -523,9 +523,19 @@ def _ensure_lease_parent(path: Path) -> None:
     _ensure_lock_directory(real_path(base), target.relative_to(base))
 
 
+def claim_inherited_file_lease(path: Path, fd: int) -> None:
+    """Validate and lock a borrowed descriptor without releasing its parent's lease."""
+    try:
+        _assert_lock_file_binding(path, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _assert_lock_file_binding(path, fd)
+    except (OSError, WorktreeIsolationError) as exc:
+        raise FileLeaseUnavailable(f"invalid inherited file lease at {path}") from exc
+
+
 @contextlib.contextmanager
-def exclusive_file_lease(path: Path, *, wait: bool = False) -> Iterator[None]:
-    """Hold a crash-released exclusive lease on one regular file."""
+def exclusive_file_lease(path: Path, *, wait: bool = False) -> Iterator[int]:
+    """Hold a crash-released lease; the yielded fd is borrowed until context exit."""
     try:
         _ensure_lease_parent(path)
         fd = _open_lock_file(path, create=True)
@@ -550,7 +560,7 @@ def exclusive_file_lease(path: Path, *, wait: bool = False) -> Iterator[None]:
             raise FileLeaseUnavailable(
                 f"cannot acquire file lease at {path}"
             ) from exc
-        yield
+        yield fd
     finally:
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)

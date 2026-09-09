@@ -1,5 +1,6 @@
 id: bugfix
 description: Reproduce, fix, review, and verify a defect.
+completion_disposition: local-handoff
 phases:
   - id: reproduce
     description: Reproduce the reported defect and capture the failing behavior.

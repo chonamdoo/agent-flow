@@ -24,8 +24,14 @@ Use this as a secondary checklist after user request, repo instructions, existin
 - Keep server/client component boundaries explicit. Do not move browser-only logic into server components.
 - Avoid hydration mismatch sources such as nondeterministic render output, browser-only values during server render, and inconsistent server/client markup.
 - Render the shell from data a plain request can obtain. A first-visit or crawler request that misses build-warmed state must still receive the shell.
-- Use stable list keys from domain IDs. Do not use array indexes when reorder, insert, delete, or filtering can happen.
+- Use stable domain IDs for ordinary lists; do not use array indexes when reorder, insert, delete, or filtering can happen. Library-managed identity takes precedence for its own rows: RHF `useFieldArray` uses generated `field.id` (or the configured key property supported by the installed version), not the row's database ID. This does not change valid domain-list keys.
 - Avoid rerender work only when there is a real changed path or measured risk. Do not add memoization by default.
+
+## Conditional Capabilities
+
+- RHF form draft, subscriptions, validation, initialization, field adapters, or submit changes: read `react-hook-form-zod`; generic TSX or an unrelated `watch`, `reset`, or `Controller` is not enough.
+- Public React Web URL indexing, metadata, canonical, JSON-LD, bot responses, or SEO-related cache changes: read `react-web-seo`; internal authenticated UI does not need SEO work by default.
+- Existing React Web Storybook stories/configuration, meaningful state or interaction reproduction, or explicit adoption design: read `react-storybook`; ordinary component work does not require introducing Storybook.
 
 ## Test
 

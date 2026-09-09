@@ -1,5 +1,6 @@
 id: diagnosing-bugs
 description: Build a tight feedback loop, diagnose a hard defect, fix it, and verify the original symptom.
+completion_disposition: local-handoff
 phases:
   - id: feedback-loop
     description: Build one red-capable command for the exact reported symptom.

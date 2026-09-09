@@ -1,0 +1,244 @@
+{
+  "cases": [
+    {
+      "id": "rhf-profile-save-draft",
+      "skill": "react-hook-form-zod",
+      "kind": "defect",
+      "task": "Review ProfileEditor for the account settings screen. The editor stays mounted for one profile and users can keep editing its name while Save is pending. The save port rejects on failure and returns the accepted submitted name on success. Server authorization and persistence are outside this component review. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "package.json": "{\n  \"private\": true,\n  \"type\": \"module\",\n  \"dependencies\": {\n    \"react\": \"18.3.1\",\n    \"react-dom\": \"18.3.1\",\n    \"react-hook-form\": \"7.54.2\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"5.7.3\",\n    \"@types/react\": \"18.3.18\",\n    \"@types/react-dom\": \"18.3.5\"\n  }\n}\n",
+        "src/ProfileEditor.tsx": "import { useState } from 'react';\nimport { useForm } from 'react-hook-form';\n\ntype Draft = { displayName: string };\ntype Profile = Draft & { id: string };\ntype Props = {\n  profile: Profile;\n  save: (id: string, draft: Draft) => Promise<Draft>;\n};\n\nexport function ProfileEditor({ profile, save }: Props) {\n  const [notice, setNotice] = useState('');\n  const { register, handleSubmit, reset, formState: { errors, isSubmitting } } =\n    useForm<Draft>({ defaultValues: { displayName: profile.displayName } });\n\n  const submit = handleSubmit(async (draft) => {\n    setNotice('');\n    try {\n      const accepted = await save(profile.id, draft);\n      reset(accepted);\n      setNotice('Saved');\n    } catch {\n      setNotice('Save failed. Try again.');\n    }\n  });\n\n  return <form onSubmit={submit} noValidate>\n    <label htmlFor=\"display-name\">Display name</label>\n    <input id=\"display-name\" {...register('displayName', { required: 'Enter a name' })}\n      aria-invalid={Boolean(errors.displayName)} aria-describedby=\"name-error\" />\n    <p id=\"name-error\" role=\"alert\">{errors.displayName?.message}</p>\n    <button type=\"submit\" disabled={isSubmitting}>Save</button>\n    <p role=\"status\">{notice}</p>\n  </form>;\n}\n"
+      },
+      "expected_verdict": "request-changes",
+      "expected_findings": [
+        {
+          "file": "src/ProfileEditor.tsx",
+          "start_line": 20,
+          "end_line": 20,
+          "invariant": "An accepted response must not replace edits entered after the submitted snapshot. Typing a newer name during the awaited save is permitted, but this reset replaces it with the earlier accepted name."
+        }
+      ],
+      "required_references": [
+        "react-hook-form-zod/references/lifecycle.md"
+      ],
+      "forbidden_skills": []
+    },
+    {
+      "id": "rhf-keyed-native-rename",
+      "skill": "react-hook-form-zod",
+      "kind": "normal",
+      "task": "Review the small RHF rename panel. Selecting another record intentionally discards the current draft; each record id is globally unique. Within one mounted record there is no background refresh. The product locks editing during save, adopts the returned title after success, and retains the draft on rejection. The typed save port reports failures by rejecting. Review the two components without proposing a new form library or reorganizing the application. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "package.json": "{\n  \"private\": true,\n  \"type\": \"module\",\n  \"dependencies\": {\n    \"react\": \"18.3.1\",\n    \"react-dom\": \"18.3.1\",\n    \"react-hook-form\": \"7.54.2\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"5.7.3\",\n    \"@types/react\": \"18.3.18\",\n    \"@types/react-dom\": \"18.3.5\"\n  }\n}\n",
+        "src/RenamePanel.tsx": "import { useState } from 'react';\nimport { useForm } from 'react-hook-form';\n\ntype Draft = { title: string };\ntype RecordValue = Draft & { id: string };\ntype Props = { record: RecordValue; save: (id: string, draft: Draft) => Promise<Draft> };\n\nexport function RenamePanel(props: Props) {\n  return <RenameForm key={props.record.id} {...props} />;\n}\n\nfunction RenameForm({ record, save }: Props) {\n  const [notice, setNotice] = useState('');\n  const { register, handleSubmit, reset, formState: { errors, isSubmitting } } =\n    useForm<Draft>({ defaultValues: { title: record.title } });\n  const submit = handleSubmit(async (draft) => {\n    setNotice('');\n    try {\n      const accepted = await save(record.id, draft);\n      reset(accepted);\n      setNotice('Saved');\n    } catch {\n      setNotice('Could not save. Your draft is still available.');\n    }\n  });\n  return <form onSubmit={submit} noValidate>\n    <label htmlFor=\"record-title\">Title</label>\n    <input id=\"record-title\" readOnly={isSubmitting}\n      {...register('title', { required: 'Enter a title' })}\n      aria-invalid={Boolean(errors.title)} aria-describedby=\"title-error\" />\n    <p id=\"title-error\" role=\"alert\">{errors.title?.message}</p>\n    <button type=\"submit\" disabled={isSubmitting}>Save</button>\n    <p role=\"status\">{notice}</p>\n  </form>;\n}\n"
+      },
+      "expected_verdict": "approve",
+      "expected_findings": [],
+      "required_references": [
+        "react-hook-form-zod/references/lifecycle.md"
+      ],
+      "forbidden_skills": []
+    },
+    {
+      "id": "rhf-server-config-parser",
+      "skill": "react-hook-form-zod",
+      "kind": "non-target",
+      "task": "Review this Node worker configuration parser. Its JSON contract requires an absolute endpoint URL and an integer retry count from zero to five; callers handle parse exceptions at process startup. This package has no browser UI or form handling. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "package.json": "{\n  \"private\": true,\n  \"type\": \"module\",\n  \"dependencies\": {\n    \"zod\": \"3.24.2\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"5.7.3\"\n  }\n}\n",
+        "src/config.ts": "import { z } from 'zod';\n\nconst configSchema = z.object({\n  endpoint: z.string().url(),\n  retries: z.number().int().min(0).max(5),\n});\n\nexport type WorkerConfig = z.output<typeof configSchema>;\n\nexport function parseWorkerConfig(json: string): WorkerConfig {\n  const value: unknown = JSON.parse(json);\n  return configSchema.parse(value);\n}\n"
+      },
+      "expected_verdict": "approve",
+      "expected_findings": [],
+      "required_references": [],
+      "forbidden_skills": ["react-hook-form-zod"]
+    },
+    {
+      "id": "rhf-optional-monthly-amount",
+      "skill": "react-hook-form-zod",
+      "kind": "held-out",
+      "task": "Review PledgeForm and its resolver boundary. The save command treats an absent monthlyAmount as no preference, while numeric 0 records an explicit choice of no monthly payment. Integers from 0 through 10000 are supported. The existing save port validates permissions independently and rejects on failure. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "package.json": "{\n  \"private\": true,\n  \"type\": \"module\",\n  \"dependencies\": {\n    \"react\": \"18.3.1\",\n    \"react-dom\": \"18.3.1\",\n    \"react-hook-form\": \"7.54.2\",\n    \"@hookform/resolvers\": \"3.10.0\",\n    \"zod\": \"3.24.2\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"5.7.3\",\n    \"@types/react\": \"18.3.18\",\n    \"@types/react-dom\": \"18.3.5\"\n  }\n}\n",
+        "src/PledgeForm.tsx": "import { useState } from 'react';\nimport { useForm } from 'react-hook-form';\nimport { zodResolver } from '@hookform/resolvers/zod';\nimport { z } from 'zod';\n\nconst pledgeSchema = z.object({\n  monthlyAmount: z.coerce.number().int().min(0).max(10000).optional(),\n});\ntype Draft = { monthlyAmount: string };\ntype Pledge = z.output<typeof pledgeSchema>;\ntype Props = { save: (pledge: Pledge) => Promise<void> };\n\nexport function PledgeForm({ save }: Props) {\n  const [notice, setNotice] = useState('');\n  const { register, handleSubmit, formState: { errors, isSubmitting } } =\n    useForm<Draft, unknown, Pledge>({\n      resolver: zodResolver(pledgeSchema),\n      defaultValues: { monthlyAmount: '' },\n    });\n  const submit = handleSubmit(async (pledge) => {\n    setNotice('');\n    try {\n      await save(pledge);\n      setNotice('Preference saved');\n    } catch {\n      setNotice('Unable to save. Try again.');\n    }\n  });\n  return <form onSubmit={submit} noValidate>\n    <label htmlFor=\"monthly-amount\">Monthly amount (optional)</label>\n    <input id=\"monthly-amount\" type=\"number\" min=\"0\" max=\"10000\" step=\"1\"\n      readOnly={isSubmitting} {...register('monthlyAmount')}\n      aria-invalid={Boolean(errors.monthlyAmount)} aria-describedby=\"amount-help amount-error\" />\n    <p id=\"amount-help\">Leave blank for no preference. Enter 0 to choose no monthly payment.</p>\n    <p id=\"amount-error\" role=\"alert\">{errors.monthlyAmount?.message}</p>\n    <button type=\"submit\" disabled={isSubmitting}>Save preference</button>\n    <p role=\"status\">{notice}</p>\n  </form>;\n}\n"
+      },
+      "expected_verdict": "request-changes",
+      "expected_findings": [
+        {
+          "file": "src/PledgeForm.tsx",
+          "start_line": 7,
+          "end_line": 7,
+          "invariant": "A blank optional input must remain absent rather than becoming an explicit zero preference. RHF passes the empty string, and number coercion parses it as 0 before optionality can preserve absence."
+        }
+      ],
+      "required_references": [
+        "react-hook-form-zod/references/schema-and-adapters.md"
+      ],
+      "forbidden_skills": []
+    },
+    {
+      "id": "seo-article-canonical-resource",
+      "skill": "react-web-seo",
+      "kind": "defect",
+      "task": "Review the article detail metadata for this public Next App Router site. The index and both full articles are independently indexable resources, with no aliases or tracking parameters in their canonical URLs. The supplied layout, index, and catalog show the existing surrounding contract; the change under review is the detail page metadata. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "package.json": "{\n  \"private\": true,\n  \"type\": \"module\",\n  \"dependencies\": {\n    \"next\": \"15.2.4\",\n    \"react\": \"19.0.0\",\n    \"react-dom\": \"19.0.0\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"5.7.3\",\n    \"@types/react\": \"19.0.10\",\n    \"@types/react-dom\": \"19.0.4\",\n    \"@types/node\": \"22.13.10\"\n  }\n}\n",
+        "app/layout.tsx": "import type { Metadata } from 'next';\nimport type { ReactNode } from 'react';\n\nexport const metadata: Metadata = { metadataBase: new URL('https://garden.example') };\n\nexport default function RootLayout({ children }: { children: ReactNode }) {\n  return <html lang=\"en\"><body>{children}</body></html>;\n}\n",
+        "app/articles/page.tsx": "import type { Metadata } from 'next';\nimport { articles } from '../../lib/articles';\n\nexport const metadata: Metadata = {\n  title: 'Garden articles',\n  description: 'Practical guides to growing and storing plants.',\n  alternates: { canonical: '/articles' },\n};\n\nexport default function ArticleIndex() {\n  return <main><h1>Garden articles</h1><ul>\n    {articles.map((article) => <li key={article.slug}>\n      <a href={`/articles/${article.slug}`}>{article.title}</a>\n    </li>)}\n  </ul></main>;\n}\n",
+        "app/articles/[slug]/page.tsx": "import type { Metadata } from 'next';\nimport { notFound } from 'next/navigation';\nimport { getArticle } from '../../../lib/articles';\n\ntype Props = { params: Promise<{ slug: string }> };\n\nexport async function generateMetadata({ params }: Props): Promise<Metadata> {\n  const article = getArticle((await params).slug);\n  if (!article) notFound();\n  return {\n    title: article.title,\n    description: article.summary,\n    alternates: { canonical: '/articles' },\n  };\n}\n\nexport default async function ArticlePage({ params }: Props) {\n  const article = getArticle((await params).slug);\n  if (!article) notFound();\n  return <main>\n    <h1>{article.title}</h1>\n    <p>{article.body}</p>\n    <a href=\"/articles\">All articles</a>\n  </main>;\n}\n",
+        "lib/articles.ts": "export type Article = { slug: string; title: string; summary: string; body: string };\nexport const articles: Article[] = [\n  { slug: 'rain-gardens', title: 'Planning a rain garden', summary: 'A guide to planting for runoff.', body: 'Choose native plants for the drainage and light conditions of your site.' },\n  { slug: 'seed-saving', title: 'Saving seeds', summary: 'Store seeds for next season.', body: 'Dry seeds fully and label each sealed container before storage.' },\n];\nexport function getArticle(slug: string): Article | undefined {\n  return articles.find((article) => article.slug === slug);\n}\n",
+        "next.config.ts": "import type { NextConfig } from 'next';\nconst config: NextConfig = {};\nexport default config;\n"
+      },
+      "expected_verdict": "request-changes",
+      "expected_findings": [
+        {
+          "file": "app/articles/[slug]/page.tsx",
+          "start_line": 13,
+          "end_line": 13,
+          "invariant": "Each distinct indexable full article needs its own canonical URL. This points every detail page to the collection resource, contradicting the visible article and consolidating distinct articles into the index."
+        }
+      ],
+      "required_references": [
+        "react-web-seo/references/next-and-bots.md"
+      ],
+      "forbidden_skills": []
+    },
+    {
+      "id": "seo-public-react-shared-directory",
+      "skill": "react-web-seo",
+      "kind": "normal",
+      "task": "Review the public /guides HTML handler and its new shared-cache header. This is a React server-rendered site, not Next.js. The existing router invokes this handler only for GET /guides, serves each listed guide at its href, and handles other paths separately. This directory contains only the release-published editorial list, is identical for all visitors, and may be five minutes stale. Deployments purge the CDN when publishing a new list; authentication and request-specific data are not part of this page. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "package.json": "{\n  \"private\": true,\n  \"type\": \"module\",\n  \"dependencies\": {\n    \"react\": \"18.3.1\",\n    \"react-dom\": \"18.3.1\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"5.7.3\",\n    \"@types/react\": \"18.3.18\",\n    \"@types/react-dom\": \"18.3.5\"\n  }\n}\n",
+        "src/guide-directory.tsx": "import { renderToStaticMarkup } from 'react-dom/server';\n\nconst guides = [\n  { slug: 'rain-gardens', title: 'Planning a rain garden' },\n  { slug: 'seed-saving', title: 'Saving seeds' },\n] as const;\n\nfunction GuideDirectory() {\n  return <html lang=\"en\"><head>\n    <title>Garden guides</title>\n    <meta name=\"description\" content=\"Public gardening guides from our editorial team.\" />\n    <link rel=\"canonical\" href=\"https://garden.example/guides\" />\n  </head><body><main>\n    <h1>Garden guides</h1>\n    <p>Practical advice for planting, growing, and storing seeds.</p>\n    <ul>{guides.map((guide) => <li key={guide.slug}>\n      <a href={`/guides/${guide.slug}`}>{guide.title}</a>\n    </li>)}</ul>\n  </main></body></html>;\n}\n\nexport function handleGuideDirectory(): Response {\n  const html = '<!doctype html>' + renderToStaticMarkup(<GuideDirectory />);\n  return new Response(html, {\n    status: 200,\n    headers: {\n      'content-type': 'text/html; charset=utf-8',\n      'cache-control': 'public, max-age=60, s-maxage=300',\n    },\n  });\n}\n"
+      },
+      "expected_verdict": "approve",
+      "expected_findings": [],
+      "required_references": [
+        "react-web-seo/references/cache-and-personalization.md"
+      ],
+      "forbidden_skills": []
+    },
+    {
+      "id": "seo-private-task-filter",
+      "skill": "react-web-seo",
+      "kind": "non-target",
+      "task": "Review the assigned-task filter in our signed-in internal React SPA. The existing authenticated shell supplies only the current employee's authorized task data and renders one instance of this panel. Task ids are unique. Scope is the checkbox and local list rendering; no public page, metadata, routing, caching, or server access-control behavior is changing. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "package.json": "{\n  \"private\": true,\n  \"type\": \"module\",\n  \"dependencies\": {\n    \"react\": \"18.3.1\",\n    \"react-dom\": \"18.3.1\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"5.7.3\",\n    \"@types/react\": \"18.3.18\",\n    \"@types/react-dom\": \"18.3.5\"\n  }\n}\n",
+        "src/AssignedTasks.tsx": "import { useState } from 'react';\n\ntype Task = { id: string; title: string; done: boolean };\n\nexport function AssignedTasks({ tasks }: { tasks: readonly Task[] }) {\n  const [showCompleted, setShowCompleted] = useState(false);\n  const visible = tasks.filter((task) => showCompleted || !task.done);\n  return <section aria-labelledby=\"tasks-heading\">\n    <h2 id=\"tasks-heading\">Assigned tasks</h2>\n    <label><input type=\"checkbox\" checked={showCompleted}\n      onChange={(event) => setShowCompleted(event.target.checked)} />Show completed</label>\n    {visible.length === 0 ? <p>No matching tasks.</p> : <ul>\n      {visible.map((task) => <li key={task.id}>\n        {task.title}{task.done ? ' (completed)' : ''}\n      </li>)}\n    </ul>}\n  </section>;\n}\n"
+      },
+      "expected_verdict": "approve",
+      "expected_findings": [],
+      "required_references": [],
+      "forbidden_skills": ["react-web-seo"]
+    },
+    {
+      "id": "seo-product-http-delivery",
+      "skill": "react-web-seo",
+      "kind": "held-out",
+      "task": "Review the public product detail response handler in our React SSR storefront. The existing router passes the decoded slug for GET /products/:slug and serves /products independently. Search engines and external inventory clients consume these URLs directly. The supplied catalog is the complete public catalog for this release; unknown or removed products are nonexistent resources rather than fallback product pages. Review HTML metadata and delivery semantics within this handler. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "package.json": "{\n  \"private\": true,\n  \"type\": \"module\",\n  \"dependencies\": {\n    \"react\": \"18.3.1\",\n    \"react-dom\": \"18.3.1\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"5.7.3\",\n    \"@types/react\": \"18.3.18\",\n    \"@types/react-dom\": \"18.3.5\"\n  }\n}\n",
+        "src/product-response.tsx": "import { renderToStaticMarkup } from 'react-dom/server';\n\ntype Product = { slug: string; name: string; description: string };\nconst products: readonly Product[] = [\n  { slug: 'linen-towel', name: 'Linen towel', description: 'An undyed woven linen towel.' },\n];\n\nexport function handleProduct(slug: string): Response {\n  const product = products.find((entry) => entry.slug === slug);\n  const page = product ? <html lang=\"en\"><head>\n    <title>{product.name}</title>\n    <meta name=\"description\" content={product.description} />\n    <link rel=\"canonical\" href={`https://shop.example/products/${product.slug}`} />\n  </head><body><main>\n    <h1>{product.name}</h1><p>{product.description}</p><a href=\"/products\">All products</a>\n  </main></body></html> : <html lang=\"en\"><head>\n    <title>Product not found</title><meta name=\"robots\" content=\"noindex\" />\n  </head><body><main>\n    <h1>Product not found</h1><a href=\"/products\">Browse products</a>\n  </main></body></html>;\n  return new Response('<!doctype html>' + renderToStaticMarkup(page), {\n    status: 200,\n    headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },\n  });\n}\n"
+      },
+      "expected_verdict": "request-changes",
+      "expected_findings": [
+        {
+          "file": "src/product-response.tsx",
+          "start_line": 22,
+          "end_line": 22,
+          "invariant": "Missing products must be delivered as nonexistent resources. The unconditional successful status also covers the missing-product branch; noindex and an error heading do not change the HTTP response for clients consuming it."
+        }
+      ],
+      "required_references": [],
+      "forbidden_skills": []
+    },
+    {
+      "id": "storybook-registration-interaction",
+      "skill": "react-storybook",
+      "kind": "defect",
+      "task": "Review the added EmailRegistrationFlow story as interaction coverage for the existing registration form: an empty submit should show the validation error and focus Email, then correction and resubmission should deliver the accepted registration and visible confirmation. The supplied form and field are existing production components for context; the onRegister port is mocked only at the application boundary. Scope the review to whether the story exercises that user flow with the installed Storybook setup. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "package.json": "{\n  \"private\": true,\n  \"type\": \"module\",\n  \"dependencies\": {\n    \"react\": \"18.3.1\",\n    \"react-dom\": \"18.3.1\",\n    \"react-hook-form\": \"7.54.2\",\n    \"@hookform/resolvers\": \"3.10.0\",\n    \"zod\": \"3.24.2\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"5.7.3\",\n    \"@types/react\": \"18.3.18\",\n    \"@types/react-dom\": \"18.3.5\",\n    \"storybook\": \"8.6.14\",\n    \"@storybook/react\": \"8.6.14\",\n    \"@storybook/react-vite\": \"8.6.14\",\n    \"@storybook/test\": \"8.6.14\",\n    \"@storybook/addon-interactions\": \"8.6.14\",\n    \"vite\": \"6.1.0\"\n  },\n  \"scripts\": {\n    \"storybook\": \"storybook dev -p 6006\",\n    \"build-storybook\": \"storybook build\"\n  }\n}\n",
+        ".storybook/main.ts": "import type { StorybookConfig } from '@storybook/react-vite';\n\nconst config: StorybookConfig = {\n  stories: ['../src/**/*.stories.tsx'],\n  framework: { name: '@storybook/react-vite', options: {} },\n  addons: ['@storybook/addon-interactions'],\n};\nexport default config;\n",
+        "src/EmailField.tsx": "import { forwardRef, useId } from 'react';\nimport type { ComponentPropsWithoutRef } from 'react';\n\ntype Props = ComponentPropsWithoutRef<'input'> & { error?: string };\n\nexport const EmailField = forwardRef<HTMLInputElement, Props>(function EmailField(\n  { error, ...inputProps }, ref,\n) {\n  const id = useId();\n  return <div>\n    <label htmlFor={id}>Email</label>\n    <input {...inputProps} id={id} ref={ref} type=\"email\"\n      aria-invalid={Boolean(error)} aria-describedby={error ? `${id}-error` : undefined} />\n    {error && <p id={`${id}-error`} role=\"alert\">{error}</p>}\n  </div>;\n});\n",
+        "src/EmailRegistration.tsx": "import { useState } from 'react';\nimport { useForm } from 'react-hook-form';\nimport { zodResolver } from '@hookform/resolvers/zod';\nimport { z } from 'zod';\nimport { EmailField } from './EmailField';\n\nconst schema = z.object({ email: z.string().email('Enter a valid email') });\ntype Registration = z.output<typeof schema>;\ntype Props = { onRegister: (value: Registration) => Promise<void> };\n\nexport function EmailRegistration({ onRegister }: Props) {\n  const [notice, setNotice] = useState('');\n  const { register, handleSubmit, formState: { errors, isSubmitting } } =\n    useForm<Registration>({ resolver: zodResolver(schema), defaultValues: { email: '' } });\n  const submit = handleSubmit(async (value) => {\n    setNotice('');\n    try {\n      await onRegister(value);\n      setNotice('Registration accepted');\n    } catch {\n      setNotice('Registration failed. Try again.');\n    }\n  });\n  return <form onSubmit={submit} noValidate>\n    <EmailField {...register('email')} error={errors.email?.message} readOnly={isSubmitting} />\n    <button type=\"submit\" disabled={isSubmitting}>Register</button>\n    <p role=\"status\">{notice}</p>\n  </form>;\n}\n",
+        "src/EmailRegistration.stories.tsx": "import type { Meta, StoryObj } from '@storybook/react';\nimport { expect, fn, userEvent, within } from '@storybook/test';\nimport { EmailRegistration } from './EmailRegistration';\nimport { EmailField } from './EmailField';\n\nconst meta = {\n  title: 'Registration/Email',\n  component: EmailRegistration,\n  args: { onRegister: fn(async () => {}) },\n  render: () => <EmailField error=\"Enter a valid email\" />,\n} satisfies Meta<typeof EmailRegistration>;\nexport default meta;\ntype Story = StoryObj<typeof meta>;\n\nexport const EmailRegistrationFlow: Story = {\n  play: async ({ canvasElement }) => {\n    const canvas = within(canvasElement);\n    await expect(canvas.getByRole('alert')).toHaveTextContent('Enter a valid email');\n    await userEvent.type(canvas.getByRole('textbox', { name: 'Email' }), 'reader@example.test');\n    await expect(canvas.getByRole('textbox', { name: 'Email' })).toHaveValue('reader@example.test');\n  },\n};\n"
+      },
+      "expected_verdict": "request-changes",
+      "expected_findings": [
+        {
+          "file": "src/EmailRegistration.stories.tsx",
+          "start_line": 10,
+          "end_line": 10,
+          "alternate_locations": [
+            {"file": "src/EmailRegistration.stories.tsx", "start_line": 16, "end_line": 21}
+          ],
+          "invariant": "The story replaces the actual registration form with a pre-errored input. Its play function never invokes the RHF form, resolver, submit button, focus-on-error behavior, or accepted-registration path, so it cannot establish the stated validation and corrected-resubmission interaction."
+        }
+      ],
+      "required_references": [
+        "react-storybook/references/interaction-and-test-details.md",
+        "react-storybook/references/version-integration.md"
+      ],
+      "forbidden_skills": []
+    },
+    {
+      "id": "storybook-email-error-presentation",
+      "skill": "react-storybook",
+      "kind": "normal",
+      "task": "Review the new ServerRejected args-only story for EmailField. It lets designers inspect an already-returned server error next to a filled field; it is not intended to cover form submission or validation transitions. The Filled story, CSF setup, component, and pinned Storybook packages are unchanged context. The consuming application supplies field errors and owns any form library integration. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "package.json": "{\n  \"private\": true,\n  \"type\": \"module\",\n  \"dependencies\": {\n    \"react\": \"18.3.1\",\n    \"react-dom\": \"18.3.1\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"5.7.3\",\n    \"@types/react\": \"18.3.18\",\n    \"@types/react-dom\": \"18.3.5\",\n    \"storybook\": \"8.6.14\",\n    \"@storybook/react\": \"8.6.14\",\n    \"@storybook/react-vite\": \"8.6.14\",\n    \"@storybook/test\": \"8.6.14\",\n    \"@storybook/addon-interactions\": \"8.6.14\",\n    \"vite\": \"6.1.0\"\n  },\n  \"scripts\": {\n    \"storybook\": \"storybook dev -p 6006\",\n    \"build-storybook\": \"storybook build\"\n  }\n}\n",
+        ".storybook/main.ts": "import type { StorybookConfig } from '@storybook/react-vite';\n\nconst config: StorybookConfig = {\n  stories: ['../src/**/*.stories.tsx'],\n  framework: { name: '@storybook/react-vite', options: {} },\n  addons: ['@storybook/addon-interactions'],\n};\nexport default config;\n",
+        "src/EmailField.tsx": "import { forwardRef, useId } from 'react';\nimport type { ComponentPropsWithoutRef } from 'react';\n\ntype Props = ComponentPropsWithoutRef<'input'> & { error?: string };\n\nexport const EmailField = forwardRef<HTMLInputElement, Props>(function EmailField(\n  { error, ...inputProps }, ref,\n) {\n  const id = useId();\n  return <div>\n    <label htmlFor={id}>Email</label>\n    <input {...inputProps} id={id} ref={ref} type=\"email\"\n      aria-invalid={Boolean(error)} aria-describedby={error ? `${id}-error` : undefined} />\n    {error && <p id={`${id}-error`} role=\"alert\">{error}</p>}\n  </div>;\n});\n",
+        "src/EmailField.stories.tsx": "import type { Meta, StoryObj } from '@storybook/react';\nimport { EmailField } from './EmailField';\n\nconst meta = {\n  title: 'Fields/Email',\n  component: EmailField,\n  args: { defaultValue: 'reader@example.test' },\n} satisfies Meta<typeof EmailField>;\nexport default meta;\ntype Story = StoryObj<typeof meta>;\n\nexport const Filled: Story = {};\n\nexport const ServerRejected: Story = {\n  args: { error: 'This email address is already registered.' },\n};\n"
+      },
+      "expected_verdict": "approve",
+      "expected_findings": [],
+      "required_references": [],
+      "forbidden_skills": []
+    },
+    {
+      "id": "storybook-ordinary-notice-component",
+      "skill": "react-storybook",
+      "kind": "non-target",
+      "task": "Review this notices component for a React web application. The parent owns removal, supplies unique notice ids, and supplies plain nonempty text suitable for an accessible button name. Scope is rendering the empty/list alternatives and forwarding a chosen dismissal. This project has not adopted a component workbench, and no test infrastructure or adoption work is requested. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "package.json": "{\n  \"private\": true,\n  \"type\": \"module\",\n  \"dependencies\": {\n    \"react\": \"18.3.1\",\n    \"react-dom\": \"18.3.1\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"5.7.3\",\n    \"@types/react\": \"18.3.18\",\n    \"@types/react-dom\": \"18.3.5\"\n  }\n}\n",
+        "src/Notices.tsx": "type Notice = { id: string; text: string };\ntype Props = { notices: readonly Notice[]; onDismiss: (id: string) => void };\n\nexport function Notices({ notices, onDismiss }: Props) {\n  return <section aria-label=\"Notices\">\n    {notices.length === 0 ? <p>No notices.</p> : <ul>\n      {notices.map((notice) => <li key={notice.id}>\n        <span>{notice.text}</span>\n        <button type=\"button\" aria-label={`Dismiss ${notice.text}`}\n          onClick={() => onDismiss(notice.id)}>Dismiss</button>\n      </li>)}\n    </ul>}\n  </section>;\n}\n"
+      },
+      "expected_verdict": "approve",
+      "expected_findings": [],
+      "required_references": [],
+      "forbidden_skills": ["react-storybook"]
+    },
+    {
+      "id": "storybook-counter-story-revisits",
+      "skill": "react-storybook",
+      "kind": "held-out",
+      "task": "Review the new Counter stories and their interaction setup. Each selection or rerun of either story should begin with a fresh zero-valued counter; users browse Empty and Increment in either order in one running Storybook session. The counter store factory and component are existing production context, and the application normally chooses the lifetime of each store instance. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "package.json": "{\n  \"private\": true,\n  \"type\": \"module\",\n  \"dependencies\": {\n    \"react\": \"18.3.1\",\n    \"react-dom\": \"18.3.1\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"5.7.3\",\n    \"@types/react\": \"18.3.18\",\n    \"@types/react-dom\": \"18.3.5\",\n    \"storybook\": \"8.6.14\",\n    \"@storybook/react\": \"8.6.14\",\n    \"@storybook/react-vite\": \"8.6.14\",\n    \"@storybook/test\": \"8.6.14\",\n    \"@storybook/addon-interactions\": \"8.6.14\",\n    \"vite\": \"6.1.0\"\n  },\n  \"scripts\": {\n    \"storybook\": \"storybook dev -p 6006\",\n    \"build-storybook\": \"storybook build\"\n  }\n}\n",
+        ".storybook/main.ts": "import type { StorybookConfig } from '@storybook/react-vite';\n\nconst config: StorybookConfig = {\n  stories: ['../src/**/*.stories.tsx'],\n  framework: { name: '@storybook/react-vite', options: {} },\n  addons: ['@storybook/addon-interactions'],\n};\nexport default config;\n",
+        "src/Counter.tsx": "import { useSyncExternalStore } from 'react';\n\nexport function createCounter() {\n  let count = 0;\n  const listeners = new Set<() => void>();\n  return {\n    getSnapshot: () => count,\n    subscribe: (listener: () => void) => {\n      listeners.add(listener);\n      return () => { listeners.delete(listener); };\n    },\n    increment: () => {\n      count += 1;\n      listeners.forEach((listener) => listener());\n    },\n  };\n}\n\nexport type CounterStore = ReturnType<typeof createCounter>;\n\nexport function Counter({ store }: { store: CounterStore }) {\n  const count = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);\n  return <section aria-label=\"Counter\">\n    <p role=\"status\">Count: {count}</p>\n    <button type=\"button\" onClick={store.increment}>Add one</button>\n  </section>;\n}\n",
+        "src/Counter.stories.tsx": "import type { Meta, StoryObj } from '@storybook/react';\nimport { expect, userEvent, within } from '@storybook/test';\nimport { Counter, createCounter } from './Counter';\n\nconst meta = {\n  title: 'Controls/Counter',\n  component: Counter,\n  args: { store: createCounter() },\n  argTypes: { store: { control: false } },\n} satisfies Meta<typeof Counter>;\nexport default meta;\ntype Story = StoryObj<typeof meta>;\n\nexport const Empty: Story = {\n  play: async ({ canvasElement }) => {\n    const canvas = within(canvasElement);\n    await expect(canvas.getByRole('status')).toHaveTextContent('Count: 0');\n  },\n};\n\nexport const Increment: Story = {\n  play: async ({ canvasElement }) => {\n    const canvas = within(canvasElement);\n    await userEvent.click(canvas.getByRole('button', { name: 'Add one' }));\n    await expect(canvas.getByRole('status')).toHaveTextContent('Count: 1');\n  },\n};\n"
+      },
+      "expected_verdict": "request-changes",
+      "expected_findings": [
+        {
+          "file": "src/Counter.stories.tsx",
+          "start_line": 8,
+          "end_line": 8,
+          "invariant": "The meta-level store is created once when the module loads and is shared by both stories and reruns. Increment mutates its closure-held count; unmounting Counter only unsubscribes and does not reset that store, so Empty and later Increment runs inherit prior state."
+        }
+      ],
+      "required_references": [
+        "react-storybook/references/interaction-and-test-details.md",
+        "react-storybook/references/version-integration.md"
+      ],
+      "forbidden_skills": []
+    }
+  ]
+}

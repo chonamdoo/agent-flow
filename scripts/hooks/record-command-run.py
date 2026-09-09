@@ -11,6 +11,8 @@
 
 관측이 잡는 것은 **"아예 안 돌렸다"**뿐이다. argv와 exit code만 보므로 "돌렸다"가
 "그게 옳은 걸 검증했다"를 뜻하지는 않는다. 그 한계는 소비 쪽에 적어 둔다.
+`code_baseline`은 명령 종료 후 관측값이다. 실행 전이나 실행 중 코드가 같았다는
+보장이 아니며, 이를 기록하지 못한 로그로 이전 RED를 재사용할 수 없다.
 
 로그는 한 줄 append다. O_APPEND 쓰기라 병렬 agent가 서로의 기록을 덮지 않는다.
 """
@@ -88,8 +90,12 @@ def exit_code(payload: object) -> int | None:
 def append_entry(log_path: Path, command: str, code: int | None, cwd: str) -> None:
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        baseline = observed_code_baseline(Path(cwd), command, code) if code not in (None, 0) else ""
         line = json.dumps(
-            {"command": command, "exit_code": code, "cwd": cwd, "at": time.time()},
+            {
+                "command": command, "exit_code": code, "cwd": cwd,
+                "at": time.time(), "code_baseline": baseline,
+            },
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -98,6 +104,45 @@ def append_entry(log_path: Path, command: str, code: int | None, cwd: str) -> No
     except OSError:
         # 관측 실패가 작업을 막아서는 안 된다. 증거가 없으면 gate가 unavailable로 처리한다.
         return
+
+
+def observed_code_baseline(cwd: Path, command: str, code: int | None) -> str:
+    install_root = Path(__file__).resolve().parents[2]
+    for source in (install_root / "runtime" / "python", install_root / "src"):
+        if (source / "agent_flow" / "core" / "command_evidence.py").is_file():
+            sys.path.insert(0, str(source))
+            break
+    else:
+        return ""
+    try:
+        from agent_flow.core.command_evidence import (
+            CommandRun,
+            CommandRunEvidence,
+            resolve_test_command_tokens,
+            test_code_baseline,
+        )
+        from agent_flow.core.local_skills import resolved_profile
+        from agent_flow.core.worktree_isolation import git_safe
+
+        checkout = git_safe(
+            "rev-parse", "--show-toplevel", cwd=cwd, optional_locks=False,
+        )
+        if not checkout.ok:
+            return ""
+        root = Path(checkout.stdout.strip())
+        observed = CommandRunEvidence(
+            available=True,
+            runs=(CommandRun(command, code, time.time(), str(cwd)),),
+        )
+        if not any(
+            observed.matching_all(tokens)
+            for tokens in resolve_test_command_tokens(resolved_profile(root))
+        ):
+            return ""
+        return test_code_baseline(root)
+    except Exception:
+        # Observation failure cannot turn this PostToolUse hook into a command gate.
+        return ""
 
 
 def git_leader_checkout(start: Path) -> Path | None:

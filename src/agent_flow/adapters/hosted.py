@@ -43,13 +43,11 @@ from agent_flow.core.worktree_isolation import (
     write_run_artifact_text,
 )
 from agent_flow.multi_review import (
-    FINAL_REVIEW_PHASE_ID,
     REVIEW_CLI_NAMES,
     Distribution,
     ReviewerJob,
     ReviewExecution,
     distribute,
-    distribute_final_review,
     eligible_reviewer_names,
     review_job_id,
     reviewer_result_error,
@@ -262,11 +260,7 @@ def _run_multi_review_distribution(
     # config root도 여기서만 안다. reviewer launch 선언은 leader의 `.agent-flow/`에
     # 있고, managed checkout에는 그 디렉터리가 없다(gitignored) — project_root를
     # 소스로 두면 선언이 조용히 무시된다.
-    distribution = (
-        distribute_final_review(jobs, host=adapter.name)
-        if phase.id == FINAL_REVIEW_PHASE_ID
-        else distribute(jobs, host=adapter.name, phase_id=phase.id)
-    )
+    distribution = distribute(jobs, host=adapter.name, phase_id=phase.id)
     execution = run_distribution(
         distribution,
         project_root,
@@ -309,12 +303,6 @@ def _write_review_results(
         phase_entered_at=binding.phase_entered_at,
         serialized_results=serialized,
         outcomes=outcomes,
-        blocking_job_ids=(
-            ()
-            if distribution.accept_any_provider
-            else distribution.required_job_ids
-        ),
-        accept_any_provider=distribution.accept_any_provider,
         expected_job_ids_by_provider=expected_by_provider,
     )
     bind_review_evidence(
@@ -850,6 +838,9 @@ def _reviewer_jobs(
             continue
         angle_output = _review_angle_output(run_dir, phase.id, angle_id)
         angle_contract = (
+            "\n\nDo not run project-wide test suites, builds, linters, or "
+            "formatters. Use supplied verification evidence; any necessary "
+            "reproduction must be limited to the changed boundary.\n"
             "\n\n## Isolated reviewer process contract\n\n"
             "You are one read-only reviewer subprocess. Do not invoke "
             "`agent-flow status`, do not continue the workflow, and do not "
@@ -967,18 +958,6 @@ def _required_reviewer_failures(
     results: Sequence[SubprocessResult],
 ) -> list[str]:
     by_id = {result.job_id: result for result in results}
-    if not distribution.accept_any_provider:
-        failures: list[str] = []
-        for job_id in sorted(distribution.required_job_ids):
-            result = by_id.get(job_id)
-            if result is None:
-                failures.append(f"{job_id}: missing result")
-            else:
-                reason = reviewer_result_error(result)
-                if reason is not None:
-                    failures.append(f"{job_id}: {reason}")
-        return failures
-
     expected_by_provider = distribution.expected_job_ids_by_provider()
     successful_job_ids = {
         result.job_id
@@ -1052,20 +1031,8 @@ def _multi_reviewer_block(
             elif reviewer_result_error(result) is None:
                 status = "pass"
             else:
-                status = (
-                    "unavailable"
-                    if distribution.accept_any_provider
-                    else "optional-failed"
-                )
-            source = (
-                "candidate"
-                if distribution.accept_any_provider
-                else (
-                    "required"
-                    if job_id in distribution.required_job_ids
-                    else "optional"
-                )
-            )
+                status = "unavailable"
+            source = "candidate"
             # skip된 angle의 artifact는 이번 시도가 쓴 것이 아니다. 경로를 그대로
             # 나열하면 host가 수정 전 코드에 대한 낡은 리뷰를 현재 결과로 집계한다.
             if result is None:

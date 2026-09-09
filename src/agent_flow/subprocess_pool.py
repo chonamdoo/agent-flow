@@ -19,7 +19,7 @@ import asyncio
 import os
 import signal
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -236,6 +236,8 @@ def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
 
 async def run_parallel_async(
     jobs: Sequence[SubprocessJob], *, max_concurrency: int | None = None,
+    should_start: Callable[[SubprocessJob], bool] | None = None,
+    on_result: Callable[[SubprocessResult], None] | None = None,
 ) -> list[SubprocessResult]:
     """Run all jobs concurrently. Returns results in the same order as jobs.
 
@@ -244,15 +246,29 @@ async def run_parallel_async(
     siblings. `BaseException` (KeyboardInterrupt, asyncio.CancelledError,
     SystemExit) is re-raised — those signal genuine cancellation/shutdown that
     must propagate.
+
+    Admission is checked after acquiring capacity; results are observed before
+    releasing it. Declined jobs are omitted, and admitted results retain job order.
     """
     if not jobs:
         return []
     limit = max_concurrency if max_concurrency and max_concurrency > 0 else max_worker_capacity()
     sem = asyncio.Semaphore(limit)
 
-    async def _bounded(job: SubprocessJob) -> SubprocessResult:
+    async def _bounded(job: SubprocessJob) -> SubprocessResult | None:
         async with sem:
-            return await _run_one(job)
+            if should_start is not None and not should_start(job):
+                return None
+            try:
+                result = await _run_one(job)
+            except Exception as exc:
+                result = SubprocessResult(
+                    job_id=job.job_id,
+                    error=f"unexpected: {type(exc).__name__}: {exc}",
+                )
+            if on_result is not None:
+                on_result(result)
+            return result
 
     tasks = [asyncio.create_task(_bounded(j)) for j in jobs]
     raw = await asyncio.gather(*tasks, return_exceptions=True)
@@ -266,12 +282,17 @@ async def run_parallel_async(
                 job_id=job.job_id,
                 error=f"unexpected: {type(item).__name__}: {item}",
             ))
-        else:
+        elif item is not None:
             out.append(item)
     return out
 
 
-def run_parallel(jobs: Sequence[SubprocessJob]) -> list[SubprocessResult]:
+def run_parallel(
+    jobs: Sequence[SubprocessJob],
+    *,
+    should_start: Callable[[SubprocessJob], bool] | None = None,
+    on_result: Callable[[SubprocessResult], None] | None = None,
+) -> list[SubprocessResult]:
     """Sync wrapper around run_parallel_async. Preferred entry point for
     callers that aren't already inside an event loop.
     """
@@ -286,7 +307,9 @@ def run_parallel(jobs: Sequence[SubprocessJob]) -> list[SubprocessResult]:
             "run_parallel called from inside a running event loop; "
             "use `await run_parallel_async(...)` instead."
         )
-    return asyncio.run(run_parallel_async(jobs))
+    return asyncio.run(run_parallel_async(
+        jobs, should_start=should_start, on_result=on_result,
+    ))
 
 
 # Note: artifact rendering and writing live in `multi_review.py` (the only

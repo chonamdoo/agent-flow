@@ -6,7 +6,7 @@ import hashlib
 from importlib import resources
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -55,6 +55,7 @@ class PhaseWorkflowDefinition:
     phases: tuple[PhaseDefinition, ...]
     source: str
     digest: str
+    completion_disposition: Literal["local-handoff", "integrated-cleanup"] = "integrated-cleanup"
 
     def to_json_dict(self) -> dict[str, Any]:
         # digest를 빼면 export가 `meta.workflow_digest`와 대조할 수 없다. drift
@@ -63,6 +64,7 @@ class PhaseWorkflowDefinition:
             "id": self.id,
             "source": self.source,
             "digest": self.digest,
+            "completion_disposition": self.completion_disposition,
             "phases": [asdict(phase) for phase in self.phases],
         }
 
@@ -359,13 +361,22 @@ def load_phase_workflow_definition(kit_root: Path, name: str) -> PhaseWorkflowDe
     workflow_id = raw.get("id", name)
     if not isinstance(workflow_id, str) or not workflow_id:
         raise ValueError(f"workflow {path}: id must be a non-empty string")
+    completion_disposition = raw.get("completion_disposition", "integrated-cleanup")
+    if completion_disposition not in ("local-handoff", "integrated-cleanup"):
+        raise ValueError(
+            f"workflow {path}: completion_disposition must be local-handoff or integrated-cleanup"
+        )
     phases_raw = raw.get("phases") or []
     if not isinstance(phases_raw, list) or not phases_raw:
         raise ValueError(f"workflow {path}: missing or empty `phases`")
     phases = _normalize_phases(phases_raw, path, workflow_id)
     _validate_routes(phases, path)
     return PhaseWorkflowDefinition(
-        id=workflow_id, phases=tuple(phases), source=str(path), digest=digest
+        id=workflow_id,
+        phases=tuple(phases),
+        source=str(path),
+        digest=digest,
+        completion_disposition=completion_disposition,
     )
 
 

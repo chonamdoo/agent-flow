@@ -57,7 +57,9 @@ For AppShell-owned global error hosts, queue acknowledgement, or root navigation
 React Native runs on React, so it does not have a Hilt-equivalent official DI framework. Use this priority:
 
 1. Prefer explicit props for local dependencies.
-2. Use React `Context` providers for app-level dependencies such as use cases, repositories, API clients, secure storage, permissions, analytics, feature flags, and configuration.
+2. Compose app-level implementations in the dependency provider, but expose typed
+   use-case, repository-interface, or capability ports to presentation. Raw API,
+   storage, and native clients stay behind those ports.
 3. Use an external DI container only when the project already has class-heavy domain/application services or an existing container.
 4. If introducing a TypeScript DI container is justified, prefer the current repo standard. If none exists, `tsyringe` is the default candidate because current npm usage is higher than common alternatives.
 
@@ -69,20 +71,16 @@ Provider rules:
 - keep provider values stable only when identity churn causes real rerender risk
 - do not put screen-local state into app dependency providers
 
-## Package Shape
+## Presentation Boundaries
 
-Feature presentation packages should stay screen-oriented:
-- `features/<feature>/presentation/<screen>/<Screen>.tsx`
-- `features/<feature>/presentation/<screen>/use<Screen>ViewModel.ts`
-- `features/<feature>/presentation/<screen>/model/<Screen>UiState.ts`
-- `features/<feature>/presentation/<screen>/model/<Screen>UiAction.ts`
-- `features/<feature>/presentation/<screen>/model/<Screen>UiEvent.ts`
-- `features/<feature>/presentation/<screen>/model/<Screen>UiModel.ts`
-- `features/<feature>/presentation/<screen>/mapper/*Mapper.ts`
-- `features/<feature>/presentation/<screen>/components/*`
+Keep screen wiring, state ownership, UI values, mapping, and components in the
+project's adopted presentation boundary. Discover actual packages and role
+configuration instead of creating a prescribed tree or one file per concept.
 
-Presentation mappers must convert domain data into presentation models before state reaches React Native components.
-Presentation model types must use the `UiModel` postfix, for example `<Screen>ItemUiModel`.
+Map domain/application values to the representation the UI consumes. Identity
+projection is valid for an already safe immutable shape; no redundant model or
+forwarding mapper is required. Use the project's naming convention: `UiModel`
+describes a role, not a suffix whose absence alone blocks approval.
 
 ## State Holder Rule
 
@@ -99,7 +97,8 @@ State patterns:
 - model `not-ready`, `loading`, `refreshing`, `placeholder`, `empty`, `error`, `success`, `offline`, and `permission-required` states explicitly when they can occur
 - define `UiState` as a discriminated union, normally by `status` or `type`, instead of multiple booleans that can contradict each other
 - do not use fake domain sentinel values as initial UI state
-- keep request ids, abort controllers, pagination cursors, selected ids, and optimistic update state private in the state holder
+- keep request handles and rollback bookkeeping private; expose selection and
+  optimistic results through observable state when the UI renders them
 - preserve cancellation with `AbortController` or the project’s existing request cancellation pattern
 - keep keyboard, scroll, focus, and animation state local unless it drives business work
 
@@ -140,7 +139,8 @@ Split state-holder wiring from rendering:
 - `uiState` has no contradictory booleans or duplicated derived fields
 - `UiAction`, `UiEvent`, and `UiState` roles are explicit for branchy screens
 - domain data is mapped to `UiModel` before rendering
-- `UiModel` postfix is used for presentation models
+- presentation values follow adopted naming conventions; suffix or file count
+  alone is not a failed state or architecture contract
 - state-holder hook owns async orchestration and exposes callbacks
 - components stay render-focused and receive plain props
 - reducer logic, when present, is pure and side-effect free
@@ -166,7 +166,9 @@ Apply these React Native-specific decisions:
 - `presentation-state-based-development`: use `applied` when presentation code was created or changed under this contract. Use `n/a` for review-only work or when no presentation code changed.
 - `presentation-state-review`: use `pass` when every applicable checklist item passes, `fail` when any applicable item fails, and `n/a` only when no React Native presentation code is in scope.
 - `ui-state-modeling`: use `explicit` when the screen's durable states are modeled explicitly. Use `n/a` only when no screen state is in scope.
-- `presentation-mapping-boundary`: use `domain-to-uimodel` when domain/application data crosses into presentation through a mapper. Use `n/a` only when no such data crosses the boundary.
+- `presentation-mapping-boundary`: use `domain-to-uimodel` for domain/application
+  values projected to the UI contract, including a safe identity projection;
+  no separate mapper file is required. Use `n/a` only when no such boundary exists.
 - `di-boundary`: use `context-provider`, `tsyringe`, `direct`, or `existing` for the verified React Native composition path. Use `n/a` only when the change neither creates nor reviews dependency wiring.
 
 A `fail` result is actionable: record the failed criterion and return to the workflow's fix path before approval.

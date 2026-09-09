@@ -6,6 +6,7 @@ Vercel이 비교한 네 구성과 같은 축이다. 차이는 **전달 방식 �
 """
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 KIT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,10 +36,7 @@ def _install_skills(project: Path) -> list[str]:
     names = []
     for name in sorted(p.name for p in (KIT_ROOT / "skills").iterdir() if (p / "SKILL.md").is_file()):
         target = root / name
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "SKILL.md").write_text(
-            (KIT_ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8"
-        )
+        shutil.copytree(KIT_ROOT / "skills" / name, target, dirs_exist_ok=True)
         names.append(name)
     return names
 

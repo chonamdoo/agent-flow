@@ -71,7 +71,7 @@ skills:
       # 배선 자리처럼 경로로 드러나지 않는 계층 검토를 지목하는 유일한 통로다.
       # 주석이 `--concern`을 가리키므로 id가 여기 선언돼 있어야 오타로 거부되지 않는다.
       concerns: [architecture]
-      path_globs: ["**/Sources/Core/Domain/**", "**/Sources/Core/Data/**", "**/Sources/Features/**", "**/Sources/Core/UI/**", "**/Sources/Core/DesignSystem/**", "**/Sources/Core/Resources/**", "**/Sources/Core/Network/**", "**/Sources/Core/Platform/**", "**/Sources/Core/Permission/**", "**/Sources/Core/Navigation/API/**", "**/Sources/Core/Navigation/Impl/**"]
+      path_globs: ["**/Sources/Core/Domain/**", "**/Sources/Core/Data/**", "**/Sources/Core/Presentation/**", "**/Sources/Features/**", "**/Sources/Core/UI/**", "**/Sources/Core/DesignSystem/**", "**/Sources/Core/Resources/**", "**/Sources/Core/Network/**", "**/Sources/Core/Platform/**", "**/Sources/Core/Permission/**", "**/Sources/Core/Navigation/API/**", "**/Sources/Core/Navigation/Impl/**"]
   # iOS 생태계에는 Apple 공식 앱개발 skill이 없고, 커뮤니티가 1 repo = 1 skill로
   # 파편화되어 있다(twostraws/Dimillian/AvdLee/...). 이름을 적으면 repo 하나가 사라질
   # 때마다 낡으므로, 스택 어휘만 두고 설치된 SKILL.md의 name + description에 맞춘다.
@@ -142,6 +142,9 @@ architecture:
       paths: ["Sources/Features/<feature>/Presentation"]
       pair_with: feature-api
       forbidden: ["ApiClient", "DataSource", "DTO", "Entity"]
+    - id: shared-presentation-contract
+      paths: ["Sources/Core/Presentation"]
+      forbidden: ["ApiClient", "DataSource", "DTO", "Entity", "RepositoryImpl", "SwiftUI", "UIKit"]
     - id: core-ui
       paths: ["Sources/Core/UI", "Sources/Core/DesignSystem", "Sources/Core/Resources"]
     - id: core-network

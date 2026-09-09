@@ -7,6 +7,8 @@ pre-push 게이트까지 돌린다(issue #130).
 from __future__ import annotations
 
 import copy
+import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +33,7 @@ from agent_flow.core.profiles import (  # noqa: E402
     ProfileGate,
     ProjectProfile,
     _gate_from_payload,
+    detect_profile,
     load_profile,
     load_profile_payload,
 )
@@ -1192,3 +1195,206 @@ def test_the_gate_order_survives_an_interpreter_path_that_says_build():
         "lint",
         "test",
     ]
+
+
+_DETECTION_CASES = json.loads((KIT_ROOT / "tests/fixtures/profile-detection.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("case", _DETECTION_CASES, ids=lambda case: case["id"])
+def test_framework_detection_matches_shared_javascript_fixtures(tmp_path: Path, case: dict) -> None:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for cross-language detection")
+    for relative, content in case["files"].items():
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    module = (KIT_ROOT / "lib/profile-detection.mjs").as_uri()
+    script = f"import {{detectProfile}} from {json.dumps(module)}; console.log(detectProfile(process.argv[1]));"
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", script, str(tmp_path)],
+        cwd=tmp_path, text=True, capture_output=True, check=False,
+    )
+    if "error" in case:
+        with pytest.raises(ValueError, match=case["error"]) as caught:
+            detect_profile(tmp_path)
+        assert result.returncode != 0
+        assert case["error"] in result.stderr
+        if "error_path" in case:
+            source = str(tmp_path / case["error_path"])
+            assert source in str(caught.value)
+            assert source in result.stderr
+    else:
+        assert detect_profile(tmp_path) == case["profile"]
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == case["profile"]
+        selected = load_profile_payload(case["profile"], tmp_path)
+        assert ("react-hook-form-zod" in selected.get("skills", {}).get("install", [])) == case.get("react_web", False)
+
+
+@pytest.mark.parametrize("profile_id", ["spring", "ktor"])
+def test_server_build_tool_and_local_gate_precedence(tmp_path: Path, profile_id: str) -> None:
+    from agent_flow.core.profile_resolution import load_single_profile
+
+    (tmp_path / "pom.xml").write_text("<project/>", encoding="utf-8")
+    (tmp_path / "mvnw").touch()
+    _, profile = load_single_profile(
+        KIT_ROOT, profile_id, strict_missing=True, explicit_fallback=False, source="fixture", project_root=tmp_path,
+    )
+    assert next(gate for gate in profile["gates"] if gate["id"] == "test")["command"] == ["./mvnw", "verify"]
+    (tmp_path / "build.gradle.kts").touch()
+    with pytest.raises(ValueError, match="ambiguous build tools"):
+        load_profile_payload(profile_id, tmp_path)
+    overrides = tmp_path / ".agent-flow/profiles"
+    overrides.mkdir(parents=True)
+    (overrides / f"{profile_id}.local.yaml").write_text(
+        "gates:\n  - id: test\n    command: [./checks, server]\n    required: true\n",
+        encoding="utf-8",
+    )
+    assert load_profile_payload(profile_id, tmp_path)["gates"][0]["command"] == ["./checks", "server"]
+    _, overridden = load_single_profile(
+        KIT_ROOT, profile_id, strict_missing=True, explicit_fallback=False, source="fixture", project_root=tmp_path,
+    )
+    assert overridden["gates"][0]["command"] == ["./checks", "server"]
+
+
+def test_project_commit_convention_override_is_validated(tmp_path: Path) -> None:
+    override = tmp_path / ".agent-flow/profiles/nextjs.local.yaml"
+    override.parent.mkdir(parents=True)
+    override.write_text("commit_convention:\n  co_author: include\n", encoding="utf-8")
+    assert load_profile_payload("nextjs", tmp_path)["commit_convention"] == {
+        "style": "conventional", "co_author": "include",
+    }
+    override.write_text("commit_convention:\n  co_author: [include]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="commit_convention.co_author"):
+        load_profile_payload("nextjs", tmp_path)
+
+
+@pytest.mark.parametrize("profile_id", ["spring", "ktor"])
+@pytest.mark.parametrize("wrapper", [False, True])
+def test_backend_gradle_gates_use_an_existing_wrapper_only(
+    tmp_path: Path, profile_id: str, wrapper: bool,
+) -> None:
+    (tmp_path / "build.gradle.kts").write_text("plugins { kotlin(\"jvm\") }\n", encoding="utf-8")
+    if wrapper:
+        (tmp_path / "gradlew").touch()
+
+    payload = load_profile_payload(profile_id, tmp_path)
+
+    gates = {gate["id"]: gate["command"] for gate in payload["gates"]}
+    executable = "./gradlew" if wrapper else "gradle"
+    assert gates["build"] == [executable, "build", "-x", "test"]
+    assert gates["test"] == [executable, "test"]
+
+
+@pytest.mark.parametrize(
+    "filename,content,expected",
+    [
+        ("pubspec.yaml", b"# \x96\n  sdk: flutter\n", "flutter"),
+        ("build.gradle.kts", b'// \x96\nplugins { id("io.ktor.plugin") }\n', "ktor"),
+        ("pom.xml", b"<!-- \x96 --><project><groupId>org.springframework.boot</groupId></project>", "spring"),
+    ],
+)
+def test_non_utf8_build_files_match_javascript_detection(
+    tmp_path: Path, filename: str, content: bytes, expected: str,
+) -> None:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for cross-language detection")
+    (tmp_path / filename).write_bytes(content)
+    module = (KIT_ROOT / "lib/profile-detection.mjs").as_uri()
+    script = f"import {{detectProfile}} from {json.dumps(module)}; console.log(detectProfile(process.argv[1]));"
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", script, str(tmp_path)],
+        cwd=tmp_path, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert detect_profile(tmp_path) == result.stdout.strip() == expected
+
+
+def _write_project_profile(root: Path, **declarations: object) -> Path:
+    source = root / ".agent-flow/profiles/probe.yaml"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(yaml.safe_dump({"id": "probe", **declarations}), encoding="utf-8")
+    return source
+
+
+@pytest.mark.parametrize("capabilities", ["react-web", [None], {"react-web": True}])
+def test_project_capabilities_reject_invalid_declarations(tmp_path: Path, capabilities: object) -> None:
+    source = _write_project_profile(tmp_path, capabilities=capabilities)
+    with pytest.raises(ValueError) as caught:
+        load_profile_payload("probe", tmp_path)
+    assert str(source) in str(caught.value)
+    assert "capabilit" in str(caught.value)
+
+
+def test_missing_capability_reports_declaration_and_resource(tmp_path: Path) -> None:
+    source = _write_project_profile(tmp_path, capabilities=["missing-probe"])
+    with pytest.raises(ValueError) as caught:
+        load_profile_payload("probe", tmp_path)
+    assert str(source) in str(caught.value)
+    assert "_missing-probe.yaml" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "body,field",
+    [
+        ("", "mapping"),
+        ("- skill\n", "mapping"),
+        ("requires_dependencies: [{}]\n", "requires_dependencies"),
+        ("excludes_dependencies: react\n", "excludes_dependencies"),
+        ("skills: [react]\n", "skills"),
+        ("skills:\n  install: [{}]\n", "skills.install"),
+        ("skills:\n  required_review: false\n", "skills.required_review"),
+        ("review_angles: false\n", "review_angles"),
+        ("skills: [\n", "YAML"),
+    ],
+)
+def test_malformed_capability_reports_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, field: str,
+) -> None:
+    from agent_flow.core import profiles
+
+    source = _write_project_profile(tmp_path, capabilities=["probe"])
+    resource_root = tmp_path / "runtime"
+    capability = resource_root / "profiles/_probe.yaml"
+    capability.parent.mkdir(parents=True)
+    capability.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(profiles.resources, "files", lambda package: resource_root)
+    with pytest.raises(ValueError) as caught:
+        load_profile_payload("probe", tmp_path)
+    message = str(caught.value)
+    assert str(source) in message
+    assert str(capability) in message
+    assert field in message
+
+
+@pytest.mark.parametrize(
+    "variants,field",
+    [
+        ({"tool": "gradle"}, "gate_variants"),
+        ([None], "gate_variants"),
+        ([{"gates": []}], "tool"),
+        ([{"tool": ["gradle"], "gates": []}], "tool"),
+        ([{"tool": "gradle"}], "gates"),
+        ([{"tool": "gradle", "requires_files": [None], "gates": []}], "requires_files"),
+        ([{"tool": "gradle", "any_files": "pom.xml", "gates": []}], "any_files"),
+        ([{"tool": "gradle", "gates": None}], "gates"),
+        ([{"tool": "gradle", "gates": [{"id": "build"}]}], "command"),
+    ],
+)
+def test_malformed_gate_variants_report_context(
+    tmp_path: Path, variants: object, field: str,
+) -> None:
+    source = _write_project_profile(tmp_path, gate_variants=variants)
+    with pytest.raises(ValueError) as caught:
+        load_profile_payload("probe", tmp_path)
+    assert str(source) in str(caught.value)
+    assert field in str(caught.value)
+
+
+def test_explicit_gates_override_unused_malformed_variants(tmp_path: Path) -> None:
+    _write_project_profile(tmp_path, gate_variants=[{"tool": "gradle"}])
+    _write_override(tmp_path, "probe", "gates:\n  - id: build\n    command: [./checks, custom]\n")
+    commands = _profile_gate_commands(["probe"], root=tmp_path)
+    assert [command.command for command in commands] == [("./checks", "custom")]

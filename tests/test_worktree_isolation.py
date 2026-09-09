@@ -1309,13 +1309,10 @@ def test_tripwire_detects_absolute_path_write_to_leader(tmp_path):
 
 
 def test_tripwire_detects_parent_traversal_write(tmp_path):
-    """불변: worktree에서 `../..`로 올라가 leader에 쓰면 잡힌다."""
     status, before = _isolated(tmp_path, "trav")
-    escaped = status.path / ".." / ".." / ".." / "escaped.txt"
-    escaped.resolve().parent.mkdir(parents=True, exist_ok=True)
-    escaped.resolve().write_text("escaped\n", encoding="utf-8")
-    if real_path(escaped.resolve().parent) != real_path(tmp_path):
-        pytest.skip("worktree layout does not place the leader three levels up")
+    relative = os.path.relpath(tmp_path / "escaped.txt", start=status.path)
+    escaped = status.path / relative
+    escaped.write_text("escaped\n", encoding="utf-8")
     with pytest.raises(W_ISO.WorktreeIsolationError):
         W_ISO.assert_leader_unchanged(tmp_path, before)
 
