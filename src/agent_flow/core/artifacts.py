@@ -20,10 +20,10 @@ GATE_RESULTS_MAX_BYTES = 32 * 1024 * 1024
 
 
 def init_project(root: Path) -> None:
-    # tripwire가 비교에서 빼는 목록과 **같은 소스**여야 한다. 갈라지면 정상
-    # 명령이 leader 오염으로 오탐된다.
+    # Legacy worktrees remain excluded by the tripwire, but are created only on demand.
     for name in AGENT_FLOW_STATE_DIRS:
-        (root / ".agent-flow" / name).mkdir(parents=True, exist_ok=True)
+        if name != "worktrees":
+            (root / ".agent-flow" / name).mkdir(parents=True, exist_ok=True)
 
 
 def write_gate_results(

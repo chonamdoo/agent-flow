@@ -2181,10 +2181,7 @@ def test_tripwire_detects_bytecode_written_outside_runtime(tmp_path):
 
 
 def test_tripwire_ignores_every_declared_state_dir(tmp_path):
-    """불변: `AGENT_FLOW_STATE_DIRS`는 `artifacts.init_project`와 같은 소스다.
-
-    갈라지면 정상 명령(handoff, team, memory 쓰기)이 leader 오염으로 오탐된다.
-    """
+    """Legacy state stays excluded even when initialization no longer creates it."""
     status, before = _isolated(tmp_path, "statedirs")
     for name in W_ISO.AGENT_FLOW_STATE_DIRS:
         target = tmp_path / ".agent-flow" / name / "written.md"
@@ -2206,7 +2203,8 @@ def test_state_dirs_match_artifacts_init(tmp_path):
 
     artifacts.init_project(tmp_path)
     created = {p.name for p in (tmp_path / ".agent-flow").iterdir() if p.is_dir()}
-    assert expected <= created
+    assert expected - {"worktrees"} <= created
+    assert "worktrees" not in created
 
 
 def test_tripwire_sees_inside_gitignored_agent_flow(tmp_path):
