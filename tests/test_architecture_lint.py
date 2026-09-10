@@ -681,6 +681,42 @@ def test_skip_balanced_leaves_the_buffer_untouched_when_it_fails():
 
 
 
+def test_nested_semantic_roles_choose_deepest_path_independent_of_rule_order():
+    from agent_flow.core.architecture_lint import match_role
+
+    roles = [
+        {"id": "api", "paths": ["**/api"]},
+        {"id": "domain", "paths": ["**/domain"]},
+    ]
+    for ordered in (roles, list(reversed(roles))):
+        for path, expected in (
+            ("services/api/src/domain/order.py", "domain"),
+            ("services/domain/src/api/routes.py", "api"),
+            ("services/api/src/domain/api/routes.py", "api"),
+        ):
+            match = match_role(path, ordered)
+            assert match is not None
+            assert match.role["id"] == expected
+
+
+def test_semantic_depth_preserves_more_specific_literal_and_placeholder_rules():
+    from agent_flow.core.architecture_lint import match_role
+
+    roles = [
+        {"id": "domain", "paths": ["**/domain"]},
+        {"id": "context-api", "paths": ["services/<context>/api"]},
+        {"id": "billing-api", "paths": ["services/billing/api"]},
+    ]
+    for ordered in (roles, list(reversed(roles))):
+        for path, expected in (
+            ("services/billing/api/domain/order.py", "billing-api"),
+            ("services/orders/api/domain/order.py", "context-api"),
+        ):
+            match = match_role(path, ordered)
+            assert match is not None
+            assert match.role["id"] == expected
+
+
 def _source(path: Path, text: str) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -908,3 +944,81 @@ def test_every_activation_root_has_a_role_pattern_that_can_prove_adoption():
             )
             checked += 1
     assert checked > 0
+
+
+@pytest.mark.parametrize("profile_id", ["spring", "ktor"])
+@pytest.mark.parametrize("package_path", ["", "org/example/billing/"])
+def test_server_role_checks_real_package_roots_and_framework_boundary(
+    tmp_path: Path, profile_id: str, package_path: str,
+) -> None:
+    from agent_flow.core.architecture_lint import lint_project
+
+    relative = f"src/main/kotlin/{package_path}application/Charge.kt"
+    source = tmp_path / relative
+    source.parent.mkdir(parents=True)
+    source.write_text("class Charge\n", encoding="utf-8")
+    assert lint_project(tmp_path, profile_id, files=[relative]) == []
+    source.write_text("import org.springframework.transaction.annotation.Transactional\nclass Charge\n", encoding="utf-8")
+    findings = lint_project(tmp_path, profile_id, files=[relative])
+    assert any("application contains forbidden token org.springframework" in finding.message for finding in findings)
+
+
+@pytest.mark.parametrize(
+    "profile_id,relative,valid,invalid",
+    [
+        ("android", "core/presentation/src/main/kotlin/demo/CommonError.kt", "package demo.core.presentation\ninterface CommonErrorNotifier\n", "package demo.core.presentation\nimport androidx.lifecycle.ViewModel\n"),
+        ("nextjs", "src/core/presentation/CommonError.ts", "export interface CommonErrorNotifier {}\n", "export type Notifier = ApiClient;\n"),
+        ("react-native", "src/core/presentation/CommonError.ts", "export interface CommonErrorNotifier {}\n", "export type Notifier = ApiClient;\n"),
+        ("ios", "Sources/Core/Presentation/CommonError.swift", "protocol CommonErrorNotifier {}\n", "import SwiftUI\nprotocol CommonErrorNotifier {}\n"),
+        ("flutter", "lib/core/presentation/common_error.dart", "abstract interface class CommonErrorNotifier {}\n", "import 'package:flutter/widgets.dart';\n"),
+    ],
+)
+def test_shared_presentation_contract_is_mapped_without_allowing_ui_or_data(
+    tmp_path: Path, profile_id: str, relative: str, valid: str, invalid: str,
+) -> None:
+    from agent_flow.core.architecture_lint import lint_project
+
+    source = tmp_path / relative
+    source.parent.mkdir(parents=True)
+    source.write_text(valid, encoding="utf-8")
+    assert lint_project(tmp_path, profile_id, files=[relative]) == []
+    source.write_text(invalid, encoding="utf-8")
+    findings = lint_project(tmp_path, profile_id, files=[relative])
+    assert any("shared-presentation-contract contains forbidden token" in finding.message for finding in findings)
+
+
+@pytest.mark.parametrize("profile_id", ["spring", "ktor"])
+@pytest.mark.parametrize(
+    "repository",
+    [
+        "org.springframework.data.jpa.repository.JpaRepository",
+        "org.springframework.data.repository.CrudRepository",
+    ],
+)
+def test_server_inbound_rejects_framework_repository_but_allows_ports(
+    tmp_path: Path, profile_id: str, repository: str,
+) -> None:
+    from agent_flow.core.architecture_lint import lint_project
+
+    domain = tmp_path / "src/main/kotlin/org/example/domain/BillingRepository.kt"
+    domain.parent.mkdir(parents=True)
+    domain.write_text("interface BillingRepository\n", encoding="utf-8")
+    relative = "src/main/kotlin/org/example/api/BillingRoute.kt"
+    source = tmp_path / relative
+    source.parent.mkdir(parents=True)
+    framework = (
+        "org.springframework.web.bind.annotation.RestController"
+        if profile_id == "spring" else "io.ktor.server.routing.Route"
+    )
+    valid = (
+        f"import {framework}\n"
+        "import org.example.domain.BillingRepository\n"
+        "import org.springframework.data.domain.Pageable\n"
+        "class BillingRoute\n"
+    )
+    source.write_text(valid, encoding="utf-8")
+    assert lint_project(tmp_path, profile_id, files=[relative]) == []
+
+    source.write_text(f"import {repository}\n" + valid, encoding="utf-8")
+    findings = lint_project(tmp_path, profile_id, files=[relative])
+    assert {finding.path for finding in findings} == {relative}

@@ -555,7 +555,7 @@ def _profile_skill_source_roots(
     profile: dict | None, *, env: dict[str, str] | None = None
 ) -> list[SkillRoot]:
     # 지연 import: skill_sync가 core.commands/security를 끌어와 import 그래프를 넓힌다.
-    from agent_flow.core.skill_sync import cache_root, parse_skill_sources
+    from agent_flow.core.skill_sync import cached_source_checkout, parse_skill_sources
 
     roots: list[SkillRoot] = []
     for source in parse_skill_sources(profile):
@@ -571,7 +571,9 @@ def _profile_skill_source_roots(
             for template in source.roots
         )
         if source.kind == "fetch" and source.layout:
-            checkout = cache_root(env) / source.id / (source.ref or "HEAD")
+            checkout = cached_source_checkout(source, env=env)
+            if checkout is None:
+                continue
             roots.append(
                 SkillRoot(
                     source="fetched",

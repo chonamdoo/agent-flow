@@ -116,7 +116,7 @@ def _write_stub_review_evidence(run_dir: Path, phase_id: str) -> None:
                 effort="stub-success",
                 status="ok",
                 verdict="approve",
-                required=True,
+                required=False,
                 artifact=artifact_name,
                 artifact_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
                 prompt_digest=hashlib.sha256(
@@ -145,8 +145,6 @@ def _write_stub_review_evidence(run_dir: Path, phase_id: str) -> None:
         phase_entered_at=binding.phase_entered_at,
         serialized_results=serialized,
         outcomes=outcomes,
-        blocking_job_ids=job_ids,
-        accept_any_provider=False,
         expected_job_ids_by_provider={"generic": job_ids},
     )
     bind_review_evidence(
@@ -179,18 +177,21 @@ def test_full_cycle(tmp_path: Path):
     run_dir = runs[0]
     assert (run_dir / "active").exists()
 
-    expected_pre_pause = ["design", "slice-plan"]
-    for a in expected_pre_pause:
-        assert (run_dir / f"{a}.md").exists(), f"missing pre-pause: {a}"
-    assert "pause" in r1.stdout.lower()
+    from agent_flow.artifact import pending_phase_approval, read_meta
+
+    assert pending_phase_approval(run_dir) is not None
 
     r_status = _run_cli(["status", "--worktree", plan.name], project)
     assert r_status.returncode == 0
     assert "test feature" in r_status.stdout
 
-    r2 = _run_cli(["continue", "--worktree", plan.name], project)
+    approval = pending_phase_approval(run_dir)
+    assert approval is not None
+    r2 = _run_cli(
+        ["continue", "--worktree", plan.name, "--approve", approval["token"]], project,
+    )
     assert r2.returncode == 0, r2.stderr
-    assert "current_phase: final-review" in r2.stdout
+    assert read_meta(run_dir)["current_phase"] == "final-review"
     _write_stub_review_evidence(run_dir, "final-review")
     r3 = _run_cli(["continue", "--worktree", plan.name], project)
     assert r3.returncode == 0, r3.stderr
@@ -225,6 +226,11 @@ def test_runner_injects_installed_profile_union_into_prompt(tmp_path: Path):
     kit.mkdir()
     (kit / "kit.json").write_text(
         json.dumps({"profile": "android", "profiles": ["android", "react-native"]}),
+        encoding="utf-8",
+    )
+    (kit / "profiles").mkdir()
+    (kit / "profiles" / "react-native.local.yaml").write_text(
+        "pr:\n  merge_strategy: merge\ncommit_convention:\n  style: tagged\n",
         encoding="utf-8",
     )
 
@@ -384,6 +390,8 @@ def test_abort_closes_a_run_whose_checkout_was_deleted(tmp_path: Path):
 
 
 def test_worktree_run_continue_status_abort(tmp_path: Path):
+    from agent_flow.artifact import pending_phase_approval
+
     project = tmp_path / "parallel"
     project.mkdir()
     _init_git_project(project)
@@ -407,7 +415,11 @@ def test_worktree_run_continue_status_abort(tmp_path: Path):
     assert r_status.returncode == 0
     assert "worktree task" in r_status.stdout
 
-    r_continue = _run_cli(["continue", "--worktree", "long-press"], project)
+    approval = pending_phase_approval(run_dir)
+    assert approval is not None
+    r_continue = _run_cli(
+        ["continue", "--worktree", "long-press", "--approve", approval["token"]], project,
+    )
     assert r_continue.returncode == 0, r_continue.stderr
     assert "current_phase: final-review" in r_continue.stdout
     _write_stub_review_evidence(run_dir, "final-review")
@@ -3270,6 +3282,11 @@ def test_generic_stub_success_source_phase_emits_task_backed_spec_item(
 def test_backward_route_invalidates_target_artifact(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.runner import Phase, Runner
+    from agent_flow.core.command_evidence import test_code_baseline
+
+    project = tmp_path / "project"
+    project.mkdir()
+    _init_git_project(project)
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -3280,12 +3297,17 @@ def test_backward_route_invalidates_target_artifact(tmp_path: Path):
 
     runner = Runner.__new__(Runner)
     runner.run_dir = run_dir
-    runner.config_root = tmp_path
+    runner.project_root = project
+    runner.config_root = project
     runner.phases = [
         Phase(id="pr-watch", description="", routes={"comments": "pr-comment-fix"}, artifact="artifacts/pr-watch.md"),
         Phase(id="pr-comment-fix", description="", routes={"default": "pr-watch"}, artifact="artifacts/pr-comment-fix.md"),
     ]
-    write_meta(run_dir, {"phase_index": 1, "current_phase": "pr-comment-fix"})
+    write_meta(run_dir, {
+        "phase_index": 1,
+        "current_phase": "pr-comment-fix",
+        "pr_fix_baseline": test_code_baseline(project),
+    })
 
     transition = runner._plan_transition(1, runner.phases[1])
     assert (transition.to_index, transition.blocked) == (0, False)
@@ -4876,3 +4898,233 @@ def test_the_angle_gate_and_the_writer_gate_agree_on_a_routed_but_missing_skill(
 
     assert "clean-architecture" in {job.angle_id for job in jobs}
     assert "clean-architecture: applied" in writer_missing
+
+
+@pytest.mark.parametrize("profile_ids", [("backend", "frontend"), ("frontend", "backend")])
+def test_profile_union_preserves_repository_delivery_policy(tmp_path, profile_ids):
+    from agent_flow.core.profile_resolution import load_profile_union
+
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    for profile_id in profile_ids:
+        (profiles / f"{profile_id}.yaml").write_text(
+            json.dumps({
+                "id": profile_id,
+                "branching": {"strategy": "trunk", "base": "main", "integration": "main"},
+                "pr": {"target_branch": "main", "merge_strategy": "merge"},
+                "commit_convention": {"style": "conventional", "co_author": "skip"},
+            }),
+            encoding="utf-8",
+        )
+    _, profile = load_profile_union(tmp_path, list(profile_ids), explicit_fallback=False)
+    assert profile["branching"]["integration"] == profile["pr"]["target_branch"] == "main"
+    assert profile["pr"]["merge_strategy"] == "merge"
+    assert profile["commit_convention"]["style"] == "conventional"
+
+    (profiles / "frontend.yaml").write_text(
+        json.dumps({"id": "frontend", "pr": {"target_branch": "release"}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"conflicting repository policy pr.target_branch"):
+        load_profile_union(tmp_path, list(profile_ids), explicit_fallback=False)
+
+
+@pytest.mark.parametrize("profile_ids", [("optional", "required"), ("required", "optional")])
+def test_profile_gate_union_preserves_required_failure(tmp_path, profile_ids, monkeypatch):
+    from agent_flow.core.gate_plan import profile_gate_commands
+    from agent_flow.core.gates import GateResult
+    from agent_flow.core.profiles import ProfileGate, ProjectProfile
+    from agent_flow.core.artifacts import write_gate_results
+    from agent_flow.core.route_verdicts import gates_route_key
+
+    profiles = {
+        name: ProjectProfile(
+            name,
+            (ProfileGate("test", ("python", "-m", "pytest"), required=name == "required"),),
+            {},
+            None,
+        )
+        for name in profile_ids
+    }
+    monkeypatch.setattr("agent_flow.core.gate_plan.load_profile", lambda name, root: profiles[name])
+    commands = profile_gate_commands(list(profile_ids), root=tmp_path, phase="all")
+    assert len(commands) == 1
+    command = commands[0]
+    results = [
+        GateResult(command.gate_id, command.command, False, 1, "", "regression failed", command.required)
+    ]
+    artifact = write_gate_results(run_dir=tmp_path, results=results, phase="all")
+    assert gates_route_key(artifact.read_text(encoding="utf-8")) == "request-changes"
+
+
+@pytest.mark.parametrize("field,values", [
+    ("timeout_s", (30, 60)),
+    ("ci_check", ("server-test", "web-test")),
+])
+def test_profile_gate_union_rejects_conflicting_execution_limits(tmp_path, monkeypatch, field, values):
+    from agent_flow.core.gate_plan import profile_gate_commands
+    from agent_flow.core.profiles import ProfileGate, ProjectProfile
+
+    execution = "ci" if field == "ci_check" else "local"
+    profiles = {
+        name: ProjectProfile(
+            name,
+            (ProfileGate("test", ("python", "-m", "pytest"), execution=execution, **{field: value}),),
+            {},
+            None,
+        )
+        for name, value in zip(("first", "second"), values)
+    }
+    monkeypatch.setattr("agent_flow.core.gate_plan.load_profile", lambda name, root: profiles[name])
+    for profile_ids in (["first", "second"], ["second", "first"]):
+        with pytest.raises(ValueError, match=f"conflicting gate {field}"):
+            profile_gate_commands(profile_ids, root=tmp_path, phase="all", execution=execution)
+
+
+@pytest.mark.parametrize("mutation", ["tracked", "untracked", "committed"])
+@pytest.mark.parametrize("fix_phase", ["pr-comment-fix", "pr-ci-fix"])
+def test_pr_fix_refreshes_review_for_code_changes_not_discussion(tmp_path, mutation, fix_phase):
+    from agent_flow.core.command_evidence import test_code_baseline
+    from agent_flow.artifact import read_meta
+    from agent_flow.runner import Phase, Runner
+
+    project = tmp_path / "project"
+    project.mkdir()
+    _init_git_project(project)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    phases = [
+        Phase(
+            id="multi-review", description="", multi_review=True,
+            routes={"approve": "architecture-review"},
+        ),
+        Phase(
+            id="architecture-review", description="", multi_review=True,
+            routes={"approve": "gates"},
+        ),
+        Phase(id="gates", description="", routes={"green": "pr-watch"}),
+        Phase(id="pr-watch", description=""),
+        Phase(id=fix_phase, description="", routes={"default": "pr-watch"}),
+    ]
+    runner = Runner.__new__(Runner)
+    runner.project_root = project
+    runner.run_dir = run_dir
+    runner.phases = phases
+    baseline = test_code_baseline(project)
+    write_meta(run_dir, {
+        "phase_index": 4, "current_phase": fix_phase, "phase_entered_at": "attempt",
+        "pr_fix_baseline": baseline,
+    })
+    artifact = run_dir / f"{fix_phase}.md"
+    artifact.write_text("discussion answered\n", encoding="utf-8")
+    assert runner._next_index(4, phases[4]).to_index == 3
+    path = project / ("new.py" if mutation == "untracked" else "README.md")
+    path.write_text("changed code\n", encoding="utf-8")
+    if mutation == "committed":
+        for args in (("add", "."), ("commit", "-m", "fix")):
+            subprocess.run(("git", *args), cwd=project, check=True, capture_output=True)
+    for name in ("multi-review", "architecture-review", "gates"):
+        (run_dir / f"{name}.md").write_text("old approval\n", encoding="utf-8")
+    transition = runner._plan_transition(4, phases[4])
+    assert transition.to_phase == "multi-review"
+    runner._commit_transition(transition)
+    assert read_meta(run_dir)["current_phase"] == "multi-review"
+    for name in ("multi-review", "architecture-review", "gates"):
+        assert not (run_dir / f"{name}.md").exists()
+
+
+def test_pause_for_approval_preserves_racing_accepted_identity(tmp_path, monkeypatch):
+    from agent_flow import artifact, runner as runner_module
+    from agent_flow.core.worktree_isolation import FileLeaseUnavailable
+    from agent_flow.runner import Phase, Runner
+
+    phase = Phase(id="implement", description="", pause_after=True)
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "implement.md").write_text("ready for approval\n", encoding="utf-8")
+    write_meta(run_dir, {
+        "run_id": "r1", "current_phase": phase.id, "phase_entered_at": "attempt",
+        "phase_approval_request": {
+            "phase_id": phase.id, "phase_entered_at": "attempt", "artifact": "implement.md",
+        },
+    })
+    pending = artifact.pending_phase_approval(run_dir)
+    assert pending is not None
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.next_command = "agent-flow continue"
+    monkeypatch.setattr(runner, "_print_structured_status", lambda **kwargs: None)
+    accepted = None
+    attempted = False
+
+    def read_while_approval_arrives(path):
+        nonlocal accepted, attempted
+        meta = artifact.read_meta(path)
+        if not attempted:
+            attempted = True
+            try:
+                accepted = artifact.approve_phase_artifact(run_dir, token=pending["token"])
+            except FileLeaseUnavailable:
+                pass
+        return meta
+
+    monkeypatch.setattr(runner_module, "read_meta", read_while_approval_arrives)
+    runner._pause_for_approval(phase)
+    if accepted is None:
+        accepted = artifact.approve_phase_artifact(run_dir, token=pending["token"])
+    assert artifact.read_meta(run_dir).get("phase_approval") == accepted
+    assert runner._pause_for_approval(phase) is False
+    assert artifact.pending_phase_approval(run_dir) is None
+
+
+def test_red_transition_inspection_is_read_only_and_commit_publishes_evidence(tmp_path, monkeypatch):
+    from agent_flow.artifact import read_meta
+    from agent_flow.core.command_evidence import missing_test_evidence_markers, test_code_baseline
+    from agent_flow.runner import Phase, Runner
+    from tests.test_test_evidence_gate import GATE, PYTHON_PROFILE, _observe
+
+    project = tmp_path / "project"
+    project.mkdir()
+    _init_git_project(project)
+    run_dir = project / ".agent-flow" / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    phase = Phase(id="red", description="")
+    runner = Runner.__new__(Runner)
+    runner.project_root = project
+    runner.config_root = project
+    runner.run_dir = run_dir
+    runner.profile = PYTHON_PROFILE
+    runner.phases = [phase, Phase(id="implement", description="")]
+    monkeypatch.setattr(runner, "_emit_observation", lambda *args, **kwargs: None)
+    baseline = test_code_baseline(project)
+    write_meta(run_dir, {
+        "run_id": "r1", "phase_index": 0, "current_phase": "red",
+        "phase_entered_at": "1970-01-01T00:00:01+00:00",
+    })
+    (run_dir / "red.md").write_text(GATE, encoding="utf-8")
+    _observe(project, "pytest tests/test_x.py::test_bug", 1, at=2, code_baseline=baseline)
+    before = {str(path.relative_to(project)): path.read_bytes()
+              for path in project.rglob("*") if path.is_file()}
+    transition = runner._plan_transition(0, phase)
+    assert transition.to_phase == "implement"
+    assert {str(path.relative_to(project)): path.read_bytes()
+            for path in project.rglob("*") if path.is_file()} == before
+
+    runner._commit_transition(transition)
+    published = list(run_dir.glob("red-evidence-*.json"))
+    assert len(published) == 1
+    content = published[0].read_bytes()
+    reference = hashlib.sha256(content).hexdigest()
+    assert published[0].name == f"red-evidence-{reference}.json"
+    assert json.loads(content)["code_baseline"] == baseline
+    entered_at = read_meta(run_dir)["phase_entered_at"]
+    from datetime import datetime
+    since = datetime.fromisoformat(entered_at).timestamp()
+    (project / "README.md").write_text("fixed code\n", encoding="utf-8")
+    _observe(project, "pytest tests/test_x.py::test_bug", 0, at=since + 1)
+    assert missing_test_evidence_markers(
+        project, "implement", GATE + f"red-reference: {reference}\n",
+        profile=PYTHON_PROFILE, since=since, run_dir=run_dir,
+        code_baseline=read_meta(run_dir)["test_code_baseline"], cwd_root=project,
+    ) == []
+    assert published[0].read_bytes() == content

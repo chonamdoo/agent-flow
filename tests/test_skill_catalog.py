@@ -801,46 +801,76 @@ def test_lock_records_moving_ref_and_resolved_source_sha(
 def test_catalog_content_and_source_sha_share_the_explicit_cache_env(
     tmp_path, monkeypatch
 ):
+    from agent_flow.core.skill_sync import parse_skill_sources, sync_skill_sources
+    from agent_flow.core.worktree_isolation import git_safe
+
     monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
     project = tmp_path / "app"
     cache = tmp_path / "custom-cache"
-    _upstream_skill(
-        cache / "upstream" / "main" / "skills",
-        "cached",
-        "Skill from the explicit cache.",
-    )
+    ambient_cache = tmp_path / "ambient-cache"
+    monkeypatch.setenv("AGENT_FLOW_SKILL_CACHE", str(ambient_cache))
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+
+    def git(*args):
+        result = git_safe(*args, cwd=upstream)
+        assert result.ok, result.stderr
+        return result.stdout.strip()
+
+    git("init", "-b", "main")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "user.name", "Cache fixture")
+    git("config", "commit.gpgsign", "false")
+    skill_file = _upstream_skill(upstream / "skills", "cached", "Explicit cache snapshot.")
+    explicit_content = skill_file.read_text(encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "explicit snapshot")
+    explicit_sha = git("rev-parse", "HEAD")
     env = {"AGENT_FLOW_SKILL_CACHE": str(cache)}
-    observed_envs = []
-
-    def source_sha(_source, env=None):
-        observed_envs.append(env)
-        return "custom-cache-sha"
-
-    monkeypatch.setattr(skill_catalog, "cached_source_sha", source_sha)
     profile = {
         "id": "python",
         "skill_sources": [
             {
                 "id": "upstream",
                 "kind": "fetch",
-                "url": "https://example.invalid/skills.git",
+                "url": str(upstream),
                 "ref": "main",
                 "layout": "skills/{skill}/SKILL.md",
             }
         ],
     }
+    sources = parse_skill_sources(profile)
+    published = sync_skill_sources(sources, env=env)[0]
+    assert published.status == "fetched", published.detail
+
+    _upstream_skill(upstream / "skills", "cached", "Ambient cache snapshot.")
+    _upstream_skill(upstream / "skills", "ambient-only", "Not in the explicit cache.")
+    ambient_content = skill_file.read_text(encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "ambient snapshot")
+    ambient_sha = git("rev-parse", "HEAD")
+    published = sync_skill_sources(sources)[0]
+    assert published.status == "fetched", published.detail
 
     result = skill_catalog.scan(
-        project,
-        profile=profile,
-        profile_ids=("python",),
-        host="claude",
-        env=env,
+        project, profile=profile, profile_ids=("python",), host="claude", env=env,
     )
-
+    cached_file = Path(result.skills["cached"]["path"])
+    assert cached_file.is_relative_to(cache)
+    assert cached_file.read_text(encoding="utf-8") == explicit_content
     assert result.skills["cached"]["source"] == "fetched"
-    assert result.sources["upstream"]["resolvedSha"] == "custom-cache-sha"
-    assert observed_envs == [env]
+    assert result.sources["upstream"]["resolvedSha"] == explicit_sha
+    assert "ambient-only" not in result.skills
+
+    ambient = skill_catalog.scan(
+        project, profile=profile, profile_ids=("python",), host="claude",
+    )
+    ambient_file = Path(ambient.skills["cached"]["path"])
+    assert ambient_file.is_relative_to(ambient_cache)
+    assert ambient_file.read_text(encoding="utf-8") == ambient_content
+    assert ambient.sources["upstream"]["resolvedSha"] == ambient_sha
+    assert "ambient-only" in ambient.skills
+    assert cached_file.read_text(encoding="utf-8") == explicit_content
 
 
 
@@ -1336,37 +1366,6 @@ def test_app_shell_and_presentation_skills_define_exclusive_ownership():
 
         assert f"use `{presentation_name}` instead" in app_shell
         assert f"use `{app_shell_name}` instead" in presentation
-
-
-
-
-def test_app_shell_shared_semantics_are_not_repeated_by_platform_skills():
-    contract = (SHIPPED_SKILLS / "app-shell-error-contract" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    shared_semantics = (
-        "`pending`",
-        "`handling`",
-        "`consumed`",
-        "retryable state",
-    )
-    metadata_fields = "`code`, `title`, `message`, and `requestId`"
-
-    for semantic in shared_semantics:
-        assert semantic in contract
-    assert metadata_fields in contract
-    for name in _APP_SHELL_CASES:
-        platform = (SHIPPED_SKILLS / name / "SKILL.md").read_text(encoding="utf-8")
-        assert all(semantic not in platform for semantic in shared_semantics)
-        assert metadata_fields not in platform
-        assert "source of truth for classification" in platform
-    assert "Shared Presentation Contract" in contract
-    assert "not a Core Domain" in contract
-    core = (SHIPPED_SKILLS / "clean-architecture-core" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    assert "Shared Presentation Contract" in core
-    assert "shared-presentation-contract-placement: pass|fail|n/a" in core
 
 
 

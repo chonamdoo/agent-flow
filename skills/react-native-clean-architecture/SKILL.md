@@ -10,34 +10,28 @@ requires:
 Load `clean-architecture-core` first. This skill adds React Native package and
 platform-adapter details only.
 
-## Package Shape
+## Package Boundaries
 
-```text
-apps/mobile-rn/
-packages/core-ui-rn/
-packages/core-design-system-rn/
-packages/core-resources/
-packages/core-platform-rn/
-packages/core-network/
-packages/core-navigation-api/
-packages/core-navigation-rn/
-packages/core-domain-home/
-packages/core-data-home/
-packages/feature-home-api/
-packages/feature-home-presentation-rn/
-```
+Discover the existing app/package boundaries, native source sets, dependency
+declarations, and profile role mappings. Keep the project's layout rather than
+creating a prescribed monorepo tree. Shared policy/contracts remain free of React
+Native runtime imports; native implementations belong to platform adapters.
 
-React Native shares the React semantic DI shape. Shared packages stay free of RN
-runtime imports unless they are explicitly RN platform or presentation packages.
+Map `shared-presentation-contract` to the existing neutral notifier/queue boundary
+used by AppShell and feature presentation. It imports no UI, data, AppShell, or
+feature implementation. No extra package is needed merely to satisfy a role name.
+An unregistered package path is missing lint coverage, not a successful check.
 
 ## DI Shape
 
 - Default to `createDependencies()` or `createContainer()` plus Context Provider
   at `App.tsx` or app shell.
-- RN platform dependencies live in `core-platform-rn`.
-- Native modules, permissions, linking, storage, and device APIs are platform
-  adapters; pass abstractions into use cases/presentation.
+- Put native modules, permissions, linking, storage, and device implementations at
+  platform adapter edges. Pass narrow application/domain capability ports to use
+  cases and presentation; those ports need not be called repositories.
 - Optional TSyringe usage stays at app shell or adapter edge.
+- Composition may construct raw clients/native adapters. Context values consumed
+  by presentation expose typed ports, not those implementations.
 - If TSyringe is used with Babel, configure TypeScript metadata support and
   import `reflect-metadata` once before DI use.
 

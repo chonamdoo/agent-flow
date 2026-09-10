@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from agent_flow.core.gates import GateCommand
@@ -30,7 +31,7 @@ def profile_gate_commands(
 ) -> list[GateCommand]:
     execution = require_gate_execution(execution)
     commands: list[tuple[int, GateCommand]] = []
-    seen: set[tuple[str, ...]] = set()
+    seen: dict[tuple[str, ...], int] = {}
     multi_profile = len(profile_ids) > 1
     architecture_lint_added = False
     architecture_lint_profile = ",".join(profile_ids)
@@ -66,8 +67,24 @@ def profile_gate_commands(
                 timeout_s = None
                 architecture_lint_added = True
             if command in seen:
+                index = seen[command]
+                position, previous = commands[index]
+                for field, value in (("timeout_s", timeout_s), ("ci_check", gate.ci_check)):
+                    if getattr(previous, field) != value:
+                        raise ValueError(
+                            f"conflicting gate {field} for {previous.gate_id} and {gate_id}: "
+                            f"{getattr(previous, field)!r} != {value!r}"
+                        )
+                commands[index] = (
+                    position,
+                    replace(
+                        previous,
+                        gate_id=min(previous.gate_id, gate_id),
+                        required=previous.required or required,
+                    ),
+                )
                 continue
-            seen.add(command)
+            seen[command] = len(commands)
             commands.append(
                 (
                     order,

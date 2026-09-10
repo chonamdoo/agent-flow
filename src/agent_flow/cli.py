@@ -184,6 +184,7 @@ from agent_flow.core.worktree_isolation import (
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
 from agent_flow.artifact import (
+    approve_phase_artifact,
     find_active_run,
     mark_inactive,
     phase_review_rejected,
@@ -202,7 +203,7 @@ from agent_flow.providers.subprocess import (
     run_provider,
     verify_provider_sandbox_backend,
 )
-from agent_flow.pr_watch import fetch_pr, watch_pr
+from agent_flow.pr_watch import acknowledge_pr_feedback, fetch_pr, watch_pr
 
 
 # 사용자가 워크플로를 몰기 위해 직접 치는 명령. 래퍼가 위임하는 하위 명령
@@ -299,6 +300,11 @@ def main(argv: list[str] | None = None) -> int:
     continue_parser.add_argument("--root", default=".")
     continue_parser.add_argument("--worktree")
     continue_parser.add_argument("--checkout-identity", help=argparse.SUPPRESS)
+    continue_parser.add_argument(
+        "--approve",
+        metavar="TOKEN",
+        help="acknowledge the exact phase artifact identified by the pending approval token",
+    )
     _add_concern_option(continue_parser)
     continue_parser.add_argument(
         ACCEPT_LEADER_DRIFT_FLAG,
@@ -375,6 +381,8 @@ def main(argv: list[str] | None = None) -> int:
     pr_watch_parser.add_argument("--max-polls", type=int, default=20)
     pr_watch_parser.add_argument("--run-dir")
     pr_watch_parser.add_argument("--allow-unbound", action="store_true")
+    pr_watch_parser.add_argument("--ack-feedback", action="append", default=[], metavar="ID")
+    pr_watch_parser.add_argument("--ack-head", metavar="SHA")
 
     detect_parser = subparsers.add_parser("detect-profile")
     detect_parser.add_argument("--root", default=".")
@@ -821,7 +829,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         try:
             assert_managed_hooks_registered(root)
-        except HookIntegrityError as exc:
+            _preflight_entry_profile(root)
+        except (HookIntegrityError, OSError, ValueError, RuntimeError, KeyError, yaml.YAMLError) as exc:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
         worktree_name = args.worktree if args.worktree is not None else args.task
@@ -904,6 +913,9 @@ def main(argv: list[str] | None = None) -> int:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
         if pending_cleanup is not None:
+            if args.approve:
+                print("cannot approve a phase artifact while checkout cleanup is pending", file=sys.stderr)
+                return 2
             try:
                 resume_result = resume_pending_worktree_cleanup(
                     root=root,
@@ -943,6 +955,9 @@ def main(argv: list[str] | None = None) -> int:
         active = find_active_run(state_root)
         resume_run_dir = active.path if active is not None else None
         if resume_run_dir is None:
+            if args.approve:
+                print("no active run; cannot approve a phase artifact", file=sys.stderr)
+                return 2
             if _legacy_js_state_exists(root):
                 _print_legacy_js_state_migration(root)
                 return 2
@@ -955,6 +970,8 @@ def main(argv: list[str] | None = None) -> int:
                 print('진행 중인 run 없음. `agent-flow run "<task>"`로 시작하세요.')
             return 0
         try:
+            if args.approve:
+                approve_phase_artifact(resume_run_dir, token=args.approve)
             Runner(
                 run_root,
                 run_dir=resume_run_dir,
@@ -1008,7 +1025,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "detect-profile":
-        print(detect_profile(root))
+        try:
+            profile_id = detect_profile(root)
+        except (OSError, ValueError) as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
+        print(profile_id)
         return 0
 
     if args.command == "provider":
@@ -1094,6 +1116,27 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if args.run_dir and watch_run_dir is None:
             return 1
+        if args.ack_feedback or args.ack_head:
+            if not args.ack_feedback or not args.ack_head or not args.repo or watch_run_dir is None:
+                print(
+                    "feedback acknowledgement requires a bound run, --repo, --ack-head, "
+                    "and at least one --ack-feedback",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                acknowledge_pr_feedback(
+                    watch_run_dir,
+                    repo=args.repo,
+                    number=args.number,
+                    head=args.ack_head,
+                    feedback_ids=args.ack_feedback,
+                )
+            except (OSError, ValueError, RuntimeError, KeyError) as exc:
+                print(f"cannot acknowledge PR feedback: {exc}", file=sys.stderr)
+                return 1
+            print(json.dumps({"acknowledged_feedback_ids": args.ack_feedback}, ensure_ascii=False))
+            return 0
         if watch_run_dir is None and not args.allow_unbound:
             print(
                 "cannot verify deferred CI gates without an active run; "
@@ -1117,6 +1160,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.number,
                 repo=args.repo,
                 required_checks=required_checks,
+                run_dir=watch_run_dir,
             )
             if args.once
             else watch_pr(
@@ -1125,11 +1169,9 @@ def main(argv: list[str] | None = None) -> int:
                 poll_interval_s=args.poll_interval,
                 max_poll_count=args.max_polls,
                 required_checks=required_checks,
+                run_dir=watch_run_dir,
             )
         )
-        if snapshot is None:
-            print(json.dumps({"number": args.number, "status": "error"}))
-            return 1
         print(json.dumps(snapshot.to_summary(), ensure_ascii=False, indent=2))
         return 1 if snapshot.status == "error" else 0
 
@@ -2105,7 +2147,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         try:
             assert_managed_hooks_registered(root)
-        except HookIntegrityError as exc:
+            _preflight_entry_profile(root)
+        except (HookIntegrityError, OSError, ValueError, RuntimeError, KeyError, yaml.YAMLError) as exc:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
         if _legacy_js_state_exists(root):
@@ -2179,6 +2222,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     return 1
+
+
+def _preflight_entry_profile(root: Path) -> None:
+    profile_id, _profile = resolve_profile(_find_kit_root(), root)
+    for execution in GATE_EXECUTIONS:
+        profile_gate_commands(
+            profile_id.split(","),
+            root=root,
+            phase=GATE_PHASE_ALL,
+            execution=execution,
+        )
 
 
 def _read_json_file(path: str) -> object | str:
@@ -3204,8 +3258,12 @@ def _workflow_declarations() -> DeclaredPhaseSkills:
 
 
 def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
-    profile_ids = active_profile_ids(root, getattr(args, "profile", None) or "auto")
-    payloads = [load_profile_payload(profile_id, root) for profile_id in profile_ids]
+    try:
+        profile_ids = active_profile_ids(root, getattr(args, "profile", None) or "auto")
+        payloads = [load_profile_payload(profile_id, root) for profile_id in profile_ids]
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(_format_cli_error(exc), file=sys.stderr)
+        return 2
 
     if args.skills_command == "sync":
         exit_code = 0

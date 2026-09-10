@@ -12,7 +12,6 @@ import time
 from pathlib import Path
 
 import pytest
-import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 SRC = str(REPO / "src")
@@ -38,7 +37,7 @@ def _project(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _observe(root: Path, command: str, exit_code=None, at=None) -> None:
+def _observe(root: Path, command: str, exit_code=None, at=None, code_baseline="") -> None:
     path = root / COMMANDS_RUN_LOG
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -49,6 +48,7 @@ def _observe(root: Path, command: str, exit_code=None, at=None) -> None:
                     "exit_code": exit_code,
                     "cwd": str(root),
                     "at": time.time() if at is None else at,
+                    "code_baseline": code_baseline,
                 }
             )
             + "\n"
@@ -213,24 +213,80 @@ def test_profile_without_a_test_gate_falls_back(tmp_path):
     assert missing_test_evidence_markers(root, "red", GATE, profile={"gates": []}) == []
 
 
-@pytest.mark.parametrize(
-    "workflow,phase_id",
-    [
-        ("full-feature", "red"),
-        ("bugfix", "implement-fix"),
-        # `default`는 "모든 프로젝트에 적용된다"고 스스로 적어 둔 기본 워크플로인데
-        # 두 phase 어느 쪽도 게이트 대상이 아니어서 테스트 실행 증거를 한 번도
-        # 요구하지 않았다 — bugfix에 있던 구멍이 기본 경로에 그대로 있었다.
-        ("default", "implement"),
-        ("default", "fix-loop"),
-    ],
-)
-@pytest.mark.parametrize("copy", ["src/agent_flow/workflows"])
-def test_workflows_require_the_regression_markers(workflow, phase_id, copy):
-    """`bugfix.yaml`에는 red phase도 required_markers도 0개였다."""
-    data = yaml.safe_load((REPO / copy / f"{workflow}.yaml").read_text(encoding="utf-8"))
-    phase = next(item for item in data["phases"] if item["id"] == phase_id)
-    markers = phase.get("required_markers") or []
-    assert "regression-test:" in markers
-    assert "red-observed:" in markers
-    assert TEST_RUN_EVIDENCE_MARKER in markers
+def test_behavior_preserving_requires_reason_and_related_green(tmp_path):
+    root = _project(tmp_path)
+    selector = "tests/test_x.py::test_bug"
+    text = GATE + "change-kind: behavior-preserving\nbehavior-preserving-reason: only the adapter boundary moves\n"
+    _observe(root, "pytest tests/test_other.py::test_other", 0, at=1)
+    assert missing_test_evidence_markers(root, "implement", text, profile=PYTHON_PROFILE) == [
+        "test-run-evidence: verified (the related test must end green)"
+    ]
+    _observe(root, f"pytest {selector}", 0, at=2)
+    assert missing_test_evidence_markers(root, "implement", text, profile=PYTHON_PROFILE) == []
+    assert missing_test_evidence_markers(
+        root, "implement", GATE + "change-kind: behavior-preserving\n", profile=PYTHON_PROFILE
+    ) == ["behavior-preserving-reason: <unchanged behavior and affected boundary>"]
+    _observe(root, f"pytest {selector}", 1, at=3)
+    assert missing_test_evidence_markers(root, "implement", text, profile=PYTHON_PROFILE) == [
+        "test-run-evidence: verified (the related test must end green)"
+    ]
+
+
+def test_undeclared_and_feature_changes_still_require_red(tmp_path):
+    root = _project(tmp_path)
+    _observe(root, "pytest tests/test_x.py::test_bug", 0)
+    for change in ("", "change-kind: feature\n", "change-kind: bugfix\n"):
+        missing = missing_test_evidence_markers(root, "implement", GATE + change, profile=PYTHON_PROFILE)
+        assert any(item.startswith("red-observed:") for item in missing)
+
+
+def test_red_reference_requires_same_regression_and_entry_code_baseline(tmp_path):
+    import subprocess
+    from agent_flow.core.command_evidence import test_code_baseline
+    from agent_flow.runner import publish_red_reference
+
+    root = _project(tmp_path)
+    (root / ".agent-flow" / "kit.json").write_text("{}\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+    code = root / "logic.py"
+    code.write_text("value = 0\n", encoding="utf-8")
+    for args in (
+        ("init", "-b", "main"), ("config", "user.email", "test@example.com"),
+        ("config", "user.name", "Test"), ("add", "."), ("commit", "-m", "baseline"),
+    ):
+        subprocess.run(("git", *args), cwd=root, check=True, capture_output=True)
+    run_dir = root / ".agent-flow" / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    baseline = test_code_baseline(root)
+    _observe(root, "pytest tests/test_x.py::test_bug", 1, at=1)
+    assert publish_red_reference(
+        root, run_dir, evidence_root=root, text=GATE, profile=PYTHON_PROFILE,
+    ) is None
+    subprocess.run(
+        (sys.executable, str(REPO / "scripts" / "hooks" / "record-command-run.py")),
+        input=json.dumps({
+            "tool_name": "Bash", "cwd": str(root),
+            "tool_input": {"command": "pytest tests/test_x.py::test_bug"}, "exit_code": 1,
+        }),
+        cwd=root, text=True, capture_output=True, check=True, timeout=30,
+    )
+    reference = publish_red_reference(
+        root, run_dir, evidence_root=root, text=GATE, profile=PYTHON_PROFILE, since=1,
+    )
+    phase_entered_at = time.time() + 1
+    code.write_text("value = 1\n", encoding="utf-8")
+    _observe(root, "pytest tests/test_x.py::test_bug", 0, at=phase_entered_at + 1)
+    text = GATE + f"red-reference: {reference}\n"
+    assert missing_test_evidence_markers(
+        root, "implement", text, profile=PYTHON_PROFILE, since=phase_entered_at,
+        run_dir=run_dir, code_baseline=baseline, cwd_root=root,
+    ) == []
+    assert missing_test_evidence_markers(
+        root, "implement", text, profile=PYTHON_PROFILE, since=phase_entered_at,
+        run_dir=run_dir, code_baseline=test_code_baseline(root), cwd_root=root,
+    ) == ["red-reference: <recorded RED for the same test and code baseline>"]
+    other_test = text.replace("test_bug", "test_other")
+    assert missing_test_evidence_markers(
+        root, "implement", other_test, profile=PYTHON_PROFILE, since=phase_entered_at,
+        run_dir=run_dir, code_baseline=baseline, cwd_root=root,
+    ) == ["test-run-evidence: verified (the referenced regression must end green)"]

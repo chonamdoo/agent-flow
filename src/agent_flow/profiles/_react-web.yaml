@@ -1,0 +1,70 @@
+requires_dependencies: [react]
+excludes_dependencies: [react-native, expo]
+skills:
+  install:
+    - react-development-guide
+    - react-clean-architecture
+    - react-clean-presentation-architecture
+    - react-app-shell-error-handling
+    - react-hook-form-zod
+    - react-web-seo
+    - react-storybook
+  required_review:
+    - group: react-web
+      skills: [react-development-guide]
+      path_globs: ["**/*.tsx", "**/*.jsx", "**/*.ts", "**/*.js"]
+      concerns: [react-web]
+      missing: "missing local React Web: <skill>"
+    - group: react-architecture
+      skills: [react-clean-architecture]
+      path_globs: ["**/src/core/domain/**", "**/src/core/data/**", "**/src/core/presentation/**", "**/src/features/**"]
+      concerns: [architecture]
+      missing: "missing local React architecture: <skill>"
+    - group: react-hook-form-zod
+      skills: [react-hook-form-zod]
+      task_terms: ["react hook form", "react-hook-form", "rhf", "zod form", "zod 폼", "폼 구독", "폼 초기화"]
+      concerns: [react-hook-form-zod]
+      missing: "missing local React forms: <skill>"
+    - group: react-web-seo
+      skills: [react-web-seo]
+      task_terms: ["seo", "canonical url", "검색 색인", "검색 노출", "json-ld"]
+      path_globs: ["**/sitemap.*", "**/robots.*", "**/opengraph-image.*"]
+      concerns: [react-web-seo]
+      missing: "missing local React SEO: <skill>"
+    - group: react-storybook
+      skills: [react-storybook]
+      task_terms: ["storybook", "스토리북"]
+      path_globs: ["**/.storybook/**", "**/*.stories.ts", "**/*.stories.tsx", "**/*.stories.js", "**/*.stories.jsx", "**/*.stories.mdx"]
+      concerns: [react-storybook]
+      missing: "missing local React Storybook: <skill>"
+architecture:
+  contract: clean-architecture-core
+  platform: react
+  strict_when_roots_present: true
+  activation_roots: ["src/core/domain", "src/core/presentation", "src/features/<feature>/api"]
+  roles:
+    - id: app-shell
+      paths: ["app", "src/app"]
+    - id: core-domain
+      paths: ["src/core/domain/<context>"]
+      forbidden: ["ApiClient", "Dto", "Component", "Screen"]
+    - id: core-data
+      paths: ["src/core/data/<context>"]
+      forbidden: ["Component", "Screen"]
+    - id: shared-presentation-contract
+      paths: ["src/core/presentation"]
+      forbidden: ["ApiClient", "DataSource", "Dto", "Entity", "RepositoryImpl", "ReactNode"]
+    - id: feature-api
+      paths: ["src/features/<feature>/api"]
+      forbidden: ["Component", "Screen", "RepositoryImpl", "ApiClient"]
+    - id: feature-presentation
+      paths: ["src/features/<feature>/presentation"]
+      forbidden: ["ApiClient", "DataSource", "Dto", "Entity"]
+    - id: core-ui
+      paths: ["src/core/ui", "src/core/design-system", "src/core/resources"]
+    - id: core-network
+      paths: ["src/core/network", "src/core/platform", "src/core/permission"]
+    - id: navigation-api
+      paths: ["src/core/navigation/api"]
+    - id: navigation-impl
+      paths: ["src/core/navigation/impl"]

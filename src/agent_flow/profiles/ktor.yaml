@@ -1,0 +1,104 @@
+id: ktor
+branching:
+  strategy: trunk
+  base: main
+  integration: main
+  worktree: required
+  naming:
+    prefix: "feat/"
+    slug_style: kebab-case
+    slug_source: feature title
+    max_slug_length: 60
+gates:
+  - {id: architecture-lint, command: ["agent-flow", "architecture-lint", "--profile", "ktor"], required: true, phase: pre-commit}
+  - {id: build, command: ["./gradlew", "build", "-x", "test"], required: true, phase: pre-commit}
+  - {id: test, command: ["./gradlew", "test"], required: true, phase: pre-push}
+gate_variants:
+  - tool: gradle
+    any_files: ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"]
+    gates:
+      - {id: architecture-lint, command: ["agent-flow", "architecture-lint", "--profile", "ktor"], required: true, phase: pre-commit}
+      - {id: build, command: ["gradle", "build", "-x", "test"], required: true, phase: pre-commit}
+      - {id: test, command: ["gradle", "test"], required: true, phase: pre-push}
+  - tool: gradle
+    requires_files: ["gradlew"]
+    any_files: ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"]
+    gates:
+      - {id: architecture-lint, command: ["agent-flow", "architecture-lint", "--profile", "ktor"], required: true, phase: pre-commit}
+      - {id: build, command: ["./gradlew", "build", "-x", "test"], required: true, phase: pre-commit}
+      - {id: test, command: ["./gradlew", "test"], required: true, phase: pre-push}
+  - tool: maven
+    requires_files: ["pom.xml"]
+    gates:
+      - {id: architecture-lint, command: ["agent-flow", "architecture-lint", "--profile", "ktor"], required: true, phase: pre-commit}
+      - {id: build, command: ["mvn", "-DskipTests", "package"], required: true, phase: pre-commit}
+      - {id: test, command: ["mvn", "verify"], required: true, phase: pre-push}
+  - tool: maven
+    requires_files: ["pom.xml", "mvnw"]
+    gates:
+      - {id: architecture-lint, command: ["agent-flow", "architecture-lint", "--profile", "ktor"], required: true, phase: pre-commit}
+      - {id: build, command: ["./mvnw", "-DskipTests", "package"], required: true, phase: pre-commit}
+      - {id: test, command: ["./mvnw", "verify"], required: true, phase: pre-push}
+review_angles:
+  - id: architecture-design
+    prompt: templates/_shared/review/architecture-design.md
+  - id: types
+    prompt: templates/_shared/review/types.md
+  - id: io-safety
+    prompt: templates/_shared/review/io-safety.md
+skills:
+  install:
+    - kotlin-backend-development-guide
+    - ktor-development-guide
+    - llm-tool-development
+  required_review:
+    - group: kotlin-backend
+      skills: [kotlin-backend-development-guide]
+      path_globs: ["**/*.kt", "**/*.kts"]
+      task_terms: ["kotlin server", "kotlin backend", "kotlin 서버", "코틀린 서버"]
+      concerns: [kotlin-backend]
+      missing: "missing local Kotlin backend: <skill>"
+    - group: ktor-server
+      skills: [ktor-development-guide]
+      path_globs: ["**/*.kt", "**/*.kts", "**/*.gradle", "**/pom.xml", "**/application.conf", "**/application.yaml"]
+      task_terms: ["ktor server", "ktor 서버"]
+      concerns: [ktor-server]
+      missing: "missing local Ktor server: <skill>"
+    - group: llm-tool-development
+      skills: [llm-tool-development]
+      task_terms: ["tool calling", "function calling", "mcp server", "mcp adapter", "툴콜", "mcp 서버"]
+      concerns: [llm-tool-development]
+      missing: "missing local LLM tool development: <skill>"
+architecture:
+  contract: clean-architecture-core
+  platform: kotlin-backend
+  strict_when_roots_present: true
+  activation_roots: ["src/main/kotlin/**/domain", "src/main/java/**/domain", "src/main/kotlin/**/application", "src/main/java/**/application"]
+  roles:
+    - id: app-shell
+      paths: ["src/main/kotlin", "src/main/java"]
+    - id: core-domain
+      paths: ["src/main/kotlin/**/domain", "src/main/java/**/domain"]
+      forbidden: ["org.springframework", "io.ktor", "jakarta.persistence", "javax.persistence", "kotlinx.serialization"]
+    - id: application
+      paths: ["src/main/kotlin/**/application", "src/main/java/**/application"]
+      forbidden: ["org.springframework", "io.ktor", "jakarta.persistence", "javax.persistence"]
+    - id: inbound-adapter
+      paths: ["src/main/kotlin/**/api", "src/main/java/**/api", "src/main/kotlin/**/adapter/in", "src/main/java/**/adapter/in"]
+      forbidden: ["jakarta.persistence.EntityManager", "javax.persistence.EntityManager", "org.springframework.data.repository", "org.springframework.data.jpa.repository"]
+    - id: core-data
+      paths: ["src/main/kotlin/**/data", "src/main/java/**/data", "src/main/kotlin/**/adapter/out", "src/main/java/**/adapter/out"]
+      forbidden: ["@RestController", "io.ktor.server.routing"]
+artifacts:
+  prd: optional
+  adr: optional
+  slice_plan: required
+vocabulary:
+  prd: spec
+  adr: ADR
+commit_convention:
+  style: conventional
+  co_author: skip
+pr:
+  target_branch: main
+  merge_strategy: squash

@@ -1,0 +1,363 @@
+{
+  "cases": [
+    {
+      "id": "kotlin-backend-price-fallback",
+      "skill": "kotlin-backend-development-guide",
+      "kind": "defect",
+      "task": "Review the pricing action used by our Kotlin/JVM HTTP service. The request adapter supplies the authenticated account and owns the coroutine. The PriceFeed port is implemented by our existing cancellable HTTP adapter; transport wiring is outside this change. Ordinary feed failures may return the fixed fallback quote, and the meter counts completed quotes. Review QuoteAction.kt. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "build.gradle.kts": "plugins { kotlin(\"jvm\") version \"2.1.20\" }\nrepositories { mavenCentral() }\nkotlin { jvmToolchain(17) }\ndependencies {\n    implementation(\"org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2\")\n    implementation(\"org.postgresql:postgresql:42.7.5\")\n}\n",
+        "src/main/kotlin/pricing/QuoteAction.kt": "package pricing\n\nimport java.util.concurrent.atomic.AtomicLong\n\ndata class Account(val id: String)\ndata class Quote(val cents: Long, val estimated: Boolean)\nfun interface PriceFeed {\n    suspend fun quote(account: Account): Long\n}\n\nclass QuoteAction(private val feed: PriceFeed, private val completed: AtomicLong) {\n    suspend fun execute(account: Account): Quote {\n        val quote = try {\n            Quote(feed.quote(account), estimated = false)\n        } catch (failure: Exception) {\n            Quote(2500, estimated = true)\n        }\n        completed.incrementAndGet()\n        return quote\n    }\n}\n"
+      },
+      "expected_verdict": "request-changes",
+      "expected_findings": [
+        {
+          "file": "src/main/kotlin/pricing/QuoteAction.kt",
+          "start_line": 15,
+          "end_line": 16,
+          "invariant": "The broad handler consumes CancellationException from the suspending feed, returns a fallback quote, and increments the completed meter instead of preserving cancellation to the request owner."
+        }
+      ],
+      "required_references": [
+        "kotlin-backend-development-guide/references/runtime-operations.md"
+      ],
+      "forbidden_skills": []
+    },
+    {
+      "id": "kotlin-backend-conditional-stock-update",
+      "skill": "kotlin-backend-development-guide",
+      "kind": "normal",
+      "task": "Review this DB-only stock reservation slice of our Kotlin/JVM server. The authenticated actor is constructed by the existing request adapter. Multiple service instances share PostgreSQL 16 at READ COMMITTED. Returning false means unavailable or insufficient stock; available stock must remain nonnegative. The application composition root supplies and closes a pooled DataSource, with an eight-connection budget, acquisition timeout, and PostgreSQL statement timeout configured outside this slice. Review the action and JDBC adapter. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "build.gradle.kts": "plugins { kotlin(\"jvm\") version \"2.1.20\" }\nrepositories { mavenCentral() }\nkotlin { jvmToolchain(17) }\ndependencies {\n    implementation(\"org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2\")\n    implementation(\"org.postgresql:postgresql:42.7.5\")\n}\n",
+        "src/main/kotlin/inventory/ReserveStock.kt": "package inventory\n\ndata class Actor(val tenant: String)\nfun interface Stock {\n    suspend fun reserve(tenant: String, sku: String, quantity: Int): Boolean\n}\nclass ReserveStock(private val stock: Stock) {\n    suspend fun execute(actor: Actor, sku: String, quantity: Int): Boolean {\n        require(sku.matches(Regex(\"[A-Z0-9-]{1,32}\")))\n        require(quantity in 1..1000)\n        return stock.reserve(actor.tenant, sku, quantity)\n    }\n}\n",
+        "src/main/kotlin/inventory/JdbcStock.kt": "package inventory\n\nimport javax.sql.DataSource\nimport kotlinx.coroutines.Dispatchers\nimport kotlinx.coroutines.withContext\n\nclass JdbcStock(private val dataSource: DataSource) : Stock {\n    private val database = Dispatchers.IO.limitedParallelism(8)\n\n    override suspend fun reserve(tenant: String, sku: String, quantity: Int): Boolean =\n        withContext(database) {\n            dataSource.connection.use { connection ->\n                connection.autoCommit = true\n                connection.prepareStatement(\n                    \"UPDATE stock SET available = available - ? WHERE tenant = ? AND sku = ? AND available >= ?\"\n                ).use { statement ->\n                    statement.setInt(1, quantity)\n                    statement.setString(2, tenant)\n                    statement.setString(3, sku)\n                    statement.setInt(4, quantity)\n                    statement.executeUpdate() == 1\n                }\n            }\n        }\n}\n",
+        "schema.sql": "CREATE TABLE stock (tenant text NOT NULL, sku text NOT NULL, available integer NOT NULL, PRIMARY KEY (tenant, sku));\n"
+      },
+      "expected_verdict": "approve",
+      "expected_findings": [],
+      "required_references": [
+        "kotlin-backend-development-guide/references/persistence-recovery.md",
+        "kotlin-backend-development-guide/references/runtime-operations.md"
+      ],
+      "forbidden_skills": []
+    },
+    {
+      "id": "kotlin-collection-labels",
+      "skill": "kotlin-backend-development-guide",
+      "kind": "non-target",
+      "task": "Review the label-formatting utility in our standalone Kotlin command-line program. Keep the current behavior: trim entries, omit blank entries, retain duplicates, and join the remaining values with a comma and space. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "build.gradle.kts": "plugins { kotlin(\"jvm\") version \"2.1.20\" }\nrepositories { mavenCentral() }\nkotlin { jvmToolchain(17) }\n",
+        "src/main/kotlin/Labels.kt": "fun formatLabels(values: List<String>): String =\n    values.asSequence().map(String::trim).filter(String::isNotEmpty).joinToString(\", \")\n"
+      },
+      "expected_verdict": "approve",
+      "expected_findings": [],
+      "required_references": [],
+      "forbidden_skills": [
+        "kotlin-backend-development-guide",
+        "spring-boot-development-guide",
+        "ktor-development-guide"
+      ]
+    },
+    {
+      "id": "kotlin-backend-stock-preflight",
+      "skill": "kotlin-backend-development-guide",
+      "kind": "held-out",
+      "task": "Review this stock reservation adapter for our Kotlin/JVM server. The authenticated action validates quantity in 1..1000 and takes tenant from the request principal. Multiple server instances use PostgreSQL 16 at READ COMMITTED. A successful reservation consumes the requested units; stock may not go below zero. Connection acquisition and statement deadlines are configured by the application-owned eight-connection pool. Request/response mapping and deployment are unchanged. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "build.gradle.kts": "plugins { kotlin(\"jvm\") version \"2.1.20\" }\nrepositories { mavenCentral() }\nkotlin { jvmToolchain(17) }\ndependencies {\n    implementation(\"org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2\")\n    implementation(\"org.postgresql:postgresql:42.7.5\")\n}\n",
+        "src/main/kotlin/inventory/ReserveStock.kt": "package inventory\n\ndata class Actor(val tenant: String)\nfun interface Stock {\n    suspend fun reserve(tenant: String, sku: String, quantity: Int): Boolean\n}\nclass ReserveStock(private val stock: Stock) {\n    suspend fun execute(actor: Actor, sku: String, quantity: Int): Boolean {\n        require(sku.matches(Regex(\"[A-Z0-9-]{1,32}\")))\n        require(quantity in 1..1000)\n        return stock.reserve(actor.tenant, sku, quantity)\n    }\n}\n",
+        "src/main/kotlin/inventory/JdbcStock.kt": "package inventory\n\nimport javax.sql.DataSource\nimport kotlinx.coroutines.Dispatchers\nimport kotlinx.coroutines.withContext\n\nclass JdbcStock(private val dataSource: DataSource) : Stock {\n    private val database = Dispatchers.IO.limitedParallelism(8)\n\n    override suspend fun reserve(tenant: String, sku: String, quantity: Int): Boolean =\n        withContext(database) {\n            dataSource.connection.use { connection ->\n                connection.autoCommit = false\n                try {\n                    val available = connection.prepareStatement(\n                        \"SELECT available FROM stock WHERE tenant = ? AND sku = ?\"\n                    ).use { statement ->\n                        statement.setString(1, tenant)\n                        statement.setString(2, sku)\n                        statement.executeQuery().use { rows ->\n                            if (rows.next()) rows.getInt(1) else 0\n                        }\n                    }\n                    if (available < quantity) {\n                        connection.rollback()\n                        false\n                    } else {\n                        connection.prepareStatement(\n                            \"UPDATE stock SET available = available - ? WHERE tenant = ? AND sku = ?\"\n                        ).use { statement ->\n                            statement.setInt(1, quantity)\n                            statement.setString(2, tenant)\n                            statement.setString(3, sku)\n                            check(statement.executeUpdate() == 1)\n                        }\n                        connection.commit()\n                        true\n                    }\n                } catch (failure: Throwable) {\n                    connection.rollback()\n                    throw failure\n                }\n            }\n        }\n}\n",
+        "schema.sql": "CREATE TABLE stock (tenant text NOT NULL, sku text NOT NULL, available integer NOT NULL, PRIMARY KEY (tenant, sku));\n"
+      },
+      "expected_verdict": "request-changes",
+      "expected_findings": [
+        {
+          "file": "src/main/kotlin/inventory/JdbcStock.kt",
+          "start_line": 28,
+          "end_line": 34,
+          "invariant": "Under READ COMMITTED, two transactions can both read the same available quantity and pass the preflight. The unconditional decrement serializes only the writes and can commit negative stock; the schema has no nonnegative constraint and the read has no lock."
+        }
+      ],
+      "required_references": [
+        "kotlin-backend-development-guide/references/persistence-recovery.md",
+        "kotlin-backend-development-guide/references/runtime-operations.md"
+      ],
+      "forbidden_skills": []
+    },
+    {
+      "id": "spring-attempt-record-boundary",
+      "skill": "spring-boot-development-guide",
+      "kind": "defect",
+      "task": "Review the Java Spring Boot transfer service. The existing authenticated gateway invokes the injected TransferService bean, not a manually constructed instance. Rejected transfers must leave no transfer row but must retain their attempt record for support investigation. Operation IDs are unique per invocation. This service intentionally owns framework-aware transaction orchestration; domain policy and gateway authorization are unchanged. There is no AspectJ weaving or custom transaction advice. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "pom.xml": "<project xmlns=\"http://maven.apache.org/POM/4.0.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">\n  <modelVersion>4.0.0</modelVersion>\n  <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.4.4</version><relativePath/></parent>\n  <groupId>example</groupId><artifactId>ledger</artifactId><version>1.0.0</version>\n  <properties><java.version>17</java.version></properties>\n  <dependencies>\n    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-jdbc</artifactId></dependency>\n    <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><scope>runtime</scope></dependency>\n  </dependencies>\n</project>\n",
+        "src/main/java/example/App.java": "package example;\n\nimport org.springframework.boot.SpringApplication;\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\nimport org.springframework.transaction.annotation.EnableTransactionManagement;\n\n@SpringBootApplication\n@EnableTransactionManagement(proxyTargetClass = true)\npublic class App {\n    public static void main(String[] args) {\n        SpringApplication.run(App.class, args);\n    }\n}\n",
+        "src/main/resources/application.properties": "spring.datasource.url=jdbc:h2:mem:ledger;DB_CLOSE_DELAY=-1\nspring.datasource.username=sa\nspring.datasource.password=\nspring.sql.init.mode=always\n",
+        "src/main/resources/schema.sql": "CREATE TABLE transfers (id varchar(80) PRIMARY KEY);\nCREATE TABLE attempts (id varchar(80) PRIMARY KEY);\n",
+        "src/main/java/example/TransferService.java": "package example;\n\nimport org.springframework.jdbc.core.JdbcTemplate;\nimport org.springframework.stereotype.Service;\nimport org.springframework.transaction.annotation.Propagation;\nimport org.springframework.transaction.annotation.Transactional;\n\n@Service\npublic class TransferService {\n    private final JdbcTemplate jdbc;\n\n    public TransferService(JdbcTemplate jdbc) { this.jdbc = jdbc; }\n\n    @Transactional\n    public void submit(String operationId, boolean rejected) {\n        jdbc.update(\"INSERT INTO transfers(id) VALUES (?)\", operationId);\n        recordAttempt(operationId);\n        if (rejected) throw new IllegalStateException(\"Transfer rejected\");\n    }\n\n    @Transactional(propagation = Propagation.REQUIRES_NEW)\n    public void recordAttempt(String operationId) {\n        jdbc.update(\"INSERT INTO attempts(id) VALUES (?)\", operationId);\n    }\n}\n"
+      },
+      "expected_verdict": "request-changes",
+      "expected_findings": [
+        {
+          "file": "src/main/java/example/TransferService.java",
+          "start_line": 17,
+          "end_line": 17,
+          "invariant": "recordAttempt is called on this rather than through the Spring proxy, so REQUIRES_NEW is not intercepted. Its insert participates in submit's existing transaction and rolls back with a rejected transfer, losing the required attempt record."
+        }
+      ],
+      "required_references": [
+        "spring-boot-development-guide/references/transactions-jpa.md"
+      ],
+      "forbidden_skills": [
+        "kotlin-backend-development-guide"
+      ]
+    },
+    {
+      "id": "spring-outer-transaction-diagnostics",
+      "skill": "spring-boot-development-guide",
+      "kind": "normal",
+      "task": "Review the Java Spring Boot transfer service and its new diagnostic listener. The authenticated gateway invokes the injected service bean once per unique operation ID. Transfer and detail rows form one atomic unit. Diagnostic log lines are best-effort, process-local troubleshooting only and may be lost on shutdown; no other process consumes them. Framework-aware application transaction orchestration is the existing architecture. There is no AspectJ weaving or custom transaction advice. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "pom.xml": "<project xmlns=\"http://maven.apache.org/POM/4.0.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">\n  <modelVersion>4.0.0</modelVersion>\n  <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.4.4</version><relativePath/></parent>\n  <groupId>example</groupId><artifactId>ledger</artifactId><version>1.0.0</version>\n  <properties><java.version>17</java.version></properties>\n  <dependencies>\n    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-jdbc</artifactId></dependency>\n    <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><scope>runtime</scope></dependency>\n  </dependencies>\n</project>\n",
+        "src/main/java/example/App.java": "package example;\n\nimport org.springframework.boot.SpringApplication;\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\nimport org.springframework.transaction.annotation.EnableTransactionManagement;\n\n@SpringBootApplication\n@EnableTransactionManagement(proxyTargetClass = true)\npublic class App {\n    public static void main(String[] args) {\n        SpringApplication.run(App.class, args);\n    }\n}\n",
+        "src/main/resources/application.properties": "spring.datasource.url=jdbc:h2:mem:ledger;DB_CLOSE_DELAY=-1\nspring.datasource.username=sa\nspring.datasource.password=\nspring.sql.init.mode=always\n",
+        "src/main/resources/schema.sql": "CREATE TABLE transfers (id varchar(80) PRIMARY KEY);\nCREATE TABLE details (id varchar(80) PRIMARY KEY REFERENCES transfers(id));\n",
+        "src/main/java/example/TransferService.java": "package example;\n\nimport org.springframework.context.ApplicationEventPublisher;\nimport org.springframework.jdbc.core.JdbcTemplate;\nimport org.springframework.stereotype.Service;\nimport org.springframework.transaction.annotation.Transactional;\n\n@Service\npublic class TransferService {\n    public record Completed(String operationId) {}\n    private final JdbcTemplate jdbc;\n    private final ApplicationEventPublisher events;\n\n    public TransferService(JdbcTemplate jdbc, ApplicationEventPublisher events) {\n        this.jdbc = jdbc;\n        this.events = events;\n    }\n\n    @Transactional\n    public void submit(String operationId) {\n        jdbc.update(\"INSERT INTO transfers(id) VALUES (?)\", operationId);\n        recordDetails(operationId);\n        events.publishEvent(new Completed(operationId));\n    }\n\n    @Transactional\n    public void recordDetails(String operationId) {\n        jdbc.update(\"INSERT INTO details(id) VALUES (?)\", operationId);\n    }\n}\n",
+        "src/main/java/example/Diagnostics.java": "package example;\n\nimport org.springframework.stereotype.Component;\nimport org.springframework.transaction.event.TransactionPhase;\nimport org.springframework.transaction.event.TransactionalEventListener;\n\n@Component\npublic class Diagnostics {\n    private static final System.Logger LOG = System.getLogger(Diagnostics.class.getName());\n\n    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)\n    public void completed(TransferService.Completed event) {\n        LOG.log(System.Logger.Level.DEBUG, \"Transfer committed\");\n    }\n}\n"
+      },
+      "expected_verdict": "approve",
+      "expected_findings": [],
+      "required_references": [
+        "spring-boot-development-guide/references/transactions-jpa.md"
+      ],
+      "forbidden_skills": [
+        "kotlin-backend-development-guide"
+      ]
+    },
+    {
+      "id": "java-local-name-formatting",
+      "skill": "spring-boot-development-guide",
+      "kind": "non-target",
+      "task": "Review this Java utility used by a desktop CSV viewer. Whitespace-only fields should be omitted, remaining fields trimmed, and their original order preserved in the display name. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "src/main/java/Names.java": "import java.util.List;\nimport java.util.stream.Collectors;\n\npublic final class Names {\n    private Names() {}\n\n    public static String display(List<String> parts) {\n        return parts.stream().map(String::strip).filter(part -> !part.isEmpty())\n                .collect(Collectors.joining(\" \"));\n    }\n}\n",
+        "runtime.json": "{\"language\":\"Java\",\"version\":17,\"application\":\"desktop-csv-viewer\",\"dependencies\":[]}\n"
+      },
+      "expected_verdict": "approve",
+      "expected_findings": [],
+      "required_references": [],
+      "forbidden_skills": [
+        "spring-boot-development-guide",
+        "kotlin-backend-development-guide",
+        "ktor-development-guide"
+      ]
+    },
+    {
+      "id": "spring-billing-publication",
+      "skill": "spring-boot-development-guide",
+      "kind": "held-out",
+      "task": "Review the Java Spring Boot invoice creation and billing notification change. The authenticated gateway calls the injected InvoiceService once for each unique invoice ID. Once creation succeeds, billing must eventually receive the invoice even if this process restarts or the billing endpoint is temporarily unavailable. The endpoint is an administrator-configured internal service; its POST is idempotent by the supplied invoice ID. The shown tables, listener, and configuration are the entire publication implementation. Existing access controls and schema deployment are outside this change. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "pom.xml": "<project xmlns=\"http://maven.apache.org/POM/4.0.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">\n  <modelVersion>4.0.0</modelVersion>\n  <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.4.4</version><relativePath/></parent>\n  <groupId>example</groupId><artifactId>ledger</artifactId><version>1.0.0</version>\n  <properties><java.version>17</java.version></properties>\n  <dependencies>\n    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-jdbc</artifactId></dependency>\n    <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><scope>runtime</scope></dependency>\n  </dependencies>\n</project>\n",
+        "src/main/java/example/App.java": "package example;\n\nimport org.springframework.boot.SpringApplication;\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\nimport org.springframework.transaction.annotation.EnableTransactionManagement;\n\n@SpringBootApplication\n@EnableTransactionManagement(proxyTargetClass = true)\npublic class App {\n    public static void main(String[] args) {\n        SpringApplication.run(App.class, args);\n    }\n}\n",
+        "src/main/resources/application.properties": "spring.datasource.url=jdbc:h2:mem:ledger;DB_CLOSE_DELAY=-1\nspring.datasource.username=sa\nspring.datasource.password=\nspring.sql.init.mode=always\nbilling.url=http://127.0.0.1:9001/invoices\n",
+        "src/main/resources/schema.sql": "CREATE TABLE invoices (id varchar(80) PRIMARY KEY);\n",
+        "src/main/java/example/InvoiceService.java": "package example;\n\nimport org.springframework.context.ApplicationEventPublisher;\nimport org.springframework.jdbc.core.JdbcTemplate;\nimport org.springframework.stereotype.Service;\nimport org.springframework.transaction.annotation.Transactional;\n\n@Service\npublic class InvoiceService {\n    public record Created(String invoiceId) {}\n    private final JdbcTemplate jdbc;\n    private final ApplicationEventPublisher events;\n\n    public InvoiceService(JdbcTemplate jdbc, ApplicationEventPublisher events) {\n        this.jdbc = jdbc;\n        this.events = events;\n    }\n\n    @Transactional\n    public void create(String invoiceId) {\n        jdbc.update(\"INSERT INTO invoices(id) VALUES (?)\", invoiceId);\n        events.publishEvent(new Created(invoiceId));\n    }\n}\n",
+        "src/main/java/example/BillingListener.java": "package example;\n\nimport java.io.IOException;\nimport java.net.URI;\nimport java.net.http.HttpClient;\nimport java.net.http.HttpRequest;\nimport java.net.http.HttpResponse;\nimport java.time.Duration;\nimport org.springframework.beans.factory.annotation.Value;\nimport org.springframework.stereotype.Component;\nimport org.springframework.transaction.event.TransactionPhase;\nimport org.springframework.transaction.event.TransactionalEventListener;\n\n@Component\npublic class BillingListener {\n    private static final System.Logger LOG = System.getLogger(BillingListener.class.getName());\n    private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();\n    private final URI endpoint;\n\n    public BillingListener(@Value(\"${billing.url}\") URI endpoint) { this.endpoint = endpoint; }\n\n    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)\n    public void created(InvoiceService.Created event) {\n        var request = HttpRequest.newBuilder(endpoint).timeout(Duration.ofSeconds(2))\n                .header(\"Idempotency-Key\", event.invoiceId())\n                .POST(HttpRequest.BodyPublishers.ofString(event.invoiceId())).build();\n        try {\n            var response = client.send(request, HttpResponse.BodyHandlers.discarding());\n            if (response.statusCode() / 100 != 2) LOG.log(System.Logger.Level.WARNING, \"Billing unavailable\");\n        } catch (InterruptedException failure) {\n            Thread.currentThread().interrupt();\n        } catch (IOException failure) {\n            LOG.log(System.Logger.Level.WARNING, \"Billing unavailable\");\n        }\n    }\n}\n"
+      },
+      "expected_verdict": "request-changes",
+      "expected_findings": [
+        {
+          "file": "src/main/java/example/InvoiceService.java",
+          "start_line": 21,
+          "end_line": 22,
+          "alternate_locations": [
+            {
+              "file": "src/main/java/example/BillingListener.java",
+              "start_line": 22,
+              "end_line": 34
+            }
+          ],
+          "invariant": "The transaction persists only the invoice and publishes an in-memory event. AFTER_COMMIT provides phase coupling, not durable publication: a crash after invoice commit or one failed HTTP send leaves no pending publication/replay state, violating eventual billing delivery."
+        },
+        {
+          "file": "src/main/resources/application.properties",
+          "start_line": 1,
+          "end_line": 1,
+          "invariant": "The configured in-memory H2 database loses committed invoice and any pending-publication data when the process exits. DB_CLOSE_DELAY retains data across connection closes, not process restarts; durable recovery requires persistent storage."
+        }
+      ],
+      "required_references": [
+        "spring-boot-development-guide/references/transactions-jpa.md"
+      ],
+      "forbidden_skills": [
+        "kotlin-backend-development-guide"
+      ]
+    },
+    {
+      "id": "ktor-report-route-coverage",
+      "skill": "ktor-development-guide",
+      "kind": "defect",
+      "task": "Review the new report detail route in this Ktor server. Both report listing and report content are restricted to staff holding the server-issued bearer credential; all staff share the same report permissions. TLS termination, credential rotation and ingress request limits are managed by the existing gateway. The module shown is loaded by the supplied entry point. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "build.gradle.kts": "plugins { kotlin(\"jvm\") version \"2.1.20\" }\nrepositories { mavenCentral() }\nkotlin { jvmToolchain(17) }\ndependencies {\n    implementation(\"io.ktor:ktor-server-netty-jvm:2.3.13\")\n    implementation(\"io.ktor:ktor-server-auth-jvm:2.3.13\")\n    implementation(\"org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2\")\n}\n",
+        "src/main/kotlin/reports/Server.kt": "package reports\n\nimport io.ktor.server.application.*\nimport io.ktor.server.auth.*\nimport io.ktor.server.engine.*\nimport io.ktor.server.netty.*\nimport io.ktor.server.response.*\nimport io.ktor.server.routing.*\nimport io.ktor.http.HttpStatusCode\n\nclass Reports {\n    private val rows = mapOf(\"weekly\" to \"Internal weekly summary\")\n    fun list(): String = rows.keys.sorted().joinToString(\"\n\")\n    fun get(id: String): String? = rows[id]\n}\n\nfun Application.reportModule(accessToken: String, reports: Reports) {\n    require(accessToken.length >= 32)\n    install(Authentication) {\n        bearer(\"staff\") {\n            authenticate { credentials ->\n                if (credentials.token == accessToken) UserIdPrincipal(\"staff\") else null\n            }\n        }\n    }\n    routing {\n        authenticate(\"staff\") {\n            get(\"/reports\") { call.respondText(reports.list()) }\n        }\n        get(\"/reports/{id}\") {\n            val report = reports.get(call.parameters[\"id\"].orEmpty())\n            if (report == null) call.respond(HttpStatusCode.NotFound)\n            else call.respondText(report)\n        }\n    }\n}\n\nfun main() {\n    val token = requireNotNull(System.getenv(\"REPORT_ACCESS_TOKEN\"))\n    embeddedServer(Netty, host = \"127.0.0.1\", port = 8080) {\n        reportModule(token, Reports())\n    }.start(wait = true)\n}\n"
+      },
+      "expected_verdict": "request-changes",
+      "expected_findings": [
+        {
+          "file": "src/main/kotlin/reports/Server.kt",
+          "start_line": 31,
+          "end_line": 31,
+          "invariant": "The detail route is a sibling of authenticate(\"staff\"), not a child. Authentication is installed but does not protect this route, so an anonymous request can read a private report."
+        }
+      ],
+      "required_references": [
+        "ktor-development-guide/references/server-plugins.md"
+      ],
+      "forbidden_skills": []
+    },
+    {
+      "id": "ktor-injected-public-catalog",
+      "skill": "ktor-development-guide",
+      "kind": "normal",
+      "task": "Review this Ktor module and DB-only catalog adapter. The catalog is public, contains only published titles, and exposes a single title by positive integer ID. An existing embedded Netty composition root invokes catalogModule(JdbcCatalog(pool)); it owns a four-connection PostgreSQL 16 pool, configures acquisition/statement deadlines and request admission, and closes it after engine request drain. That unchanged startup code is outside this review. No write or background job is introduced. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "build.gradle.kts": "plugins { kotlin(\"jvm\") version \"2.1.20\" }\nrepositories { mavenCentral() }\nkotlin { jvmToolchain(17) }\ndependencies {\n    implementation(\"io.ktor:ktor-server-netty-jvm:2.3.13\")\n    implementation(\"io.ktor:ktor-server-auth-jvm:2.3.13\")\n    implementation(\"org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2\")\n}\n\ndependencies { implementation(\"org.postgresql:postgresql:42.7.5\") }\n",
+        "src/main/kotlin/catalog/Catalog.kt": "package catalog\n\nimport javax.sql.DataSource\nimport kotlinx.coroutines.Dispatchers\nimport kotlinx.coroutines.withContext\nimport io.ktor.http.HttpStatusCode\nimport io.ktor.server.application.*\nimport io.ktor.server.response.*\nimport io.ktor.server.routing.*\n\nfun interface Catalog {\n    suspend fun title(id: Int): String?\n}\nclass JdbcCatalog(private val source: DataSource) : Catalog {\n    private val database = Dispatchers.IO.limitedParallelism(4)\n    override suspend fun title(id: Int): String? = withContext(database) {\n        source.connection.use { connection ->\n            connection.prepareStatement(\"SELECT title FROM catalog WHERE id = ?\").use { statement ->\n                statement.setInt(1, id)\n                statement.executeQuery().use { rows -> if (rows.next()) rows.getString(1) else null }\n            }\n        }\n    }\n}\n\nfun Application.catalogModule(catalog: Catalog) {\n    routing {\n        get(\"/catalog/{id}\") {\n            val id = call.parameters[\"id\"]?.toIntOrNull()?.takeIf { it > 0 }\n            if (id == null) {\n                call.respond(HttpStatusCode.BadRequest)\n                return@get\n            }\n            val title = catalog.title(id)\n            if (title == null) call.respond(HttpStatusCode.NotFound)\n            else call.respondText(title)\n        }\n    }\n}\n",
+        "schema.sql": "CREATE TABLE catalog (id integer PRIMARY KEY CHECK (id > 0), title varchar(120) NOT NULL);\n"
+      },
+      "expected_verdict": "approve",
+      "expected_findings": [],
+      "required_references": [
+        "ktor-development-guide/references/server-plugins.md",
+        "ktor-development-guide/references/data-lifecycle.md"
+      ],
+      "forbidden_skills": []
+    },
+    {
+      "id": "ktor-client-text-download",
+      "skill": "ktor-development-guide",
+      "kind": "non-target",
+      "task": "Review the HTTPS text-fetch helper in our desktop Kotlin application. It receives a caller-owned HttpClient and a prevalidated HTTPS URL from the fixed public help catalog. The application owns and closes the client, and the invoking UI coroutine owns the request. Existing client configuration sets request deadlines and response limits. The helper should return the response text without creating another client. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "build.gradle.kts": "plugins { kotlin(\"jvm\") version \"2.1.20\" }\nrepositories { mavenCentral() }\nkotlin { jvmToolchain(17) }\ndependencies { implementation(\"io.ktor:ktor-client-cio-jvm:2.3.13\") }\n",
+        "src/main/kotlin/help/HelpText.kt": "package help\n\nimport io.ktor.client.HttpClient\nimport io.ktor.client.request.get\nimport io.ktor.client.statement.bodyAsText\nimport io.ktor.http.Url\n\nsuspend fun helpText(client: HttpClient, url: Url): String = client.get(url).bodyAsText()\n"
+      },
+      "expected_verdict": "approve",
+      "expected_findings": [],
+      "required_references": [],
+      "forbidden_skills": [
+        "ktor-development-guide",
+        "kotlin-backend-development-guide",
+        "spring-boot-development-guide"
+      ]
+    },
+    {
+      "id": "ktor-sampler-shutdown",
+      "skill": "ktor-development-guide",
+      "kind": "held-out",
+      "task": "Review ownership and shutdown of the Ktor application sampler. It writes optional local diagnostic samples; missed scheduled ticks need no replay or durable queue. On orderly shutdown, stop scheduling and allow the current bounded database operation to finish before disposing its resources. The deployment allows ten seconds for shutdown. PostgreSQL 16 schema creation is handled by the existing deployment runner, and the supplied embedded Netty entry point is the production entry point. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "build.gradle.kts": "plugins { kotlin(\"jvm\") version \"2.1.20\" }\nrepositories { mavenCentral() }\nkotlin { jvmToolchain(17) }\ndependencies {\n    implementation(\"io.ktor:ktor-server-netty-jvm:2.3.13\")\n    implementation(\"io.ktor:ktor-server-auth-jvm:2.3.13\")\n    implementation(\"org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2\")\n}\n\ndependencies {\n    implementation(\"com.zaxxer:HikariCP:5.1.0\")\n    implementation(\"org.postgresql:postgresql:42.7.5\")\n}\n",
+        "src/main/kotlin/samples/Server.kt": "package samples\n\nimport com.zaxxer.hikari.HikariConfig\nimport com.zaxxer.hikari.HikariDataSource\nimport io.ktor.server.application.*\nimport io.ktor.server.engine.*\nimport io.ktor.server.netty.*\nimport java.util.concurrent.Executors\nimport java.util.concurrent.TimeUnit\n\nfun Application.samplerModule(jdbcUrl: String) {\n    val pool = HikariDataSource(HikariConfig().apply {\n        this.jdbcUrl = jdbcUrl\n        maximumPoolSize = 1\n        connectionTimeout = 1000\n        addDataSourceProperty(\"socketTimeout\", \"3\")\n        addDataSourceProperty(\"options\", \"-c statement_timeout=2000\")\n    })\n    val executor = Executors.newSingleThreadScheduledExecutor()\n    val logger = log\n    val scheduled = executor.scheduleWithFixedDelay({\n        try {\n            pool.connection.use { connection ->\n                connection.createStatement().use { statement ->\n                    statement.executeUpdate(\"INSERT INTO samples(captured_at) VALUES (CURRENT_TIMESTAMP)\")\n                }\n            }\n        } catch (failure: Exception) {\n            logger.warn(\"Sample collection failed\")\n        }\n    }, 0, 10, TimeUnit.SECONDS)\n    environment.monitor.subscribe(ApplicationStopping) {\n        pool.close()\n        scheduled.cancel(false)\n        executor.shutdown()\n        if (!executor.awaitTermination(4, TimeUnit.SECONDS)) executor.shutdownNow()\n    }\n}\n\nfun main() {\n    val jdbcUrl = requireNotNull(System.getenv(\"SAMPLE_JDBC_URL\"))\n    embeddedServer(Netty, host = \"127.0.0.1\", port = 8080) {\n        samplerModule(jdbcUrl)\n    }.start(wait = true)\n}\n",
+        "schema.sql": "CREATE TABLE samples (captured_at timestamp with time zone NOT NULL);\n"
+      },
+      "expected_verdict": "request-changes",
+      "expected_findings": [
+        {
+          "file": "src/main/kotlin/samples/Server.kt",
+          "start_line": 33,
+          "end_line": 33,
+          "invariant": "The ApplicationStopping handler closes Hikari before stopping scheduling and waiting for the running sampler. Pool shutdown can abort or reject the current sampler connection; users must stop/drain before pool disposal to honor orderly shutdown."
+        }
+      ],
+      "required_references": [
+        "ktor-development-guide/references/data-lifecycle.md",
+        "kotlin-backend-development-guide/references/runtime-operations.md"
+      ],
+      "forbidden_skills": []
+    },
+    {
+      "id": "llm-shipping-draft-approval",
+      "skill": "llm-tool-development",
+      "kind": "defect",
+      "task": "Review the local executor and OpenAI Responses adapter for the assistant delivery-draft editor. Python 3.12 uses direct Responses JSON rather than an SDK. The caller passes only complete function_call output items; it retains conversation items separately. Host authentication constructs Context and a separate human-review endpoint stores Approval for the reviewed tool, order and normalized address; neither is deserialized from model arguments. Drafts are intentionally session-memory data, with no carrier request or durable order update. Host-owned records are accessed only through the executor lock while editing. Users may edit drafts within their tenant after human review; the permission flag is freshly resolved for each invocation. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "runtime.json": "{\"python\": \"3.12\", \"dependencies\": []}\n",
+        "draft_tool.py": "from dataclasses import dataclass\nimport json\nfrom threading import RLock\nimport time\n\n\nTOOL = {\n    \"type\": \"function\", \"name\": \"set_shipping_draft\", \"strict\": True,\n    \"description\": \"Set the delivery address on a session draft.\",\n    \"parameters\": {\"type\": \"object\", \"additionalProperties\": False,\n                   \"properties\": {\"order_id\": {\"type\": \"string\"},\n                                  \"address\": {\"type\": \"string\"}},\n                   \"required\": [\"order_id\", \"address\"]},\n}\n\n\n@dataclass(frozen=True)\nclass Context:\n    principal: str\n    tenant: str\n    can_edit: bool\n    approval_id: str\n\n\n@dataclass(frozen=True)\nclass Approval:\n    principal: str\n    tenant: str\n    tool: str\n    order_id: str\n    address: str\n    expires_at: float\n\n\n@dataclass\nclass Draft:\n    tenant: str\n    address: str\n\n\nclass DraftExecutor:\n    def __init__(self, drafts: dict[str, Draft], approvals: dict[str, Approval]):\n        self._drafts = drafts\n        self._approvals = approvals\n        self._lock = RLock()\n\n    def execute(self, arguments: object, context: Context) -> dict:\n        if not isinstance(arguments, dict) or set(arguments) != {\"order_id\", \"address\"}:\n            return {\"error\": \"invalid_input\", \"effect_state\": \"not_started\"}\n        order_id, address = arguments[\"order_id\"], arguments[\"address\"]\n        if not isinstance(order_id, str) or not 1 <= len(order_id) <= 80:\n            return {\"error\": \"invalid_input\", \"effect_state\": \"not_started\"}\n        if not isinstance(address, str) or not 1 <= len(address.strip()) <= 200:\n            return {\"error\": \"invalid_input\", \"effect_state\": \"not_started\"}\n        address = address.strip()\n        with self._lock:\n            draft = self._drafts.get(order_id)\n            if not context.can_edit or draft is None or draft.tenant != context.tenant:\n                return {\"error\": \"denied\", \"effect_state\": \"not_started\"}\n            approved = self._approvals.get(context.approval_id)\n            if approved is None or approved.expires_at <= time.time():\n                return {\"error\": \"approval_required\", \"effect_state\": \"not_started\"}\n            if (approved.principal, approved.tenant, approved.tool, approved.order_id) != (\n                context.principal, context.tenant, \"set_shipping_draft\", order_id\n            ):\n                return {\"error\": \"approval_required\", \"effect_state\": \"not_started\"}\n            draft.address = address\n            return {\"result\": \"updated\", \"effect_state\": \"committed\"}\n\n\ndef function_output(call: dict, context: Context, executor: DraftExecutor) -> dict:\n    if call[\"name\"] != \"set_shipping_draft\":\n        outcome = {\"error\": \"unknown_tool\", \"effect_state\": \"not_started\"}\n    elif len(call[\"arguments\"].encode(\"utf-8\")) > 2048:\n        outcome = {\"error\": \"invalid_input\", \"effect_state\": \"not_started\"}\n    else:\n        try:\n            arguments = json.loads(call[\"arguments\"])\n        except (ValueError, RecursionError):\n            outcome = {\"error\": \"invalid_input\", \"effect_state\": \"not_started\"}\n        else:\n            outcome = executor.execute(arguments, context)\n    return {\"type\": \"function_call_output\", \"call_id\": call[\"call_id\"],\n            \"output\": json.dumps(outcome)}\n"
+      },
+      "expected_verdict": "request-changes",
+      "expected_findings": [
+        {
+          "file": "draft_tool.py",
+          "start_line": 63,
+          "end_line": 65,
+          "invariant": "The executor checks principal, tenant, tool and order but not the approved normalized address. A completed model call can supply a different address under the same approval and reach draft.address mutation without human approval for that material input."
+        }
+      ],
+      "required_references": [
+        "llm-tool-development/references/openai.md"
+      ],
+      "forbidden_skills": []
+    },
+    {
+      "id": "llm-mcp-bounded-title-read",
+      "skill": "llm-tool-development",
+      "kind": "normal",
+      "task": "Review the tools/call handler for our Python MCP server, negotiated revision 2025-11-25. The existing transport authenticates tokens for this server audience, enforces note-read scope, validates complete JSON-RPC requests and byte/depth limits, and builds Context from the trusted session. Tool capability negotiation and tools/list advertise the supplied TOOL unchanged. The immutable, insertion-ordered snapshot has at most 1000 notes and titles of at most 80 characters. Policy permits these titles to be returned to this authenticated assistant session without a separate confirmation dialog. This handler sends no data to other services and performs no mutations. Review only this adapter; transport implementation is unchanged. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "runtime.json": "{\"python\": \"3.12\", \"dependencies\": []}\n",
+        "notes_mcp.py": "from dataclasses import dataclass\nimport json\n\n\nTOOL = {\n    \"name\": \"list_note_titles\",\n    \"description\": \"List up to ten note titles visible to the authenticated tenant.\",\n    \"inputSchema\": {\"type\": \"object\", \"additionalProperties\": False,\n                    \"properties\": {\"limit\": {\"type\": \"integer\", \"minimum\": 1, \"maximum\": 10}},\n                    \"required\": [\"limit\"]},\n    \"outputSchema\": {\"type\": \"object\", \"additionalProperties\": False,\n                     \"properties\": {\"titles\": {\"type\": \"array\", \"maxItems\": 10,\n                                               \"items\": {\"type\": \"string\", \"maxLength\": 80}}},\n                     \"required\": [\"titles\"]},\n    \"annotations\": {\"readOnlyHint\": True, \"destructiveHint\": False},\n}\n\n\n@dataclass(frozen=True)\nclass Context:\n    principal: str\n    tenant: str\n    can_read_notes: bool\n\n\n@dataclass(frozen=True)\nclass Note:\n    tenant: str\n    title: str\n\n\ndef protocol_error(request_id: str | int, code: int, message: str) -> dict:\n    return {\"jsonrpc\": \"2.0\", \"id\": request_id,\n            \"error\": {\"code\": code, \"message\": message}}\n\n\ndef tool_error(request_id: str | int, message: str) -> dict:\n    return {\"jsonrpc\": \"2.0\", \"id\": request_id,\n            \"result\": {\"isError\": True, \"content\": [{\"type\": \"text\", \"text\": message}]}}\n\n\ndef tool_call(request: dict, context: Context, notes: tuple[Note, ...]) -> dict:\n    request_id = request[\"id\"]\n    params = request.get(\"params\")\n    if request.get(\"method\") != \"tools/call\" or not isinstance(params, dict):\n        return protocol_error(request_id, -32600, \"Invalid request\")\n    if params.get(\"name\") != TOOL[\"name\"]:\n        return protocol_error(request_id, -32602, \"Unknown tool\")\n    arguments = params.get(\"arguments\", {})\n    if not isinstance(arguments, dict):\n        return protocol_error(request_id, -32602, \"Arguments must be an object\")\n    if set(arguments) != {\"limit\"}:\n        return tool_error(request_id, \"Supply only the required limit argument\")\n    limit = arguments[\"limit\"]\n    if type(limit) not in (int, float) or not 1 <= limit <= 10 or limit != int(limit):\n        return tool_error(request_id, \"limit must be an integer between 1 and 10\")\n    if not context.can_read_notes:\n        result = {\"isError\": True, \"content\": [{\"type\": \"text\", \"text\": \"Not authorized\"}]}\n    else:\n        titles = []\n        for note in notes:\n            if note.tenant == context.tenant:\n                titles.append(note.title)\n                if len(titles) == limit:\n                    break\n        output = {\"titles\": titles}\n        result = {\"isError\": False, \"structuredContent\": output,\n                  \"content\": [{\"type\": \"text\", \"text\": json.dumps(output)}]}\n    return {\"jsonrpc\": \"2.0\", \"id\": request_id, \"result\": result}\n"
+      },
+      "expected_verdict": "approve",
+      "expected_findings": [],
+      "required_references": [
+        "llm-tool-development/references/mcp.md"
+      ],
+      "forbidden_skills": []
+    },
+    {
+      "id": "llm-chat-transcript-format",
+      "skill": "llm-tool-development",
+      "kind": "non-target",
+      "task": "Review the transcript formatter in our chat-only demo. It accepts user and assistant text and produces display lines in the same order, retaining empty text. It is used only in the terminal transcript view. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "runtime.json": "{\"python\": \"3.12\", \"dependencies\": []}\n",
+        "transcript.py": "from dataclasses import dataclass\nfrom typing import Literal\n\n\n@dataclass(frozen=True)\nclass Message:\n    role: Literal[\"user\", \"assistant\"]\n    text: str\n\n\ndef display_lines(messages: tuple[Message, ...]) -> list[str]:\n    return [f\"{message.role}: {message.text}\" for message in messages]\n"
+      },
+      "expected_verdict": "approve",
+      "expected_findings": [],
+      "required_references": [],
+      "forbidden_skills": [
+        "llm-tool-development"
+      ]
+    },
+    {
+      "id": "llm-responses-outcome-envelope",
+      "skill": "llm-tool-development",
+      "kind": "held-out",
+      "task": "Review the new OpenAI Responses result-envelope mapper. This Python integration uses the direct Responses JSON API without an SDK. Its application-side executor has already completed authorization, exact human approval checks and operation-ledger reconciliation; it provides one host-owned Outcome per complete function call keyed by provider call_id. Outcomes contain only public-safe strings; an unknown effect is reported as unknown and never retried here. The caller preserves response output and reasoning items in conversation history before appending these result items. Review this mapping boundary rather than the unchanged executor. Review only the supplied change; do not edit files, run builds/tests, or start a workflow. Return JSON with verdict (approve or request-changes) and findings containing file, line, and reason.",
+      "files": {
+        "runtime.json": "{\"python\": \"3.12\", \"dependencies\": []}\n",
+        "responses_output.py": "from dataclasses import dataclass\nimport json\nfrom typing import Literal\n\n\nEffectState = Literal[\"not_started\", \"not_committed\", \"committed\", \"unknown\"]\n\n\n@dataclass(frozen=True)\nclass Outcome:\n    call_id: str\n    execution_id: str\n    effect_state: EffectState\n    public_result: dict[str, str]\n\n\ndef outputs_for_response(response: dict, outcomes: dict[str, Outcome]) -> list[dict]:\n    outputs = []\n    for item in response[\"output\"]:\n        if item[\"type\"] != \"function_call\":\n            continue\n        outcome = outcomes[item[\"call_id\"]]\n        if outcome.call_id != item[\"call_id\"]:\n            raise ValueError(\"Outcome does not match call\")\n        outputs.append({\n            \"type\": \"function_call_output\",\n            \"call_id\": item[\"id\"],\n            \"output\": json.dumps({\"effect_state\": outcome.effect_state,\n                                  \"result\": outcome.public_result}),\n        })\n    return outputs\n",
+        "response.json": "{\"id\": \"resp_482\", \"output\": [{\"type\": \"message\", \"id\": \"msg_30\", \"role\": \"assistant\", \"status\": \"completed\", \"content\": [{\"type\": \"output_text\", \"text\": \"I will update the draft.\", \"annotations\": []}]}, {\"type\": \"function_call\", \"id\": \"fc_91\", \"call_id\": \"call_7ab\", \"name\": \"set_shipping_draft\", \"arguments\": \"{\\\"order_id\\\": \\\"order-1\\\", \\\"address\\\": \\\"28 Oak Road\\\"}\", \"status\": \"completed\"}]}\n"
+      },
+      "expected_verdict": "request-changes",
+      "expected_findings": [
+        {
+          "file": "responses_output.py",
+          "start_line": 27,
+          "end_line": 27,
+          "invariant": "Responses function_call_output must reference the function call's call_id. Using the output item id (fc_91 rather than call_7ab in the fixture) prevents the provider from associating the otherwise correctly preserved outcome with its call."
+        }
+      ],
+      "required_references": [
+        "llm-tool-development/references/openai.md"
+      ],
+      "forbidden_skills": []
+    }
+  ]
+}

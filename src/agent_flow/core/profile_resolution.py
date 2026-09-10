@@ -25,7 +25,7 @@ import yaml
 from agent_flow.core.local_skills import merged_profile_payload
 from agent_flow.core.phase_workflow import package_root
 from agent_flow.core.profiles import (
-    apply_project_profile_override,
+    resolve_project_profile_payload,
     kit_declared_profile,
     kit_declared_profiles,
     project_profile_path,
@@ -139,7 +139,7 @@ def load_single_profile(
     if raw.get("id") != profile_id:
         raise ValueError(f"profile id mismatch: {profile_id}")
     if project_root is not None:
-        raw = apply_project_profile_override(raw, profile_id=profile_id, root=project_root)
+        raw = resolve_project_profile_payload(raw, profile_id=profile_id, root=project_root)
     return profile_id, raw
 
 
@@ -199,7 +199,37 @@ def load_profile_union(
     for key in ("skills", "skill_sources"):
         if key in merged:
             union[key] = merged[key]
+    for key in ("branching", "pr", "commit_convention"):
+        declarations = [
+            (profile_id, profile[key])
+            for profile_id, profile in deduped
+            if key in profile
+        ]
+        if declarations:
+            union[key] = _merge_repository_policy(declarations, key)
     return ",".join(active_ids), union
+
+
+def _merge_repository_policy(
+    declarations: list[tuple[str, Any]], field: str
+) -> Any:
+    if all(isinstance(value, dict) for _, value in declarations):
+        keys = sorted({key for _, value in declarations for key in value})
+        return {
+            key: _merge_repository_policy(
+                [(owner, value[key]) for owner, value in declarations if key in value],
+                f"{field}.{key}",
+            )
+            for key in keys
+        }
+    first = declarations[0][1]
+    if any(type(value) is not type(first) or value != first for _, value in declarations):
+        detail = ", ".join(f"{owner}={value!r}" for owner, value in declarations)
+        raise ValueError(
+            f"conflicting repository policy {field}: {detail}; "
+            "declare matching project profile overrides before starting the run"
+        )
+    return first
 
 
 def packaged_profile_path(profile_id: str) -> Path | None:

@@ -212,19 +212,24 @@ and after the fix, the comment pass and the reviews run again before verificatio
 
 ## Skills and profiles
 
-53 skills ship with the kit, and only the ones the changed files and the active profile call
+60 skills ship with the kit, and only the ones the changed files and the active profile call
 for are loaded. Reading all of them costs more context than the work can carry.
 
 They fall into architecture (`clean-architecture-core`, `ddd-architecture`,
-`domain-modeling`), platform (Android, iOS, React, React Native, Flutter, Python), development
+`domain-modeling`), platform (Android, iOS, React, React Native, Flutter, Python, Kotlin servers), development
 discipline (`tdd`, `code-generation-discipline`, `comment-authoring-discipline`), review
 (`code-review`, `architecture-reviewer`, `plan-reviewer`), requirement refinement (`grilling`,
 `to-prd`, `product-brief`), and operations (`agent-flow`, `agent-flow-diagnosing-bugs`, `push-watch`).
 
-10 profiles — `android` `flutter` `generic` `ios` `nextjs` `node` `python` `react-native` `spring` `typescript`
+11 profiles — `android` `flutter` `generic` `ios` `ktor` `nextjs` `node` `python` `react-native` `spring` `typescript`
 
 A profile declares the per-platform verification commands and review angles. The exact format
 is in [docs/USAGE.md](docs/USAGE.md).
+
+Spring and Ktor server projects use framework-specific profiles; Gradle alone is
+not an Android signal. React Web capabilities select form, SEO, and Storybook
+skills without treating every React project as Next.js. Ambiguous projects need
+an explicit profile; project-local overrides are applied after capability selection.
 
 ---
 

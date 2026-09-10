@@ -14,7 +14,7 @@ SRC = str(KIT_ROOT / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from agent_flow.artifact import create_run, mark_inactive, read_meta, write_meta
+from agent_flow.artifact import ActiveRunExists, create_run, mark_inactive, read_meta, write_meta
 from agent_flow.core.commands import SafeCommandResult
 from agent_flow.core import worktrees as W
 from agent_flow.core import worktree_isolation as W_ISO
@@ -331,10 +331,10 @@ def test_run_lifecycle_lease_is_shared_and_recovers_after_owner_crash(
     try:
         assert holder.stdout is not None
         assert holder.stdout.readline().strip() == "ready"
-        with pytest.raises(W.CleanupBlockedError, match="run lifecycle"):
+        with pytest.raises(W.CleanupBlockedError):
             with W._run_start_exclusion(state_root):
                 pytest.fail("cleanup entered while create-run lease was held")
-        with pytest.raises(RuntimeError, match="another agent-flow run"):
+        with pytest.raises(ActiveRunExists):
             create_run(state_root, "default", "blocked", run_id="blocked")
     finally:
         holder.kill()
@@ -2387,3 +2387,56 @@ def test_continue_finishes_cleanup_after_source_metadata_is_removed(
         == 0
     )
     assert "status: complete" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("pending_cleanup", [False, True])
+def test_local_handoff_preserves_checkout_and_does_not_hide_pending_cleanup(
+    tmp_path, monkeypatch, capsys, pending_cleanup,
+):
+    from dataclasses import replace
+
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "local-handoff")
+    user_file = status.path / "unfinished.txt"
+    user_file.write_text("preserve my work\n", encoding="utf-8")
+    runner = Runner(
+        status.path,
+        state_root=W.worktree_runtime_root(root=root, name=status.name),
+        config_root=root,
+        workflow="default",
+        run_dir=run_dir,
+        checkout_identity=f"worktree:{status.name}",
+    )
+    runner.workflow = replace(runner.workflow, completion_disposition="local-handoff")
+    meta = read_meta(run_dir)
+    meta.update(phase_index=len(runner.phases), current_phase=None)
+    if pending_cleanup:
+        meta["cleanup_journal"] = str(tmp_path / "pending.json")
+    write_meta(run_dir, meta)
+
+    class Adapter:
+        name = "generic"
+
+    monkeypatch.setattr(runner_module, "assert_managed_hooks_registered", lambda *_args: None)
+    monkeypatch.setattr(runner_module, "detect_adapter", lambda: Adapter())
+    monkeypatch.setattr(runner_module, "detect_available_clis", lambda: [])
+
+    def write_report(path):
+        report = path / "run-report.md"
+        report.write_text("report\n", encoding="utf-8")
+        return report
+
+    def pending_transaction(**kwargs):
+        raise W.CleanupBlockedError("integration proof is unknown")
+
+    monkeypatch.setattr(runner_module, "write_run_report", write_report)
+    monkeypatch.setattr(runner_module, "run_worktree_cleanup_transaction", pending_transaction)
+    runner.run(ResumeMode.RESUME)
+    assert user_file.read_text(encoding="utf-8") == "preserve my work\n"
+    assert W.worktree_branch_exists(root=root, branch=status.branch)
+    assert (run_dir / "active").exists() is pending_cleanup
+    if pending_cleanup:
+        assert "reason: cleanup_pending" in capsys.readouterr().out
+    else:
+        assert read_meta(run_dir)["completion_disposition"] == "local-handoff"

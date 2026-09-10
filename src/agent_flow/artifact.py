@@ -32,6 +32,7 @@ import yaml
 
 from agent_flow.core.atomic_io import atomic_write_text
 from agent_flow.core.design_value_check import missing_spec_item_evidence
+from agent_flow.core.installation import installation_lock_path
 from agent_flow.core.local_skills import (
     changed_files,
     missing_local_skill_markers,
@@ -39,8 +40,10 @@ from agent_flow.core.local_skills import (
 )
 from agent_flow.core.markers import missing_markers, normalize_required_markers
 from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
+from agent_flow.core.run_storage import ACTIVE_MARKER, RUNS_DIRNAME, active_run_paths
 from agent_flow.core.security import validate_safe_name
 from agent_flow.core.skill_resolver import PhaseSkills
+from agent_flow.core.worktree_isolation import shared_file_lease
 from agent_flow.core.review_evidence import (
     review_route_needs_regeneration,
     ReviewEvidenceBindingError,
@@ -56,11 +59,10 @@ from agent_flow.core.worktree_isolation import (
     FileLeaseUnavailable,
     exclusive_file_lease,
     write_run_artifact_text,
+    resolve_run_subpath,
 )
 
 
-RUNS_DIRNAME = ".agent-flow/runs"
-ACTIVE_MARKER = "active"
 META_FILE = "meta.json"
 ACTIVE_LOCK = "active.lock"
 
@@ -172,6 +174,11 @@ class ActiveRun:
                     if missing_markers
                     else "phase_artifact_written_continue_required"
                 )
+                if not missing_markers:
+                    pending = pending_phase_approval(self.path)
+                    if pending is not None:
+                        reason = "phase_approval_required"
+                        next_command = f"{next_command} --approve {pending['token']}"
         payload = workflow_status_payload(
             status=structured_status,
             run=f"{self.workflow}/{self.run_id}",
@@ -194,14 +201,7 @@ class ActiveRun:
 
 
 def find_active_runs(project_root: Path) -> tuple[ActiveRun, ...]:
-    runs_dir = project_root / RUNS_DIRNAME
-    if not runs_dir.exists():
-        return ()
-    paths = sorted(
-        (path for path in runs_dir.iterdir() if (path / ACTIVE_MARKER).exists()),
-        key=lambda path: path.name,
-    )
-    return tuple(_active_run(path) for path in paths)
+    return tuple(_active_run(path) for path in active_run_paths(project_root))
 
 
 def find_active_run(project_root: Path) -> ActiveRun | None:
@@ -252,6 +252,7 @@ def create_run(
     task: str,
     *,
     architecture: str | None = None,
+    checkout_root: Path | None = None,
     run_id: str | None = None,
     checkout_identity: str | None = None,
     checkout_registration_identity: str | None = None,
@@ -281,9 +282,11 @@ def create_run(
         except ValueError as exc:
             raise ValueError("invalid checkout registration identity") from exc
     runs_dir = project_root / RUNS_DIRNAME
-    runs_dir.mkdir(parents=True, exist_ok=True)
     try:
-        with exclusive_file_lease(runs_dir / ACTIVE_LOCK):
+        with (
+            shared_file_lease(installation_lock_path(checkout_root or project_root)),
+            exclusive_file_lease(runs_dir / ACTIVE_LOCK),
+        ):
             existing = find_active_run(project_root)
             if existing is not None:
                 raise ActiveRunExists(
@@ -352,7 +355,7 @@ def create_run(
             return run_path
     except FileLeaseUnavailable as exc:
         raise ActiveRunExists(
-            "another agent-flow run is starting or its lifecycle lock is unsafe; "
+            "installation or another run holds the lifecycle lease, or the lease is unsafe; "
             "retry after the current process exits"
         ) from exc
 
@@ -418,6 +421,55 @@ def write_meta(run_path: Path, meta: Mapping[str, Any]) -> None:
         run_path.resolve() / META_FILE,
         json.dumps(meta, indent=2),
     )
+
+
+def _phase_approval_identity(run_path: Path, meta: Mapping[str, Any]) -> dict[str, str] | None:
+    request = meta.get("phase_approval_request")
+    if not isinstance(request, dict):
+        return None
+    phase_id = meta.get("current_phase")
+    entered_at = meta.get("phase_entered_at")
+    run_id = meta.get("run_id")
+    if (
+        request.get("phase_id") != phase_id
+        or request.get("phase_entered_at") != entered_at
+        or not all(isinstance(value, str) and value for value in (run_id, phase_id, entered_at))
+    ):
+        return None
+    relative = request.get("artifact")
+    if not isinstance(relative, str) or Path(relative).is_absolute():
+        raise ValueError("phase approval artifact must be run-relative")
+    artifact = resolve_run_subpath(run_path, run_path.resolve() / relative)
+    if not artifact.is_file():
+        return None
+    identity = {
+        "run_id": run_id,
+        "phase_id": phase_id,
+        "phase_entered_at": entered_at,
+        "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+    }
+    identity["token"] = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return identity
+
+
+def pending_phase_approval(run_dir: Path) -> dict[str, str] | None:
+    meta = read_meta(run_dir)
+    identity = _phase_approval_identity(run_dir, meta)
+    return identity if identity != meta.get("phase_approval") else None
+
+
+def approve_phase_artifact(run_dir: Path, *, token: str) -> dict[str, str]:
+    """Acknowledge these artifact bytes, not the caller's identity."""
+    with exclusive_file_lease(run_dir.parent / ACTIVE_LOCK):
+        meta = read_meta(run_dir)
+        identity = _phase_approval_identity(run_dir, meta)
+        if identity is None or not secrets.compare_digest(identity["token"], token):
+            raise ValueError("phase approval token does not match the current artifact and attempt")
+        meta["phase_approval"] = identity
+        write_meta(run_dir, meta)
+        return identity
 
 
 def ensure_review_binding(run_path: Path) -> ReviewBinding:

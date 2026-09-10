@@ -15,42 +15,36 @@ This is not a standalone Clean Architecture guide. Load [`clean-architecture-cor
 2. Use this adapter only to translate those rules into Android Gradle modules, Kotlin packages, Hilt bindings, Retrofit/OkHttp boundaries, and Android platform adapters.
 3. If the task is only ViewModel, UiState, Compose screen wiring, or one-shot presentation effects, pair with `android-clean-presentation-architecture` before applying presentation details.
 
-## Module Shape
+## Module Boundaries
 
-```text
-app/
-core/{ui,designsystem,resources,platform,network,database,navigation/api,navigation/impl}
-core/domain/<context>/
-core/data/<context>/
-feature/<name>/api/
-feature/<name>/presentation/
-```
+Discover the project's Gradle modules, Kotlin source sets, dependency declarations,
+and active architecture role mappings. Preserve an adopted layout; roles do not
+require a new module or a fixed folder tree. Kotlin `internal` is a compilation
+module boundary, not package-private visibility.
 
-Android paths include Gradle module path plus Kotlin source root/package path.
-The semantic boundary is the Gradle module family, not the repeated package
-string after `src/main/java`.
+Map source sets as well as module ownership. Repeated package names do not prove
+the dependency direction, and a role outside lint activation has not been checked.
 
-## Package Roles
+## Roles
 
-- `app`: `Application`, root activity, root navigation, global error host,
-  app-wide startup, and Hilt composition root.
-- `core/domain/<context>`: domain models, repository interfaces, use cases,
-  policies, domain services, domain errors.
-- `core/data/<context>`: repository impls, API services, DTOs, mappers,
-  remote/local sources, cache, Hilt data modules.
-- `core/database`: optional. When a repo keeps a shared database module, Room
-  entities, DAOs, and patch transactions live here and `core/data/<context>`
-  depends on it. The dependency runs `core:data -> core:database` only; the
-  database module never depends on `core:data`, a feature, or `app`, and
-  `core/domain/<context>` never depends on it. A repo without this module keeps
-  local sources under `core/data/<context>/source/local`.
-- `core/network`: Retrofit/OkHttp factories, response envelope, common network
-  failure mapping, interceptors, qualifiers.
-- `core/navigation/api`: route/nav-key contracts.
-- `core/navigation/impl`: concrete navigation graph/entry composition.
-- `feature/<name>/api`: public route keys and feature entry contracts.
-- `feature/<name>/presentation`: routes, screens, ViewModels, UiState, UiAction,
-  UiEvent, UiModel, domain-to-UI mappers, components.
+- `app-shell` owns Application/activity entry, startup, root navigation, global
+  error hosts, and Hilt composition.
+- `core-domain` owns pure domain policy, values, errors, and repository contracts;
+  application orchestration consumes those contracts and other stable ports.
+- `core-data` owns repository implementations, source/cache policy, outbound
+  DTO/entity mapping, and data bindings.
+- If the project has a shared database role, data adapters may depend on it.
+  Database code does not depend on data implementations, features, or AppShell;
+  pure domain policy does not depend on the database. Otherwise keep persistence
+  inside the existing data adapter boundary.
+- Network/platform roles own client setup, interceptors, qualifiers, native
+  capabilities, and failure mapping.
+- Navigation and feature API roles expose entry/route contracts; their
+  implementation/presentation roles own concrete graphs, screens, state holders,
+  UI values, and mapping.
+- `shared-presentation-contract` owns neutral notifier/queue interfaces consumed
+  by AppShell and feature presentation. Wire implementations at composition;
+  neither domain policy nor the contract imports AppShell or UI implementations.
 
 ## Hilt DI
 
@@ -59,29 +53,25 @@ string after `src/main/java`.
 - Use `@HiltViewModel` for ViewModels.
 - Put `@Provides` for third-party builders/factory logic.
 - Put `@Binds` for interface-to-implementation mappings.
-- Put Retrofit and OkHttp construction in `core/network/di`.
-- Put API service providers and repository bindings in `core/data/<context>/di`.
-- Use cases with `@Inject constructor` do not need Hilt modules.
+- Keep Retrofit/OkHttp construction at the network adapter/composition edge.
+- Keep API providers and repository bindings at the data adapter/composition edge.
+- An adopted application use-case `@Inject constructor` needs no redundant Hilt
+  module. This is application wiring metadata, not permission for Hilt or Android
+  types inside pure domain policy. Use external factories for a fully pure action.
 - Assisted ViewModel factories pass only route values; other dependencies stay
   normal Hilt injections.
 
 ## Data Boundary
 
-Default production flow:
+Keep Retrofit interfaces, outbound DTOs, persistence entities, and source/cache
+policy in the data/network adapter that owns them. Convert to domain/application
+values at that boundary. Compose separate sources and mappers when their policy
+or change reasons differ; a DB-only repository needs no remote/cache collaborator.
 
-```text
-HomeRepositoryImpl -> HomeRemoteDataSource -> HomeApiService
-```
-
-- Keep Retrofit interfaces in `core/data/<context>/api`.
-- Keep DTO/request/response models in `core/data/<context>/model`.
-- Keep remote data sources in `core/data/<context>/source/remote`.
-- Keep local sources in `core/data/<context>/source/local`.
-- Keep data-to-domain mapping in `core/data/<context>/mapper`.
-- Keep repository impls in `core/data/<context>/repository`.
-- Repository impls compose sources/cache/mappers and return domain models only.
-- Do not make `RepositoryImpl` injecting an API service directly the default
-  production shape.
+Apply the core's recorded simple-adapter exception instead of adding forwarding
+classes. Presentation still receives contracts, never raw API services or ORM
+entities. Discover the existing binding locations rather than moving files to
+match an example layout.
 
 ## Presentation Boundary
 

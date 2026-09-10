@@ -152,6 +152,16 @@ adoption record. Any other linked worktree has to be adopted before it is recogn
 agent-flow worktree adopt --path <checkout>
 ```
 
+Short workflows (`review`, `development`, `bugfix`, `diagnosing-bugs`) declare
+`completion_disposition: local-handoff`: completing them keeps the bound checkout.
+An already-pending cleanup journal still resumes; this setting is not a way to hide
+unfinished cleanup. Other workflows retain integrated cleanup.
+
+At a `pause_after` boundary, review the artifact and use the exact `next_command`
+reported by `status`. Its `--approve` token identifies the run, phase attempt, and
+artifact bytes. Rewriting the artifact or re-entering the phase requires a new
+approval. The token binds an approval to content; it is not user authentication.
+
 ### The SPEC ledger
 
 The initial list automatically becomes the baseline. Only additions, changes, and deletions
@@ -207,6 +217,20 @@ The second form is a local check that runs only the default `pre-commit`. It wri
 `artifacts/gate-results-local-pre-commit.json` and leaves the canonical all-phase ledger
 unchanged. Passing `--timeout` takes precedence over the profile declaration.
 
+With several active profiles, branching, PR, and commit policy must agree;
+conflicts fail before creating a worktree. Duplicate command gates retain
+`required: true` if any profile requires them. Conflicting timeout or CI-check
+declarations also need an explicit resolution.
+
+Implementation evidence distinguishes `change-kind: bugfix|feature|behavior-preserving`.
+Bugfixes and features need a real failing regression followed by GREEN.
+Behavior-preserving work needs an unchanged-contract reason and the named
+relevant regression GREEN, not an invented failure. A runner-issued
+`red-reference` is reusable only for the same regression and phase-entry code
+baseline; empty legacy baselines are not reusable. Command hooks observe a
+post-command baseline, not proof that code stayed unchanged throughout a command.
+CI-only gates remain remote unless the user grants a scoped local exception.
+
 ### Skills
 
 `skills sync` fetches only the external `skill_sources` a profile declares. The profiles and
@@ -215,6 +239,23 @@ workflows themselves are refreshed by running the installer again.
 ```bash
 agent-flow skills sync
 ```
+
+Bundled skills are restored through the installer, not `skills sync`. External
+source refresh publishes URL/ref-qualified immutable checkouts atomically; failed
+refreshes leave existing published readers intact. Legacy mutable cache paths are
+not accepted as a published snapshot.
+
+Run installation from the leader only after active runs finish. Both installer
+entrypoints check leader and private-worktree runtime state before writing project
+assets. A delegated failure exits nonzero and skips the success metadata/banner;
+this does not promise rollback of every earlier write. Explicit `--no-hooks`
+cleanup remains independent. User-edited copied references survive reinstall and
+retirement, and the installation digest is taken after reference synchronization.
+
+Hook registration is not proof that a host executes hooks. Check the native
+host's activation/trust requirements and observed command evidence. Managed
+provider confinement currently has a verified macOS `sandbox-exec` backend only;
+other operating systems fail closed instead of receiving the same isolation claim.
 
 ### PR watching
 
@@ -227,6 +268,20 @@ pass `--allow-unbound` explicitly to watch without deferred CI gate evidence.
 
 It calls the `gh` CLI directly and inherits the authentication the user already has. agent-flow
 does not manage a token of its own. If `gh` is missing or unauthenticated, it says exactly that.
+
+Resolved review threads and superseded reviews do not requeue old feedback.
+To acknowledge observed feedback without treating discussion as a code change:
+
+```bash
+agent-flow pr-watch <number> --run-dir <run-dir> --repo <owner/repo> \
+  --ack-head <observed-head> --ack-feedback <observed-feedback-id>
+```
+
+Repeat `--ack-feedback` for additional observed IDs. An acknowledgement is scoped
+to that run, repository, PR, HEAD, and feedback revision; it does not acknowledge
+new or edited feedback. Code changes during PR fixes return to review and
+invalidate previous gate evidence before publication. Discussion-only work
+returns to watching.
 
 ## Repository layout
 
@@ -294,21 +349,23 @@ commands that are not in a gate are not repeated at will.
 
 ## Reviewer distribution
 
-Phases marked `multi_review: true` run review angles only on the installed **Claude and Codex**
-CLIs. OMP can be the host or controller but is not used as a reviewer provider.
+Every phase marked `multi_review: true` uses the same availability-based dispatch
+over installed **Claude and Codex** CLIs. OMP can be the host or controller but is
+not a reviewer provider. An installed binary must also complete a valid probe.
 
-`final-review` distributes every angle to both providers. Other `multi_review` phases run every
-angle on one primary provider, plus any additional provider that was selected.
+- **Both available** — both can review every angle. A provider with a failed probe
+  is excluded from remaining angles; valid rejections already obtained are kept.
+- **Only one available** — that provider covers every angle, still using at least
+  two independent subprocesses. Two subprocesses do not require two vendor names.
+- **Neither available** — review is blocked. Controller-session work cannot replace it.
 
-- **Both installed** — `final-review` runs every angle on both sides, and a provider whose probe
-  failed is excluded from the remaining angles
-- **Only one installed** — every angle runs on that provider, still as independent subprocesses
-- **Neither** — the phase closes as a failure. The controller session cannot record the review
-  verdict in its place
+Approval requires a complete valid set from at least one provider and no valid
+request-changes result. Authentication, quota, timeout, and malformed-output failures
+are execution failures, not code approval.
 
-`AGENT_FLOW_REVIEWERS="codex"` narrows it. Names other than Claude and Codex are ignored.
-Per-angle artifacts (`final-review-<angle>-<provider>.md`) survive even when some time out. One
-slow CLI does not block the rest.
+`AGENT_FLOW_REVIEWERS="codex"` narrows the candidate pool. Names other than Claude
+and Codex are ignored. Per-angle artifacts survive partial failure so the cause
+and valid findings remain available.
 
 ## Verification
 

@@ -45,7 +45,9 @@ For widget-level layout, constraint, adaptive sizing, disposal, child-widget key
 Flutter has no framework-bundled DI container. Use this priority:
 
 1. Prefer constructor parameters for a dependency a single widget or notifier owns.
-2. Use Riverpod providers for app-level dependencies such as use cases, repositories, HTTP clients, storage, permissions, analytics, feature flags, and configuration.
+2. Assemble app dependencies with the existing provider graph. Presentation
+   consumes typed action, repository-interface, or capability ports; HTTP/storage/
+   plugin implementations remain inside composition and adapters.
 3. Use `get_it` only when the project already registers services there.
 4. Read a dependency through `ref`, and reserve `BuildContext` for `Theme`, `MediaQuery`, localization, navigation, and dialogs.
 
@@ -55,20 +57,15 @@ Provider rules — `flutter-clean-architecture` owns where `ProviderScope` sits 
 - let a screen-scoped provider's state be destroyed when the screen stops listening, using whichever auto-dispose form the repo's Riverpod version provides
 - keep screen-local state out of app-level providers
 
-## Package Shape
+## Presentation Boundaries
 
-Feature presentation directories should stay screen-oriented:
-- `lib/features/<feature>/presentation/<screen>/<screen>_screen.dart`
-- `lib/features/<feature>/presentation/<screen>/<screen>_notifier.dart`
-- `lib/features/<feature>/presentation/<screen>/model/<screen>_ui_state.dart`
-- `lib/features/<feature>/presentation/<screen>/model/<screen>_ui_action.dart`
-- `lib/features/<feature>/presentation/<screen>/model/<screen>_ui_event.dart`
-- `lib/features/<feature>/presentation/<screen>/model/<screen>_ui_model.dart`
-- `lib/features/<feature>/presentation/<screen>/mapper/<screen>_mapper.dart`
-- `lib/features/<feature>/presentation/<screen>/widgets/*`
+Locate the project's adopted screen, notifier, UI-value, mapper, and widget
+boundaries and map their actual paths in the architecture profile. These are
+responsibilities, not a fixed tree or a required number of files/packages.
 
-Presentation mappers must convert domain data into presentation models before state reaches widgets.
-Presentation model types must use the `UiModel` postfix, for example `<Screen>ItemUiModel`.
+Project domain/application values into the UI contract. An already safe immutable
+shape may use identity projection without a forwarding mapper or duplicate model.
+Follow adopted names; `UiModel` is a semantic role, not a mandatory suffix.
 
 ## State Holder Rule
 
@@ -85,7 +82,8 @@ State patterns:
 - model `not-ready`, `loading`, `refreshing`, `placeholder`, `empty`, `error`, `success`, `offline`, and `permission-required` states explicitly when they can occur
 - define `UiState` as a sealed class hierarchy or an `AsyncValue`, and switch over it exhaustively instead of combining booleans that can contradict each other
 - keep initial UI state out of fake domain sentinel values
-- keep request ids, `CancelToken`s, pagination cursors, selected ids, and optimistic update state private in the notifier
+- keep request handles, cancellation tokens, and rollback bookkeeping private;
+  expose rendered selection, retry status, and optimistic results as observable state
 - cancel in-flight work with the repo's existing cancellation pattern when a newer request supersedes it
 - keep keyboard, scroll, focus, and animation state in the widget unless it drives business work
 
@@ -117,7 +115,8 @@ Split state-holder wiring from rendering:
 - `UiState` has no contradictory booleans or duplicated derived fields
 - `UiAction`, `UiEvent`, and `UiState` roles are explicit for branchy screens
 - domain data is mapped to `UiModel` before rendering
-- `UiModel` postfix is used for presentation models
+- presentation values follow the project's naming convention; suffix or file count
+  alone does not fail the state or architecture contract
 - the notifier owns async orchestration and exposes named action methods
 - widgets stay render-focused and receive plain values
 - providers are declared as top-level `final` variables rather than constructed inside `build`
@@ -146,7 +145,9 @@ Apply these Flutter-specific decisions:
 - `presentation-state-based-development`: use `applied` when presentation code was created or changed under this contract. Use `n/a` for review-only work or when no presentation code changed.
 - `presentation-state-review`: use `pass` when every applicable checklist item passes, `fail` when any applicable item fails, and `n/a` only when no Flutter presentation code is in scope.
 - `ui-state-modeling`: use `explicit` when the screen's durable states are modeled explicitly. Use `n/a` only when no screen state is in scope.
-- `presentation-mapping-boundary`: use `domain-to-uimodel` when domain data crosses into presentation through a mapper. Use `n/a` only when no such data crosses the boundary.
+- `presentation-mapping-boundary`: use `domain-to-uimodel` for domain/application
+  values projected to the UI contract, including safe identity projection;
+  no separate mapper file is required. Use `n/a` only when no such boundary exists.
 - `di-boundary`: use `riverpod`, `get-it`, `direct`, or `existing` for the verified Flutter composition path. Use `n/a` only when the change neither creates nor reviews dependency wiring.
 
 A `fail` result is actionable: record the failed criterion and return to the workflow's fix path before approval.

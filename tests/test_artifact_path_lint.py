@@ -16,15 +16,13 @@ if SRC not in sys.path:
 from agent_flow.core.artifacts import write_gate_results
 from agent_flow.core.gates import (
     GateResult,
-    _recorded_gate_command,
-    relativize_local_path,
     relativize_local_paths,
 )
 
 # artifact에서 제거해야 하는 운영체제별 로컬 절대 경로 접두사를 재현한다.
 ABSOLUTE_PATH_RE = re.compile(
     r"(?<![\w.-])"
-    r"(?:/Users/|/home/|/private/var/|/workspace/|/tmp/|/var/|/opt/|/mnt/|[A-Za-z]:[\\/])"
+    r"(?:/Users/|/home/|/private/|/workspace/|/tmp/|/var/|/opt/|/mnt/|[A-Za-z]:[\\/])"
 )
 
 
@@ -83,14 +81,6 @@ def test_explicit_gate_cwd_overrides_the_derived_base(tmp_path):
     assert stdout.strip() == "cannot read scripts/verify.mjs"
 
 
-def test_command_and_output_normalization_share_one_rule(tmp_path):
-    base = tmp_path.resolve()
-    target = base / "scripts" / "verify.mjs"
-
-    assert _recorded_gate_command(("node", str(target)), base)[1] == relativize_local_path(
-        str(target), base
-    )
-    assert relativize_local_paths(f"see {target}", base) == "see scripts/verify.mjs"
 
 
 def test_foreign_platform_absolute_path_is_deidentified(tmp_path):
@@ -118,3 +108,11 @@ def test_unrelativizable_path_never_raises(tmp_path, monkeypatch):
     assert not ABSOLUTE_PATH_RE.search(recorded)
 
 
+
+def test_macos_private_paths_are_relative_without_rewriting_urls():
+    base = Path("/private/tmp/agent-flow-project")
+    assert relativize_local_paths(
+        "failed /private/tmp/agent-flow-project/src/main.py; "
+        "see https://example.com/private/tmp/reference",
+        base,
+    ) == "failed src/main.py; see https://example.com/private/tmp/reference"

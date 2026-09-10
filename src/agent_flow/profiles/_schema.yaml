@@ -10,9 +10,8 @@
 #
 #   .agent-flow/profiles/<profile-id>.local.yaml
 #
-# install이 손대지 않는 유일한 자리이고, `architecture`·`branching`·`execution`·
-# `gates`·`pr`만 받는다(그 외 키는 거부된다 — 반영되지 않는 선언을 조용히 삼키지
-# 않기 위해서다).
+# `architecture`, `branching`, `commit_convention`, `execution`, `gates`, `pr` are
+# project-overridable. Other keys are rejected rather than silently ignored.
 # dict는 깊게 병합하고 리스트와 스칼라는 통째로 대체한다. 리스트를 대체로 두는
 # 이유는 `gates`와 `architecture.roles` 때문이다: 저장소가 자기 모듈 구조를
 # 선언하는 것은 배포본 표에 **덧붙이는** 일이 아니라 **대신하는** 일이고, 이어
@@ -34,6 +33,12 @@ required:
   - id                  # unique profile identifier (matches filename stem)
 
 optional:
+  capabilities: ["dependency-qualified capability id; declaration lives in _<id>.yaml"]
+  gate_variants:
+    - tool: "build-tool identity; simultaneous matches from different tools require local gates"
+      requires_files: ["all these project-relative files must exist"]
+      any_files: ["at least one must exist when declared"]
+      gates: ["replacement gate mappings using the gates schema below"]
   branching:
     strategy: "release-first | trunk | gitflow"
     base: "branch name to start work from"
@@ -187,12 +192,12 @@ optional:
     # Canonical clean architecture role mapping. Paths are platform-native,
     # but role ids remain semantic and cross-platform.
     contract: "clean-architecture-core"
-    platform: "android | flutter | react-native | react | ios | python"
+    platform: "android | flutter | react-native | react | ios | python | kotlin-backend"
     strict_when_roots_present: "optional bool; if true, deterministic lint is n/a until activation_roots exist or are changed"
     activation_roots: ["optional path roots that indicate the architecture contract is adopted"]
     roles:
-      - id: "app-shell | android-native | core-domain | core-data | core-database | core-ui | core-design-system | core-resources | core-network | core-platform | core-platform-adapter | core-permission | feature-api | feature-presentation | navigation-api | navigation-impl"
-        paths: ["platform/native/path/<context-or-feature>"]
+      - id: "app-shell | android-native | core-domain | core-data | core-database | core-ui | core-design-system | core-resources | core-network | core-platform | core-platform-adapter | core-permission | feature-api | feature-presentation | shared-presentation-contract | application | inbound-adapter | navigation-api | navigation-impl"
+        paths: ["platform/native/path/<context-or-feature>; ** matches zero or more package segments"]
         modules: ["optional module id pattern"]
         package_suffix: "optional package suffix pattern"
         pair_with: "optional role id that must exist for the same semantic boundary"

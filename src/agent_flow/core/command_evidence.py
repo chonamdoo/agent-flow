@@ -22,9 +22,13 @@ hook이 없는 host에서는 로그 파일 자체가 없다. 그때는 `availabl
 진단에만 쓴다. 갈라진 이유는 생산자다 — `record-command-run.py`는 argv를 실행
 시점에 잡으므로 hook이 로드된 세션이면 빠짐이 없고, 그 세션은 창을 비우지
 않는다. 두 층을 같은 문장으로 요약하지 마라.
+
+관측 해석과 RED 참조 내용 계산은 파일을 만들지 않는다. 참조 게시와 phase 진입
+기준선 캡처 시점은 runner가 소유한다.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -33,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from agent_flow.core.worktree_isolation import capture_leader_snapshot
 from agent_flow.core.markers import (
     completion_gate_marker_values,
     completion_gate_marker_values_exact,
@@ -84,6 +89,7 @@ class CommandRun:
     exit_code: int | None
     at: float
     cwd: str = ""
+    code_baseline: str = ""
 
 
 @dataclass(frozen=True)
@@ -161,6 +167,9 @@ def read_command_evidence(
                 exit_code=code if isinstance(code, int) and not isinstance(code, bool) else None,
                 at=stamp,
                 cwd=cwd if isinstance(cwd, str) else "",
+                code_baseline=(
+                    entry["code_baseline"] if isinstance(entry.get("code_baseline"), str) else ""
+                ),
             )
         )
     return CommandRunEvidence(available=True, runs=tuple(runs))
@@ -224,6 +233,8 @@ def is_test_command_execution(
 
 
 def _command_selects_exact_test(argv: Sequence[str], test_name: str) -> bool:
+    if re.search(r"[:/#.]", test_name) and test_name in argv[1:]:
+        return True
     escaped = re.escape(test_name)
     node_selector = re.compile(rf"[:/#.]{escaped}(?:$|[\[])")
     anchored_selector = re.compile(
@@ -353,6 +364,8 @@ def missing_test_evidence_markers(
     required_markers: Sequence[str] = (),
     since: float | None = None,
     cwd_root: Path | None = None,
+    run_dir: Path | None = None,
+    code_baseline: str | None = None,
 ) -> list[str]:
     """"테스트를 아예 안 돌렸다"만 잡는다. 그 이상은 이 층이 증명하지 못한다.
 
@@ -378,6 +391,18 @@ def missing_test_evidence_markers(
     if phase_id not in TEST_EVIDENCE_PHASES:
         return []
     values = completion_gate_marker_values(text)
+    change_kind = values.get("change-kind")
+    if change_kind is not None and change_kind not in {"bugfix", "feature", "behavior-preserving"}:
+        return ["change-kind: bugfix|feature|behavior-preserving"]
+    if change_kind == "behavior-preserving":
+        if not values.get("behavior-preserving-reason", "").strip():
+            return ["behavior-preserving-reason: <unchanged behavior and affected boundary>"]
+        selector = values.get("regression-test", "").strip()
+        evidence = read_command_evidence(project_root, since=since, cwd_root=cwd_root)
+        relevant = _selected_test_runs(evidence, profile, selector)
+        if not relevant or max(relevant, key=lambda run: run.at).exit_code != 0:
+            return ["test-run-evidence: verified (the related test must end green)"]
+        return []
     required = {marker.strip() for marker in required_markers}
     if (
         REGRESSION_SEAM_MARKER in required
@@ -398,6 +423,15 @@ def missing_test_evidence_markers(
             "phase; the regression test has to actually run)"
         ]
     reported = [run.exit_code for run in observed if run.exit_code is not None]
+    if reported and all(code == 0 for code in reported) and values.get("red-reference"):
+        relevant = _selected_test_runs(evidence, profile, values.get("regression-test", "").strip())
+        if not relevant or max(relevant, key=lambda run: run.at).exit_code != 0:
+            return ["test-run-evidence: verified (the referenced regression must end green)"]
+        if _valid_red_reference(
+            project_root, run_dir, values, profile, code_baseline, cwd_root=cwd_root
+        ):
+            return []
+        return ["red-reference: <recorded RED for the same test and code baseline>"]
     if reported and all(code == 0 for code in reported):
         # `implement-fix`도 같은 요구를 받는다. 고친 뒤 한 번만 돌리면 초록이라
         # 통과하는데, 그러면 회귀 테스트가 그 버그를 정말 잡는지 아무도 안 봤다는
@@ -410,6 +444,93 @@ def missing_test_evidence_markers(
         )
         return [f"red-observed: <failing exit code> (every observed test command exited 0; {detail})"]
     return []
+
+
+def test_code_baseline(project_root: Path) -> str:
+    """현재 checkout의 코드 지문을 읽는다. git 상태를 알 수 없으면 실패한다."""
+    snapshot = capture_leader_snapshot(project_root, include_ignored=False)
+    if not snapshot.armed:
+        return ""
+    return hashlib.sha256(
+        json.dumps([snapshot.version, snapshot.head, snapshot.status]).encode()
+    ).hexdigest()
+
+
+def _selected_test_runs(evidence: CommandRunEvidence, profile: dict | None, selector: str):
+    if not is_concrete_test_selector(selector):
+        return ()
+    tokens = resolve_test_command_tokens(profile)
+    return tuple(
+        run for run in evidence.runs
+        if any(is_test_command_execution(run.command, group, selector) for group in tokens)
+    )
+
+
+def read_red_reference(
+    evidence_root: Path,
+    *,
+    text: str,
+    code_baseline: str,
+    profile: dict | None = None,
+    since: float | None = None,
+    cwd_root: Path | None = None,
+) -> tuple[str, str] | None:
+    """관측된 RED의 digest와 게시할 내용을 계산한다. 파일은 만들지 않는다."""
+    values = completion_gate_marker_values(text)
+    selector = values.get("regression-test", "").strip()
+    evidence = read_command_evidence(evidence_root, since=since, cwd_root=cwd_root)
+    failures = [
+        run for run in _selected_test_runs(evidence, profile, selector)
+        if run.exit_code not in (None, 0) and run.code_baseline == code_baseline
+    ]
+    if not failures or not code_baseline:
+        return None
+    run = max(failures, key=lambda item: item.at)
+    record = {
+        "test": selector, "code_baseline": code_baseline,
+        "command": run.command, "cwd": run.cwd, "at": run.at, "exit_code": run.exit_code,
+    }
+    content = json.dumps(record, sort_keys=True, separators=(",", ":"))
+    reference = hashlib.sha256(content.encode()).hexdigest()
+    return reference, content
+
+
+def _valid_red_reference(
+    evidence_root: Path,
+    run_dir: Path | None,
+    values: dict[str, str],
+    profile: dict | None,
+    code_baseline: str | None,
+    *,
+    cwd_root: Path | None,
+) -> bool:
+    reference = values["red-reference"]
+    if run_dir is None or not code_baseline or not re.fullmatch(r"[0-9a-f]{64}", reference):
+        return False
+    path = run_dir / f"red-evidence-{reference}.json"
+    if path.is_symlink():
+        return False
+    try:
+        content = path.read_bytes()
+        record = json.loads(content)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if (
+        hashlib.sha256(content).hexdigest() != reference
+        or not isinstance(record, dict)
+        or record.get("code_baseline") != code_baseline
+        or record.get("test") != values.get("regression-test", "").strip()
+    ):
+        return False
+    evidence = read_command_evidence(evidence_root, cwd_root=cwd_root)
+    return any(
+        run.exit_code not in (None, 0)
+        and all(
+            record.get(key) == getattr(run, key)
+            for key in ("command", "cwd", "at", "exit_code", "code_baseline")
+        )
+        for run in _selected_test_runs(evidence, profile, record["test"])
+    )
 
 
 def missing_feedback_evidence_markers(

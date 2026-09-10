@@ -891,8 +891,7 @@ def test_the_fix_collector_targets_come_from_the_declared_route_keys(tmp_path: P
 
     실측: 비었을 때 `agent-flow start development`는 review→fix-loop를 돌며 90초
     뒤에도 끝나지 않았고, 고친 뒤 2초 안에 `reason: route_blocked`로 멈췄다.
-    상한 자체는 `_increment_fix_loop_rounds`가 지키므로, 여기서는 상한이 볼 대상이
-    실제로 잡히는지만 고정한다.
+    상한은 전이를 커밋할 때 소비한다. 여기서는 상한이 볼 대상을 고정한다.
     """
     runner, phases = _development_runner(tmp_path)
     declared = {
@@ -909,3 +908,84 @@ def test_the_fix_collector_targets_come_from_the_declared_route_keys(tmp_path: P
     # 어긋나 항상 False가 되면 여기서 걸린다.
     assert "fix-loop" in collectors
     assert FIX_LOOP_MAX_ROUNDS > 0
+
+
+def test_fix_round_is_not_consumed_before_journal_and_replays_once(tmp_path):
+    phases = [
+        Phase(id="fix", description="", routes={"default": "review"}),
+        Phase(id="review", description="", routes={"request-changes": "fix"}),
+    ]
+    runner = _runner(tmp_path, phases)
+    write_meta(tmp_path, {"phase_index": 1, "current_phase": "review", "phase_entered_at": "attempt-1"})
+    (tmp_path / "review.md").write_text("verdict: request-changes\n", encoding="utf-8")
+    first = runner._plan_transition(1, phases[1])
+    assert runner._plan_transition(1, phases[1]) == first
+    assert "fix_loop_rounds" not in read_meta(tmp_path)
+    runner._append_transition_journal(first)
+    runner._resume_pending_transition()
+    runner._resume_pending_transition()
+    meta = read_meta(tmp_path)
+    assert meta["current_phase"] == "fix"
+    assert meta["fix_loop_rounds"] == {"fix": 1}
+
+
+def test_same_phase_new_attempt_rejects_stale_transition(tmp_path):
+    phases = [Phase(id="review", description="", routes={"request-changes": "review"})]
+    runner = _runner(tmp_path, phases)
+    write_meta(tmp_path, {"phase_index": 0, "current_phase": "review", "phase_entered_at": "first"})
+    (tmp_path / "review.md").write_text("verdict: request-changes\n", encoding="utf-8")
+    transition = runner._plan_transition(0, phases[0])
+    runner._append_transition_journal(transition)
+    runner._resume_pending_transition()
+    assert read_meta(tmp_path)["fix_loop_rounds"] == {"review": 1}
+    with pytest.raises(WorktreeIsolationError, match="stale transition"):
+        runner._commit_transition(transition)
+
+
+@pytest.mark.parametrize("change", ["bytes", "phase_entered_at", "run_id"])
+def test_phase_approval_is_bound_to_artifact_and_attempt(tmp_path, change):
+    from agent_flow.artifact import approve_phase_artifact, pending_phase_approval
+
+    artifact = tmp_path / "design.md"
+    artifact.write_text("approved scope\n", encoding="utf-8")
+    write_meta(tmp_path, {
+        "run_id": "run-1", "current_phase": "design", "phase_entered_at": "first",
+        "phase_approval_request": {"phase_id": "design", "phase_entered_at": "first", "artifact": "design.md"},
+    })
+    token = pending_phase_approval(tmp_path)["token"]
+    approve_phase_artifact(tmp_path, token=token)
+    assert pending_phase_approval(tmp_path) is None
+    if change == "bytes":
+        artifact.write_text("different scope\n", encoding="utf-8")
+    else:
+        meta = read_meta(tmp_path)
+        meta[change] = "second"
+        if change == "phase_entered_at":
+            meta["phase_approval_request"]["phase_entered_at"] = "second"
+        write_meta(tmp_path, meta)
+    with pytest.raises(ValueError, match="does not match"):
+        approve_phase_artifact(tmp_path, token=token)
+    assert pending_phase_approval(tmp_path)["token"] != token
+
+
+def test_existing_pause_artifact_still_requires_explicit_approval(tmp_path, monkeypatch):
+    from agent_flow.artifact import approve_phase_artifact, pending_phase_approval
+
+    phase = Phase(id="design", description="", pause_after=True)
+    runner = _runner(tmp_path, [phase])
+    runner.profile = {}
+    runner.next_command = "agent-flow continue"
+    monkeypatch.setattr(runner, "_print_structured_status", lambda **kwargs: None)
+    write_meta(tmp_path, {
+        "run_id": "run-1", "phase_index": 0, "current_phase": "design", "phase_entered_at": "first",
+        "task": "Bind design approval to the exact artifact.",
+    })
+    (tmp_path / "design.md").write_text("approved scope\n", encoding="utf-8")
+    assert runner._pause_for_approval(phase)
+    assert runner._pause_for_approval(phase)
+    approve_phase_artifact(tmp_path, token=pending_phase_approval(tmp_path)["token"])
+    assert not runner._pause_for_approval(phase)
+    transition = runner._plan_transition(0, phase)
+    (tmp_path / "design.md").write_text("unapproved scope\n", encoding="utf-8")
+    with pytest.raises(WorktreeIsolationError, match="approval"):
+        runner._commit_transition(transition)

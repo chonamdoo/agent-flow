@@ -36,7 +36,7 @@ Use this skill for Android feature work where presentation code should follow a 
 
 ## Compose/Kotlin Local Skill Loading
 
-For Android/Kotlin/Compose/KMP implementation or review:
+For Android/Compose or Android-targeted Kotlin/KMP implementation or review:
 - Load every matching local `compose-*`, `kotlin-*`, `navigation-3`, `edge-to-edge`, `adaptive`, and `testing-setup` `SKILL.md` named by the active Android profile.
 - Prefer project-local skills under `.agent-flow/local-skills/<skill>/SKILL.md`; otherwise use `.agent-flow/skills/<skill>/SKILL.md` or the current host's configured local skill directory.
 - Do not say "Compose/Kotlin convention applied" or approve Compose/Kotlin code if matching local skill files were not explicitly loaded in the current work session.
@@ -47,28 +47,28 @@ For Android/Kotlin/Compose/KMP implementation or review:
 - `domain` owns repository interfaces, use cases, and domain models.
 - `data` implements domain repositories and binds implementations to interfaces.
 - `network` provides Retrofit/API infrastructure.
-- A ViewModel may inject a **single context's repository interface** directly. Put a use case in `core/domain/<context>` when one of these holds: (a) it combines repositories from two or more contexts, (b) it runs multi-step side effects whose order carries meaning (reservation, fence, polling), (c) it adds domain/business failure semantics beyond repository error translation. Do not write a use case that forwards one repository method without changing its arguments.
+- A ViewModel may inject a single context's repository interface directly.
+  Require an application use case when it crosses contexts, orders meaningful
+  multi-step side effects, or adds business failure semantics. Place it according
+  to the adopted role mapping; do not add a pure forwarding wrapper.
 - Repositories/data map transport failures to domain errors; a presentation mapper converts domain/application errors into screen-specific UI results.
 - In every case presentation injects neither a repository implementation, nor a data source, nor an API service.
-- Keep public feature contracts, including route keys and exported entry contracts, in `feature:*:api` when the repo uses feature api/presentation split.
-- Keep Compose screens, routes, ViewModels, UI contracts, UI models, and mappers in `feature:*:presentation`.
+- When the project uses a feature API/presentation split, keep public route/entry
+  contracts in its feature API role and screens/state holders/UI mapping in its
+  presentation role. Map actual source roots rather than requiring fixed paths.
 - DTOs, entities owned by data, Retrofit models, data sources, and data DI must not reach presentation.
 - Do not add `BaseViewModel`, `BaseUiState`, or inherited error hooks for new presentation work. Use explicit helpers and mappers.
 
-## Package Shape
+## Presentation Boundaries
 
-Feature presentation packages should stay screen-oriented:
-- `presentation/<flow>/<screen>/<Screen>.kt`
-- `presentation/<flow>/<screen>/<Screen>ViewModel.kt`
-- `presentation/<flow>/<screen>/model/<Screen>UiState.kt`
-- `presentation/<flow>/<screen>/model/<Screen>UiAction.kt`
-- `presentation/<flow>/<screen>/model/<Screen>UiEvent.kt`
-- `presentation/<flow>/<screen>/model/<Screen>UiModel.kt`
-- `presentation/<flow>/<screen>/mapper/*Mapper.kt`
-- `presentation/<flow>/<screen>/component/*`
+Keep route/screen wiring, ViewModels, UI values/actions/events, mapping, and
+components in the project's adopted presentation boundary. These responsibilities
+do not require a fixed folder tree or one file per concept.
 
-Presentation mappers must convert domain data into presentation models before state reaches Compose UI.
-Presentation model types must use the `UiModel` postfix, for example `<Screen>ItemUiModel`.
+Project domain/application values to the UI contract. Identity projection is
+valid for an already safe immutable shape without transport dependencies; do not
+create redundant models or forwarding mappers. Follow adopted naming conventions:
+`UiModel` is a semantic role, not a suffix whose absence alone fails review.
 
 ## DI Rule
 
@@ -212,8 +212,9 @@ stateless-content rule — a node renderer is a content composable.
 - **A screen whose `UiState` carries the server node tree needs no per-screen
   `UiModel` or mapper.** `Success(screen: Screen)` is a complete state type when
   `Screen` is the parsed node model; the mapping boundary belongs to the node
-  parser, which already converted the payload into client types. Per-screen
-  presentation models return as soon as a screen owns its own layout.
+  parser, which already converted the payload into client types. When the client
+  owns layout, apply the Presentation Boundaries rule; a safe identity projection
+  still does not require a separate per-screen type.
 - **One shared abstract state holder for server-driven screens is a documented
   exception to the `BaseViewModel` prohibition.** The shared holder owns the whole
   state pipeline — storage flow, refresh, effect channel — because every
@@ -269,7 +270,9 @@ Apply these Android-specific decisions:
 - `presentation-state-based-development`: use `applied` when presentation code was created or changed under this contract. Use `n/a` for review-only work or when no presentation code changed.
 - `presentation-state-review`: use `pass` when every applicable checklist item passes, `fail` when any applicable item fails, and `n/a` only when no Android presentation code is in scope.
 - `ui-state-modeling`: use `explicit` when the screen's durable states are modeled explicitly. Use `n/a` only when no screen state is in scope.
-- `presentation-mapping-boundary`: use `domain-to-uimodel` when domain/application data crosses into presentation through a mapper. Use `n/a` only when no such data crosses the boundary.
+- `presentation-mapping-boundary`: use `domain-to-uimodel` for domain/application
+  values projected to the UI contract, including safe identity projection;
+  no separate mapper file is required. Use `n/a` only when no such boundary exists.
 - `di-boundary`: use `hilt`, `direct`, or `existing` for the verified Android composition path. Use `n/a` only when the change neither creates nor reviews dependency wiring.
 
 A `fail` result is actionable: record the failed criterion and return to the workflow's fix path before approval.

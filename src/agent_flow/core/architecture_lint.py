@@ -38,6 +38,7 @@ CORE_FAMILY_SEGMENTS = {
     "network",
     "permission",
     "platform",
+    "presentation",
     "resources",
     "ui",
 }
@@ -54,7 +55,7 @@ PLACEHOLDER_RESERVED_SEGMENTS = {
 # role 집합과 대조할 수 있다. if 사슬로 두면 role을 늘릴 때 규칙 누락이 조용히 통과한다.
 FORBIDDEN_GRADLE_MODULES: dict[str, tuple[str, ...]] = {
     # 도메인이 Room 모듈을 보면 저장소 구현이 도메인 계약을 통과해 새어 들어온다.
-    "core-domain": (":app", ":core:data", ":core:database", ":core:network", ":core:platform", ":core:navigation:impl", ":feature"),
+    "core-domain": (":app", ":core:data", ":core:database", ":core:network", ":core:platform", ":core:presentation", ":core:navigation:impl", ":feature"),
     "core-data": (":app", ":feature"),
     # 선언된 방향은 `core:data -> core:database` 하나뿐이다. 역방향을 열어 두면
     # Room 모듈이 repository 구현을 통해 도메인 계약까지 되짚어 올라간다.
@@ -62,6 +63,9 @@ FORBIDDEN_GRADLE_MODULES: dict[str, tuple[str, ...]] = {
     "feature-api": (":app", ":core:data", ":core:database", ":feature:<feature>:presentation"),
     "feature-presentation": (":app", ":core:data", ":core:database"),
     "navigation-api": (":app", ":core:navigation:impl", ":feature"),
+    "shared-presentation-contract": (":app", ":feature", ":core:data", ":core:database", ":core:network", ":core:ui", ":core:designsystem", ":core:navigation:impl"),
+    "application": (":app", ":core:data", ":core:database", ":core:network", ":feature"),
+    "inbound-adapter": (":core:data", ":core:database"),
 }
 REQUIRED_GRADLE_MODULES: dict[str, tuple[str, ...]] = {
     "core-data": (":core:domain:<context>",),
@@ -496,7 +500,8 @@ def is_test_file(rel_path: str) -> bool:
 
 
 def match_role(rel_path: str, roles: list[object]) -> RoleMatch | None:
-    matches: list[RoleMatch] = []
+    best: RoleMatch | None = None
+    best_rank: tuple[int, int, int] | None = None
     for role in roles:
         if not isinstance(role, dict):
             continue
@@ -506,23 +511,44 @@ def match_role(rel_path: str, roles: list[object]) -> RoleMatch | None:
         for pattern in paths:
             if not isinstance(pattern, str):
                 continue
-            captures = match_pattern(rel_path, pattern)
-            if captures is not None:
-                matches.append(RoleMatch(role=role, captures=captures, pattern=pattern))
-    if not matches:
-        return None
-    return max(matches, key=lambda match: pattern_specificity(match.pattern))
+            matched = _match_pattern_with_depth(rel_path, pattern)
+            if matched is not None:
+                captures, depth = matched
+                rank = (*pattern_specificity(pattern), depth)
+                if best_rank is None or rank > best_rank:
+                    best = RoleMatch(role=role, captures=captures, pattern=pattern)
+                    best_rank = rank
+    return best
 
 
 def pattern_specificity(pattern: str) -> tuple[int, int]:
     parts = [part for part in pattern.strip("/").split("/") if part]
-    static_count = sum(1 for part in parts if not re.fullmatch(r"<[a-zA-Z][a-zA-Z0-9_-]*>", part))
-    return (len(parts), static_count)
+    static_count = sum(1 for part in parts if part != "**" and not re.fullmatch(r"<[a-zA-Z][a-zA-Z0-9_-]*>", part))
+    return (len(parts) - parts.count("**"), static_count)
 
 
 def match_pattern(rel_path: str, pattern: str) -> dict[str, str] | None:
+    matched = _match_pattern_with_depth(rel_path, pattern)
+    return matched[0] if matched is not None else None
+
+
+def _match_pattern_with_depth(rel_path: str, pattern: str) -> tuple[dict[str, str], int] | None:
     path_parts = rel_path.split("/")
     pattern_parts = pattern.strip("/").split("/")
+    if "**" in pattern_parts:
+        pivot = pattern_parts.index("**")
+        prefix = _match_pattern_with_depth(rel_path, "/".join(pattern_parts[:pivot])) if pivot else ({}, 0)
+        if prefix is None:
+            return None
+        suffix = "/".join(pattern_parts[pivot + 1:])
+        if not suffix:
+            return prefix
+        for offset in range(len(path_parts) - 1, pivot - 1, -1):
+            matched = _match_pattern_with_depth("/".join(path_parts[offset:]), suffix)
+            if matched is not None:
+                captures, depth = matched
+                return {**prefix[0], **captures}, offset + depth
+        return None
     if len(path_parts) < len(pattern_parts):
         return None
     captures: dict[str, str] = {}
@@ -537,7 +563,7 @@ def match_pattern(rel_path: str, pattern: str) -> dict[str, str] | None:
             continue
         if expected != actual:
             return None
-    return captures
+    return captures, len(pattern_parts)
 
 
 def architecture_managed_roots(roles: list[object]) -> tuple[str, ...]:
@@ -562,7 +588,7 @@ def architecture_managed_roots(roles: list[object]) -> tuple[str, ...]:
 def static_prefix_before_placeholder(pattern: str) -> str:
     parts: list[str] = []
     for part in pattern.strip("/").split("/"):
-        if re.fullmatch(r"<[a-zA-Z][a-zA-Z0-9_-]*>", part):
+        if part == "**" or re.fullmatch(r"<[a-zA-Z][a-zA-Z0-9_-]*>", part):
             break
         if part:
             parts.append(part)

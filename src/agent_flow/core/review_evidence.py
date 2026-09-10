@@ -141,16 +141,19 @@ class ReviewEvidenceBindingError(RuntimeError):
     """Run metadata cannot safely publish reviewer evidence."""
 
 
-class ReviewEvidenceRecord(TypedDict):
-    schema_version: Literal[1]
+class _ReviewEvidenceFields(TypedDict):
+    schema_version: Literal[1, 2]
     nonce: str
     results_sha256: str
     phase_entered_at: str
     observed_job_ids: list[str]
-    blocking_job_ids: list[str]
-    accept_any_provider: bool
     expected_job_ids_by_provider: dict[str, list[str]]
     complete_providers: list[str]
+
+
+class ReviewEvidenceRecord(_ReviewEvidenceFields, total=False):
+    blocking_job_ids: list[str]
+    accept_any_provider: bool
 
 
 def review_results_path(artifact_root: Path, phase_id: str) -> Path:
@@ -200,8 +203,6 @@ def review_evidence_record(
     phase_entered_at: str,
     serialized_results: str,
     outcomes: Sequence[ReviewerOutcome],
-    blocking_job_ids: Iterable[str],
-    accept_any_provider: bool,
     expected_job_ids_by_provider: Mapping[str, list[str]],
 ) -> ReviewEvidenceRecord:
     """Build the metadata binding from the same typed outcomes as the payload."""
@@ -210,15 +211,13 @@ def review_evidence_record(
         for provider, job_ids in expected_job_ids_by_provider.items()
     }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "nonce": nonce,
         "results_sha256": hashlib.sha256(
             serialized_results.encode("utf-8")
         ).hexdigest(),
         "phase_entered_at": phase_entered_at,
         "observed_job_ids": [outcome.job_id for outcome in outcomes],
-        "blocking_job_ids": sorted(blocking_job_ids),
-        "accept_any_provider": accept_any_provider,
         "expected_job_ids_by_provider": expected,
         "complete_providers": complete_review_providers(expected, outcomes),
     }
@@ -487,8 +486,7 @@ def _review_evidence_error(
     results_sha256 = expected["results_sha256"]
     recorded_phase_entered_at = expected["phase_entered_at"]
     observed = expected["observed_job_ids"]
-    blocking = expected["blocking_job_ids"]
-    accept_any = expected["accept_any_provider"]
+    blocking = expected.get("blocking_job_ids", [])
     expected_by_provider = expected["expected_job_ids_by_provider"]
     recorded_complete = expected["complete_providers"]
     if nonce != review_nonce or recorded_phase_entered_at != phase_entered_at:
@@ -567,7 +565,7 @@ def _review_evidence_error(
             "invalid",
             "complete review providers do not match outcomes",
         )
-    if accept_any and not computed_complete:
+    if not computed_complete:
         return ReviewEvidenceError(
             "incomplete-provider",
             "no provider completed every expected review",
@@ -607,20 +605,28 @@ def _is_schema_version_1(value: object) -> bool:
 def _review_evidence_record_shape(
     value: object,
 ) -> TypeGuard[ReviewEvidenceRecord]:
-    # Metadata bindings are strict snapshots; schema_version forces an explicit
-    # migration instead of accepting unknown fields from another release.
-    if (
-        not isinstance(value, dict)
-        or set(value) != set(ReviewEvidenceRecord.__annotations__)
-    ):
+    # v1의 required 기록은 무결성 검증에만 쓴다. v2는 provider 완료 정책만 게시한다.
+    if not isinstance(value, dict):
+        return False
+    schema_version = value.get("schema_version")
+    historical_fields = {"blocking_job_ids", "accept_any_provider"}
+    fields = set(ReviewEvidenceRecord.__annotations__)
+    if _is_schema_version_1(schema_version):
+        if (
+            set(value) != fields
+            or not _string_list(value.get("blocking_job_ids"))
+            or not isinstance(value.get("accept_any_provider"), bool)
+        ):
+            return False
+    elif type(schema_version) is not int or schema_version != 2:
+        return False
+    elif set(value) != fields - historical_fields:
         return False
     nonce = value.get("nonce")
     results_sha256 = value.get("results_sha256")
     phase_entered_at = value.get("phase_entered_at")
-    schema_version = value.get("schema_version")
     return (
-        _is_schema_version_1(schema_version)
-        and isinstance(nonce, str)
+        isinstance(nonce, str)
         and re.fullmatch(r"[0-9a-f]{32}", nonce) is not None
         and isinstance(results_sha256, str)
         and re.fullmatch(
@@ -631,8 +637,6 @@ def _review_evidence_record_shape(
         and isinstance(phase_entered_at, str)
         and bool(phase_entered_at)
         and _string_list(value.get("observed_job_ids"))
-        and _string_list(value.get("blocking_job_ids"))
-        and isinstance(value.get("accept_any_provider"), bool)
         and _expected_job_map(value.get("expected_job_ids_by_provider"))
         and _string_list(value.get("complete_providers"))
     )

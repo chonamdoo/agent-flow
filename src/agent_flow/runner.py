@@ -39,11 +39,11 @@ from agent_flow.adapters.generic import STUB_SENTINEL
 from agent_flow.artifact import (
     ACTIVE_LOCK,
     META_FILE,
-    RUNS_DIRNAME,
     create_run,
     mark_inactive,
     read_meta,
     phase_review_rejected,
+    pending_phase_approval,
     run_concerns,
     run_concerns_value,
     write_meta,
@@ -52,8 +52,12 @@ from agent_flow.cli_detect import CliInfo, REVIEW_CLI_NAMES, detect_available_cl
 from agent_flow.core.command_evidence import (
     missing_feedback_evidence_markers,
     missing_test_evidence_markers,
+    TEST_EVIDENCE_PHASES,
+    read_red_reference,
+    test_code_baseline,
 )
 from agent_flow.core.context_contract import run_relative_path
+from agent_flow.core.run_storage import RUNS_DIRNAME
 from agent_flow.core.observation import (
     PHASE_ENTERED as OBS_PHASE_ENTERED,
     PHASE_EXITED as OBS_PHASE_EXITED,
@@ -95,6 +99,7 @@ from agent_flow.core.worktree_isolation import (
     leader_root_for,
     leader_sweep_scope,
     resolve_run_subpath,
+    write_run_artifact_text,
     write_run_subpath_text,
 )
 from agent_flow.core.route_verdicts import (
@@ -239,6 +244,8 @@ class PhaseTransition:
     invalidated: tuple[str, ...] = ()
     # 앞으로 건너뛴 phase에 남길 skip 표식. (run_dir 기준 상대 경로, 내용).
     skipped: tuple[tuple[str, str], ...] = ()
+    source_attempt: str = ""
+    fix_round: int = 0
 
     def journal_record(self, at: str) -> dict[str, Any]:
         # skip 표식은 경로만이 아니라 내용까지 적는다. 원장 한 줄만 보고 전이를
@@ -252,6 +259,8 @@ class PhaseTransition:
             "to_index": self.to_index,
             "to_phase": self.to_phase,
             "blocked": self.blocked,
+            "source_attempt": self.source_attempt,
+            "fix_round": self.fix_round,
             "invalidated": list(self.invalidated),
             "skipped": [
                 {"path": path, "content": content} for path, content in self.skipped
@@ -298,6 +307,10 @@ class PhaseTransition:
             if not isinstance(path, str) or not isinstance(content, str):
                 return None
             skipped.append((path, content))
+        source_attempt = record.get("source_attempt", "")
+        fix_round = record.get("fix_round", 0)
+        if not isinstance(source_attempt, str) or type(fix_round) is not int or fix_round < 0:
+            return None
         return cls(
             from_index=from_index,
             from_phase=str(record.get("from_phase", "")),
@@ -307,6 +320,8 @@ class PhaseTransition:
             blocked=bool(record.get("blocked", False)),
             invalidated=tuple(invalidated),
             skipped=tuple(skipped),
+            source_attempt=source_attempt,
+            fix_round=fix_round,
         )
 
 
@@ -314,6 +329,33 @@ def _phase_available_clis(clis: list[CliInfo], phase: Phase | None) -> list[CliI
     if phase is None or not phase.multi_review:
         return clis
     return [cli for cli in clis if cli.name in REVIEW_CLI_NAMES]
+
+
+def publish_red_reference(
+    project_root: Path,
+    run_dir: Path,
+    *,
+    evidence_root: Path,
+    text: str,
+    profile: dict | None = None,
+    since: float | None = None,
+) -> str | None:
+    """현재 코드와 일치하는 관측 RED를 run의 불변 참조로 게시한다."""
+    reference = read_red_reference(
+        evidence_root,
+        text=text,
+        code_baseline=test_code_baseline(project_root),
+        profile=profile,
+        since=since,
+        cwd_root=project_root,
+    )
+    if reference is None:
+        return None
+    digest, content = reference
+    write_run_artifact_text(
+        run_dir, run_dir.resolve() / f"red-evidence-{digest}.json", content
+    )
+    return digest
 
 
 class Runner:
@@ -404,6 +446,7 @@ class Runner:
                     architecture=self.architecture,
                     run_id=self.requested_run_id,
                     concerns=self.requested_concerns,
+                    checkout_root=self.project_root,
                     checkout_identity=self.checkout_identity,
                     checkout_registration_identity=(
                         self.checkout_registration_identity
@@ -583,6 +626,8 @@ class Runner:
                 if self._artifact_needs_auto_revalidation(phase):
                     self._existing_artifact_path(phase).unlink()
                 else:
+                    if self._pause_for_approval(phase):
+                        return
                     print(f"  [skip] {phase.id}")
                     transition = self._plan_transition(phase_index, phase)
                     meta = self._commit_transition(transition)
@@ -715,17 +760,7 @@ class Runner:
                     required_artifact=artifact,
                 )
                 return
-            if phase.pause_after:
-                print(
-                    f"\n═══ pause: '{phase.id}' 결과 검토 후 "
-                    f"`{self.next_command}` ═══"
-                )
-                self._print_structured_status(
-                    status="blocked",
-                    phase=phase,
-                    reason="pause_after",
-                    required_artifact=self._artifact_path(phase),
-                )
+            if self._pause_for_approval(phase):
                 return
             transition = self._plan_transition(phase_index, phase)
             meta = self._commit_transition(transition)
@@ -745,7 +780,14 @@ class Runner:
 
         report_path = write_run_report(self.run_dir)
         cleanup_journal = read_meta(self.run_dir).get("cleanup_journal")
-        if leader_root is not None or cleanup_journal:
+        disposition = getattr(self.workflow, "completion_disposition", "integrated-cleanup")
+        if disposition == "local-handoff" and not cleanup_journal:
+            meta = read_meta(self.run_dir)
+            meta["completion_disposition"] = disposition
+            meta["handoff_checkout"] = str(self.project_root)
+            write_meta(self.run_dir, meta)
+            mark_inactive(self.run_dir)
+        elif leader_root is not None or cleanup_journal:
             try:
                 target_branch, integration_strategy = _cleanup_profile_contract(
                     self.profile
@@ -783,6 +825,30 @@ class Runner:
             reason="workflow_complete",
             report=report_path,
         )
+
+    def _pause_for_approval(self, phase: Phase) -> bool:
+        if not phase.pause_after:
+            return False
+        assert self.run_dir is not None
+        with exclusive_file_lease(self.run_dir.parent / ACTIVE_LOCK):
+            meta = read_meta(self.run_dir)
+            meta["phase_approval_request"] = {
+                "phase_id": phase.id,
+                "phase_entered_at": meta.get("phase_entered_at"),
+                "artifact": self._artifact_rel(phase),
+            }
+            write_meta(self.run_dir, meta)
+            pending = pending_phase_approval(self.run_dir)
+        if pending is None:
+            return False
+        print(f"  [approval] {self.next_command} --approve {pending['token']}")
+        self._print_structured_status(
+            status="blocked",
+            phase=phase,
+            reason="phase_approval_required",
+            required_artifact=self._artifact_path(phase),
+        )
+        return True
 
     def _assert_declared_concerns(self) -> None:
         """선언되지 않은 concern은 오타다. 조용히 무시하면 사용자는 그 skill이 붙었다고
@@ -900,13 +966,8 @@ class Runner:
         cursor보다 먼저 사라져, 그 사이에 죽은 실행은 왜 되돌아갔는지를 잃은 채
         이전 phase를 다시 돈다. 무효화는 ``_commit_transition``이 원장을 적은 뒤에 한다.
 
-        디스크를 아예 안 만지는 것은 아니다. 설계 원장과 fix-loop 라운드 카운터는
-        여기서 굳힌다 — 둘 다 phase를 **떠나는 순간**의 사실이고 key로 멱등해서,
-        같은 판정을 두 번 계산해도 값이 늘거나 갈리지 않는다.
+        설계 원장과 RED 참조 게시도 ``_commit_transition``이 소유한다.
         """
-        # 설계 원장은 phase를 떠나는 이 자리에서 굳혀야 skip 경로(재개)와 실행 경로
-        # 양쪽에서 같은 값이 다음 phase로 넘어간다.
-        self._capture_design_ledger(phase)
         # route가 없는 phase는 판정 자체가 없다.
         if not phase.routes:
             return RouteDecision(current_index + 1, False, "none")
@@ -937,15 +998,6 @@ class Runner:
             if key == GATE_MALFORMED:
                 detail = gate_parse_error(text)
                 print(f"  [block] gate-results.json is unreadable: {detail}")
-                self._emit_observation(
-                    OBS_VALIDATION_FAILED,
-                    phase.id,
-                    details={
-                        "status": "blocked",
-                        "reason": "malformed_gate_results",
-                        "detail": detail,
-                    },
-                )
                 return RouteDecision(current_index, True, key)
             if key == "default":
                 recorded_phase = recorded_gate_phase(text)
@@ -1002,6 +1054,18 @@ class Runner:
         if not target:
             return RouteDecision(current_index + 1, False, key)
         fix_collectors = self._fix_collector_targets()
+        if phase.id in {"pr-comment-fix", "pr-ci-fix"} and target == "pr-watch":
+            meta = read_meta(self.run_dir)
+            baseline = meta.get("pr_fix_baseline")
+            current = test_code_baseline(self.project_root)
+            if not baseline or baseline != current:
+                reviews = [
+                    candidate.id for candidate in self.phases[:current_index]
+                    if candidate.multi_review or candidate.id in {"review", "final-review"}
+                ]
+                if not reviews:
+                    raise ValueError("PR code changes require a preceding review phase")
+                target = reviews[0]
         for i, candidate in enumerate(self.phases):
             if candidate.id == target:
                 # 상한은 리터럴 이름("fix-loop")이 아니라 "fix collector"로 판정한다.
@@ -1015,7 +1079,7 @@ class Runner:
                 # 루프는 상한에서 빠진다. 카운트는 target별로 나눠 서로 다른 순환이
                 # 예산을 공유하지 않게 한다.
                 if target in fix_collectors:
-                    rounds = self._increment_fix_loop_rounds(target)
+                    rounds = _fix_loop_round_counts(read_meta(self.run_dir)).get(target, 0) + 1
                     if rounds > FIX_LOOP_MAX_ROUNDS:
                         print(
                             f"  [block] fix-loop exceeded {FIX_LOOP_MAX_ROUNDS} "
@@ -1037,11 +1101,7 @@ class Runner:
         return None
 
     def _plan_transition(self, current_index: int, phase: Phase) -> PhaseTransition:
-        """이 phase를 떠나는 이동 전체를 값으로 계산한다. phase artifact는 그대로 둔다.
-
-        ``_next_index``가 굳히는 설계 원장·라운드 카운터는 예외다. 그 이유는
-        ``_next_index``의 docstring에 있다.
-        """
+        """이 phase를 떠나는 이동 전체를 값으로 계산한다. 파일은 만들지 않는다."""
         decision = self._next_index(current_index, phase)
         to_index, blocked = decision.to_index, decision.blocked
         to_phase = self.phases[to_index].id if to_index < len(self.phases) else ""
@@ -1065,6 +1125,13 @@ class Runner:
                         f"reason: route_to_{to_phase}\n",
                     )
                 )
+        assert self.run_dir is not None
+        meta = read_meta(self.run_dir)
+        fix_round = (
+            _fix_loop_round_counts(meta).get(to_phase, 0) + 1
+            if not blocked and to_phase in self._fix_collector_targets()
+            else 0
+        )
         return PhaseTransition(
             from_index=current_index,
             from_phase=phase.id,
@@ -1074,10 +1141,12 @@ class Runner:
             blocked=blocked,
             invalidated=tuple(invalidated),
             skipped=tuple(skipped),
+            source_attempt=str(meta.get("phase_entered_at", "")),
+            fix_round=fix_round,
         )
 
     def _commit_transition(self, transition: PhaseTransition) -> dict[str, Any]:
-        """전이를 한 번에 굳힌다: 원장 → 무효화 → cursor. 반환값은 갱신된 meta.
+        """설계/RED 증거를 게시한 뒤 전이를 굳힌다: 전이 원장 → 무효화 → cursor.
 
         순서가 계약이다. 원장이 먼저 있어야 중간에서 죽은 실행을 다음 실행이
         같은 결론으로 마칠 수 있다. 반대로 무효화가 먼저면 근거가 사라진 채
@@ -1092,10 +1161,46 @@ class Runner:
                 type(current_index) is not int
                 or current_index != transition.from_index
                 or current_phase != transition.from_phase
+                or str(meta.get("phase_entered_at", "")) != transition.source_attempt
             ):
                 raise WorktreeIsolationError(
                     f"stale transition from {transition.from_phase}; "
                     f"current phase is {current_phase or 'complete'}"
+                )
+            phase = self.phases[transition.from_index]
+            if phase.pause_after and (
+                not isinstance(meta.get("phase_approval"), dict)
+                or pending_phase_approval(self.run_dir) is not None
+            ):
+                raise WorktreeIsolationError("phase artifact approval is missing or stale")
+            self._capture_design_ledger(phase)
+            meta = read_meta(self.run_dir)
+            if phase.id == "red" and self._has_artifact(phase):
+                reference = publish_red_reference(
+                    self.project_root,
+                    self.run_dir,
+                    evidence_root=self.config_root,
+                    text=self._existing_artifact_path(phase).read_text(encoding="utf-8"),
+                    profile=self.profile,
+                    since=_meta_timestamp(meta.get("phase_entered_at")),
+                )
+                if reference:
+                    print(f"  [evidence] red-reference: {reference}")
+            if phase.id == "gates" and transition.route_key == GATE_MALFORMED:
+                try:
+                    text = self._existing_artifact_path(phase).read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                except OSError:
+                    text = ""
+                self._emit_observation(
+                    OBS_VALIDATION_FAILED,
+                    phase.id,
+                    details={
+                        "status": "blocked",
+                        "reason": "malformed_gate_results",
+                        "detail": gate_parse_error(text),
+                    },
                 )
             self._append_transition_journal(transition)
             if not self._apply_transition(transition):
@@ -1107,6 +1212,7 @@ class Runner:
                     f"{transition.to_phase or 'complete'} names an artifact path "
                     f"outside the run directory"
                 )
+            self._apply_fix_round(meta, transition)
             self._advance_phase(meta, transition.to_index, transition.blocked)
             write_meta(self.run_dir, meta)
         self._emit_observation(
@@ -1274,6 +1380,16 @@ class Runner:
                 meta.get("phase_index") == target_index
                 and recorded_phase == transition.to_phase
                 and blocked_recorded
+                and (
+                    transition.blocked
+                    or not transition.source_attempt
+                    or meta.get("phase_entered_at") != transition.source_attempt
+                )
+            ):
+                return
+            if transition.source_attempt and (
+                recorded_phase != transition.from_phase
+                or str(meta.get("phase_entered_at", "")) != transition.source_attempt
             ):
                 return
             print(
@@ -1289,6 +1405,7 @@ class Runner:
                     "directory; not applying it"
                 )
                 return
+            self._apply_fix_round(meta, transition)
             self._advance_phase(meta, target_index, transition.blocked)
             write_meta(self.run_dir, meta)
 
@@ -1418,6 +1535,8 @@ class Runner:
             meta["phase_blocked_reason"] = "route_blocked"
         else:
             meta.pop(BASELINE_KEY, None)
+            meta.pop("phase_approval_request", None)
+            meta.pop("phase_approval", None)
             meta.pop("phase_blocked_reason", None)
         self._stamp_phase(meta, phase_index, entering=not blocked)
 
@@ -1440,21 +1559,23 @@ class Runner:
         )
         if entering or meta.get("current_phase") != phase_id or not meta.get("phase_entered_at"):
             meta["phase_entered_at"] = datetime.now(timezone.utc).isoformat()
+            project_root = getattr(self, "project_root", None)
+            if project_root is not None:
+                if phase_id in TEST_EVIDENCE_PHASES:
+                    meta["test_code_baseline"] = test_code_baseline(project_root)
+                if phase_id in {"pr-comment-fix", "pr-ci-fix"}:
+                    meta["pr_fix_baseline"] = test_code_baseline(project_root)
         meta["phase_index"] = phase_index
         meta["current_phase"] = phase_id
 
-    def _increment_fix_loop_rounds(self, target: str) -> int:
-        assert self.run_dir is not None
-        meta = read_meta(self.run_dir)
-        counts = _fix_loop_round_counts(meta)
-        rounds = counts.get(target, 0) + 1
-        if rounds > FIX_LOOP_MAX_ROUNDS:
-            return rounds
-        # 재시작 후에도 상한을 유지하도록 target별 카운트를 run meta에 저장한다.
-        counts[target] = rounds
-        meta["fix_loop_rounds"] = counts
-        write_meta(self.run_dir, meta)
-        return rounds
+    @staticmethod
+    def _apply_fix_round(meta: dict[str, Any], transition: PhaseTransition) -> None:
+        if transition.fix_round:
+            counts = _fix_loop_round_counts(meta)
+            counts[transition.to_phase] = max(
+                counts.get(transition.to_phase, 0), transition.fix_round
+            )
+            meta["fix_loop_rounds"] = counts
 
     def _write_automatic_artifact(self, phase: Phase) -> bool:
         """runner가 직접 쓰는 phase artifact. 봉쇄는 정본 writer 한 벌뿐이다.
@@ -1785,6 +1906,8 @@ class Runner:
                 # 관측 로그는 저장소 전체가 공유한다. cwd를 좁히지 않으면 형제
                 # worktree에서 돈 테스트가 이 run의 증거로 잡힌다.
                 cwd_root=self.project_root,
+                run_dir=self.run_dir,
+                code_baseline=meta.get("test_code_baseline"),
             )
         )
         missing.extend(
@@ -1811,6 +1934,13 @@ class Runner:
                 since=_meta_timestamp(meta.get("phase_entered_at")),
             )
         )
+        review_rejected = phase_review_rejected(
+            self.run_dir,
+            getattr(self, "workflow_name", ""),
+            phase.id,
+            text,
+            run_meta=meta,
+        )
         missing.extend(
             missing_spec_item_evidence(
                 self.project_root,
@@ -1821,13 +1951,7 @@ class Runner:
                 profile=self.profile,
                 since=_meta_timestamp(meta.get("started_at")),
                 evidence_root=self.config_root,
-                review_rejected=phase_review_rejected(
-                    self.run_dir,
-                    getattr(self, "workflow_name", ""),
-                    phase.id,
-                    text,
-                    run_meta=meta,
-                ),
+                review_rejected=review_rejected,
             )
         )
         missing.extend(
@@ -1837,6 +1961,7 @@ class Runner:
                 phase.id,
                 text,
                 profile=self.profile,
+                review_rejected=review_rejected,
             )
         )
         return missing
@@ -1912,6 +2037,10 @@ class Runner:
         assert self.run_dir is not None
         meta = read_meta(self.run_dir)
         next_command = "none" if status == "complete" else self.next_command
+        if reason == "phase_approval_required":
+            pending = pending_phase_approval(self.run_dir)
+            if pending is not None:
+                next_command = f"{next_command} --approve {pending['token']}"
         payload = workflow_status_payload(
             status=status,
             run=f"{self.workflow_name}/{self.run_dir.name}",

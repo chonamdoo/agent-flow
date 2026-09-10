@@ -86,8 +86,6 @@ def missing_spec_item_evidence(
         return missing
     if phase_id not in DESIGN_VALUE_PHASES:
         return []
-    if review_rejected:
-        return []
     ledger = read_ledger(run_dir)
     if not ledger.exists:
         return ["spec-ledger: design-spec.md is missing"]
@@ -95,6 +93,8 @@ def missing_spec_item_evidence(
         return [f"spec-ledger: {error}" for error in ledger.errors]
     if task_text.strip() and not ledger.spec_items:
         return ["spec-ledger: no SPEC items for a non-empty task"]
+    if review_rejected:
+        return []
     evidence = read_command_evidence(
         evidence_root or project_root,
         since=since,
@@ -155,11 +155,12 @@ def missing_design_value_implementations(
     text: str,
     *,
     profile: dict | None = None,
+    review_rejected: bool = False,
 ) -> list[str]:
     if phase_id not in DESIGN_VALUE_PHASES:
         return []
     ledger = read_ledger(run_dir)
-    if not ledger.values:
+    if review_rejected or not ledger.values:
         return []
     if git_repo_state(project_root) != "repo":
         # git이 없으면 대조할 관측자가 없다. 관측 불가를 위반으로 들지 않는다.

@@ -23,12 +23,20 @@ Design choices:
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
+from agent_flow.artifact import ACTIVE_LOCK
+from agent_flow.core.worktree_isolation import (
+    WorktreeIsolationError, exclusive_file_lease, validate_run_artifact_target,
+    write_run_artifact_text,
+)
 
 
 PRStatus = Literal[
@@ -47,6 +55,9 @@ class PRSnapshot:
     review_comments: list[dict[str, Any]] = field(default_factory=list)
     issue_comments: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
+    repo: str = ""
+    head: str = ""
+    feedback_ids: list[str] = field(default_factory=list)
 
     def to_summary(self) -> dict[str, Any]:
         return {
@@ -54,6 +65,9 @@ class PRSnapshot:
             "title": self.title,
             "state": self.state,
             "status": self.status,
+            "repo": self.repo,
+            "head": self.head,
+            "feedback_ids": self.feedback_ids,
             "failed_checks": [
                 {
                     "name": c.get("name") or c.get("workflowName"),
@@ -74,13 +88,23 @@ class PRSnapshot:
             ],
             "review_comments": [
                 {
-                    "author": c.get("author", {}).get("login"),
+                    "feedback_id": c.get("feedback_id"),
+                    "url": c.get("url"),
+                    "author": (c.get("author") or {}).get("login"),
                     "state": c.get("state"),
                     "body": _truncate(c.get("body", ""), 200),
                 }
                 for c in self.review_comments
             ],
             "issue_comments_count": len(self.issue_comments),
+            "issue_comments": [
+                {
+                    "feedback_id": c.get("feedback_id"),
+                    "body": _truncate(c.get("body", ""), 200),
+                    "url": c.get("url"),
+                }
+                for c in self.issue_comments
+            ],
             "error": self.error,
         }
 
@@ -90,55 +114,45 @@ def fetch_pr(
     repo: str | None = None,
     *,
     required_checks: tuple[str, ...] = (),
-) -> PRSnapshot | None:
-    """Fetch a single PR snapshot via `gh pr view --json`.
+    run_dir: Path | None = None,
+) -> PRSnapshot:
+    """Query and classify a PR, publishing feedback for ACK when run_dir is set.
 
-    Returns None if the gh subprocess fails (gh not installed, auth missing,
-    PR not found).
+    Query or feedback-storage failures return an explicit error snapshot.
+    Publishing waits for the run lease; success is never returned before storage.
     """
-    cmd = [
-        "gh", "pr", "view", str(number),
-        "--json",
-        "number,title,state,statusCheckRollup,reviews,comments",
-    ]
-    if repo:
-        cmd += ["--repo", repo]
+    repository = repo or ""
     try:
-        # 디코드를 로케일에 맡기면 비 UTF-8 로케일에서 `gh` 출력이
-        # UnicodeDecodeError를 낸다. 그건 아래 두 handler 어느 쪽도 아니라
-        # 호출부까지 그대로 올라간다.
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-            check=False,
-        )
-    except FileNotFoundError:
+        data = _fetch_pr_data(number, repo)
+        url = urlsplit(str(data.get("url", "")))
+        match = re.fullmatch(r"/([^/]+/[^/]+)/pull/(\d+)/?", url.path)
+        if (
+            url.scheme not in {"http", "https"} or not url.netloc
+            or url.username is not None or url.password is not None
+            or match is None or int(match.group(2)) != number
+        ):
+            raise ValueError("cannot resolve PR repository identity")
+        repository = _normalize_repository(f"{url.netloc}/{match.group(1)}")
+        if data.get("state") not in {"MERGED", "CLOSED"}:
+            data["reviewThreads"] = _fetch_review_threads(number, repository)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return PRSnapshot(
-            number=number, title="", state="UNKNOWN", status="error",
-            error="gh CLI not found on PATH. Install: https://cli.github.com/",
-        )
-    except subprocess.TimeoutExpired:
-        return PRSnapshot(
-            number=number, title="", state="UNKNOWN", status="error",
-            error="gh pr view timed out after 30s",
-        )
-    if result.returncode != 0:
-        return PRSnapshot(
-            number=number, title="", state="UNKNOWN", status="error",
-            error=f"gh pr view failed: {result.stderr.strip()}",
+            number, "", "UNKNOWN", "error", error=f"cannot observe PR: {exc}", repo=repository,
         )
     try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError as e:
-        return PRSnapshot(
-            number=number, title="", state="UNKNOWN", status="error",
-            error=f"gh output not JSON: {e}",
+        handled = _read_feedback_state(run_dir, repository, number).get("handled", [])
+        snapshot = _classify(
+            number, data, required_checks=required_checks, repo=repository,
+            handled_ids=handled,
         )
-    return _classify(number, data, required_checks=required_checks)
+        if run_dir is not None:
+            _record_feedback_observation(run_dir, snapshot)
+        return snapshot
+    except (OSError, ValueError, WorktreeIsolationError) as exc:
+        return PRSnapshot(
+            number, "", "UNKNOWN", "error",
+            error=f"cannot record PR feedback: {exc}", repo=repository,
+        )
 
 
 def watch_pr(
@@ -150,7 +164,8 @@ def watch_pr(
     max_interval_s: int = 300,
     *,
     required_checks: tuple[str, ...] = (),
-) -> PRSnapshot | None:
+    run_dir: Path | None = None,
+) -> PRSnapshot:
     """Poll a PR until status leaves `pending` or max_poll_count exceeded.
 
     Backoff: each failed/pending poll grows the interval by 1.5×, capped at
@@ -163,18 +178,17 @@ def watch_pr(
     the function return — caller prints it to stdout if needed.
     """
     import random
-    last: PRSnapshot | None = None
+    last = PRSnapshot(
+        number, "", "UNKNOWN", "error",
+        error="watch requires at least one poll", repo=repo or "",
+    )
     interval = float(poll_interval_s)
     max_loop_seconds = poll_interval_s * max_poll_count  # rough budget
     elapsed = 0.0
 
     for i in range(max_poll_count):
-        snap = fetch_pr(number, repo, required_checks=required_checks)
+        snap = fetch_pr(number, repo, required_checks=required_checks, run_dir=run_dir)
         last = snap
-        if snap is None:
-            time.sleep(interval)
-            elapsed += interval
-            continue
         if snap.status == "error":
             print(f"  PR #{number}: error — {snap.error}", file=sys.stderr)
             return snap
@@ -206,6 +220,8 @@ def _classify(
     data: dict[str, Any],
     *,
     required_checks: tuple[str, ...] = (),
+    repo: str = "",
+    handled_ids: list[str] | tuple[str, ...] = (),
 ) -> PRSnapshot:
     if (
         not isinstance(required_checks, tuple)
@@ -217,14 +233,15 @@ def _classify(
         raise TypeError("required_checks must be a tuple of non-empty check names")
     state = str(data.get("state", "UNKNOWN"))
     title = str(data.get("title", ""))
+    identity: dict[str, Any] = {"repo": repo, "head": str(data.get("headRefOid", ""))}
 
     if state == "MERGED":
         return PRSnapshot(
-            number=number, title=title, state=state, status="merged",
+            number=number, title=title, state=state, status="merged", **identity,
         )
     if state == "CLOSED":
         return PRSnapshot(
-            number=number, title=title, state=state, status="closed",
+            number=number, title=title, state=state, status="closed", **identity,
         )
 
     rollup = data.get("statusCheckRollup") or []
@@ -283,17 +300,52 @@ def _classify(
         )
 
     reviews = data.get("reviews") or []
+    decisions: dict[str, dict[str, Any]] = {}
+    review_comments = []
+    ordered = sorted(
+        (review for review in reviews if isinstance(review, dict)),
+        key=lambda item: str(item.get("submittedAt", "")),
+    )
+    for index, review in enumerate(ordered):
+        review_state = review.get("state")
+        if review_state == "COMMENTED":
+            if str(review.get("body") or "").strip():
+                review_comments.append(dict(review, feedback_id=_feedback_id("review", review)))
+        elif review_state in {"CHANGES_REQUESTED", "APPROVED", "DISMISSED"}:
+            author = (review.get("author") or {}).get("login") or str(index)
+            decisions[author] = review
+    review_comments.extend(
+        dict(review, feedback_id=_feedback_id("review", review))
+        for review in decisions.values()
+        if review.get("state") == "CHANGES_REQUESTED"
+        and data.get("reviewDecision") != "APPROVED"
+    )
+    for thread in data.get("reviewThreads") or []:
+        if not thread.get("isResolved"):
+            comments = (thread.get("comments") or {}).get("nodes") or []
+            comment = comments[-1] if comments else {}
+            review_comments.append(
+                dict(comment, feedback_id=_feedback_id("thread", {
+                    "thread": thread["id"],
+                    "comments": [
+                        {key: item.get(key) for key in ("id", "body", "updatedAt")}
+                        for item in comments
+                    ],
+                }))
+            )
     review_comments = [
-        review
-        for review in reviews
-        if isinstance(review, dict)
-        and review.get("state") in ("COMMENTED", "CHANGES_REQUESTED")
+        comment for comment in review_comments if comment["feedback_id"] not in handled_ids
     ]
     # Bot summaries and CI reporters are not actionable review feedback.
-    issue_comments = [
-        comment
-        for comment in (data.get("comments") or [])
-        if isinstance(comment, dict) and not _is_bot_comment(comment)
+    issue_comments = []
+    for comment in data.get("comments") or []:
+        if not isinstance(comment, dict) or _is_bot_comment(comment):
+            continue
+        feedback_id = _feedback_id("comment", comment)
+        if feedback_id not in handled_ids:
+            issue_comments.append(dict(comment, feedback_id=feedback_id))
+    identity["feedback_ids"] = [
+        comment["feedback_id"] for comment in (*review_comments, *issue_comments)
     ]
 
     if failed:
@@ -302,6 +354,7 @@ def _classify(
             title=title,
             state=state,
             status="ci_failed",
+            **identity,
             failed_checks=failed,
             review_comments=review_comments,
             issue_comments=issue_comments,
@@ -312,6 +365,7 @@ def _classify(
             title=title,
             state=state,
             status="has_comments",
+            **identity,
             review_comments=review_comments,
             issue_comments=issue_comments,
         )
@@ -321,10 +375,11 @@ def _classify(
             title=title,
             state=state,
             status="pending",
+            **identity,
             pending_checks=pending,
         )
     return PRSnapshot(
-        number=number, title=title, state=state, status="green",
+        number=number, title=title, state=state, status="green", **identity,
     )
 
 
@@ -375,3 +430,235 @@ def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 1] + "…"
+
+
+def _feedback_id(kind: str, item: dict[str, Any]) -> str:
+    revision = {
+        key: item.get(key) for key in ("id", "thread", "body", "updatedAt", "submittedAt", "state")
+    }
+    if kind == "thread":
+        revision["comments"] = item.get("comments")
+    content = json.dumps(revision, sort_keys=True, separators=(",", ":"))
+    return f"{kind}:{hashlib.sha256(content.encode()).hexdigest()}"
+
+
+def _fetch_pr_data(number: int, repo: str | None) -> dict[str, Any]:
+    cmd = [
+        "gh", "pr", "view", str(number), "--json",
+        "number,title,state,url,headRefOid,reviewDecision,statusCheckRollup,reviews,comments",
+    ]
+    if repo:
+        cmd += ["--repo", repo]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=30, check=False,
+        )
+    except FileNotFoundError as exc:
+        raise ValueError("gh CLI not found on PATH. Install: https://cli.github.com/") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("gh pr view timed out after 30s") from exc
+    if result.returncode:
+        raise ValueError(f"gh pr view failed: {result.stderr.strip()}")
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"gh output not JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("gh PR output is not an object")
+    return data
+
+
+def _normalize_repository(repo: str) -> str:
+    parts = repo.split("/")
+    if len(parts) == 2:
+        parts.insert(0, "github.com")
+    if len(parts) != 3 or any(
+        not part or any(char.isspace() or char in "\\?#@" for char in part)
+        for part in parts
+    ):
+        raise ValueError("repository must be [HOST/]OWNER/REPO")
+    return "/".join(parts).lower()
+
+
+def _fetch_graphql_pages(query: str, host: str, fields: list[str]) -> list[dict[str, Any]]:
+    result = subprocess.run(
+        ["gh", "api", "graphql", "--hostname", host, "--paginate", "--slurp",
+         "-f", f"query={query}", *fields],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=False,
+    )
+    if result.returncode:
+        raise ValueError(f"cannot fetch PR review threads: {result.stderr.strip()}")
+    pages = json.loads(result.stdout)
+    if not isinstance(pages, list) or not pages:
+        raise ValueError("PR review threads response is incomplete")
+    if any(not isinstance(page, dict) or page.get("errors") for page in pages):
+        raise ValueError("PR review threads query failed")
+    return pages
+
+
+def _connection_nodes(connection: Any, *, has_next: bool | None = None) -> list[dict[str, Any]]:
+    if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
+        raise ValueError("PR review connection is incomplete")
+    page_info = connection.get("pageInfo")
+    if not isinstance(page_info, dict) or type(page_info.get("hasNextPage")) is not bool:
+        raise ValueError("PR review pagination is incomplete")
+    if has_next is not None and page_info["hasNextPage"] is not has_next:
+        raise ValueError("PR review pagination is incomplete")
+    if page_info["hasNextPage"] and (
+        not isinstance(page_info.get("endCursor"), str) or not page_info["endCursor"]
+    ):
+        raise ValueError("PR review pagination cursor is missing")
+    nodes = connection["nodes"]
+    if any(
+        not isinstance(node, dict) or not isinstance(node.get("id"), str) or not node["id"]
+        for node in nodes
+    ):
+        raise ValueError("PR review node identity is malformed")
+    return nodes
+
+
+def _fetch_thread_comments(thread: dict[str, Any], host: str) -> list[dict[str, Any]]:
+    initial = thread.get("comments")
+    if not isinstance(initial, dict):
+        raise ValueError("PR review thread comments are incomplete")
+    initial = dict(initial, pageInfo=initial.get("commentPageInfo"))
+    _connection_nodes(initial)
+    connections = [initial]
+    if initial["pageInfo"]["hasNextPage"]:
+        query = """query($thread:ID!,$endCursor:String){
+          node(id:$thread){... on PullRequestReviewThread{
+            id comments(first:100,after:$endCursor){
+              totalCount nodes{id body updatedAt url author{login}}
+              pageInfo{hasNextPage endCursor}
+            }
+          }}
+        }"""
+        pages = _fetch_graphql_pages(query, host, [
+            "-f", f"thread={thread['id']}", "-f", f"endCursor={initial['pageInfo']['endCursor']}",
+        ])
+        for page in pages:
+            try:
+                node = page["data"]["node"]
+                if node["id"] != thread["id"]:
+                    raise ValueError("PR review thread identity changed during pagination")
+                connections.append(node["comments"])
+            except (KeyError, TypeError) as exc:
+                raise ValueError("PR review thread comments are incomplete") from exc
+    comments: list[dict[str, Any]] = []
+    expected_count = initial.get("totalCount")
+    if type(expected_count) is not int or expected_count < 0:
+        raise ValueError("PR review comment count is missing")
+    cursors: set[str] = set()
+    for index, connection in enumerate(connections):
+        nodes = _connection_nodes(connection, has_next=index < len(connections) - 1)
+        if connection.get("totalCount") != expected_count:
+            raise ValueError("PR review comment count changed during pagination")
+        if any(not isinstance(comment.get("body"), str) for comment in nodes):
+            raise ValueError("PR review comment body is malformed")
+        if connection["pageInfo"]["hasNextPage"]:
+            cursor = connection["pageInfo"]["endCursor"]
+            if cursor in cursors:
+                raise ValueError("PR review comment pagination repeated a cursor")
+            cursors.add(cursor)
+        comments.extend(nodes)
+    if len(comments) != expected_count or len({comment["id"] for comment in comments}) != expected_count:
+        raise ValueError("PR review comment pagination is incomplete")
+    return comments
+
+
+def _fetch_review_threads(number: int, repo: str) -> list[dict[str, Any]]:
+    host, owner, name = _normalize_repository(repo).split("/")
+    query = """query($owner:String!,$name:String!,$number:Int!,$endCursor:String){
+      repository(owner:$owner,name:$name){pullRequest(number:$number){
+        reviewThreads(first:100,after:$endCursor){
+          nodes{id isResolved comments(first:100){
+            totalCount nodes{id body updatedAt url author{login}}
+            commentPageInfo:pageInfo{hasNextPage endCursor}
+          }}
+          pageInfo{hasNextPage endCursor}
+        }
+      }}
+    }"""
+    # gh paginates the first pageInfo it finds; nested comment cursors must be aliased.
+    pages = _fetch_graphql_pages(query, host, [
+        "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={number}",
+    ])
+    threads: list[dict[str, Any]] = []
+    thread_ids: set[str] = set()
+    cursors: set[str] = set()
+    for index, page in enumerate(pages):
+        try:
+            connection = page["data"]["repository"]["pullRequest"]["reviewThreads"]
+            nodes = _connection_nodes(connection, has_next=index < len(pages) - 1)
+        except (KeyError, TypeError) as exc:
+            raise ValueError("PR review threads response is incomplete") from exc
+        if any(
+            not isinstance(thread, dict)
+            or not isinstance(thread.get("id"), str)
+            or type(thread.get("isResolved")) is not bool
+            for thread in nodes
+        ):
+            raise ValueError("PR review thread identity or resolution state is malformed")
+        if connection["pageInfo"]["hasNextPage"]:
+            cursor = connection["pageInfo"]["endCursor"]
+            if cursor in cursors:
+                raise ValueError("PR review threads pagination repeated a cursor")
+            cursors.add(cursor)
+        for thread in nodes:
+            if thread["id"] in thread_ids:
+                raise ValueError("PR review threads pagination repeated a thread")
+            thread_ids.add(thread["id"])
+            if not thread["isResolved"]:
+                thread["comments"]["nodes"] = _fetch_thread_comments(thread, host)
+            threads.append(thread)
+    return threads
+
+
+def _read_feedback_state(run_dir: Path | None, repo: str, number: int) -> dict[str, Any]:
+    if run_dir is None:
+        return {}
+    repo = _normalize_repository(repo)
+    _, path = validate_run_artifact_target(run_dir, run_dir.resolve() / "pr-feedback.json")
+    if not path.exists():
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("PR feedback state is not an object")
+    if payload.get("repo") != repo or payload.get("number") != number:
+        return {}
+    if not isinstance(payload.get("handled"), list) or not all(
+        isinstance(item, str) for item in payload["handled"]
+    ):
+        raise ValueError("PR feedback acknowledgements are malformed")
+    return payload
+
+
+def _record_feedback_observation(run_dir: Path, snapshot: PRSnapshot) -> None:
+    repository = _normalize_repository(snapshot.repo)
+    with exclusive_file_lease(run_dir.parent / ACTIVE_LOCK, wait=True):
+        previous = _read_feedback_state(run_dir, repository, snapshot.number)
+        write_run_artifact_text(
+            run_dir, run_dir.resolve() / "pr-feedback.json",
+            json.dumps({
+                "repo": repository, "number": snapshot.number, "head": snapshot.head,
+                "feedback_ids": snapshot.feedback_ids, "handled": previous.get("handled", []),
+            }),
+        )
+
+
+def acknowledge_pr_feedback(
+    run_dir: Path, *, repo: str, number: int, head: str, feedback_ids: list[str]
+) -> None:
+    repo = _normalize_repository(repo)
+    with exclusive_file_lease(run_dir.parent / ACTIVE_LOCK):
+        state = _read_feedback_state(run_dir, repo, number)
+        if (
+            not state or state.get("head") != head
+            or not feedback_ids or not set(feedback_ids).issubset(state.get("feedback_ids", []))
+        ):
+            raise ValueError("feedback acknowledgement does not match the observed PR, head, and feedback")
+        state["handled"] = sorted(set(state["handled"]) | set(feedback_ids))
+        write_run_artifact_text(
+            run_dir, run_dir.resolve() / "pr-feedback.json", json.dumps(state),
+        )

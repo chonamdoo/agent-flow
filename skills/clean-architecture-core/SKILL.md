@@ -5,96 +5,117 @@ description: Platform-neutral Clean Architecture contract for semantic layers, d
 
 # Clean Architecture Core
 
-Use this skill as the canonical source for platform-neutral architecture rules.
-Load a platform-specific clean architecture skill only for path, framework, or
-DI details.
+Use this as the canonical semantic contract. Apply it to the boundaries the
+project adopts; platform adapters add framework details, not competing rules.
+Discover actual source roots, modules, dependency wiring, and architecture role
+configuration before judging coverage. Roles do not prescribe folders or a
+minimum number of modules, files, interfaces, or models.
 
 ## Semantic Layers
 
-- App Shell owns process startup, composition root, root routing/navigation,
-  global error host, and feature entry composition.
-- Feature API exposes public route keys, destination contracts, entry contracts,
-  and feature capabilities. It has no screen internals and no data/domain
-  implementation.
-- Feature Presentation owns route/screen wiring, state holder, UI state/action,
-  UI events, UI models, domain-to-UI mapping, and rendering components.
-- Shared Presentation Contract owns narrow, framework-neutral interfaces for cross-presentation signals that App Shell handles, such as a common-error notifier and queue. App Shell and Feature Presentation may depend on this contract; it imports neither App Shell implementations nor platform UI types.
-- Core Domain owns business language, domain models, repository interfaces,
-  use cases, policies, domain services, and domain errors.
-- Core Data implements domain repository interfaces and owns remote/local
-  sources, API clients, DTO/request/response models, entity models, cache,
-  data-to-domain mappers, and data DI bindings.
-- Core Network owns HTTP/client setup, API response envelope, network
-  interceptors, network qualifiers, and common network failure mapping.
-- Core UI/design/resources/platform modules expose UI primitives, resources, and
-  platform abstractions without hiding data or network policy inside rendering.
+- `app-shell` owns startup, composition, root routing, and concrete dependency
+  wiring; in UI apps it also owns global UI hosts.
+- `inbound-adapter` owns HTTP handlers, worker/tool entry adapters, input/output
+  schemas, trusted caller-context extraction, and transport error/response mapping.
+- `application` owns use cases, application workflows, command/result contracts,
+  and consumer-focused ports for orchestration, time, payments, transactions, or
+  platform capabilities.
+- `core-domain` owns business language, invariants, domain models, repository
+  contracts, policies, domain services, and domain errors.
+- `core-data` implements domain/application ports and owns persistence, outbound
+  providers, their DTOs/entities, mapping, and source/cache policy where needed.
+- `feature-api` exposes UI feature entry, route, and capability contracts without
+  screen internals or data implementations.
+- `feature-presentation` owns UI wiring, state holders, UI state/actions/events,
+  presentation models, mapping, and rendering.
+- `shared-presentation-contract` owns narrow framework-neutral cross-presentation
+  ports, such as a common-error notifier/queue. AppShell and feature presentation
+  may consume it. It may use domain error values but imports neither AppShell or
+  feature implementations nor UI, transport, or storage implementation types.
+  Domain policy does not depend on this UI-facing contract. Servers need no UI queue.
+- Network/platform adapters own outbound client setup, transport envelopes,
+  interceptors, failure mapping, and platform implementations. UI/design/resources
+  roles expose rendering primitives without hiding network or persistence policy.
 
 ## Dependency Rule
 
-Dependencies point toward stable policy:
+Dependencies point toward stable policy; composition roots construct concrete
+adapters and pass contracts inward:
 
 ```text
-Presentation -> UseCase -> Repository interface <- Repository impl
-Repository impl -> RemoteDataSource / LocalDataSource / Cache / Mapper
-RemoteDataSource -> ApiService or transport client
+Inbound adapter -> Application -> Domain policy
+Data / platform adapter -> Application or domain port
+Feature presentation -> Application or domain contract
+AppShell / feature presentation -> Shared presentation contract
 ```
 
-- A presentation state holder may depend on a single context's repository interface
-directly when no orchestration is needed: the use case in the chain above is
-required when the call crosses contexts, orders multi-step side effects, or adds
-domain/business failure semantics. Repositories/data map transport failures to
-domain errors; presentation maps domain/application errors to UI results. The
-forbidden edge is presentation to a repository implementation, data source, or
-API service, never presentation to a domain contract.
-
-- Domain must not import UI, DB, HTTP, SDK, serialization framework, DI
-  framework, or transport implementation details.
-- Presentation must not import data implementations, API services, DTOs, DB
-  entities, or transport models.
-- Data may depend on domain contracts and models, but domain must not depend on
-  data.
-- DI framework hooks belong at the app shell or adapter edge, not inside domain
-  policy.
+- A UI state holder may use one context's repository interface directly when no
+  orchestration is needed. Require a use case for cross-context work, ordered
+  multi-step side effects, or additional business failure semantics. Presentation
+  never depends on a repository implementation, data source, or API service.
+- HTTP/tool handlers call application actions by default. The UI direct-repository
+  exception is not permission to expose Spring Data repositories, ORM entities,
+  or raw clients through a handler; any different handler policy must be explicit.
+- Pure domain policy imports no UI, DB, HTTP, provider SDK, serialization, or DI
+  framework. Pure application orchestration also keeps those implementations at
+  adapter boundaries.
+- Application wiring metadata, such as an adopted Android `@Inject constructor`
+  pattern, is distinct from domain policy or a runtime container lookup. Keep the
+  accepted platform choice explicit. Framework-aware application services require
+  an intentional architecture decision; neither choice admits framework types
+  into pure domain policy.
+- Presentation receives typed application/domain ports and presentation values,
+  not data implementations or transport DTOs. A composition root may construct
+  raw clients without exposing them to presentation consumers.
+- Source roots and lint activation describe where this contract is checked.
+  An unmapped or inactive boundary is not evidence that its dependencies passed.
 
 ## Use Case Boundary
 
 - A use case represents one user intent or application action.
 - Public or multi-feature use cases should have a stable interface when another
   module or platform adapter depends on the contract.
-- Use cases depend on repository interfaces only.
+- Use cases depend on stable domain/application ports and pure policies, including
+  repository, Clock, payment, transaction, and platform-capability contracts.
+  Name a port for its responsibility rather than disguising it as a repository.
 - A use case must not directly call another use case. Share common logic through
   a domain service, policy, pure function, or explicitly named application
   workflow/orchestrator.
-- Use cases pass infrastructure failures through unless adding domain-specific
-  business failure semantics.
+- Adapters normalize raw transport/storage/provider failures at their boundary.
+  Use cases preserve that established result/error contract unless adding
+  business failure semantics; this is not permission to leak raw infrastructure
+  exceptions. Preserve cancellation rather than recasting it as a business error.
 
 ## Repository And Source Boundary
 
 - Repository interfaces live in domain/application contracts.
 - Repository implementations live in data/infrastructure adapters.
-- Repository implementations return domain models only.
-- Production repository implementations should compose remote, local, cache, and
-  mapper collaborators. They should not inject an API service or HTTP client
-  directly as the default shape.
-- Put API services and raw transport clients behind a remote data source.
-- Direct API-service injection is allowed only for temporary/simple adapters, and
-  the exception must be recorded.
-- A `core-data-<context>` or `core/data/<context>` module normally requires
-  matching domain ownership. Pure transport/shared adapters without domain
-  ownership must record the exception.
+- Implementations return the domain/application values promised by the port,
+  never outbound DTOs, ORM entities, raw responses, or UI models.
+- Separate remote/local sources, caches, and mappers when they own distinct
+  transport, persistence, invalidation, or conversion policy. Compose only the
+  collaborators the repository actually needs.
+- A remote source normally isolates raw transport clients. A simple adapter may
+  own its transport and mapping in one place when the boundary remains explicit;
+  record that choice. A DB-only repository needs no remote source or cache.
+- Keep conversion at its semantic boundary without mandatory forwarding classes
+  or identity copies when representations and contracts already coincide.
+- A data context normally has matching domain/application ownership. Record
+  pure transport/shared adapter exceptions rather than inventing a domain context.
 
 ## Mapping Boundary
 
-- DTO/request/response, DB/entity, domain model, UI model, and API response
-  model are separate shapes.
-- Put mappers at the boundary they cross:
-  - data DTO/entity -> domain
-  - domain -> UI model
-  - domain -> API response model
-- Mappers only convert data. They must not call APIs, databases, caches, or make
-  business policy decisions.
-- Avoid one large mapper that crosses remote DTO, DB/entity, domain, and UI
-  boundaries at once.
+- Inbound HTTP/tool schemas belong to the driving adapter; outbound provider DTOs
+  and persistence entities belong to driven adapters. Commands/results belong to
+  application contracts. A type named `Dto` is not automatically a data-layer type.
+- Keep wire, persistence, domain/application, and UI responsibilities distinct.
+  Separate representations when semantics, validation, mutability, or dependencies
+  differ; identical safe value shapes do not require duplicate models or copies.
+- Put conversion at the boundary it crosses: inbound schema to command,
+  outbound DTO/entity to domain/application value, and application/domain result
+  to UI or API response.
+- Mappers convert values only. They do not perform I/O, cache access, or business
+  policy decisions. Keep unrelated boundaries out of one giant mapper.
 
 ## Cache Boundary
 
@@ -102,7 +123,8 @@ API service, never presentation to a domain contract.
   business concept.
 - Split memory and disk cache when lifetime, invalidation, or restart behavior
   differs.
-- Cache interfaces and implementations are separate.
+- Keep a cache implementation behind the consumer's contract; introduce a
+  separate cache interface when lifetime, substitution, or ownership needs it.
 - Never expose internal mutable cache storage directly.
 - Restart-required data must not live only in memory cache.
 - Temporary data should not be written to disk without a product or reliability
@@ -118,25 +140,33 @@ API service, never presentation to a domain contract.
 
 ## Must Avoid
 
-- Domain importing UI, DB, HTTP, SDK, serialization framework, or DI framework.
-- Presentation importing data impl, API service, DTO, entity, or transport
-  model.
-- Repository interface returning DTO, entity, transport model, response model, or
-  UI model.
-- Repository implementation as a thin API wrapper with no source/mapper boundary
-  in production architecture.
-- Repository implementation directly injecting an API service without a recorded
-  temporary/simple-adapter exception.
-- Core data context without matching domain ownership or documented adapter
-  exception.
+- Pure domain policy importing UI, DB, HTTP, provider SDK, serialization, or DI
+  frameworks; application orchestration bypassing its declared adapter boundary.
+- Presentation importing repository implementations, API services, outbound DTOs,
+  ORM entities, or raw transport models.
+- Repository ports returning outbound DTOs, ORM entities, raw response objects,
+  or UI models.
+- Repository transport or mapping policy leaking into consumers. A recorded
+  simple adapter is allowed; absence of a separate source/cache/mapper class is
+  not itself a violation.
+- Direct API-service injection without the recorded simple-adapter choice.
+- Data contexts without matching domain/application ownership or a documented
+  technical-adapter exception.
 - Core UI importing network policy details.
 - Use case calling another use case directly.
 - Mapper doing API, DB, cache, or business-policy work.
 - Consumer depending on a large interface with methods it does not use.
+- Shared presentation contracts importing AppShell/feature implementations or
+  UI/data/transport implementation types.
 
 ## Review Checklist
 
 Record these items in architecture or code review output:
+
+Use `n/a` for `usecase-boundary` and `usecase-calls-usecase` only when no use-case
+implementation or composition is in scope; an existing applicable path must be
+reviewed as `pass` or `fail`. Missing evidence is not a pass. Keep the active
+workflow's other marker enums and conditional required checks unchanged.
 
 ```text
 clean-architecture-core: applied

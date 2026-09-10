@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -54,7 +55,7 @@ def _route(profile_id: str, **kwargs) -> tuple[RoutedSkill, ...]:
 def _android_project(tmp_path: Path) -> Path:
     project = tmp_path / "app"
     project.mkdir()
-    (project / "settings.gradle.kts").write_text("rootProject.name = \"x\"\n", encoding="utf-8")
+    (project / "build.gradle.kts").write_text('plugins { id("com.android.application") }\n', encoding="utf-8")
     return project
 
 
@@ -218,11 +219,18 @@ def test_runner_profile_union_routes_like_the_flat_merge(tmp_path):
     """
     from agent_flow.core.profile_resolution import load_profile_union
 
+    override = tmp_path / ".agent-flow/profiles/android.local.yaml"
+    override.parent.mkdir(parents=True)
+    override.write_text(
+        "pr:\n  merge_strategy: squash\n"
+        "commit_convention:\n  style: conventional\n",
+        encoding="utf-8",
+    )
     _profile_id, union = load_profile_union(
-        tmp_path, ["react-native", "android"], explicit_fallback=False
+        REPO, ["react-native", "android"], explicit_fallback=False, project_root=tmp_path
     )
     flat = merged_profile_payload(
-        [load_profile_payload("react-native"), load_profile_payload("android")]
+        [load_profile_payload("react-native", tmp_path), load_profile_payload("android", tmp_path)]
     )
 
     changed = ["android/app/src/main/java/A.kt"]
@@ -679,3 +687,51 @@ def test_the_opt_in_concern_reaches_a_path_the_globs_exclude():
 
     assert "react-clean-architecture" not in without
     assert "react-clean-architecture" in with_concern
+
+
+@pytest.mark.parametrize("profile_id", ["typescript", "node", "nextjs"])
+@pytest.mark.parametrize(
+    "task,concerns,expected",
+    [
+        ("Fix React Hook Form dirty reset", [], "react-hook-form-zod"),
+        ("폼 초기화 정책 수정", [], "react-hook-form-zod"),
+        ("Update form adapter", ["react-hook-form-zod"], "react-hook-form-zod"),
+        ("검색 색인 개선", [], "react-web-seo"),
+        ("Fix Storybook focus", [], "react-storybook"),
+        ("툴콜 승인 인자 검증", [], "llm-tool-development"),
+    ],
+)
+def test_react_capabilities_route_by_intent_not_all_tsx(
+    tmp_path: Path, profile_id: str, task: str, concerns: list[str], expected: str,
+) -> None:
+    (tmp_path / "package.json").write_text('{"dependencies":{"react":"19"}}', encoding="utf-8")
+    payload = load_profile_payload(profile_id, tmp_path)
+    baseline = _names(routed_profile_skills(
+        payload, phase_id="implement", changed_files=["src/components/Label.tsx"],
+        task_text="Change label color",
+    ))
+    optional = {"react-hook-form-zod", "react-web-seo", "react-storybook", "llm-tool-development"}
+    assert baseline.isdisjoint(optional)
+    activated = _names(routed_profile_skills(
+        payload, phase_id="implement", changed_files=["src/components/Label.tsx"],
+        task_text=task, concerns=concerns,
+    ))
+    assert activated & optional == {expected}
+
+
+@pytest.mark.parametrize("profile_id,adapter", [("spring", "spring-boot-development-guide"), ("ktor", "ktor-development-guide")])
+def test_kotlin_backend_routes_its_adapter_without_android(profile_id: str, adapter: str) -> None:
+    names = _names(_route(
+        profile_id, phase_id="implement", changed_files=["src/main/kotlin/api/Route.kt"], task_text="Fix authorization",
+    ))
+    assert names == {"kotlin-backend-development-guide", adapter}
+
+
+@pytest.mark.parametrize("dependencies", [{}, {"react-native": "0.80", "react": "19"}, {"expo": "53", "react": "19"}])
+def test_react_web_concern_cannot_activate_without_web_dependencies(tmp_path: Path, dependencies: dict) -> None:
+    (tmp_path / "package.json").write_text(json.dumps({"dependencies": dependencies}), encoding="utf-8")
+    names = _names(routed_profile_skills(
+        load_profile_payload("typescript", tmp_path), phase_id="review", changed_files=["Screen.tsx"],
+        task_text="React Hook Form", concerns=["react-hook-form-zod"],
+    ))
+    assert "react-hook-form-zod" not in names

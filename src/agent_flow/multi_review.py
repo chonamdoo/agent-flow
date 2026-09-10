@@ -58,10 +58,6 @@ _REVIEWER_PROVENANCE_RE = re.compile(
 _REVIEWER_SANDBOX_FAILURE_SIGNALS = (
     "sandbox_apply: operation not permitted",
 )
-# final-review를 고르는 자리(`adapters/hosted.py`)와 launch 선언의 `match.phase`를
-# 비교하는 자리가 같은 값을 봐야 한다. 두 벌로 두면 한쪽 오타가 선언을 조용히
-# 죽인다 — 그래서 소비자가 이 상수를 import한다.
-FINAL_REVIEW_PHASE_ID = "final-review"
 # 선언하지 않은 값을 artifact에 적는 말. 빈 칸으로 두면 "기록이 없다"와
 # "선언이 없다"가 같은 모양이 된다.
 _UNSPECIFIED = "unspecified"
@@ -112,8 +108,6 @@ class Distribution:
     fallback_to_generic: bool = False
     insufficient_reviewers: bool = False
     host: str | None = None
-    required_job_ids: frozenset[str] = frozenset()
-    accept_any_provider: bool = False
     # launch 선언의 `match.phase`가 비교하는 값. 알 수 없으면 None이고, 그때는
     # phase를 지정한 rule이 매치되지 않는다(모르는 phase를 추측해 맞추지 않는다).
     phase_id: str | None = None
@@ -191,16 +185,15 @@ def _has_sufficient_reviewer_processes(
     return sum(len(assigned) for assigned in by_cli.values()) >= 2
 
 
-def distribute_final_review(
+def distribute(
     jobs: list[ReviewerJob],
     host: str | None = None,
+    phase_id: str | None = None,
 ) -> Distribution:
-    """Assign final-review angles to available Claude and Codex processes."""
+    """Assign every angle to each eligible provider; accept a complete provider."""
     if not jobs:
         return Distribution()
     host = host or detect_host_cli()
-    # AGENT_FLOW_REVIEWERS는 pool을 **좁히는** 스위치다. 여기서 무시하면 문서가
-    # 약속한 좁히기가 final-review에서만 조용히 풀린다.
     narrowed = _configured_reviewer_names()
     available = {
         cli.name: cli
@@ -222,109 +215,14 @@ def distribute_final_review(
             fallback_to_generic=True,
             insufficient_reviewers=True,
             host=host,
-            phase_id=FINAL_REVIEW_PHASE_ID,
-        )
-    _assert_unique_output_paths(by_cli)
-    return Distribution(
-        by_cli=by_cli,
-        insufficient_reviewers=not _has_sufficient_reviewer_processes(by_cli),
-        host=host,
-        accept_any_provider=True,
-        phase_id=FINAL_REVIEW_PHASE_ID,
-    )
-
-
-def distribute(
-    jobs: list[ReviewerJob],
-    host: str | None = None,
-    phase_id: str | None = None,
-) -> Distribution:
-    """Assign every required angle to one provider and fan out optional peers.
-
-    `phase_id`는 launch 선언의 `match.phase`가 비교하는 값이다. 호출부가 도는
-    phase를 알고 있으므로 여기서 추측하지 않는다 — 넘기지 않으면 phase를 지정한
-    rule은 발동하지 않는다.
-    """
-    if not jobs:
-        return Distribution()
-    narrowed = _configured_reviewer_names()
-    available = {
-        cli.name: cli
-        for cli in detect_available_clis()
-        if cli.name in REVIEW_CLI_NAMES
-        and (narrowed is None or cli.name in narrowed)
-    }
-    primary_name = (
-        host
-        if host in available
-        else next((name for name in REVIEW_CLI_NAMES if name in available), None)
-    )
-    primary_cli = available.get(primary_name) if primary_name is not None else None
-    if primary_cli is None:
-        return Distribution(
-            fallback_jobs=list(jobs),
-            fallback_to_generic=True,
-            insufficient_reviewers=True,
-            host=host,
             phase_id=phase_id,
         )
-
-    by_cli = {
-        primary_cli.name: [
-            _bound_reviewer_job(job, cli_name=primary_cli.name) for job in jobs
-        ]
-    }
-    optional = {
-        cli_name: cli
-        for cli_name, cli in available.items()
-        if cli_name != primary_cli.name
-    }
-    for cli_name in optional:
-        by_cli[cli_name] = [
-            _optional_reviewer_job(job, cli_name=cli_name)
-            for job in jobs
-        ]
     _assert_unique_output_paths(by_cli)
-    required_job_ids = frozenset(
-        review_job_id(primary_cli.name, job)
-        for job in by_cli[primary_cli.name]
-    )
     return Distribution(
         by_cli=by_cli,
         insufficient_reviewers=not _has_sufficient_reviewer_processes(by_cli),
         host=host,
-        required_job_ids=required_job_ids,
         phase_id=phase_id,
-    )
-
-
-def _bound_reviewer_job(
-    job: ReviewerJob,
-    *,
-    cli_name: str,
-) -> ReviewerJob:
-    return replace(
-        job,
-        prompt=job.prompt_for(cli_name),
-        prompt_by_provider={},
-    )
-
-
-def _optional_reviewer_job(
-    job: ReviewerJob,
-    *,
-    cli_name: str,
-) -> ReviewerJob:
-    output = job.output_path.with_name(
-        f"{job.output_path.stem}-extra-{cli_name}{job.output_path.suffix}"
-    )
-    return replace(
-        job,
-        angle_id=f"{job.angle_id}-{cli_name}-extra",
-        prompt=job.prompt_for(cli_name),
-        prompt_by_provider={},
-        output_path=output,
-        base_angle_id=job.match_angle_id,
     )
 
 
@@ -614,34 +512,34 @@ def run_distribution(
     if leader is not None:
         include_ignored = leader_sweep_include_ignored_for(leader)
         leader_before = capture_leader_snapshot(leader, include_ignored=include_ignored)
-    skipped_providers: tuple[str, ...] = ()
-    if distribution.accept_any_provider:
-        probes = [jobs[0] for jobs in sub_jobs_by_cli.values()]
-        results = run_parallel(probes)
-        available = {
-            result.job_id.split("-", 1)[0]
-            for result in results
-            if reviewer_provider_error(result) is None
-        }
-        skipped_providers = tuple(
-            cli_name
-            for cli_name in sub_jobs_by_cli
-            if cli_name not in available
-        )
-        remaining = [
-            job
-            for cli_name, jobs in sub_jobs_by_cli.items()
-            if cli_name in available
-            for job in jobs[1:]
-        ]
-        if remaining:
-            results.extend(run_parallel(remaining))
-    else:
-        results = run_parallel([
-            job
-            for jobs in sub_jobs_by_cli.values()
-            for job in jobs
-        ])
+    probes = [jobs[0] for jobs in sub_jobs_by_cli.values()]
+    results = run_parallel(probes)
+    available = {
+        result.job_id.split("-", 1)[0]
+        for result in results
+        if reviewer_provider_error(result) is None
+    }
+
+    def should_start(job: SubprocessJob) -> bool:
+        return job.job_id.split("-", 1)[0] in available
+
+    def observe_result(result: SubprocessResult) -> None:
+        if reviewer_provider_error(result) is not None:
+            available.discard(result.job_id.split("-", 1)[0])
+
+    remaining = [
+        job
+        for cli_name, jobs in sub_jobs_by_cli.items()
+        if cli_name in available
+        for job in jobs[1:]
+    ]
+    if remaining:
+        results.extend(run_parallel(
+            remaining, should_start=should_start, on_result=observe_result,
+        ))
+    skipped_providers = tuple(
+        cli_name for cli_name in sub_jobs_by_cli if cli_name not in available
+    )
     # Write each artifact at the angle's intended output_path so the host AI
     # can aggregate them into final-review.md.
     #
@@ -667,10 +565,6 @@ def run_distribution(
             job=job_to_output[result.job_id],
             launch=launch_by_job[result.job_id],
             artifact_sha256=artifact_digests[result.job_id],
-            required=(
-                not distribution.accept_any_provider
-                and result.job_id in distribution.required_job_ids
-            ),
         )
         for result in results
         if result.job_id in artifact_digests
@@ -699,7 +593,6 @@ def _reviewer_outcome(
     job: ReviewerJob,
     launch: ResolvedLaunch,
     artifact_sha256: str,
-    required: bool,
 ) -> ReviewerOutcome:
     error = reviewer_result_error(result)
     status: ReviewStatus = (
@@ -723,7 +616,7 @@ def _reviewer_outcome(
         effort=launch.effort or _UNSPECIFIED,
         status=status,
         verdict=verdict,
-        required=required,
+        required=False,
         artifact=job.output_path.name,
         artifact_sha256=artifact_sha256,
         prompt_digest=_text_digest(job.prompt),

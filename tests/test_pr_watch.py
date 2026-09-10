@@ -330,10 +330,457 @@ def test_to_summary_truncates_bodies():
         "state": "OPEN", "title": "x",
         "statusCheckRollup": [],
         "reviews": [
-            {"state": "COMMENTED", "body": "x" * 500},
+            {"state": "CHANGES_REQUESTED", "body": "x" * 500},
         ],
         "comments": [],
     })
     summary = snap.to_summary()
     body = summary["review_comments"][0]["body"]
     assert len(body) <= 200
+
+
+def test_resolved_threads_and_superseded_reviews_do_not_requeue():
+    data = {
+        "state": "OPEN", "reviews": [
+            {"id": "r1", "author": {"login": "reviewer"}, "state": "CHANGES_REQUESTED", "submittedAt": "1"},
+            {"id": "r2", "author": {"login": "reviewer"}, "state": "APPROVED", "submittedAt": "2"},
+        ],
+        "reviewThreads": [{"id": "t1", "isResolved": True}],
+    }
+    assert _classify(1, data).status == "green"
+    data["reviewThreads"][0]["isResolved"] = False
+    assert _classify(1, data).status == "has_comments"
+
+
+def test_feedback_acknowledgement_is_scoped_and_new_revision_requeues(tmp_path):
+    from agent_flow.pr_watch import (
+        _read_feedback_state, _record_feedback_observation, acknowledge_pr_feedback,
+    )
+
+    data = {"state": "OPEN", "headRefOid": "head-1", "comments": [
+        {"id": "c1", "body": "please clarify", "updatedAt": "1"},
+    ]}
+    snapshot = _classify(7, data, repo="owner/repo")
+    _record_feedback_observation(tmp_path, snapshot)
+    with pytest.raises(ValueError, match="does not match"):
+        acknowledge_pr_feedback(
+            tmp_path, repo="other/repo", number=7, head="head-1", feedback_ids=snapshot.feedback_ids,
+        )
+    with pytest.raises(ValueError, match="does not match"):
+        acknowledge_pr_feedback(
+            tmp_path, repo="owner/repo", number=7, head="stale", feedback_ids=snapshot.feedback_ids,
+        )
+    acknowledge_pr_feedback(
+        tmp_path, repo="owner/repo", number=7, head="head-1", feedback_ids=snapshot.feedback_ids,
+    )
+    handled = _read_feedback_state(tmp_path, "owner/repo", 7)["handled"]
+    assert _classify(7, data, repo="owner/repo", handled_ids=handled).status == "green"
+    data["headRefOid"] = "head-2"
+    assert _classify(7, data, repo="owner/repo", handled_ids=handled).status == "green"
+    data["comments"][0]["body"] = "one more question"
+    data["comments"][0]["updatedAt"] = "2"
+    assert _classify(7, data, repo="owner/repo", handled_ids=handled).status == "has_comments"
+
+
+def test_fetch_pr_reads_all_thread_pages_and_records_feedback(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from agent_flow.pr_watch import fetch_pr, _read_feedback_state
+
+    view = {
+        "state": "OPEN", "url": "https://github.com/owner/repo/pull/7", "headRefOid": "head-1",
+        "reviews": [], "comments": [],
+    }
+    def page(thread, has_next):
+        return {"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "nodes": [thread], "pageInfo": {"hasNextPage": has_next, "endCursor": "cursor"},
+        }}}}}
+    pages = [
+        page({"id": "t1", "isResolved": True}, True),
+        page({"id": "t2", "isResolved": False, "comments": {"nodes": [
+            {"id": "c2", "body": "unsafe boundary", "url": "https://github.com/thread"},
+        ], "totalCount": 1, "commentPageInfo": {"hasNextPage": False}}}, False),
+    ]
+    replies = iter([json.dumps(view), json.dumps(pages)])
+    monkeypatch.setattr(
+        "agent_flow.pr_watch.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=next(replies), stderr=""),
+    )
+    snapshot = fetch_pr(7, run_dir=tmp_path)
+    assert snapshot.status == "has_comments"
+    assert snapshot.to_summary()["review_comments"][0]["body"] == "unsafe boundary"
+    assert _read_feedback_state(tmp_path, "owner/repo", 7)["feedback_ids"] == snapshot.feedback_ids
+
+
+def test_commented_review_body_requires_ack_and_edited_revision_requeues(tmp_path):
+    from agent_flow.pr_watch import (
+        _read_feedback_state, _record_feedback_observation, acknowledge_pr_feedback,
+    )
+
+    review = {
+        "id": "r1", "author": {"login": "reviewer"}, "state": "COMMENTED",
+        "body": "Handle the missing token before saving", "submittedAt": "1",
+    }
+    data = {"state": "OPEN", "headRefOid": "head-1", "reviews": [review]}
+    snapshot = _classify(7, data, repo="owner/repo")
+    assert snapshot.status == "has_comments"
+    assert snapshot.to_summary()["review_comments"][0]["body"] == review["body"]
+    _record_feedback_observation(tmp_path, snapshot)
+    acknowledge_pr_feedback(
+        tmp_path, repo="owner/repo", number=7, head="head-1",
+        feedback_ids=snapshot.feedback_ids,
+    )
+    handled = _read_feedback_state(tmp_path, "owner/repo", 7)["handled"]
+    assert _classify(7, data, handled_ids=handled).status == "green"
+    review["body"] = "The token can also expire while saving"
+    assert _classify(7, data, handled_ids=handled).status == "has_comments"
+
+
+def test_later_commented_review_does_not_erase_unacknowledged_bodies():
+    data = {"state": "OPEN", "reviews": [
+        {"id": "r1", "author": {"login": "reviewer"}, "state": "COMMENTED",
+         "body": "Fix token expiry", "submittedAt": "1"},
+        {"id": "r2", "author": {"login": "reviewer"}, "state": "COMMENTED",
+         "body": "Also handle cancellation", "submittedAt": "2"},
+    ]}
+    snapshot = _classify(7, data)
+    assert {item["body"] for item in snapshot.review_comments} == {
+        "Fix token expiry", "Also handle cancellation",
+    }
+
+
+def test_fetch_pr_preserves_rejection_after_commented_followup(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from agent_flow.pr_watch import fetch_pr, acknowledge_pr_feedback
+
+    rejection = {
+        "id": "r1", "author": {"login": "reviewer"}, "state": "CHANGES_REQUESTED",
+        "body": "Fix the lost update", "submittedAt": "1",
+    }
+    followup = {
+        "id": "r2", "author": {"login": "reviewer"}, "state": "COMMENTED",
+        "body": "", "submittedAt": "2",
+    }
+    view = {
+        "state": "OPEN", "url": "https://github.com/owner/repo/pull/7",
+        "headRefOid": "head-1", "reviewDecision": "CHANGES_REQUESTED",
+    }
+    def respond(cmd, **kwargs):
+        if cmd[1:3] == ["pr", "view"]:
+            payload = dict(view)
+            fields = cmd[cmd.index("--json") + 1].split(",")
+            if "reviews" in fields:
+                payload["reviews"] = [rejection, followup]
+            if "latestReviews" in fields:
+                payload["latestReviews"] = [followup]
+        else:
+            payload = [{"data": {"repository": {"pullRequest": {"reviewThreads": {
+                "nodes": [], "pageInfo": {"hasNextPage": False},
+            }}}}}]
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("agent_flow.pr_watch.subprocess.run", respond)
+    snapshot = fetch_pr(7, run_dir=tmp_path)
+    assert snapshot.status == "has_comments"
+    assert snapshot.to_summary()["review_comments"][0]["body"] == rejection["body"]
+    acknowledge_pr_feedback(
+        tmp_path, repo="owner/repo", number=7, head="head-1",
+        feedback_ids=snapshot.feedback_ids,
+    )
+    assert fetch_pr(7, run_dir=tmp_path).status == "green"
+
+
+@pytest.mark.parametrize("state", ["MERGED", "CLOSED"])
+def test_fetch_terminal_pr_does_not_depend_on_review_threads(state, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from agent_flow.pr_watch import fetch_pr
+
+    def respond(cmd, **kwargs):
+        if cmd[1:3] == ["pr", "view"]:
+            return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({
+                "state": state, "url": "https://github.com/owner/repo/pull/7",
+                "headRefOid": "head-1",
+            }))
+        return SimpleNamespace(returncode=1, stdout="", stderr="GraphQL unavailable")
+
+    monkeypatch.setattr("agent_flow.pr_watch.subprocess.run", respond)
+    snapshot = fetch_pr(7)
+    assert snapshot.status == state.lower()
+    assert snapshot.head == "head-1"
+
+
+def test_fetch_pr_returns_error_snapshot_when_feedback_lease_is_unavailable(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from agent_flow.core.worktree_isolation import FileLeaseUnavailable
+    from agent_flow.pr_watch import fetch_pr
+
+    monkeypatch.setattr(
+        "agent_flow.pr_watch.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({
+            "state": "OPEN", "url": "https://github.com/owner/repo/pull/7",
+            "headRefOid": "head-1",
+        })),
+    )
+    monkeypatch.setattr("agent_flow.pr_watch._fetch_review_threads", lambda *args: [])
+    def unavailable(*args, **kwargs):
+        raise FileLeaseUnavailable("feedback lease is busy")
+
+    monkeypatch.setattr("agent_flow.pr_watch.exclusive_file_lease", unavailable)
+    snapshot = fetch_pr(7, run_dir=tmp_path)
+    assert snapshot.status == "error"
+    assert "feedback lease is busy" in snapshot.error
+
+
+def test_fetch_open_pr_keeps_unavailable_threads_fail_closed(monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from agent_flow.pr_watch import fetch_pr
+
+    replies = iter([
+        SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({
+            "state": "OPEN", "url": "https://github.com/owner/repo/pull/7",
+        })),
+        SimpleNamespace(returncode=1, stdout="", stderr="GraphQL unavailable"),
+    ])
+    monkeypatch.setattr(
+        "agent_flow.pr_watch.subprocess.run", lambda *args, **kwargs: next(replies),
+    )
+    snapshot = fetch_pr(7)
+    assert snapshot.status == "error"
+    assert "GraphQL unavailable" in snapshot.error
+
+
+def test_approval_clears_rejection_but_not_unacknowledged_commented_body():
+    data = {
+        "state": "OPEN", "reviewDecision": "APPROVED", "reviews": [
+            {"id": "r1", "author": {"login": "reviewer"}, "state": "CHANGES_REQUESTED",
+             "body": "Fix token expiry", "submittedAt": "1"},
+            {"id": "r2", "author": {"login": "reviewer"}, "state": "COMMENTED",
+             "body": "Document cancellation", "submittedAt": "2"},
+        ],
+    }
+    snapshot = _classify(7, data)
+    assert [item["body"] for item in snapshot.review_comments] == ["Document cancellation"]
+    assert _classify(7, data, handled_ids=snapshot.feedback_ids).status == "green"
+
+
+def test_commented_followup_does_not_reverse_reviewer_approval():
+    data = {"state": "OPEN", "reviews": [
+        {"id": "r1", "author": {"login": "reviewer"}, "state": "CHANGES_REQUESTED",
+         "body": "Fix token expiry", "submittedAt": "1"},
+        {"id": "r2", "author": {"login": "reviewer"}, "state": "APPROVED",
+         "submittedAt": "2"},
+        {"id": "r3", "author": {"login": "reviewer"}, "state": "COMMENTED",
+         "body": "", "submittedAt": "3"},
+    ]}
+    assert _classify(7, data).status == "green"
+
+
+def _thread_transport(monkeypatch, comments, *, host="github.com", incomplete=False):
+    import json
+    from types import SimpleNamespace
+
+    def connection(nodes, has_next=False, cursor=None):
+        return {
+            "nodes": nodes, "totalCount": len(comments),
+            "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+        }
+
+    def respond(cmd, **kwargs):
+        if cmd[1:3] == ["pr", "view"]:
+            payload = {
+                "state": "OPEN", "url": f"https://{host}/owner/repo/pull/7",
+                "headRefOid": "head-1",
+            }
+        else:
+            requested_host = cmd[cmd.index("--hostname") + 1] if "--hostname" in cmd else "github.com"
+            if requested_host != host:
+                return SimpleNamespace(returncode=1, stdout="", stderr="repository not found on this host")
+            query = next(arg.removeprefix("query=") for arg in cmd if arg.startswith("query="))
+            if "reviewThreads(" in query:
+                first = comments[-1:] if "comments(last:1)" in query else comments[:100]
+                initial = connection(first, len(first) < len(comments), "c100")
+                if "commentPageInfo:pageInfo" in query:
+                    initial["commentPageInfo"] = initial.pop("pageInfo")
+                payload = [{"data": {"repository": {"pullRequest": {"reviewThreads": {
+                    "nodes": [{
+                        "id": "t1", "isResolved": False,
+                        "comments": initial,
+                    }],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }}}}}]
+            else:
+                remaining = comments[100:]
+                payload = [
+                    {"data": {"node": {
+                        "id": "t1",
+                        "comments": connection(
+                            remaining[start:start + 100], start + 100 < len(remaining),
+                            f"c{start + 200}",
+                        ),
+                    }}}
+                    for start in range(0, len(remaining), 100)
+                ]
+                if incomplete:
+                    payload = payload[:-1]
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("agent_flow.pr_watch.subprocess.run", respond)
+
+
+def test_acknowledged_thread_requeues_when_earlier_comment_is_edited(tmp_path, monkeypatch):
+    from agent_flow.pr_watch import acknowledge_pr_feedback, fetch_pr
+
+    comments = [
+        {"id": "c1", "body": "Original finding", "updatedAt": "1"},
+        {"id": "c2", "body": "Reply", "updatedAt": "2"},
+    ]
+    _thread_transport(monkeypatch, comments)
+    observed = fetch_pr(7, run_dir=tmp_path)
+    assert observed.status == "has_comments"
+    acknowledge_pr_feedback(
+        tmp_path, repo=observed.repo, number=7, head=observed.head,
+        feedback_ids=observed.feedback_ids,
+    )
+    assert fetch_pr(7, run_dir=tmp_path).status == "green"
+    comments[0].update(body="Edited original finding", updatedAt="3")
+    assert fetch_pr(7, run_dir=tmp_path).status == "has_comments"
+
+
+@pytest.mark.parametrize("edited_index", [0, 150, 200], ids=["first-page", "middle-page", "last-page"])
+def test_thread_revision_includes_every_comment_page(tmp_path, monkeypatch, edited_index):
+    from agent_flow.pr_watch import acknowledge_pr_feedback, fetch_pr
+
+    comments = [{"id": f"c{i}", "body": f"Finding {i}", "updatedAt": "1"} for i in range(201)]
+    _thread_transport(monkeypatch, comments)
+    observed = fetch_pr(7, run_dir=tmp_path)
+    assert observed.status == "has_comments"
+    acknowledge_pr_feedback(
+        tmp_path, repo=observed.repo, number=7, head=observed.head,
+        feedback_ids=observed.feedback_ids,
+    )
+    assert fetch_pr(7, run_dir=tmp_path).status == "green"
+    comments[edited_index].update(body="Changed finding", updatedAt="2")
+    assert fetch_pr(7, run_dir=tmp_path).status == "has_comments"
+
+
+def test_incomplete_nested_comment_pages_fail_closed(tmp_path, monkeypatch):
+    from agent_flow.pr_watch import fetch_pr
+
+    comments = [{"id": f"c{i}", "body": f"Finding {i}"} for i in range(201)]
+    _thread_transport(monkeypatch, comments, incomplete=True)
+    snapshot = fetch_pr(7, run_dir=tmp_path)
+    assert snapshot.status == "error"
+    assert not (tmp_path / "pr-feedback.json").exists()
+
+
+@pytest.mark.parametrize(("repo", "host"), [
+    ("github.com/owner/repo", "github.com"),
+    ("owner/repo", "git.example.com"),
+    ("git.example.com/owner/repo", "git.example.com"),
+    (None, "git.example.com"),
+])
+def test_repository_host_routes_threads_and_scopes_ack(tmp_path, monkeypatch, repo, host):
+    from agent_flow.pr_watch import acknowledge_pr_feedback, fetch_pr
+
+    _thread_transport(monkeypatch, [{"id": "c1", "body": "Fix this"}], host=host)
+    observed = fetch_pr(7, repo=repo, run_dir=tmp_path)
+    assert observed.status == "has_comments"
+    assert observed.to_summary()["repo"] == f"{host}/owner/repo"
+    acknowledge_pr_feedback(
+        tmp_path, repo=observed.repo, number=7, head=observed.head,
+        feedback_ids=observed.feedback_ids,
+    )
+    assert fetch_pr(7, repo=repo, run_dir=tmp_path).status == "green"
+
+
+def test_same_repository_on_other_host_does_not_share_ack(tmp_path, monkeypatch):
+    from agent_flow.pr_watch import acknowledge_pr_feedback, fetch_pr
+
+    comments = [{"id": "c1", "body": "Fix this"}]
+    _thread_transport(monkeypatch, comments)
+    public = fetch_pr(7, run_dir=tmp_path)
+    acknowledge_pr_feedback(
+        tmp_path, repo=public.repo, number=7, head=public.head, feedback_ids=public.feedback_ids,
+    )
+    _thread_transport(monkeypatch, comments, host="git.example.com")
+    enterprise = fetch_pr(7, run_dir=tmp_path)
+    assert enterprise.status == "has_comments"
+    with pytest.raises(ValueError, match="does not match"):
+        acknowledge_pr_feedback(
+            tmp_path, repo=public.repo, number=7, head=public.head,
+            feedback_ids=public.feedback_ids,
+        )
+
+
+@pytest.mark.parametrize("target_kind", ["dangling-symlink", "directory"])
+def test_unsafe_feedback_target_returns_error_without_writing(tmp_path, monkeypatch, target_kind):
+    from agent_flow.pr_watch import fetch_pr
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    target = run_dir / "pr-feedback.json"
+    outside = tmp_path / "outside.json"
+    if target_kind == "dangling-symlink":
+        target.symlink_to(outside)
+    else:
+        target.mkdir()
+    _thread_transport(monkeypatch, [{"id": "c1", "body": "Fix this"}])
+    snapshot = fetch_pr(7, run_dir=run_dir)
+    assert snapshot.status == "error"
+    assert snapshot.error
+    assert not outside.exists()
+    assert target.is_symlink() if target_kind == "dangling-symlink" else target.is_dir()
+
+
+def test_watch_waits_for_observation_lease_before_returning_green(tmp_path, monkeypatch):
+    import json
+    import threading
+    from agent_flow.artifact import ACTIVE_LOCK
+    from agent_flow.core.worktree_isolation import exclusive_file_lease
+    from agent_flow.pr_watch import watch_pr
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    entered = threading.Event()
+    finished = threading.Event()
+    snapshots = []
+    failures = []
+    monkeypatch.setattr(
+        "agent_flow.pr_watch._fetch_pr_data",
+        lambda *args: {"state": "OPEN", "url": "https://github.com/owner/repo/pull/7",
+                      "headRefOid": "head-1"},
+    )
+    monkeypatch.setattr("agent_flow.pr_watch._fetch_review_threads", lambda *args: [])
+
+    def observe_lease(*args, **kwargs):
+        entered.set()
+        return exclusive_file_lease(*args, **kwargs)
+
+    def watch():
+        try:
+            snapshots.append(watch_pr(7, run_dir=run_dir, max_poll_count=1))
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr("agent_flow.pr_watch.exclusive_file_lease", observe_lease)
+    worker = threading.Thread(target=watch, daemon=True)
+    try:
+        with exclusive_file_lease(run_dir.parent / ACTIVE_LOCK):
+            worker.start()
+            assert entered.wait(2)
+            assert not finished.wait(0.1)
+            assert not (run_dir / "pr-feedback.json").exists()
+    finally:
+        worker.join(2)
+    assert finished.is_set()
+    assert not failures
+    assert snapshots[0].status == "green"
+    observation = json.loads((run_dir / "pr-feedback.json").read_text())
+    assert observation["head"] == snapshots[0].head
+    assert observation["repo"] == snapshots[0].repo

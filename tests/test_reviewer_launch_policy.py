@@ -319,8 +319,8 @@ def test_review_outcome_artifact_records_launch_and_content_digests(
     cli = CliInfo("claude", ("claude",), ("-p",))
     monkeypatch.setattr(multi_review, "cli_by_name", lambda _name: cli)
 
-    def fake_run_parallel(jobs):
-        verdicts = ("approve", "request-changes")
+    def fake_run_parallel(jobs, **_kwargs):
+        verdicts = {"claude-generalist": "approve", "claude-architecture-design": "request-changes"}
         return [
             SubprocessResult(
                 job_id=job.job_id,
@@ -330,11 +330,11 @@ def test_review_outcome_artifact_records_launch_and_content_digests(
                     "reviewer-source: sub-agent\n"
                     "## stderr\n"
                     "quoted heading in reviewer body\n"
-                    f"verdict: {verdict}\n"
+                    f"verdict: {verdicts[job.job_id]}\n"
                 ),
                 stderr="verdict: request-changes",
             )
-            for job, verdict in zip(jobs, verdicts)
+            for job in jobs
         ]
 
     monkeypatch.setattr(multi_review, "run_parallel", fake_run_parallel)
@@ -350,9 +350,6 @@ def test_review_outcome_artifact_records_launch_and_content_digests(
     distribution = multi_review.Distribution(
         by_cli={"claude": jobs},
         phase_id="review",
-        required_job_ids=frozenset(
-            f"claude-{job.angle_id}" for job in jobs
-        ),
     )
     (tmp_path / "meta.json").write_text(
         json.dumps(
@@ -392,10 +389,6 @@ def test_review_outcome_artifact_records_launch_and_content_digests(
         "claude-generalist",
         "claude-architecture-design",
     ]
-    assert evidence["blocking_job_ids"] == [
-        "claude-architecture-design",
-        "claude-generalist",
-    ]
     assert evidence["results_sha256"] == hashlib.sha256(
         results_path.read_bytes()
     ).hexdigest()
@@ -406,9 +399,23 @@ def test_review_outcome_artifact_records_launch_and_content_digests(
         run_meta=run_meta,
     )
     assert validated.validation == "verified"
+    from agent_flow.core.review_evidence import multi_review_route_key
+
+    assert multi_review_route_key(validated) == "request-changes"
+    evidence.update({
+        "schema_version": 1, "blocking_job_ids": [], "accept_any_provider": False,
+    })
+    historical = load_review_evidence(
+        artifact_root=tmp_path, phase_id="review", run_meta=run_meta,
+    )
+    assert multi_review_route_key(historical) == "request-changes"
+    evidence["blocking_job_ids"] = ["claude-generalist"]
+    assert load_review_evidence(
+        artifact_root=tmp_path, phase_id="review", run_meta=run_meta,
+    ).validation == "invalid"
 
 
-def test_accept_any_provider_keeps_running_after_a_malformed_probe(
+def test_provider_keeps_running_after_a_malformed_probe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -425,7 +432,7 @@ def test_accept_any_provider_keeps_running_after_a_malformed_probe(
     monkeypatch.setattr(multi_review, "cli_by_name", lambda _name: _CLAUDE)
     launches: list[list[str]] = []
 
-    def fake_run_parallel(jobs):
+    def fake_run_parallel(jobs, **_kwargs):
         launches.append([job.job_id for job in jobs])
         if len(launches) == 1:
             return [
@@ -457,10 +464,6 @@ def test_accept_any_provider_keeps_running_after_a_malformed_probe(
     distribution = multi_review.Distribution(
         by_cli={"claude": jobs},
         phase_id="review",
-        required_job_ids=frozenset(
-            f"claude-{job.angle_id}" for job in jobs
-        ),
-        accept_any_provider=True,
     )
     (tmp_path / "meta.json").write_text(
         json.dumps(
@@ -487,6 +490,127 @@ def test_accept_any_provider_keeps_running_after_a_malformed_probe(
     )
     assert evidence.validation == "incomplete"
     assert evidence.detail == "no provider completed every expected review"
+
+
+@pytest.mark.parametrize(
+    ("later_result", "expected_status", "disables_provider"),
+    [
+        ("timeout", "timeout", True),
+        ("auth", "error", True),
+        ("quota", "error", True),
+        ("unavailable", "error", True),
+        ("malformed", "error", False),
+        ("request-changes", "ok", False),
+    ],
+)
+def test_late_provider_result_controls_queued_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    later_result: str,
+    expected_status: str,
+    disables_provider: bool,
+) -> None:
+    import asyncio
+
+    from agent_flow import subprocess_pool
+    from agent_flow.adapters.hosted import _write_review_results
+    from agent_flow.core.review_evidence import (
+        load_review_evidence,
+        multi_review_route_key,
+    )
+
+    monkeypatch.setenv("AGENT_FLOW_MAX_WORKERS", "1")
+    monkeypatch.setattr(
+        multi_review, "assert_managed_hooks_registered", lambda *_args: None
+    )
+    monkeypatch.setattr(multi_review, "leader_root_for", lambda _root: None)
+    launched: list[str] = []
+
+    async def execute(job):
+        launched.append(job.job_id)
+        await asyncio.sleep(0)
+        result = subprocess_pool.SubprocessResult(
+            job_id=job.job_id,
+            returncode=0,
+            stdout="reviewer-source: sub-agent\nverdict: approve\n",
+        )
+        if job.job_id == "claude-types":
+            if later_result == "timeout":
+                result.timed_out = True
+                result.returncode = -1
+                result.stdout = ""
+            elif later_result in {"auth", "quota", "unavailable"}:
+                result.returncode = 1
+                result.stdout = ""
+                result.stderr = {
+                    "auth": "authentication failed",
+                    "quota": "rate limit exceeded",
+                    "unavailable": "service unavailable",
+                }[later_result]
+            elif later_result == "malformed":
+                result.stdout = "reviewer-source: sub-agent\nmissing verdict\n"
+            else:
+                result.stdout = (
+                    "reviewer-source: sub-agent\nverdict: request-changes\n"
+                )
+        return result
+
+    monkeypatch.setattr(subprocess_pool, "_run_one", execute)
+    angles = ("generalist", "types", "io-safety", "architecture-design")
+    distribution = multi_review.Distribution(
+        by_cli={
+            provider: [
+                multi_review.ReviewerJob(
+                    angle,
+                    f"review {angle}",
+                    tmp_path / f"review-{provider}-{angle}.md",
+                    tmp_path,
+                )
+                for angle in angles
+            ]
+            for provider in ("claude", "codex")
+        },
+        phase_id="review",
+    )
+    (tmp_path / "meta.json").write_text(
+        json.dumps(
+            {"run_id": "r1", "phase_entered_at": "2026-08-21T00:00:00+00:00"}
+        ),
+        encoding="utf-8",
+    )
+
+    execution = multi_review.run_distribution(distribution, tmp_path)
+    _write_review_results(distribution, execution.outcomes)
+
+    expected_claude = angles[:2] if disables_provider else angles
+    assert [job for job in launched if job.startswith("claude-")] == [
+        f"claude-{angle}" for angle in expected_claude
+    ]
+    assert [job for job in launched if job.startswith("codex-")] == [
+        f"codex-{angle}" for angle in angles
+    ]
+    assert execution.skipped_providers == (("claude",) if disables_provider else ())
+    assert {outcome.job_id for outcome in execution.outcomes} == set(launched)
+    late_outcome = next(
+        outcome for outcome in execution.outcomes if outcome.job_id == "claude-types"
+    )
+    assert late_outcome.status == expected_status
+    assert late_outcome.verdict == (
+        "request-changes" if later_result == "request-changes" else None
+    )
+    for job in distribution.by_cli["claude"][len(expected_claude):]:
+        assert not job.output_path.exists()
+    run_meta = json.loads((tmp_path / "meta.json").read_text(encoding="utf-8"))
+    assert run_meta["review_evidence"]["review"]["complete_providers"] == (
+        ["claude", "codex"] if later_result == "request-changes" else ["codex"]
+    )
+    evidence = load_review_evidence(
+        artifact_root=tmp_path, phase_id="review", run_meta=run_meta
+    )
+    assert evidence.validation == "verified"
+    assert multi_review_route_key(evidence) == (
+        "request-changes" if later_result == "request-changes" else "approve"
+    )
 
 
 def test_reviewer_verdict_normalization_matches_outcome_parser() -> None:
@@ -828,56 +952,6 @@ def test_override_with_non_string_keys_fails_as_a_declaration_error(tmp_path: Pa
         load_profile_payload("generic", tmp_path)
 
 
-def test_final_review_dispatch_reads_the_shared_phase_id_constant(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """final-review를 고르는 자리와 `match.phase`를 세우는 자리가 같은 값을 봐야
-    한다. 한쪽만 리터럴로 두면 상수를 바꾼 날 선언이 조용히 죽는다.
-    """
-    from types import SimpleNamespace
-
-    from agent_flow.adapters import hosted
-
-    assert hosted.FINAL_REVIEW_PHASE_ID is multi_review.FINAL_REVIEW_PHASE_ID
-
-    chosen: list[str] = []
-    monkeypatch.setattr(
-        hosted,
-        "_write_review_input_snapshot",
-        lambda *a, **k: hosted.ReviewInputSnapshot(
-            tmp_path / "input.md",
-            "a" * 64,
-        ),
-    )
-    monkeypatch.setattr(hosted, "_reviewer_jobs", lambda *a, **k: [])
-    monkeypatch.setattr(
-        hosted,
-        "distribute",
-        lambda jobs, host=None, phase_id=None: chosen.append("distribute")
-        or multi_review.Distribution(phase_id=phase_id),
-    )
-    monkeypatch.setattr(
-        hosted,
-        "distribute_final_review",
-        lambda jobs, host=None: chosen.append("final")
-        or multi_review.Distribution(phase_id=multi_review.FINAL_REVIEW_PHASE_ID),
-    )
-    monkeypatch.setattr(
-        hosted,
-        "run_distribution",
-        lambda *a, **k: multi_review.ReviewExecution(),
-    )
-    adapter = hosted.HostedAdapter("claude")
-
-    for phase_id in (multi_review.FINAL_REVIEW_PHASE_ID, "review"):
-        hosted._run_multi_review_distribution(
-            SimpleNamespace(id=phase_id, multi_review=True),
-            tmp_path / "run",
-            tmp_path / "checkout",
-            adapter,
-        )
-
-    assert chosen == ["final", "distribute"]
 
 
 def test_host_and_reviewer_envelopes_are_observed_under_distinct_names(

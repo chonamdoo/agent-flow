@@ -79,12 +79,15 @@ def _capture_spec_ledger(
     run_dir: Path,
     verification: str,
     requirement: str = "Empty search results show the empty state.",
+    *,
+    design_values: str = "",
 ) -> None:
     artifact = (
         "## Spec Items\n\n"
         f"SPEC-1: {requirement}\n"
         f"verify: {verification}\n\n"
         "## Design Values\n"
+        f"{design_values}"
     )
     (run_dir / "design.md").write_text(artifact, encoding="utf-8")
     capture_design_ledger(run_dir, "design", artifact)
@@ -440,7 +443,8 @@ def test_request_changes_routes_even_when_spec_evidence_is_missing(
     run_dir,
     capsys: pytest.CaptureFixture[str],
 ):
-    _capture_spec_ledger(run_dir, "manual")
+    _capture_spec_ledger(run_dir, "manual", design_values="request-timeout: 30s\n")
+    _write_code(project, "val requestTimeout = 10\n")
     review = "## Overall\nverdict: request-changes\n"
     (run_dir / "final-review.md").write_text(review, encoding="utf-8")
     reviewer = run_dir / "final-review-fixture.md"
@@ -509,6 +513,13 @@ def test_request_changes_routes_even_when_spec_evidence_is_missing(
         encoding="utf-8",
     )
     runner = Runner(project, run_dir=run_dir)
+    missing_values = missing_design_value_implementations(
+        project, run_dir, "final-review", GATE
+    )
+    assert any("request-timeout=30s" in item for item in missing_values)
+    assert missing_design_value_implementations(
+        project, run_dir, "final-review", review, review_rejected=True
+    ) == []
 
     assert missing_spec_item_evidence(
         project,

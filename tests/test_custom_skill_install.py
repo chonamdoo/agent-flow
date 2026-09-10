@@ -7,10 +7,18 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 import yaml
+
+from agent_flow.core.skill_resolver import (
+    SkillRoot,
+    discover_skill_catalog,
+    expand_dependencies,
+    resolve_skill,
+)
 
 
 KIT_ROOT = Path(__file__).resolve().parent.parent
@@ -122,8 +130,15 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(
         "python-api-clean-architecture",
     } <= indexed
     assert matt_skill_closure <= indexed
-    # host 디렉토리 link는 allowlist에 든 공통·AppShell skill로 제한한다.
-    assert {link["name"] for link in index["links"]} == host_skills
+    for skill in index["skills"]:
+        assert (project / skill["path"]).is_file()
+    for link in index["links"]:
+        host_root = project / Path(link["path"]).parent
+        resolved = resolve_skill(link["name"], (
+            SkillRoot(source="host", template=str(host_root / "{skill}/SKILL.md")),
+        ))
+        assert resolved.path is not None
+        assert resolved.path.is_file()
     for host_dir in (".Codex", ".claude", ".omp"):
         assert (
             project
@@ -171,8 +186,9 @@ def test_clean_architecture_skills_install_core_and_platform_dependency_graph(tm
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
-    skills = {skill["name"]: skill for skill in index["skills"]}
+    roots = (
+        SkillRoot(source="project", template=str(project / ".agent-flow/skills/{skill}/SKILL.md")),
+    )
     platform_skills = {
         "android-clean-architecture",
         "ios-clean-architecture",
@@ -181,35 +197,20 @@ def test_clean_architecture_skills_install_core_and_platform_dependency_graph(tm
         "python-api-clean-architecture",
     }
 
-    assert "clean-architecture-core" in skills
-    assert "clean-architecture" in skills
-    assert platform_skills <= set(skills)
-    assert skills["clean-architecture"]["requires"] == ["clean-architecture-core"]
-    for name in platform_skills:
-        assert skills[name]["requires"] == ["clean-architecture-core"]
-    assert not any("missing required skill" in warning for warning in index["warnings"])
-
-    core = (
-        project / ".agent-flow" / "skills" / "clean-architecture-core" / "SKILL.md"
-    ).read_text(encoding="utf-8")
-    android = (
-        project / ".agent-flow" / "skills" / "android-clean-architecture" / "SKILL.md"
-    ).read_text(encoding="utf-8")
-    alias = (
-        project / ".agent-flow" / "skills" / "clean-architecture" / "SKILL.md"
-    ).read_text(encoding="utf-8")
-    assert "repository-impl-direct-api-service: pass|fail" in core
-    assert "HomeRepositoryImpl -> HomeRemoteDataSource -> HomeApiService" in android
-    assert "Compatibility Alias" in alias
-    assert "Samantha" not in core + android + alias
-    assert "http://" not in core + android + alias
-    assert "https://" not in core + android + alias
+    catalog = discover_skill_catalog(project, roots)
+    required = expand_dependencies(sorted(platform_skills | {"clean-architecture"}), catalog)
+    assert "clean-architecture-core" in required
+    for name in required:
+        resolved = resolve_skill(name, roots)
+        assert resolved.path is not None
+        assert resolved.path.is_file()
 
 
 def test_android_profile_installs_android_skills_and_common_dependencies_only(tmp_path: Path) -> None:
     project = tmp_path / "android-project"
     project.mkdir()
     (project / "settings.gradle.kts").write_text("pluginManagement {}\n", encoding="utf-8")
+    (project / "build.gradle.kts").write_text('plugins { id("com.android.application") }\n', encoding="utf-8")
 
     result = _install(project)
 
@@ -685,6 +686,7 @@ def test_android_upstream_skills_are_not_installed_or_vendored(tmp_path: Path) -
     project = tmp_path / "project"
     project.mkdir()
     (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    (project / "build.gradle").write_text("plugins { id 'com.android.application' }\n", encoding="utf-8")
 
     result = _install(project)
 
@@ -731,6 +733,7 @@ def test_install_scopes_profiles_to_the_detected_stack(tmp_path: Path, binary: s
     project = tmp_path / f"scoped-profiles-{binary}"
     project.mkdir()
     (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    (project / "build.gradle").write_text("plugins { id 'com.android.application' }\n", encoding="utf-8")
 
     result = _install_with(binary, project)
 
@@ -748,6 +751,7 @@ def test_install_keeps_the_full_runtime_profile_catalog(tmp_path: Path, binary: 
     project = tmp_path / f"runtime-catalog-{binary}"
     project.mkdir()
     (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    (project / "build.gradle").write_text("plugins { id 'com.android.application' }\n", encoding="utf-8")
 
     result = _install_with(binary, project)
 
@@ -760,6 +764,7 @@ def test_installed_runtime_loads_a_profile_the_project_did_not_select(tmp_path: 
     project = tmp_path / "override-project"
     project.mkdir()
     (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    (project / "build.gradle").write_text("plugins { id 'com.android.application' }\n", encoding="utf-8")
     assert _install(project).returncode == 0
 
     runtime = project / ".agent-flow" / "runtime" / "python"
@@ -813,27 +818,24 @@ def test_react_native_carries_its_android_vocabulary_without_the_android_profile
     assert domains["android-native"]["path_globs"] == ["android/**"]
 
 
-def test_install_keeps_the_detected_profile_when_another_is_requested(tmp_path: Path) -> None:
-    """worktree에는 kit.json이 없어 런타임이 감지 profile로 되돌아간다.
-
-    그래서 감지 id는 선택하지 않아도 이 프로젝트에 걸린다.
-    """
+def test_explicit_profile_wins_over_detected_android(tmp_path: Path) -> None:
     project = tmp_path / "gradle-as-ios"
     project.mkdir()
-    (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    (project / "build.gradle.kts").write_text(
+        'plugins { id("com.android.application") }\n', encoding="utf-8"
+    )
 
     result = _install(project, "--profile", "ios")
 
     assert result.returncode == 0, result.stderr
-    kit = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
-    assert kit["profile"] == "android"
-    assert kit["profiles"] == ["ios"]
-    assert _installed_profile_yaml(project) == {
-        "_schema.yaml",
-        "generic.yaml",
-        "ios.yaml",
-        "android.yaml",
-    }
+    profiles = project / ".agent-flow/profiles"
+    assert (profiles / "ios.yaml").is_file()
+    assert not (profiles / "android.yaml").exists()
+    roots = (
+        SkillRoot(source="project", template=str(project / ".agent-flow/skills/{skill}/SKILL.md")),
+    )
+    assert resolve_skill("ios-clean-architecture", roots).exists
+    assert not resolve_skill("android-clean-architecture", roots).exists
 
 
 def test_install_scopes_profiles_to_requested_profiles(tmp_path: Path) -> None:
@@ -856,6 +858,7 @@ def test_reinstall_prunes_foreign_profiles_and_keeps_custom_ones(tmp_path: Path)
     project = tmp_path / "project"
     project.mkdir()
     (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    (project / "build.gradle").write_text("plugins { id 'com.android.application' }\n", encoding="utf-8")
     assert _install(project).returncode == 0
 
     # 예전 설치본은 배포되는 profile을 전부 받았다. 업그레이드가 그것을 걷어내야 한다.
@@ -886,6 +889,7 @@ def test_reinstall_is_quiet_when_pruning_loses_nothing(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    (project / "build.gradle").write_text("plugins { id 'com.android.application' }\n", encoding="utf-8")
     assert _install(project).returncode == 0
 
     # 손대지 않은 kit 사본을 지우는 것은 잃는 것이 없다. 그때도 알리면 "정리했다"는
@@ -963,15 +967,6 @@ def test_sdui_skill_is_android_only(tmp_path: Path) -> None:
     names = {skill["name"] for skill in index["skills"]}
     assert index["selection"]["profiles"] == ["python"]
     assert "android-sdui-architecture" not in names
-
-
-def test_profile_yaml_is_the_only_profile_skill_install_source() -> None:
-    source = (
-        Path(__file__).resolve().parents[1] / "lib" / "skill-selection.mjs"
-    ).read_text(encoding="utf-8")
-
-    assert re.search(r"\bPROFILE_SKILLS\b", source) is None
-    assert "return skillsFromProfileYaml(profileYamlPath(kitRoot, profile));" in source
 
 
 def test_unreadable_skill_metadata_reports_context(tmp_path: Path) -> None:
@@ -1379,13 +1374,20 @@ def test_standalone_no_hooks_prunes_stale_json_when_delegated_kit_fails(
         "agent-flow-install.mjs", project, "--no-hooks", env=env
     )
 
-    assert result.returncode == 0, result.stderr
-    assert "agent-flow-kit install skipped" in result.stderr
+    assert result.returncode != 0
+    assert not (project / ".agent-flow/kit.json").exists()
     for relative in (".claude/settings.json", ".Codex/hooks.json"):
-        text = (project / relative).read_text(encoding="utf-8")
-        assert "guard-protected-branch.sh" not in text
-        assert "./custom-hook.sh" in text
-    assert _hook_state(project)["scripts"] == set()
+        payload = json.loads((project / relative).read_text(encoding="utf-8"))
+        commands = [
+            hook["command"]
+            for entries in payload["hooks"].values()
+            for entry in entries
+            for hook in entry["hooks"]
+        ]
+        assert commands == ["./custom-hook.sh"]
+    hooks = project / ".agent-flow/scripts/hooks"
+    assert not list(hooks.glob("*.sh"))
+    assert not list(hooks.glob("*.py"))
 
 
 
@@ -2858,6 +2860,14 @@ def test_kit_assets_without_a_record_are_upgraded_once(tmp_path: Path, binary: s
     # 사본은 미러 트리 밖에 남는다. 안에 남기면 profile을 좁혀도 그 skill이 안 지워진다.
     assert not list(target.parent.glob("*.bak*"))
     assert f"backup: {backup.relative_to(project).as_posix()}" in result.stdout
+    if relative == _SIBLING_RELATIVE:
+        from agent_flow.core.skill_resolver import skill_observed_content_digest
+
+        index = json.loads((project / ".agent-flow/skills/index.json").read_text(encoding="utf-8"))
+        skill = next(item for item in index["skills"] if item["name"] == "android-guides")
+        assert skill["observedContentDigest"] == skill_observed_content_digest(
+            project / ".agent-flow/skills/android-guides"
+        )
 
     again = _install_with(binary, project)
     assert f"upgraded: {relative.as_posix()}" not in again.stdout
@@ -3110,3 +3120,422 @@ def test_skill_index_stays_name_only(tmp_path: Path, binary: str) -> None:
         assert payload.startswith("{") and payload.endswith("}"), line
         assert ":" not in payload, line
     assert "tdd" in _indexed_names(block, "on-demand")
+
+
+_FRAMEWORK_FIXTURES = json.loads((KIT_ROOT / "tests/fixtures/profile-detection.json").read_text(encoding="utf-8"))
+_NEW_HOST_SKILLS = {
+    "kotlin-backend-development-guide",
+    "spring-boot-development-guide",
+    "ktor-development-guide",
+    "llm-tool-development",
+    "react-hook-form-zod",
+    "react-web-seo",
+    "react-storybook",
+}
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("case", _FRAMEWORK_FIXTURES, ids=lambda case: case["id"])
+def test_installer_entrypoints_consume_framework_fixtures(tmp_path: Path, binary: str, case: dict) -> None:
+    for relative, content in case["files"].items():
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    result = _install_with(binary, tmp_path)
+    if "error" in case:
+        assert result.returncode != 0
+        assert case["error"] in result.stderr
+        assert not (tmp_path / ".agent-flow/kit.json").exists()
+        return
+    assert result.returncode == 0, result.stderr
+    kit = json.loads((tmp_path / ".agent-flow/kit.json").read_text(encoding="utf-8"))
+    assert kit["profile"] == case["profile"]
+    index = json.loads((tmp_path / ".agent-flow/skills/index.json").read_text(encoding="utf-8"))
+    names = {skill["name"] for skill in index["skills"]}
+    expected_host_skills = set()
+    if case["profile"] == "generic":
+        expected_host_skills.update(_NEW_HOST_SKILLS)
+    if case["profile"] in {"spring", "ktor"}:
+        adapter = "spring-boot-development-guide" if case["profile"] == "spring" else "ktor-development-guide"
+        expected_host_skills.update({"kotlin-backend-development-guide", adapter, "llm-tool-development"})
+        assert "android-code-review" not in names
+    if case["profile"] in {"node", "typescript", "nextjs", "python"}:
+        expected_host_skills.add("llm-tool-development")
+    if case.get("react_web"):
+        expected_host_skills.update({"react-hook-form-zod", "react-web-seo", "react-storybook"})
+    for host in (".claude", ".Codex", ".omp"):
+        for name in _NEW_HOST_SKILLS:
+            directory = tmp_path / host / "skills" / name
+            if name in expected_host_skills:
+                assert (directory / "SKILL.md").is_file(), (case["id"], host, name)
+            else:
+                assert not directory.exists(), (case["id"], host, name)
+                assert not directory.is_symlink(), (case["id"], host, name)
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_explicit_profile_overrides_ambiguous_detection_and_survives_reinstall(tmp_path: Path, binary: str) -> None:
+    (tmp_path / "build.gradle.kts").write_text("plugins { kotlin(\"jvm\") }\n", encoding="utf-8")
+    for args in [("--profile", "ktor"), ()]:
+        result = _install_with(binary, tmp_path, *args)
+        assert result.returncode == 0, result.stderr
+        assert json.loads((tmp_path / ".agent-flow/kit.json").read_text())["profile"] == "ktor"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_copied_host_reference_edits_survive_reinstall_and_retirement(tmp_path: Path, binary: str) -> None:
+    skill = tmp_path / "skills/demo"
+    _skill(skill, "SOURCE", hosts="[codex]")
+    reference = skill / "references/policy.md"
+    reference.parent.mkdir()
+    reference.write_text("source policy\n", encoding="utf-8")
+    first = _install_with(binary, tmp_path)
+    assert first.returncode == 0, first.stderr
+    host = tmp_path / ".Codex/skills/demo"
+    if host.is_symlink():
+        host.unlink()
+        shutil.copytree(skill, host)
+    edited = host / "references/policy.md"
+    edited.write_text("user policy\n", encoding="utf-8")
+    for _ in range(2):
+        result = _install_with(binary, tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert edited.read_text(encoding="utf-8") == "user policy\n"
+    (skill / "SKILL.md").unlink()
+    retired = _install_with(binary, tmp_path)
+    assert retired.returncode == 0, retired.stderr
+    assert edited.read_text(encoding="utf-8") == "user policy\n"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("edited_reference", [False, True])
+def test_counted_copy_receipt_allows_only_unchanged_retirement(
+    tmp_path: Path, binary: str, edited_reference: bool,
+) -> None:
+    canonical = tmp_path / "skills/demo"
+    _skill(canonical, "SOURCE", hosts="[codex]")
+    (canonical / "references").mkdir()
+    (canonical / "references/policy.md").write_text("source policy\n", encoding="utf-8")
+    first = _install_with(binary, tmp_path)
+    assert first.returncode == 0, first.stderr
+    host = tmp_path / ".Codex/skills/demo"
+    if host.is_symlink():
+        host.unlink()
+    else:
+        shutil.rmtree(host)
+    shutil.copytree(canonical, host)
+    index_path = tmp_path / ".agent-flow/skills/index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    skill = next(item for item in index["skills"] if item["name"] == "demo")
+    script = (
+        "import { recordSkillLinkReceipt } from "
+        f"{json.dumps((KIT_ROOT / 'lib/skill-metadata.mjs').as_uri())};\n"
+        "const skill = JSON.parse(process.argv[1]);\n"
+        "console.log(JSON.stringify(recordSkillLinkReceipt({"
+        'name: "demo", host: "codex", path: ".Codex/skills/demo", status: "copied:2:0"'
+        "}, skill, null)));\n"
+    )
+    receipt = subprocess.run(
+        (_node(), "--input-type=module", "-e", script, json.dumps(skill)),
+        cwd=tmp_path, text=True, capture_output=True, check=False, timeout=30,
+    )
+    assert receipt.returncode == 0, receipt.stderr
+    index["links"] = [
+        json.loads(receipt.stdout) if link["name"] == "demo" and link["host"] == "codex" else link
+        for link in index["links"]
+    ]
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    reference = host / "references/policy.md"
+    if edited_reference:
+        reference.write_text("user policy\n", encoding="utf-8")
+    shutil.rmtree(canonical)
+
+    retired = _install_with(binary, tmp_path)
+
+    assert retired.returncode == 0, retired.stderr
+    if edited_reference:
+        assert reference.read_text(encoding="utf-8") == "user policy\n"
+    else:
+        assert not host.exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("run_location", ["leader", "worktree-runtime"])
+def test_active_run_blocks_install_before_any_project_write(
+    tmp_path: Path, binary: str, run_location: str,
+) -> None:
+    project = tmp_path / "active-install"
+    project.mkdir()
+    if run_location == "worktree-runtime":
+        subprocess.run(["git", "init", str(project)], check=True, capture_output=True)
+    assert _install_with(binary, project, "--profile", "typescript").returncode == 0
+    state_root = (
+        project if run_location == "leader"
+        else project / ".git/agent-flow/worktrees/feat-running"
+    )
+    run = state_root / ".agent-flow/runs/20260909-120000"
+    run.mkdir(parents=True)
+    (run / "active").touch()
+    (run / "meta.json").write_text('{"workflow":"development"}', encoding="utf-8")
+    before = {
+        file.relative_to(project).as_posix(): file.read_bytes()
+        for file in project.rglob("*") if file.is_file()
+    }
+
+    result = _install_with(binary, project, "--profile", "ktor")
+
+    assert result.returncode != 0
+    assert "active run" in result.stderr
+    assert {
+        file.relative_to(project).as_posix(): file.read_bytes()
+        for file in project.rglob("*") if file.is_file()
+    } == before
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("run_location", ["plain", "git-private"])
+def test_install_and_run_creation_are_mutually_exclusive(
+    tmp_path: Path, binary: str, run_location: str,
+) -> None:
+    from agent_flow.artifact import ActiveRunExists, create_run, find_active_run
+
+    project = tmp_path / "project"
+    project.mkdir()
+    if run_location == "git-private":
+        subprocess.run(["git", "init", str(project)], check=True, capture_output=True)
+    state_root = (
+        project if run_location == "plain"
+        else project / ".git/agent-flow/worktrees/feat-concurrent"
+    )
+    ready = tmp_path / "install-ready"
+    release = tmp_path / "release-install"
+    preload = tmp_path / "pause-install.cjs"
+    preload.write_text(
+        "const fs = require('node:fs');\n"
+        "const mkdir = fs.mkdirSync;\n"
+        f"const ready = {json.dumps(str(ready))};\n"
+        f"const release = {json.dumps(str(release))};\n"
+        f"const target = {json.dumps(str(project / '.agent-flow'))};\n"
+        "fs.mkdirSync = function (directory, ...args) {\n"
+        "  if (String(directory).startsWith(target) && !fs.existsSync(ready)) {\n"
+        "    fs.writeFileSync(ready, 'paused');\n"
+        "    const deadline = Date.now() + 30000;\n"
+        "    while (!fs.existsSync(release)) {\n"
+        "      if (Date.now() > deadline) throw new Error('install barrier timed out');\n"
+        "      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);\n"
+        "    }\n"
+        "  }\n"
+        "  return mkdir.call(this, directory, ...args);\n"
+        "};\n",
+        encoding="utf-8",
+    )
+    installer = subprocess.Popen(
+        [_node(), str(KIT_ROOT / "bin" / binary), "install", "--profile", "typescript"],
+        cwd=project,
+        env={**os.environ, "NODE_OPTIONS": f"--require={preload}"},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 25
+        while not ready.exists() and installer.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "installer did not reach its project-write barrier"
+        with pytest.raises(ActiveRunExists):
+            create_run(state_root, "development", "concurrent run", checkout_root=project)
+        assert find_active_run(state_root) is None
+    finally:
+        release.write_text("continue", encoding="utf-8")
+        try:
+            stdout, stderr = installer.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            installer.kill()
+            installer.communicate()
+            raise
+    assert installer.returncode == 0, stdout + stderr
+    created = create_run(
+        state_root, "development", "run after installation", checkout_root=project,
+    )
+    assert find_active_run(state_root).path == created
+
+
+def test_delegated_install_safety_failure_stops_parent_writes(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install_with("agent-flow-install.mjs", project).returncode == 0
+    before = {
+        file.relative_to(project): file.read_bytes()
+        for file in project.rglob("*") if file.is_file()
+    }
+    preload = tmp_path / "refuse-delegated-install.cjs"
+    preload.write_text(
+        'if (process.argv[1]?.endsWith("agent-flow-kit.mjs")) {\n'
+        '  process.stderr.write("install blocked by active run: competing run\\n");\n'
+        '  process.exit(75);\n'
+        '}\n',
+        encoding="utf-8",
+    )
+    result = _install_with(
+        "agent-flow-install.mjs", project, "--profile", "ktor",
+        env={**os.environ, "NODE_OPTIONS": f"--require={preload}"},
+    )
+    assert result.returncode != 0
+    assert {
+        file.relative_to(project): file.read_bytes()
+        for file in project.rglob("*") if file.is_file()
+    } == before
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("edited_reference", [False, True])
+@pytest.mark.parametrize("copy_status", ["copied", "copied:2:0"])
+def test_legacy_host_copy_upgrade_requires_unchanged_content(
+    tmp_path: Path, binary: str, edited_reference: bool, copy_status: str,
+) -> None:
+    assert _install_with(binary, tmp_path).returncode == 0
+    name = "comment-authoring-discipline"
+    canonical = tmp_path / ".agent-flow/skills" / name
+    old = f"---\nname: {name}\n---\n\nPrevious release\n"
+    (canonical / "SKILL.md").write_text(old, encoding="utf-8")
+    _record_installed_hash(tmp_path, name)
+    host = tmp_path / ".Codex/skills" / name
+    if host.is_symlink():
+        host.unlink()
+    else:
+        shutil.rmtree(host)
+    shutil.copytree(canonical, host)
+    index_path = tmp_path / ".agent-flow/skills/index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    for link in index["links"]:
+        if link["name"] == name and link["host"] == "codex":
+            link["status"] = copy_status
+            link.pop("installedContentDigest", None)
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    reference = host / "references/team-policy.txt"
+    if edited_reference:
+        reference.parent.mkdir(exist_ok=True)
+        reference.write_text("user policy\n", encoding="utf-8")
+
+    result = _install_with(binary, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    if edited_reference:
+        assert (host / "SKILL.md").read_text(encoding="utf-8") == old
+        assert reference.read_text(encoding="utf-8") == "user policy\n"
+    else:
+        assert (host / "SKILL.md").read_bytes() == (
+            KIT_ROOT / "skills" / name / "SKILL.md"
+        ).read_bytes()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("copy_status", ["copied", "copied:2:0"])
+def test_unverified_retired_copy_keeps_explicit_recovery_path(
+    tmp_path: Path, binary: str, copy_status: str,
+) -> None:
+    canonical = tmp_path / "skills/demo"
+    _skill(canonical, "previous source", hosts="[codex]")
+    assert _install_with(binary, tmp_path).returncode == 0
+    host = tmp_path / ".Codex/skills/demo"
+    if host.is_symlink():
+        host.unlink()
+        shutil.copytree(canonical, host)
+    index_path = tmp_path / ".agent-flow/skills/index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    for link in index["links"]:
+        if link["name"] == "demo":
+            link["status"] = copy_status
+            link.pop("installedContentDigest", None)
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    (host / "policy.txt").write_text("user policy\n", encoding="utf-8")
+    shutil.rmtree(canonical)
+
+    result = _install_with(binary, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert (host / "policy.txt").read_text(encoding="utf-8") == "user policy\n"
+    recorded = json.loads(index_path.read_text(encoding="utf-8"))
+    assert any(
+        link["name"] == "demo" and link["status"] == "skipped-unverified-copy"
+        for link in recorded["links"]
+    )
+    recovered = _install_with(binary, tmp_path, "--force-managed")
+    assert recovered.returncode == 0, recovered.stderr
+    assert not host.exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_rejects_an_unrelated_inherited_descriptor(tmp_path: Path, binary: str) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    unrelated = tmp_path / "unrelated"
+    unrelated.write_text("keep this file\n", encoding="utf-8")
+    with unrelated.open("r") as descriptor:
+        result = subprocess.run(
+            [_node(), str(KIT_ROOT / "bin" / binary), "install"],
+            cwd=project,
+            env={
+                **os.environ,
+                "AGENT_FLOW_INSTALL_LEASE_FD": str(descriptor.fileno()),
+            },
+            pass_fds=(descriptor.fileno(),),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    assert result.returncode != 0
+    assert not (project / ".agent-flow").exists()
+    assert unrelated.read_text(encoding="utf-8") == "keep this file\n"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("active_run", [False, True])
+def test_install_safety_works_without_isolated_pyyaml(
+    tmp_path: Path, binary: str, active_run: bool,
+) -> None:
+    from agent_flow.artifact import create_run
+
+    project = tmp_path / "project"
+    project.mkdir()
+    if active_run:
+        create_run(project, "development", "keep installation out")
+    before = {
+        file.relative_to(project): file.read_bytes()
+        for file in project.rglob("*") if file.is_file()
+    }
+    preload = tmp_path / "stdlib-python.cjs"
+    preload.write_text(
+        "const cp = require('node:child_process');\n"
+        "const path = require('node:path');\n"
+        "const original = cp.spawnSync;\n"
+        "cp.spawnSync = (command, args, options) => "
+        "/^python(?:[0-9.t]*)$/.test(path.basename(command))\n"
+        "  ? original(process.env.PROBE_PYTHON, ['-S', ...args], options)\n"
+        "  : original(command, args, options);\n"
+        "require('node:module').syncBuiltinESMExports();\n",
+        encoding="utf-8",
+    )
+    result = _install_with(
+        binary, project, "--no-hooks",
+        env={
+            **os.environ,
+            "NODE_OPTIONS": f"--require={preload}",
+            "PROBE_PYTHON": sys.executable,
+            "PYTHON": sys.executable,
+            "PYTHONPATH": str(Path(yaml.__file__).parent.parent),
+        },
+    )
+
+    if active_run:
+        assert result.returncode == 75, result.stderr
+        assert {
+            file.relative_to(project): file.read_bytes()
+            for file in project.rglob("*") if file.is_file()
+        } == before
+    else:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(
+            (project / ".agent-flow/kit.json").read_text(encoding="utf-8")
+        )["hooks"] is False

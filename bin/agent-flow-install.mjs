@@ -13,13 +13,17 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
+import { BUNDLED_HOST_SKILL_NAMES, mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
+import { installProfile } from "../lib/profile-detection.mjs";
 import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
 import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
 import { parseSimpleYaml, splitFrontmatter } from "../lib/frontmatter.mjs";
-import { observeSkillContent, parseSkillMetadata } from "../lib/skill-metadata.mjs";
+import { captureLegacySkillCopyReceipts, observeSkillContent, parseSkillMetadata, recordSkillLinkReceipt, skillCopyMatchesReceipt, skippedSkillCopy } from "../lib/skill-metadata.mjs";
 import {
   activeInstallProfileIds,
+  ensureInstallLease,
+  inheritedInstallLeaseOptions,
+  INSTALL_SAFETY_EXIT,
   AGENT_FLOW_COMMAND,
   ASSET_BACKUP_NOTICE_PREFIX,
   ASSET_UPGRADE_NOTICE_PREFIX,
@@ -34,7 +38,6 @@ import {
   COMMAND_TOOL_MATCHER,
   ensureChildPath,
   escapeRegex,
-  hasChildWithSuffix,
   hookScriptCommand,
   hookLauncherDigest,
   INSTALL_SYNOPSIS,
@@ -162,17 +165,6 @@ const PROJECT = process.argv[2] === "install" ? installRoot(REQUESTED_PROJECT) :
 const AF_DIR = path.join(PROJECT, ".agent-flow");
 
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
-const BUNDLED_HOST_SKILL_NAMES = new Set([
-  "agent-flow",
-  "agent-flow-diagnosing-bugs",
-  "app-shell-error-contract",
-  "android-appshell-error-handling",
-  "comment-authoring-discipline",
-  "comment-checker",
-  "ios-app-shell-error-handling",
-  "react-app-shell-error-handling",
-  "react-native-app-shell-error-handling",
-]);
 // 설치된 외부 skill 이름은 여기 열거하지 않는다. upstream이 6개월에 이름 35%를 바꿨고
 // (실측: `camera1-to-camerax` → `camerax`), 열거된 목록은 우리가 배포하지도 않는 이름을
 // 영구히 들고 있게 된다. 프로젝트 skill 색인은 우리가 배포한 것만 담고, 외부 skill은
@@ -246,69 +238,6 @@ function bootstrapLocalSkillName(skillPath, fallback) {
   return fallback;
 }
 
-// `flutter create`가 `dependencies:`에 쓰는 Flutter SDK 의존. pubspec을 가진 순수 Dart
-// 패키지와 Flutter 저장소를 가르는 유일한 표지다. Python 쪽과 같은 패턴을 쓴다 — 인라인
-// 주석을 허용하고, `#` 앞의 공백을 요구해 `sdk: flutter#c` 스칼라는 잡지 않는다.
-const FLUTTER_SDK_DEPENDENCY_RE = /^\s*sdk:\s*["']?flutter["']?(?:[ \t]+#.*)?[ \t]*$/m;
-
-function detectProfile() {
-  // 설치 배너도 Python CLI와 같은 profile을 보여줘야 agent가 다른 guide를 고르지 않는다.
-  if (fs.existsSync(path.join(PROJECT, "next.config.js")) ||
-      fs.existsSync(path.join(PROJECT, "next.config.mjs")) ||
-      fs.existsSync(path.join(PROJECT, "next.config.ts"))) {
-    return "nextjs";
-  }
-  if (
-      fs.existsSync(path.join(PROJECT, "Package.swift")) ||
-      hasChildWithSuffix(PROJECT, ".xcodeproj") ||
-      hasChildWithSuffix(PROJECT, ".xcworkspace")
-  ) {
-    return "ios";
-  }
-  if (fs.existsSync(path.join(PROJECT, "pyproject.toml")) ||
-      fs.existsSync(path.join(PROJECT, "requirements.txt"))) {
-    return "python";
-  }
-  const earlyPackagePath = path.join(PROJECT, "package.json");
-  if (fs.existsSync(earlyPackagePath)) {
-    const packageText = fs.readFileSync(earlyPackagePath, "utf8");
-    if (packageText.includes("react-native")) {
-      return "react-native";
-    }
-  }
-  // `pubspec.yaml`만으로는 Flutter가 아니다 — 순수 Dart 패키지도 전부 갖고 있고, 그런
-  // 저장소를 flutter로 잡으면 `flutter analyze`·`flutter test`가 상시 실패하는 필수
-  // gate가 된다. 확정 표지는 `flutter create`가 쓰는 SDK 의존이다. gradle 분기보다 앞에
-  // 두는 이유는 Android 호스트를 함께 빌드하는 monorepo다. 값으로 매칭한다 — YAML
-  // 스칼라라 인용과 공백이 저자의 선택이고, 바이트 비교는 `sdk: "flutter"`를 놓친다.
-  const pubspecPath = path.join(PROJECT, "pubspec.yaml");
-  if (fs.existsSync(pubspecPath) && FLUTTER_SDK_DEPENDENCY_RE.test(fs.readFileSync(pubspecPath, "utf8"))) {
-    return "flutter";
-  }
-  if (
-      fs.existsSync(path.join(PROJECT, "build.gradle")) ||
-      fs.existsSync(path.join(PROJECT, "settings.gradle")) ||
-      fs.existsSync(path.join(PROJECT, "build.gradle.kts")) ||
-      fs.existsSync(path.join(PROJECT, "settings.gradle.kts"))
-  ) {
-    return "android";
-  }
-  if (fs.existsSync(path.join(PROJECT, "package.json"))) {
-    const packageText = fs.readFileSync(path.join(PROJECT, "package.json"), "utf8");
-    if (packageText.includes("react-native")) {
-      return "react-native";
-    }
-    if (packageText.includes("\"next\"")) {
-      return "nextjs";
-    }
-    if (fs.existsSync(path.join(PROJECT, "tsconfig.json"))) {
-      return "typescript";
-    }
-    return "node";
-  }
-  // npm gate를 실행할 수 없는 tsconfig 단독 프로젝트는 generic으로 둔다.
-  return "generic";
-}
 
 
 
@@ -701,7 +630,7 @@ function installProjectSkills(forceManaged = false, installSelection = null) {
       continue;
     }
     for (const host of skill.hosts) {
-      links.push(linkProjectSkill(skill, host, previousIndex, forceManaged));
+      links.push(recordSkillLinkReceipt(linkProjectSkill(skill, host, previousIndex, forceManaged), skill, previousIndex));
     }
   }
   links.push(...removeStaleProjectSkillLinks(selected.skills, previousIndex, forceManaged));
@@ -847,14 +776,11 @@ function removeStaleProjectSkillLinks(skills, previousIndex, forceManaged = fals
       removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-forced" });
       continue;
     }
-    const previousHash = previousSkillHash(previousIndex, link.name);
-    const skillFile = path.join(target, "SKILL.md");
-    if (stat.isDirectory() && previousHash && fs.existsSync(skillFile)) {
-      const currentHash = crypto.createHash("sha256").update(fs.readFileSync(skillFile, "utf8")).digest("hex");
-      if (currentHash === previousHash) {
-        fs.rmSync(target, { recursive: true, force: true });
-        removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-copied" });
-      }
+    if (stat.isDirectory() && skillCopyMatchesReceipt(target, link.installedContentDigest)) {
+      fs.rmSync(target, { recursive: true, force: true });
+      removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-copied" });
+    } else if (stat.isDirectory()) {
+      removed.push(skippedSkillCopy(link));
     }
   }
   return removed;
@@ -878,7 +804,7 @@ function linkProjectSkill(skill, host, previousIndex, forceManaged = false) {
   const destDir = path.join(hostRoot, skill.name);
   ensureChildPath(hostRoot, destDir);
   const destSkill = path.join(destDir, "SKILL.md");
-  const previousHash = previousSkillHash(previousIndex, skill.name);
+  const previousLink = previousIndex?.links?.find((link) => link.name === skill.name && link.host === host);
   // `existsSync`는 심링크를 **따라가서** 끊어진 링크에 false를 준다. 그러면 stale
   // link 정리 분기를 못 타고 곧바로 링크 생성이 EEXIST로 죽는다. profile을 좁히거나
   // `--skills` 선택을 바꾸면 이전 선택의 host 링크가 끊긴 채 남으므로 실제로 밟는다.
@@ -890,9 +816,8 @@ function linkProjectSkill(skill, host, previousIndex, forceManaged = false) {
       else fs.rmSync(destDir, { recursive: true, force: true });
     } else if (stat.isSymbolicLink()) fs.unlinkSync(destDir);
     else if (fs.existsSync(destSkill)) {
-      const currentHash = crypto.createHash("sha256").update(fs.readFileSync(destSkill, "utf8")).digest("hex");
-      if (currentHash !== skill.hash && currentHash !== previousHash) {
-        return { name: skill.name, host, path: path.relative(PROJECT, destDir), status: "skipped-user-modified" };
+      if (!skillCopyMatchesReceipt(destDir, skill.observedContentDigest, previousLink?.installedContentDigest)) {
+        return skippedSkillCopy({ ...previousLink, name: skill.name, host, path: path.relative(PROJECT, destDir) });
       }
       fs.rmSync(destDir, { recursive: true, force: true });
     } else {
@@ -937,10 +862,6 @@ function legacyHostSkillRoot(linkPath) {
 
 
 
-function previousSkillHash(previousIndex, name) {
-  if (!previousIndex || !Array.isArray(previousIndex.skills)) return "";
-  return previousIndex.skills.find((skill) => skill && skill.name === name)?.hash || "";
-}
 
 
 
@@ -955,7 +876,9 @@ function runKitInstall() {
   // 자식이 제 cwd 기준으로 한 번 더 풀어 다른 곳을 가리킨다.
   const forwarded = withoutInstallRootOption(INSTALL_ARGS).filter((arg) => arg !== "install");
   const args = [kitCli, "install", ...forwarded];
-  const result = spawnSync(process.execPath, args, { cwd: PROJECT, encoding: "utf8" });
+  const result = spawnSync(process.execPath, args, {
+    cwd: PROJECT, encoding: "utf8", ...inheritedInstallLeaseOptions(),
+  });
   // kit.mjs의 stdout은 여기서 갇힌다. prune과 skill 갱신 알림만은 사용자가 무엇이
   // 바뀌었는지 아는 유일한 통로라 그대로 다시 낸다 — 실제 갱신은 자식이 하므로
   // 여기서 걸러 내면 install.mjs 경로가 통째로 무음이 된다.
@@ -976,6 +899,9 @@ function runKitInstall() {
   }
   if (result.status !== 0) {
     const detail = (result.stderr || result.stdout || String(result.error || "unknown error")).trim().split("\n")[0];
+    if (result.status === INSTALL_SAFETY_EXIT) {
+      throw new Error(`delegated install safety check failed: ${detail}`);
+    }
     console.error(`warning: agent-flow-kit install skipped (${detail}); .agent-flow prompts/bootstrap may be incomplete until \`agent-flow-kit install\` succeeds`);
     return false;
   }
@@ -1015,15 +941,17 @@ function install() {
     process.exitCode = 1;
     return;
   }
+  if (!ensureInstallLease(PROJECT)) return;
   // 자식 kit install이 index를 다시 쓴다. 그 뒤에 읽으면 "사용자가 손댔는가"를
   // 가르는 hash가 방금 관측한 현재 내용으로 갱신돼 있어 오라클이 사라진다.
   const previousSkillIndex = readJsonIfExists(path.join(AF_DIR, "skills", "index.json"));
+  captureLegacySkillCopyReceipts(PROJECT, previousSkillIndex);
   const delegatedKitInstalled = runKitInstall();
   ensureDir(path.join(AF_DIR, "runs"));
   ensureDir(path.join(AF_DIR, "memory"));
   ensureDir(path.join(AF_DIR, "local-skills"));
 
-  const profile = detectProfile();
+  const profile = installProfile(PROJECT, INSTALL_ARGS, previousSkillIndex);
   let installSelection = resolveInstallSelection({ args: INSTALL_ARGS, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: PROJECT });
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, PROJECT);
 
@@ -1087,9 +1015,6 @@ function install() {
     new Set(["index.json", "catalog.lock.json"]),
     installSelection.copyRootNames,
   );
-  const skillIndex = installProjectSkills(FORCE_MANAGED, installSelection);
-  upsertSkillIndexBlock(PROJECT);
-  upsertDocsIndexBlock(PROJECT);
   const workflowsCopied = copyDir(
     path.join(PACKAGED_ASSETS, "workflows"),
     path.join(AF_DIR, "workflows"),
@@ -1212,6 +1137,9 @@ function install() {
   } else {
     console.warn(`warning: ${KIT_ASSETS_RELATIVE} is unreadable; kit asset sync skipped (delete it to re-bootstrap)`);
   }
+  const skillIndex = installProjectSkills(FORCE_MANAGED, installSelection);
+  upsertSkillIndexBlock(PROJECT);
+  upsertDocsIndexBlock(PROJECT);
 
   const agentFlowSkill = path.join(AF_DIR, "skills", "agent-flow");
   const claudeSkillStatus = linkOrCopyDir(
@@ -1240,6 +1168,11 @@ function install() {
         "The installer links `agent-flow` into `.claude/skills/agent-flow` " +
         "when possible, or copies it when symlinks are unavailable.\n");
     }
+  }
+  if (!delegatedKitInstalled) {
+    console.error("agent-flow install incomplete: delegated kit installation failed; success metadata was not published");
+    process.exitCode = 1;
+    return;
   }
 
   // 이 파일이 kit.mjs가 쓴 kit.json을 덮는다. 먼저 읽지 않으면 최초 설치
@@ -1288,9 +1221,7 @@ function install() {
     },
   };
   atomicWriteFileSync(path.join(AF_DIR, "kit.json"), JSON.stringify(kitJson, null, 2));
-  if (delegatedKitInstalled) {
-    syncManagedWorktreeHostHooks(PROJECT);
-  }
+  syncManagedWorktreeHostHooks(PROJECT);
 
   console.log(`agent-flow installed`);
   console.log(`  profile : ${profile}`);

@@ -78,6 +78,7 @@ class _UnknownProfileError(ValueError):
 PROJECT_OVERRIDE_KEYS: tuple[str, ...] = (
     "architecture",
     "branching",
+    "commit_convention",
     "execution",
     "gates",
     "pr",
@@ -128,62 +129,122 @@ class ProjectProfile:
     architecture: dict[str, Any] | None
 
 
+def package_dependencies(root: Path) -> set[str]:
+    manifest = root / "package.json"
+    if not manifest.is_file():
+        return set()
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f"invalid package manifest {manifest}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{manifest} must contain a JSON object")
+    return {
+        name
+        for key in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
+        if isinstance(payload.get(key), dict)
+        for name in payload[key]
+    }
+
+
+
+
+def _read_build_file(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+
+
+def _without_gradle_comments(text: str) -> str:
+    return re.sub(
+        r""""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|/\*[\s\S]*?\*/|//[^\n]*""",
+        lambda match: "" if match[0].startswith("/") else match[0],
+        text,
+    )
+
+
+def _build_directories(root: Path) -> list[Path]:
+    root = root.resolve()
+    directories = [root]
+    seen = {root}
+    for directory in directories:
+        settings = "\n".join(
+            _without_gradle_comments(_read_build_file(directory / name))
+            for name in ("settings.gradle", "settings.gradle.kts")
+        )
+        children: list[str] = []
+        for include in re.finditer(r"\binclude\s*(?:\(([^)]*)\)|([^\n]+))", settings):
+            children.extend(
+                name.lstrip(":").replace(":", "/")
+                for name in re.findall(r"""["'](:?[A-Za-z0-9_.:-]+)["']""", include[1] or include[2] or "")
+            )
+        pom = re.sub(r"<!--[\s\S]*?-->", "", _read_build_file(directory / "pom.xml"))
+        for modules in re.findall(r"<modules\b[^>]*>([\s\S]*?)</modules>", pom):
+            children.extend(re.findall(r"<module\b[^>]*>\s*([^<]+?)\s*</module>", modules))
+        for child in children:
+            candidate = directory / child
+            resolved = candidate.resolve()
+            if (
+                candidate.is_dir()
+                and not candidate.is_symlink()
+                and resolved.is_relative_to(root)
+                and resolved not in seen
+            ):
+                seen.add(resolved)
+                directories.append(resolved)
+    return directories
+
+
 def detect_profile(root: Path) -> str:
-    # 설치 스크립트(install.mjs/kit.mjs)와 동일한 우선순위를 유지해야
-    # 설치 배너와 런타임 gate/skill routing이 같은 profile을 본다.
-    if (
-        (root / "next.config.js").exists()
-        or (root / "next.config.mjs").exists()
-        or (root / "next.config.ts").exists()
+    dependencies = package_dependencies(root)
+    candidates: set[str] = set()
+    if dependencies.intersection({"react-native", "expo"}):
+        candidates.add("react-native")
+    if _FLUTTER_SDK_DEPENDENCY_RE.search(_read_build_file(root / "pubspec.yaml")):
+        candidates.add("flutter")
+    if "next" in dependencies or any(
+        (root / name).exists() for name in ("next.config.js", "next.config.mjs", "next.config.ts")
     ):
-        return "nextjs"
-    if (
-        (root / "Package.swift").exists()
-        or any(root.glob("*.xcodeproj"))
-        or any(root.glob("*.xcworkspace"))
-    ):
-        return "ios"
+        candidates.add("nextjs")
+    if (root / "Package.swift").exists() or any(root.glob("*.xcodeproj")) or any(root.glob("*.xcworkspace")):
+        candidates.add("ios")
     if (root / "pyproject.toml").exists() or (root / "requirements.txt").exists():
-        return "python"
-    package_path = root / "package.json"
-    if package_path.exists():
-        package_text = package_path.read_text(encoding="utf-8", errors="ignore")
-        if "react-native" in package_text:
-            return "react-native"
-    # `pubspec.yaml`만으로는 Flutter가 아니다 — 순수 Dart 패키지(server/CLI/library)도
-    # 전부 갖고 있다. 그런 저장소를 flutter로 잡으면 `flutter analyze`·`flutter test`가
-    # 필수 gate가 되는데 그 저장소에는 Flutter SDK 의존이 없어서 상시 실패한다. 확정
-    # 표지는 `flutter create`가 `dependencies:`에 쓰는 SDK 의존이다. gradle 분기보다
-    # 앞에 두는 이유는 Android 호스트를 함께 빌드하는 monorepo다 — 루트 gradle과
-    # pubspec이 함께 있는 저장소를 android로 잡으면 Dart gate가 하나도 돌지 않는다.
-    #
-    # 값으로 매칭한다. 옆의 `"react-native" in package_text`는 JSON 안의 패키지 이름을
-    # 보므로 인용이 형식에 고정돼 있지만, 여기는 YAML 스칼라라 인용과 공백이 저자의
-    # 선택이다. 바이트로 비교하면 `sdk: "flutter"`와 `sdk:  flutter`를 쓴 실제 Flutter
-    # 저장소가 조용히 profile을 잃는다(실측).
-    pubspec_path = root / "pubspec.yaml"
-    if pubspec_path.exists():
-        pubspec_text = pubspec_path.read_text(encoding="utf-8", errors="ignore")
-        if _FLUTTER_SDK_DEPENDENCY_RE.search(pubspec_text):
-            return "flutter"
-    if (
-        (root / "build.gradle").exists()
-        or (root / "settings.gradle").exists()
-        or (root / "build.gradle.kts").exists()
-        or (root / "settings.gradle.kts").exists()
-    ):
-        return "android"
-    if package_path.exists():
-        package_text = package_path.read_text(encoding="utf-8", errors="ignore")
-        if "react-native" in package_text:
-            return "react-native"
-        if '"next"' in package_text:
-            return "nextjs"
-        # 일반 TypeScript 프로젝트는 node보다 좁은 profile을 써야 gate와 skill routing이 맞다.
-        if (root / "tsconfig.json").exists():
-            return "typescript"
-        return "node"
-    # npm gate를 실행할 수 없는 tsconfig 단독 프로젝트는 generic으로 둔다.
+        candidates.add("python")
+    jvm = False
+    for directory in _build_directories(root):
+        gradle_files = [directory / name for name in (
+            "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"
+        )]
+        jvm = jvm or any(path.exists() for path in gradle_files) or (directory / "pom.xml").exists()
+        gradle = "\n".join(_without_gradle_comments(_read_build_file(path)) for path in gradle_files)
+        pom = re.sub(r"<!--[\s\S]*?-->", "", _read_build_file(directory / "pom.xml"))
+        if (
+            re.search(r"""\bid\s*(?:\(\s*)?["']org\.springframework\.boot["']""", gradle)
+            or re.search(r"""["']org\.springframework\.boot:spring-boot[^"']*["']""", gradle)
+            or re.search(r"<groupId\b[^>]*>\s*org\.springframework\.boot\s*</groupId>", pom)
+        ):
+            candidates.add("spring")
+        if (
+            re.search(r"""\bid\s*(?:\(\s*)?["']io\.ktor(?:\.plugin)?["']""", gradle)
+            or re.search(r"""["']io\.ktor:ktor-server-[^"']+["']""", gradle)
+            or re.search(r"<(dependency|plugin)\b[^>]*>(?:(?!</\1>)[\s\S])*<groupId>\s*io\.ktor\s*</groupId>\s*<artifactId>\s*ktor-server-[^<]+</artifactId>", pom)
+        ):
+            candidates.add("ktor")
+        if (
+            re.search(r"""\bid\s*(?:\(\s*)?["']com\.android\.(?:application|library|test|dynamic-feature)["']""", gradle)
+            or any((directory / name).exists() for name in (
+                "src/main/AndroidManifest.xml", "app/src/main/AndroidManifest.xml"
+            ))
+        ):
+            candidates.add("android")
+    if candidates.intersection({"react-native", "flutter"}):
+        candidates.discard("android")
+    if len(candidates) > 1:
+        raise ValueError(f"ambiguous project profiles in {root}: {', '.join(sorted(candidates))}; select an explicit profile")
+    if candidates:
+        return next(iter(candidates))
+    if jvm:
+        raise ValueError(f"JVM framework evidence is insufficient in {root}; select an explicit profile")
+    if (root / "package.json").exists():
+        return "typescript" if (root / "tsconfig.json").exists() else "node"
     return "generic"
 
 
@@ -244,7 +305,7 @@ def load_profile_payload(
         raise ValueError(f"profile id mismatch: {profile_id}")
     if root is None:
         return payload
-    return apply_project_profile_override(payload, profile_id=profile_id, root=root)
+    return resolve_project_profile_payload(payload, profile_id=profile_id, root=root)
 
 
 def project_profile_path(root: Path, profile_id: str) -> Path:
@@ -270,6 +331,123 @@ def _project_profile_path(root: Path, profile_id: str, *, suffix: str) -> Path:
         profiles_root / f"{safe_id}{suffix}",
         "profile",
     )
+
+
+def resolve_project_profile_payload(
+    payload: dict[str, Any], *, profile_id: str, root: Path
+) -> dict[str, Any]:
+    """Resolve declared project capabilities and gate variants before local overrides."""
+    resolved = dict(payload)
+    source = project_profile_path(root, profile_id)
+    capability_ids = payload.get("capabilities", [])
+    if not isinstance(capability_ids, list) or not all(
+        isinstance(item, str) and item.strip() for item in capability_ids
+    ):
+        raise ValueError(f"profile capabilities must be a list of non-empty strings: {source}")
+    if capability_ids:
+        dependencies = package_dependencies(root)
+        for capability_id in capability_ids:
+            try:
+                safe_id = validate_safe_name(capability_id, "profile capability")
+            except ValueError as exc:
+                raise ValueError(f"invalid profile capability in {source}: {exc}") from exc
+            resource = resources.files("agent_flow").joinpath("profiles", f"_{safe_id}.yaml")
+            context = f"{resource} (declared in {source})"
+            try:
+                capability = yaml.safe_load(resource.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError) as exc:
+                raise ValueError(f"cannot read profile capability {context}: {exc}") from exc
+            except yaml.YAMLError as exc:
+                raise ValueError(f"invalid profile capability YAML {context}: {exc}") from exc
+            _validate_capability_fields(capability, source=context)
+            required = set(capability.get("requires_dependencies", []))
+            excluded = set(capability.get("excludes_dependencies", []))
+            if not required.issubset(dependencies) or excluded.intersection(dependencies):
+                continue
+            _validate_capability_fields(resolved, source=str(source))
+            skills = dict(resolved.get("skills") or {})
+            additions = capability.get("skills") or {}
+            skills["install"] = list(dict.fromkeys([*skills.get("install", []), *additions.get("install", [])]))
+            skills["required_review"] = [*skills.get("required_review", []), *additions.get("required_review", [])]
+            resolved["skills"] = skills
+            if "architecture" not in resolved and "architecture" in capability:
+                resolved["architecture"] = capability["architecture"]
+            resolved["review_angles"] = [*resolved.get("review_angles", []), *capability.get("review_angles", [])]
+    variants = payload.get("gate_variants", [])
+    if "gate_variants" in payload:
+        override_path = project_profile_override_path(root, profile_id)
+        override = yaml.safe_load(override_path.read_text(encoding="utf-8")) if override_path.is_file() else None
+        if not isinstance(override, dict) or "gates" not in override:
+            _validate_gate_variants(variants, profile_id=profile_id, source=source)
+            matches = [
+                variant for variant in variants
+                if all((root / name).is_file() for name in variant.get("requires_files", []))
+                and (
+                    not variant.get("any_files")
+                    or any((root / name).is_file() for name in variant["any_files"])
+                )
+            ]
+            if len({variant["tool"] for variant in matches}) > 1:
+                raise ValueError(f"ambiguous build tools for {profile_id}; declare gates in {override_path}")
+            if matches:
+                selected = max(matches, key=lambda variant: len(variant.get("requires_files", [])))
+                resolved["gates"] = selected["gates"]
+    return apply_project_profile_override(resolved, profile_id=profile_id, root=root)
+
+
+def _validate_capability_fields(payload: object, *, source: str) -> None:
+    if not isinstance(payload, dict):
+        raise ValueError(f"profile capability must be a mapping: {source}")
+    for field in ("requires_dependencies", "excludes_dependencies"):
+        value = payload.get(field, [])
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item.strip() for item in value
+        ):
+            raise ValueError(f"profile {field} must be a list of non-empty strings: {source}")
+    skills = payload.get("skills", {})
+    if not isinstance(skills, dict):
+        raise ValueError(f"profile skills must be a mapping: {source}")
+    install = skills.get("install", [])
+    if not isinstance(install, list) or not all(
+        isinstance(item, str) and item.strip() for item in install
+    ):
+        raise ValueError(f"profile skills.install must be a list of non-empty strings: {source}")
+    for field, value in (
+        ("skills.required_review", skills.get("required_review", [])),
+        ("review_angles", payload.get("review_angles", [])),
+    ):
+        if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+            raise ValueError(f"profile {field} must be a list of mappings: {source}")
+
+
+def _validate_gate_variants(
+    variants: object, *, profile_id: str, source: Path
+) -> None:
+    if not isinstance(variants, list):
+        raise ValueError(f"profile gate_variants must be a list of mappings: {source}")
+    for index, variant in enumerate(variants):
+        context = f"{source}: gate_variants[{index}]"
+        if not isinstance(variant, dict):
+            raise ValueError(f"profile gate_variants entry must be a mapping: {context}")
+        tool = variant.get("tool")
+        if not isinstance(tool, str) or not tool.strip():
+            raise ValueError(f"profile gate_variants tool must be a non-empty string: {context}")
+        for field in ("requires_files", "any_files"):
+            value = variant.get(field, [])
+            if not isinstance(value, list) or not all(
+                isinstance(item, str) and item.strip() for item in value
+            ):
+                raise ValueError(
+                    f"profile gate_variants {field} must be a list of non-empty strings: {context}"
+                )
+        gates = variant.get("gates")
+        if not isinstance(gates, list):
+            raise ValueError(f"profile gate_variants gates must be a list: {context}")
+        try:
+            for gate in gates:
+                _gate_from_payload(gate, profile_id=profile_id)
+        except ValueError as exc:
+            raise ValueError(f"invalid profile gate_variants gate: {context}: {exc}") from exc
 
 
 def apply_project_profile_override(
@@ -416,6 +594,14 @@ def _validate_project_profile_override_shape(
         _assert_override_keeps_shipped_role_declarations(roles, packaged, source=source)
     _validate_override_leader_tripwire(override, source=source)
     _validate_override_execution(override, source=source)
+    if "commit_convention" in override:
+        convention = override["commit_convention"]
+        allowed = {"style": {"conventional", "tagged", "freeform"}, "co_author": {"include", "skip"}}
+        if not isinstance(convention, dict) or convention.keys() - allowed.keys():
+            raise ValueError(f"profile override commit_convention supports only style and co_author: {source}")
+        for key, value in convention.items():
+            if not isinstance(value, str) or value not in allowed[key]:
+                raise ValueError(f"invalid profile override commit_convention.{key}: {source}")
     if "gates" not in override:
         return
     gates = override["gates"]

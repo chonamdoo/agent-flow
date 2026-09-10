@@ -26,9 +26,17 @@ framework-specific evidence.
 2. Clean Architecture alignment
    - Dependency direction points inward.
    - UseCase, Repository, Cache, and Mapper boundaries match the design.
-   - Domain/Application imports no UI, DB, HTTP, SDK, or framework implementation.
-   - DTO, DB Entity, Domain Model, and UI Model remain separate.
-   - Composition root owns concrete wiring.
+   - Pure domain policy imports no UI, DB, HTTP, provider SDK, or framework.
+     Application wiring metadata and intentionally framework-aware orchestration
+     follow the adopted core/platform contract, not a blanket domain exception.
+   - Inbound schemas, outbound DTO/entities, application values, and UI models
+     retain their separate responsibilities without pointless identity copies.
+   - Composition root owns concrete wiring; consumers receive narrow ports.
+     Clock/payment/transaction/platform ports are valid application contracts.
+   - Judge mapped roles and actual dependencies, not a prescribed folder tree or
+     file count. Unmapped/inactive lint coverage is not a semantic pass.
+   - Preserve the core's single-context UI repository-interface exception.
+     Shared presentation ports remain neutral; servers need no UI queue.
 
 3. SOLID boundary validation
    - SRP change reasons are not mixed across layers.
