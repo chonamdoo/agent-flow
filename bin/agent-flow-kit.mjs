@@ -181,7 +181,7 @@ function installProject(requestedRoot) {
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, root);
   const phases = fullFeaturePhases();
 
-  for (const name of ["runs", "state", "handoffs", "team", "worktrees", "workflows", "skills", "templates", "prompts", "rules", "bootstrap"]) {
+  for (const name of ["runs", "state", "handoffs", "team", "workflows", "skills", "templates", "prompts", "rules", "bootstrap"]) {
     fs.mkdirSync(path.join(agentFlowDir, name), { recursive: true });
   }
   fs.mkdirSync(path.join(agentFlowDir, "local-skills"), { recursive: true });

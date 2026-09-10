@@ -1411,9 +1411,8 @@ def _no_git_dir_above(root) -> bool:
 
 _AGENT_FLOW_PREFIX = ".agent-flow"
 
-# agent-flow가 스스로 쓰는 **상태** 디렉터리. `artifacts.init_project`가 이걸
-# 그대로 만든다. tripwire 비교에서 빼는 유일한 자리이므로 둘이 갈라지면 정상
-# 명령이 오탐을 낸다.
+# State directories excluded by the tripwire. Initialization creates only current
+# directories; legacy worktrees stay excluded without being created eagerly.
 AGENT_FLOW_STATE_DIRS = (
     "runs",
     "state",

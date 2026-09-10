@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -154,6 +155,7 @@ from agent_flow.core.worktrees import (
     resolve_worktree,
     worktree_branch_exists,
     worktree_runtime_root,
+    worktree_runtime_root_for_path,
     user_worktrees_root,
 )
 from agent_flow.core.hook_integrity import (
@@ -177,6 +179,7 @@ from agent_flow.core.worktree_isolation import (
     provider_lease,
     registered_worktree_at,
     same_worktree_path,
+    sanitized_worker_env,
     verify_linked_worktree,
     worker_claim_lock,
     worktree_path_key,
@@ -185,6 +188,7 @@ from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
 from agent_flow.artifact import (
     find_active_run,
+    find_active_runs,
     mark_inactive,
     phase_review_rejected,
     read_meta,
@@ -535,6 +539,16 @@ def main(argv: list[str] | None = None) -> int:
     worktree_status = worktree_subparsers.add_parser("status")
     worktree_status.add_argument("--root", default=".")
     worktree_status.add_argument("--name", required=True)
+    worktree_status.add_argument(
+        "--detail", action="store_true",
+        help="show the verified code path, runtime path, and recorded active tasks",
+    )
+    worktree_open = worktree_subparsers.add_parser(
+        "open", help="open an existing managed checkout in a new editor window"
+    )
+    worktree_open.add_argument("--root", default=".")
+    worktree_open.add_argument("--name", required=True)
+    worktree_open.add_argument("--editor", required=True, help="code, cursor, or zed")
     worktree_list = worktree_subparsers.add_parser("list")
     worktree_list.add_argument("--root", default=".")
     worktree_remove = worktree_subparsers.add_parser("remove")
@@ -1515,6 +1529,42 @@ def main(argv: list[str] | None = None) -> int:
                 root=root, checkouts=tuple(checkout for checkout, _ in synced)
             )
             return 0
+        if args.worktree_command == "open" or (
+            args.worktree_command == "status" and args.detail
+        ):
+            try:
+                entry = resolve_worktree(root=root, selector=args.name)
+                if entry is None:
+                    raise ValueError(f"registered worktree not found: {args.name}")
+                checkout = verify_linked_worktree(
+                    root=root, path=entry.path, expected_branch=entry.branch
+                )
+                print(f"project: {status_value(root)}")
+                print(f"worktree: {status_value(entry.path.name)}")
+                print(f"branch: {status_value(entry.branch or '-')}")
+                print(f"code_path: {status_value(checkout)}")
+                runtime = worktree_runtime_root_for_path(root=root, path=checkout)
+                if runtime is None:
+                    print("runtime_path: unknown (ownership mismatch)")
+                    print("recorded_active_runs: unavailable")
+                else:
+                    print(f"runtime_path: {status_value(runtime)}")
+                    active_runs = find_active_runs(runtime)
+                    if not active_runs:
+                        print("recorded_active_runs: none")
+                    for active in active_runs:
+                        print(
+                            f"recorded_active_run: {status_value(active.workflow)}/"
+                            f"{status_value(active.run_id)} task: {status_value(active.task)}"
+                        )
+                if args.worktree_command == "open":
+                    _open_worktree_editor(
+                        root=root, checkout=checkout, branch=entry.branch, editor=args.editor
+                    )
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
+            return 0
         if args.worktree_command == "status":
             try:
                 status = get_worktree_status(root=root, name=args.name)
@@ -2309,6 +2359,52 @@ def _resolve_run_dir(root: Path, value: str | None) -> Path | None:
         print(f"run dir not found: {run_dir}", file=sys.stderr)
         return None
     return run_dir
+
+
+def _open_worktree_editor(
+    *, root: Path, checkout: Path, branch: str | None, editor: str
+) -> None:
+    new_window_flags = {"code": "--new-window", "cursor": "--new-window", "zed": "-n"}
+    if editor not in new_window_flags:
+        raise ValueError(
+            f"unsupported editor: {editor}; use code, cursor, or zed, "
+            "or open code_path manually in a separate window"
+        )
+    executable = shutil.which(editor)
+    if executable is None:
+        raise ValueError(
+            f"editor command not found: {editor}; open code_path manually "
+            "or install the editor's shell command"
+        )
+    executable_path = Path(executable).resolve()
+    if executable_path.is_relative_to(root) or executable_path.is_relative_to(checkout):
+        raise ValueError(f"refusing an editor executable inside the project: {executable_path}")
+    verify_linked_worktree(root=root, path=checkout, expected_branch=branch)
+    if checkout.is_relative_to(root):
+        print(
+            "warning: this legacy checkout is inside the leader; IDE watchers "
+            "may change leader caches. Keep the leader closed in your IDE.",
+            file=sys.stderr,
+        )
+    process = subprocess.Popen(
+        (str(executable_path), new_window_flags[editor], str(checkout)),
+        cwd=checkout,
+        env=sanitized_worker_env(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=os.name != "nt",
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+        close_fds=True,
+    )
+    try:
+        returncode: int | None = process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        # A foreground GUI may outlive this CLI; unlike gate commands it must not be killed.
+        returncode = None
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, process.args)
+    print(f"editor_launch_requested: {editor}")
 
 
 def _worktree_root(root: Path, name: str) -> Path | None:

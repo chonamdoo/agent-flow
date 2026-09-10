@@ -3297,6 +3297,17 @@ def worktree_runtime_root(*, root: Path, name: str) -> Path:
     return _runtime_state_root(root=root, name=resolve_worktree_name(root=root, name=name))
 
 
+def worktree_runtime_root_for_path(*, root: Path, path: Path) -> Path | None:
+    """Return state for a verified checkout, or None when its ownership is unproven."""
+    key = _runtime_state_key(root=root, name=path.name)
+    runtime = _runtime_state_root(root=root, name=key)
+    if runtime.exists() and _state_key_manifest(root=root, key=key) is None:
+        return None
+    if not _metadata_belongs_to_path(root=root, key=key, path=path):
+        return None
+    return runtime
+
+
 def resolve_worktree_name(*, root: Path, name: str) -> str:
     """조회용 이름 해석. 실제로 존재하는 이름이 정규화보다 우선한다.
 
@@ -5303,5 +5314,3 @@ def _registered_worktree_paths(root: Path) -> set[Path]:
         for line in result.stdout.splitlines()
         if line.startswith(prefix)
     }
-
-
