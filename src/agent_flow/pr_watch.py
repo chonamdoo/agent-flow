@@ -58,6 +58,8 @@ class PRSnapshot:
     repo: str = ""
     head: str = ""
     feedback_ids: list[str] = field(default_factory=list)
+    ci_checks: dict[str, str] | None = None
+    ci_revisions: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def to_summary(self) -> dict[str, Any]:
         return {
@@ -145,7 +147,7 @@ def fetch_pr(
             number, data, required_checks=required_checks, repo=repository,
             handled_ids=handled,
         )
-        if run_dir is not None:
+        if run_dir is not None and snapshot.status != "error":
             _record_feedback_observation(run_dir, snapshot)
         return snapshot
     except (OSError, ValueError, WorktreeIsolationError) as exc:
@@ -244,17 +246,30 @@ def _classify(
             number=number, title=title, state=state, status="closed", **identity,
         )
 
-    rollup = data.get("statusCheckRollup") or []
+    rollup = data.get("statusCheckRollup")
+    if rollup is not None and (
+        not isinstance(rollup, list) or any(not isinstance(check, dict) for check in rollup)
+    ):
+        return PRSnapshot(
+            number, title, state, "error", error="malformed CI check observation", **identity,
+        )
+    observed_checks = rollup is not None
+    rollup = rollup or []
     # GitHub returns Actions/custom check runs and external commit statuses.
     # Any nonterminal result is pending; explicit failure signals win.
     def _is_failure(check: dict[str, Any]) -> bool:
         return (
-            check.get("conclusion") in ("FAILURE", "TIMED_OUT", "CANCELLED")
+            check.get("conclusion") in ("FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE")
             or check.get("status") == "FAILURE"
             or check.get("state") in ("FAILURE", "ERROR")
         )
 
     def _is_pending(check: dict[str, Any]) -> bool:
+        if check.get("conclusion") not in (
+            None, "", "SUCCESS", "FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED",
+            "STARTUP_FAILURE", "NEUTRAL", "SKIPPED", "STALE",
+        ):
+            return True
         if check.get("status") in ("IN_PROGRESS", "PENDING", "QUEUED"):
             return check.get("conclusion") in (None, "")
         if check.get("state") in ("PENDING", "EXPECTED"):
@@ -262,7 +277,6 @@ def _classify(
         return (
             check.get("conclusion") in (None, "")
             and check.get("state") in (None, "")
-            and check.get("status") not in ("COMPLETED",)
         )
 
     failed = [
@@ -298,6 +312,41 @@ def _classify(
                 "conclusion": None,
             }
         )
+    ci_checks: dict[str, str] = {}
+    ci_revisions: dict[str, dict[str, str]] = {}
+    for check in rollup:
+        name = check.get("name") or check.get("context")
+        workflow = check.get("workflowName")
+        if workflow is None:
+            workflow = ""
+        if not isinstance(name, str) or not name.strip() or not isinstance(workflow, str):
+            return PRSnapshot(
+                number, title, state, "error", error="CI check identity is missing", **identity,
+            )
+        check_id = json.dumps(
+            ["check" if check.get("name") else "status", workflow, name],
+            ensure_ascii=False, separators=(",", ":"),
+        )
+        outcome = (
+            "failed" if check in failed else
+            "success" if check.get("conclusion") == "SUCCESS" or check.get("state") == "SUCCESS"
+            else "pending"
+        )
+        if check_id in ci_checks:
+            return PRSnapshot(
+                number, title, state, "error",
+                error=f"ambiguous duplicate CI check identity: {check_id}", **identity,
+            )
+        ci_checks[check_id] = outcome
+        ci_revisions[check_id] = {
+            key: str(value) for key in (
+                "id", "databaseId", "detailsUrl", "targetUrl", "startedAt", "completedAt", "createdAt",
+            )
+            if isinstance(value := check.get(key), (str, int)) and not isinstance(value, bool)
+            and value and not str(value).startswith("0001-")
+        }
+    identity["ci_checks"] = ci_checks if observed_checks else None
+    identity["ci_revisions"] = ci_revisions
 
     reviews = data.get("reviews") or []
     decisions: dict[str, dict[str, Any]] = {}
@@ -356,6 +405,7 @@ def _classify(
             status="ci_failed",
             **identity,
             failed_checks=failed,
+            pending_checks=pending,
             review_comments=review_comments,
             issue_comments=issue_comments,
         )
@@ -367,6 +417,7 @@ def _classify(
             status="has_comments",
             **identity,
             review_comments=review_comments,
+            pending_checks=pending,
             issue_comments=issue_comments,
         )
     if pending:
@@ -625,7 +676,12 @@ def _read_feedback_state(run_dir: Path | None, repo: str, number: int) -> dict[s
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("PR feedback state is not an object")
+    sequence = payload.get("observation_sequence", 0)
+    if type(sequence) is not int or sequence < 0:
+        raise ValueError("PR feedback observation sequence is malformed")
     if payload.get("repo") != repo or payload.get("number") != number:
+        if _ci_execution_history(payload, sequence):
+            raise ValueError("PR CI execution history belongs to a different PR; use a separate run")
         return {}
     if not isinstance(payload.get("handled"), list) or not all(
         isinstance(item, str) for item in payload["handled"]
@@ -634,15 +690,73 @@ def _read_feedback_state(run_dir: Path | None, repo: str, number: int) -> dict[s
     return payload
 
 
+def _valid_ci_revision(revision: object) -> bool:
+    return isinstance(revision, dict) and all(
+        key in {"id", "databaseId", "detailsUrl", "targetUrl", "startedAt", "completedAt", "createdAt"}
+        and isinstance(value, str) and bool(value)
+        for key, value in revision.items()
+    )
+
+
+def _ci_execution_history(observation: dict[str, Any], sequence: int) -> dict[str, Any]:
+    history = observation.get("ci_executions", {} if sequence == 0 else None)
+    if not isinstance(history, dict):
+        raise ValueError("PR CI execution history is missing or malformed")
+    for head, checks in history.items():
+        if not isinstance(head, str) or not head or not isinstance(checks, dict):
+            raise ValueError("PR CI execution history is malformed")
+        for check, entries in checks.items():
+            if not isinstance(check, str) or not check or not isinstance(entries, list):
+                raise ValueError("PR CI execution history is malformed")
+            revisions = set()
+            for entry in entries:
+                if (
+                    not isinstance(entry, dict) or not _valid_ci_revision(entry.get("revision"))
+                    or type(entry.get("observation_sequence")) is not int
+                    or not 0 < entry["observation_sequence"] <= sequence
+                    or not isinstance(entry.get("outcome"), str)
+                    or entry["outcome"] not in {"failed", "success"}
+                ):
+                    raise ValueError("PR CI execution history is malformed")
+                revision = frozenset(entry["revision"].items())
+                if revision in revisions:
+                    raise ValueError("PR CI execution has multiple first observations")
+                revisions.add(revision)
+    return history
+
+
+def _ci_execution_entry(
+    history: dict[str, Any], head: str, check: str, revision: dict[str, str],
+) -> dict[str, Any] | None:
+    return next((
+        entry for entry in history.get(head, {}).get(check, ())
+        if entry["revision"] == revision
+    ), None)
+
+
 def _record_feedback_observation(run_dir: Path, snapshot: PRSnapshot) -> None:
     repository = _normalize_repository(snapshot.repo)
     with exclusive_file_lease(run_dir.parent / ACTIVE_LOCK, wait=True):
         previous = _read_feedback_state(run_dir, repository, snapshot.number)
+        sequence = previous.get("observation_sequence", 0)
+        executions = _ci_execution_history(previous, sequence)
+        for check, outcome in (snapshot.ci_checks or {}).items():
+            if outcome not in {"failed", "success"}:
+                continue
+            revision = snapshot.ci_revisions.get(check, {})
+            entry = _ci_execution_entry(executions, snapshot.head, check, revision)
+            if entry is None:
+                entry = {"observation_sequence": sequence + 1, "revision": revision, "outcome": outcome}
+                executions.setdefault(snapshot.head, {}).setdefault(check, []).append(entry)
         write_run_artifact_text(
             run_dir, run_dir.resolve() / "pr-feedback.json",
             json.dumps({
                 "repo": repository, "number": snapshot.number, "head": snapshot.head,
                 "feedback_ids": snapshot.feedback_ids, "handled": previous.get("handled", []),
+                "status": snapshot.status, "ci_checks": snapshot.ci_checks,
+                "ci_revisions": snapshot.ci_revisions,
+                "ci_executions": executions,
+                "observation_sequence": sequence + 1,
             }),
         )
 

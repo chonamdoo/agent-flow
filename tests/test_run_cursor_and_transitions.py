@@ -942,6 +942,495 @@ def test_same_phase_new_attempt_rejects_stale_transition(tmp_path):
         runner._commit_transition(transition)
 
 
+def _ci_repair_runner(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    phases = [
+        Phase(id="review", description="", routes={"default": "push-pr"}),
+        Phase(id="push-pr", description=""),
+        Phase(id="pr-watch", description="", routes={
+            "ci_failed": "pr-ci-fix", "green": "merge",
+            "has_comments": "pr-comment-fix", "pending": "block", "error": "block",
+        }),
+        Phase(id="pr-ci-fix", description="", routes={"default": "pr-watch", "blocked": "block"}),
+        Phase(id="pr-comment-fix", description="", routes={"default": "pr-watch"}),
+        Phase(id="merge", description=""),
+    ]
+    runner = _runner(tmp_path, phases)
+    runner.project_root = tmp_path
+    current = {"head": "head-0", "code": "code-0"}
+    monkeypatch.setattr("agent_flow.runner.test_code_baseline", lambda root: current["code"])
+    monkeypatch.setattr(
+        "agent_flow.runner.git_safe",
+        lambda *args, **kwargs: SimpleNamespace(ok=True, stdout=current["head"]),
+    )
+    write_meta(tmp_path, {
+        "phase_index": 2, "current_phase": "pr-watch", "phase_entered_at": "watch-0",
+        "fix_loop_rounds": {"fix-loop": 3},
+    })
+    return runner, current
+
+
+def _ci_pr_data(current, outcomes, *, proof=True):
+    return {
+        "state": "OPEN", "headRefOid": current["head"],
+        "url": "https://github.com/owner/repo/pull/7",
+        "statusCheckRollup": [
+            {
+                "name": name, "workflowName": "CI", "conclusion": outcome,
+                "status": "IN_PROGRESS" if outcome is None else "COMPLETED",
+                **({
+                    "detailsUrl": f"https://github.com/owner/repo/actions/runs/{current.get('execution', 0)}",
+                    "completedAt": current.get("completed_at", "2026-09-11T01:00:00Z") if outcome else None,
+                } if proof else {}),
+            }
+            for name, outcome in outcomes.items()
+        ],
+    }
+
+
+def _observe_ci(runner, current, outcomes, *, comments=False, proof=True):
+    from agent_flow.pr_watch import _classify, _record_feedback_observation
+
+    data = _ci_pr_data(current, outcomes, proof=proof)
+    data["comments"] = [{"id": "question", "body": "please explain"}] if comments else []
+    snapshot = _classify(7, data, repo="github.com/owner/repo")
+    _record_feedback_observation(runner.run_dir, snapshot)
+    (runner.run_dir / "pr-watch.md").write_text(f"status: {snapshot.status}\n", encoding="utf-8")
+    return snapshot
+
+
+def _ci_step(runner, text="finished\n", *, replay=False):
+    meta = read_meta(runner.run_dir)
+    index = meta["phase_index"]
+    phase = runner.phases[index]
+    if phase.id != "pr-watch":
+        (runner.run_dir / f"{phase.id}.md").write_text(text, encoding="utf-8")
+    transition = runner._plan_transition(index, phase)
+    if replay:
+        runner._append_transition_journal(transition)
+        runner._resume_pending_transition()
+        runner._resume_pending_transition()
+    else:
+        runner._commit_transition(transition)
+    return transition
+
+
+def _publish_ci_repair(runner, current, number):
+    current.update(code=f"code-{number}", head=f"head-{number}")
+    assert _ci_step(runner).to_phase == "review"
+    assert _ci_step(runner).to_phase == "push-pr"
+    assert _ci_step(runner).to_phase == "pr-watch"
+
+
+def test_ci_repair_blocks_after_third_completed_repair_and_replays_once(tmp_path, monkeypatch):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    first = runner._plan_transition(2, runner.phases[2])
+    assert runner._plan_transition(2, runner.phases[2]) == first
+    assert "ci_repair_state" not in read_meta(tmp_path)
+    assert _ci_step(runner, replay=True).to_phase == "pr-ci-fix"
+    for number in range(1, 4):
+        _publish_ci_repair(runner, current, number)
+        _observe_ci(runner, current, {"unit": "FAILURE"})
+        before = read_meta(tmp_path)
+        planned = runner._plan_transition(2, runner.phases[2])
+        assert runner._next_index(2, runner.phases[2]).blocked == (number == 3)
+        assert runner._plan_transition(2, runner.phases[2]) == planned
+        assert read_meta(tmp_path) == before
+        transition = _ci_step(runner, replay=True)
+        assert transition.blocked == (number == 3)
+    assert transition.route_key == "ci-repair-limit"
+    assert read_meta(tmp_path)["current_phase"] == "pr-watch"
+    assert read_meta(tmp_path)["fix_loop_rounds"] == {"fix-loop": 3}
+    for _ in range(3):
+        _observe_ci(runner, current, {"unit": "FAILURE"})
+        assert _ci_step(runner, replay=True).route_key == "ci-repair-limit"
+
+
+def test_ci_repair_ignores_unrelated_heads_and_requires_publication(tmp_path, monkeypatch):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    _ci_step(runner)
+    current.update(code="repair", head="head-repair")
+    assert _ci_step(runner).to_phase == "review"
+    assert _ci_step(runner).to_phase == "push-pr"
+    assert all(count == 0 for count in read_meta(tmp_path)["ci_repair_state"]["counts"].values())
+    assert _ci_step(runner).to_phase == "pr-watch"
+    for number in range(4):
+        current["head"] = f"unrelated-{number}"
+        _observe_ci(runner, current, {"unit": "FAILURE"})
+        assert _ci_step(runner, replay=True).route_key == "ci-repair-evidence"
+    current["head"] = "head-repair"
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    assert _ci_step(runner).to_phase == "pr-ci-fix"
+    _publish_ci_repair(runner, current, 2)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    assert _ci_step(runner).to_phase == "pr-ci-fix"
+    _publish_ci_repair(runner, current, 3)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    assert _ci_step(runner).route_key == "ci-repair-limit"
+
+
+def test_ci_repair_separates_checks_and_resets_only_success(tmp_path, monkeypatch):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    _ci_step(runner)
+    _publish_ci_repair(runner, current, 1)
+    _observe_ci(runner, current, {"unit": "FAILURE", "lint": "FAILURE"})
+    assert _ci_step(runner).to_phase == "pr-ci-fix"
+    _publish_ci_repair(runner, current, 2)
+    _observe_ci(runner, current, {"unit": "SUCCESS", "lint": "FAILURE"})
+    assert _ci_step(runner).to_phase == "pr-ci-fix"
+    _publish_ci_repair(runner, current, 3)
+    _observe_ci(runner, current, {"unit": "FAILURE", "lint": "FAILURE"})
+    assert _ci_step(runner).to_phase == "pr-ci-fix"
+    _publish_ci_repair(runner, current, 4)
+    _observe_ci(runner, current, {"unit": "FAILURE", "lint": "SUCCESS"})
+    assert _ci_step(runner).to_phase == "pr-ci-fix"
+    _publish_ci_repair(runner, current, 5)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    assert _ci_step(runner).to_phase == "pr-ci-fix"
+    _publish_ci_repair(runner, current, 6)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    assert _ci_step(runner).route_key == "ci-repair-limit"
+
+
+def test_ci_repair_preserves_pending_results_and_ordinary_comment_budget(tmp_path, monkeypatch):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE", "lint": "FAILURE"})
+    _ci_step(runner)
+    _publish_ci_repair(runner, current, 1)
+    for _ in range(4):
+        _observe_ci(runner, current, {"unit": "FAILURE", "lint": None})
+        assert _ci_step(runner, replay=True).route_key == "ci-repair-pending"
+    _observe_ci(runner, current, {"unit": None, "lint": "SUCCESS"})
+    assert _ci_step(runner).blocked
+    for _ in range(4):
+        _observe_ci(runner, current, {"unit": None}, comments=True)
+        assert _ci_step(runner).to_phase == "pr-comment-fix"
+        assert _ci_step(runner).to_phase == "pr-watch"
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    assert _ci_step(runner).to_phase == "pr-ci-fix"
+    _publish_ci_repair(runner, current, 2)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    assert _ci_step(runner).to_phase == "pr-ci-fix"
+    _publish_ci_repair(runner, current, 3)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    assert _ci_step(runner).route_key == "ci-repair-limit"
+
+
+@pytest.mark.parametrize("evidence", ["missing", "malformed", "empty", "unknown"])
+def test_ci_repair_never_clears_streak_on_missing_evidence(tmp_path, monkeypatch, evidence):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    _ci_step(runner)
+    _publish_ci_repair(runner, current, 1)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    _ci_step(runner)
+    _publish_ci_repair(runner, current, 2)
+    path = tmp_path / "pr-feedback.json"
+    if evidence == "missing":
+        path.unlink()
+    elif evidence == "malformed":
+        path.write_text('{"ci_checks": []}', encoding="utf-8")
+    elif evidence == "empty":
+        _observe_ci(runner, current, {})
+    else:
+        _observe_ci(runner, current, {"unit": "UNRECOGNIZED"})
+    (tmp_path / "pr-watch.md").write_text("status: green\n", encoding="utf-8")
+    assert _ci_step(runner, replay=True).blocked
+    assert list(read_meta(tmp_path)["ci_repair_state"]["counts"].values()) == [1]
+
+
+def test_ci_repair_rejects_observation_changed_between_plan_and_commit(tmp_path, monkeypatch):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    transition = runner._plan_transition(2, runner.phases[2])
+    _observe_ci(runner, current, {"unit": "SUCCESS"})
+    with pytest.raises(WorktreeIsolationError, match="CI observation changed"):
+        runner._commit_transition(transition)
+    assert read_meta(tmp_path)["current_phase"] == "pr-watch"
+
+
+@pytest.mark.parametrize("revision_field", ["execution", "completed_at"])
+def test_ci_repair_direct_retry_requires_distinct_completed_execution(tmp_path, monkeypatch, revision_field):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    _ci_step(runner)
+    assert _ci_step(runner).to_phase == "pr-watch"
+    for number in range(1, 4):
+        for _ in range(4):
+            _observe_ci(runner, current, {"unit": "FAILURE"})
+            assert _ci_step(runner, replay=True).route_key == "ci-repair-evidence"
+            assert list(read_meta(tmp_path)["ci_repair_state"]["counts"].values()) == [number - 1]
+        current[revision_field] = number if revision_field == "execution" else f"2026-09-11T0{number + 1}:00:00Z"
+        _observe_ci(runner, current, {"unit": None})
+        assert _ci_step(runner, replay=True).blocked
+        assert list(read_meta(tmp_path)["ci_repair_state"]["counts"].values()) == [number - 1]
+        _observe_ci(runner, current, {"unit": "FAILURE"})
+        result = _ci_step(runner, replay=True)
+        assert list(read_meta(tmp_path)["ci_repair_state"]["counts"].values()) == [number]
+        if number < 3:
+            assert result.to_phase == "pr-ci-fix"
+            assert _ci_step(runner).to_phase == "pr-watch"
+        else:
+            assert result.route_key == "ci-repair-limit"
+
+
+def test_ci_repair_does_not_recount_delayed_initial_or_consumed_executions(tmp_path, monkeypatch):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    _ci_step(runner)
+    assert _ci_step(runner).to_phase == "pr-watch"
+    current["execution"] = 1
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    assert _ci_step(runner, replay=True).to_phase == "pr-ci-fix"
+    assert _ci_step(runner).to_phase == "pr-watch"
+    for execution in (0, 1, 0, 1):
+        current["execution"] = execution
+        _observe_ci(runner, current, {"unit": "FAILURE"})
+        assert _ci_step(runner, replay=True).route_key == "ci-repair-evidence"
+    for execution in (2, 3):
+        current["execution"] = execution
+        _observe_ci(runner, current, {"unit": "FAILURE"})
+        result = _ci_step(runner, replay=True)
+        if execution == 2:
+            assert result.to_phase == "pr-ci-fix"
+            assert _ci_step(runner).to_phase == "pr-watch"
+        else:
+            assert result.route_key == "ci-repair-limit"
+
+
+@pytest.mark.parametrize("switch_pr", [False, True])
+def test_ci_repair_replayed_success_cannot_clear_a_newer_failure_streak(tmp_path, monkeypatch, switch_pr):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    _ci_step(runner)
+    assert _ci_step(runner).to_phase == "pr-watch"
+    current["execution"] = 1
+    _observe_ci(runner, current, {"unit": "SUCCESS"}, comments=True)
+    assert _ci_step(runner).to_phase == "pr-comment-fix"
+    assert _ci_step(runner).to_phase == "pr-watch"
+    for execution in (2, 3):
+        current["execution"] = execution
+        _observe_ci(runner, current, {"unit": "FAILURE"})
+        assert _ci_step(runner).to_phase == "pr-ci-fix"
+        assert _ci_step(runner).to_phase == "pr-watch"
+    current["execution"] = 1
+    _observe_ci(runner, current, {"unit": "SUCCESS"})
+    assert _ci_step(runner, replay=True).route_key == "ci-repair-evidence"
+    for execution in (4, 5):
+        current["execution"] = execution
+        _observe_ci(runner, current, {"unit": "FAILURE"})
+        result = _ci_step(runner, replay=True)
+        if execution == 4:
+            assert result.to_phase == "pr-ci-fix"
+            assert _ci_step(runner).to_phase == "pr-watch"
+        else:
+            assert result.route_key == "ci-repair-limit"
+    if switch_pr:
+        from agent_flow.pr_watch import fetch_pr
+
+        other = _ci_pr_data(current, {"unit": "SUCCESS"})
+        other["url"] = "https://github.com/owner/repo/pull/8"
+        monkeypatch.setattr("agent_flow.pr_watch._fetch_pr_data", lambda number, repo: other)
+        monkeypatch.setattr("agent_flow.pr_watch._fetch_review_threads", lambda number, repo: [])
+        assert fetch_pr(8, repo="owner/repo", run_dir=tmp_path).status == "error"
+    current["execution"] = 1
+    _observe_ci(runner, current, {"unit": "SUCCESS"})
+    assert _ci_step(runner, replay=True).blocked
+    current["execution"] = 6
+    _observe_ci(runner, current, {"unit": "SUCCESS"})
+    assert _ci_step(runner).to_phase == "merge"
+
+
+def test_ci_repair_delayed_success_cannot_overwrite_unconsumed_success(tmp_path, monkeypatch):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    _ci_step(runner)
+    assert _ci_step(runner).to_phase == "pr-watch"
+    current["execution"] = 1
+    _observe_ci(runner, current, {"unit": "SUCCESS"}, comments=True)
+    assert _ci_step(runner).to_phase == "pr-comment-fix"
+    assert _ci_step(runner).to_phase == "pr-watch"
+    for execution in (2, 3, 4):
+        current["execution"] = execution
+        _observe_ci(runner, current, {"unit": "FAILURE"})
+        assert _ci_step(runner).to_phase == "pr-ci-fix"
+        assert _ci_step(runner).to_phase == "pr-watch"
+    for execution, outcome in ((5, "SUCCESS"), (1, "SUCCESS"), (6, "FAILURE")):
+        current["execution"] = execution
+        _observe_ci(runner, current, {"unit": outcome})
+    assert _ci_step(runner, replay=True).to_phase == "pr-ci-fix"
+    assert _ci_step(runner).to_phase == "pr-watch"
+    for execution in (7, 8, 9):
+        current["execution"] = execution
+        _observe_ci(runner, current, {"unit": "FAILURE"})
+        result = _ci_step(runner, replay=True)
+        if execution < 9:
+            assert result.to_phase == "pr-ci-fix"
+            assert _ci_step(runner).to_phase == "pr-watch"
+        else:
+            assert result.route_key == "ci-repair-limit"
+
+
+@pytest.mark.parametrize("outcome", ["SUCCESS", "FAILURE"])
+def test_ci_repair_superseded_observation_cannot_settle_later_repair(tmp_path, monkeypatch, outcome):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    _ci_step(runner)
+    assert _ci_step(runner).to_phase == "pr-watch"
+    for execution, result in ((1, outcome), (2, "SUCCESS"), (3, "FAILURE")):
+        current["execution"] = execution
+        _observe_ci(runner, current, {"unit": result})
+    assert _ci_step(runner).to_phase == "pr-ci-fix"
+    assert _ci_step(runner).to_phase == "pr-watch"
+    for execution in (4, 5):
+        current["execution"] = execution
+        _observe_ci(runner, current, {"unit": "FAILURE"})
+        assert _ci_step(runner).to_phase == "pr-ci-fix"
+        assert _ci_step(runner).to_phase == "pr-watch"
+    current["execution"] = 1
+    _observe_ci(runner, current, {"unit": outcome})
+    assert _ci_step(runner, replay=True).route_key == "ci-repair-evidence"
+    current["execution"] = 6
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    assert _ci_step(runner, replay=True).route_key == "ci-repair-limit"
+
+
+def test_ci_repair_keeps_success_observed_before_pending_transition_recovery(tmp_path, monkeypatch):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    transition = runner._plan_transition(2, runner.phases[2])
+    runner._append_transition_journal(transition)
+    current["execution"] = 1
+    _observe_ci(runner, current, {"unit": "SUCCESS"})
+    current.update(head="unrelated-head", execution=2)
+    _observe_ci(runner, current, {"unit": "SUCCESS"})
+    current.update(head="head-0", execution=3)
+    runner._resume_pending_transition()
+    assert _ci_step(runner).to_phase == "pr-watch"
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    assert _ci_step(runner).to_phase == "pr-ci-fix"
+    assert _ci_step(runner).to_phase == "pr-watch"
+    for execution in (4, 5, 6):
+        current["execution"] = execution
+        _observe_ci(runner, current, {"unit": "FAILURE"})
+        result = _ci_step(runner, replay=True)
+        if execution < 6:
+            assert result.to_phase == "pr-ci-fix"
+            assert _ci_step(runner).to_phase == "pr-watch"
+        else:
+            assert result.route_key == "ci-repair-limit"
+
+
+@pytest.mark.parametrize("proof", [False, True])
+def test_ci_repair_same_head_missing_revision_or_status_changes_cannot_settle(tmp_path, monkeypatch, proof):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE"}, proof=proof)
+    _ci_step(runner)
+    assert _ci_step(runner).to_phase == "pr-watch"
+    for outcome in (None, "FAILURE", "SUCCESS", "FAILURE"):
+        _observe_ci(runner, current, {"unit": outcome}, proof=proof)
+        assert _ci_step(runner, replay=True).blocked
+        assert list(read_meta(tmp_path)["ci_repair_state"]["counts"].values()) == [0]
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    assert _ci_step(runner).route_key == "ci-repair-evidence"
+
+
+@pytest.mark.parametrize("same_head", [False, True])
+def test_ci_repair_consumes_intermediate_watcher_success_once(tmp_path, monkeypatch, same_head):
+    from agent_flow.pr_watch import watch_pr
+
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    _ci_step(runner)
+    for number in (1, 2):
+        _publish_ci_repair(runner, current, number)
+        _observe_ci(runner, current, {"unit": "FAILURE"})
+        assert _ci_step(runner).to_phase == "pr-ci-fix"
+    if same_head:
+        assert _ci_step(runner).to_phase == "pr-watch"
+        current["execution"] = 1
+    else:
+        _publish_ci_repair(runner, current, 3)
+    polls = iter([
+        _ci_pr_data(current, {"unit": "SUCCESS", "lint": None}),
+        _ci_pr_data(current, {"unit": None, "lint": None}),
+        _ci_pr_data({**current, "execution": 2}, {"unit": "FAILURE", "lint": "SUCCESS"}),
+    ])
+    monkeypatch.setattr("agent_flow.pr_watch._fetch_pr_data", lambda *args: next(polls))
+    monkeypatch.setattr("agent_flow.pr_watch._fetch_review_threads", lambda *args: [])
+    monkeypatch.setattr("agent_flow.pr_watch.time.sleep", lambda _: None)
+    result = watch_pr(7, repo="owner/repo", run_dir=tmp_path, max_poll_count=3)
+    assert result.status == "ci_failed"
+    (tmp_path / "pr-watch.md").write_text(f"status: {result.status}\n", encoding="utf-8")
+    assert _ci_step(runner, replay=True).to_phase == "pr-ci-fix"
+    assert list(read_meta(tmp_path)["ci_repair_state"]["counts"].values()) == [0]
+    assert _ci_step(runner).to_phase == "pr-watch"
+    current["execution"] = 2
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    assert _ci_step(runner, replay=True).route_key == "ci-repair-evidence"
+    assert list(read_meta(tmp_path)["ci_repair_state"]["counts"].values()) == [0]
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_ci_repair_consumes_success_before_unrelated_head_change(tmp_path, monkeypatch, active):
+    from agent_flow.pr_watch import watch_pr
+
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    _ci_step(runner)
+    for number in (1, 2, 3):
+        _publish_ci_repair(runner, current, number)
+        if active and number == 3:
+            break
+        _observe_ci(runner, current, {"unit": "FAILURE"})
+        assert _ci_step(runner).blocked == (number == 3)
+    current["execution"] = 1
+    succeeded = _ci_pr_data(current, {"unit": "SUCCESS", "lint": None})
+    current.update(head="manual-head", code="manual-code")
+    current_result = _ci_pr_data(current, {"unit": "SUCCESS" if active else "FAILURE", "lint": "SUCCESS"})
+    polls = iter([succeeded, current_result])
+    monkeypatch.setattr("agent_flow.pr_watch._fetch_pr_data", lambda *args: next(polls))
+    monkeypatch.setattr("agent_flow.pr_watch._fetch_review_threads", lambda *args: [])
+    monkeypatch.setattr("agent_flow.pr_watch.time.sleep", lambda _: None)
+    result = watch_pr(7, repo="owner/repo", run_dir=tmp_path, max_poll_count=2)
+    assert result.status == ("green" if active else "ci_failed")
+    (tmp_path / "pr-watch.md").write_text(f"status: {result.status}\n", encoding="utf-8")
+    if active:
+        assert _ci_step(runner, replay=True).to_phase == "merge"
+        return
+    assert _ci_step(runner, replay=True).to_phase == "pr-ci-fix"
+    for number in (4, 5, 6):
+        _publish_ci_repair(runner, current, number)
+        _observe_ci(runner, current, {"unit": "FAILURE"})
+        assert _ci_step(runner).blocked == (number == 6)
+
+
+@pytest.mark.parametrize("body", ["[]", "null", '"not an observation"'])
+def test_ci_repair_commit_rejects_non_object_observation(tmp_path, monkeypatch, body):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "FAILURE"})
+    transition = runner._plan_transition(2, runner.phases[2])
+    (tmp_path / "pr-feedback.json").write_text(body, encoding="utf-8")
+    with pytest.raises(ValueError, match="recorded CI observation"):
+        runner._commit_transition(transition)
+    assert "ci_repair_state" not in read_meta(tmp_path)
+
+
+@pytest.mark.parametrize("corrupt", [None, [], {"counts": "three"}])
+def test_ci_repair_malformed_accounting_blocks_without_reset(tmp_path, monkeypatch, corrupt):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    _observe_ci(runner, current, {"unit": "SUCCESS"})
+    meta = read_meta(tmp_path)
+    meta["ci_repair_state"] = corrupt
+    write_meta(tmp_path, meta)
+    assert _ci_step(runner).route_key == "ci-repair-evidence"
+    assert read_meta(tmp_path)["ci_repair_state"] == corrupt
+
+
 @pytest.mark.parametrize("change", ["bytes", "phase_entered_at", "run_id"])
 def test_phase_approval_is_bound_to_artifact_and_attempt(tmp_path, change):
     from agent_flow.artifact import approve_phase_artifact, pending_phase_approval

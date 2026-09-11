@@ -280,8 +280,23 @@ agent-flow pr-watch <number> --run-dir <run-dir> --repo <owner/repo> \
 Repeat `--ack-feedback` for additional observed IDs. An acknowledgement is scoped
 to that run, repository, PR, HEAD, and feedback revision; it does not acknowledge
 new or edited feedback. Code changes during PR fixes return to review and
-invalidate previous gate evidence before publication. Discussion-only work
-returns to watching.
+invalidate previous gate evidence before publication. Keep code-related feedback
+unacknowledged and threads open until the fix is verified in the published PR
+HEAD; then reply, resolve the thread, and acknowledge it. Discussion-only answers
+can complete without a push. The canonical triage and completion rules are in
+[`push-watch`](../skills/push-watch/SKILL.md).
+
+The runner tracks unsuccessful completed CI repairs independently per check and
+blocks after the third recurrence. Initial failures, repeated observations,
+journal replay, unrelated HEAD changes, and ordinary review comments do not spend
+this budget. Same-HEAD retries require a distinct completed CI execution/result,
+not another read of the old failure. Explicit success resets only the resolved
+check, including success observed between polls or before a HEAD change; pending
+or missing results do not. A block identifies the check and required human decision.
+
+The legacy Node `agent-flow-kit run push-watch-tick` command delegates bound PR
+observation to the Python watcher, so both entry points use the same check
+classification and recorded feedback evidence.
 
 ## Repository layout
 
