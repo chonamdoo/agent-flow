@@ -284,6 +284,15 @@ function installProject(requestedRoot) {
     true,
     true,
   );
+  // Keep canonical metadata available when a filtered installation omits a skill.
+  copyBundledDirIfMissingOrSame(
+    path.join(KIT_ROOT, "skills"),
+    path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow", "skills"),
+    true,
+    new Set(),
+    true,
+    true,
+  );
   if (!samePath(root, KIT_ROOT)) {
     removeManagedDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"), forceManaged);
   }

@@ -38,6 +38,7 @@ from agent_flow.core.skill_resolver import (
     CODE_PHASES,
     IMPLEMENTATION_PHASES,
     REVIEW_PHASES,
+    PhaseSkills,
     discover_skill_catalog,
     resolve_phase_skills,
     skill_roots,
@@ -880,3 +881,65 @@ def test_localized_aliases_respect_excluded_code_phases(
         tmp_path, monkeypatch, "android", {}, task, phase_id=phase_id,
     )
     assert skill not in {entry.name for entry in resolution.required}
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+@pytest.mark.parametrize("profile_id,name,task,phase_id,expected", [
+    ("android", "android-debugging", "크래시", "review", False),
+    ("android", "android-debugging", "크래시", "implement", True),
+    ("android", "android-module-creator", "새 모듈", "red", False),
+    ("nextjs", "react-clean-presentation-architecture", "화면 상태", "design", True),
+])
+def test_removed_profile_skill_preserves_phase_scope(
+    tmp_path, monkeypatch, indexed, profile_id, name, task, phase_id, expected,
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    (tmp_path / "package.json").write_text(
+        json.dumps({"dependencies": {"react": "19", "next": "16"}}), encoding="utf-8",
+    )
+    installed = tmp_path / ".agent-flow" / "skills" / name / "SKILL.md"
+    installed.parent.mkdir(parents=True)
+    installed.write_text((REPO / "skills" / name / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8")
+    profile = load_profile_payload(profile_id, tmp_path)
+    kwargs = dict(project_root=tmp_path, phase_id=phase_id, profile=profile, task_text=task, host="codex")
+    before = resolve_phase_skills(**kwargs)
+    assert (name in {skill.name for skill in before.available_required}) is expected
+    if indexed:
+        entry = next(
+            entry for entry in discover_skill_catalog(tmp_path, skill_roots(tmp_path, host="codex"))
+            if entry.name == name
+        )
+        (installed.parent.parent / "index.json").write_text(
+            json.dumps({"version": 1, "skills": [{"id": f"{name}-id", "name": name, "workflowPhases": entry.workflow_phases}]}),
+            encoding="utf-8",
+        )
+    installed.unlink()
+    after = resolve_phase_skills(**kwargs)
+    assert (name in {skill.name for skill in after.missing}) is expected
+    assert name not in {skill.name for skill in after.available_required}
+    assert (name in local_skill_prompt_block(**kwargs)) is expected
+
+
+def test_installed_phase_metadata_yields_to_live_skill_and_explicit_workflow(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    bundled = tmp_path / ".agent-flow" / "skills"
+    bundled.mkdir(parents=True)
+    (bundled / "index.json").write_text(
+        json.dumps({"version": 1, "skills": [{"id": "scoped-check-id", "name": "scoped-check", "workflowPhases": ["design"]}]}),
+        encoding="utf-8",
+    )
+    profile = {"skills": {"required_review": [
+        {"group": "scoped", "skills": ["scoped-check"], "task_terms": ["boundary"]},
+    ]}}
+    kwargs = dict(project_root=tmp_path, profile=profile, task_text="boundary", host="codex")
+    assert {skill.name for skill in resolve_phase_skills(phase_id="design", **kwargs).missing} == {"scoped-check"}
+    assert not resolve_phase_skills(phase_id="review", **kwargs).required
+    explicit = resolve_phase_skills(
+        phase_id="review", phase_skills=PhaseSkills(required=("scoped-check",)), **kwargs,
+    )
+    assert {skill.name for skill in explicit.missing} == {"scoped-check"}
+    live = tmp_path / "skills" / "scoped-check" / "SKILL.md"
+    live.parent.mkdir(parents=True)
+    live.write_text("---\nname: scoped-check\nworkflowPhases: [review]\ntaskTerms: [boundary]\n---\n", encoding="utf-8")
+    assert {skill.name for skill in resolve_phase_skills(phase_id="review", **kwargs).available_required} == {"scoped-check"}
+    assert not resolve_phase_skills(phase_id="design", **kwargs).required

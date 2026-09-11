@@ -426,6 +426,59 @@ def test_skill_metadata_dependencies_are_indexed_and_auto_installed(tmp_path: Pa
     assert (project / ".claude" / "skills" / "dependency-skill" / "SKILL.md").exists()
 
 
+def test_installed_runtime_preserves_missing_skill_phase_contracts(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    skill = project / "skills" / "consumer-skill" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nid: consumer-skill-id\nname: consumer-skill\n"
+        "description: Check a boundary.\nworkflowPhases: [design]\n---\n",
+        encoding="utf-8",
+    )
+    env = {**os.environ, "HOME": str(tmp_path / "home")}
+    result = _install(project, "--profile", "python", "--skills", "consumer-skill", env=env)
+    assert result.returncode == 0, result.stderr
+    skill.unlink()
+    probe = """
+import json
+from pathlib import Path
+from agent_flow.core.profiles import load_profile_payload
+from agent_flow.core.skill_resolver import resolve_phase_skills
+root = Path.cwd()
+custom = {"skills": {"required_review": [
+    {"group": "consumer", "skills": ["consumer-skill"], "task_terms": ["boundary"]},
+]}}
+cases = [
+    ("indexed-design", custom, "boundary", "design", "consumer-skill"),
+    ("indexed-review", custom, "boundary", "review", "consumer-skill"),
+    ("bundled-implement", load_profile_payload("android", root), "크래시", "implement", "android-debugging"),
+    ("bundled-review", load_profile_payload("android", root), "크래시", "review", "android-debugging"),
+]
+out = {}
+for label, profile, task, phase, name in cases:
+    resolution = resolve_phase_skills(
+        project_root=root, phase_id=phase, profile=profile, task_text=task, host="codex",
+    )
+    out[label] = {
+        "required": name in {skill.name for skill in resolution.required},
+        "missing": name in {skill.name for skill in resolution.missing},
+    }
+print(json.dumps(out))
+"""
+    result = subprocess.run(
+        (sys.executable, "-c", probe), cwd=project, capture_output=True, text=True,
+        env={**env, "PYTHONPATH": str(project / ".agent-flow" / "runtime" / "python")},
+        check=False, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "indexed-design": {"required": True, "missing": True},
+        "indexed-review": {"required": False, "missing": False},
+        "bundled-implement": {"required": True, "missing": True},
+        "bundled-review": {"required": False, "missing": False},
+    }
+
+
 def test_local_skill_priority_beats_project_and_bundled_conflict_is_recorded(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()

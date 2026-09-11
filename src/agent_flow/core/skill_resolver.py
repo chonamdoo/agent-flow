@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -339,11 +340,7 @@ def resolve_phase_skills(
 
     # profile 표로 붙는 skill은 upstream 파일이라 frontmatter 선언이 없어도 required다.
     # Profile task aliases must preserve the same phase allowlists as frontmatter triggers.
-    declared_skill_phases = {
-        entry.name: entry.workflow_phases
-        for entry in catalog
-        if entry.phase_declared
-    }
+    declared_skill_phases = _profile_skill_phases(project_root, profile, catalog)
     for routed in routed_profile_skills(
         profile,
         phase_id=phase_id,
@@ -396,6 +393,50 @@ def resolve_phase_skills(
         required=tuple(resolve(name) for name in _stable_unique(required_names)),
         optional=tuple(resolve(name) for name in _stable_unique(optional_names)),
     )
+
+
+def _profile_skill_phases(
+    project_root: Path, profile: dict | None, catalog: Sequence[SkillCatalogEntry]
+) -> dict[str, tuple[str, ...]]:
+    from agent_flow.core.phase_workflow import find_kit_root
+    from agent_flow.core.profile_routing import routable_group_skills
+
+    phases = {
+        entry.name: entry.workflow_phases for entry in catalog if entry.phase_declared
+    }
+    missing = routable_group_skills(profile) - {entry.name for entry in catalog}
+    if not missing:
+        return phases
+
+    # 파일 부재는 설치 당시의 단계 계약을 지우지 않으며, index는 가용성 증거가 아니다.
+    index_path = project_root / ".agent-flow" / "skills" / "index.json"
+    try:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        index = {}
+    entries = index.get("skills") if isinstance(index, dict) else None
+    indexed: set[str] = set()
+    for entry in entries if isinstance(entries, list) else ():
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or name not in missing or name in indexed:
+            continue
+        phases[name] = _string_tuple(entry.get("workflowPhases")) or CODE_PHASES
+        indexed.add(name)
+
+    # 아직 설치되지 않은 bundled skill도 같은 정본을 쓰되 읽을 수 있다고 표시하지 않는다.
+    missing = missing - indexed
+    if missing:
+        bundled = find_kit_root() / "skills"
+        for name in missing:
+            if not _is_safe_skill_name(name):
+                continue
+            metadata = _read_frontmatter(bundled / name / "SKILL.md") or {}
+            declared = _string_tuple(metadata.get("workflowPhases"))
+            if declared:
+                phases[name] = declared
+    return phases
 
 
 _CATALOG_CACHE: dict[tuple[tuple[str, ...], str], tuple["SkillCatalogEntry", ...]] = {}
