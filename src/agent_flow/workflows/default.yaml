@@ -590,6 +590,8 @@ phases:
       Output: commit.md.
 
   - id: push-pr
+    skills:
+      required: [agent-flow-concise-output]
     required_markers:
       - "remote:"
       - "branch:"
@@ -598,6 +600,8 @@ phases:
       - "pr-base:"
     description: Push branch and create or reuse its PR against profile.pr.target_branch.
     prompt: |
+      Before drafting or refreshing the PR body, apply agent-flow-concise-output
+      and the PR descriptions mode in write-for-work.
       Locate the current branch's PR in the intended repository with
       `gh pr list --repo <repo> --head <branch> --state all`, including on
       reentry after a PR fix, review, gates, and commit. Reuse its number and
