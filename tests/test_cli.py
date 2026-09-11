@@ -2101,10 +2101,6 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "prompts" / "pr-watch.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "merge requires explicit approval",
-                (project_root / ".agent-flow" / "skills" / "push-watch" / "SKILL.md").read_text(encoding="utf-8"),
-            )
-            self.assertIn(
                 'agent-flow run "<task>"',
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
@@ -5862,6 +5858,7 @@ if (codexContext !== undefined) {
             check_data["statusCheckRollup"][0]["conclusion"] = "SUCCESS"
             check_data["statusCheckRollup"][0]["detailsUrl"] = "https://github.com/acme/demo/actions/runs/2/job/2"
             check_data["statusCheckRollup"][0]["completedAt"] = "2026-09-11T11:00:00Z"
+            check_data["reviewDecision"] = "APPROVED"
             observe(check_data)
             ready = subprocess.run(
                 (node, cli, "run", "advance"),
@@ -6743,6 +6740,7 @@ if (codexContext !== undefined) {
 
             intent.write_bytes(stale_intent)
             _write_node_pr_watch_gh(bin_dir, checkout, {
+                "reviewDecision": "APPROVED",
                 "statusCheckRollup": [
                     {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
                 ],
@@ -7060,7 +7058,7 @@ if (codexContext !== undefined) {
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("status: ci-failed", (run_dir / _node_phase_artifact("pr-watch")).read_text(encoding="utf-8"))
 
-    def test_node_push_watch_tick_uses_python_green_without_review_approval(self) -> None:
+    def test_node_push_watch_tick_stays_pending_until_review_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -7070,23 +7068,76 @@ if (codexContext !== undefined) {
             run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
-            _write_node_pr_watch_gh(bin_dir, checkout, {
-                "statusCheckRollup": [
-                    {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
-                ],
-            })
+            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+            for review_decision, expected_status in (
+                ("", "pending"),
+                ("REVIEW_REQUIRED", "pending"),
+                ("APPROVED", "green"),
+            ):
+                with self.subTest(review_decision=review_decision):
+                    _write_node_pr_watch_gh(bin_dir, checkout, {
+                        "reviewDecision": review_decision,
+                        "statusCheckRollup": [
+                            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                        ],
+                    })
+                    result = subprocess.run(
+                        (node, cli, "run", "push-watch-tick"), cwd=checkout,
+                        text=True, capture_output=True, check=False, env=env,
+                    )
 
-            result = subprocess.run(
-                (node, cli, "run", "push-watch-tick"),
-                cwd=checkout,
-                text=True,
-                capture_output=True,
-                check=False,
-                env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
-            )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(
+                        f"status: {expected_status}",
+                        (run_dir / _node_phase_artifact("pr-watch")).read_text(encoding="utf-8"),
+                    )
+                    self.assertEqual(
+                        json.loads((run_dir / "pr-feedback.json").read_text(encoding="utf-8"))["status"],
+                        expected_status,
+                    )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("status: green", (run_dir / _node_phase_artifact("pr-watch")).read_text(encoding="utf-8"))
+    def test_node_push_watch_tick_waits_for_new_head_check_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+            success = [{"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+            for stage, checks, expected_status in (
+                ("previous-head", success, "green"),
+                ("new-head", [], "pending"),
+                ("registered", [{"name": "test", "status": "QUEUED"}], "pending"),
+                ("completed", success, "green"),
+            ):
+                with self.subTest(stage=stage):
+                    if stage == "new-head":
+                        subprocess.run(
+                            ("git", "commit", "--allow-empty", "-m", "Push CI fix"),
+                            cwd=checkout, check=True, capture_output=True, text=True,
+                        )
+                    _write_node_pr_watch_gh(bin_dir, checkout, {
+                        "reviewDecision": "APPROVED",
+                        "statusCheckRollup": checks,
+                    })
+                    result = subprocess.run(
+                        (node, cli, "run", "push-watch-tick"), cwd=checkout,
+                        text=True, capture_output=True, check=False, env=env,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(
+                        f"status: {expected_status}",
+                        (run_dir / _node_phase_artifact("pr-watch")).read_text(encoding="utf-8"),
+                    )
+                    self.assertEqual(
+                        json.loads((run_dir / "pr-feedback.json").read_text(encoding="utf-8"))["status"],
+                        expected_status,
+                    )
 
     def test_node_push_watch_tick_treats_legacy_success_context_as_green_when_approved(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -7862,6 +7913,38 @@ if (codexContext !== undefined) {
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["number"], 4)
         self.assertEqual(payload["status"], "green")
+
+    def test_pr_watch_cli_require_ready_applies_to_once_and_polling(self) -> None:
+        view = {
+            "number": 4, "title": "demo", "state": "OPEN",
+            "url": "https://github.com/owner/repo/pull/4", "headRefOid": "a" * 40,
+            "reviewDecision": "REVIEW_REQUIRED", "reviews": [], "comments": [],
+            "statusCheckRollup": [
+                {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            ],
+        }
+        threads = {"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "nodes": [], "pageInfo": {"hasNextPage": False},
+        }}}}}
+        for mode in (["--once"], ["--max-polls", "1"]):
+            for readiness, expected_status in (([], "green"), (["--require-ready"], "pending")):
+                with self.subTest(mode=mode, readiness=readiness):
+                    output = io.StringIO()
+                    with (
+                        mock.patch(
+                            "agent_flow.pr_watch.subprocess.run",
+                            side_effect=[
+                                subprocess.CompletedProcess((), 0, json.dumps(view), ""),
+                                subprocess.CompletedProcess((), 0, json.dumps([threads]), ""),
+                            ],
+                        ),
+                        contextlib.redirect_stdout(output),
+                    ):
+                        self.assertEqual(
+                            main(["pr-watch", "4", "--allow-unbound", *mode, *readiness]), 0,
+                            output.getvalue(),
+                        )
+                    self.assertEqual(json.loads(output.getvalue())["status"], expected_status)
 
     def test_pr_watch_cli_fails_closed_without_run_context(self) -> None:
         error = io.StringIO()

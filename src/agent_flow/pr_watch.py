@@ -116,6 +116,7 @@ def fetch_pr(
     repo: str | None = None,
     *,
     required_checks: tuple[str, ...] = (),
+    require_ready: bool = False,
     run_dir: Path | None = None,
 ) -> PRSnapshot:
     """Query and classify a PR, publishing feedback for ACK when run_dir is set.
@@ -145,7 +146,7 @@ def fetch_pr(
         handled = _read_feedback_state(run_dir, repository, number).get("handled", [])
         snapshot = _classify(
             number, data, required_checks=required_checks, repo=repository,
-            handled_ids=handled,
+            require_ready=require_ready, handled_ids=handled,
         )
         if run_dir is not None and snapshot.status != "error":
             _record_feedback_observation(run_dir, snapshot)
@@ -166,6 +167,7 @@ def watch_pr(
     max_interval_s: int = 300,
     *,
     required_checks: tuple[str, ...] = (),
+    require_ready: bool = False,
     run_dir: Path | None = None,
 ) -> PRSnapshot:
     """Poll a PR until status leaves `pending` or max_poll_count exceeded.
@@ -189,7 +191,10 @@ def watch_pr(
     elapsed = 0.0
 
     for i in range(max_poll_count):
-        snap = fetch_pr(number, repo, required_checks=required_checks, run_dir=run_dir)
+        snap = fetch_pr(
+            number, repo, required_checks=required_checks,
+            require_ready=require_ready, run_dir=run_dir,
+        )
         last = snap
         if snap.status == "error":
             print(f"  PR #{number}: error — {snap.error}", file=sys.stderr)
@@ -222,6 +227,7 @@ def _classify(
     data: dict[str, Any],
     *,
     required_checks: tuple[str, ...] = (),
+    require_ready: bool = False,
     repo: str = "",
     handled_ids: list[str] | tuple[str, ...] = (),
 ) -> PRSnapshot:
@@ -271,7 +277,7 @@ def _classify(
         ):
             return True
         if check.get("status") in ("IN_PROGRESS", "PENDING", "QUEUED"):
-            return check.get("conclusion") in (None, "")
+            return True
         if check.get("state") in ("PENDING", "EXPECTED"):
             return True
         return (
@@ -329,8 +335,9 @@ def _classify(
         )
         outcome = (
             "failed" if check in failed else
-            "success" if check.get("conclusion") == "SUCCESS" or check.get("state") == "SUCCESS"
-            else "pending"
+            "pending" if check in pending else
+            "success" if check.get("conclusion") in ("SUCCESS", "NEUTRAL", "SKIPPED", "STALE")
+            or check.get("state") == "SUCCESS" else "pending"
         )
         if check_id in ci_checks:
             return PRSnapshot(
@@ -409,7 +416,9 @@ def _classify(
             review_comments=review_comments,
             issue_comments=issue_comments,
         )
-    if review_comments or issue_comments:
+    if review_comments or issue_comments or (
+        require_ready and data.get("reviewDecision") == "CHANGES_REQUESTED"
+    ):
         return PRSnapshot(
             number=number,
             title=title,
@@ -420,7 +429,7 @@ def _classify(
             pending_checks=pending,
             issue_comments=issue_comments,
         )
-    if pending:
+    if pending or (require_ready and (not rollup or data.get("reviewDecision") != "APPROVED")):
         return PRSnapshot(
             number=number,
             title=title,

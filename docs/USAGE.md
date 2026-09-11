@@ -290,13 +290,20 @@ The runner tracks unsuccessful completed CI repairs independently per check and
 blocks after the third recurrence. Initial failures, repeated observations,
 journal replay, unrelated HEAD changes, and ordinary review comments do not spend
 this budget. Same-HEAD retries require a distinct completed CI execution/result,
-not another read of the old failure. Explicit success resets only the resolved
-check, including success observed between polls or before a HEAD change; pending
-or missing results do not. A block identifies the check and required human decision.
+not another read of the old failure. An accepted terminal result resets only the
+resolved check, including results observed between polls or before a HEAD change.
+Optional `NEUTRAL`, `SKIPPED`, and `STALE` results are accepted; declared required
+checks still require success. Pending or missing results do not reset the budget.
+A capped run stays blocked on `continue`; the
+[`push-watch` recovery procedure](../skills/push-watch/SKILL.md#ci-repair--pr-ci-fix)
+requires explicit user approval to preserve and end it before a focused new run.
 
 The legacy Node `agent-flow-kit run push-watch-tick` command delegates bound PR
 observation to the Python watcher, so both entry points use the same check
-classification and recorded feedback evidence.
+classification and recorded feedback evidence. It passes `--require-ready` to
+preserve its stricter readiness contract: at least one check must be registered
+and `reviewDecision` must be `APPROVED` before the result can be green. The Python
+watcher also accepts this flag; without it, no-CI repositories remain supported.
 
 ## Repository layout
 

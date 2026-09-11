@@ -59,10 +59,15 @@ IDs and phase artifacts, not separate thread storage.
    that this evidence already proves fixed.
 3. After successful publication is established, post a substantive response
    linking the fix commit and relevant verification evidence. Then resolve the
-   corresponding GitHub review thread, then ACK only that handled feedback ID.
-   For issue comments without a review thread, reply then ACK. If a reply or
-   required thread resolution fails, leave the item unACKed; on reentry reuse
-   the existing successful response rather than posting duplicates.
+   corresponding GitHub review thread, then ACK the handled feedback ID.
+   For issue comments without a review thread, record the posted response URL
+   in the fix artifact and refresh the watcher observation. Match that exact URL
+   to its observed feedback ID, recheck HEAD and the original feedback revision,
+   then ACK both the handled original and response IDs. Leave unrelated or edited
+   feedback pending; an authenticated author's other comments are not responses.
+   If a reply, required resolution, or refreshed identity check fails, leave the
+   item unACKed. On reentry reuse the recorded successful response, including its
+   response-ID completion, instead of posting duplicates.
 4. **No-publication exception:** discussion-only feedback may receive its
    substantive answer, then thread resolution (where applicable), then ACK
    without a push. This exception never applies to a code fix that is merely
@@ -95,3 +100,17 @@ do not consume repair cycles. Check identity is objective; similar log wording
 or a guessed shared root cause does not combine unrelated failures. On the
 runner's block, report its reason and the human decision needed rather than
 starting another autonomous repair.
+
+The cap stops this run; `continue` does not reset it. A decision to try further
+automated repairs must explicitly authorize preserving and ending the capped run
+and starting a focused follow-up in the same worktree. Only after that approval:
+
+```sh
+agent-flow abort --worktree <name> --yes
+agent-flow run "<approved repair>" --workflow bugfix --worktree <name>
+```
+
+Carry the prior run's evidence and unresolved feedback into the new task. Keep
+the old counters and journal intact; never reset them by editing runtime metadata.
+Without that approval, remain blocked. A new run is not permission to resolve or
+ACK feedback before the repair is verified and published.

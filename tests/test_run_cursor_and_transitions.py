@@ -989,12 +989,12 @@ def _ci_pr_data(current, outcomes, *, proof=True):
     }
 
 
-def _observe_ci(runner, current, outcomes, *, comments=False, proof=True):
+def _observe_ci(runner, current, outcomes, *, comments=False, proof=True, required_checks=()):
     from agent_flow.pr_watch import _classify, _record_feedback_observation
 
     data = _ci_pr_data(current, outcomes, proof=proof)
     data["comments"] = [{"id": "question", "body": "please explain"}] if comments else []
-    snapshot = _classify(7, data, repo="github.com/owner/repo")
+    snapshot = _classify(7, data, repo="github.com/owner/repo", required_checks=required_checks)
     _record_feedback_observation(runner.run_dir, snapshot)
     (runner.run_dir / "pr-watch.md").write_text(f"status: {snapshot.status}\n", encoding="utf-8")
     return snapshot
@@ -1021,6 +1021,38 @@ def _publish_ci_repair(runner, current, number):
     assert _ci_step(runner).to_phase == "review"
     assert _ci_step(runner).to_phase == "push-pr"
     assert _ci_step(runner).to_phase == "pr-watch"
+
+
+@pytest.mark.parametrize("conclusion", ["NEUTRAL", "SKIPPED", "STALE"])
+@pytest.mark.parametrize("required", [False, True])
+def test_ci_repair_new_accepted_terminal_result_settles_only_optional_checks(
+    tmp_path, monkeypatch, conclusion, required,
+):
+    runner, current = _ci_repair_runner(tmp_path, monkeypatch)
+    required_checks = ("unit",) if required else ()
+    _observe_ci(runner, current, {"unit": "FAILURE"}, required_checks=required_checks)
+    assert _ci_step(runner).to_phase == "pr-ci-fix"
+    assert _ci_step(runner).to_phase == "pr-watch"
+
+    _observe_ci(runner, current, {"unit": conclusion}, required_checks=required_checks)
+    assert _ci_step(runner, replay=True).route_key == "ci-repair-evidence"
+    assert list(read_meta(tmp_path)["ci_repair_state"]["counts"].values()) == [0]
+
+    current["execution"] = 1
+    _observe_ci(runner, current, {"unit": None}, required_checks=required_checks)
+    assert _ci_step(runner, replay=True).route_key == "ci-repair-pending"
+    snapshot = _observe_ci(
+        runner, current, {"unit": conclusion}, required_checks=required_checks,
+    )
+    assert snapshot.status == ("ci_failed" if required else "green")
+    transition = _ci_step(runner, replay=True)
+    assert transition.to_phase == ("pr-ci-fix" if required else "merge")
+    state = read_meta(tmp_path)["ci_repair_state"]
+    if required:
+        assert list(state["counts"].values()) == [1]
+    else:
+        assert state["active"] is None
+        assert state["counts"] == {}
 
 
 def test_ci_repair_blocks_after_third_completed_repair_and_replays_once(tmp_path, monkeypatch):
@@ -1203,13 +1235,16 @@ def test_ci_repair_does_not_recount_delayed_initial_or_consumed_executions(tmp_p
 
 
 @pytest.mark.parametrize("switch_pr", [False, True])
-def test_ci_repair_replayed_success_cannot_clear_a_newer_failure_streak(tmp_path, monkeypatch, switch_pr):
+@pytest.mark.parametrize("conclusion", ["SUCCESS", "NEUTRAL", "SKIPPED", "STALE"])
+def test_ci_repair_replayed_success_cannot_clear_a_newer_failure_streak(
+    tmp_path, monkeypatch, switch_pr, conclusion,
+):
     runner, current = _ci_repair_runner(tmp_path, monkeypatch)
     _observe_ci(runner, current, {"unit": "FAILURE"})
     _ci_step(runner)
     assert _ci_step(runner).to_phase == "pr-watch"
     current["execution"] = 1
-    _observe_ci(runner, current, {"unit": "SUCCESS"}, comments=True)
+    _observe_ci(runner, current, {"unit": conclusion}, comments=True)
     assert _ci_step(runner).to_phase == "pr-comment-fix"
     assert _ci_step(runner).to_phase == "pr-watch"
     for execution in (2, 3):
@@ -1218,7 +1253,7 @@ def test_ci_repair_replayed_success_cannot_clear_a_newer_failure_streak(tmp_path
         assert _ci_step(runner).to_phase == "pr-ci-fix"
         assert _ci_step(runner).to_phase == "pr-watch"
     current["execution"] = 1
-    _observe_ci(runner, current, {"unit": "SUCCESS"})
+    _observe_ci(runner, current, {"unit": conclusion})
     assert _ci_step(runner, replay=True).route_key == "ci-repair-evidence"
     for execution in (4, 5):
         current["execution"] = execution
@@ -1232,16 +1267,16 @@ def test_ci_repair_replayed_success_cannot_clear_a_newer_failure_streak(tmp_path
     if switch_pr:
         from agent_flow.pr_watch import fetch_pr
 
-        other = _ci_pr_data(current, {"unit": "SUCCESS"})
+        other = _ci_pr_data(current, {"unit": conclusion})
         other["url"] = "https://github.com/owner/repo/pull/8"
         monkeypatch.setattr("agent_flow.pr_watch._fetch_pr_data", lambda number, repo: other)
         monkeypatch.setattr("agent_flow.pr_watch._fetch_review_threads", lambda number, repo: [])
         assert fetch_pr(8, repo="owner/repo", run_dir=tmp_path).status == "error"
     current["execution"] = 1
-    _observe_ci(runner, current, {"unit": "SUCCESS"})
+    _observe_ci(runner, current, {"unit": conclusion})
     assert _ci_step(runner, replay=True).blocked
     current["execution"] = 6
-    _observe_ci(runner, current, {"unit": "SUCCESS"})
+    _observe_ci(runner, current, {"unit": conclusion})
     assert _ci_step(runner).to_phase == "merge"
 
 

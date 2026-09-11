@@ -40,6 +40,90 @@ def test_green():
     assert snap.status == "green"
 
 
+@pytest.mark.parametrize(("checks", "decision", "expected"), [
+    (None, "APPROVED", "pending"),
+    ([], "APPROVED", "pending"),
+    ([{"name": "unit", "conclusion": "SUCCESS"}], None, "pending"),
+    ([{"name": "unit", "conclusion": "SUCCESS"}], "REVIEW_REQUIRED", "pending"),
+    ([{"name": "unit", "conclusion": "SUCCESS"}], "CHANGES_REQUESTED", "has_comments"),
+    ([{"name": "unit", "conclusion": "SUCCESS"}], "APPROVED", "green"),
+])
+def test_fetch_pr_requires_checks_and_approval_only_when_opted_in(
+    monkeypatch, checks, decision, expected,
+):
+    from agent_flow.pr_watch import fetch_pr
+
+    data = {
+        "state": "OPEN", "url": "https://github.com/owner/repo/pull/7",
+        "statusCheckRollup": checks, "reviewDecision": decision,
+    }
+    monkeypatch.setattr("agent_flow.pr_watch._fetch_pr_data", lambda *args: data)
+    monkeypatch.setattr("agent_flow.pr_watch._fetch_review_threads", lambda *args: [])
+
+    assert fetch_pr(7).status == "green"
+    snapshot = fetch_pr(7, require_ready=True)
+    assert snapshot.status == expected
+    assert snapshot.pending_checks == []
+
+
+@pytest.mark.parametrize(("conclusion", "decision", "comments", "required", "expected"), [
+    ("FAILURE", "CHANGES_REQUESTED", [], (), "ci_failed"),
+    ("NEUTRAL", "CHANGES_REQUESTED", [], ("unit",), "ci_failed"),
+    (None, "CHANGES_REQUESTED", [], (), "has_comments"),
+    (None, "REVIEW_REQUIRED", [{"id": "c1", "body": "please explain"}], (), "has_comments"),
+    (None, "APPROVED", [], (), "pending"),
+])
+def test_require_ready_preserves_ci_failure_feedback_and_pending_precedence(
+    conclusion, decision, comments, required, expected,
+):
+    snapshot = _classify(7, {
+        "state": "OPEN", "reviewDecision": decision, "comments": comments,
+        "statusCheckRollup": [{
+            "name": "unit", "conclusion": conclusion,
+            "status": "IN_PROGRESS" if conclusion is None else "COMPLETED",
+        }],
+    }, require_ready=True, required_checks=required)
+    assert snapshot.status == expected
+
+
+def test_watch_require_ready_waits_for_checks_then_approval(tmp_path, monkeypatch):
+    from agent_flow.pr_watch import _read_feedback_state, watch_pr
+
+    polls = iter([
+        {"statusCheckRollup": [], "reviewDecision": "APPROVED"},
+        {"statusCheckRollup": [{"name": "unit", "conclusion": "SUCCESS"}]},
+        {
+            "statusCheckRollup": [{"name": "unit", "conclusion": "SUCCESS"}],
+            "reviewDecision": "APPROVED",
+        },
+    ])
+    monkeypatch.setattr("agent_flow.pr_watch._fetch_pr_data", lambda *args: {
+        "state": "OPEN", "url": "https://github.com/owner/repo/pull/7",
+        "headRefOid": "head-1", **next(polls),
+    })
+    monkeypatch.setattr("agent_flow.pr_watch._fetch_review_threads", lambda *args: [])
+    monkeypatch.setattr("agent_flow.pr_watch.time.sleep", lambda seconds: None)
+
+    snapshot = watch_pr(7, require_ready=True, run_dir=tmp_path, max_poll_count=3)
+    assert snapshot.status == "green"
+    observed = _read_feedback_state(tmp_path, "owner/repo", 7)
+    assert observed["observation_sequence"] == 3
+    assert observed["status"] == "green"
+
+
+@pytest.mark.parametrize("conclusion", ["NEUTRAL", "SKIPPED", "STALE"])
+@pytest.mark.parametrize("pending", [
+    {"status": "IN_PROGRESS"}, {"state": "PENDING"},
+])
+def test_pending_check_cannot_be_accepted_by_its_terminal_conclusion(conclusion, pending):
+    snapshot = _classify(7, {
+        "state": "OPEN", "reviewDecision": "APPROVED",
+        "statusCheckRollup": [{"name": "unit", "conclusion": conclusion, **pending}],
+    }, require_ready=True)
+    assert snapshot.status == "pending"
+    assert snapshot.ci_checks == {'["check","","unit"]': "pending"}
+
+
 @pytest.mark.parametrize("conclusion", ["ACTION_REQUIRED", "STARTUP_FAILURE"])
 def test_completed_failure_requires_ci_repair_instead_of_waiting(conclusion):
     snapshot = _classify(1, {

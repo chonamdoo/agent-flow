@@ -1564,7 +1564,7 @@ function readPullRequestIdentity(root) {
 function observePullRequest(runDir, pr) {
   const result = safeSpawnSync(
     preferredPython(),
-    ["-m", "agent_flow.cli", "pr-watch", pr.number, "--repo", pr.repo, "--once", "--run-dir", runDir],
+    ["-m", "agent_flow.cli", "pr-watch", pr.number, "--repo", pr.repo, "--once", "--require-ready", "--run-dir", runDir],
     {
       cwd: process.cwd(),
       env: pythonCliEnv(),
