@@ -2,6 +2,7 @@
 name: code-generation-discipline
 description: Common code generation and code modification discipline for agent-flow. Use before and during implementation, TDD red/green/refactor, fix-loop, bug fixes, feature work, and any task where Codex, Claude, OMP, or another agent writes or changes code. Enforces start-before, during-implementation, and after-implementation checks without a scoring rubric.
 delivery: passive
+requires: [write-for-work]
 ---
 
 # Code Generation Discipline
@@ -122,6 +123,7 @@ a second workflow. The repository's actual metadata and routing contract governs
 - Treat these as blocking only when the code creates a concrete correctness, data-loss, contract, testability, or high-risk maintainability defect. Style differences alone are non-blocking.
 - Use the selected language-specific guides as secondary checklists. Repo patterns and task scope stay first.
 - Default to no new comments during implementation. Apply `comment-authoring-discipline` as the semantic source for warranted comments and the final comment-quality pass.
+- When authoring or revising warranted comments or docstrings, read `write-for-work` and apply its Code comments and docstrings mode before writing the prose. This does not require adding comments to otherwise clear code.
 - Remove unused imports, variables, functions, and files created by the change.
 
 ## After Implementation

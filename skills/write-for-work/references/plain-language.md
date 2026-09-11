@@ -3,12 +3,14 @@
 ## Contents
 
 1. Decision rule
-2. Imported workplace jargon
-3. Stock Korean AI expressions
-4. Vague action words
-5. English AI expressions
-6. Structural habits
-7. Examples
+2. Korean sentence repair
+3. Imported workplace jargon
+4. Stock Korean AI expressions
+5. Vague action words
+6. English AI expressions
+7. Structural habits
+8. Examples
+9. Adaptation sources
 
 ## Decision rule
 
@@ -28,6 +30,28 @@ Examples of terms to preserve:
 - Product features and interface labels
 
 Explain an acronym at first use when the reader may not know it.
+
+## Korean sentence repair
+
+Build the sentence around who does what, under which condition, rather than translating English word order or replacing isolated words. Name an actor only when the source identifies one; a passive is valid when the actor is unknown or irrelevant.
+
+These are synthetic examples, not mandatory substitutions:
+
+| Draft | Possible revision | Preserve |
+|---|---|---|
+| 설정 변경 작업을 수행한다 | 설정을 바꾼다 | The actual action; do not invent a new effect |
+| 요청에 있어서 검증의 수행이 필요하다 | 요청을 검증해야 한다 | The requirement, not a claim that validation already happens |
+| 응답이 수신되어진다 | 응답을 받는다 | Who receives it; retain passive wording if that actor is unknown |
+| 오류가 발생할 수 있을 것으로 보인다 | 오류가 발생할 수 있다 | Uncertainty; never shorten this to "오류가 발생한다" |
+| 승인이 없는 경우에는 배포가 허용되지 않는다 | 승인 없이는 배포할 수 없다 | The negative condition and prohibition |
+| 확인하시어 회신을 부탁드립니다 | 확인 후 회신해 주세요 | Appropriate politeness; not a universal switch to casual speech |
+
+- Unpack noun chains into a subject and predicate when that clarifies the relationship. Keep an established noun such as "의존성 주입" rather than paraphrasing away its meaning.
+- Use one name for one concept. Do not alternate "사용자", "고객", and "클라이언트" for rhythm when they mean the same thing, or collapse them when they mean different things.
+- Distinguish real identifiers from decorative English. Keep an exact token such as `retryCount`, but remove duplicate labels such as "retry 재시도" when `retry` is not an identifier. Explain unfamiliar terminology once for the intended audience.
+- Keep the document's chosen register consistent. Technical instructions may repeatedly end in "~한다"; vary wording only when it improves comprehension, not to satisfy a rhythm rule.
+- Read the Korean around code tokens on its own. Repair awkward particles or word order without translating the tokens.
+- Preserve meaningful contrasts, necessary passive voice, real lists of three, and caution in legal or safety text. None is an error merely because a model also uses it.
 
 ## Imported workplace jargon
 
@@ -184,6 +208,8 @@ Keep useful structure. Remove only the structure that decorates or simulates ana
 
 ### Business report
 
+Supplied context for this synthetic example: the next review concerns cost reduction and follow-up work.
+
 Before:
 
 > 다음 게이트에서 핵심 레버와 액션 아이템을 얼라인한다.
@@ -204,6 +230,8 @@ After:
 
 ### AI-style conclusion
 
+Supplied facts for this synthetic example: a new approval procedure passed an internal test; its effect on processing time has not been measured in a pilot.
+
 Before:
 
 > 이러한 맥락에서 이번 결과는 단순한 기술 검증을 넘어 사업의 새로운 가능성을 연다는 점에서 의미가 있다.
@@ -223,3 +251,26 @@ After:
 > `PAYMENT_STATUS`는 API 응답에 정의된 필드다.
 
 Keep the identifier because changing it would damage precision.
+
+### Missing evidence
+
+Before:
+
+> 처리 효율을 개선할 수 있을 것으로 보인다.
+
+After:
+
+> 처리 효율이 나아질 수 있다.
+
+The source supplies no affected step or measurement. Do not turn this into "검수 시간을 30% 줄인다". If the document needs that detail, report the missing evidence outside the revised passage.
+
+## Adaptation sources
+
+The Korean and technical-writing additions were authored for this skill after reviewing these sources on 2026-09-12:
+
+- [im-not-ai rewriting playbook](https://github.com/epoko77-ai/im-not-ai/blob/main/skills/humanize-korean/references/rewriting-playbook.md): Korean translationese, register, and modality preservation.
+- [Humanizer](https://github.com/blader/humanizer/blob/main/SKILL.md): source-fact and non-prose protection; figurative jargon versus real technical usage.
+- [Humanizer KR](https://github.com/hjongc/humanizer-kr/blob/main/skills/humanizer-kr/SKILL.md): audience-aware Korean and minimal revision.
+- [Patina technical documents](https://github.com/devswha/patina/blob/main/document-types/technical.md) and [code comments](https://github.com/devswha/patina/blob/main/document-types/code-comment.md): document-specific constraints and exact technical meaning.
+
+These are references, not runtime dependencies or proof of rewriting quality. The PR mode in [modes.md](modes.md) applies those principles to reviewable changes. Examples here are synthetic; no AI-authorship claims, forced change ratios, invented experiences, or external execution workflows are adopted.
