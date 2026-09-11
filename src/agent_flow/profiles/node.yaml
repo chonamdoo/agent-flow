@@ -1,5 +1,5 @@
 id: node
-capabilities: [react-web]
+capabilities: [react-web, webview-json-rpc]
 branching:
   strategy: trunk
   base: main
@@ -40,7 +40,7 @@ skills:
   required_review:
     - group: llm-tool-development
       skills: [llm-tool-development]
-      task_terms: ["tool calling", "function calling", "mcp server", "mcp adapter", "툴콜", "mcp 서버"]
+      task_terms: ["tool calling", "function calling", "mcp server", "mcp adapter", "툴콜", "mcp 서버", "툴콜 개발", "툴콜 리뷰", "도구 호출 구현", "도구 호출 리뷰", "MCP 서버 개발", "MCP 어댑터 개발", "MCP 서버 리뷰"]
       path_globs: ["**/tool-dispatcher.*", "**/mcp-server.*"]
       concerns: [llm-tool-development]
       missing: "missing local LLM tool development: <skill>"

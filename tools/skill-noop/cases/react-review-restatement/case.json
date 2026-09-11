@@ -3,10 +3,10 @@
   "subject": "react-development-guide: three lines that restate the closed Blocking-only list were removed. Re-adding them must change nothing.",
   "baseline": "skills/react-development-guide/SKILL.md",
   "variant": {
-    "insertAfter": 39,
+    "insertAfter": 45,
     "expectAnchor": "Blocking only: hook rule violation",
     "text": [
-      "- Best practice 일반론으로 blocking하지 말 것.",
+      "- Do not block on generic best-practice advice.",
       "- Do not block on theoretical cleaner architecture, preferred folder layout, CSS taste, or optional memoization.",
       "- Treat generic React best practice comments as suggestions unless they prevent a concrete failure."
     ]

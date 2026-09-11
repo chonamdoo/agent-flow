@@ -50,7 +50,7 @@ Use this rubric when auditing Codex project memory.
 
 ### 5. Currency (15 points)
 
-15: Commands work, paths exist, tech stack is current, and instructions match the repo.
+15: Command declarations, paths, tech stack, and instructions match the repo. Distinguish static agreement from observed command execution; report unexecuted commands as unverified, not working.
 
 10: Mostly current with minor stale references.
 
@@ -71,7 +71,7 @@ Use this rubric when auditing Codex project memory.
 ## Assessment Process
 
 1. Read the relevant `AGENTS.md` file completely.
-2. Cross-check documented commands, paths, architecture claims, and imports against the repo.
+2. Cross-check documented commands, paths, architecture claims, and imports against the repo. Execute commands only when authorized by the current task and workflow owner; reading an install or deploy command does not authorize it. State which conclusions come from static inspection and which have execution evidence.
 3. Score each criterion.
 4. Assign a grade: A 90-100, B 70-89, C 50-69, D 30-49, F 0-29.
 5. List concrete issues and proposed improvements.
@@ -85,4 +85,4 @@ Use this rubric when auditing Codex project memory.
 - generic advice not specific to this repo
 - stale TODO items
 - duplicated content across global and project instruction files
-- long documentation that belongs in `.Codex/rules/`
+- long documentation that belongs in `.Codex/rules/` when the project already imports that structure

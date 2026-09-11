@@ -26,8 +26,10 @@ state.
 
 ## ViewModel Rules
 
-- Depend on use cases, not repositories or API clients, unless the project
-  intentionally has a simpler architecture.
+- A ViewModel may depend on one context's repository interface when no
+  orchestration is needed. Require a use case for cross-context work, ordered
+  side effects, or added business failure semantics. Never inject repository
+  implementations, data sources, or API clients directly.
 - Keep action handling exhaustive.
 - Keep one-off navigation or toast events separate from durable UI state if the
   project has an event/effect channel.

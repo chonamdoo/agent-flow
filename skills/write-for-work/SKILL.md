@@ -93,7 +93,7 @@ If a document mixes modes, choose one primary mode and borrow only the necessary
 
 For HTML, verify the document structure and render it at desktop and mobile widths when browser tools are available. Preserve the original and create a separate revised file unless the user explicitly requests in-place editing.
 
-When converting project experience into reusable guidance, keep only generalized writing rules. Remove project names, internal identifiers, source examples, confidential data, metrics, and file paths.
+When converting project experience into reusable guidance, retain generalized writing rules and remove private implementation details, identifying information, confidential data, and unnecessary source-specific examples. Preserve public API spelling, required CLI and parser literals, contractual terms, permitted source locators, and material uncertainty. Do not silently erase numbers or facts needed to represent the source accurately; omit restricted material explicitly or retain its supported meaning without exposing it.
 
 ## Output behavior
 

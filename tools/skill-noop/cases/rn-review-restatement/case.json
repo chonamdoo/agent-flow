@@ -6,7 +6,7 @@
     "insertAfter": 38,
     "expectAnchor": "Blocking only: crash risk",
     "text": [
-      "- Best practice 일반론으로 blocking하지 말 것.",
+      "- Do not block on generic best-practice advice.",
       "- Do not block on theoretical architecture, optional memoization, preferred navigation style, native-layer preferences, or TypeScript generalities.",
       "- Treat generic React Native best practice comments as suggestions unless they prevent a concrete failure."
     ]

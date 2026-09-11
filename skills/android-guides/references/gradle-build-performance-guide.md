@@ -16,15 +16,8 @@
 
 ## Validation
 
-Run the smallest meaningful gate first:
-
-```bash
-./gradlew :feature:<name>:presentation:assembleDebug
-```
-
-Then run the profile gate, usually:
-
-```bash
-./gradlew assembleDebug
-```
+Discover the repository's actual wrapper, module paths, variants, available
+tasks, and active profile gates. Run the smallest meaningful gate for the
+changed boundary first, then the required broader profile gate. Do not assume
+a feature taxonomy, debug variant, or root assemble task.
 

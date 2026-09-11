@@ -8,59 +8,29 @@ Every line in `AGENTS.md` enters future agent context. Keep only information tha
 
 ### 1. Commands/Workflows Discovered
 
-Add commands that future sessions need and cannot infer safely:
-
-```markdown
-## Commands
-- `npm run build` - production build
-- `npm run lint` - lint changed TypeScript and TSX files
-```
+Add commands future sessions need and cannot infer safely. Resolve them from the repo's declared scripts and workflow, including working directory and prerequisites. Reading a command does not authorize executing it; distinguish declaration checks from actual execution evidence.
 
 ### 2. Gotchas and Non-Obvious Patterns
 
-Add repo-specific traps:
-
-```markdown
-## Gotchas
-- Tests touching shared DB state must run sequentially.
-- Generated files under `src/generated/` are not edited manually.
-```
+Add recurring repo-specific constraints supported by evidence. If tests share mutable state, record the required isolation or execution policy. For generated files, identify the actual source and generator rather than copying an example output directory.
 
 ### 3. Package Relationships
 
-Add relationships that are not obvious from filenames:
-
-```markdown
-## Architecture
-- `apps/web` consumes API types generated from `packages/api`.
-- Auth middleware must load before feature route handlers.
-```
+Add relationships not obvious from filenames: contract producers and consumers, dependency direction, and required initialization order. Record only relationships established by the repository, not an assumed application structure.
 
 ### 4. Testing Approaches That Worked
 
-Add verification patterns that future agents should reuse:
-
-```markdown
-## Testing
-- API tests use `supertest` with helpers from `tests/setup.ts`.
-- UI tests mock image loading through `tests/mocks/image.ts`.
-```
+Add verification patterns with observed execution evidence. Locate helpers and setup through existing tests, and explain the observable contract or environmental constraint they support. Label unexecuted checks as unverified and retain the assigned verification owner.
 
 ### 5. Configuration Quirks
 
-Add environment behavior that commonly breaks work:
-
-```markdown
-## Config
-- `NEXT_PUBLIC_*` values must exist at build time.
-- Local Redis needs the IPv6-compatible connection suffix used in `.env.example`.
-```
+Add recurring environment behavior only when its cause, applicability, and supported configuration are established. Distinguish build-time and runtime inputs where that affects correctness. Do not copy an incident-specific connection workaround into permanent guidance without evidence that it remains necessary.
 
 ## What Not To Add
 
 ### 1. Obvious Code Info
 
-Do not add statements that names already express, such as "`UserService` handles users."
+Do not add statements that merely repeat a class or file name's meaning.
 
 ### 2. Generic Best Practices
 
@@ -88,4 +58,4 @@ For each proposed update, show:
 ```
 ````
 
-Ask for approval before applying non-trivial instruction changes.
+Ask for approval before applying instruction changes, as required by the entrypoint.

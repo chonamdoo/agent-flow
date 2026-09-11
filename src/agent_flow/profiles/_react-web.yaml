@@ -9,7 +9,41 @@ skills:
     - react-hook-form-zod
     - react-web-seo
     - react-storybook
+    - react-scroll-restoration
+    - react-runtime-i18n
+    - ga4-ecommerce-events
+    - datadog-rum-sourcemaps
   required_review:
+    - group: react-scroll-restoration
+      skills: [react-scroll-restoration]
+      task_terms: ["scroll restoration", "history scroll restoration", "스크롤 복원", "뒤로가기 위치 복원"]
+      concerns: [react-scroll-restoration]
+      missing: "missing local react-scroll-restoration: <skill>"
+    - group: react-runtime-i18n
+      skills: [react-runtime-i18n]
+      task_terms: ["runtime i18n", "runtime translation", "remote translations", "locale message hydration", "런타임 번역", "원격 번역", "로케일 메시지 일치"]
+      concerns: [react-runtime-i18n]
+      missing: "missing local react-runtime-i18n: <skill>"
+    - group: ga4-ecommerce-events
+      skills: [ga4-ecommerce-events]
+      task_terms: ["ga4 ecommerce", "ga4 e-commerce", "gtm ecommerce", "GA4 전자상거래", "GTM 전자상거래"]
+      concerns: [ga4-ecommerce-events]
+      missing: "missing local ga4-ecommerce-events: <skill>"
+    - group: datadog-rum-sourcemaps
+      skills: [datadog-rum-sourcemaps]
+      task_terms: ["datadog rum sourcemaps", "datadog rum source maps", "datadog sourcemap", "datadog source maps", "Datadog 소스맵", "Datadog RUM 소스맵"]
+      concerns: [datadog-rum-sourcemaps]
+      missing: "missing local datadog-rum-sourcemaps: <skill>"
+    - group: react-app-shell-error-handling
+      skills: [react-app-shell-error-handling]
+      task_terms: ["공통 에러", "전역 에러", "세션 만료"]
+      concerns: [react-app-shell-error-handling]
+      missing: "missing local react-app-shell-error-handling: <skill>"
+    - group: react-clean-presentation-architecture
+      skills: [react-clean-presentation-architecture]
+      task_terms: ["상태 홀더", "화면 상태", "프레젠테이션 계층"]
+      concerns: [react-clean-presentation-architecture]
+      missing: "missing local react-clean-presentation-architecture: <skill>"
     - group: react-web
       skills: [react-development-guide]
       path_globs: ["**/*.tsx", "**/*.jsx", "**/*.ts", "**/*.js"]

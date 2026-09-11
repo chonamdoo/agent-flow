@@ -9,17 +9,9 @@
 
 ## Language
 
-**Order**:
-{A one or two sentence description of the term}
-_Avoid_: Purchase, transaction
-
-**Invoice**:
-A request for payment sent to a customer after delivery.
-_Avoid_: Bill, payment request
-
-**Customer**:
-A person or organization that places orders.
-_Avoid_: Client, buyer, account
+**{Agreed canonical term}**:
+{One or two sentences defining its agreed meaning in this context.}
+_Avoid_: {Confirmed ambiguous or competing terms for the same concept}
 ```
 
 ## Rules
@@ -35,21 +27,16 @@ _Avoid_: Client, buyer, account
 
 **Multiple contexts:** A `CONTEXT-MAP.md` at the repo root lists the contexts, where they live, and how they relate to each other:
 
-```md
-# Context Map
+Use `# Context Map`, `## Contexts`, and `## Relationships` to organize the map:
 
-## Contexts
-
-- [Ordering](./src/ordering/CONTEXT.md) — receives and tracks customer orders
-- [Billing](./src/billing/CONTEXT.md) — generates invoices and processes payments
-- [Fulfillment](./src/fulfillment/CONTEXT.md) — manages warehouse picking and shipping
-
-## Relationships
-
-- **Ordering → Fulfillment**: Ordering emits `OrderPlaced` events; Fulfillment consumes them to start picking
-- **Fulfillment → Billing**: Fulfillment emits `ShipmentDispatched` events; Billing consumes them to generate invoices
-- **Ordering ↔ Billing**: Shared types for `CustomerId` and `Money`
-```
+- Under **Contexts**, link each confirmed context to its actual `CONTEXT.md`
+  location and describe its responsibility.
+- Under **Relationships**, record verified direction, ownership, and translation
+  between contexts. Record published or consumed events and shared contracts only
+  when supported by the agreed model or observed integration.
+- Separate observed integration from intended relationships; leave unresolved
+  policy explicit rather than inventing event payloads, shared types, or ownership
+  rules to complete the map.
 
 The skill infers which structure applies:
 

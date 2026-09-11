@@ -43,7 +43,7 @@ Score each file on:
 | Currency | 15 |
 | Actionability | 15 |
 
-Flag stale commands, broken paths, duplicated instructions, generic advice, outdated architecture, TODOs that are not useful to future agents, and long content that should move to `.Codex/rules/`.
+Flag stale commands, broken paths, duplicated instructions, generic advice, outdated architecture, TODOs that are not useful to future agents, and long content that should move to `.Codex/rules/` only when the project already uses that import pattern.
 
 ### Phase 3: Report Before Editing
 
@@ -89,7 +89,7 @@ Only add information that will help future Codex sessions:
 - commands or workflows discovered during analysis
 - gotchas or non-obvious patterns found in the repo
 - package relationships not obvious from filenames
-- testing or verification approaches that actually work
+- testing or verification approaches with evidence of actual execution; label declaration-only checks as unexecuted
 - configuration quirks that would otherwise be rediscovered
 
 Avoid generic best practices, one-off fixes, verbose explanations, and statements that merely restate file or class names.

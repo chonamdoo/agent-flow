@@ -1,180 +1,132 @@
 # Renderer and Action Guide
 
-Source: PART 7 (whole), PART 3-3 (app-shell boundary), PART 1-2 (cross-screen
-result delivery), PART 8-6 (server-time countdown).
+Source attribution retained from the supplied bundle: PART 7, PART 3-3,
+PART 1-2, and PART 8-6. Original-source identity, version, locator, effective
+date, and author authority are unverified. Public API references below support
+specific platform facts, not every adopted design decision.
 
-## App-shell boundary (PART 3-3)
+## App-shell boundary
 
-Deciding rule: **if failure makes the app unusable it is native; if failure only
-empties part of a screen it is SDUI.**
+If failure makes the app unusable, native code owns the fallback. Server-authored
+content may fail locally only when the remaining surface stays usable.
 
-| Surface | Verdict | Why |
-|---|---|---|
-| App bar / tab bar skeleton | native | a server error must never delete navigation |
-| App bar / tab bar composition | JSON-controlled | add a tab without a release |
-| Content area | SDUI | changes often, failure is recoverable |
-| Search input | native | keyboard, IME, and focus are platform concerns |
-| Search results | SDUI | the most A/B-tested surface |
+- Native code owns the app-bar/tab-bar skeleton and essential navigation.
+- Server config may control supported shell composition, not remove the skeleton.
+- Content regions may be SDUI when their failure is recoverable.
+- Native inputs retain keyboard, IME, and focus ownership; independently rendered
+  results may be SDUI.
 
-Shell config resolves through three tiers: server response, then Room cache,
-then a hardcoded `DEFAULT`. The third tier is mandatory.
+Resolve shell configuration from a valid server response, then usable cached
+configuration, then bundled safe defaults. The final native fallback is mandatory
+and does not depend on a particular storage engine or constant name.
 
-## Modifier mapping (PART 7-1)
+## Modifier mapping
 
-- One `NodeModifier.toCompose(scope)` function owns the whole chain. No node
-  type builds its own.
-- Apply in this fixed order; changing it changes rendering:
-  `margin -> size/aspectRatio -> weight -> clip -> background -> border ->
-  elevation -> alpha -> padding`.
-- `weight` needs the parent scope, so pass `RowScope`/`ColumnScope` down and
-  ignore `weight` when there is none.
-- Resolve every value through the token tables, never from the payload directly.
-- Compute the shape once and reuse it for `clip`, `background`, and `border`.
+Apply the adopted ordering contract consistently at a shared rendering boundary;
+see [ui-node-model-guide.md](ui-node-model-guide.md). Node-local chains must not
+silently change rendering semantics. Resolve design values through client token
+resolvers; structural values must satisfy the declared schema constraints.
 
-## Recursive renderer (PART 7-2)
+`weight` has meaning only in the appropriate `RowScope` or `ColumnScope`; ignore
+it outside a supported parent scope under the supplied contract. Preserve that
+meaning without prescribing a specific scope-passing helper. Reuse resolved
+shapes for clipping, background, and border rather than recomputing them.
 
-```kotlin
-LazyColumn(state = listState, modifier = root.modifier.toCompose()) {
-    items(root.children, key = { it.id }, contentType = { it::class.simpleName }) {
-        RenderNode(it, onEvent)
-    }
-}
-```
+## Recursive rendering
 
-- `key` on every lazy list; `contentType` on the screen-level list. Without a key
-  the list rebuilds on patch and scroll position jumps.
-- Container nodes recurse and pass their Compose scope to children.
-- Never nest a lazy list inside a lazy list of the same axis. Render `Grid` as
-  chunked `Row`s inside a plain `Column`.
-- `visibility == GONE` returns before composing anything.
-- Click and semantics are attached by the shared modifier builder, so every node
-  type gets them for free.
-- The `when` over `UiNode` must have a branch for `Unknown`. Debug builds may
-  show a placeholder; release builds render nothing and do not throw.
+- Lazy items have stable identity keys; the screen-level lazy list has meaningful
+  `contentType` grouping. Preserve identities across patches and repeat parses.
+- Containers recursively render supported child types with valid constraints.
+  Avoid unbounded same-axis scroll nesting. Bounded-size nesting is permitted by
+  [Compose lists](https://developer.android.com/develop/ui/compose/lists#avoid-nesting-scrollable);
+  do not replace large virtualized grids with eager rows solely to satisfy a ban.
+- A node with `visibility == GONE` produces no composed content.
+- Apply declared interactions and semantics consistently to all node variants.
+- Unsupported-node fallbacks render without throwing; debug placeholders are
+  acceptable, while release fallback may omit unusable content.
 
-## Parser (PART 7-3)
+## Parser safety
 
-```kotlin
-private const val MAX_DEPTH = 12
+Enforce the declared recursion/resource budget before interpreting node fields
+or descending into children. Every child traversal advances the depth budget.
+Budget exhaustion returns a safe fallback rather than a stack overflow or exception.
 
-fun JsonObject.toUiNode(json: Json, depth: Int = 0): UiNode {
-    val id = this["id"]?.jsonPrimitive?.contentOrNull ?: UUID.randomUUID().toString()
-    if (depth > MAX_DEPTH) return UiNode.Unknown(id, "max_depth_exceeded")
-    val type = this["type"]?.jsonPrimitive?.contentOrNull ?: return UiNode.Unknown(id, "null")
-    return runCatching {
-        when (type) {
-            "COLUMN" -> UiNode.Column(id, ..., childrenOf(json, depth + 1))
-            "PRODUCT_CARD" -> UiNode.ProductCard(id, ..., toProductData())
-            else -> UiNode.Unknown(id, type)                 // unsupported type
-        }
-    }.getOrElse { UiNode.Unknown(id, "$type(parse_error)") } // malformed payload
-}
-```
+Treat unsupported types and malformed known types as distinct diagnostics with
+safe fallback behavior. Include malformed `id` and `type` field shapes in the
+protected parsing boundary; primitive extraction must not throw before fallback
+handling begins. Parse all other fields defensively as well.
 
-Two fallbacks, not one: an unsupported type and a field-level parse failure are
-different faults and both must degrade to `Unknown`. Depth is checked before any
-child recursion.
+Define deterministic identity for malformed nodes or safely omit them according
+to the adopted contract. Random identity on every parse undermines lazy keys and
+patch targeting. The fallback itself must not fail during rendering.
 
-## Action interpreter (PART 7-4)
+## Action interpreter
 
-- `SduiAction` is a sealed type and the executor `when` is exhaustive. No
-  reflection, no dynamic dispatch on a raw string.
-- `Noop` and `Unknown` are silent no-ops, so an action added on the server never
-  crashes an older client.
-- `Sequence` executes steps in order; `Condition` evaluates one fixed operator
-  set and runs a single branch.
-- `Navigate` registers `expectResult` before emitting the navigation effect.
-- Navigation, dismissal, scrolling, toasts, and snackbars leave as `UiEffect`;
-  the executor never touches `NavController` or `Context`.
-- `RefreshSections` calls the repository and returns; the UI update arrives
-  through the Room flow.
-- Expression resolution is **regex substitution only**:
+- Use a finite typed catalog and exhaustive execution. No reflection or dynamic
+  dispatch that grants arbitrary behavior from raw server strings.
+- Unknown future actions and explicit no-ops safely do nothing on an older client.
+  Server capability validation remains a separate obligation.
+- Sequences execute in order; conditions choose one branch using only declared
+  operators within the complexity bound.
+- Register expected results before emitting navigation.
+- Navigation, dismissal, scrolling, toasts, and snackbars leave as transient UI
+  effects. Route/AppShell wiring performs them; the interpreter owns neither
+  `NavController` nor `Context`.
+- Refresh commands use repository contracts; durable updates arrive through
+  storage observation.
+- Resolve only allowlisted, typed binding references from the declared context.
+  Define unresolved/mismatched-value behavior; no `eval`, scripting engine, or
+  arbitrary member traversal. See [json-schema-guide.md](json-schema-guide.md)
+  for binding roots and destination/operation authority checks.
 
-```kotlin
-private val TOKEN = Regex("""\{\$\.([\w.]+)\}""")
+## Cross-screen results
 
-private fun resolve(template: String, ctx: ActionContext): String =
-    TOKEN.replace(template) { m ->
-        when (val path = m.groupValues[1]) {
-            "item.token" -> (ctx.node as? UiNode.ProductCard)?.data?.token.orEmpty()
-            "section.id" -> ctx.sectionId.orEmpty()
-            else -> ctx.result?.get(path.removePrefix("result.")).orEmpty()
-        }
-    }
-```
+Keep the existing caller instance and its state alive while a destination returns
+a result. A deep link is not inherently wrong, but recreating the caller instead
+of returning can lose state or create unwanted back-stack entries.
 
-No `eval`, no scripting engine, no template language that can reach arbitrary
-members.
+1. The caller registers the expected result before navigation.
+2. The destination performs its work without learning the caller's implementation.
+3. Dismissal returns a typed result under the registered key.
+4. The existing caller consumes the result once and executes the registered action,
+   which may refresh sections and conditionally scroll.
 
-## Cross-screen result delivery (PART 1-2, PART 7-5)
+Use the project's actual navigation/result API rather than copying a NavController
+recipe into a Navigation3 host. Preserve caller scroll, images, and usable content.
+Patch operations can add or update sections without rebuilding the whole screen.
 
-Problem: screen A opens B, and returning must create or refresh one section
-while A stays alive.
-
-A deep-link round trip is wrong. It produces `A -> B -> A'`, so back navigation
-returns to B forever, A loses scroll position, images and cache, and the return
-URI has to re-expose a domain id.
-
-Correct flow:
-
-1. A navigates with `NAVIGATE` and registers `expectResult` under a result key.
-2. B does local work.
-3. B closes with `DISMISS_WITH_RESULT`, emitting a payload under that key. B
-   never learns who A is.
-4. A resumes, matches the key, and runs the registered action: usually
-   `REFRESH_SECTIONS` followed by a conditional `SCROLL_TO`.
-
-The server answers with patch operations, not a whole screen. `UPSERT` collapses
-"create" and "update" into one operation, so the server needs no knowledge of
-client state.
-
-```kotlin
-// B: closing. A is not recreated.
-navController.previousBackStackEntry?.savedStateHandle?.set(key, payload)
-navController.popBackStack()
-
-// A: receiving, then clearing so it fires once.
-entry?.savedStateHandle?.getStateFlow<Map<String, String>?>(key, null)
-    ?.filterNotNull()
-    ?.collect { payload ->
-        viewModel.onEvent(ScreenEvent.ResultReceived(key, payload))
-        entry.savedStateHandle[key] = null
-    }
-```
-
-Required behavior around the patch:
-
-| Concern | Handling |
+| Concern | Required behavior |
 |---|---|
-| Scroll preservation | stable `key` per section; without it the list rebuilds and scroll jumps. This is the whole reason patches exist. |
-| Insertion jump | inserting above the viewport pushes content; animate or compensate the offset |
-| Refresh failure | keep the existing section and fail quietly, never blank the screen |
-| Duplicate triggers | `distinctUntilChanged` plus `flatMapLatest` on fast round trips |
-| Ordering | discard a patch whose `version` is older than the stored one |
+| Scroll preservation | Stable section identity and layout-state handling preserve the viewed content across patches |
+| Insertion above viewport | Compensate or animate position changes according to the interaction contract |
+| Refresh failure | Keep usable existing content; classify local/global errors rather than swallowing AppShell recovery |
+| Duplicate results | Define semantic duplicate identity and consumption order; cancel prior work only when doing so is safe |
+| Patch ordering | Discard versions older than stored state, independently of duplicate-result policy |
 
-## Server-time countdown (PART 8-6)
+For global/session failures, use `android-appshell-error-handling` and
+`app-shell-error-contract`; preserving old content is not permission to hide a
+required recovery action.
 
-Countdowns compute remaining time from a server-adjusted clock, never
-`System.currentTimeMillis()`. Derive the offset from the response `Date` header;
-a device-clock countdown can be extended by changing the system time. Drive the
-tick from a `LaunchedEffect` keyed on the deadline and stop the loop at zero.
+## Countdown lifetime and time basis
 
-## Risk table (PART 7-6)
+Derive remaining time from the declared trusted reference time and elapsed-time
+measurement, not a freely adjustable wall clock alone. A response `Date` header
+or clock offset does not by itself prove tamper resistance; establish reference
+trust, freshness, and resynchronization under the actual protocol. Lifecycle-bound
+ticks restart when their deadline changes and stop at zero or owner disposal.
 
-| Risk | Defense |
-|---|---|
-| Deep nesting cost | `MAX_DEPTH` enforced at parse time |
-| Recomposition storms | `@Immutable` models plus `key` and `contentType` |
-| Design drift | reject raw dp/hex, tokens only, validated server-side |
-| Undebuggable trees | debug-build node boundary overlay and JSON inspector |
-| Lost accessibility | `accessibility` field plus semantic components first |
+## Risk and accessibility checks
 
-Accessibility maps straight through the shared modifier builder:
+- Bound parse depth and work before recursion.
+- Use truthful immutable/stability contracts and identity/content grouping; an
+  annotation alone does not prove recomposition performance.
+- Reject raw styling server-side while retaining client token fallbacks.
+- Debug-only tree inspection can aid diagnosis without becoming a production dependency.
+- Inspect actual accessibility semantics, not just JSON field presence.
 
-```kotlin
-// "accessibility": { "label": "Season sale banner", "role": "BUTTON", "hidden": false }
-m = m.semantics {
-    node.accessibility?.label?.let { contentDescription = it }
-    node.accessibility?.role?.let { role = it.toComposeRole() }
-}
-```
+[Compose semantics](https://developer.android.com/develop/ui/compose/accessibility/semantics)
+separates accessible names, roles, state, and actions. Map the declared semantics
+into the real tree, preserving correct built-in text and merged semantics.
+Decorative/duplicate hiding is valid; hiding the sole operable function is not
+an exemption. Every interaction remains perceivable and operable to assistive
+technology, whether rendered from primitives or a semantic component.

@@ -2,7 +2,7 @@
 name: ios-app-shell-error-handling
 description: Use when implementing or reviewing iOS app-wide error handling where SwiftUI views/ViewModels notify common errors and an @main App, WindowGroup AppShell, NavigationStack coordinator, or UIKit AppCoordinator owns root navigation, tab/session flow switching, alerts, sheets, toast hosts, SessionExpired handling, Maintenance handling, and root reset behavior.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [app shell, appshell, global error, common error, session expired, alert host, toast host, root reset, 공통 에러, 전역 에러, 세션 만료]
+taskTerms: [app shell, appshell, global error, common error, session expired, alert host, toast host, root reset]
 pathGlobs: ["**/*AppShell*.swift", "**/*AppCoordinator*.swift", "**/*CommonError*Host.swift"]
 requires: [app-shell-error-contract]
 ---
@@ -54,7 +54,7 @@ UIKit structure:
 - Feature coordinators may request intents, but root coordinator performs common
   session flow changes.
 
-Feature views and ViewModels render feature UI and notify error intents only.
+For common errors, feature views and ViewModels emit error intents rather than owning global UI or root recovery. Feature-local errors remain in feature state.
 
 ## Shared Error Contract
 
@@ -72,8 +72,8 @@ Read [`app-shell-error-contract`](../app-shell-error-contract/SKILL.md) before t
 
 Request changes when any of these are true:
 
-- A feature ViewModel mutates `NavigationPath`, `AppRoute` path, root session
-  flow, or coordinator root reset directly.
+- For a common error, a feature ViewModel directly mutates the root route/path
+  state, including `NavigationPath`, root session flow, or coordinator reset.
 - A feature ViewModel owns SwiftUI `Alert`, `Sheet`, UIKit `UIAlertController`,
   snackbar host, or toast host for common errors.
 - A feature view presents session-expired or maintenance UI instead of AppShell.

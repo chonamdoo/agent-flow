@@ -338,12 +338,19 @@ def resolve_phase_skills(
             required_names.append(entry.name)
 
     # profile 표로 붙는 skill은 upstream 파일이라 frontmatter 선언이 없어도 required다.
+    # Profile task aliases must preserve the same phase allowlists as frontmatter triggers.
+    declared_skill_phases = {
+        entry.name: entry.workflow_phases
+        for entry in catalog
+        if entry.phase_declared
+    }
     for routed in routed_profile_skills(
         profile,
         phase_id=phase_id,
         changed_files=changed_files,
         task_text=task_text,
         concerns=concerns,
+        declared_skill_phases=declared_skill_phases,
     ):
         if routed.name not in required_names:
             required_names.append(routed.name)

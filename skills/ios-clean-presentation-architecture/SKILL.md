@@ -2,7 +2,7 @@
 name: ios-clean-presentation-architecture
 description: Use when creating, modifying, or reviewing an iOS Clean Architecture presentation layer with SwiftUI/UIKit state holders, explicit UiState, UiModel mapping, dependency injection, and state-based presentation code review.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [uistate, ui state, state holder, observableobject, swiftui view state, 상태 홀더, 화면 상태, 프레젠테이션 계층]
+taskTerms: [uistate, ui state, state holder, observableobject, swiftui view state, screen state, presentation layer]
 pathGlobs: ["**/*ViewModel.swift", "**/*UiState.swift", "**/Presentation/**"]
 requires: [clean-architecture-core]
 ---
@@ -25,7 +25,6 @@ For AppShell-owned global error hosts, queue acknowledgement, or root navigation
 - Apple `URLSession` docs define asynchronous network transfers that return data
   and `URLResponse` or throw errors.
 - Apple Swift `Result` docs model success and failure as typed associated values.
-- GitHub API check on 2026-06-01: `Swinject/Swinject` had the highest stars among checked Swift DI containers; `Factory`, `swift-dependencies`, and `Needle` were active alternatives.
 - Library docs: Factory targets Swift/SwiftUI container DI and previews/tests; swift-dependencies is inspired by SwiftUI environment; Needle is compile-time safe; Swinject is a mature Swift DI container.
 
 ## Architecture Rule
@@ -54,7 +53,7 @@ For AppShell-owned global error hosts, queue acknowledgement, or root navigation
 iOS has no built-in Hilt equivalent. Use this priority:
 
 1. Prefer initializer injection for local dependencies.
-2. Use a composition root such as `AppDependencies`, `SceneDependencies`, or feature builder/factory to wire concrete implementations once.
+2. Use the adopted app, scene, or feature composition owner to construct concrete implementations with explicit shared or local lifetimes.
 3. In SwiftUI, use `EnvironmentValues` / `@Environment` for app-level dependencies and feature dependencies that must flow through a view tree.
 4. If using iOS 17+ Observation, prefer `@Observable` state holders with `@State` ownership and `@Environment` injection where it fits the tree.
 5. Use `@StateObject`, `@ObservedObject`, and `@EnvironmentObject` only when the project still uses `ObservableObject` or needs incremental migration.
@@ -62,42 +61,26 @@ iOS has no built-in Hilt equivalent. Use this priority:
 
 Library selection:
 - Existing repo standard wins.
-- For new SwiftUI container-based DI, prefer `Factory` when a library is justified.
+- For justified SwiftUI container-based DI, consider `Factory` if its scope and test/preview substitution model fits the project.
 - For controllable live/test/preview dependencies, especially clients like date, UUID, API, storage, or feature flags, consider `swift-dependencies`.
 - For mature general-purpose container DI or existing UIKit-heavy codebases, `Swinject` is acceptable.
 - For large modular apps that need generated compile-time-safe dependency graphs, consider `Needle`.
+- Check the selected library's supported Swift/toolchain versions, lifetime semantics, and compile-time or runtime resolution guarantees; popularity alone does not establish suitability.
 - Do not introduce a DI library for a small feature when initializer injection plus composition root is enough.
 
 ## Direct DI Shape
 
-Use direct DI before a container:
+Prefer direct composition when a container adds no needed capability. The
+composition owner constructs dependencies for their declared app, scene, or
+feature lifetime and passes typed dependencies through initializers or SwiftUI
+environment values. Shared collaborators are reused within that owner, not
+automatically made app-wide singletons.
 
-```swift
-struct AppDependencies {
-    var searchUseCase: SearchUseCase
-}
-
-extension EnvironmentValues {
-    @Entry var appDependencies: AppDependencies = .live
-}
-```
-
-If the project toolchain cannot use `@Entry`, use the older `EnvironmentKey` shape instead:
-
-```swift
-private struct AppDependenciesKey: EnvironmentKey {
-    static let defaultValue: AppDependencies = .live
-}
-
-extension EnvironmentValues {
-    var appDependencies: AppDependencies {
-        get { self[AppDependenciesKey.self] }
-        set { self[AppDependenciesKey.self] = newValue }
-    }
-}
-```
-
-At the composition root, create concrete dependencies once and inject them through initializers or environment values. Tests and previews should replace `AppDependencies` with test doubles.
+Use `@Entry` for custom environment values when the project toolchain supports
+it; otherwise use `EnvironmentKey` and `EnvironmentValues`. Choose defaults
+according to the dependency contract rather than assuming a live implementation
+is safe. Tests and previews must be able to supply replacements without reaching
+production services.
 
 ## Swinject Rule
 
@@ -111,7 +94,7 @@ Registration shape:
 - Prefer initializer injection inside resolved types. Use property, method, or `initCompleted` injection only for UIKit/storyboard integration or unavoidable circular dependencies.
 
 Lifetime and tests:
-- Choose object scopes deliberately: `.transient` for new instances, `.graph` for one resolution graph, `.container` for app-wide shared instances, `.hierarchy` for parent/child container sharing, and `.weak` only for weakly shared instances.
+- Choose [Swinject object scopes](https://github.com/Swinject/Swinject/blob/master/Documentation/ObjectScopes.md) deliberately: `.transient` creates new instances; `.graph` shares within one resolution graph; `.container` shares within the registering container and its children; `.weak` shares only while strong references remain. A container need not be app-wide. Use a custom scope only when the project actually defines its storage and reset contract; `.hierarchy` is not a built-in scope.
 - Use child containers or alternate assemblies for tests, previews, and mock implementations.
 - If resolutions can cross threads, resolve through `container.synchronize()` as a `Resolver`; direct `Container.resolve` is not thread safe.
 - Treat circular dependencies as a design smell. If unavoidable, make one side property-based and wire it with `initCompleted`.
@@ -128,10 +111,10 @@ mapper. `UiModel` describes a responsibility, not a suffix whose absence fails r
 
 ## State Holder Rule
 
-Use a screen-level state holder:
-- SwiftUI iOS 17+: `@MainActor @Observable final class <Screen>ViewModel`
-- SwiftUI incremental/older code: `@MainActor final class <Screen>ViewModel: ObservableObject`
-- UIKit: `@MainActor final class <Screen>ViewModel` with explicit observation/binding used by the project
+Use a screen-level state holder with the project's adopted naming:
+- SwiftUI iOS 17+: use `@Observable` when adopting Observation, with UI state isolated to `MainActor`
+- SwiftUI incremental/older code: preserve `ObservableObject` and the corresponding ownership wrappers, with UI state isolated to `MainActor`
+- UIKit: use the project's explicit observation/binding mechanism and `MainActor`-safe UI state
 
 State patterns:
 - expose explicit `UiState`, preferably an enum with associated data

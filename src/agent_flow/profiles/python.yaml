@@ -74,7 +74,7 @@ skills:
       path_globs: ["**/src/core/domain/**", "**/src/domain/**", "**/src/core/data/**", "**/src/data/**", "**/src/features/**", "**/src/core/ui/**", "**/src/core/resources/**", "**/src/core/network/**", "**/src/core/platform/**", "**/src/core/permission/**", "**/src/core/navigation/api/**", "**/src/core/navigation/impl/**"]
     - group: llm-tool-development
       skills: [llm-tool-development]
-      task_terms: ["tool calling", "function calling", "mcp server", "mcp adapter", "툴콜", "mcp 서버"]
+      task_terms: ["tool calling", "function calling", "mcp server", "mcp adapter", "툴콜", "mcp 서버", "툴콜 개발", "툴콜 리뷰", "도구 호출 구현", "도구 호출 리뷰", "MCP 서버 개발", "MCP 어댑터 개발", "MCP 서버 리뷰"]
       path_globs: ["**/tool_dispatcher.py", "**/mcp_server.py"]
       concerns: [llm-tool-development]
       missing: "missing local LLM tool development: <skill>"

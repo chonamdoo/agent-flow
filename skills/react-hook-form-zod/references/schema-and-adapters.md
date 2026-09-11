@@ -24,6 +24,8 @@ Decide product meanings before coercing. Browser number inputs do not make raw v
 
 Normalize at one intentional boundary; account for `setValueAs`/`valueAsNumber` options already applied before the resolver to avoid conflicting double conversion. Schema defaults fill parse-time output, not necessarily the visible RHF default baseline.
 
+RHF `register` value conversion runs before validation and does not transform `defaultValue` or `defaultValues`. When `valueAsNumber` or `valueAsDate` is enabled, `setValueAs` is ignored. Establish where defaults and reset values are prepared instead of assuming user-input conversion normalizes every initialization path; choose conversion according to the field's meaning and installed API.
+
 ## Controlled and Native Inputs
 
 - Native inputs can use `register`; do not convert every input to `Controller`. External controlled widgets may use `Controller` or `useController` through a presentation field adapter.

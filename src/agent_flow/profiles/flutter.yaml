@@ -48,10 +48,20 @@ review_angles:
 skills:
   install:
     - dart-development-guide
+    - app-shell-error-contract
     - flutter-clean-architecture
     - flutter-clean-presentation-architecture
     - flutter-development-guide
   required_review:
+    - group: app-shell-error-contract
+      skills: [app-shell-error-contract]
+      task_terms: ["공통 에러", "전역 에러", "세션 만료"]
+      missing: "missing local app-shell-error-contract: <skill>"
+    - group: flutter-clean-presentation-architecture
+      skills: [flutter-clean-presentation-architecture]
+      task_terms: ["상태 홀더", "화면 상태", "프레젠테이션 계층"]
+      concerns: [flutter-clean-presentation-architecture]
+      missing: "missing local flutter-clean-presentation-architecture: <skill>"
     # baseline과 architecture를 가른다. 한 group에 두면 문구·색상만 바꾸는 변경에도
     # 계층 계약 문서가 required가 된다. architecture 문서는 계층 경계 경로가 실제로
     # 바뀔 때만 요구한다 — 경로 목록은 이 profile의 `architecture.roles`에서 온다.

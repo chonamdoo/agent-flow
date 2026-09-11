@@ -42,7 +42,7 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
 - For app-wide error handling, common dialog/snackbar/toast hosts, SessionExpired navigation, root navigation resets, or API/domain common error mapping, read the matching app-shell skill: `android-appshell-error-handling`, `react-app-shell-error-handling`, `react-native-app-shell-error-handling`, or `ios-app-shell-error-handling`.
 - For presentation-layer code generation, modification, and code review, also read the matching presentation architecture skill before writing or judging code:
   - Android/Compose or Android-targeted KMP presentation: read `android-clean-presentation-architecture`.
-  - React Web/Next.js/TSX presentation: read `react-clean-presentation-architecture`.
+  - React Web/Next.js presentation, confirmed by dependencies and source scope rather than TSX alone: read `react-clean-presentation-architecture`.
   - React Native/Expo presentation: read `react-native-clean-presentation-architecture`.
   - iOS/SwiftUI/UIKit presentation: read `ios-clean-presentation-architecture`.
   - Flutter/Dart presentation: read `flutter-clean-presentation-architecture`.
@@ -70,6 +70,8 @@ with [SKILL-MECHANICS](https://github.com/mattpocock/skills/blob/main/skills/pro
 Do not import either skill wholesale, install its scaffolder/validator, or create
 a second workflow. The repository's actual metadata and routing contract governs.
 
+When extracting or evaluating reusable professional knowledge and procedures, use `work-to-skill` as conditional authoring guidance. Do not add it as a generated skill's runtime dependency.
+
 - Establish the intended task, trigger/non-trigger examples, expected observable
   result, and harmful failure before writing. Resolve these from the request and
   project evidence; ask only for a material gap.
@@ -92,9 +94,11 @@ a second workflow. The repository's actual metadata and routing contract governs
   A skill is guidance, not an enforced permission or sandbox boundary.
 - Distinguish source facts, design choices, executed results, and deferred checks.
   Shorter text alone is not evidence of improved correctness or performance.
-- For each new or materially changed skill, hand off an observable acceptance,
-  valid-code counterexample, critical-failure case, non-target activation case,
-  and conditional-reference case. Evaluate actual behavior through the existing
+- For each new or materially changed skill, hand off observable acceptance and
+  cases appropriate to its capability: supported success, a valid alternative or
+  exception, material failure, non-target activation, and conditional references
+  when applicable. A knowledge-only or writing skill needs task decisions, not an
+  invented valid-code example. Evaluate actual behavior through the existing
   evaluation path; a readable document or resolved skill name is not behavioral proof.
 - Keep proof layers separate: deterministic structure, selection/distribution,
   and scorer contracts belong in declared CI; live-model behavior runs manually
@@ -121,7 +125,7 @@ a second workflow. The repository's actual metadata and routing contract governs
 - Explicit Receiver — make the owner of state or collaborator behavior clear at the call site without requiring language-specific receiver syntax.
 - Treat these as blocking only when the code creates a concrete correctness, data-loss, contract, testability, or high-risk maintainability defect. Style differences alone are non-blocking.
 - Use the selected language-specific guides as secondary checklists. Repo patterns and task scope stay first.
-- Default to no new comments during implementation. Apply `comment-authoring-discipline` as the semantic source for warranted comments and the final comment-quality pass.
+- Default to no new comments during implementation. Apply `comment-authoring-discipline` as the semantic source for warranted comments while writing; run its final comment-quality pass after implementation/fix work and before review.
 - Remove unused imports, variables, functions, and files created by the change.
 
 ## After Implementation

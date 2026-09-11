@@ -10,8 +10,8 @@
 1. **profile** — `active_profile_ids()`가 고른 profile들의 합본. 비활성 profile의
    선언은 입력에 아예 없다. Python 프로젝트에서 Android skill이 나오지 않는 이유가
    이것이고, 다른 층의 조건문이 아니다.
-2. **phase_id** — 코드를 쓰는 phase(`IMPLEMENTATION_PHASES`)와 판정하는
-   phase(`REVIEW_PHASES`)를 가른다.
+2. **phase_id** — 기본값은 코드 구현·리뷰 단계다. 스킬이 `workflowPhases`를
+   명시하면 코드·비코드 단계 모두 그 목록을 따른다.
 3. **changed_files / task_text** — 그룹의 `task_terms` / `path_globs`.
    `skill_resolver`의 selector matcher를 그대로 쓴다. 규칙이 둘로 갈라지면
    frontmatter로 붙은 skill과 profile로 붙은 skill이 다른 기준으로 활성화된다.
@@ -37,10 +37,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Collection, Mapping, Sequence
 
-# 합집합은 `skill_resolver.CODE_PHASES`와 같아야 한다 — read gate가 걸리지 않는 phase에
-# skill을 밀어 넣으면 프롬프트만 길어진다.
+# Explicit skill phase declarations override the code-phase default in both directions.
 IMPLEMENTATION_PHASES = frozenset(
     {
         "implement",
@@ -76,8 +75,9 @@ def routed_profile_skills(
     changed_files: Sequence[str] = (),
     task_text: str = "",
     concerns: Sequence[str] = (),
+    declared_skill_phases: Mapping[str, Collection[str]] | None = None,
 ) -> tuple[RoutedSkill, ...]:
-    """활성 profile 선언에서 이번 phase/변경 범위에 걸리는 skill을 고른다."""
+    """Route matching groups under explicit skill phases or the code-phase default."""
     if not isinstance(profile, dict):
         return ()
     routed: dict[str, RoutedSkill] = {}
@@ -86,7 +86,9 @@ def routed_profile_skills(
             group, changed_files=changed_files, task_text=task_text, concerns=concerns
         ):
             continue
-        for skill in _group_skills(group, phase_id=phase_id):
+        for skill in _group_skills(
+            group, phase_id=phase_id, declared_skill_phases=declared_skill_phases
+        ):
             routed.setdefault(skill.name, skill)
     return tuple(routed.values())
 
@@ -133,6 +135,7 @@ def _group_skills(
     group: dict,
     *,
     phase_id: str,
+    declared_skill_phases: Mapping[str, Collection[str]] | None,
 ) -> list[RoutedSkill]:
     group_id = str(group.get("group", "")).strip() or "profile"
     literal = _string_list(group.get("skills"))
@@ -141,12 +144,18 @@ def _group_skills(
     # 그룹 자신이 범위를 선언하지 않으면 활성화 근거가 없어 코드 phase 전체에 얹힌다.
     if not _has_selectors(group):
         return []
-    if phase_id not in IMPLEMENTATION_PHASES and phase_id not in REVIEW_PHASES:
+    code_phase = phase_id in IMPLEMENTATION_PHASES or phase_id in REVIEW_PHASES
+    if not code_phase and not declared_skill_phases:
         return []
     missing_report = str(group.get("missing", "")).strip()
     return [
         RoutedSkill(name=name, group=group_id, missing_report=missing_report)
         for name in literal
+        if (
+            phase_id in declared_skill_phases[name]
+            if declared_skill_phases is not None and name in declared_skill_phases
+            else code_phase
+        )
     ]
 
 

@@ -8,6 +8,11 @@ diff touches none of these, record every completion marker as `n/a`.
 ## What to verify
 
 Read `.agent-flow/skills/android-sdui-architecture/references/sdui-review-checklist.md` and apply all nine sections. For each marker, follow its Rule, How to check, and Verdict clauses and cite the observed evidence. Treat text searches as candidate discovery, never as proof that a structured schema passes. Output markdown findings only.
+Use `unverified` only where the marker below declares it. For other applicable
+checks with missing evidence, report the gap in prose and leave the check
+unresolved; do not invent a value or substitute `pass`, `fail`, or `n/a`.
+Follow the active workflow's missing-evidence or blocked path, and do not approve
+while required evidence is unresolved.
 
 
 ## Must-fix policy

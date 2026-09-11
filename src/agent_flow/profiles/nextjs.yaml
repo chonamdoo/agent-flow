@@ -1,5 +1,5 @@
 id: nextjs
-capabilities: [react-web]
+capabilities: [react-web, webview-json-rpc]
 branching:
   strategy: trunk
   base: main
@@ -42,7 +42,13 @@ skills:
     - react-development-guide
     - typescript-development-guide
     - llm-tool-development
+    - nextjs-auth-session
   required_review:
+    - group: nextjs-auth-session
+      skills: [nextjs-auth-session]
+      task_terms: ["next.js authentication", "nextjs authentication", "next.js server authentication", "next.js auth", "nextjs auth", "next.js session", "nextjs session", "next.js server authorization", "Next.js 인증", "Next.js 세션", "Next 서버 인가"]
+      concerns: [nextjs-auth-session]
+      missing: "missing local nextjs-auth-session: <skill>"
     # baseline과 architecture를 가른다. 한 group에 두면 문구·색상만 바꾸는 변경에도
     # 계층 계약 문서가 required가 된다(실측: `.tsx` 한 줄 변경에 required 4개 /
     # 15,746 B → 2개 / 5,220 B). architecture 문서는 계층 경계 경로가 실제로 바뀔 때만
@@ -75,7 +81,7 @@ skills:
       path_globs: ["**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"]
     - group: llm-tool-development
       skills: [llm-tool-development]
-      task_terms: ["tool calling", "function calling", "mcp server", "mcp adapter", "툴콜", "mcp 서버"]
+      task_terms: ["tool calling", "function calling", "mcp server", "mcp adapter", "툴콜", "mcp 서버", "툴콜 개발", "툴콜 리뷰", "도구 호출 구현", "도구 호출 리뷰", "MCP 서버 개발", "MCP 어댑터 개발", "MCP 서버 리뷰"]
       path_globs: ["**/tool-dispatcher.*", "**/mcp-server.*"]
       concerns: [llm-tool-development]
       missing: "missing local LLM tool development: <skill>"

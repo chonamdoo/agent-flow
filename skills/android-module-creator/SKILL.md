@@ -2,7 +2,7 @@
 name: android-module-creator
 description: Android module creation workflow for new feature modules and Clean Architecture slices, including Gradle registration, convention plugin selection, dependency direction, Hilt bindings, and initial screen scaffolding. Use when creating a new Android module or feature slice; do not use for non-Android packages or presentation-only screen edits inside an existing module.
 workflowPhases: [design, ddd-design, implement, implement-fix, green, refactor]
-taskTerms: [new module, module creation, feature slice, convention plugin, 모듈 생성, 새 모듈, 피처 슬라이스, gradle 모듈]
+taskTerms: [new module, module creation, feature slice, convention plugin, gradle module]
 pathGlobs: ["**/settings.gradle.kts", "**/settings.gradle", "**/build-logic/**"]
 ---
 
@@ -16,7 +16,7 @@ templates. If a generator task exists, use it instead of hand-creating files.
 
 1. Inspect existing module names, Gradle convention plugins, version catalogs, and nearby feature modules.
 2. Choose the module layer and dependency direction before creating files.
-3. Register the smallest useful vertical slice in `settings.gradle.kts` and matching build files.
+3. Register the smallest useful vertical slice in the repository's existing Kotlin or Groovy settings file and matching build files.
 4. Add DI, navigation, and screen scaffolding only where the project already uses those mechanisms.
 
 ## Non-goals
@@ -26,14 +26,14 @@ templates. If a generator task exists, use it instead of hand-creating files.
 
 ## Process
 
-1. Inspect `settings.gradle.kts`, `build-logic`, `buildSrc`, version catalogs,
-   and nearby feature modules.
+1. Inspect the existing `settings.gradle.kts` or `settings.gradle`, `build-logic`,
+   `buildSrc`, version catalogs, and nearby feature modules.
 2. Identify the repository's module taxonomy. Common layers are
    `presentation`, `domain`, `usecase`, and `data`, but do not force layers
    that the project does not use.
 3. Choose dependency direction before editing Gradle files.
 4. Create the smallest useful vertical slice and register it in
-   `settings.gradle.kts`.
+   the existing settings file using its Kotlin or Groovy DSL.
 5. Add DI/navigation only where the project already uses those mechanisms.
 6. Run at least the module build or the Android profile build gate.
 
@@ -57,7 +57,7 @@ Rules:
 
 ## Gradle Checklist
 
-- `settings.gradle.kts` includes every new submodule.
+- The repository's existing Kotlin or Groovy settings file includes every new submodule.
 - Each module applies the repository's matching convention plugin.
 - Version catalog aliases are reused instead of hard-coded dependency versions.
 - New dependencies are scoped narrowly to the layer that uses them.

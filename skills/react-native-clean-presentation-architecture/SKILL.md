@@ -2,7 +2,7 @@
 name: react-native-clean-presentation-architecture
 description: Use when creating, modifying, or reviewing a React Native Clean Architecture presentation layer with Context Provider DI, state-holder hooks, uiState modeling, UiModel mapping, navigation effects, and state-based presentation code review.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [uistate, ui state, state holder, screen state, navigation effect, 상태 홀더, 화면 상태, 프레젠테이션 계층]
+taskTerms: [uistate, ui state, state holder, screen state, navigation effect, presentation layer]
 pathGlobs: ["**/*UiState.ts", "**/*UiState.tsx", "**/presentation/**"]
 requires: [clean-architecture-core]
 ---
@@ -27,7 +27,6 @@ For AppShell-owned global error hosts, queue acknowledgement, or root navigation
 - React Native FlatList docs require stable keys and `extraData` when render output depends on external state.
 - React Native SafeAreaView is deprecated in current docs; prefer `react-native-safe-area-context` for safe area handling.
 - React Native has no official Hilt-equivalent DI container; external containers should be introduced only when project shape justifies them.
-- npm downloads check on 2026-06-02 for 2026-05-02..2026-05-31: `tsyringe` 23,949,329; `inversify` 8,334,605; `typed-inject` 3,066,359; `awilix` 1,904,000; `typedi` 1,878,420.
 
 ## Architecture Rule
 
@@ -61,12 +60,12 @@ React Native runs on React, so it does not have a Hilt-equivalent official DI fr
    use-case, repository-interface, or capability ports to presentation. Raw API,
    storage, and native clients stay behind those ports.
 3. Use an external DI container only when the project already has class-heavy domain/application services or an existing container.
-4. If introducing a TypeScript DI container is justified, prefer the current repo standard. If none exists, `tsyringe` is the default candidate because current npm usage is higher than common alternatives.
+4. If a TypeScript DI container is justified, prefer the repo's adopted tool. For a new choice, compare required lifetime and resolution behavior, RN/Expo compiler and runtime compatibility, metadata support, and test/preview substitution. `tsyringe` is one conditional candidate, not a popularity-based default.
 
 Provider rules:
-- create providers near composition roots such as `App`, navigation root, or feature boundaries
+- create providers at the adopted app, framework navigation, or feature composition boundary
 - create context objects outside components
-- expose typed hooks such as `useSearchDependencies()`
+- expose typed dependency access through hooks following the project's naming convention
 - throw a clear error when a required provider is missing
 - keep provider values stable only when identity churn causes real rerender risk
 - do not put screen-local state into app dependency providers
@@ -85,7 +84,7 @@ describes a role, not a suffix whose absence alone blocks approval.
 ## State Holder Rule
 
 Use a custom hook as the screen state holder:
-- name it `use<Screen>ViewModel`
+- follow the project's state-holder hook naming convention
 - inject use cases/dependencies through props, parameters, or dependency hooks
 - expose `uiState` as an explicit discriminated union
 - expose user actions as named callbacks
@@ -121,7 +120,7 @@ Event patterns:
 ## Component Rule
 
 Split state-holder wiring from rendering:
-- navigation/screen container obtains dependencies and calls `use<Screen>ViewModel`
+- the navigation/screen container obtains dependencies and invokes the screen state-holder hook
 - screen component receives plain `uiState` and callbacks
 - child components receive only the data/callbacks they need
 - presentational components should not import use cases, repositories, API clients, native modules, or DI containers
@@ -184,4 +183,3 @@ A `fail` result is actionable: record the failed criterion and return to the wor
 - React Native FlatList docs
 - React Native SafeAreaView docs
 - TSyringe README
-- npm package metadata API

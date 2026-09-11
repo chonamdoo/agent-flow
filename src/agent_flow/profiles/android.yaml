@@ -1,4 +1,5 @@
 id: android
+capabilities: [webview-json-rpc]
 branching:
   strategy: trunk
   base: main
@@ -81,6 +82,31 @@ skills:
     # 설치는 profile이 넓게, 활성화는 선언이 좁게 한다.
     - android-sdui-architecture
   required_review:
+    - group: android-appshell-error-handling
+      skills: [android-appshell-error-handling]
+      task_terms: ["공통 에러", "전역 에러", "세션 만료"]
+      concerns: [android-appshell-error-handling]
+      missing: "missing local android-appshell-error-handling: <skill>"
+    - group: android-clean-presentation-architecture
+      skills: [android-clean-presentation-architecture]
+      task_terms: ["상태 홀더", "화면 상태", "프레젠테이션 계층"]
+      concerns: [android-clean-presentation-architecture]
+      missing: "missing local android-clean-presentation-architecture: <skill>"
+    - group: android-debugging
+      skills: [android-debugging]
+      task_terms: ["크래시", "재현", "무한 로딩", "렌더링 오류", "원인 분석"]
+      concerns: [android-debugging]
+      missing: "missing local android-debugging: <skill>"
+    - group: android-module-creator
+      skills: [android-module-creator]
+      task_terms: ["모듈 생성", "새 모듈", "피처 슬라이스", "gradle 모듈"]
+      concerns: [android-module-creator]
+      missing: "missing local android-module-creator: <skill>"
+    - group: android-sdui-architecture
+      skills: [android-sdui-architecture]
+      task_terms: ["서버 드리븐", "서버드리븐", "서버 주도 ui", "동적 화면", "json 렌더링", "컴포넌트 카탈로그"]
+      concerns: [android-sdui-architecture]
+      missing: "missing local android-sdui-architecture: <skill>"
     # baseline과 architecture를 가른다. 한 group에 두면 문구·색상만 바꾸는 변경에도
     # 계층 계약 문서가 required가 된다(실측: `.tsx` 한 줄 변경에 required 4개 /
     # 15,746 B → 2개 / 5,220 B). architecture 문서는 계층 경계 경로가 실제로 바뀔 때만

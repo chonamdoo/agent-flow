@@ -1,0 +1,9 @@
+skills:
+  install:
+    - webview-json-rpc-bridge
+  required_review:
+    - group: webview-json-rpc-bridge
+      skills: [webview-json-rpc-bridge]
+      task_terms: ["webview json-rpc", "webview json rpc", "webview rpc bridge", "웹뷰 JSON-RPC", "웹뷰 RPC 브리지"]
+      concerns: [webview-json-rpc-bridge]
+      missing: "missing local webview-json-rpc-bridge: <skill>"

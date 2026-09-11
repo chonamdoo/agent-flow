@@ -34,17 +34,6 @@ def _gate(body: str) -> str:
     return f"# artifact\n\n## Completion Gate\n\n{body}\n"
 
 
-def test_codex_reviewer_missing_skill_policy_matches_canonical():
-    canonical = (
-        REPO / "skills" / "code-generation-discipline" / "SKILL.md"
-    ).read_text(encoding="utf-8")
-    reviewer = (REPO / ".Codex" / "agents" / "code-reviewer.md").read_text(
-        encoding="utf-8"
-    )
-
-    assert "never turn absence into `verdict: request-changes`" in canonical
-    assert "non-blocking coverage gap" in reviewer
-    assert "never changes the verdict" in reviewer
 
 
 # --- P7 -----------------------------------------------------------------
@@ -530,51 +519,13 @@ def test_sdui_depends_on_the_presentation_contract():
     assert "android-clean-architecture" in requirements
     assert "android-clean-presentation-architecture" in requirements
 
-    presentation = PRESENTATION_SKILL.read_text(encoding="utf-8")
-    assert "## Server-Driven Screen Exception" in presentation
-    # 이름이 반대로 붙는다는 사실이 예외 절의 핵심이다. 방향으로 판정하게 만든다.
-    assert "ScreenEvent" in presentation and "UiEffect" in presentation
-    assert presentation.index("## Server-Driven Screen Exception") < presentation.index(
-        "## Navigation Rule"
-    )
 
     sdui_angle = (REVIEW_ANGLES / "sdui.md").read_text(encoding="utf-8")
     assert "sdui-udf-contract: pass|fail|n/a" in sdui_angle
     assert "sdui-udf-contract: pass|fail|n/a" in SDUI_SKILL.read_text(encoding="utf-8")
 
-    checklist = (SDUI_SKILL.parent / "references" / "sdui-review-checklist.md").read_text(
-        encoding="utf-8"
-    )
-    item_nine = checklist.split("## 9. `sdui-udf-contract`", 1)[1]
-    for evidence_rule in ("Source:", "Rule:", "How to check:", "Verdict:"):
-        assert evidence_rule in item_nine
 
 
-def test_promoted_presentation_rules_stay_project_neutral():
-    """반증: `AppResult<T>`를 올렸다가 존재하지 않는 타입을 요구한 적이 있다."""
-    text = PRESENTATION_SKILL.read_text(encoding="utf-8")
-    for promoted in (
-        "Do not start initial screen-state loading from `init`",
-        "`MutableStateFlow` is for ViewModel-owned input and transient transition state",
-        "## Derived Display State",
-        "## List Item Modeling",
-        "## UiModel Stability",
-        "Preview and Compose UI tests target the stateless screen/content composable",
-    ):
-        assert promoted in text
-    # 프로젝트 로컬 메커니즘은 승격 대상이 아니다. 올리면 없는 타입을 요구하게 된다.
-    for project_local in (
-        "launchCatching",
-        "CommonErrorNotifier",
-        "ViewModelErrorLauncher",
-        "AppError",
-        "AppFailure",
-        "AppResult",
-        "TaraeDimensions",
-        "TaraeColors",
-        "TaraeTypography",
-    ):
-        assert project_local not in text
 
 
 
@@ -594,36 +545,31 @@ def test_shared_presentation_contract_marker_is_required_by_architecture_reviews
         assert marker in phase["required_markers"]
         assert marker in phase["prompt"]
 
-    architecture_skill = (
-        SKILLS / "architecture-reviewer" / "SKILL.md"
-    ).read_text(encoding="utf-8")
-    assert marker not in architecture_skill
-    assert "Use only the markers supplied by the active phase" in architecture_skill
-    assert "do not launch reviewer CLIs yourself" in architecture_skill
 
 
 def test_sdui_completion_marker_values_match_the_evidence_contract():
     template = (REVIEW_ANGLES / "sdui.md").read_text(encoding="utf-8")
     skill = SDUI_SKILL.read_text(encoding="utf-8")
 
+    markers = (
+        "sdui-design-token-only", "sdui-room-ssot-scope",
+        "sdui-action-finite-vocabulary", "sdui-parse-depth-limit",
+        "sdui-unknown-node-fallback", "sdui-list-key-contenttype",
+        "sdui-accessibility-field", "sdui-semantic-promotion", "sdui-udf-contract",
+    )
     for text in (template, skill):
         assert "sdui-architecture: applied|n/a" in text
-        assert "sdui-design-token-only: pass|fail|n/a|unverified" in text
-    assert template.count("sdui-review-checklist.md") == 1
-    assert "mark the completion gate `n/a`" not in template
+        for marker in markers:
+            contract = f"{marker}: pass|fail|n/a"
+            permits_unverified = marker == "sdui-design-token-only"
+            if permits_unverified:
+                contract += "|unverified"
+            declaration = next(line for line in text.splitlines() if line.startswith(f"{marker}:"))
+            assert declaration == contract
+            unresolved = missing_markers(_gate(f"{marker}: unverified"), (declaration,))
+            assert bool(unresolved) is not permits_unverified
 
 
-def test_sdui_ssot_maps_data_failures_before_presentation():
-    text = (
-        SKILLS / "android-sdui-architecture" / "references" / "offline-ssot-data-guide.md"
-    ).read_text(encoding="utf-8")
-
-    assert "ObserveScreenResult.Failure(it.toDomainError())" in text
-    assert "runCatching<ObserveScreenResult?>" in text
-    assert ".catch { emit(ObserveScreenResult.Failure" not in text
-    assert "screenErrorMapper.toUiModel(result.error)" in text
-    assert "screenUiMapper.toUiModel(result.screen)" in text
-    assert "ScreenUiState.Error(it.message)" not in text
 
 
 

@@ -735,3 +735,148 @@ def test_react_web_concern_cannot_activate_without_web_dependencies(tmp_path: Pa
         task_text="React Hook Form", concerns=["react-hook-form-zod"],
     ))
     assert "react-hook-form-zod" not in names
+
+
+_PORTFOLIO_WEB = {
+    "react-scroll-restoration", "react-runtime-i18n",
+    "ga4-ecommerce-events", "datadog-rum-sourcemaps",
+}
+_PORTFOLIO = _PORTFOLIO_WEB | {"nextjs-auth-session", "webview-json-rpc-bridge"}
+
+
+def _portfolio_resolution(tmp_path, monkeypatch, profile_id, dependencies, task, concerns=(), changed_files=(), *, phase_id="implement"):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    (tmp_path / "package.json").write_text(
+        json.dumps({"dependencies": dependencies}), encoding="utf-8",
+    )
+    bundled = tmp_path / ".agent-flow" / "skills"
+    bundled.parent.mkdir(exist_ok=True)
+    bundled.symlink_to(REPO / "skills", target_is_directory=True)
+    return resolve_phase_skills(
+        project_root=tmp_path, phase_id=phase_id, host="claude",
+        profile=load_profile_payload(profile_id, tmp_path),
+        task_text=task, concerns=concerns, changed_files=changed_files,
+    )
+
+
+@pytest.mark.parametrize(
+    "profile_id,dependencies,task,expected",
+    [
+        ("typescript", {"react": "19"}, "Restore scroll restoration after history traversal", "react-scroll-restoration"),
+        ("node", {"react": "19"}, "뒤로가기 위치 복원 수정", "react-scroll-restoration"),
+        ("typescript", {"react": "19"}, "Fix runtime translation request isolation", "react-runtime-i18n"),
+        ("nextjs", {"react": "19", "next": "16"}, "런타임 번역 로케일 변경", "react-runtime-i18n"),
+        ("node", {"react": "19"}, "Fix GA4 ecommerce purchase identity", "ga4-ecommerce-events"),
+        ("typescript", {"react": "19"}, "GA4 전자상거래 이벤트 중복 방지", "ga4-ecommerce-events"),
+        ("nextjs", {"react": "19", "next": "16"}, "Match Datadog sourcemap release", "datadog-rum-sourcemaps"),
+        ("node", {"react": "19"}, "Datadog 소스맵 업로드 릴리스 확인", "datadog-rum-sourcemaps"),
+        ("nextjs", {"react": "19", "next": "16"}, "Fix Next.js authentication authorization", "nextjs-auth-session"),
+        ("nextjs", {"react": "19", "next": "16"}, "Next.js 세션 쿠키 경계 수정", "nextjs-auth-session"),
+    ],
+)
+def test_portfolio_full_resolver_scopes_explicit_tasks(
+    tmp_path, monkeypatch, profile_id, dependencies, task, expected,
+):
+    resolution = _portfolio_resolution(tmp_path, monkeypatch, profile_id, dependencies, task)
+    required = {skill.name for skill in resolution.required}
+    assert required & _PORTFOLIO == {expected}
+    assert all(skill.exists for skill in resolution.required)
+
+
+@pytest.mark.parametrize("profile_id", ["android", "ios", "react-native", "node", "typescript", "nextjs"])
+@pytest.mark.parametrize("task,concerns", [
+    ("Implement WebView JSON-RPC request correlation", []),
+    ("웹뷰 JSON-RPC 응답 검증", []),
+    ("Review document transport boundary", ["webview-json-rpc-bridge"]),
+])
+def test_bridge_full_resolver_reaches_native_and_web_hosts(tmp_path, monkeypatch, profile_id, task, concerns):
+    resolution = _portfolio_resolution(tmp_path, monkeypatch, profile_id, {}, task, concerns)
+    assert {skill.name for skill in resolution.required} & _PORTFOLIO == {"webview-json-rpc-bridge"}
+    assert all(skill.exists for skill in resolution.required)
+
+
+@pytest.mark.parametrize("profile_id,dependencies,task,concerns", [
+    ("typescript", {}, "Fix runtime translation and GA4 ecommerce", list(_PORTFOLIO_WEB)),
+    ("typescript", {"react": "19", "react-native": "0.80"}, "스크롤 복원, 런타임 번역, GA4 전자상거래, Datadog 소스맵", list(_PORTFOLIO_WEB)),
+    ("typescript", {"react": "19", "expo": "53"}, "scroll restoration runtime i18n ga4 ecommerce datadog sourcemap", list(_PORTFOLIO_WEB)),
+    ("node", {"react": "19"}, "Fix Next.js authentication", ["nextjs-auth-session"]),
+    ("react-native", {"react": "19", "react-native": "0.80"}, "Implement TurboModule JSI native bridge", []),
+    ("android", {}, "Adjust WebView insets and keyboard layout", []),
+    ("ios", {}, "Fix native bridge module registration", []),
+    ("python", {}, "Implement WebView JSON-RPC", ["webview-json-rpc-bridge"]),
+    ("nextjs", {"react": "19", "next": "16"}, "Change label color", []),
+])
+def test_portfolio_full_resolver_rejects_nearby_non_targets(tmp_path, monkeypatch, profile_id, dependencies, task, concerns):
+    resolution = _portfolio_resolution(
+        tmp_path, monkeypatch, profile_id, dependencies, task, concerns,
+        changed_files=["src/components/Label.tsx"],
+    )
+    assert {skill.name for skill in resolution.required}.isdisjoint(_PORTFOLIO)
+
+
+@pytest.mark.parametrize("name", sorted(_PORTFOLIO_WEB | {"nextjs-auth-session"}))
+def test_portfolio_concerns_reach_tasks_without_keyword_hints(tmp_path, monkeypatch, name):
+    resolution = _portfolio_resolution(
+        tmp_path, monkeypatch, "nextjs", {"react": "19", "next": "16"},
+        "Review changed boundary", [name],
+    )
+    assert {skill.name for skill in resolution.required} & _PORTFOLIO == {name}
+
+
+@pytest.mark.parametrize("profile_id,dependencies,task,expected,excluded", [
+    ("android", {}, "공통 에러 처리", {"android-appshell-error-handling", "app-shell-error-contract"}, {"ios-app-shell-error-handling", "react-app-shell-error-handling"}),
+    ("android", {}, "화면 상태 변경", {"android-clean-presentation-architecture"}, {"react-clean-presentation-architecture"}),
+    ("android", {}, "무한 로딩 원인 분석", {"android-debugging"}, {"react-native-development-guide"}),
+    ("android", {}, "피처 슬라이스 모듈 생성", {"android-module-creator"}, {"kotlin-backend-development-guide"}),
+    ("android", {}, "서버 주도 ui 컴포넌트 카탈로그", {"android-sdui-architecture"}, {"react-clean-presentation-architecture"}),
+    ("ios", {}, "세션 만료 처리", {"ios-app-shell-error-handling", "app-shell-error-contract"}, {"android-appshell-error-handling"}),
+    ("ios", {}, "상태 홀더 변경", {"ios-clean-presentation-architecture"}, {"android-clean-presentation-architecture"}),
+    ("flutter", {}, "프레젠테이션 계층 수정", {"flutter-clean-presentation-architecture"}, {"react-clean-presentation-architecture"}),
+    ("flutter", {}, "공통 에러 처리", {"app-shell-error-contract"}, {"android-appshell-error-handling", "ios-app-shell-error-handling", "react-app-shell-error-handling", "react-native-app-shell-error-handling"}),
+    ("typescript", {"react": "19"}, "전역 에러 처리", {"react-app-shell-error-handling", "app-shell-error-contract"}, {"react-native-app-shell-error-handling"}),
+    ("typescript", {"react": "19"}, "화면 상태 변경", {"react-clean-presentation-architecture"}, {"react-native-clean-presentation-architecture"}),
+    ("typescript", {"react": "19"}, "RHF 폼 수정", {"react-hook-form-zod"}, {"react-native-development-guide"}),
+    ("react-native", {"react-native": "0.80"}, "공통 에러 처리", {"react-native-app-shell-error-handling", "app-shell-error-contract"}, {"react-app-shell-error-handling"}),
+    ("react-native", {"expo": "53"}, "화면 상태 변경", {"react-native-clean-presentation-architecture"}, {"react-clean-presentation-architecture"}),
+    ("react-native", {"react-native": "0.80"}, "내비게이션 구조 변경", {"react-native-operational-adoption"}, {"react-clean-architecture"}),
+    ("spring", {}, "코틀린 백엔드 수정", {"kotlin-backend-development-guide"}, {"android-code-review"}),
+    ("spring", {}, "스프링 트랜잭션 수정", {"spring-boot-development-guide"}, {"ktor-development-guide"}),
+    ("ktor", {}, "코토 서버 수정", {"ktor-development-guide"}, {"spring-boot-development-guide"}),
+    ("python", {}, "도구 호출 구현 검토", {"llm-tool-development"}, {"android-code-review"}),
+    ("python", {}, "공통 에러와 화면 상태 변경", set(), {"app-shell-error-contract", "android-appshell-error-handling", "react-clean-presentation-architecture"}),
+    ("typescript", {"react": "19", "expo": "53"}, "전역 에러와 화면 상태 변경", set(), {"react-app-shell-error-handling", "react-clean-presentation-architecture"}),
+])
+def test_localized_aliases_keep_platform_boundaries_in_full_resolver(
+    tmp_path, monkeypatch, profile_id, dependencies, task, expected, excluded,
+):
+    resolution = _portfolio_resolution(tmp_path, monkeypatch, profile_id, dependencies, task)
+    required = {skill.name for skill in resolution.required}
+    assert expected <= required
+    assert required.isdisjoint(excluded)
+
+
+@pytest.mark.parametrize("phase_id,expected", [("design", True), ("handoff", False)])
+def test_localized_aliases_preserve_declared_phase_boundaries(
+    tmp_path, monkeypatch, phase_id, expected,
+):
+    resolution = _portfolio_resolution(
+        tmp_path, monkeypatch, "nextjs", {"react": "19", "next": "16"},
+        "화면 상태 변경, runtime i18n and Next.js authentication",
+        phase_id=phase_id,
+    )
+    required = {skill.name for skill in resolution.required}
+    assert ("react-clean-presentation-architecture" in required) is expected
+    assert required.isdisjoint(_PORTFOLIO)
+
+
+@pytest.mark.parametrize("task,skill,phase_id", [
+    ("크래시", "android-debugging", "review"),
+    ("새 모듈", "android-module-creator", "red"),
+])
+def test_localized_aliases_respect_excluded_code_phases(
+    tmp_path, monkeypatch, task, skill, phase_id,
+):
+    resolution = _portfolio_resolution(
+        tmp_path, monkeypatch, "android", {}, task, phase_id=phase_id,
+    )
+    assert skill not in {entry.name for entry in resolution.required}

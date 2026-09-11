@@ -2,7 +2,7 @@
 name: spring-boot-development-guide
 description: "Spring Boot Java/Kotlin server development and review involving MVC/WebFlux, Security, transactions, JPA/JDBC/R2DBC, Batch, or service operations. Use with confirmed Spring dependencies or an explicit Spring server task; not for Gradle/Kotlin alone, Android, Ktor-only servers, or unrelated language edits."
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [Spring Boot, Spring MVC, Spring WebFlux, Spring Security, Spring transaction, Spring JPA, Spring R2DBC, Spring Batch, 스프링 부트, 스프링 서버, 스프링 트랜잭션]
+taskTerms: [Spring Boot, Spring MVC, Spring WebFlux, Spring Security, Spring transaction, Spring JPA, Spring R2DBC, Spring Batch, Spring server]
 requires: [clean-architecture-core]
 ---
 

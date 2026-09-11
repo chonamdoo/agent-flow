@@ -2,7 +2,7 @@
 name: react-hook-form-zod
 description: React Web React Hook Form creation, review, subscription performance, draft initialization, conditional fields, controlled adapters, and submission correctness; Zod resolver input/output at the form boundary. Not generic TSX, server-only Zod, other form libraries, or React Native-only work.
 workflowPhases: [design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [react-hook-form, react hook form, zodResolver, RHF form, RHF 폼]
+taskTerms: [react-hook-form, react hook form, zodResolver, RHF form]
 ---
 
 # React Hook Form and Zod

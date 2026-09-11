@@ -1,4 +1,5 @@
 id: ios
+capabilities: [webview-json-rpc]
 branching:
   strategy: trunk
   base: main
@@ -43,6 +44,16 @@ skills:
     - ios-clean-architecture
     - ios-clean-presentation-architecture
   required_review:
+    - group: ios-app-shell-error-handling
+      skills: [ios-app-shell-error-handling]
+      task_terms: ["공통 에러", "전역 에러", "세션 만료"]
+      concerns: [ios-app-shell-error-handling]
+      missing: "missing local ios-app-shell-error-handling: <skill>"
+    - group: ios-clean-presentation-architecture
+      skills: [ios-clean-presentation-architecture]
+      task_terms: ["상태 홀더", "화면 상태", "프레젠테이션 계층"]
+      concerns: [ios-clean-presentation-architecture]
+      missing: "missing local ios-clean-presentation-architecture: <skill>"
     # baseline과 architecture를 가른다. 한 group에 두면 문구·색상만 바꾸는 변경에도
     # 계층 계약 문서가 required가 된다(실측: `.tsx` 한 줄 변경에 required 4개 /
     # 15,746 B → 2개 / 5,220 B). architecture 문서는 계층 경계 경로가 실제로 바뀔 때만

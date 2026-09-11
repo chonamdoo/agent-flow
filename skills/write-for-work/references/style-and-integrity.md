@@ -36,11 +36,11 @@ Never repair missing evidence by inventing a plausible detail.
 
 Prefer natural Korean order and direct business wording.
 
-- Replace unnecessary "~을 가지고 있다" with a direct predicate.
-- Remove false passives such as "~되어진다".
-- Use "~라고 볼 수 있다" only when real uncertainty remains.
-- Reduce repeated sentence-openers such as "또한", "게다가", and "한편".
-- Replace empty weight such as "주목할 만하다", "시사하는 바가 크다", and "의미가 있다" with the actual result.
+- Replace unnecessary Korean constructions meaning "has or possesses" with a direct predicate.
+- Remove redundant double-passive constructions.
+- Use a hedge meaning "can be regarded as" only when real uncertainty remains.
+- Reduce repeated openers meaning "also", "in addition", or "meanwhile".
+- Replace empty claims of significance, major implications, or meaningfulness with the actual result.
 - Replace vague technical nouns with the screen, action, file, behavior, or decision the reader can inspect.
 - Avoid compressed noun chains when a short sentence is clearer.
 - Keep domain terminology when precision matters, and explain it at first use for mixed audiences.
@@ -48,10 +48,10 @@ Prefer natural Korean order and direct business wording.
 
 Avoid promotional certainty:
 
-- "유일한 합법 구조" becomes a sourced and dated comparison or a verification task.
-- "사업화 가능한 수준" becomes the exact technical result plus the business evidence still required.
-- "기술 리스크 해소" becomes the specific technical risk tested and the risks not tested.
-- "높은 지불 의향" becomes measured conversion data or an explicit customer hypothesis.
+- A claim of being the only lawful structure needs a sourced, dated comparison or a verification task.
+- A claim of commercial readiness needs the exact technical result and the business evidence still required.
+- A claim that technical risk is resolved needs the specific risk tested and the risks not tested.
+- A claim of high willingness to pay needs measured conversion data or an explicit customer hypothesis.
 
 ## English writing checks
 
@@ -85,7 +85,7 @@ For Korean business writing, read [plain-language.md](plain-language.md). Apply 
 
 Apply punctuation and typography restrictions only when the user, repository, organization, or selected profile requires them. Do not treat one person's preferences as universal writing rules.
 
-For Ricky's clean-writing profile:
+When the user or organization has explicitly selected a clean-writing profile with the following restrictions:
 
 - Avoid U+2014 em dash in revised prose.
 - Avoid U+00B7 middle dot in revised prose.

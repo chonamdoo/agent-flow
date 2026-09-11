@@ -2,7 +2,7 @@
 name: react-native-operational-adoption
 description: "Supplemental React Native and Expo development skill. Use alongside react-native-development-guide when writing, modifying, or reviewing RN app code that touches architecture, app shell, navigation, Hermes/RN upgrade strategy, New Architecture boundaries, native modules, micro-frontend routing, signed OTA bundles with rollback, legacy/new RN coexistence, FlashList, MMKV, Reanimated, Relay/SWR, react-native-web parity, or mobile observability. Do not use for React Web-only work, generic React component styling, generic TypeScript issues, or reverse-engineering a specific third-party app itself."
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [hermes, new architecture, turbo module, native module, ota, over-the-air, flashlist, mmkv, reanimated, react-native-web, micro-frontend, observability, rn upgrade, 앱 셸, 내비게이션 구조]
+taskTerms: [hermes, new architecture, turbo module, native module, ota, over-the-air, flashlist, mmkv, reanimated, react-native-web, micro-frontend, observability, rn upgrade, app shell, navigation architecture]
 pathGlobs: ["**/metro.config.*", "**/react-native.config.*", "**/*.podspec", "**/ios/Podfile", "**/android/settings.gradle", "**/android/settings.gradle.kts"]
 ---
 
@@ -14,12 +14,15 @@ pathGlobs: ["**/metro.config.*", "**/react-native.config.*", "**/*.podspec", "**
 - Pair with `react-native-clean-presentation-architecture` when changing presentation boundaries.
 - Pair with `react-development-guide` only when the RN task also changes shared React Web code.
 - Android/Kotlin skills when adding native Android integration.
+- Use `react-runtime-i18n` only when the task changes an actual React Web locale runtime. RN retains native locale, formatter, storage, and lifecycle adapters; shared message meaning does not require DOM or SSR behavior on native.
+- Use `webview-json-rpc-bridge` only for an actual JSON-RPC transport between a WebView document and host. It does not replace TurboModule/Codegen/JSI boundaries, typed native capabilities, or native permission/lifecycle ownership.
+- Use `datadog-rum-sourcemaps` only for a web bundle that actually uses Datadog browser RUM. RN/Hermes maps, native symbols, Expo release paths, and OTA bundle identity remain mobile responsibilities; browser upload success is not native symbolication evidence.
 
 ## Source Basis
 
 Read [references/react-native-operational-patterns.md](references/react-native-operational-patterns.md) when the task asks why these patterns exist or asks for React Native operational adoption rationale.
 
-Treat the source as an architecture signal, not a dependency recipe. Prefer official React Native and Hermes releases. Do not copy private framework names, private Maven/npm scopes, or vendor-forked React Native builds.
+The reference records supplied analysis notes whose original artifacts, reuse permission, and applicable versions remain unverified. Treat its observations as leads, not proof or a dependency recipe; its adoption guidance is conditional author interpretation. Prefer supported, compatible official React Native and Hermes releases. Do not copy private framework names, private Maven/npm scopes, or vendor-forked React Native builds.
 
 ## Before Starting
 
@@ -39,13 +42,13 @@ Confirm current project facts before proposing changes:
 ## Adoption Order
 
 1. Baseline runtime.
-   - Prefer official React/RN releases over forks.
+   - Prefer supported official React/RN releases compatible with the adopted project or Expo release channel over forks; this is not an instruction to upgrade RN for unrelated work.
    - For RN, keep Hermes enabled unless a measured blocker exists.
    - If native modules are involved, prefer New Architecture-compatible libraries and Codegen/TurboModule boundaries.
 
 2. App shell and routing.
-   - Use `react-navigation` as the native routing substrate for RN.
-   - Put file-based routing, product modules, or mini-app routing above `react-navigation`; do not leak router internals into feature UI.
+   - Preserve the adopted router and verify its installed version's public API. Plain React Navigation may own its container; Expo and other framework-managed routers own theirs.
+   - Keep module and mini-app routing behind public route contracts. Use framework-owned auth/recovery mechanisms where applicable instead of adding another navigation container or reaching through router internals.
    - For React Web, mirror the same route ownership with framework routing or package boundaries, not RN-specific APIs.
 
 3. Module and micro-frontend boundary.
@@ -60,14 +63,15 @@ Confirm current project facts before proposing changes:
    - Keep version lanes for legacy/new RN only during migrations. Add removal criteria.
 
 5. Runtime library choices.
-   - Navigation: `@react-navigation/native-stack`, `bottom-tabs`, `drawer`, `stack`.
-   - Gestures/animation: `react-native-reanimated`, `react-native-gesture-handler`, `react-native-screens`.
-   - Lists: prefer `@shopify/flash-list` for large mobile lists after measuring current `FlatList` issues.
-   - Storage: use `react-native-mmkv` for fast local key-value state; do not store secrets without platform security review.
-   - Data: choose one primary server-state path, usually Relay/GraphQL for schema-driven apps or SWR for REST/lightweight fetches.
+   - Keep the adopted libraries unless a concrete capability gap warrants a change; compare platform/toolchain compatibility and measured behavior before adding a candidate below.
+   - Navigation: use the adopted router's supported navigator APIs; `@react-navigation/native-stack`, bottom-tabs, drawer, and stack are candidates for plain React Navigation, not mandatory imports for framework-managed routers.
+   - Gestures/animation: consider `react-native-reanimated`, `react-native-gesture-handler`, or `react-native-screens` when the required interaction and supported runtime justify them.
+   - Lists: consider `@shopify/flash-list` for large mobile lists after measuring current `FlatList` issues and checking migration compatibility.
+   - Storage: consider `react-native-mmkv` for a measured local key-value performance need; preserve the existing storage contract and do not store secrets without platform security review.
+   - Data: keep the adopted server-state path. Relay/GraphQL is a candidate for schema-driven requirements and SWR for compatible REST/lightweight fetching; select by caching, offline, and runtime needs rather than imposing either.
    - State transforms: use `immer` only where immutable updates are complex enough to justify it.
-   - i18n: use FormatJS/react-intl style message catalogs for shared React/RN copy.
-   - Money/math: use decimal arithmetic, not binary floating point.
+   - i18n: preserve the adopted catalog and formatter contract. FormatJS/react-intl is a candidate when already adopted or needed for shared React/RN compatibility, not a required catalog format.
+   - Money: choose a representation that satisfies required currency precision, rounding, and exactness, such as integer minor units or decimal arithmetic. This does not prohibit binary floating point for unrelated mathematics.
    - Observability: wire Sentry or equivalent for JS and native crash context before rollout.
 
 6. Web parity.

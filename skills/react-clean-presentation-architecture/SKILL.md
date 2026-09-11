@@ -2,7 +2,7 @@
 name: react-clean-presentation-architecture
 description: Use when creating, modifying, or reviewing a React Clean Architecture presentation layer with Context Provider DI, state-holder hooks, uiState modeling, UiModel mapping, and state-based presentation code review.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [uistate, ui state, state holder, container component, presentation hook, 상태 홀더, 화면 상태, 프레젠테이션 계층]
+taskTerms: [uistate, ui state, state holder, container component, presentation hook, screen state, presentation layer]
 pathGlobs: ["**/*UiState.ts", "**/*UiState.tsx", "**/presentation/**"]
 requires: [clean-architecture-core]
 ---
@@ -26,7 +26,6 @@ For AppShell-owned global error hosts, queue acknowledgement, or root navigation
   data fetching and use Client Components for state, event handlers, effects,
   and browser APIs.
 - React has no official Hilt-equivalent DI container; external containers should be introduced only when project shape justifies them.
-- npm downloads check on 2026-06-02 for 2026-05-02..2026-05-31: `tsyringe` 23,949,329; `inversify` 8,334,605; `typed-inject` 3,066,359; `awilix` 1,904,000; `typedi` 1,878,420.
 
 ## Architecture Rule
 
@@ -57,13 +56,13 @@ React has no Hilt-equivalent official DI framework. Use this priority:
 1. Prefer explicit props for local dependencies.
 2. Use React `Context` providers for app-level typed use cases/ports, feature flags, and configuration. Raw clients and implementations are created inside the composition root, not exposed through feature dependency hooks. Analytics/storage/browser capabilities reach state holders as typed ports.
 3. Use an external DI container only when the project already has class-heavy domain/application services or an existing container.
-4. If introducing a TypeScript DI container is justified, prefer the current repo standard. If none exists, `tsyringe` is the default candidate because current npm usage is higher than common alternatives.
+4. If introducing a TypeScript DI container is justified, prefer the current repo standard. If none exists, evaluate `tsyringe` as a candidate against the project's concrete requirements; popularity alone is not an adoption reason.
 
 Provider rules:
 - create providers near composition roots such as `App`, route providers, or feature boundaries
 - create context objects outside components
 - keep provider values stable with `useMemo` only when the value object/function identity causes real rerender risk
-- expose typed hooks such as `useSearchDependencies()`
+- expose typed dependency-access hooks
 - throw a clear error when a required provider is missing
 - do not hide mutable UI state inside dependency providers
 
@@ -71,7 +70,7 @@ Provider rules:
 
 Discover the existing feature, route, dependency-provider, and model conventions before placing code. Keep screen wiring, render contracts, state-holder logic, and necessary boundary mapping near their consumers; separate files or packages only when a real responsibility or dependency boundary needs them.
 
-`UiState`, `UiModel`, and `use<Screen>ViewModel` describe roles, not a mandatory folder tree or file count. Preserve project naming conventions; an existing `OrderRowProps` render contract need not be renamed just to acquire a suffix. Domain-to-presentation mapping remains explicit in meaning, but equal shapes do not require copying models or forwarding mappers.
+`UiState`, `UiModel`, and `use<Screen>ViewModel` describe roles, not a mandatory folder tree or file count. Preserve project naming conventions; an existing render contract need not be renamed just to acquire a suffix. Domain-to-presentation mapping remains explicit in meaning, but equal shapes do not require copying models or forwarding mappers.
 
 ## State Holder Rule
 
@@ -167,7 +166,6 @@ A `fail` result is actionable: record the concrete failed contract or adopted pr
 - React context and state structure docs
 - React useEffect and event separation docs
 - TSyringe README
-- npm package metadata API
 - [Next Server and Client Components](https://nextjs.org/docs/app/getting-started/server-and-client-components)
 - [Next metadata server ownership](https://nextjs.org/docs/app/api-reference/functions/generate-metadata)
 - [React serializable Client Component props](https://react.dev/reference/rsc/use-client#serializable-types-returned-by-server-components)

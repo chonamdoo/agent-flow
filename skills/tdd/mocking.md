@@ -2,58 +2,28 @@
 
 Mock at **system boundaries** only:
 
-- External APIs (payment, email, etc.)
-- Databases (sometimes - prefer test DB)
-- Time/randomness
+- External APIs
+- Databases (sometimes; prefer a test database)
+- Time and randomness
 - File system (sometimes)
+- Owned remote services when an adapter at the network seam isolates the behavior under test
 
-Don't mock:
-
-- Your own classes/modules
-- Internal collaborators
-- Anything you control
+Do not mock in-process classes or internal collaborators merely because they are easy to replace. Ownership alone does not determine the seam: an owned remote service can need a transport adapter, while an internal collaborator should normally run for real.
 
 ## Designing for Mockability
 
-At system boundaries, design interfaces that are easy to mock:
+At system boundaries, design interfaces that are easy to substitute.
 
-**1. Use dependency injection**
+### Dependency injection
 
-Pass external dependencies in rather than creating them internally:
+**Good decision:** accept the external collaborator at the seam so a test can supply a controlled adapter and observe the module's outcome.
 
-```typescript
-// Easy to mock
-function processPayment(order, paymentClient) {
-  return paymentClient.charge(order.total);
-}
+**Bad decision:** create the external client inside the operation under test, forcing tests to depend on credentials, global configuration, or client-construction internals. The defect is hidden dependency creation, not the choice of provider.
 
-// Hard to mock
-function processPayment(order) {
-  const client = new StripeClient(process.env.STRIPE_KEY);
-  return client.charge(order.total);
-}
-```
+### Operation-specific contracts
 
-**2. Prefer SDK-style interfaces over generic fetchers**
+**Good decision:** expose each meaningful external operation with its own input, result, and error contract. A test substitute can describe that operation directly.
 
-Create specific functions for each external operation instead of one generic function with conditional logic:
+**Bad decision:** make behavior tests dispatch on raw endpoints and transport options through a generic fetch mock. The mock must reproduce routing logic before it can express a result. A generic transport can remain behind the adapter; it need not become the behavior-level test interface.
 
-```typescript
-// GOOD: Each function is independently mockable
-const api = {
-  getUser: (id) => fetch(`/users/${id}`),
-  getOrders: (userId) => fetch(`/users/${userId}/orders`),
-  createOrder: (data) => fetch('/orders', { method: 'POST', body: data }),
-};
-
-// BAD: Mocking requires conditional logic inside the mock
-const api = {
-  fetch: (endpoint, options) => fetch(endpoint, options),
-};
-```
-
-The SDK approach means:
-- Each mock returns one specific shape
-- No conditional logic in test setup
-- Easier to see which endpoints a test exercises
-- Type safety per endpoint
+Operation-specific contracts keep result shapes and type expectations local, make the exercised external action visible, and avoid conditional routing logic in test setup.

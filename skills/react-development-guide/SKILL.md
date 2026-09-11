@@ -16,16 +16,16 @@ Use this as a secondary checklist after user request, repo instructions, existin
 ## Write
 
 - Keep component responsibility narrow and aligned with existing repo patterns.
-- Follow Rules of Hooks: call hooks only at the top level of components or custom hooks, never inside conditions, loops, callbacks, async functions, or after early returns.
+- Follow Rules of Hooks: call hooks only at the top level of components or custom hooks, never inside conditions, loops, callbacks, async functions, or after early returns. The installed React version's supported `use` API has separate rules: conditional/loop calls are allowed inside a component or hook, but reading a promise with `use` must not be wrapped in `try/catch`. This exception does not relax ordinary Hook rules.
 - Minimize effects. Use effects for external systems, not for derivable render state.
-- When `useEffectEvent` is available, read non-reactive values inside an Effect through it and keep the dependency list complete.
+- When the installed React and hooks-lint versions support `useEffectEvent`, use it only for genuinely non-reactive events inside Effects, including calls from another local Effect Event. Keep dependencies needed for resynchronization; exclude the Effect Event itself from the dependency array. It is not a general callback for render, click handlers, or passing to another component/hook.
 - Avoid derived state when a value can be computed from props/state during render.
 - Preserve loading, empty, error, and success states when touching async or user-visible flows.
 - Keep server/client component boundaries explicit. Do not move browser-only logic into server components.
-- Avoid hydration mismatch sources such as nondeterministic render output, browser-only values during server render, and inconsistent server/client markup.
+- Server HTML and the first client hydration render must use the same snapshot. Avoid nondeterministic output and inconsistent markup; a Client Component can participate in SSR, so a lazy initializer reading browser storage or locale is not automatically safe. Pass request-known initial values consistently from server to client. For browser-only differences, use a supported client-only boundary or update after that boundary hydrates, accounting for extra rendering and visible changes. Do not hide every screen until mount or move all derivation into Effects; a parent's Effect does not prove every streaming descendant has hydrated.
 - Render the shell from data a plain request can obtain. A first-visit or crawler request that misses build-warmed state must still receive the shell.
 - Use stable domain IDs for ordinary lists; do not use array indexes when reorder, insert, delete, or filtering can happen. Library-managed identity takes precedence for its own rows: RHF `useFieldArray` uses generated `field.id` (or the configured key property supported by the installed version), not the row's database ID. This does not change valid domain-list keys.
-- Avoid rerender work only when there is a real changed path or measured risk. Do not add memoization by default.
+- Avoid rerender work only when there is a real changed path or measured risk. Do not add memoization by default. Before relying on React Compiler, inspect installed React/Compiler versions, the actual build configuration, compilation/skip coverage for the changed path, and third-party API compatibility. Avoid redundant manual memoization on compiled paths; compatible manual memoization remains valid for uncompiled/skipped paths or measured bottlenecks. Memoization is not a correctness or state-lifetime guarantee, and Compiler installation alone does not justify bulk deletion of existing memoization. For RHF compatibility, use the subscription reference in `react-hook-form-zod`.
 
 ## Conditional Capabilities
 
@@ -46,6 +46,7 @@ Use this as a secondary checklist after user request, repo instructions, existin
 
 ## Sources
 
-- React docs: Rules of Hooks, `useEffect`, memoization.
+- React [Rules of Hooks](https://react.dev/reference/rules/rules-of-hooks), [`use`](https://react.dev/reference/react/use), [`useEffectEvent`](https://react.dev/reference/react/useEffectEvent), and [`hydrateRoot`](https://react.dev/reference/react-dom/client/hydrateRoot).
+- React [Compiler setup and coverage](https://react.dev/learn/react-compiler/installation), [incompatible libraries](https://react.dev/reference/eslint-plugin-react-hooks/lints/incompatible-library), and [`memo`](https://react.dev/reference/react/memo).
 - Next.js docs: Server and Client Components.
 - Repo configuration and existing component patterns override generic advice.

@@ -2,7 +2,7 @@
 name: android-clean-presentation-architecture
 description: Defines Android Clean Architecture presentation-layer guidance for Hilt DI, ViewModel, StateFlow uiState, one-shot UI events, and Compose screen wiring. Use when creating, modifying, or reviewing Android feature presentation code for state-based UI and domain-to-UiModel boundaries.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [viewmodel, uistate, uievent, uiaction, uimodel, state holder, compose screen, 상태 홀더, 화면 상태, 프레젠테이션 계층]
+taskTerms: [viewmodel, uistate, uievent, uiaction, uimodel, state holder, compose screen, screen state, presentation layer]
 pathGlobs: ["**/*ViewModel.kt", "**/*UiState.kt", "**/presentation/**/*Screen.kt", "**/presentation/src/main/**/*.kt", "**/presentation/src/commonMain/**/*.kt", "**/presentation/src/androidMain/**/*.kt"]
 requires: [clean-architecture-core]
 ---
@@ -38,8 +38,8 @@ Use this skill for Android feature work where presentation code should follow a 
 
 For Android/Compose or Android-targeted Kotlin/KMP implementation or review:
 - Load every matching local `compose-*`, `kotlin-*`, `navigation-3`, `edge-to-edge`, `adaptive`, and `testing-setup` `SKILL.md` named by the active Android profile.
-- Prefer project-local skills under `.agent-flow/local-skills/<skill>/SKILL.md`; otherwise use `.agent-flow/skills/<skill>/SKILL.md` or the current host's configured local skill directory.
-- Do not say "Compose/Kotlin convention applied" or approve Compose/Kotlin code if matching local skill files were not explicitly loaded in the current work session.
+- Read the exact paths supplied by the active phase resolver and installed skill index; do not guess another host's installation paths.
+- Apply the missing-skill procedure in `code-generation-discipline` when a required skill is unavailable. Record degraded availability and the paths actually read; absence is not a code defect or grounds for request-changes.
 
 ## Architecture Rule
 
@@ -77,10 +77,11 @@ Application and entry points:
 - `@AndroidEntryPoint` on Activities or Fragments that host injected ViewModels.
 - Compose obtains ViewModels with `hiltViewModel()` only at the state-holder boundary.
 
-Module placement:
-- `app/di`: Android platform bindings such as `SharedPreferences`, `ResourceProvider`, `NetworkStatusChecker`.
-- `core/network/di`: `Json`, `OkHttpClient`, `Retrofit`, API creation.
-- `core/data/<feature>/di`: data API providers and repository bindings.
+Binding ownership:
+- Android platform bindings belong at the app/platform composition boundary.
+- Serialization, HTTP clients, and API construction belong at the network adapter boundary.
+- Repository bindings and data providers belong at the data adapter/composition boundary.
+- Locate those roles in the existing project rather than creating a prescribed DI tree.
 
 Binding rule:
 - Use `@Provides` for constructing concrete objects that need factory logic or third-party builders.
@@ -89,39 +90,38 @@ Binding rule:
 - Do not create Hilt modules for use cases that can use `@Inject constructor`.
 
 Route arguments and startup:
-- Use `@HiltViewModel` with normal `@Inject` when no route argument is needed.
-- Use `@HiltViewModel(assistedFactory = ...)` plus `@AssistedInject` when the ViewModel needs a NavKey or serializable route value.
-- `@AssistedFactory.create(...)` should take only the NavKey or route value. Other dependencies stay normal Hilt injections.
+- Use normal `@Inject` with `SavedStateHandle` when the adopted navigation and restoration contract supplies route values there.
+- Use Hilt assisted injection when route values need explicit construction-time delivery. Assisted values are not persisted after process death; define restoration separately when required.
+- Assisted factories accept only route values. Other dependencies stay normal Hilt injections. Choose by argument lifetime and the actual navigation API, not by the mere presence of a route argument; see [Hilt View Models](https://dagger.dev/hilt/view-model.html).
 - ViewModel creation belongs in the route/navigation entry wiring, not inside `Screen`.
-- Use AndroidX Startup `Initializer` for one-shot SDK initialization. If initializer code needs Hilt dependencies, use Hilt `@EntryPoint` plus `EntryPointAccessors.fromApplication(...)`.
+- Use AndroidX Startup `Initializer` when the SDK/project adopts that initialization mechanism. If it needs Hilt dependencies, use Hilt `@EntryPoint` and application entry-point access; otherwise preserve the SDK's supported initialization contract.
 
 ## ViewModel Rule
 
 ViewModels are screen-level state holders:
 - annotate with `@HiltViewModel`
-- use `@Inject constructor`
+- use normal or assisted constructor injection according to the route-argument contract above
 - inject use cases, a single context's repository interface, and platform abstractions
-- expose immutable `StateFlow<ScreenUiState>`
+- expose immutable screen state through `StateFlow`
 - keep mutable state private
-- accept user input through named callbacks for simple screens or `fun onAction(action: ScreenUiAction)` for branchy screens
-- expose one-shot UI behavior effects as `Flow<ScreenUiEvent>` only when they cannot be reduced to durable `ScreenUiState`
+- accept user input through named callbacks for simple screens or a typed action handler for branchy screens
+- expose transient UI behavior through an event `Flow` only when it cannot be reduced to durable screen state
 - convert non-suspending UI callbacks into `viewModelScope.launch`
-- use `fun onAction(action: ScreenUiAction)` when the screen has multiple events or branchy behavior
 - do not hold `Context`, `Activity`, `NavController`, `Navigator`, `Router`, launchers, `Intent`, `WebView`, or Compose state objects
 - do not call navigation APIs directly. Emit state or event; route/navigation wiring executes navigation.
 
 State patterns:
-- For imperative screen state, use private `MutableStateFlow<ScreenUiState>` and public `asStateFlow()`.
-- For repository/use-case streams, map domain data to `ScreenUiState` and terminate with `stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), initialState)`.
+- For imperative screen state, use private `MutableStateFlow` and public `asStateFlow()`.
+- For repository/use-case streams, map domain data into UI state and share one `stateIn` value in the state-holder scope. Choose `SharingStarted` and any stop timeout from the actual collector lifetime, upstream cost, and freshness requirements.
 - Use `MutableStateFlow.update { ... }` for copy/update operations.
 - Use `combine(...)` when UI state depends on multiple flows.
 - Keep paging request ids, selected item ids, and active `Job` handles private inside the ViewModel.
-- Do not start initial screen-state loading from `init`. Model it as a cold flow terminated by `stateIn` so the work starts when the route collects — including a one-shot initial API load, unless product behavior requires an explicit user action to begin.
+- This portfolio's default initial-loading policy is subscription-driven: use a cold flow shared by `stateIn`, rather than starting screen-state loading from `init`. Preserve an explicitly adopted lifecycle-driven loading contract or a product requirement for user-triggered loading; record the owner, restart/re-subscription behavior, and freshness rule. This is an adopted policy, not the only Android-supported lifecycle.
 - `MutableStateFlow` is for ViewModel-owned input and transient transition state. State produced from a repository or use-case stream terminates in `stateIn` instead of being pushed into a manually updated `MutableStateFlow`.
 
 Event patterns:
-- Prefer modeling critical results as `ScreenUiState`; use `ScreenUiEvent` only for UI behavior such as navigation, snackbar, toast, permission launcher, browser intent, focus, or haptic feedback.
-- Use `Channel<ScreenUiEvent>(Channel.BUFFERED)` plus `receiveAsFlow()` for single-consumer UI behavior events. Another deliberate single-consumer model is acceptable when it drops nothing and replays nothing; the requirement is single-consumer delivery without replay, not the `Channel` type.
+- Prefer modeling critical results as durable screen state. Reserve transient UI events for navigation, snackbar, toast, permission launcher, browser intent, focus, or haptic behavior.
+- A buffered `Channel` with `receiveAsFlow()` is one single-consumer, no-replay option, not a no-loss guarantee: cancellation after receipt can lose an element before processing. Define owner/collector lifetimes, buffering, cancellation, and consumption explicitly; use durable state when loss is unacceptable. See [receiveAsFlow cancellation semantics](https://kotlinlang.org/api/kotlinx.coroutines/kotlinx-coroutines-core/kotlinx.coroutines.flow/receive-as-flow.html).
 - Do not model fire-once effects as `StateFlow`.
 - Prefer explicit `UiEvent` sealed interfaces over raw strings or lambdas from ViewModel to UI.
 
@@ -132,16 +132,12 @@ Coroutine rule:
 
 ## UiState Rule
 
-Use a sealed interface for screen state. Add a stability annotation only under the verified rules below:
-- `data object NotReady` or a domain-specific not-ready state when input is missing
-- `data object Loading`
-- `data object Refreshing` when refresh is visually distinct from first load
-- `data object Placeholder` or `data class Placeholder(...)` when skeleton rows/cards need stable placeholder `UiModel`s
-- `data object Empty` or `SearchNotReady` when absence is a real UI state
-- `data class Success(...)`
-- `data class Error(...)`
-- `data object Offline` when network absence is a distinct UI state
-- `data object PermissionRequired` when permission is required before content can load
+Use a sealed interface for screen state. Add a stability annotation only under
+the verified rules below. Represent every reachable condition explicitly:
+not-ready when input is missing; loading; refreshing when distinct from first
+load; placeholders with stable identity when skeleton content needs it; empty;
+success; error; offline when distinct; and permission-required when access
+blocks content. Use the project's names and payloads, not a fixed type scaffold.
 
 `UiState`, `UiAction`, and `UiEvent` roles:
 - `UiState` is durable render data. It must be replayable and enough to redraw the screen after recreation.
@@ -166,18 +162,18 @@ Keep `UiState` immutable:
 
 Use this when one scroll surface renders several distinct section types.
 
-- Model the mixed sections as one `sealed interface <Screen>ListItemUiModel` with one subtype per section.
-- Subtypes are immutable data classes or `data object`s, and each exposes a stable unique `val key: String`. Add `@Immutable` only under the `UiModel Stability` rule above.
-- The ViewModel or mapper builds one immutable list; the lazy layout renders it with `items(items, key = { it.key }, contentType = { it::class })` and an exhaustive `when`.
+- Model mixed sections as one sealed UI item contract with one subtype per section kind.
+- Subtypes are immutable values and expose stable unique identity. Add `@Immutable` only under the `UiModel Stability` rule above.
+- The ViewModel or mapper builds one immutable list; the lazy layout uses stable keys, meaningful `contentType` grouping, and exhaustive rendering of its item variants.
 - Do not model mixed sections as nullable payload buckets, `Any`, raw `Pair`/`Triple`, or a string type switch, and do not compute the list shape inside the composable.
 - Keep callbacks at the call site. Do not store lambdas in an item model.
 
 ## Derived Display State
 
 The state holder or mapper owns cross-item and cross-screen display derivation. Precompute these onto the item `UiModel`:
-- neighbor and grouping flags (`showHeader`, `isLastIntroMessage`, block grouping, previous speaker)
-- index and position flags (`isLast`, section index display, separator placement)
-- selection and action flags derived from screen state (`selectable`, `isSelected`, `canDelete`)
+- neighbor and grouping relationships
+- position-dependent labels and separator placement
+- selection state and available actions derived from screen state
 
 The composable renders these fields. It must not derive them from `items[index ± 1]`, `index == lastIndex`, or unrelated screen state. This is a UDF and testability rule, not a recomposition shortcut.
 
@@ -210,9 +206,9 @@ stateless-content rule — a node renderer is a content composable.
   `UiEffect` plays the role it calls `UiEvent`. Decide which role a type has from
   the direction it travels, never from its suffix.
 - **A screen whose `UiState` carries the server node tree needs no per-screen
-  `UiModel` or mapper.** `Success(screen: Screen)` is a complete state type when
-  `Screen` is the parsed node model; the mapping boundary belongs to the node
-  parser, which already converted the payload into client types. When the client
+  `UiModel` or mapper.** A success state containing the parsed client node model
+  already supplies the rendering contract. The mapping boundary belongs to the
+  node parser, which converted payloads into client types. When the client
   owns layout, apply the Presentation Boundaries rule; a safe identity projection
   still does not require a separate per-screen type.
 - **One shared abstract state holder for server-driven screens is a documented
@@ -238,10 +234,10 @@ stateless-content rule — a node renderer is a content composable.
 - `UiAction`, `UiEvent`, and `UiState` roles are explicit; transient `UiEvent`s are not used for durable state.
 - one-shot UI behavior events use `Channel(...).receiveAsFlow()` or another deliberate event model.
 - flows converted to UI state use one shared `stateIn` value, not per-call `stateIn`.
-- `SharingStarted.WhileSubscribed(5_000)` is acceptable only when stale cached `.value` is not used as a fresh source.
-- initial screen-state loading is not started from `init`; a cold flow plus `stateIn` starts it when the route collects.
+- sharing lifetime and timeout follow actual requirements; stale cached `.value` is not treated as a fresh source.
+- initial loading follows the subscription-driven default or an explicit existing lifecycle/user-triggered exception, including restart and freshness semantics.
 - leaf `*UiModel`s are not blanket-annotated `@Stable`; `@Immutable` or inferred stability is the default.
-- mixed section lists use one sealed `*ListItemUiModel` with stable keys, `contentType`, and an exhaustive `when`.
+- mixed section lists use one sealed item contract with stable keys, meaningful `contentType`, and exhaustive rendering.
 - neighbor/index/selection display flags are precomputed in the state holder or mapper, not derived inside a composable.
 - Preview and Compose UI tests render the stateless screen with a fake `UiState`.
 - the screen entry composable (a route, or the stateful overload of a same-named screen) collects with lifecycle APIs and passes state/callbacks downward.

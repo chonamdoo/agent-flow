@@ -2,7 +2,7 @@
 name: ktor-development-guide
 description: "Ktor server development and review of Application composition, routing, authentication, serialization/plugins, engine lifecycle, or database execution. Use with Ktor server dependencies or an explicit Ktor server task; exclude Ktor HttpClient-only Android/KMP work, Spring-only services, and generic Kotlin edits."
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [Ktor server, Ktor Application, Ktor routing, Ktor server plugin, Ktor server authentication, Ktor 서버, 코토 서버]
+taskTerms: [Ktor server, Ktor Application, Ktor routing, Ktor server plugin, Ktor server authentication]
 requires: [kotlin-backend-development-guide]
 ---
 

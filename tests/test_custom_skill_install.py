@@ -358,6 +358,12 @@ def test_ios_project_auto_selects_ios_profile_skills(tmp_path: Path) -> None:
     assert index["selection"]["profiles"] == ["ios"]
     assert "ios-clean-architecture" in names
     assert "ios-clean-presentation-architecture" in names
+    assert "webview-json-rpc-bridge" in names
+    assert "nextjs-auth-session" not in names
+    assert "react-runtime-i18n" not in names
+    for host in (".claude", ".Codex", ".omp"):
+        assert (project / host / "skills/webview-json-rpc-bridge/SKILL.md").is_file()
+    assert not any("missing required skill" in warning for warning in index["warnings"])
     assert "android-code-review" not in names
     assert "react-native-clean-architecture" not in names
 
@@ -3131,6 +3137,12 @@ _NEW_HOST_SKILLS = {
     "react-hook-form-zod",
     "react-web-seo",
     "react-storybook",
+    "react-scroll-restoration",
+    "react-runtime-i18n",
+    "ga4-ecommerce-events",
+    "datadog-rum-sourcemaps",
+    "nextjs-auth-session",
+    "webview-json-rpc-bridge",
 }
 
 
@@ -3151,6 +3163,7 @@ def test_installer_entrypoints_consume_framework_fixtures(tmp_path: Path, binary
     kit = json.loads((tmp_path / ".agent-flow/kit.json").read_text(encoding="utf-8"))
     assert kit["profile"] == case["profile"]
     index = json.loads((tmp_path / ".agent-flow/skills/index.json").read_text(encoding="utf-8"))
+    assert not any("missing required skill" in warning for warning in index["warnings"])
     names = {skill["name"] for skill in index["skills"]}
     expected_host_skills = set()
     if case["profile"] == "generic":
@@ -3163,6 +3176,17 @@ def test_installer_entrypoints_consume_framework_fixtures(tmp_path: Path, binary
         expected_host_skills.add("llm-tool-development")
     if case.get("react_web"):
         expected_host_skills.update({"react-hook-form-zod", "react-web-seo", "react-storybook"})
+        expected_host_skills.update({
+            "react-scroll-restoration",
+            "react-runtime-i18n",
+            "ga4-ecommerce-events",
+            "datadog-rum-sourcemaps",
+        })
+    if case["profile"] == "nextjs":
+        expected_host_skills.add("nextjs-auth-session")
+    if case["profile"] in {"android", "ios", "react-native", "node", "typescript", "nextjs"}:
+        expected_host_skills.add("webview-json-rpc-bridge")
+    assert names & _NEW_HOST_SKILLS == expected_host_skills
     for host in (".claude", ".Codex", ".omp"):
         for name in _NEW_HOST_SKILLS:
             directory = tmp_path / host / "skills" / name

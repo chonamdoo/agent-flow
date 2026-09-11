@@ -2,7 +2,7 @@
 name: android-appshell-error-handling
 description: Defines Android app-shell common-error handling where feature ViewModels notify common errors and AppShell owns global UI, root navigation, Navigation3 back stack resets, SessionExpired handling, and Retrofit CallAdapter error mapping. Use when implementing or reviewing Android Kotlin Compose app-wide error handling.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [app shell, appshell, global error, common error, error mapping, session expired, snackbar host, dialog host, 공통 에러, 전역 에러, 세션 만료]
+taskTerms: [app shell, appshell, global error, common error, error mapping, session expired, snackbar host, dialog host]
 pathGlobs: ["**/*AppShell*.kt", "**/*CommonError*Host.kt"]
 requires: [app-shell-error-contract]
 ---
@@ -44,8 +44,8 @@ Keep app-wide error UI and root navigation above feature screens:
 - `Activity` applies the theme and calls `AppShell` or the app composable.
 - `AppShell` owns the Navi3 root back stack, top-level navigation, and full-screen
   `NavDisplay`.
-- `AppShell` hosts app-wide `CommonErrorDialogHost`, `SnackbarHost`, `ToastHost`,
-  and common app dialogs.
+- `AppShell` hosts app-wide common error dialogs, snackbars, toasts, and other
+  shared app dialogs.
 - Feature routes and screens render local UI only.
 
 Feature ViewModels notify common errors. They do not own `NavController`,
@@ -66,11 +66,12 @@ Feature ViewModels notify common errors. They do not own `NavController`,
 
 ## Boundary Checklist
 
-- Retrofit CallAdapters may convert API failures into `AppFailure(AppError)`.
-- Data mappers convert network/server failures into `AppError`; they do not create
-  Compose UI models.
-- Presentation mappers convert `AppError` into feature-local `ErrorUiModel` or
-  common `CommonErrorUiModel`.
+- Retrofit CallAdapters may normalize API failures into the project's established
+  failure representation.
+- Data mappers convert network/server failures into domain errors while preserving
+  the shared metadata contract; they do not create Compose UI models.
+- Presentation mappers project domain errors into feature-local or common-error
+  UI values. These are semantic roles, not required wrapper or class names.
 - Remote data sources and repositories stay free of dialog, navigation, toast,
   snackbar, and Android UI concerns.
 - Do not add a `BaseViewModel` solely to centralize common error display.
@@ -101,11 +102,11 @@ Request changes when any of these are true:
 
 ## Tests To Expect
 
-- `CommonErrorDialogHost` renders the shared common error and drives Android AppShell recovery.
+- The common-error UI displays the queued failure, accepts confirmation, and drives Android AppShell recovery.
 - `SessionExpired` confirmation clears the root back stack and adds the login
   route.
-- ViewModel tests prove common errors notify AppShell instead of becoming feature
-  `UiState.Error`.
+- ViewModel tests prove common errors notify AppShell instead of also becoming
+  feature-local error state.
 - Mapper and CallAdapter tests cover non-2xx responses, connectivity failures,
   serialization failures, canceled calls, and metadata preservation.
 
