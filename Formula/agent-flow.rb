@@ -3,8 +3,8 @@ class AgentFlow < Formula
 
   desc "CLI workflow kit that runs AI coding agents on a verifiable process"
   homepage "https://github.com/chonamdoo/agent-flow"
-  url "https://github.com/chonamdoo/agent-flow/archive/refs/tags/v0.2.11.tar.gz"
-  sha256 "05b7b0a89ea4f30dcfb6a5d038a8681ebc5252ec6bea79d290396ed15b7ae669"
+  url "https://github.com/chonamdoo/agent-flow/archive/refs/tags/v0.2.12.tar.gz"
+  sha256 "f6c0b49013af42b3a9792c6909c184d8d5a709feec7caa0ec6696f88b047d291"
   license "MIT"
   head "https://github.com/chonamdoo/agent-flow.git", branch: "main"
 
