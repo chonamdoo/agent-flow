@@ -9,33 +9,15 @@ Actively build and sharpen the project's domain model as you design. This is the
 
 ## File structure
 
-Most repos have a single context:
+Discover the repository's existing documentation conventions before choosing a
+location. Most repos have a single context, with a root `CONTEXT.md` and
+system-wide decisions in `docs/adr/`.
 
-```
-/
-├── CONTEXT.md
-├── docs/
-│   └── adr/
-│       ├── 0001-event-sourced-orders.md
-│       └── 0002-postgres-for-write-model.md
-└── src/
-```
-
-If a `CONTEXT-MAP.md` exists at the root, the repo has multiple contexts. The map points to where each one lives:
-
-```
-/
-├── CONTEXT-MAP.md
-├── docs/
-│   └── adr/                          ← system-wide decisions
-├── src/
-│   ├── ordering/
-│   │   ├── CONTEXT.md
-│   │   └── docs/adr/                 ← context-specific decisions
-│   └── billing/
-│       ├── CONTEXT.md
-│       └── docs/adr/
-```
+If a root `CONTEXT-MAP.md` exists, read it to locate each context and its glossary.
+Keep system-wide ADRs separate from context-specific ADRs at the locations
+established by that map or the repository's conventions. A source directory alone
+does not establish a business context; use the agreed meaning and ownership
+boundaries.
 
 Create files lazily — only when you have something to write. If no `CONTEXT.md` exists, create one when the first term is resolved. If no `docs/adr/` exists, create it when the first ADR is needed.
 
@@ -43,23 +25,23 @@ Create files lazily — only when you have something to write. If no `CONTEXT.md
 
 ### Challenge against the glossary
 
-When the user uses a term that conflicts with the existing language in `CONTEXT.md`, call it out immediately. "Your glossary defines 'cancellation' as X, but you seem to mean Y — which is it?"
+When the user uses a term that conflicts with the existing language in `CONTEXT.md`, call it out immediately. State the documented meaning and the meaning implied by the current discussion, then ask which meaning is intended.
 
 ### Sharpen fuzzy language
 
-When the user uses vague or overloaded terms, propose a precise canonical term. "You're saying 'account' — do you mean the Customer or the User? Those are different things."
+When the user uses vague or overloaded terms, identify the distinct concepts the term might refer to and propose a precise canonical term grounded in the context's agreed language.
 
 ### Discuss concrete scenarios
 
-When domain relationships are being discussed, stress-test them with specific scenarios. Invent scenarios that probe edge cases and force the user to be precise about the boundaries between concepts.
+When domain relationships are being discussed, stress-test them with specific scenarios that probe edge cases and clarify boundaries between concepts. Label invented scenarios as hypotheses for discussion, not agreed business rules.
 
 ### Cross-reference with code
 
-When the user states how something works, check whether the code agrees. If you find a contradiction, surface it: "Your code cancels entire Orders, but you just said partial cancellation is possible — which is right?"
+When the user states how something works, check whether the code agrees. Surface any contradiction between observed implementation and stated intent, and resolve which behavior is current versus intended. Code is evidence of implementation, not authority to override the user's business meaning.
 
 ### Update CONTEXT.md inline
 
-When a term is resolved, update `CONTEXT.md` right there. Don't batch these up — capture them as they happen. Use the format in [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md).
+When a term's meaning is confirmed and editing is authorized, update `CONTEXT.md` right there rather than batching resolved terms. For review- or discussion-only requests, propose the update without editing; agreement on a definition is not itself permission to change files. Use the format in [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md).
 
 `CONTEXT.md` should be totally devoid of implementation details. Do not treat `CONTEXT.md` as a spec, a scratch pad, or a repository for implementation decisions. It is a glossary and nothing else.
 

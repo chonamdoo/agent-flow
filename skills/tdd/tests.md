@@ -2,75 +2,43 @@
 
 ## Good Tests
 
-**Integration-style**: Test through real interfaces, not mocks of internal parts.
+**Integration-style:** test through real interfaces, not mocks of internal parts.
 
-```typescript
-// GOOD: Tests observable behavior
-test("user can checkout with valid cart", async () => {
-  const cart = createCart();
-  cart.add(product);
-  const result = await checkout(cart, paymentMethod);
-  expect(result.status).toBe("confirmed");
-});
-```
+A caller performs a supported action under a stated condition, then checks its observable result through the public interface. This proves the capability rather than the collaboration used to implement it.
 
 Characteristics:
 
-- Tests behavior users/callers care about
-- Uses public API only
+- Tests behavior users or callers care about
+- Uses the public API
 - Survives internal refactors
 - Describes WHAT, not HOW
 - One logical assertion per test
 
 ## Bad Tests
 
-**Implementation-detail test** — this block illustrates one flaw only: it asserts an internal collaboration instead of the public result.
+### Internal collaboration instead of outcome
 
-```typescript
-test("checkout processes one payment for a valid cart", async () => {
-  const payment = { process: jest.fn().mockResolvedValue({ status: "confirmed" }) };
-  await checkout(createCart(), payment);
-  expect(payment.process).toHaveBeenCalledTimes(1);
-});
-```
+**Bad case:** a test substitutes an internal collaborator and checks only that it was called once. The public result could be wrong while the test passes. Changing the internal collaboration without changing behavior could also break it.
+
+**Valid exception:** the count or order of an externally observable side effect is itself a requirement, such as preventing duplicate submissions or ensuring authorization precedes an external write. Observe that effect at the external seam and check the required outcome; this does not justify asserting unrelated internal call counts.
 
 Red flags:
 
 - Mocking internal collaborators
 - Testing private methods
-- Asserting on call counts/order
-- Test breaks when refactoring without behavior change
-- Test name describes HOW not WHAT
-- Verifying through external means instead of interface
+- Asserting internal call counts or ordering that callers cannot observe
+- Breaking on refactoring without behavior change
+- Naming HOW instead of WHAT
+- Verifying through a side channel instead of the agreed interface
 
-```typescript
-// BAD: Bypasses interface to verify
-test("createUser saves to database", async () => {
-  await createUser({ name: "Alice" });
-  const row = await db.query("SELECT * FROM users WHERE name = ?", ["Alice"]);
-  expect(row).toBeDefined();
-});
+### Storage bypass instead of public retrieval
 
-// GOOD: Verifies through interface
-test("createUser makes user retrievable", async () => {
-  const user = await createUser({ name: "Alice" });
-  const retrieved = await getUser(user.id);
-  expect(retrieved.name).toBe("Alice");
-});
-```
+**Bad case:** after creating a record through a public operation, a test queries private database storage to prove success. This couples the test to schema details and misses failures in the public retrieval path.
 
-**Tautological tests**: Expected value restates the implementation, so the test passes by construction.
+**Good case:** create through the agreed interface, retrieve through its public query, and compare the observable data with independently supplied input. Test storage directly only when storage itself is the agreed public contract, not as a shortcut around another interface.
 
-```typescript
-// BAD: Expected value is recomputed the way the code computes it
-test("calculateTotal sums line items", () => {
-  const items = [{ price: 10 }, { price: 5 }];
-  const expected = items.reduce((sum, i) => sum + i.price, 0);
-  expect(calculateTotal(items)).toBe(expected);
-});
+### Expected value copied from implementation
 
-// GOOD: Expected value is an independent, known literal
-test("calculateTotal sums line items", () => {
-  expect(calculateTotal([{ price: 10 }, { price: 5 }])).toBe(15);
-});
-```
+**Bad case:** the expected result is recomputed with the same algorithm as the implementation. The same defect can occur in both computations, so agreement provides no independent evidence.
+
+**Good case:** obtain the expected result from a worked example, known-good literal, or specification independent of the implementation. Choose inputs that would expose a plausible incorrect result rather than asserting a constant equals itself.

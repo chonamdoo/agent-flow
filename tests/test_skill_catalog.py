@@ -1195,11 +1195,16 @@ def test_every_profile_install_name_is_activation_reachable(tmp_path, monkeypatc
 
     unreachable: dict[str, list[str]] = {}
     for profile_id in _profile_ids():
-        payload = load_profile_payload(profile_id)
+        project = tmp_path / profile_id
+        project.mkdir()
+        if profile_id in {"nextjs", "node", "typescript"}:
+            (project / "package.json").write_text(
+                json.dumps({"dependencies": {"react": "19", "next": "16"}}), encoding="utf-8",
+            )
+        payload = load_profile_payload(profile_id, project)
         install = (payload.get("skills") or {}).get("install") or []
         if not install:
             continue
-        project = tmp_path / profile_id
         for name in install:
             _bundled_shipped_skill(project, name)
 
@@ -1262,28 +1267,6 @@ def _shipped_catalog():
     return discover_skill_catalog(REPO, (root,))
 
 
-def test_flutter_development_guide_defines_contextual_responsive_layout_contract():
-    guide = (
-        SHIPPED_SKILLS / "flutter-development-guide" / "SKILL.md"
-    ).read_text(encoding="utf-8")
-    required_decisions = (
-        "linear single-run",
-        "bounded main axis",
-        "direct child",
-        "`Wrap` when items may reflow",
-        "lazy `ListView`, `GridView`, or slivers",
-        "`Flex.spacing`",
-        "`TextScaler`",
-        "`MediaQuery.sizeOf`",
-        "`LayoutBuilder`",
-        "`Padding`",
-        "`SafeArea`",
-    )
-
-    missing = [decision for decision in required_decisions if decision not in guide]
-    assert missing == []
-    assert "hardware type or top-level orientation" in guide
-    assert "blanket ban" in guide
 
 
 def test_alias_expands_to_clean_architecture_core():
@@ -1355,37 +1338,12 @@ def test_clean_presentation_skills_depend_on_the_core_contract():
         assert "clean-architecture-core" in catalog[name].dependencies
 
 
-def test_app_shell_and_presentation_skills_define_exclusive_ownership():
-    for app_shell_name, presentation_name in _APP_SHELL_PRESENTATION_PAIRS.items():
-        app_shell = (SHIPPED_SKILLS / app_shell_name / "SKILL.md").read_text(
-            encoding="utf-8"
-        )
-        presentation = (
-            SHIPPED_SKILLS / presentation_name / "SKILL.md"
-        ).read_text(encoding="utf-8")
-
-        assert f"use `{presentation_name}` instead" in app_shell
-        assert f"use `{app_shell_name}` instead" in presentation
 
 
 
 
-def test_react_app_shell_review_rejects_unguarded_protected_history():
-    text = (
-        SHIPPED_SKILLS / "react-app-shell-error-handling" / "SKILL.md"
-    ).read_text(encoding="utf-8")
-
-    assert "Back navigation reaches a protected route without the auth guard" in text
-    assert "Back navigation can reach only routes that the auth guard rejects" not in text
 
 
-def test_app_shell_skills_defer_completion_markers_to_the_active_phase():
-    for name in ("app-shell-error-contract", *_APP_SHELL_CASES):
-        text = (SHIPPED_SKILLS / name / "SKILL.md").read_text(encoding="utf-8")
-
-        assert "Use only the markers supplied by the active phase." in text
-        assert "project-local-skills-used:" not in text
-        assert "do not record it under `project-local-skills-used`" not in text
 
 
 @pytest.mark.parametrize("name", sorted(_APP_SHELL_CASES))

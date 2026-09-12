@@ -20,7 +20,7 @@ Use this only for Dart code in the changed scope. Do not score it. For widget, l
 - Prefer a record for an unnamed multi-value return, and a named class once the shape gains behavior, validation, or a domain name.
 - Return `Future` from async work and `Stream` from multi-event work; keep `void` async APIs out of code a caller must sequence.
 - Await every `Future` a caller depends on. Mark a deliberate fire-and-forget call with `unawaited` so the analyzer stays quiet for a stated reason.
-- Cancel `StreamSubscription`, `Timer`, and `StreamController` in the owning object's teardown.
+- Cancel owned `StreamSubscription` and `Timer` instances during teardown; close owned controllers with [`StreamController.close()`](https://api.dart.dev/dart-async/StreamController/close.html). Await asynchronous cleanup when the owner's shutdown contract requires completion; a controller's close future can remain pending for a paused or absent listener.
 - Catch a specific exception type at a boundary. Wrap a caught error with context and rethrow with `Error.throwWithStackTrace` or `rethrow` so the original stack survives.
 - Keep `dynamic` out of new signatures. Use `Object?` plus a type check or pattern when the value is genuinely unknown.
 - Keep `print` out of library code; use the repo's logging boundary.
@@ -28,7 +28,7 @@ Use this only for Dart code in the changed scope. Do not score it. For widget, l
 ## Test
 
 - Add or update focused unit tests for new branches, edge cases, and bug regressions. Use `package:test` in a pure-Dart package and `package:flutter_test` once the package depends on the Flutter SDK.
-- Assert on error type and message for failure paths, not only on success paths.
+- Assert failure semantics, error types, and public error fields. Match exact message text only when it is a stable external contract.
 - Test stream and async APIs with explicit completion, not with `Future.delayed` sleeps.
 - Prefer fakes over generated mocks for a single-method dependency. Generate mocks with the repo's existing mocking package when a class has real interaction to verify.
 
@@ -37,7 +37,7 @@ Use this only for Dart code in the changed scope. Do not score it. For widget, l
 - Treat these as blocking only for real runtime bugs, data loss, security issues, analyzer errors, failing tests, or project-rule violations.
 - Treat formatter-equivalent style differences as no findings at all.
 - Treat lint-configurable preferences as suggestions unless `analysis_options.yaml` already enforces them.
-- Check that awaited futures match caller expectations, subscriptions and controllers are cancelled, nullable values are handled at their boundary, caught errors preserve their stack, and tests cover the changed behavior.
+- Check that awaited futures match caller expectations, subscriptions and timers are cancelled, controllers are closed, nullable values are handled at their boundary, caught errors preserve their stack, and tests cover the changed behavior.
 
 ## Sources
 

@@ -2,7 +2,7 @@
 name: llm-tool-development
 description: "Develop or review LLM function/tool schemas, dispatchers, execution authorization/approval, outcomes and replay, provider adapters, or MCP client/server tool implementations. Includes hosted-tool control integration; not ordinary tool invocation, connecting an existing MCP server, generic CLI tooling, or chat/prompt work without a tool execution boundary."
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [LLM tool development, tool calling implementation, tool calling review, function calling implementation, function calling review, tool dispatcher, tool execution authorization, MCP server implementation, MCP adapter development, MCP server review, MCP adapter review, 툴콜 개발, 툴콜 리뷰, 도구 호출 구현, 도구 호출 리뷰, MCP 서버 개발, MCP 어댑터 개발, MCP 서버 리뷰]
+taskTerms: [LLM tool development, tool calling implementation, tool calling review, function calling implementation, function calling review, tool dispatcher, tool execution authorization, MCP server implementation, MCP adapter development, MCP server review, MCP adapter review]
 requires: [clean-architecture-core]
 ---
 

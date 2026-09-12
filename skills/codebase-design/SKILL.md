@@ -9,7 +9,7 @@ Design **deep modules**: a lot of behaviour behind a small interface, placed at 
 
 ## Glossary
 
-Use these terms exactly — don't substitute "component," "service," "API," or "boundary." Consistent language is the whole point.
+Use these terms consistently in design explanations. The distinctions below guide reasoning; they do not authorize renaming established domain terms, public APIs, framework concepts, or project identifiers.
 
 **Module** — anything with an interface and an implementation. Deliberately scale-agnostic: a function, class, package, or tier-spanning slice. _Avoid_: unit, component, service.
 
@@ -62,37 +62,17 @@ When designing an interface, ask:
 - **Depth is a property of the interface, not the implementation.** A deep module can be internally composed of small, mockable, swappable parts — they just aren't part of the interface. A module can have **internal seams** (private to its implementation, used by its own tests) as well as the **external seam** at its interface.
 - **The deletion test.** Imagine deleting the module. If complexity vanishes, it was a pass-through. If complexity reappears across N callers, it was earning its keep.
 - **The interface is the test surface.** Callers and tests cross the same seam. If you want to test *past* the interface, the module is probably the wrong shape.
-- **One adapter means a hypothetical seam. Two adapters means a real one.** Don't introduce a seam unless something actually varies across it.
+- **Justify a seam by a real need.** Actual variation, ownership, isolation, or test substitution can justify a seam even with one production adapter. Adapter count alone neither proves value nor warrants indirection.
 
 ## Designing for testability
 
 Good interfaces make testing natural:
 
-1. **Accept dependencies, don't create them.**
+1. **Accept dependencies that need substitution.** When an operation depends on an external collaborator, accepting that collaborator at the seam lets tests control it. Creating it internally can hide configuration and prevent isolation. Keep ordinary internal construction when no real variation or isolation need exists.
 
-   ```typescript
-   // Testable
-   function processOrder(order, paymentGateway) {}
+2. **Make results observable.** Returning a computed value lets callers and tests inspect the result without discovering hidden mutations. Side effects are valid when required by the contract; expose their outcomes at the agreed seam rather than making tests inspect private state.
 
-   // Hard to test
-   function processOrder(order) {
-     const gateway = new StripeGateway();
-   }
-   ```
-
-2. **Return results, don't produce side effects.**
-
-   ```typescript
-   // Testable
-   function calculateDiscount(cart): Discount {}
-
-   // Hard to test
-   function applyDiscount(cart): void {
-     cart.total -= discount;
-   }
-   ```
-
-3. **Small surface area.** Fewer methods = fewer tests needed. Fewer params = simpler test setup.
+3. **Small surface area.** Remove unnecessary methods and parameters to reduce what callers must learn. Preserve operations needed to express distinct behavior; fewer methods do not eliminate the need to test their observable contracts and edge cases.
 
 ## Relationships
 

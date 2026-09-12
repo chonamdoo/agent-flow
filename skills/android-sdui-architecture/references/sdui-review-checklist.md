@@ -1,144 +1,157 @@
 # SDUI Review Checklist
 
-Evidence and verdict rule for each marker. Sources are named per item; the
-review angle that consumes this lives at `templates/_shared/review/sdui.md`.
+Evidence and verdict rules for the review angle at
+`templates/_shared/review/sdui.md`. Source PART labels below are retained from the
+supplied bundle; original-source identity, version, locator, effective date, and
+author authority are unverified. Consult the linked guides for adopted policy
+and their public API references.
+
+Use the marker vocabulary declared in the skill entrypoint and active workflow.
+Use `pass` only with evidence, `fail` for a confirmed violation, and `n/a` only
+for an inapplicable check. The design-token marker also supports `unverified`.
+For other markers, describe missing evidence in prose and leave the check
+unresolved rather than inventing a value. Follow the workflow's missing-evidence
+or blocked path; do not approve while required evidence is unresolved.
+State what was inspected: source inspection is not runtime behavior proof.
 
 ## 1. `sdui-design-token-only`
 
-Source: PART 4-4, PART 7-6.
+Source attribution: PART 4-4, PART 7-6.
 
-Rule: styling fields in server JSON carry token names. Raw dp numbers and hex
-colors are schema violations, and the client is the only owner of values.
+Rule: styling references client-owned tokens. Raw design dimensions and hex colors
+are rejected; declared structural ratios/modes are a separate bounded schema class.
 
-How to check: use a text search across screen JSON, fixtures, and composer output to find candidates such as raw `#[0-9A-Fa-f]{3,8}` colors or `[0-9]+dp` values near styling keys. The search is not validation: inspect structured payload fields, then verify the target schema or validator rejects raw literals and fixtures cover both rejection and token acceptance. Confirm token resolution exists only in the design-system module.
+Check structured payloads, fixtures, composer output, and validator behavior.
+Text search for raw color/dimension patterns finds candidates, not proof. Confirm
+the actual styling fields reject raw values and accept valid tokens, and token
+resolution stays at the client design-system boundary.
 
-Verdict: `fail` when a raw literal is confirmed in a styling field or the schema/validator accepts one. A numeric fallback inside the token table is resilience, not permission. Report `n/a` only when no styling contract or payload is in scope; report the check as unverified rather than `pass` when the target schema/validator cannot be inspected.
+Fail on confirmed raw styling or permissive validation. Tolerant client fallbacks
+are resilience, not server permission. Missing schema/validator evidence is
+`unverified`. See [design-token-guide.md](design-token-guide.md).
 
 ## 2. `sdui-room-ssot-scope`
 
-Source: PART 1-8, PART 6-3, PART 6-6.
+Source attribution: PART 1-8, PART 6-3, PART 6-6.
 
-Rule: state holders and UI observe a storage flow for every state that must
-survive a process restart, whether one screen or many observe it. No component
-subscribes to an API response, and refresh writes to storage before anything
-renders. Progress flags, one-shot effects, command responses, server clock offset,
-cursor pages, auth credentials, and media bytes stay outside storage — see
-`offline-ssot-data-guide.md`.
+Rule: restart-durable rendered state originates in observable storage, even with
+one observer. Refresh is a command; durable data reaches UI through observation,
+not its direct network result. The historical marker name does not mandate Room.
 
-How to check: confirm the durable screen flow originates from a DAO or DataStore
-`Flow`; confirm no network data source is injected into a state holder; confirm
-refresh functions return `Result<Unit>` rather than a screen; then name which
-observed state the change treats as durable and which as ephemeral.
+Trace storage provenance, repository boundaries, refresh writes, and rendered
+state. Name which values require durability and which are transient. Confirm
+missing-cache, cold-load failure, and recoverable parse-failure states are visible.
+No fixed DAO, return signature, table name, or `Flow` recipe is required.
 
-Verdict: `fail` if a durable rendered value reaches the UI without passing through
-storage, or if a DTO is subscribed to directly. `n/a` when the change touches no
-data path. Ephemeral state held outside storage is not a finding on its own.
+Fail when durable content bypasses storage or UI consumes transport DTOs directly.
+Transient progress, effects, command results, clock offsets, and scroll cursors
+may remain outside screen storage. Credentials/media belong in their appropriate
+stores, not the SDUI screen store. See
+[offline-ssot-data-guide.md](offline-ssot-data-guide.md).
 
 ## 3. `sdui-action-finite-vocabulary`
 
-Source: PART 1-3, PART 5-4, PART 7-4.
+Source attribution: PART 1-3, PART 5-4, PART 7-4.
 
-Rule: every action `type` exists in the declared sealed vocabulary. Unlisted
-types resolve to `Unknown` and are ignored. Expressions are resolved by regex
-substitution only.
+Rule: typed actions and expressions form a finite catalog with exhaustive
+execution and safe unknown-action tolerance. Targets and operations remain inside
+client-approved authority.
 
-How to check: confirm the action model is a sealed type and the executor `when`
-is exhaustive with no `else -> error(...)`; diff the JSON action types against
-the sealed subtypes; grep for `eval`, script engines, or reflective dispatch on
-a type string.
+Compare payloads against the target client's declared catalog/capabilities;
+inspect interpreter branches, bounded binding resolution, unresolved-value
+handling, and operation/destination authorization. API-name searches can locate
+code, but are not the acceptance test.
 
-Verdict: `fail` on an action type with no sealed counterpart, on a non-exhaustive
-executor, or on any dynamic evaluation. `n/a` when no action code or payload
-changed.
+Fail on dynamic evaluation, missing execution handling, authority escalation, or
+server payloads that violate declared target capabilities. An older client safely
+ignoring an unknown future action is a valid compatibility behavior, not itself a
+missing-counterpart defect. See [json-schema-guide.md](json-schema-guide.md).
 
 ## 4. `sdui-parse-depth-limit`
 
-Source: PART 7-3, PART 7-6.
+Source attribution: PART 7-3, PART 7-6.
 
-Rule: the recursive parser enforces a maximum depth and returns a fallback node
-past it.
+Rule: parsing is bounded before field interpretation and child recursion, and
+budget exhaustion degrades safely.
 
-How to check: grep the parser for `MAX_DEPTH`; confirm the check happens before
-child recursion and that recursion increments depth; confirm the exceeded branch
-returns `Unknown`, not an exception.
-
-Verdict: `fail` if recursion has no bound or the bound throws. `n/a` when the
-parser was not touched and a bound already exists.
+Trace every recursive branch and confirm the adopted depth/work budget advances
+and terminates without throwing. Judge observable bounds and fallback outcomes,
+not a required constant name. Fail on an unbounded or throwing path. An unchanged
+parser can still be in review scope; absence of inspection is not `n/a`.
 
 ## 5. `sdui-unknown-node-fallback`
 
-Source: PART 7-3, PART 7-2.
+Source attribution: PART 7-3, PART 7-2.
 
-Rule: an unsupported component type and a malformed node both degrade to a
-fallback node that renders without crashing.
+Rule: unsupported types and malformed known nodes both degrade without crashing.
 
-How to check: confirm the parser `when` ends in `else -> UiNode.Unknown(id, type)`
-and that the whole branch is wrapped so a field-level failure also yields
-`Unknown`; confirm the renderer has a branch for `Unknown` and that its `when`
-over node types cannot throw on an unmatched case.
-
-Verdict: `fail` if either fallback is missing, or if the renderer's fallback path
-throws in release builds.
+Inspect all field reads, including `id`/`type`, fallback identity, child parsing,
+and release rendering. Confirm malformed primitive shapes cannot throw before
+protection begins and fallback identity remains suitable for repeat rendering.
+Fail if either fault lacks a safe fallback or the fallback itself throws. No
+particular `when`, catch wrapper, or generated UUID is required.
 
 ## 6. `sdui-list-key-contenttype`
 
-Source: PART 7-2, PART 7-6, PART 1-2.
+Source attribution: PART 7-2, PART 7-6, PART 1-2.
 
-Rule: lazy list rendering supplies a stable `key`, and the screen-level list also
-supplies `contentType`.
+Rule: lazy items have stable identity keys and the screen-level lazy list has
+meaningful `contentType` grouping.
 
-How to check: grep the renderer for `items(` and verify each call passes
-`key =`; verify the top-level list passes `contentType =`; verify keys come from
-node or section ids rather than list indices.
+Trace identity from parsing through patching and rendering, including moves and
+insertions. Inspect content grouping and actual layout constraints. Public lazy
+APIs are useful search hints, not mandatory call text.
 
-Verdict: `fail` on a missing key, an index-derived key, or a missing
-`contentType` on the screen-level list. Keys are what preserve scroll position
-across a patch, so this is not cosmetic.
+Fail on missing/unstable/index-based identity or missing screen-level content
+grouping. Confirm scroll preservation rather than assuming keys alone guarantee
+it. Bounded same-axis nested scrolling is valid; unbounded constraints are not.
 
 ## 7. `sdui-accessibility-field`
 
-Source: PART 7-6.
+Source attribution: PART 7-6; public facts from
+[Compose semantics](https://developer.android.com/develop/ui/compose/accessibility/semantics).
 
-Rule: interactive nodes carry an accessibility label or role, and the renderer
-maps them into `semantics`.
+Rule: every interaction is perceivable and operable through the actual semantics
+tree, with an accessible name and appropriate role, state, and actions.
 
-How to check: confirm the shared modifier builder applies `contentDescription`
-and `role`; then check interactive node types in the payload — buttons, icon
-buttons, and any node with a click event — for a label, a role, or an explicit
-`hidden: true`.
+Inspect payload semantics, rendering, built-in component behavior, and merged
+semantics. Correct text or merged semantics can supply the accessible name without
+an extra label field. A role alone does not provide a name; field presence alone
+does not prove the renderer applies it.
 
-Verdict: `fail` when an interactive node has no label, no role, and no explicit
-hidden decision, or when the renderer never applies the field. `n/a` when no
-interactive node was added or changed.
+Fail on an inaccessible interaction or ignored required semantics. Decorative or
+duplicate hiding is valid, but hiding the only operable function is not an
+exemption. Record runtime assistive-technology evidence separately from static review.
 
 ## 8. `sdui-semantic-promotion`
 
-Source: PART 2-4.
+Source attribution: PART 2-4.
 
-Rule: a layout-tree combination that appears in three or more places is promoted
-to a semantic component.
+Rule: justify promotion using repeated maintenance cost, payload/rendering cost,
+accessibility, and design stability under
+[hybrid-boundary-guide.md](hybrid-boundary-guide.md), not a fixed occurrence count.
 
-How to check: this is a repository-wide observation, not a diff-local one. Scan
-stored screen templates and fixtures for repeated container-plus-leaf shapes and
-compare the count against the existing semantic component list.
-
-Verdict: `fail` only with a concrete third occurrence identified. `n/a` is the
-correct verdict when the change is diff-local and repository-wide repetition was
-not surveyed — say so rather than guessing.
+Inspect relevant templates, fixtures, and the semantic catalog when the change
+requires an ownership/promotion decision. Name the observed repeated shapes and
+costs, then evaluate whether a new capability is justified. Fail on a concrete
+violation of the adopted ownership decision, not merely a third occurrence.
+If a required corpus survey is unavailable, report that missing evidence in prose
+and leave the decision unresolved. `n/a` means the decision is genuinely outside scope.
 
 ## 9. `sdui-udf-contract`
 
-Source: PART 11.
+Source attribution: PART 11; delivery semantics follow
+`android-clean-presentation-architecture`.
 
-Rule: the upward event type carries only UI input, the downward one-shot type
-uses a deliberate single-consumer channel that neither drops nor replays, and
-renderers stay stateless.
+Rule: UI input travels upward, durable state downward, and transient effects use
+a deliberate single-consumer/no-replay policy with explicit lifetimes. Renderers
+remain stateless; route/AppShell wiring owns navigation and platform effects.
 
-How to check: inspect the event/effect types and their transport, then inspect
-renderer and node composables for state-holder creation, state collection, or
-navigation calls below the screen entry.
+Inspect direction rather than suffixes, the owner/collector lifecycle, buffering,
+cancellation and consumption, and renderer acquisition/collection calls. A channel
+name cannot prove no loss: critical results require durable state when cancellation
+or process loss must not lose them. Preserve the presentation skill's three
+SDUI-specific exceptions without extending them to ordinary native screens.
 
-Verdict: `fail` when durable state rides the effect channel, the effect transport
-drops or replays one-shot work, or a renderer/node composable owns screen state
-or navigation. `n/a` when the change does not touch these contracts.
-
+Fail when durable results rely on lossy transient delivery, effects violate their
+declared consumption contract, or renderers own screen state or navigation.

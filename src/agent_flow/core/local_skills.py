@@ -511,6 +511,11 @@ def _missing_routed_names(
             changed_files=changed_files,
             task_text=task_text,
             concerns=concerns,
+            declared_skill_phases=(
+                {skill.name: (phase_id,) for skill in resolution.required}
+                if phase_id not in CODE_PHASES
+                else None
+            ),
         )
     }
     if not routed:

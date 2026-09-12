@@ -5,7 +5,7 @@
   "lineIn": "baseline",
   "variant": {
     "deleteLines": [21, 21],
-    "expectRemoved": ["When `useEffectEvent` is available, read non-reactive values inside an Effect"]
+    "expectRemoved": ["When the installed React and hooks-lint versions support `useEffectEvent`"]
   },
   "fixtures": [{ "name": "target", "file": "fixture.diff", "expect": "request-changes" }],
   "patterns": {

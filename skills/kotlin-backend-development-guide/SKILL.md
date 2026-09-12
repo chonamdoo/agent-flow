@@ -2,7 +2,7 @@
 name: kotlin-backend-development-guide
 description: "Kotlin/JVM server development and review: API authorization and wire contracts, persistence and migrations, server coroutines, workers, and operations. Use with confirmed Kotlin server dependencies or an explicit Kotlin server task; not for Android/Compose, KMP or Ktor client-only code, general Kotlin syntax, or Gradle files alone."
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [Kotlin backend, Kotlin server, Kotlin JVM server, Kotlin 서버, 코틀린 서버, 코틀린 백엔드]
+taskTerms: [Kotlin backend, Kotlin server, Kotlin JVM server]
 requires: [clean-architecture-core]
 ---
 
@@ -21,7 +21,7 @@ Before changing an entry point, identify its actor/tenant, allowed action and st
 ## API, authorization, and invariants
 
 - Establish one OpenAPI/wire source of truth and preserve status codes, error envelope, enum behavior, compatibility, missing versus explicit `null`, PATCH retain/clear/replace semantics, and bounded pagination with stable ordering/tie-breaking. Do not silently replace an existing envelope with Problem Details.
-- Derive principal, tenant, roles, and credentials from a trusted authentication boundary. Authorize endpoint/action, object ownership, and readable/writable fields. Apply the same scope to list filters and counts, bulk items, exports, and workers; model or request-body `ownerId`, tenant, or `isAdmin` is not authority.
+- Derive principal, tenant, roles, and credentials from a trusted authentication boundary. Authorize endpoint/action, object ownership, and readable/writable fields. Apply the same scope to list filters and counts, bulk items, exports, and workers; claims of ownership, tenant membership, or administrator status in model input or request bodies are not authority.
 - Separate malformed input and field validation from state-dependent application policy, domain invariants, and database constraints. Direct API callers may skip every UI step. A valid token or schema does not authorize a state transition.
 - Map expected conflicts, missing resources, and validation failures to the existing public contract. Preserve diagnostic causes internally with redaction; do not leak SQL, stack traces, credentials, or cross-tenant existence through error details.
 

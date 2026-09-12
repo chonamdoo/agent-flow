@@ -358,6 +358,12 @@ def test_ios_project_auto_selects_ios_profile_skills(tmp_path: Path) -> None:
     assert index["selection"]["profiles"] == ["ios"]
     assert "ios-clean-architecture" in names
     assert "ios-clean-presentation-architecture" in names
+    assert "webview-json-rpc-bridge" in names
+    assert "nextjs-auth-session" not in names
+    assert "react-runtime-i18n" not in names
+    for host in (".claude", ".Codex", ".omp"):
+        assert (project / host / "skills/webview-json-rpc-bridge/SKILL.md").is_file()
+    assert not any("missing required skill" in warning for warning in index["warnings"])
     assert "android-code-review" not in names
     assert "react-native-clean-architecture" not in names
 
@@ -418,6 +424,59 @@ def test_skill_metadata_dependencies_are_indexed_and_auto_installed(tmp_path: Pa
     assert skills["consumer-skill"]["requires"] == ["dependency-skill"]
     assert (project / ".Codex" / "skills" / "dependency-skill" / "SKILL.md").exists()
     assert (project / ".claude" / "skills" / "dependency-skill" / "SKILL.md").exists()
+
+
+def test_installed_runtime_preserves_missing_skill_phase_contracts(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    skill = project / "skills" / "consumer-skill" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nid: consumer-skill-id\nname: consumer-skill\n"
+        "description: Check a boundary.\nworkflowPhases: [design]\n---\n",
+        encoding="utf-8",
+    )
+    env = {**os.environ, "HOME": str(tmp_path / "home")}
+    result = _install(project, "--profile", "python", "--skills", "consumer-skill", env=env)
+    assert result.returncode == 0, result.stderr
+    skill.unlink()
+    probe = """
+import json
+from pathlib import Path
+from agent_flow.core.profiles import load_profile_payload
+from agent_flow.core.skill_resolver import resolve_phase_skills
+root = Path.cwd()
+custom = {"skills": {"required_review": [
+    {"group": "consumer", "skills": ["consumer-skill"], "task_terms": ["boundary"]},
+]}}
+cases = [
+    ("indexed-design", custom, "boundary", "design", "consumer-skill"),
+    ("indexed-review", custom, "boundary", "review", "consumer-skill"),
+    ("bundled-implement", load_profile_payload("android", root), "크래시", "implement", "android-debugging"),
+    ("bundled-review", load_profile_payload("android", root), "크래시", "review", "android-debugging"),
+]
+out = {}
+for label, profile, task, phase, name in cases:
+    resolution = resolve_phase_skills(
+        project_root=root, phase_id=phase, profile=profile, task_text=task, host="codex",
+    )
+    out[label] = {
+        "required": name in {skill.name for skill in resolution.required},
+        "missing": name in {skill.name for skill in resolution.missing},
+    }
+print(json.dumps(out))
+"""
+    result = subprocess.run(
+        (sys.executable, "-c", probe), cwd=project, capture_output=True, text=True,
+        env={**env, "PYTHONPATH": str(project / ".agent-flow" / "runtime" / "python")},
+        check=False, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "indexed-design": {"required": True, "missing": True},
+        "indexed-review": {"required": False, "missing": False},
+        "bundled-implement": {"required": True, "missing": True},
+        "bundled-review": {"required": False, "missing": False},
+    }
 
 
 def test_local_skill_priority_beats_project_and_bundled_conflict_is_recorded(tmp_path: Path) -> None:
@@ -3131,6 +3190,12 @@ _NEW_HOST_SKILLS = {
     "react-hook-form-zod",
     "react-web-seo",
     "react-storybook",
+    "react-scroll-restoration",
+    "react-runtime-i18n",
+    "ga4-ecommerce-events",
+    "datadog-rum-sourcemaps",
+    "nextjs-auth-session",
+    "webview-json-rpc-bridge",
 }
 
 
@@ -3151,6 +3216,7 @@ def test_installer_entrypoints_consume_framework_fixtures(tmp_path: Path, binary
     kit = json.loads((tmp_path / ".agent-flow/kit.json").read_text(encoding="utf-8"))
     assert kit["profile"] == case["profile"]
     index = json.loads((tmp_path / ".agent-flow/skills/index.json").read_text(encoding="utf-8"))
+    assert not any("missing required skill" in warning for warning in index["warnings"])
     names = {skill["name"] for skill in index["skills"]}
     expected_host_skills = set()
     if case["profile"] == "generic":
@@ -3163,6 +3229,17 @@ def test_installer_entrypoints_consume_framework_fixtures(tmp_path: Path, binary
         expected_host_skills.add("llm-tool-development")
     if case.get("react_web"):
         expected_host_skills.update({"react-hook-form-zod", "react-web-seo", "react-storybook"})
+        expected_host_skills.update({
+            "react-scroll-restoration",
+            "react-runtime-i18n",
+            "ga4-ecommerce-events",
+            "datadog-rum-sourcemaps",
+        })
+    if case["profile"] == "nextjs":
+        expected_host_skills.add("nextjs-auth-session")
+    if case["profile"] in {"android", "ios", "react-native", "node", "typescript", "nextjs"}:
+        expected_host_skills.add("webview-json-rpc-bridge")
+    assert names & _NEW_HOST_SKILLS == expected_host_skills
     for host in (".claude", ".Codex", ".omp"):
         for name in _NEW_HOST_SKILLS:
             directory = tmp_path / host / "skills" / name

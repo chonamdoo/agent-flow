@@ -1,8 +1,8 @@
 ---
 name: react-native-app-shell-error-handling
-description: Use when implementing or reviewing React Native app-wide error handling where screens notify common errors and App.tsx/AppShell owns NavigationContainer, root stack/tab navigation, global Modal, snackbar, toast hosts, auth flow switching, navigation reset, SessionExpired handling, and Maintenance handling.
+description: Use when implementing or reviewing React Native app-wide error handling where screens notify common errors and the app or framework root owns global Modal, snackbar, toast hosts, auth-flow switching, navigation recovery, SessionExpired handling, and Maintenance handling. Covers plain React Navigation and framework-managed roots such as Expo Router.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [app shell, appshell, global error, common error, session expired, navigation reset, modal host, toast host, 공통 에러, 전역 에러, 세션 만료]
+taskTerms: [app shell, appshell, global error, common error, session expired, navigation reset, modal host, toast host]
 pathGlobs: ["**/App.tsx", "**/*AppShell*.tsx", "**/*CommonError*Host.tsx"]
 requires: [app-shell-error-contract]
 ---
@@ -20,6 +20,7 @@ implementation or review.
 - React Navigation authentication flow examples switch available screens from
   top-level auth state.
 - React Navigation `CommonActions.reset` replaces navigation state.
+- [Expo Router manages the root `NavigationContainer`](https://docs.expo.dev/router/migrate/from-react-navigation/#replace-the-navigationcontainer); use the installed framework version's public navigation APIs rather than adding another container.
 
 ## When To Use
 
@@ -37,9 +38,9 @@ implementation or review.
 
 ## AppShell Role
 
-`App.tsx` or `AppShell` is the top-level React Native container:
+The app's adopted top-level composition or framework root owns AppShell responsibilities:
 
-- owns `NavigationContainer`;
+- owns `NavigationContainer` in plain React Navigation, or integrates with the framework-owned root in Expo Router and other managed routers;
 - owns root stack, nested tabs, and auth-flow screen switching;
 - owns app-wide `Modal`, snackbar, toast, and dialog hosts;
 - observes `CommonErrorNotifier` or equivalent store;
@@ -47,7 +48,7 @@ implementation or review.
 - passes feature routes/screens only the callbacks or stores needed to notify
   errors.
 
-Screens render screen UI only.
+For common errors, screens emit intents rather than owning global UI or root recovery. Feature-local errors remain in screen state.
 
 ## Shared Error Contract
 
@@ -59,7 +60,7 @@ Read [`app-shell-error-contract`](../app-shell-error-contract/SKILL.md) before t
 - Run root navigation recovery through the shared queue and acknowledgement contract.
 - For `SessionExpired`, reset the root navigator to the login flow.
 - For `Maintenance`, reset the root navigator to the maintenance flow when present.
-- Use React Navigation auth-flow state or root `CommonActions.reset` from AppShell-owned code.
+- Identify the installed router and version. In plain React Navigation, use auth-flow state or root `CommonActions.reset` from AppShell-owned code. For Expo or another framework-managed root, use its supported auth/recovery mechanism and import boundary without creating a second `NavigationContainer`.
 
 ## Review Checklist
 
@@ -85,9 +86,10 @@ Request changes when any of these are true:
 
 ## Tests To Expect
 
-- AppShell renders common errors in the global host and performs the root reset.
-- Screen tests prove common errors call `notify` instead of rendering local error
-  state.
+- A common error appears once in the global host without duplicate local rendering; a feature-local error remains local.
+- Successful session recovery removes authenticated routes and switches to login, including when back navigation is attempted.
+- Maintenance recovery reaches the configured maintenance root. Failed or cancelled recovery remains retryable according to the shared contract.
+- Exercise the adopted router's observable recovery behavior rather than asserting a particular notifier method name.
 
 ## Completion Gate
 

@@ -55,18 +55,18 @@ skills:
     - group: kotlin-backend
       skills: [kotlin-backend-development-guide]
       path_globs: ["**/*.kt", "**/*.kts"]
-      task_terms: ["kotlin server", "kotlin backend", "kotlin 서버", "코틀린 서버"]
+      task_terms: ["kotlin server", "kotlin backend", "kotlin 서버", "코틀린 서버", "코틀린 백엔드"]
       concerns: [kotlin-backend]
       missing: "missing local Kotlin backend: <skill>"
     - group: ktor-server
       skills: [ktor-development-guide]
       path_globs: ["**/*.kt", "**/*.kts", "**/*.gradle", "**/pom.xml", "**/application.conf", "**/application.yaml"]
-      task_terms: ["ktor server", "ktor 서버"]
+      task_terms: ["ktor server", "ktor 서버", "코토 서버"]
       concerns: [ktor-server]
       missing: "missing local Ktor server: <skill>"
     - group: llm-tool-development
       skills: [llm-tool-development]
-      task_terms: ["tool calling", "function calling", "mcp server", "mcp adapter", "툴콜", "mcp 서버"]
+      task_terms: ["tool calling", "function calling", "mcp server", "mcp adapter", "툴콜", "mcp 서버", "툴콜 개발", "툴콜 리뷰", "도구 호출 구현", "도구 호출 리뷰", "MCP 서버 개발", "MCP 어댑터 개발", "MCP 서버 리뷰"]
       concerns: [llm-tool-development]
       missing: "missing local LLM tool development: <skill>"
 architecture:

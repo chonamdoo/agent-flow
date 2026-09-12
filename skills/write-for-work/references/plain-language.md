@@ -55,113 +55,115 @@ These are synthetic examples, not mandatory substitutions:
 
 ## Imported workplace jargon
 
-| Signal | Prefer, depending on meaning |
-|---|---|
-| 게이트 | 판단 기준, 승인 조건, 검증 단계, 다음 검토 |
-| 레버 | 바꿀 수 있는 요인, 조정 수단, 개선 방법, 비용 절감 방법 |
-| 슬롯 | 항목, 입력란, 확인할 수치, 배정 시간 |
-| 액션 아이템 | 할 일, 후속 작업, 다음 조치 |
-| 얼라인, 얼라인먼트 | 합의하다, 방향을 맞추다, 기준을 통일하다 |
-| 오너십 | 담당 책임, 책임 범위, 주도권 |
-| 임팩트 | 영향, 효과, 결과, 변화 |
-| 인사이트 | 발견, 해석, 확인한 점, 판단 근거 |
-| 러닝 | 배운 점, 확인한 사실, 실험 결과 |
-| 컨텍스트 | 배경, 맥락, 전제, 앞선 논의 |
-| 내러티브 | 설명 흐름, 주장, 이야기 구조 |
-| 프레임워크 | 기준, 구조, 분석 틀, 절차 |
-| 로드맵 | 추진 계획, 단계별 계획, 일정 |
-| 마일스톤 | 주요 일정, 중간 목표, 완료 기준 |
-| 팔로업 | 후속 확인, 다음 작업, 추가 연락 |
-| 브레이크다운 | 세부 내역, 항목별 구분, 나눠 보기 |
-| 드라이브하다 | 추진하다, 주도하다, 진행하다 |
-| 셋업 | 설정, 준비, 구성, 설치 |
-| 킥오프 | 시작 회의, 착수, 작업 시작 |
-| 어젠다 | 안건, 논의할 내용 |
-| 디펜던시 | 선행 조건, 의존 관계, 먼저 필요한 작업 |
-| 블로커 | 막힌 문제, 진행을 막는 요인 |
-| 리소스 | 인력, 예산, 시간, 장비처럼 실제 대상을 명시 |
-| 스코프 | 범위, 대상, 포함할 일 |
-| 싱크 | 공유, 상태 확인, 내용 맞추기 |
-| 롤아웃 | 순차 적용, 단계적 출시, 배포 |
-| 랜딩 | 확정, 반영, 적용, 도착처럼 실제 의미를 명시 |
-| 트랙 | 작업 흐름, 진행 경로, 추적 대상 |
-| 베이스라인 | 비교 기준, 기본값, 기존 측정값 |
-| 페인 포인트 | 불편, 문제, 막히는 지점 |
-| 밸류 프로포지션 | 고객이 얻는 가치, 선택 이유 |
-| 터치포인트 | 접점, 만나는 화면, 연락 시점 |
-| 엔드투엔드 | 처음부터 끝까지, 전체 과정 |
-| 유즈 케이스 | 사용 사례, 이용 상황 |
-| 디시전 | 결정, 판단 |
-| 테이크어웨이 | 결론, 기억할 내용, 핵심 결과 |
+For Korean prose, the signals below describe English loanwords commonly transliterated into Korean. Choose natural Korean wording for the specific meaning rather than preserving the imported workplace label. The table describes those meanings in English; it is not a rule to produce English output.
 
-Some borrowed terms have several legitimate meanings. For example, do not replace "랜딩 페이지" with "확정 페이지". Interpret the phrase before editing it.
+| Signal loanword | Prefer wording that means, depending on context |
+|---|---|
+| Gate | Decision criterion, approval condition, verification step, next review |
+| Lever | Adjustable factor, control, improvement method, cost-saving method |
+| Slot | Item, input field, metric to confirm, allocated time |
+| Action item | Task, follow-up work, next action |
+| Align, alignment | Agree, reconcile direction, use consistent criteria |
+| Ownership | Assigned responsibility, responsibility scope, initiative |
+| Impact | Influence, effect, result, change |
+| Insight | Finding, interpretation, confirmed point, decision evidence |
+| Learning | Lesson, confirmed fact, experiment result |
+| Context | Background, surrounding circumstances, premise, earlier discussion |
+| Narrative | Explanation sequence, argument, story structure |
+| Framework | Criteria, structure, analysis method, procedure |
+| Roadmap | Delivery plan, phased plan, schedule |
+| Milestone | Key date, intermediate objective, completion criterion |
+| Follow-up | Subsequent check, next task, further contact |
+| Breakdown | Detailed figures, grouping by item, decomposition |
+| Drive | Advance, lead, carry out |
+| Setup | Configure, prepare, arrange, install |
+| Kickoff | Opening meeting, commencement, start of work |
+| Agenda | Items for discussion |
+| Dependency | Prerequisite, dependency relationship, work needed first |
+| Blocker | Unresolved problem, impediment to progress |
+| Resource | Name the actual people, budget, time, or equipment |
+| Scope | Boundary, target, included work |
+| Sync | Share information, check status, reconcile details |
+| Rollout | Gradual adoption, phased release, deployment |
+| Landing | Name the actual meaning: finalize, incorporate, apply, or arrive |
+| Track | Workstream, route forward, tracked subject |
+| Baseline | Comparison point, default, previous measurement |
+| Pain point | Difficulty, problem, point of obstruction |
+| Value proposition | Customer benefit, reason to choose |
+| Touchpoint | Contact point, encountered screen, time of contact |
+| End-to-end | From beginning to end, the whole process |
+| Use case | Usage example, situation of use |
+| Decision | Choice, judgment |
+| Takeaway | Conclusion, point to remember, principal result |
+
+Some borrowed terms have several legitimate meanings. A landing page is a destination page, not a page for finalizing decisions. Interpret the phrase before editing it.
 
 ## Stock Korean AI expressions
 
-Treat these as signals that the sentence may be adding weight without information.
+The signals below describe recurring Korean expressions in English. Treat them as signs that a sentence may add weight without information, not as forbidden phrases to replace blindly.
 
-| Signal | Check or rewrite |
+| Signal meaning or construction | Check or rewrite |
 |---|---|
-| 단순한 X를 넘어 Y | State Y directly. Keep the contrast only if X and Y genuinely differ. |
-| X에 그치지 않고 Y | State the additional result and its evidence. |
-| X가 아니라 Y다 | Keep only when correcting a real misconception. |
-| 핵심은 명확하다 | State the actual conclusion. |
-| 결국 중요한 것은 | Remove the lead-in and state what matters. |
-| 이러한 맥락에서 | Name the relationship or remove the transition. |
-| 이를 통해 | State who did what and what changed. |
-| 나아가 | Use only when the next point is a real extension. |
-| 한편 | Use only for a genuine contrast or parallel point. |
-| 종합적으로 볼 때 | State the conclusion and supporting evidence. |
-| 주목할 만하다 | State the result that deserves attention. |
-| 시사하는 바가 크다 | State the decision or next test the result supports. |
-| 의미가 있다 | Explain what changes because of it. |
-| 새로운 가능성을 열다 | Name the new capability, customer, or action. |
-| 중요한 전환점 | Name what changed before and after. |
-| 패러다임 전환 | Describe the operating or market change. |
-| 게임 체인저 | Name the measurable advantage or remove it. |
-| 새로운 여정을 시작하다 | State the work that begins. |
-| 생태계를 구축하다 | Name the participants, exchange, and operating model. |
-| 지속 가능한 성장 | Name the revenue, cost, retention, or operating condition. |
-| 미래지향적 | Name the future requirement the choice satisfies. |
-| 혁신적, 획기적 | Provide the observable difference or remove the praise. |
-| 차별화된 | State the exact difference and comparison target. |
-| 다층적, 다각적, 전방위적 | List the actual dimensions when they matter. |
-| 선제적으로 | State what was done before which event or risk. |
-| 체계적으로 | State the procedure, owner, or sequence. |
-| 성공적으로 | State the completion or measured result. |
-| 효과적으로 | State the effect and its measure. |
-| 원활하게 | State what completed without which problem. |
-| 본질적으로 | State the actual mechanism or definition. |
-| 무엇보다 | Keep only when a real priority order exists. |
-| 빠르게 변화하는 환경에서 | Name the specific change and date or remove it. |
+| Going beyond mere X to Y | State Y directly. Keep the contrast only if X and Y genuinely differ. |
+| Not stopping at X, but also Y | State the additional result and its evidence. |
+| It is not X but Y | Keep only when correcting a real misconception. |
+| The core point is clear | State the actual conclusion. |
+| What ultimately matters is | Remove the lead-in and state what matters. |
+| In this context | Name the relationship or remove the transition. |
+| Through this | State who did what and what changed. |
+| Furthermore | Use only when the next point is a real extension. |
+| Meanwhile or on the other hand | Use only for a genuine contrast or parallel point. |
+| Viewed comprehensively | State the conclusion and supporting evidence. |
+| Worth noting | State the result that deserves attention. |
+| Has major implications | State the decision or next test the result supports. |
+| Is meaningful | Explain what changes because of it. |
+| Opens new possibilities | Name the new capability, customer, or action. |
+| An important turning point | Name what changed before and after. |
+| Paradigm shift | Describe the operating or market change. |
+| Game changer | Name the measurable advantage or remove it. |
+| Beginning a new journey | State the work that begins. |
+| Building an ecosystem | Name the participants, exchange, and operating model. |
+| Sustainable growth | Name the revenue, cost, retention, or operating condition. |
+| Future-oriented | Name the future requirement the choice satisfies. |
+| Innovative or groundbreaking | Provide the observable difference or remove the praise. |
+| Differentiated | State the exact difference and comparison target. |
+| Multilayered, multifaceted, or all-encompassing | List the actual dimensions when they matter. |
+| Proactively | State what was done before which event or risk. |
+| Systematically | State the procedure, owner, or sequence. |
+| Successfully | State the completion or measured result. |
+| Effectively | State the effect and its measure. |
+| Smoothly | State what completed without which problem. |
+| Essentially | State the actual mechanism or definition. |
+| Above all | Keep only when a real priority order exists. |
+| In a rapidly changing environment | Name the specific change and date or remove it. |
 
-Do not replace one empty abstraction with another. "시사하는 바가 크다" should not automatically become "중요한 인사이트를 제공한다".
+Do not replace one empty abstraction with another. Replacing a claim of major implications with a claim of important insights still leaves the implications unexplained.
 
 ## Vague action words
 
-These words are useful only when the document names what changes.
+In Korean work writing, verbs with these meanings are useful only when the document names what changes.
 
-| Signal | Make it concrete |
+| Signal meaning | Make it concrete |
 |---|---|
-| 강화 | What becomes stronger, by which action, and how will it be measured? |
-| 고도화 | Is accuracy improving, scope expanding, or work becoming automated? |
-| 최적화 | Which metric improves under which constraint? |
-| 효율화 | Does time, cost, error, or staffing decrease? |
-| 극대화 | What is the target and current value? |
-| 제고 | Does awareness, quality, conversion, or speed increase? |
-| 확보 | What was obtained, in what amount, and is it confirmed? |
-| 지원 | What action can the recipient now complete? |
-| 연계 | Which systems, teams, or steps connect and how? |
-| 활용 | Who uses what for which task? |
-| 추진 | What work starts, who owns it, and by when? |
-| 검토 | What decision will the review produce? |
-| 대응 | What specific action addresses which risk? |
+| Strengthen | What becomes stronger, by which action, and how will it be measured? |
+| Advance or enhance | Is accuracy improving, scope expanding, or work becoming automated? |
+| Optimize | Which metric improves under which constraint? |
+| Improve efficiency | Does time, cost, error, or staffing decrease? |
+| Maximize | What is the target and current value? |
+| Raise or improve | Does awareness, quality, conversion, or speed increase? |
+| Secure or obtain | What was obtained, in what amount, and is it confirmed? |
+| Support | What action can the recipient now complete? |
+| Connect or link | Which systems, teams, or steps connect and how? |
+| Utilize | Who uses what for which task? |
+| Advance an initiative | What work starts, who owns it, and by when? |
+| Review | What decision will the review produce? |
+| Respond | What specific action addresses which risk? |
 
-Examples:
+Examples described in English:
 
-- "운영 효율을 강화한다" becomes "수동 검수 시간을 줄인다" when that is the actual goal.
-- "서비스를 고도화한다" becomes "고객 문의의 평균 처리 시간을 줄인다" when response time is the target.
-- "데이터를 활용한다" becomes "지난 30일 결제 데이터를 가격 실험 대상 선정에 사용한다" when the source supports it.
+- Replace a vague promise to strengthen operational efficiency with the actual goal of reducing manual review time, when supported.
+- Replace a vague promise to enhance a service with the target of reducing average response time, when that is the measured goal.
+- Replace a vague claim to use data with the specific dataset, source-supported observation period, and decision it informs. Do not invent a period or business metric.
 
 ## English AI expressions
 
@@ -198,7 +200,7 @@ Check for patterns that make writing look generated even when individual sentenc
 - The introduction announces the document instead of giving the answer.
 - The conclusion repeats the introduction without a decision or next action.
 - Headings, cards, callouts, and highlights all emphasize the same point.
-- Unknowns are hidden under "추후 검토" without stating what decision they affect.
+- Unknowns are hidden under a promise of later review without stating what decision they affect.
 - The document alternates between inflated claims and broad disclaimers.
 - A social post opens with manufactured controversy or ends with engagement bait.
 
@@ -206,51 +208,33 @@ Keep useful structure. Remove only the structure that decorates or simulates ana
 
 ## Examples
 
+The English guidance below applies in the requested output language; quoted examples preserve the language being edited.
+
 ### Business report
 
 Supplied context for this synthetic example: the next review concerns cost reduction and follow-up work.
 
-Before:
+**Before:** a sentence promises to align key levers and action items at the next gate.
 
-> 다음 게이트에서 핵심 레버와 액션 아이템을 얼라인한다.
-
-After:
-
-> 다음 검토에서 비용을 줄일 방법과 후속 작업을 합의한다.
+**After:** name the next review and the actual agreement needed, such as cost-reduction methods and follow-up tasks when those are supported by the source.
 
 ### Quantitative input
 
-Before:
+**Before:** a sentence asks readers to fill quantitative slots for a business assessment.
 
-> 사업성 판단을 위한 정량 슬롯을 채운다.
-
-After:
-
-> 사업성 판단에 필요한 수치를 확정한다.
+**After:** identify the figures that must be confirmed for the assessment.
 
 ### AI-style conclusion
 
 Supplied facts for this synthetic example: a new approval procedure passed an internal test; its effect on processing time has not been measured in a pilot.
 
-Before:
+**Before:** a conclusion claims that a technical evaluation goes beyond validation and opens meaningful business possibilities.
 
-> 이러한 맥락에서 이번 결과는 단순한 기술 검증을 넘어 사업의 새로운 가능성을 연다는 점에서 의미가 있다.
-
-After:
-
-> 새 결재 절차는 내부 시험을 통과했다. 실제 처리 시간이 줄어드는지는 시범 운영에서 확인해야 한다.
+**After:** state exactly what passed the internal evaluation and what operational or business outcome remains to be verified. Do not turn technical success into evidence of real-world benefit.
 
 ### Formal identifier
 
-Before:
-
-> `PAYMENT_STATUS`는 API 응답에 정의된 필드다.
-
-After:
-
-> `PAYMENT_STATUS`는 API 응답에 정의된 필드다.
-
-Keep the identifier because changing it would damage precision.
+Preserve the exact spelling of an identifier defined by a public API, schema, or source contract. Improve the surrounding explanation instead of translating or renaming the identifier. Exactness here is part of correctness, not workplace jargon.
 
 ### Missing evidence
 

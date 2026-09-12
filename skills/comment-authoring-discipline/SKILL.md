@@ -1,13 +1,13 @@
 ---
 name: comment-authoring-discipline
-description: Use as the final comment-quality pass before final-review, multi-review, or architecture-review after code changes. Applies equally in Codex, Claude, and OMP for Python, Kotlin, React Web, React Native, iOS, Swift, and SwiftUI.
+description: Apply comment-quality criteria during implementation and the final comment-quality pass before final-review, multi-review, or architecture-review after code changes. Applies equally in Codex, Claude, and OMP for Python, Kotlin, React Web, React Native, iOS, Swift, and SwiftUI.
 delivery: passive
 requires: [write-for-work]
 ---
 
 # Comment Authoring Discipline
 
-Use this only after implementation/fix work is complete and before review.
+Apply the semantic criteria while writing or changing comments. Run the final comment-quality pass only after implementation/fix work is complete and before review.
 
 ## Contract
 
@@ -44,7 +44,7 @@ When repository instructions require Korean comments, docstrings, review notes, 
 
 - Write the sentence in natural Korean from the start. Do not preserve English word order and replace only individual words.
 - Keep only code identifiers, API names, product names, and established project terms in English. Write ordinary concepts in Korean.
-- Do not mix duplicate Korean and English labels such as `field 필터`, `reason 값`, or `notify 우선순위`. If the English token is an identifier, wrap that exact token in backticks and explain it once in natural Korean.
+- Do not combine an ordinary English label with a redundant or mismatched Korean noun, such as an English label for a field followed by a Korean label for a filter. If the English token is an identifier, wrap that exact token in backticks and explain it once in natural Korean.
 - Reuse the repository's existing domain terms and glossary. Do not invent a translation or use a near-synonym when the project already has a name for the concept.
 - Read the sentence without its code tokens. If the remaining Korean is awkward, ambiguous, or sounds translated, rewrite it or remove the comment.
 - Apply the same wording check to findings and artifact explanations produced during the comment-authoring pass.
@@ -70,6 +70,6 @@ When repository instructions require Korean comments, docstrings, review notes, 
 1. Inspect only the changed diff.
 2. For each existing or candidate comment, ask: why is this not obvious from code?
 3. If the answer is not one of the allowed reasons, remove or avoid the comment.
-4. Run comment-checker or the configured hook when available.
-5. Record `comment-authoring: applied` in the phase artifact.
-6. Record `comment-checker: checked` when it ran, `unavailable` only when no project-local checker or hook command exists, and `n/a` only when the changed diff has no code files to inspect.
+4. Run comment-checker or the configured hook when available and authorized for the active phase and assigned owner.
+5. Record `comment-authoring: applied` in the phase artifact after completing this pass.
+6. Record `comment-checker: checked` when it ran, `unavailable` only when no project-local checker or hook command exists, and `n/a` only when the changed diff has no code files to inspect. If an existing checker cannot run in this phase or belongs to another owner, record the reason and responsible owner in prose and leave the verification obligation open for that owner. Do not claim it ran, mislabel it unavailable, invent a marker value, or claim the completion gate passed before required evidence exists.

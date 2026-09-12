@@ -1,8 +1,8 @@
 ---
 name: android-sdui-architecture
-description: Hybrid Server-Driven UI architecture for Android — server layout tree vs client semantic components, design-token-only styling, storage-backed offline rendering scoped to durable shared state, a finite action vocabulary, and crash-safe recursive renderers. Use when designing, implementing, or reviewing SDUI screens, UiNode trees, screen JSON schemas, action interpreters, section patch operations, or server-side screen composition on Android. Do not use for static native Compose screens, WebView-hosted dynamic content, or payload design no renderer consumes.
+description: Hybrid Server-Driven UI architecture for Android — server layout tree vs client semantic components, design-token-only styling, storage-backed rendering for restart-durable state even with one observer, a finite action vocabulary, and crash-safe recursive renderers. Use when designing, implementing, or reviewing SDUI screens, UiNode trees, screen JSON schemas, action interpreters, section patch operations, or server-side screen composition on Android. Do not use for static native Compose screens, WebView-hosted dynamic content, or payload design no renderer consumes.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [sdui, server-driven ui, server driven ui, 서버 드리븐, 서버드리븐, 서버 주도 ui, 동적 화면, json 렌더링, 컴포넌트 카탈로그]
+taskTerms: [sdui, server-driven ui, server driven ui, dynamic screen, json rendering, component catalog]
 pathGlobs: ["**/sdui/**", "**/*UiNode*", "**/*ScreenComposer*", "**/*NodeRenderer*"]
 requires: [android-clean-architecture, android-clean-presentation-architecture]
 ---
@@ -46,31 +46,23 @@ Three axes hold the design together (PART 3-1):
    many observe it. `offline-ssot-data-guide.md` names what stays outside it.
 3. **UDF** — state flows storage to UI, events flow UI to the state holder.
 
-## Module Shape
+## Responsibility Boundaries
 
-Compressed from PART 3-2:
+The supplied PART 3-2 architecture is expressed as roles, not required modules:
 
-```text
-app/                # Application, root activity, root navigation
-core/model/         # UiNode, NodeModifier, SduiAction, Screen, SectionOperation
-core/designsystem/  # spacing/color/typography/shape/icon tokens
-core/network/       # DTOs, mappers with Unknown fallback, capability header
-core/database/      # Room entities, DAOs, patch transactions
-core/data/          # offline-first repositories, sync worker
-core/sdui/render/   # screen renderer, recursive node renderer, modifier mapper
-core/sdui/action/   # action executor, expression resolver, result registry
-feature/<name>/     # SDUI-hosted and native screens
-```
+- Pure node/domain contracts declare typed screen, action, and patch meanings
+  without Compose, storage, or network implementations.
+- Client design-system code owns token values and their theme/window resolution.
+- Transport/parsing adapters validate payloads and construct safe client values.
+- Storage/repository adapters own persistence, observation, atomic patches, and
+  offline synchronization.
+- Presentation renderers and interpreters consume contracts, never concrete data
+  implementations. Route/AppShell wiring executes navigation and platform effects.
+- The composition root constructs adapters and injects their contracts.
 
-```text
-feature:* -> core:sdui -> core:data -> core:database
-                                    -> core:network
-every module -> core:model, core:designsystem
-```
-
-`core/model` stays pure Kotlin. `core/designsystem` owns every literal dp,
-color, and text style; no other module resolves a token value — it is the line
-the server cannot cross.
+Map these responsibilities to existing modules/source sets. Dependencies point
+toward contracts; pure domain does not depend on the design system, database, or
+renderer. Module count and paths are not acceptance criteria.
 
 ## Reference index
 
@@ -95,7 +87,7 @@ Read only the matching file.
 
 ## Review Checklist
 
-Read [`sdui-review-checklist.md`](references/sdui-review-checklist.md) and apply all nine marker rules. That file is the semantic source of truth; this skill keeps only the invocation and required output markers.
+Read [`sdui-review-checklist.md`](references/sdui-review-checklist.md) and apply its nine marker rules to the actual change/review scope. That file owns semantics and evidence criteria. Report missing applicable evidence without mislabeling it as a pass, a confirmed failure, or an inapplicable check; preserve the marker values declared below.
 
 ## Required Markers
 
@@ -116,8 +108,12 @@ sdui-udf-contract: pass|fail|n/a
 
 ## Evidence Basis
 
-- Internal SDUI design source, PART 1 through PART 9 and the PART 11
-  design-decision section; each reference names its source parts.
-- Android UI layer and offline-first data layer docs for single source of truth
-  and unidirectional data flow.
-- Compose list, stability, and semantics docs for keys and accessibility.
+- The supplied bundle attributes its adopted design policies to an internal SDUI
+  source, PART 1 through PART 9 and PART 11. Original title, version, retrievable
+  locator, effective date, and author authority are unverified; PART labels are
+  retained for provenance, not proof that the original source was inspected.
+- Android UI layer and offline-first guidance inform UDF and source-of-truth
+  design; the specific durability policy here remains an adopted contract.
+- Public Compose API facts are linked in the node, renderer, and review guides:
+  strong skipping, bounded nested lists, and accessibility semantics. They do not
+  certify this architecture's runtime behavior or every source-derived policy.

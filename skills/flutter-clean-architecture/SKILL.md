@@ -29,24 +29,33 @@ unmapped or inactive boundaries.
 
 ## DI Shape
 
-- Default to Riverpod: declare providers as top-level `final` variables and put
-  `ProviderScope` at `runApp` as the composition root.
-- Resolve dependencies through `ref`, not `BuildContext`. A state holder, a use
-  case wiring provider, and a test all read the same graph without a widget tree.
-- The graph is static, so a provider that does not exist is an analyze-time error
-  on an undefined name instead of a runtime lookup failure.
+- Identify the adopted DI path first; preserve constructor composition or an
+  existing graph. Consider Riverpod only when its graph, lifetime, and override
+  model fit the project and its toolchain.
+- When Riverpod is adopted, declare providers as top-level `final` variables and
+  put the root `ProviderScope` at the app composition boundary.
+- In that graph, resolve dependencies through `ref`, not `BuildContext`, so
+  state holders, wiring providers, and tests use the same dependency graph.
+- A reference to an undeclared top-level provider is an analyzer error; this
+  does not prove every runtime dependency or override is configured correctly.
 - Plugins, permissions, secure storage, path lookups, and `MethodChannel`
   implementations belong to platform adapters. Pass consumer-focused
   domain/application ports to use cases and presentation; a capability is not
   required to masquerade as a repository.
-- Override platform and network adapters with `ProviderScope(overrides: ...)` for
-  tests, flavors, and previews instead of branching inside the graph.
-- Providers may construct clients inside composition. A presentation consumer
-  reads a typed action/port, not the raw HTTP client, plugin, or data implementation.
+- With Riverpod, override platform and network adapters through
+  `ProviderScope(overrides: ...)` for tests, flavors, and previews instead of
+  branching inside the graph.
+- Composition may construct clients. A presentation consumer reads a typed
+  action/port, not the raw HTTP client, plugin, or data implementation.
 - Use `get_it` only when the repo already registers services there. Keep its
   registration at app startup and out of domain and presentation code.
 
 ## Review Additions
+
+Apply provider-specific criteria only to an adopted Riverpod path. For another
+DI path, explain the applicability boundary and use the active workflow's
+supported marker values; do not introduce Riverpod just to satisfy a marker or
+invent a new enum value.
 
 ```text
 flutter-clean-architecture: applied

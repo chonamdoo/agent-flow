@@ -2,7 +2,7 @@
 name: react-app-shell-error-handling
 description: Use when implementing or reviewing React Web app-wide error handling where feature components notify common errors and an AppShell, root layout, root route, or client provider layer owns global dialogs, snackbars, toasts, auth flow switching, router resets, SessionExpired handling, Maintenance handling, React Router layout/error boundaries, or Next.js App Router layout/error boundaries.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [app shell, appshell, global error, common error, session expired, error boundary, snackbar, toast host, router reset, 공통 에러, 전역 에러, 세션 만료]
+taskTerms: [app shell, appshell, global error, common error, session expired, error boundary, snackbar, toast host, router reset]
 pathGlobs: ["**/*AppShell*.tsx", "**/app/layout.tsx", "**/*CommonError*Provider.tsx", "**/*CommonError*Host.tsx"]
 requires: [app-shell-error-contract]
 ---
@@ -16,8 +16,9 @@ implementation or review.
 
 - React Error Boundaries catch render crashes and show fallback UI.
 - React Router root/layout routes can own shared UI and nested route rendering.
-- React Router route `errorElement`/`ErrorBoundary` handles route render, loader,
-  and action exceptions.
+- In React Router framework/data modes, route `errorElement`/`ErrorBoundary`
+  handles route render, loader, and action exceptions; see
+  [Error Boundaries](https://reactrouter.com/how-to/error-boundary) for supported route-local responses.
 - Next.js App Router root layouts own shared UI; Client Components own client
   context providers.
 - Next.js `error.tsx` and `global-error.tsx` handle uncaught render/runtime
@@ -51,7 +52,7 @@ implementation or review.
 - contains React Router `RouterProvider`/root route layout, or Next.js root
   layout plus a client provider boundary for interactive state.
 
-Feature routes render feature UI only.
+Feature routes render feature UI without owning global common-error hosts or root recovery. Their normal loaders, server composition, and nested route-local error boundaries remain valid.
 
 ## Shared Error Contract
 
@@ -65,6 +66,7 @@ Read [`app-shell-error-contract`](../app-shell-error-contract/SKILL.md) before t
 - For `Maintenance`, replace the current entry with the maintenance flow and guard routes that cannot run during maintenance.
 - In React Router, put global hosts in the root/layout route, not leaf routes.
 - In Next.js App Router, put interactive stores/providers in a Client Component imported by `layout.tsx`; keep the root document server-rendered unless another requirement needs a client boundary.
+- Root switching, history replacement, and client guards recover the user flow; they do not validate sessions, authorize data access, or protect direct Server Action/Route Handler calls. For Next.js trusted-server session or authorization changes, use `nextjs-auth-session` and the installed-version [Next authentication guidance](https://nextjs.org/docs/app/guides/authentication). Common-error UI or login styling alone does not need that branch.
 
 ## Review Checklist
 
@@ -83,8 +85,11 @@ Request changes when any of these are true:
 ## Platform-Specific Forbidden Patterns
 
 - Do not use React Error Boundaries as the main API/domain common error handler.
-- Do not throw expected API/domain errors just to reach `error.tsx`,
-  `global-error.tsx`, or a React Router error boundary.
+- Route classified common errors through the AppShell queue rather than throwing
+  them to bypass it via `error.tsx`, `global-error.tsx`, or a React Router error boundary.
+  Framework-supported route-local missing-resource/status responses, including
+  React Router loader/action 404 data and Next.js `notFound`/`redirect` control
+  flow, are separate from that queue and remain valid.
 - Do not put global common error stores inside feature-only providers.
 - Do not call router reset/replace for session expiry from leaf components except
   through an AppShell-owned callback/store effect.

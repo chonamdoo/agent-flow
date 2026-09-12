@@ -1,11 +1,15 @@
 ---
 name: push-watch
-description: Use for verified branch publication and active pr-watch, pr-comment-fix, or pr-ci-fix phases, including deferred feedback completion after publication. Not for local implementation or standalone code review.
+description: Use for verified, authorized branch publication and active pr-watch, pr-comment-fix, or pr-ci-fix phases, including deferred feedback completion after publication. Not for local implementation or standalone code review.
 ---
 
 # Push Watch
 
 ## Phase authority
+
+Publish only when the current user request or active workflow already grants
+authority. A ready branch alone is not permission to publish. Reuse existing
+authorization within its scope rather than asking for it again.
 
 Stay in the active run and follow `agent-flow status`'s exact `next_command`.
 This skill supplies PR triage and completion policy; the runner owns routing.

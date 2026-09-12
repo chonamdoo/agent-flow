@@ -11,20 +11,20 @@ This skill is for synthesis, not discovery interviewing. Do not ask a fresh ques
 ## Quick start
 
 1. Explore the repo only enough to describe current state, domain language, ADR constraints, and testing seams.
-2. Confirm the intended test seams with the user.
+2. Reuse the agreed test seams; resolve only missing or materially changed seam decisions through `grilling` before synthesis.
 3. Write the PRD from the template below. Save it to the caller's requested artifact path, or publish and label it `ready-for-agent` only when the workflow or user explicitly asks for tracker publication.
 
 Use `grilling` before this when decisions are unresolved.
 
-This skill takes the current conversation context and codebase understanding and produces a PRD. Do NOT interview the user — just synthesize what you already know.
+The Process below expands this quick start. Synthesize the existing context rather than starting a fresh interview.
 
 ## Process
 
 1. Explore the repo to understand the current state of the codebase, if you haven't already. Use the project's domain glossary vocabulary throughout the PRD, and respect any ADRs in the area you're touching.
 
-2. Sketch out the seams at which you're going to test the feature. Existing seams should be preferred to new ones. Use the highest seam possible. If new seams are needed, propose them at the highest point you can. The fewer seams across the codebase, the better - the ideal number is one.
+2. Describe the agreed seams at which the feature will be tested. Prefer existing seams and the highest public interface that exposes the required behavior. Cover the source-supported acceptance conditions without inventing seams to meet a count or hiding distinct observable contracts behind an arbitrary single-seam target.
 
-Check with the user that these seams match their expectations.
+Reuse settled decisions. If a required seam decision is missing or materially changed, use `grilling` to resolve that decision before completing synthesis.
 
 3. Write the PRD using the template below. Save it to the caller's requested artifact path; publish it to the project issue tracker and apply the `ready-for-agent` triage label only when the workflow or user explicitly asks for tracker publication.
 
@@ -40,7 +40,7 @@ The solution to the problem, from the user's perspective.
 
 ## User Stories
 
-A LONG, numbered list of user stories. Each user story should be in the format of:
+A numbered list covering every source-supported user need and observable acceptance condition, without inventing scope to meet a length target. Each user story should be in the format of:
 
 1. As an <actor>, I want a <feature>, so that <benefit>
 
@@ -48,7 +48,7 @@ A LONG, numbered list of user stories. Each user story should be in the format o
 1. As a mobile bank customer, I want to see balance on my accounts, so that I can make better informed decisions about my spending
 </user-story-example>
 
-This list of user stories should be extremely extensive and cover all aspects of the feature.
+Cover the agreed feature scope completely; distinguish unresolved assumptions from settled stories.
 
 ## Implementation Decisions
 

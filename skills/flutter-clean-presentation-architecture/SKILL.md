@@ -2,7 +2,7 @@
 name: flutter-clean-presentation-architecture
 description: Use when creating, modifying, or reviewing a Flutter Clean Architecture presentation layer with Riverpod provider DI, state-holder notifiers, UiState modeling, UiModel mapping, navigation effects, and state-based presentation code review.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [uistate, ui state, state holder, screen state, navigation effect, riverpod, asyncvalue, notifier, 상태 홀더, 화면 상태, 프레젠테이션 계층]
+taskTerms: [uistate, ui state, state holder, screen state, navigation effect, riverpod, asyncvalue, notifier, presentation layer]
 pathGlobs: ["**/*_ui_state.dart", "**/*_notifier.dart", "**/presentation/**"]
 requires: [clean-architecture-core]
 ---
@@ -45,17 +45,22 @@ For widget-level layout, constraint, adaptive sizing, disposal, child-widget key
 Flutter has no framework-bundled DI container. Use this priority:
 
 1. Prefer constructor parameters for a dependency a single widget or notifier owns.
-2. Assemble app dependencies with the existing provider graph. Presentation
+2. Assemble app dependencies with the existing composition owner or provider graph. Presentation
    consumes typed action, repository-interface, or capability ports; HTTP/storage/
    plugin implementations remain inside composition and adapters.
 3. Use `get_it` only when the project already registers services there.
-4. Read a dependency through `ref`, and reserve `BuildContext` for `Theme`, `MediaQuery`, localization, navigation, and dialogs.
+4. When Riverpod is adopted, read dependencies through `ref`; otherwise preserve constructor or existing observable wiring. Reserve `BuildContext` for `Theme`, `MediaQuery`, localization, navigation, and dialogs.
 
-Provider rules — `flutter-clean-architecture` owns where `ProviderScope` sits and how an override replaces a dependency:
+When Riverpod is adopted, apply these provider rules; `flutter-clean-architecture` owns composition and overrides:
 - declare providers as top-level `final` variables, not inside `build`; a provider constructed per rebuild leaks its state
 - expose a use case or repository through its own provider so a test can override that one edge
-- let a screen-scoped provider's state be destroyed when the screen stops listening, using whichever auto-dispose form the repo's Riverpod version provides
-- keep screen-local state out of app-level providers
+- use the installed Riverpod version's auto-dispose mechanism for listener-scoped state; retain state deliberately when its declared route/restoration lifetime outlives listeners, with an explicit release owner
+- keep screen-local state out of unrelated app-level providers; restoration ownership does not make transient widget state global
+
+See [Riverpod automatic disposal](https://riverpod.dev/docs/concepts2/auto_dispose)
+for version-specific retention APIs. Keep-alive changes listener-based disposal,
+not state destruction on provider recomputation; durable restoration needs its
+own declared storage and lifetime.
 
 ## Presentation Boundaries
 
@@ -69,9 +74,9 @@ Follow adopted names; `UiModel` is a semantic role, not a mandatory suffix.
 
 ## State Holder Rule
 
-Use a Riverpod notifier as the screen state holder:
-- name it `<Screen>Notifier` with a `<screen>NotifierProvider`
-- read use cases and dependencies through `ref`, not through `BuildContext`
+Use the project's screen state holder and naming convention:
+- use a Riverpod notifier when that is the adopted state mechanism
+- read dependencies through `ref` in Riverpod or constructor parameters/existing wiring otherwise, not through `BuildContext`
 - expose one `UiState` value
 - expose user actions as named methods
 - keep async orchestration, pagination, refresh, retry, and navigation-effect decisions inside the notifier
@@ -100,7 +105,7 @@ Event patterns:
 ## Widget Rule
 
 Split state-holder wiring from rendering:
-- a `ConsumerWidget` or `ConsumerStatefulWidget` screen watches the notifier provider and passes plain values down
+- with Riverpod, a `ConsumerWidget` or `ConsumerStatefulWidget` screen watches the notifier provider; otherwise the screen uses the adopted observable binding; both pass plain values down
 - child widgets receive only the data and callbacks they need
 - presentational widgets should not read providers, use cases, repositories, HTTP clients, or plugins
 - `switch` over the sealed `UiState` or `AsyncValue` exhaustively so every declared state has a rendered branch
@@ -119,13 +124,13 @@ Split state-holder wiring from rendering:
   alone does not fail the state or architecture contract
 - the notifier owns async orchestration and exposes named action methods
 - widgets stay render-focused and receive plain values
-- providers are declared as top-level `final` variables rather than constructed inside `build`
-- a screen-scoped provider's state is destroyed when the screen stops listening
-- screen-local state is absent from app-level providers
+- when Riverpod is adopted, providers are top-level declarations rather than constructed inside `build`
+- listener-scoped state is disposed when unused; retained route/restoration state has an explicit owner and release policy
+- screen-local state is absent from unrelated app-level providers
 - a superseded in-flight request is cancelled through the repo's existing cancellation pattern
 - `BuildContext` is reserved for framework lookups and effects
 - one-shot effects are not modeled as durable UI state
-- `ProviderScope` stays the single composition root and test overrides replace one edge
+- composition has a clear owner; with Riverpod, the root `ProviderScope` and deliberate nested scopes/overrides preserve that ownership and let tests replace the required edge
 - review output includes the required markers below
 
 ## Required Markers

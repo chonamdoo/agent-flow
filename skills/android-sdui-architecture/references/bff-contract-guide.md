@@ -1,105 +1,73 @@
 # Server Contract Guide
 
-Source: PART 9 (whole).
+Source attribution retained from the supplied bundle: PART 9. Original-source
+identity, version, locator, effective date, and author authority are unverified.
 
-The server side of SDUI is a view-composition layer, not a UI authoring tool.
-Domain services stay unaware of components; one thin layer maps domain data to
-the component catalog and assembles screens from templates.
+Domain services remain unaware of UI components. A composition layer maps domain
+data to the finite client catalog, selects screen templates, applies the declared
+personalization/experiment context, and chooses supported representations.
+Templates own section membership/order; component projection owns reusable typed
+presentation, not domain business policy.
 
-```text
-[domain services]  catalog / promotion / personalization / inventory
-        |  domain data
-[composition layer]
-        - domain -> component catalog mapping
-        - screen template lookup (section set and order, from DB or CMS)
-        - personalization and experiment assignment
-        - downgrade to client capability
-        |  SDUI JSON
-[client renderer]
-```
+## Authorized prototypes and evaluation
 
-## Staging the backend
+Use bundled assets or substitute sources only in an authorized prototype or
+isolated evaluation. They are not proof of a production backend. Choose latency,
+offline state, and failure scenarios deterministically so each outcome is
+observable; random failures are not a required staging recipe. Use the real
+backend when the deliverable requires actual composition or patch behavior.
 
-- Early phases: bundled asset JSON plus a fake data source. Focus stays on the
-  client contract and rendering.
-- Later phases: a real local service, once dynamic patch composition is needed.
+## Screen composition
 
-A fake source must not be a happy-path stub. Simulate latency, an offline
-switch, and a low random failure rate, otherwise the offline and retry paths are
-never exercised.
-
-## Screen composer
-
-```kotlin
-fun composeScreen(screenId: String, capabilities: Set<String>): ScreenDto {
-    val sectionIds = templates[screenId] ?: error("Unknown screen")
-    val sections = sectionIds.mapNotNull { downgradeIfNeeded(buildSection(it), capabilities) }
-    return ScreenDto(screenId, SCHEMA_VERSION, sections, ActionCatalog.forScreen(screenId))
-}
-```
-
-- The template holds only section ids and their order. Reordering a screen is a
-  data change, never a code change.
-- `buildSection` converts domain data into catalog components. It knows nothing
-  about the target screen.
-- The action catalog is per screen and shared across that screen's nodes.
+- Resolve a screen's template, section order, and applicable context.
+- Map domain results into supported typed catalog components independently of a
+  particular screen's layout.
+- Share the screen-level action dictionary across its nodes.
+- Keep template-driven reordering a data concern where the adopted schema permits
+  it; behavior outside the catalog still requires client capability work.
 
 ## Capability negotiation
 
-```kotlin
-private fun downgradeIfNeeded(section: SectionDto, caps: Set<String>): SectionDto? = when {
-    caps.isEmpty() -> section                                       // unknown client, send default
-    section.type in caps -> section
-    section.fallbackType in caps -> section.copy(type = section.fallbackType!!)
-    else -> null                                                    // drop, never send unsupported
-}
-```
+Discover the actual capability transport, component identifiers, versions, and
+baseline policy rather than inventing a request header.
 
-Clients advertise supported components and versions in a request header. Every
-section declares a `fallbackType`; a section with no supported representation is
-dropped rather than sent and skipped on the device. This is what lets a new
-component ship without a forced update.
+- Explicitly supported representations may be sent only at supported versions.
+- Missing capability information selects the documented compatible baseline,
+  not an assumption that the client supports every current component.
+- A downgrade must transform the entire payload into the fallback's schema and
+  event/action contract. Renaming only its type does not establish compatibility.
+- If neither the primary nor a valid fallback is supported, omit the unsupported
+  section under the agreed fallback policy.
+
+Client unknown-node tolerance does not excuse a server capability violation.
+Existing clients can receive richer composition only within capabilities they
+actually implement.
 
 ## Patch composition
 
-- `composePatch(screenId, sectionIds, context)` returns operations plus a
-  monotonic `version`.
-- When the requested section has no content, emit `REMOVE` instead of an empty
-  section.
-- When it has content and is absent from the template, emit `UPSERT` with an
-  anchor and also insert the id into the template so a full reload agrees with
-  the patched state.
-- The version counter is the client's only ordering guarantee. Never reuse or
-  decrease it.
+- Return operations and a monotonically ordered `version` under the screen/context
+  ordering contract. Do not reuse or decrease that ordering identity.
+- When a requested section has no content, emit `REMOVE` rather than an empty section.
+- When newly present, emit `UPSERT` with an anchor; align subsequent full reloads
+  with the patched membership/order.
+- Update templates only in their declared scope. A user-specific or request-local
+  patch must not accidentally alter a global template. Determine whether reload
+  agreement comes from scoped template updates or reproducible composition.
 
-## Domain to component mapping
+## Projection and authority
 
-```kotlin
-fun Product.toProductCard() = buildJsonObject {
-    put("id", "p_$token")
-    put("type", "PRODUCT_CARD")
-    put("token", token)
-    put("name", name)
-    put("imageUrl", imageUrl)
-    putJsonObject("price") {
-        put("origin", originPrice); put("sale", salePrice)
-        put("discountRate", ((1 - salePrice.toDouble() / originPrice) * 100).toInt())
-    }
-    putJsonObject("events") {
-        putJsonObject("onClick") { put("actionRef", "act_go_detail") }
-        putJsonObject("onLike") { put("actionRef", "act_toggle_like") }
-    }
-}
-```
+Generality means recombining a finite set of supported representations, not
+serializing arbitrary domain objects. Preserve typed content, event references,
+and token-only design meaning without copying application business fields or
+calculation snippets into the contract.
 
-This mapping function is what generality actually means. A new screen reuses it
-and the client needs no change. Generality is not "represent any data"; it is
-"fix a finite set of representations and let the server recombine them".
-
-Expose domain ids as opaque tokens. A client that computes destinations from raw
-ids has hardcoded a routing rule that then needs a release to change.
+Use opaque identities and server-owned route selection where the project adopts
+them. Opaque identifiers do not authorize access: the client and server still
+apply their existing target/scope authorization checks.
 
 ## Local development
 
-Point the client at a loopback base URL and permit cleartext for that host only,
-scoped to debug builds. Never widen the cleartext policy application-wide.
+Resolve the reachable service address from the actual host, emulator, or device
+network environment; loopback refers to the execution environment itself. When
+cleartext is necessary, permit only the intended development host in debug
+builds. Never widen cleartext policy application-wide.

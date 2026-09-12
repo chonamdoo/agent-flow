@@ -24,8 +24,9 @@ An unregistered package path is missing lint coverage, not a successful check.
 
 ## DI Shape
 
-- Default to `createDependencies()` or `createContainer()` plus Context Provider
-  at `App.tsx` or app shell.
+- Assemble dependencies at the adopted app or framework composition owner.
+  When using Context, provide typed consumer ports through that boundary; no
+  particular factory function name or root filename is required.
 - Put native modules, permissions, linking, storage, and device implementations at
   platform adapter edges. Pass narrow application/domain capability ports to use
   cases and presentation; those ports need not be called repositories.

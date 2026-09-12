@@ -1,100 +1,70 @@
 # Hybrid Boundary Guide
 
-Source: PART 2 (whole), plus the design-decision section of PART 11.
+Source attribution retained from the supplied bundle: PART 2 and PART 11's
+ design-decision section. The original title, version, locator, effective date,
+and author authority are unavailable; these are adopted design policies, not
+independently verified source claims.
 
 ## Two different burdens
 
-Release burden and server burden are not the same constraint, and they hurt
-different people. Naming them separately is what makes the boundary decidable.
+Release burden includes store review, updates, and old-client fragmentation.
+Server burden includes payload size, authoring, composition cost, and renderer
+complexity. Removing release work by making every design change a backend task
+only transfers the burden.
 
-| Burden | What hurts | Who feels it |
-|---|---|---|
-| Release | release cadence, store review, forced updates, old-version fragmentation | product and merchandising, who want weekly changes |
-| Server | response size, backend authoring UI, runtime composition cost, client renderer complexity | backend, where every UI change becomes their ticket |
+Separate frequently changing composition and content from stable interaction
+and design. Determine actual change frequency from the product; no release
+cadence is inherent to an SDUI approach.
 
-Server burden is mostly an organizational failure: at 100% server-driven UI,
-"change this button color" becomes a backend task. Removing the app release
-bottleneck by creating a backend bottleneck is not a win.
+## Client capability boundary
 
-## Restated goal
+| Approach | Change that requires client capability work |
+|---|---|
+| Native | A new compiled UI or interaction; remotely supplied content can change without a release |
+| Component catalog | A component or supported component behavior not in the installed catalog |
+| Hybrid | A new primitive, semantic component, or behavior outside the installed schema |
+| Full layout tree | A primitive, interpreter capability, or platform integration not already supported |
+| WebView | A change beyond the installed web runtime, native bridge, or deployment contract; it is not universally release-free |
 
-The goal is not "never ship again". It is **separating what changes fast from
-what changes slowly**.
-
-- Changes fast (weekly or daily, decided by product/merchandising): section
-  composition and order, item lists, promotion copy and layout.
-- Changes slowly (quarterly, decided by design/engineering): card appearance,
-  button interaction.
-
-## Release-frequency spectrum
-
-| Approach | Requires a release when | Real cadence |
-|---|---|---|
-| 100% native | every UI change | weekly or more |
-| Component catalog | a new component is added | 1-2 per quarter |
-| **Hybrid** | a new primitive or a new semantic component | ~1 per quarter |
-| Full layout tree | a new primitive (rare) | ~1 per year |
-| WebView | never (loses performance and platform capability) | - |
-
-Hybrid beats a plain catalog because a new layout does not require a new
-component. "This campaign card is horizontal with three buttons" forces a
-`PROMO_CARD_V2` release under a catalog; under hybrid it is a JSON change over
-existing primitives.
+Hybrid permits new combinations of existing primitives without creating a new
+catalog component. It does not create new client capabilities from server data.
 
 ## Decision axes
 
-Do not answer with a label. Answer with these axes.
+Compare layout-tree and semantic-component ownership using:
 
-| Axis | Server owns (layout tree) | Client owns (semantic component) |
-|---|---|---|
-| Change frequency | weekly or faster | quarterly |
-| Reuse count | one-off campaign | repeated 3+ times |
-| Response-size impact | 1-2 per screen | tens to hundreds in a list |
-| Performance sensitivity | low | high (scrolling items) |
-| Accessibility demand | low | high |
-| Design stability | different every time | fixed |
+- Frequency and cost of changing the composition versus stable design.
+- Repeated authoring and maintenance cost across real surfaces.
+- Measured payload size, parsing cost, rendering cost, and scrolling workload.
+- Accessibility complexity that a semantic component can consistently encapsulate.
+- Design stability and the cost of versioning a new client component.
 
-Worked examples: a product card scores right on every axis, so it is a semantic
-component owned by the client. A campaign banner scores left on every axis, so
-it is a server-authored layout tree.
+Accessibility is required for both approaches. A one-off banner is not exempt,
+and a repeated component is not accessible merely because the client owns it.
+Do not infer payload bytes from an item count without measurement.
 
-Response size is the practical trap: 100 products as node trees is megabytes of
-JSON, while a `PRODUCT_CARD` is one node with a few fields.
+Promote a repeated layout into a semantic component when demonstrated maintenance,
+performance, accessibility, or design-consistency benefits justify the capability
+and release cost. Repetition is evidence, not an automatic count threshold.
 
-**Promotion rule**: when the same layout-tree combination appears in three or
-more places, promote it to a semantic component.
+## Mechanisms that can reduce both burdens
 
-## Four devices that lower both burdens
-
-1. **Slot pattern** — the client fixes the component structure, the server fills
-   named slots. Adding a seasonal badge needs no release.
-
-   ```json
-   {
-     "type": "PRODUCT_CARD",
-     "slots": {
-       "trailing": { "type": "TEXT", "text": "Limited" },
-       "overlay": { "type": "IMAGE", "url": "https://cdn.example/badge.png" }
-     }
-   }
-   ```
-
-2. **Capability negotiation** — the client advertises supported components
-   (`X-Supported-Components: PRODUCT_CARD@2,CAROUSEL@1`) and the server serves
-   the richest supported variant, downgrading for older versions. New features
-   ship immediately without a forced update.
-
-3. **Composition layer on the server** — backend does not author UI; a thin
-   layer maps domain data to catalog components, and screen templates live in a
-   CMS that product owners edit directly.
-
-4. **Remote assets** — icons and animations are URLs, so asset swaps need no
-   release.
+1. **Slots:** the client fixes component structure and declares named extension
+   points. The server fills only supported slots with allowed content. New slot
+   behavior outside that contract still requires client work.
+2. **Capability negotiation:** clients advertise supported representations and
+   versions using the adopted transport contract. The server chooses supported
+   payloads or valid fallbacks; see [bff-contract-guide.md](bff-contract-guide.md)
+   when implementing absent-capability and downgrade behavior.
+3. **Composition layer:** map domain data into the finite catalog; templates and
+   editorial tooling own section composition without pushing UI into domain services.
+4. **Remote assets:** approved asset locations can permit asset replacement without
+   recompilation, subject to existing formats, platform behavior, and access policy.
 
 ## Limits
 
-- More than two levels of conditional logic in JSON means the schema is
-  reinventing a programming language. Stop and move the logic to the client or
-  the composition layer.
-- Checkout, payment, and complex forms are not SDUI targets.
-- The schema is the contract, so versioning cost is real and permanent.
+- Bound conditional expression complexity in the schema. Move logic to native
+  capabilities or server composition when it becomes hard to reason about,
+  validate, or execute within that bound; do not add arbitrary evaluation.
+- Checkout, payment, and complex forms stay native.
+- Schema versioning and old-client support remain ongoing costs.

@@ -1,73 +1,42 @@
 # Design Token Guide
 
-Source: PART 4-4.
+Source attribution retained from the supplied bundle: PART 4-4. Original-source
+identity, version, locator, effective date, and author authority are unverified.
 
 ## Rule
 
-The server states **meaning**; the client owns the **value**. Any styling field
-in server JSON carries a token name. Raw dp numbers and hex colors are a schema
-violation, not a style choice.
+The server states **meaning**; the client owns the **value**. Styling fields in
+server JSON reference semantic tokens. Raw dp dimensions, hex colors, and other
+literal design values violate the schema. Structural sizing modes and bounded
+ratios are a distinct, explicitly declared value class; see
+[ui-node-model-guide.md](ui-node-model-guide.md) for that distinction.
 
-Rejected payload:
+Judge a payload by its structured field meaning: a spacing or surface token is
+acceptable only if it belongs to the client catalog; a literal pretending to be
+a token is not. Do not turn incidental token names or numerical tables into a
+required application design system.
 
-```json
-{
-  "padding": { "all": "13dp" },
-  "background": { "color": "#F3F4F6" }
-}
-```
+## Resolution ownership
 
-Accepted payload:
+The client design-system boundary resolves spacing, color, typography,
+shape/radius, elevation, and icon tokens. Other layers consume those meanings
+without duplicating their concrete values.
 
-```json
-{
-  "padding": { "all": "spacing_m" },
-  "background": { "color": "surface_variant" }
-}
-```
+Each resolver defines a safe fallback for an absent, unknown, or malformed token.
+The fallback must avoid a crash and preserve a usable surface where possible;
+its neutral behavior follows the actual component contract, not a universal
+numeric constant or parser recipe.
 
-## Token tables
+## Fallback is not permission
 
-Token resolution lives in the design-system module and nowhere else.
+Server schema validation rejects raw styling literals before delivery. Client
+resilience handles bad payloads that still arrive. These are separate contracts:
+an existing tolerant numeric fallback is not permission for the server to send
+numbers, nor a requirement to add numeric parsing to every resolver.
 
-```kotlin
-object SpacingTokens {
-    private val map = mapOf(
-        "spacing_none" to 0.dp, "spacing_xs" to 4.dp, "spacing_s" to 8.dp,
-        "spacing_m" to 16.dp, "spacing_l" to 24.dp, "spacing_xl" to 32.dp,
-    )
-    operator fun get(token: String?): Dp =
-        map[token] ?: token?.toFloatOrNull()?.dp ?: 0.dp   // resilience fallback
-}
+## Theme and window behavior
 
-object ColorTokens {
-    @Composable
-    operator fun get(token: String?): Color = when (token) {
-        "primary" -> MaterialTheme.colorScheme.primary
-        "surface" -> MaterialTheme.colorScheme.surface
-        "surface_variant" -> MaterialTheme.colorScheme.surfaceVariant
-        "on_surface" -> MaterialTheme.colorScheme.onSurface
-        else -> Color.Unspecified
-    }
-}
-```
-
-Cover the same shape for typography, shape/radius, elevation, and icons. Every
-table needs a defined fallback so an unknown token degrades to a neutral value
-instead of throwing.
-
-## The fallback is not permission
-
-A client-side numeric fallback exists so a bad payload still renders. It is not
-the sanctioned path. Raw literals must be rejected by server-side schema
-validation before they ever reach a device, otherwise the fallback silently
-becomes the API and the token layer stops meaning anything.
-
-## Why this line matters
-
-- Dark mode and large-screen adaptation follow automatically, because the value
-  is resolved from the active theme rather than baked into a payload.
-- A spacing or palette revision is one client change, not a sweep across every
-  stored JSON template.
-- Without it the server can render arbitrary pixels and the design system has no
-  enforcement point at all.
+Token resolution can support dark mode and larger windows only when the client
+resolver and components actually use the active theme and window conditions.
+Tokenization alone does not prove adaptation. Design revisions belong at the
+client design-system boundary rather than in every stored screen template.

@@ -20,7 +20,7 @@ This skill covers domain modeling only. It answers "what is the domain?"
 For layer boundaries, dependency direction, UseCase port/impl boundaries,
 Repository port/adapter boundaries, Cache, Mapper, Composition Root,
 Testability, and SOLID architecture validation, apply
-`skills/clean-architecture/SKILL.md` after this skill.
+`clean-architecture` at the location provided by the active host after this skill.
 
 When both DDD and Clean Architecture are needed, apply order is:
 
@@ -30,6 +30,10 @@ When both DDD and Clean Architecture are needed, apply order is:
 ## Core principles
 
 These are defaults; profiles or projects may opt out where they do not fit.
+
+Ground business rules, events, and context relationships in confirmed requirements
+or stakeholder decisions. Distinguish proposals and unresolved rules from agreed
+facts; do not invent business policy to fill an output section.
 
 - **Bounded Context** — define where each domain term has one meaning. Cross-context
   relationships are explicit: partnership, customer-supplier, conformist, ACL,

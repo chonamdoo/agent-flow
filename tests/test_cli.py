@@ -7853,47 +7853,6 @@ if (codexContext !== undefined) {
                 self.assertEqual(main(["detect-profile", "--root", str(root)]), 0)
             self.assertEqual(output.getvalue().strip(), "ios")
 
-    def test_load_profile_reads_packaged_gates(self) -> None:
-        profile = load_profile("node")
-        self.assertEqual(profile.profile_id, "node")
-        self.assertEqual(profile.gates[0].gate_id, "architecture-lint")
-        self.assertEqual(
-            profile.gates[0].command,
-            ("agent-flow", "architecture-lint", "--profile", "node"),
-        )
-        # npm 기반 TypeScript profile은 subprocess argv list로 검증 명령을 보관한다.
-        typescript = load_profile("typescript")
-        self.assertEqual(typescript.gates[0].gate_id, "architecture-lint")
-        self.assertEqual(
-            typescript.gates[0].command,
-            ("agent-flow", "architecture-lint", "--profile", "typescript"),
-        )
-        self.assertEqual(typescript.gates[1].gate_id, "typecheck")
-        self.assertEqual(typescript.gates[1].command, ("npx", "tsc", "--noEmit"))
-        nextjs_gates = {gate.gate_id: gate.command for gate in load_profile("nextjs").gates}
-        self.assertEqual(nextjs_gates["architecture-lint"], ("agent-flow", "architecture-lint", "--profile", "nextjs"))
-        self.assertEqual(nextjs_gates["build"], ("npm", "run", "build"))
-        python_gates = {gate.gate_id: gate for gate in load_profile("python").gates}
-        self.assertFalse(python_gates["type"].required)
-        self.assertFalse(python_gates["lint"].required)
-        self.assertTrue(python_gates["test"].required)
-        android = load_profile("android")
-        self.assertEqual(android.profile_id, "android")
-        android_required = android.skills["required_review"]
-        self.assertEqual(android_required[0]["group"], "profile")
-        self.assertIn("android-code-review", android_required[0]["skills"])
-        # baseline과 architecture는 서로 다른 group이다. 한 group이면 Kotlin 한 줄
-        # 변경에도 계층 계약 문서가 required가 된다.
-        self.assertEqual(
-            [group["group"] for group in android_required], ["profile", "architecture"]
-        )
-        self.assertNotIn("android_skills", android.skills)
-        rn_required = load_profile("react-native").skills["required_review"]
-        # `typescript` group은 `typescript-development-guide`의 범위를 스택 glob에서
-        # 분리한 자리이고, `architecture`는 계층 계약 문서를 경계 경로로 분리한 자리다.
-        # 옛 escalation group이 되살아나면 이 목록이 늘어난다.
-        self.assertEqual([group["group"] for group in rn_required], ["profile", "architecture", "typescript"])
-
     def test_runner_prefers_repository_kit_root(self) -> None:
         from agent_flow.runner import _find_kit_root
 

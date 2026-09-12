@@ -2,7 +2,7 @@
 name: android-debugging
 description: Android diagnosis workflow for crashes, ANRs, incorrect UI state, coroutine or Flow bugs, data loading failures, and Compose rendering issues. Use when an Android app is broken, throwing, hanging, rendering incorrectly, or needs root-cause analysis; do not use as a general code-review checklist.
 workflowPhases: [implement, implement-fix, red, green, fix-loop, pr-ci-fix]
-taskTerms: [crash, anr, stack trace, root cause, hang, 크래시, 재현, 무한 로딩, 렌더링 오류, 원인 분석]
+taskTerms: [crash, anr, stack trace, root cause, hang, reproduction, endless loading, rendering failure]
 ---
 
 # Android Debugging
@@ -35,7 +35,8 @@ make the smallest fix that proves the hypothesis.
 7. Fix: apply one hypothesis at a time.
 8. Verify: rerun the reproduction path plus the narrowest build/test gate.
 
-If three hypotheses fail, stop and return to evidence collection.
+Return to evidence collection when observations contradict the hypothesis or
+repeated checks no longer add information. Seek new evidence before another fix.
 
 ## Android Evidence Sources
 

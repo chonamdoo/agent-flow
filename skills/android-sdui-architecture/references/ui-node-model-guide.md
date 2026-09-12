@@ -1,108 +1,74 @@
 # UiNode Model Guide
 
-Source: PART 4-1, PART 4-2, PART 4-3.
+Source attribution retained from the supplied bundle: PART 4-1 through PART 4-3.
+Original-source identity, version, locator, effective date, and author authority
+are unverified. The field roles below are the bundle's adopted contract, not a
+required Kotlin class scaffold.
 
-## Screen
+## Screen contract
 
-```kotlin
-data class Screen(
-    val screenId: String,
-    val schemaVersion: Int,
-    val version: Long,
-    val root: UiNode,                    // tree root, usually a lazy column
-    val actions: Map<String, SduiAction>,
-    val resultContract: ResultContract?, // only when this screen returns a result
-    val cachePolicy: CachePolicy,
-    val fetchedAt: Long,
-)
-```
+- `screenId` identifies the screen within the declared storage/request scope.
+- `schemaVersion` guards parser compatibility; `version` orders responses/patches.
+- `root` contains the typed node tree; `actions` is the screen-level action dictionary.
+- `resultContract` is optional and declares a result only for screens that return one.
+- `cachePolicy` defines expiry and stale-while-revalidate behavior; `fetchedAt`
+  supplies freshness metadata. Resolve values from the actual cache contract,
+  not a copied timeout.
 
-`schemaVersion` guards parser compatibility; `version` orders patch responses.
+## One node contract, three tiers
 
-## UiNode: one base contract, three tiers
+Every node has stable `id`, layout/modifier semantics, visibility, event bindings,
+and accessibility semantics. Define required fields and defaults once at parsing:
+missing optional styling becomes a neutral modifier, not repeated renderer checks.
 
-Every node exposes `id`, `modifier`, `visibility`, `events`, and `accessibility`,
-so the renderer can attach layout, clicks, and semantics uniformly.
+- **Layout containers:** represent column, row, overlay, grid, pager, and lazy
+  list structure. Own typed children, token-based spacing, and any bounded
+  structural parameters declared by the schema.
+- **Primitive leaves:** represent text, images, buttons, icons, spacing, dividers,
+  and countdown display. Own only the typed data their rendering contract needs.
+- **Semantic components:** own stable design, interaction, performance, and
+  accessibility for a reusable concept; carry a typed payload rather than an
+  unstructured property bag.
+- **Fallback:** retain safe identity and diagnostic type information for unsupported
+  or malformed input. Rendering the fallback must not crash.
 
-- **Tier 1 — layout containers**, freely composable: `Column`, `Row`, `Box`,
-  `Grid(columns)`, `Pager(autoScrollMs)`, `LazyColumn`, `LazyRow(contentPadding)`.
-  Each holds `children: List<UiNode>` and a `spacing` token.
-- **Tier 2 — primitive leaves**, freely composable: `Text(text, style, color,
-  maxLines)`, `Image(url, contentScale)`, `Button(label, variant, leadingIcon)`,
-  `IconButton(icon)`, `Spacer`, `Divider`, `CountdownText(endsAt, template)`.
-- **Tier 3 — semantic components**, fixed design, owning performance and
-  accessibility: `ProductCard(data)`, `SectionHeader(data)`,
-  `FilterChipGroup(data)`, and peers. Each wraps one typed payload.
-- **Fallback** — `Unknown(id, rawType)`. Not optional: it is the only reason an
-  unrecognized server type does not take down the screen.
+Choose tiers using [hybrid-boundary-guide.md](hybrid-boundary-guide.md), including
+its evidence-based promotion rule. A semantic type adds client release cost;
+repeated use alone does not dictate a fixed promotion threshold.
 
-```kotlin
-sealed interface UiNode {
-    val id: String
-    val modifier: NodeModifier
-    val visibility: Visibility
-    val events: Map<TriggerType, ActionRef>
-    val accessibility: Accessibility?
+## Modifier field semantics
 
-    data class Column(..., val spacing: String?, val children: List<UiNode>) : UiNode
-    data class Text(..., val text: String, val style: String, val maxLines: Int) : UiNode
-    data class ProductCard(val data: ProductCardData, ...) : UiNode
-    data class Unknown(override val id: String, val rawType: String) : UiNode
-}
-```
+- `padding` and `margin` hold semantic inset tokens.
+- `width` and `height` distinguish supported sizing modes from token-based design
+  dimensions. Raw dp is not an approved styling value.
+- `aspectRatio` and `weight` are structural ratios, not design dimensions. Accept
+  them only as constrained schema values with declared valid ranges and scopes.
+- `background`, `shape`, `border`, and `elevation` reference client-owned design
+  tokens; structured variants must remain within the declared schema.
+- `alpha` and `clip` are bounded opacity and clipping controls only where the
+  schema explicitly allows them. They do not authorize arbitrary styling.
+- Missing optional fields use defined neutral defaults. Invalid values follow the
+  parser/fallback policy rather than reaching Compose unchecked.
 
-Tier selection:
+Token ownership and malformed-token behavior are defined in
+[design-token-guide.md](design-token-guide.md).
 
-- Layout that changes often (campaigns, promotions) — tier 1 plus tier 2.
-- Repeated with fixed design (product cards, filter chips) — tier 3.
-- A tier 1+2 combination seen in three or more places — promote to tier 3.
-
-Adding a tier 3 type costs a release, so add one only when the promotion rule or
-a performance/accessibility requirement forces it.
-
-## NodeModifier
-
-```kotlin
-@Immutable
-data class NodeModifier(
-    val padding: EdgeInsets? = null,
-    val margin: EdgeInsets? = null,
-    val width: SizeSpec? = null,
-    val height: SizeSpec? = null,
-    val aspectRatio: Float? = null,
-    val weight: Float? = null,
-    val background: BackgroundSpec? = null,
-    val shape: ShapeSpec? = null,
-    val border: BorderSpec? = null,
-    val elevation: String? = null,
-    val alpha: Float? = null,
-    val clip: Boolean = false,
-) {
-    companion object { val EMPTY = NodeModifier() }
-}
-
-sealed interface SizeSpec {
-    data object MatchParent : SizeSpec
-    data object WrapContent : SizeSpec
-    data class Fixed(val dp: Int) : SizeSpec
-}
-```
-
-- `@Immutable` is required. The modifier is read on every recomposition of every
-  node; an unstable type defeats skipping across the whole tree.
-- Inset, color, radius, and elevation fields hold **token names**, not values.
-  See `design-token-guide.md`.
-- A missing modifier resolves to `EMPTY`, never to null handling at each call
-  site.
+Models must actually obey immutable value/equality contracts. Use inferred
+stability or truthful annotations under the presentation skill; do not require
+`@Immutable` solely to claim performance. [Strong skipping](https://developer.android.com/develop/ui/compose/performance/stability/strongskipping)
+can skip restartable composables with unstable parameters. Judge compiler
+version/mode, stability reports, and measured behavior rather than claiming one
+unstable modifier necessarily defeats skipping throughout the tree.
 
 ## Modifier application order
 
-Fixed. Changing it changes rendering:
+Modifier order is part of rendering compatibility. The supplied contract orders:
 
 ```text
 margin -> size/aspectRatio -> weight -> clip -> background -> border
        -> elevation -> alpha -> padding
 ```
 
-Encode the order once in the modifier mapper. Any node type that builds its own
-chain locally is a defect.
+Apply the adopted order consistently at a shared rendering boundary. Changing it
+requires an intentional rendering-contract change, not a node-local exception.
+No specific helper name or parent-scope plumbing implementation is required.
