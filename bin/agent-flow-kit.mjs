@@ -468,9 +468,14 @@ function runWorkflowCommand(args) {
         throw new Error(`blocked: push-watch-tick requires current phase pr-watch, got ${state.phase}`);
       }
       const runDir = resolveRunDir(root, state.run_dir);
-      const pr = readPullRequestStatus(process.cwd());
-      const watchStatus = pullRequestWatchStatus(pr);
-      commitPushWatchObservation(root, runDir, state.run_id, pr, watchStatus);
+      replayPushWatchIntent(root, runDir, state.run_id);
+      const pr = readPullRequestIdentity(process.cwd());
+      const observation = observePullRequest(runDir, pr);
+      const watchStatus = {
+        ci_failed: "ci-failed",
+        has_comments: "comments",
+      }[observation.status] ?? observation.status;
+      commitPushWatchObservation(root, runDir, state.run_id, { ...observation, url: pr.url }, watchStatus);
       console.log(`push-watch status=${watchStatus}`);
     });
     return;
@@ -1547,47 +1552,40 @@ function currentBranch(root) {
   return branch;
 }
 
-function readPullRequestStatus(root) {
-  const result = safeSpawnSync("gh", ["pr", "view", "--json", "url,reviewDecision,statusCheckRollup"], {
+function readPullRequestIdentity(root) {
+  const result = safeSpawnSync("gh", ["pr", "view", "--json", "url"], {
     cwd: root,
     encoding: "utf8",
   });
-  if (result.status !== 0) {
+  if (result.error || result.status !== 0) {
     const detail = result.error?.message ?? result.stderr?.trim() ?? "unknown error";
     throw new Error(`blocked: gh pr view failed: ${detail}`);
   }
-  return JSON.parse(result.stdout);
+  const pr = JSON.parse(result.stdout);
+  const url = new URL(pr.url);
+  const match = url.pathname.match(/^\/([^/]+\/[^/]+)\/pull\/([1-9]\d*)\/?$/);
+  if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || !match) {
+    throw new Error("blocked: cannot resolve PR repository identity");
+  }
+  return { url: pr.url, number: match[2], repo: `${url.host}/${match[1]}` };
 }
 
-function pullRequestWatchStatus(pr) {
-  const reviewDecision = String(pr.reviewDecision ?? "").toUpperCase();
-  const checks = Array.isArray(pr.statusCheckRollup) ? pr.statusCheckRollup : [];
-  const hasFailedCheck = checks.some((check) =>
-    ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"].includes(
-      String(check.conclusion ?? check.state ?? "").toUpperCase(),
-    ),
+function observePullRequest(runDir, pr) {
+  const result = safeSpawnSync(
+    preferredPython(),
+    ["-m", "agent_flow.cli", "pr-watch", pr.number, "--repo", pr.repo, "--once", "--require-ready", "--run-dir", runDir],
+    {
+      cwd: process.cwd(),
+      env: pythonCliEnv(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    },
   );
-  if (hasFailedCheck) {
-    return "ci-failed";
+  if (result.error || result.status !== 0) {
+    const detail = result.error?.message || result.stderr?.trim() || result.stdout?.trim() || "unknown error";
+    throw new Error(`blocked: Python pr-watch failed: ${detail}`);
   }
-  if (reviewDecision === "CHANGES_REQUESTED") {
-    return "comments";
-  }
-  const hasPendingCheck =
-    checks.length === 0 ||
-    checks.some((check) => {
-      const status = String(check.status ?? "").toUpperCase();
-      const conclusion = String(check.conclusion ?? "").toUpperCase();
-      const state = String(check.state ?? "").toUpperCase();
-      if (state) {
-        return state !== "SUCCESS";
-      }
-      return status !== "COMPLETED" || (conclusion !== "SUCCESS" && conclusion !== "SKIPPED");
-    });
-  if (hasPendingCheck || reviewDecision !== "APPROVED") {
-    return "pending";
-  }
-  return "green";
+  return JSON.parse(result.stdout);
 }
 
 

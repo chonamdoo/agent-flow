@@ -2101,10 +2101,6 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "prompts" / "pr-watch.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "merge requires explicit approval",
-                (project_root / ".agent-flow" / "skills" / "push-watch" / "SKILL.md").read_text(encoding="utf-8"),
-            )
-            self.assertIn(
                 'agent-flow run "<task>"',
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
@@ -5700,7 +5696,26 @@ if (codexContext !== undefined) {
 
             watch = run_dir / _node_phase_artifact("pr-watch")
             watch.parent.mkdir(parents=True, exist_ok=True)
-            watch.write_text("status: pending\n", encoding="utf-8")
+            (watch.parent / "gate-results.json").write_text(
+                json.dumps({
+                    "produced_by": {"gate_phase": "all", "gate_execution": "local"},
+                    "deferred_ci_checks": ["pytest"],
+                }),
+                encoding="utf-8",
+            )
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+
+            def observe(payload: dict[str, object]) -> None:
+                _write_node_pr_watch_gh(bin_dir, plan.path, payload)
+                tick = subprocess.run(
+                    (node, cli, "run", "push-watch-tick"), cwd=plan.path,
+                    text=True, capture_output=True, check=False, env=env,
+                )
+                self.assertEqual(tick.returncode, 0, tick.stdout + tick.stderr)
+
+            observe({"statusCheckRollup": []})
             pending = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -5721,7 +5736,10 @@ if (codexContext !== undefined) {
             self.assertIn("reason: route_blocked", pending_status.stdout)
             self.assertIn("next_command: agent-flow continue --root", pending_status.stdout)
 
-            watch.write_text("status: comments\n", encoding="utf-8")
+            observe({
+                "statusCheckRollup": [],
+                "comments": [{"id": "comment-1", "body": "Please fix this", "author": {"login": "reviewer"}}],
+            })
             comments = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -5767,7 +5785,10 @@ if (codexContext !== undefined) {
             self.assertEqual(back_to_watch.returncode, 0, back_to_watch.stderr)
             self.assertIn("current_phase: pr-watch", back_to_watch.stdout)
 
-            watch.write_text("status: comments\n", encoding="utf-8")
+            observe({
+                "statusCheckRollup": [],
+                "comments": [{"id": "comment-2", "body": "One more fix", "author": {"login": "reviewer"}}],
+            })
             comments_again = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -5792,7 +5813,16 @@ if (codexContext !== undefined) {
                 0,
             )
 
-            watch.write_text("status: ci-failed\n", encoding="utf-8")
+            check_data = {
+                "statusCheckRollup": [
+                    {
+                        "name": "pytest", "status": "COMPLETED", "conclusion": "FAILURE",
+                        "detailsUrl": "https://github.com/acme/demo/actions/runs/1/job/1",
+                        "completedAt": "2026-09-11T10:00:00Z",
+                    },
+                ],
+            }
+            observe(check_data)
             ci_failed = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -5825,7 +5855,11 @@ if (codexContext !== undefined) {
             self.assertEqual(back_to_watch_again.returncode, 0, back_to_watch_again.stderr)
             self.assertIn("current_phase: pr-watch", back_to_watch_again.stdout)
 
-            watch.write_text("status: green\n", encoding="utf-8")
+            check_data["statusCheckRollup"][0]["conclusion"] = "SUCCESS"
+            check_data["statusCheckRollup"][0]["detailsUrl"] = "https://github.com/acme/demo/actions/runs/2/job/2"
+            check_data["statusCheckRollup"][0]["completedAt"] = "2026-09-11T11:00:00Z"
+            check_data["reviewDecision"] = "APPROVED"
+            observe(check_data)
             ready = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -6550,20 +6584,12 @@ if (codexContext !== undefined) {
             run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
-            gh = bin_dir / "gh"
-            gh.write_text(
-                "\n".join(
-                    [
-                        "#!/bin/sh",
-                        "cat <<'JSON'",
-                        '{"url":"https://github.com/acme/demo/pull/7","reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[{"name":"test","status":"COMPLETED","conclusion":"FAILURE"}]}',
-                        "JSON",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            gh.chmod(0o755)
+            _write_node_pr_watch_gh(bin_dir, checkout, {
+                "statusCheckRollup": [
+                    {"name": "test", "status": "COMPLETED", "conclusion": "FAILURE"},
+                ],
+            })
+            previous_meta = (run_dir / "meta.json").read_bytes()
 
             result = subprocess.run(
                 (node, cli, "run", "push-watch-tick"),
@@ -6579,6 +6605,64 @@ if (codexContext !== undefined) {
             watch_text = watch.read_text(encoding="utf-8")
             self.assertIn("status: ci-failed", watch_text)
             self.assertIn("https://github.com/acme/demo/pull/7", watch_text)
+            self.assertEqual((run_dir / "meta.json").read_bytes(), previous_meta)
+            self.assertTrue((run_dir / "pr-feedback.json").is_file())
+
+    def test_node_push_watch_tick_errors_preserve_last_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(
+                subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
+                0,
+            )
+            run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+            gh = _write_node_pr_watch_gh(bin_dir, checkout, {
+                "statusCheckRollup": [{"name": "test", "status": "QUEUED"}],
+            })
+            observed = subprocess.run(
+                (node, cli, "run", "push-watch-tick"), cwd=checkout,
+                text=True, capture_output=True, check=False, env=env,
+            )
+            self.assertEqual(observed.returncode, 0, observed.stderr)
+            preserved = {
+                file: file.read_bytes()
+                for file in (
+                    run_dir / "meta.json", run_dir / "pr-feedback.json",
+                    run_dir / _node_phase_artifact("pr-watch"),
+                    project_root / ".agent-flow" / "state" / "push-watch.json",
+                )
+            }
+            for failure in ("no-pr", "malformed-ci", "missing-ledger"):
+                with self.subTest(failure=failure):
+                    if failure == "no-pr":
+                        gh.write_text(
+                            "#!/bin/sh\n"
+                            "echo 'no pull requests found for branch' >&2\n"
+                            "exit 1\n",
+                            encoding="utf-8",
+                        )
+                    else:
+                        _write_node_pr_watch_gh(bin_dir, checkout, {
+                            "statusCheckRollup": "invalid" if failure == "malformed-ci" else [],
+                        })
+                    if failure == "missing-ledger":
+                        (run_dir / "artifacts" / "gate-results.json").unlink()
+                    rejected = subprocess.run(
+                        (node, cli, "run", "push-watch-tick"), cwd=checkout,
+                        text=True, capture_output=True, check=False, env=env,
+                    )
+                    self.assertNotEqual(rejected.returncode, 0)
+                    for file, contents in preserved.items():
+                        self.assertEqual(file.read_bytes(), contents, str(file))
+                    self.assertFalse(
+                        (project_root / ".agent-flow" / "state" / "push-watch.lock").exists()
+                    )
 
     def test_push_watch_tick_replays_incomplete_observation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -6593,18 +6677,11 @@ if (codexContext !== undefined) {
             run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
-            gh = bin_dir / "gh"
-            gh.write_text(
-                "#!/bin/sh\n"
-                "cat <<'JSON'\n"
-                '{"url":"https://github.com/acme/demo/pull/7",'
-                '"reviewDecision":"REVIEW_REQUIRED",'
-                '"statusCheckRollup":[{"name":"test","status":"COMPLETED",'
-                '"conclusion":"FAILURE"}]}\n'
-                "JSON\n",
-                encoding="utf-8",
-            )
-            gh.chmod(0o755)
+            _write_node_pr_watch_gh(bin_dir, checkout, {
+                "statusCheckRollup": [
+                    {"name": "test", "status": "COMPLETED", "conclusion": "FAILURE"},
+                ],
+            })
             env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
 
             first = subprocess.run(
@@ -6637,6 +6714,7 @@ if (codexContext !== undefined) {
                 ),
                 encoding="utf-8",
             )
+            stale_intent = intent.read_bytes()
             state_path.write_text(
                 json.dumps({"status": "watching", "iterations": 0}),
                 encoding="utf-8",
@@ -6660,6 +6738,24 @@ if (codexContext !== undefined) {
             self.assertEqual(artifact.read_text(encoding="utf-8"), captured_artifact)
             self.assertFalse(intent.exists())
 
+            intent.write_bytes(stale_intent)
+            _write_node_pr_watch_gh(bin_dir, checkout, {
+                "reviewDecision": "APPROVED",
+                "statusCheckRollup": [
+                    {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                ],
+            })
+            refreshed = subprocess.run(
+                (node, cli, "run", "push-watch-tick"), cwd=checkout,
+                text=True, capture_output=True, check=False, env=env,
+            )
+            self.assertEqual(refreshed.returncode, 0, refreshed.stderr)
+            self.assertIn("status: green", artifact.read_text(encoding="utf-8"))
+            self.assertEqual(
+                json.loads(state_path.read_text(encoding="utf-8"))["status"], "green",
+            )
+            self.assertFalse(intent.exists())
+
     def test_push_watch_tick_restores_unchanged_observation_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
@@ -6673,16 +6769,9 @@ if (codexContext !== undefined) {
             run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
-            gh = bin_dir / "gh"
-            gh.write_text(
-                "#!/bin/sh\n"
-                "cat <<'JSON'\n"
-                '{"url":"https://github.com/acme/demo/pull/7",'
-                '"reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[]}\n'
-                "JSON\n",
-                encoding="utf-8",
-            )
-            gh.chmod(0o755)
+            _write_node_pr_watch_gh(bin_dir, checkout, {
+                "statusCheckRollup": [{"name": "test", "status": "QUEUED"}],
+            })
             env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
             first = subprocess.run(
                 (node, cli, "run", "push-watch-tick"),
@@ -6727,16 +6816,9 @@ if (codexContext !== undefined) {
             run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
-            gh = bin_dir / "gh"
-            gh.write_text(
-                "#!/bin/sh\n"
-                "cat <<'JSON'\n"
-                '{"url":"https://github.com/acme/demo/pull/7",'
-                '"reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[]}\n'
-                "JSON\n",
-                encoding="utf-8",
-            )
-            gh.chmod(0o755)
+            _write_node_pr_watch_gh(bin_dir, checkout, {
+                "statusCheckRollup": [{"name": "test", "status": "QUEUED"}],
+            })
             artifact = run_dir / _node_phase_artifact("pr-watch")
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text("status: current\n", encoding="utf-8")
@@ -6789,16 +6871,9 @@ if (codexContext !== undefined) {
             run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
-            gh = bin_dir / "gh"
-            gh.write_text(
-                "#!/bin/sh\n"
-                "cat <<'JSON'\n"
-                '{"url":"https://github.com/acme/demo/pull/7",'
-                '"reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[]}\n'
-                "JSON\n",
-                encoding="utf-8",
-            )
-            gh.chmod(0o755)
+            _write_node_pr_watch_gh(bin_dir, checkout, {
+                "statusCheckRollup": [{"name": "test", "status": "QUEUED"}],
+            })
             finished_run_dir = run_dir.parent / "finished-run"
             finished_run_dir.mkdir()
             intent = project_root / ".agent-flow" / "state" / "push-watch-intent.json"
@@ -6850,20 +6925,11 @@ if (codexContext !== undefined) {
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
             ready = Path(temp_dir) / "gh-ready"
-            gh = bin_dir / "gh"
-            gh.write_text(
-                "#!/bin/sh\n"
-                'touch \"$PUSH_WATCH_TEST_READY\"\n'
-                "sleep 1\n"
-                "cat <<'JSON'\n"
-                '{"url":"https://github.com/acme/demo/pull/7",'
-                '"reviewDecision":"REVIEW_REQUIRED",'
-                '"statusCheckRollup":[{"name":"test","status":"COMPLETED",'
-                '"conclusion":"FAILURE"}]}\n'
-                "JSON\n",
-                encoding="utf-8",
-            )
-            gh.chmod(0o755)
+            _write_node_pr_watch_gh(bin_dir, checkout, {
+                "statusCheckRollup": [
+                    {"name": "test", "status": "COMPLETED", "conclusion": "FAILURE"},
+                ],
+            }, ready=ready)
             env = {
                 **os.environ,
                 "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
@@ -6916,16 +6982,9 @@ if (codexContext !== undefined) {
             _, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
-            gh = bin_dir / "gh"
-            gh.write_text(
-                "#!/bin/sh\n"
-                "cat <<'JSON'\n"
-                '{"url":"https://github.com/acme/demo/pull/7",'
-                '"reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[]}\n'
-                "JSON\n",
-                encoding="utf-8",
-            )
-            gh.chmod(0o755)
+            _write_node_pr_watch_gh(bin_dir, checkout, {
+                "statusCheckRollup": [{"name": "test", "status": "QUEUED"}],
+            })
             token = "a" * 32
             lock = project_root / ".agent-flow" / "state" / "push-watch.lock"
             lock.mkdir(parents=True)
@@ -6983,20 +7042,9 @@ if (codexContext !== undefined) {
             run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
-            gh = bin_dir / "gh"
-            gh.write_text(
-                "\n".join(
-                    [
-                        "#!/bin/sh",
-                        "cat <<'JSON'",
-                        '{"url":"https://github.com/acme/demo/pull/8","reviewDecision":"APPROVED","statusCheckRollup":[{"context":"lint","state":"FAILURE"}]}',
-                        "JSON",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            gh.chmod(0o755)
+            _write_node_pr_watch_gh(bin_dir, checkout, {
+                "statusCheckRollup": [{"context": "lint", "state": "FAILURE"}],
+            })
 
             result = subprocess.run(
                 (node, cli, "run", "push-watch-tick"),
@@ -7010,7 +7058,7 @@ if (codexContext !== undefined) {
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("status: ci-failed", (run_dir / _node_phase_artifact("pr-watch")).read_text(encoding="utf-8"))
 
-    def test_node_push_watch_tick_requires_review_approval_before_green(self) -> None:
+    def test_node_push_watch_tick_stays_pending_until_review_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -7020,32 +7068,76 @@ if (codexContext !== undefined) {
             run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
-            gh = bin_dir / "gh"
-            gh.write_text(
-                "\n".join(
-                    [
-                        "#!/bin/sh",
-                        "cat <<'JSON'",
-                        '{"url":"https://github.com/acme/demo/pull/9","statusCheckRollup":[{"name":"test","status":"COMPLETED","conclusion":"SUCCESS"}]}',
-                        "JSON",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            gh.chmod(0o755)
+            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+            for review_decision, expected_status in (
+                ("", "pending"),
+                ("REVIEW_REQUIRED", "pending"),
+                ("APPROVED", "green"),
+            ):
+                with self.subTest(review_decision=review_decision):
+                    _write_node_pr_watch_gh(bin_dir, checkout, {
+                        "reviewDecision": review_decision,
+                        "statusCheckRollup": [
+                            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                        ],
+                    })
+                    result = subprocess.run(
+                        (node, cli, "run", "push-watch-tick"), cwd=checkout,
+                        text=True, capture_output=True, check=False, env=env,
+                    )
 
-            result = subprocess.run(
-                (node, cli, "run", "push-watch-tick"),
-                cwd=checkout,
-                text=True,
-                capture_output=True,
-                check=False,
-                env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
-            )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(
+                        f"status: {expected_status}",
+                        (run_dir / _node_phase_artifact("pr-watch")).read_text(encoding="utf-8"),
+                    )
+                    self.assertEqual(
+                        json.loads((run_dir / "pr-feedback.json").read_text(encoding="utf-8"))["status"],
+                        expected_status,
+                    )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("status: pending", (run_dir / _node_phase_artifact("pr-watch")).read_text(encoding="utf-8"))
+    def test_node_push_watch_tick_waits_for_new_head_check_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+            success = [{"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+            for stage, checks, expected_status in (
+                ("previous-head", success, "green"),
+                ("new-head", [], "pending"),
+                ("registered", [{"name": "test", "status": "QUEUED"}], "pending"),
+                ("completed", success, "green"),
+            ):
+                with self.subTest(stage=stage):
+                    if stage == "new-head":
+                        subprocess.run(
+                            ("git", "commit", "--allow-empty", "-m", "Push CI fix"),
+                            cwd=checkout, check=True, capture_output=True, text=True,
+                        )
+                    _write_node_pr_watch_gh(bin_dir, checkout, {
+                        "reviewDecision": "APPROVED",
+                        "statusCheckRollup": checks,
+                    })
+                    result = subprocess.run(
+                        (node, cli, "run", "push-watch-tick"), cwd=checkout,
+                        text=True, capture_output=True, check=False, env=env,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(
+                        f"status: {expected_status}",
+                        (run_dir / _node_phase_artifact("pr-watch")).read_text(encoding="utf-8"),
+                    )
+                    self.assertEqual(
+                        json.loads((run_dir / "pr-feedback.json").read_text(encoding="utf-8"))["status"],
+                        expected_status,
+                    )
 
     def test_node_push_watch_tick_treats_legacy_success_context_as_green_when_approved(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -7057,20 +7149,10 @@ if (codexContext !== undefined) {
             run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
-            gh = bin_dir / "gh"
-            gh.write_text(
-                "\n".join(
-                    [
-                        "#!/bin/sh",
-                        "cat <<'JSON'",
-                        '{"url":"https://github.com/acme/demo/pull/10","reviewDecision":"APPROVED","statusCheckRollup":[{"context":"lint","state":"SUCCESS"}]}',
-                        "JSON",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            gh.chmod(0o755)
+            _write_node_pr_watch_gh(bin_dir, checkout, {
+                "reviewDecision": "APPROVED",
+                "statusCheckRollup": [{"context": "lint", "state": "SUCCESS"}],
+            })
 
             result = subprocess.run(
                 (node, cli, "run", "push-watch-tick"),
@@ -7790,6 +7872,38 @@ if (codexContext !== undefined) {
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["number"], 4)
         self.assertEqual(payload["status"], "green")
+
+    def test_pr_watch_cli_require_ready_applies_to_once_and_polling(self) -> None:
+        view = {
+            "number": 4, "title": "demo", "state": "OPEN",
+            "url": "https://github.com/owner/repo/pull/4", "headRefOid": "a" * 40,
+            "reviewDecision": "REVIEW_REQUIRED", "reviews": [], "comments": [],
+            "statusCheckRollup": [
+                {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            ],
+        }
+        threads = {"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "nodes": [], "pageInfo": {"hasNextPage": False},
+        }}}}}
+        for mode in (["--once"], ["--max-polls", "1"]):
+            for readiness, expected_status in (([], "green"), (["--require-ready"], "pending")):
+                with self.subTest(mode=mode, readiness=readiness):
+                    output = io.StringIO()
+                    with (
+                        mock.patch(
+                            "agent_flow.pr_watch.subprocess.run",
+                            side_effect=[
+                                subprocess.CompletedProcess((), 0, json.dumps(view), ""),
+                                subprocess.CompletedProcess((), 0, json.dumps([threads]), ""),
+                            ],
+                        ),
+                        contextlib.redirect_stdout(output),
+                    ):
+                        self.assertEqual(
+                            main(["pr-watch", "4", "--allow-unbound", *mode, *readiness]), 0,
+                            output.getvalue(),
+                        )
+                    self.assertEqual(json.loads(output.getvalue())["status"], expected_status)
 
     def test_pr_watch_cli_fails_closed_without_run_context(self) -> None:
         error = io.StringIO()
@@ -12577,6 +12691,55 @@ def _read_node_phase(run_dir: Path) -> dict[str, object]:
     return json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
 
 
+def _write_node_pr_watch_gh(
+    bin_dir: Path,
+    checkout: Path,
+    payload: dict[str, object],
+    *,
+    ready: Path | None = None,
+) -> Path:
+    head = subprocess.run(
+        ("git", "rev-parse", "HEAD"), cwd=checkout,
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    pr = {
+        "number": 7,
+        "url": "https://github.com/acme/demo/pull/7",
+        "title": "Demo",
+        "state": "OPEN",
+        "headRefOid": head,
+        "reviews": [],
+        "comments": [],
+        **payload,
+    }
+    threads = [{
+        "data": {"repository": {"pullRequest": {"reviewThreads": {
+            "nodes": [],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }}}},
+    }]
+    gh = bin_dir / "gh"
+    gh.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys, time\n"
+        f"pr = json.loads({json.dumps(pr)!r})\n"
+        "if sys.argv[1:3] == ['pr', 'view']:\n"
+        + (
+            f"    pathlib.Path({str(ready)!r}).touch()\n"
+            "    time.sleep(1)\n"
+            if ready is not None else ""
+        )
+        + "    print(json.dumps(pr))\n"
+        "elif sys.argv[1:3] == ['api', 'graphql']:\n"
+        f"    print({json.dumps(threads)!r})\n"
+        "else:\n"
+        "    raise SystemExit('unexpected gh command: ' + repr(sys.argv[1:]))\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    return gh
+
+
 def _node_start_full_feature_at_pr_watch(
     project_root: Path, node: str, cli: str
 ) -> tuple[Path, Path]:
@@ -12593,6 +12756,15 @@ def _node_start_full_feature_at_pr_watch(
     )
     run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
     _set_node_phase(run_dir, "pr-watch")
+    artifacts = run_dir / "artifacts"
+    artifacts.mkdir(exist_ok=True)
+    (artifacts / "gate-results.json").write_text(
+        json.dumps({
+            "produced_by": {"gate_phase": "all", "gate_execution": "local"},
+            "deferred_ci_checks": [],
+        }),
+        encoding="utf-8",
+    )
     return run_dir, plan.path
 
 

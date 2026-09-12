@@ -2,6 +2,7 @@
 name: comment-authoring-discipline
 description: Apply comment-quality criteria during implementation and the final comment-quality pass before final-review, multi-review, or architecture-review after code changes. Applies equally in Codex, Claude, and OMP for Python, Kotlin, React Web, React Native, iOS, Swift, and SwiftUI.
 delivery: passive
+requires: [write-for-work]
 ---
 
 # Comment Authoring Discipline
@@ -34,7 +35,7 @@ Use the platform's normal comment format only for:
 When a comment is warranted, write it well instead of padding or translating it:
 
 - Keep code identifiers, API names, and established technical terms in English; do not translate them into awkward Korean.
-- State the reason, constraint, or contract plainly and specifically, following `write-for-work`.
+- Before writing or revising warranted comment/docstring prose, read `write-for-work` and use its Code comments and docstrings mode. This skill still decides whether the comment belongs; the writing skill improves its wording.
 - Prefer one clear sentence over a decorative block, and match the file's existing comment language.
 
 ## Korean Comment Quality

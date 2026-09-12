@@ -381,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     pr_watch_parser.add_argument("number", type=int)
     pr_watch_parser.add_argument("--repo")
     pr_watch_parser.add_argument("--once", action="store_true")
+    pr_watch_parser.add_argument("--require-ready", action="store_true")
     pr_watch_parser.add_argument("--poll-interval", type=int, default=30)
     pr_watch_parser.add_argument("--max-polls", type=int, default=20)
     pr_watch_parser.add_argument("--run-dir")
@@ -1174,6 +1175,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.number,
                 repo=args.repo,
                 required_checks=required_checks,
+                require_ready=args.require_ready,
                 run_dir=watch_run_dir,
             )
             if args.once
@@ -1183,6 +1185,7 @@ def main(argv: list[str] | None = None) -> int:
                 poll_interval_s=args.poll_interval,
                 max_poll_count=args.max_polls,
                 required_checks=required_checks,
+                require_ready=args.require_ready,
                 run_dir=watch_run_dir,
             )
         )

@@ -13,6 +13,8 @@ Optimize for finding and completing a task.
 - Explain failure cases and recovery when they are likely or costly.
 - Replace abstract labels such as "responsibility boundary" or "processing criteria" with the location or behavior the reader can inspect.
 - Keep architecture terminology when the reader needs it for precision.
+- Explain current behavior in durable reference material. Preserve before/after and version history when the document is a migration guide, release note, or change record.
+- Keep prerequisites, warnings, defaults, and requirement strength exact. A clearer sentence must not invent supported versions, recovery behavior, or successful verification.
 - Remove introductions that merely announce what the title already says.
 - End with the resulting state or the next linked task, not a generic summary.
 
@@ -24,6 +26,49 @@ Preferred sequence when applicable:
 4. Verification
 5. Failure and recovery
 6. Related references
+
+## PR descriptions
+
+Help a reviewer understand why the change exists and what evidence supports it.
+
+- Start from the supplied issue, diff, notes, and execution results. Lead with the problem and changed behavior, not a file inventory or "안정성을 강화했다".
+- Separate implemented behavior from intended benefits. Say which condition or operation changed; do not claim faster, safer, or regression-free behavior without evidence.
+- Report verification exactly as observed: what ran, what it checked, its result, and what did not run. A test added to the diff is not evidence it passed.
+- Preserve the repository's template, required headings, issue links, and machine-readable markers. Keep checkbox state unless source evidence and the task authorize a status update; prose editing alone does not.
+- Include compatibility effects, remaining risks, or rollout/rollback requirements only when supported. Do not invent an issue number, reviewer approval, test result, or release plan to fill a section.
+- Keep change history here when it explains the patch. Do not apply the documentation rule about current behavior by deleting the reason for the change.
+- Return the requested PR text; publishing or updating a remote PR requires separate authorization.
+
+Synthetic example with all facts in the draft:
+
+> 캐시 무효화 스코프의 강화를 진행했습니다. 이전에는 모든 캐시를 지웠지만 이제 변경된 키만 지웁니다. 테스트는 실행하지 못했습니다.
+
+Possible revision:
+
+> 전체 캐시 대신 변경된 키만 지우도록 수정했습니다. 테스트는 실행하지 못했습니다.
+
+Do not replace the last sentence with "검증 완료".
+
+## Code comments and docstrings
+
+Improve maintenance information at its point of use, not the amount of commentary.
+
+- Follow the project's comment policy to decide whether a comment belongs. A prose-editing request does not authorize adding comments throughout the code or changing its behavior.
+- For a warranted comment, state the reason or constraint that a maintainer cannot recover from the nearby code alone. Preserve public API contracts, exceptions, and non-obvious security, concurrency, compatibility, or data-loss warnings.
+- Remove syntax narration only when it carries no additional contract or rationale. A public return-value description is not redundant merely because it starts with "Returns".
+- Keep identifiers, surrounding executable code, indentation and delimiters required by syntax, documentation tags, links, and tool directives intact. Rewrite only explanatory text; do not translate `@param`, `:raises:`, `noqa`, or an issue identifier.
+- Use the file's established comment language and register unless the task requests a change. In Korean comments, prefer a direct condition and reason over ceremonial wording or duplicate English/Korean labels.
+- Derive guarantees and reasons only from supplied context or inspected implementation. Missing rationale stays unknown; do not manufacture an issue, owner, TODO, future optimization, or safety guarantee.
+
+Synthetic example with its rationale already present:
+
+> 응답이 유실되면 서버 반영 여부를 알 수 없으므로 중복 반영 방지를 위해 자동 재시도의 수행을 금지한다.
+
+Possible revision:
+
+> 응답이 유실되면 서버 반영 여부를 알 수 없어 자동 재시도하면 안 된다. 중복 반영을 막기 위해서다.
+
+Preserve the prohibition, uncertain outcome, and duplicate-write risk; "자동 재시도하면 안 된다" alone loses the reason.
 
 ## Business or strategy report
 

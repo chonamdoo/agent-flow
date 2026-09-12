@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -49,6 +50,7 @@ from agent_flow.artifact import (
     write_meta,
 )
 from agent_flow.cli_detect import CliInfo, REVIEW_CLI_NAMES, detect_available_clis
+from agent_flow.pr_watch import _ci_execution_entry, _ci_execution_history, _valid_ci_revision
 from agent_flow.core.command_evidence import (
     missing_feedback_evidence_markers,
     missing_test_evidence_markers,
@@ -176,6 +178,7 @@ GIT_DEPENDENT_PHASES = {
 # stale/marker 검사로 막지 않고 매번 다시 만든다.
 RUNNER_OWNED_PHASES = frozenset({"gates"})
 FIX_LOOP_MAX_ROUNDS = 3
+CI_REPAIR_MAX_ROUNDS = 3
 MAX_REVIEW_REGENERATION_ATTEMPTS = 1
 # fix collector 판정에 쓰는 rejection verdict 키. review/gate가 "다시 해라"라고
 # 되돌려 보내는 route만 상한 대상이다 — 정상 진행(default·approve·green)과 PR
@@ -246,6 +249,7 @@ class PhaseTransition:
     skipped: tuple[tuple[str, str], ...] = ()
     source_attempt: str = ""
     fix_round: int = 0
+    ci_repair_state: dict[str, Any] | None = None
 
     def journal_record(self, at: str) -> dict[str, Any]:
         # skip 표식은 경로만이 아니라 내용까지 적는다. 원장 한 줄만 보고 전이를
@@ -261,6 +265,7 @@ class PhaseTransition:
             "blocked": self.blocked,
             "source_attempt": self.source_attempt,
             "fix_round": self.fix_round,
+            "ci_repair_state": self.ci_repair_state,
             "invalidated": list(self.invalidated),
             "skipped": [
                 {"path": path, "content": content} for path, content in self.skipped
@@ -311,6 +316,12 @@ class PhaseTransition:
         fix_round = record.get("fix_round", 0)
         if not isinstance(source_attempt, str) or type(fix_round) is not int or fix_round < 0:
             return None
+        ci_repair_state = record.get("ci_repair_state")
+        if ci_repair_state is not None:
+            try:
+                _validate_ci_repair_state(ci_repair_state)
+            except ValueError:
+                return None
         return cls(
             from_index=from_index,
             from_phase=str(record.get("from_phase", "")),
@@ -322,6 +333,7 @@ class PhaseTransition:
             skipped=tuple(skipped),
             source_attempt=source_attempt,
             fix_round=fix_round,
+            ci_repair_state=ci_repair_state,
         )
 
 
@@ -1016,6 +1028,12 @@ class Runner:
                     )
         else:
             key = route_key(text)
+        if phase.id == "pr-watch" and (
+            key in {"ci-failed", "ci_failed"} or "ci_repair_state" in read_meta(self.run_dir)
+        ):
+            _, ci_block, _ = self._ci_watch_state(key)
+            if ci_block:
+                return RouteDecision(current_index, True, ci_block)
         if key == "approve" and phase.routes.get("request-changes") and has_failure_markers(text):
             print("  [route] approve overridden to request-changes: Completion Gate has failure markers")
             key = "request-changes"
@@ -1132,6 +1150,7 @@ class Runner:
             if not blocked and to_phase in self._fix_collector_targets()
             else 0
         )
+        ci_repair_state = self._ci_transition_state(phase, decision, meta)
         return PhaseTransition(
             from_index=current_index,
             from_phase=phase.id,
@@ -1143,6 +1162,7 @@ class Runner:
             skipped=tuple(skipped),
             source_attempt=str(meta.get("phase_entered_at", "")),
             fix_round=fix_round,
+            ci_repair_state=ci_repair_state,
         )
 
     def _commit_transition(self, transition: PhaseTransition) -> dict[str, Any]:
@@ -1168,6 +1188,13 @@ class Runner:
                     f"current phase is {current_phase or 'complete'}"
                 )
             phase = self.phases[transition.from_index]
+            if phase.id == "pr-watch" and transition.ci_repair_state is not None:
+                observation = json.loads(
+                    resolve_run_subpath(self.run_dir, Path("pr-feedback.json")).read_text(encoding="utf-8")
+                )
+                _validate_ci_observation(observation)
+                if observation.get("observation_sequence") != transition.ci_repair_state["observation_sequence"]:
+                    raise WorktreeIsolationError("CI observation changed while planning; observe and plan again")
             if phase.pause_after and (
                 not isinstance(meta.get("phase_approval"), dict)
                 or pending_phase_approval(self.run_dir) is not None
@@ -1213,6 +1240,7 @@ class Runner:
                     f"outside the run directory"
                 )
             self._apply_fix_round(meta, transition)
+            self._apply_ci_repair_state(meta, transition)
             self._advance_phase(meta, transition.to_index, transition.blocked)
             write_meta(self.run_dir, meta)
         self._emit_observation(
@@ -1381,6 +1409,10 @@ class Runner:
                 and recorded_phase == transition.to_phase
                 and blocked_recorded
                 and (
+                    transition.ci_repair_state is None
+                    or meta.get("ci_repair_state") == transition.ci_repair_state
+                )
+                and (
                     transition.blocked
                     or not transition.source_attempt
                     or meta.get("phase_entered_at") != transition.source_attempt
@@ -1406,6 +1438,7 @@ class Runner:
                 )
                 return
             self._apply_fix_round(meta, transition)
+            self._apply_ci_repair_state(meta, transition)
             self._advance_phase(meta, target_index, transition.blocked)
             write_meta(self.run_dir, meta)
 
@@ -1576,6 +1609,191 @@ class Runner:
                 counts.get(transition.to_phase, 0), transition.fix_round
             )
             meta["fix_loop_rounds"] = counts
+
+    @staticmethod
+    def _apply_ci_repair_state(meta: dict[str, Any], transition: PhaseTransition) -> None:
+        if transition.ci_repair_state is not None:
+            meta["ci_repair_state"] = transition.ci_repair_state
+
+    def _ci_watch_state(
+        self, key: str,
+    ) -> tuple[dict[str, Any] | None, str, dict[str, Any]]:
+        assert self.run_dir is not None
+        meta = read_meta(self.run_dir)
+        stored = meta.get("ci_repair_state")
+        try:
+            if "ci_repair_state" in meta:
+                _validate_ci_repair_state(stored)
+            path = resolve_run_subpath(self.run_dir, Path("pr-feedback.json"))
+            observation = json.loads(path.read_text(encoding="utf-8"))
+            _validate_ci_observation(observation)
+            expected = {"ci-failed": "ci_failed", "comments": "has_comments"}.get(key, key)
+            if observation["status"] != expected:
+                raise ValueError("PR artifact does not match the recorded CI observation")
+            if stored is not None and (
+                stored["repo"] != observation["repo"] or stored["number"] != observation["number"]
+            ):
+                raise ValueError("CI repair accounting belongs to a different PR")
+        except (OSError, ValueError, WorktreeIsolationError) as exc:
+            print(f"  [block] CI repair evidence is unavailable: {exc}; observe the PR again or request a human decision")
+            return None, "ci-repair-evidence", {}
+        state = deepcopy(stored) if stored is not None else {
+            "repo": observation["repo"], "number": observation["number"],
+            "counts": {}, "active": None,
+        }
+        state["observation_sequence"] = observation["observation_sequence"]
+        if key in {"merged", "closed"}:
+            return state, "", observation
+        checks = observation["ci_checks"]
+        counts = state["counts"]
+        active = state["active"]
+        if active is not None:
+            if (
+                active["stage"] != "published"
+                or observation["observation_sequence"] <= active["observation_sequence"]
+            ):
+                print("  [block] CI repair awaits a fresh observation of its published HEAD; observe that HEAD or request a human decision")
+                return state, "ci-repair-evidence", observation
+        successes: dict[str, dict[str, Any]] = {}
+        active_checks = set(active["checks"]) if active is not None else set()
+        for head, evidence in observation["ci_executions"].items():
+            for check, entries in evidence.items():
+                if check in active_checks and head != active["head"]:
+                    continue
+                for success in entries:
+                    if (
+                        success["outcome"] != "success"
+                        or success["observation_sequence"] <= state.get("success_sequence", 0)
+                    ):
+                        continue
+                    if check not in successes or success["observation_sequence"] > successes[check]["observation_sequence"]:
+                        successes[check] = success
+        if active is not None:
+            same_head = active["head"] == active["origin_head"]
+            remaining = []
+            awaiting_execution = False
+            for check in active["checks"]:
+                baseline = active.get("origin_revisions", {}).get(check, {})
+                success = successes.get(check)
+                if success is not None and (
+                    success["observation_sequence"] <= active.get("origin_sequence", active["observation_sequence"])
+                    or (same_head and not _distinct_ci_revision(baseline, success["revision"]))
+                ):
+                    successes.pop(check)
+                    success = None
+                outcome = checks.get(check) if active["head"] == observation["head"] else None
+                if success is not None:
+                    outcome = "success"
+                revision = observation.get("ci_revisions", {}).get(check, {})
+                execution = _ci_execution_entry(
+                    observation["ci_executions"], active["head"], check, revision,
+                )
+                if success is None and outcome in {"failed", "success"} and (
+                    outcome == "success" or execution is None
+                    or execution["observation_sequence"] <= active.get("origin_sequence", active["observation_sequence"])
+                    or (same_head and not _distinct_ci_revision(baseline, revision))
+                ):
+                    awaiting_execution = True
+                    remaining.append(check)
+                elif outcome == "failed":
+                    counts[check] = counts.get(check, 0) + 1
+                elif outcome == "success":
+                    counts.pop(check, None)
+                else:
+                    remaining.append(check)
+            active["checks"] = remaining
+            if not remaining:
+                state["active"] = None
+        else:
+            awaiting_execution = False
+        for check in successes:
+            counts.pop(check, None)
+        state["success_sequence"] = observation["observation_sequence"]
+        if state["active"] is not None and state["active"]["head"] != observation["head"]:
+            print("  [block] CI repair awaits results for its published HEAD; observe that HEAD or request a human decision")
+            return state, "ci-repair-evidence", observation
+        exhausted = {
+            check: count for check, count in counts.items()
+            if count >= CI_REPAIR_MAX_ROUNDS and checks.get(check) == "failed"
+        }
+        if exhausted:
+            detail = "; ".join(f"{check}: {count} completed unsuccessful repairs" for check, count in sorted(exhausted.items()))
+            print(f"  [block] CI repair limit: {detail}; human decision required before further repair")
+            return state, "ci-repair-limit", observation
+        if awaiting_execution:
+            print("  [block] CI repair awaits an unseen completed execution on its published HEAD; observe the retry or request a human decision")
+            return state, "ci-repair-evidence", observation
+        unresolved = [check for check in counts if checks.get(check) != "failed"]
+        if state["active"] is not None or (unresolved and key == "green"):
+            detail = ", ".join(sorted(unresolved))
+            print(f"  [block] CI repair results are pending or missing for {detail}; observe the checks or request a human decision")
+            return state, "ci-repair-pending", observation
+        return state, "", observation
+
+    def _ci_transition_state(
+        self, phase: Phase, decision: RouteDecision, meta: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        stored = meta.get("ci_repair_state")
+        if phase.id == "pr-watch" and (
+            decision.route_key in {"ci-failed", "ci_failed"} or stored is not None
+        ):
+            artifact = self._existing_artifact_path(phase)
+            try:
+                key = route_key(artifact.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                key = "default"
+            if not decision.blocked and key != decision.route_key:
+                raise WorktreeIsolationError("PR status changed while planning; observe and plan again")
+            state, reason, observation = self._ci_watch_state(key)
+            if reason and not decision.blocked:
+                raise WorktreeIsolationError("CI evidence changed while planning; observe and plan again")
+            if state is None:
+                return None
+            if (
+                not reason and not decision.blocked and decision.to_index < len(self.phases)
+                and self.phases[decision.to_index].id == "pr-ci-fix"
+            ):
+                failed = sorted(check for check, outcome in observation["ci_checks"].items() if outcome == "failed")
+                for check in failed:
+                    state["counts"].setdefault(check, 0)
+                state["active"] = {
+                    "checks": failed, "origin_head": observation["head"], "stage": "editing",
+                    "head": "", "observation_sequence": observation["observation_sequence"],
+                    "origin_sequence": observation["observation_sequence"],
+                    "origin_revisions": {
+                        check: observation.get("ci_revisions", {}).get(check, {}) for check in failed
+                    },
+                }
+            return state
+        if stored is None or decision.blocked:
+            return None
+        _validate_ci_repair_state(stored)
+        state = deepcopy(stored)
+        active = state["active"]
+        if active is None:
+            return None
+        target = self.phases[decision.to_index].id if decision.to_index < len(self.phases) else ""
+        if phase.id == "pr-ci-fix" and active["stage"] == "editing":
+            active["stage"] = "repaired"
+        if active["stage"] == "repaired" and target == "pr-watch" and phase.id in {"pr-ci-fix", "push-pr"}:
+            head = git_safe(
+                "rev-parse", "HEAD", cwd=self.project_root, timeout_s=5, optional_locks=False,
+            )
+            if not head.ok or not head.stdout.strip():
+                raise WorktreeIsolationError("cannot bind CI repair to its published HEAD")
+            if phase.id == "pr-ci-fix" and head.stdout.strip() != active["origin_head"]:
+                raise WorktreeIsolationError("changed CI repair HEAD requires review and push-pr publication")
+            observation = json.loads(
+                resolve_run_subpath(self.run_dir, Path("pr-feedback.json")).read_text(encoding="utf-8")
+            )
+            _validate_ci_observation(observation)
+            if observation["repo"] != state["repo"] or observation["number"] != state["number"]:
+                raise WorktreeIsolationError("CI repair publication belongs to a different PR")
+            active.update(
+                stage="published", head=head.stdout.strip(),
+                observation_sequence=observation["observation_sequence"],
+            )
+        return state
 
     def _write_automatic_artifact(self, phase: Phase) -> bool:
         """runner가 직접 쓰는 phase artifact. 봉쇄는 정본 writer 한 벌뿐이다.
@@ -2136,6 +2354,98 @@ def _phases_from_definition(definition: PhaseWorkflowDefinition) -> list[Phase]:
         )
         for phase in definition.phases
     ]
+
+
+def _validate_ci_repair_state(state: object) -> None:
+    if (
+        not isinstance(state, dict)
+        or not isinstance(state.get("repo"), str) or not state["repo"]
+        or type(state.get("number")) is not int or state["number"] <= 0
+        or not isinstance(state.get("counts"), dict)
+        or any(
+            not isinstance(check, str) or not check or type(count) is not int or count < 0
+            for check, count in state["counts"].items()
+        )
+        or type(state.get("observation_sequence")) is not int or state["observation_sequence"] < 1
+        or "active" not in state
+    ):
+        raise ValueError("CI repair accounting is malformed")
+    if type(state.get("success_sequence", 0)) is not int or state.get("success_sequence", 0) < 0:
+        raise ValueError("CI repair success watermark is malformed")
+    active = state["active"]
+    if active is None:
+        return
+    if (
+        not isinstance(active, dict)
+        or not isinstance(active.get("checks"), list) or not active["checks"]
+        or any(not isinstance(check, str) or check not in state["counts"] for check in active["checks"])
+        or len(set(active["checks"])) != len(active["checks"])
+        or not isinstance(active.get("stage"), str)
+        or active["stage"] not in {"editing", "repaired", "published"}
+        or not isinstance(active.get("origin_head"), str) or not active["origin_head"]
+        or not isinstance(active.get("head"), str)
+        or (active["stage"] == "published" and not active["head"])
+        or type(active.get("observation_sequence")) is not int
+        or active["observation_sequence"] < 1
+    ):
+        raise ValueError("CI repair cycle is malformed")
+    if (
+        type(active.get("origin_sequence", active["observation_sequence"])) is not int
+        or active.get("origin_sequence", active["observation_sequence"]) < 1
+        or not isinstance(active.get("origin_revisions", {}), dict)
+        or any(
+            not isinstance(check, str) or not check or not _valid_ci_revision(revision)
+            for check, revision in active.get("origin_revisions", {}).items()
+        )
+    ):
+        raise ValueError("CI repair execution baseline is malformed")
+
+
+def _distinct_ci_revision(baseline: dict[str, str], revision: dict[str, str]) -> bool:
+    return any(key in baseline and baseline[key] != value for key, value in revision.items())
+
+
+def _validate_ci_observation(observation: object) -> None:
+    if (
+        not isinstance(observation, dict)
+        or not isinstance(observation.get("repo"), str) or not observation["repo"]
+        or type(observation.get("number")) is not int or observation["number"] <= 0
+        or not isinstance(observation.get("head"), str) or not observation["head"]
+        or type(observation.get("observation_sequence")) is not int
+        or observation["observation_sequence"] < 1
+        or not isinstance(observation.get("status"), str)
+        or observation["status"] not in {"green", "pending", "ci_failed", "has_comments", "merged", "closed"}
+    ):
+        raise ValueError("recorded CI observation is missing or malformed")
+    if observation["status"] in {"merged", "closed"}:
+        return
+    if (
+        not isinstance(observation.get("ci_checks"), dict)
+        or any(
+            not isinstance(check, str) or not check or not isinstance(outcome, str)
+            or outcome not in {"failed", "pending", "success"}
+            for check, outcome in observation["ci_checks"].items()
+        )
+    ):
+        raise ValueError("recorded CI observation is missing or malformed")
+    revisions = observation.get("ci_revisions", {})
+    if (
+        not isinstance(revisions, dict)
+        or any(
+            check not in observation["ci_checks"] or not _valid_ci_revision(revision)
+            for check, revision in revisions.items()
+        )
+    ):
+        raise ValueError("recorded CI execution evidence is malformed")
+    history = _ci_execution_history(observation, observation["observation_sequence"])
+    for check, outcome in observation["ci_checks"].items():
+        if outcome != "pending" and _ci_execution_entry(
+            history, observation["head"], check, revisions.get(check, {}),
+        ) is None:
+            raise ValueError("recorded CI execution has no first observation")
+    failed = "failed" in observation["ci_checks"].values()
+    if failed != (observation["status"] == "ci_failed"):
+        raise ValueError("recorded CI status disagrees with its checks")
 
 
 def _fix_loop_round_counts(meta: dict[str, Any]) -> dict[str, int]:
