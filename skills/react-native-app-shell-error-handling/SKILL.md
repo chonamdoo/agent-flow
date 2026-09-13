@@ -34,7 +34,7 @@ implementation or review.
 ## Do not use for
 
 - Feature-local validation or fetch errors that render inline.
-- Ordinary screen/hook state or UI-model mapping; use `react-native-clean-presentation-architecture` instead.
+- Ordinary screen/hook state or UI-model mapping; use the selected contract's presentation guidance (`react-native-clean-presentation-architecture` in Clean mode) instead.
 
 ## AppShell Role
 

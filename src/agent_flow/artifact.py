@@ -121,6 +121,7 @@ class ActiveRun:
         structured_status = "running"
         reason = "in_progress"
         missing_markers: list[str] = []
+        detail: str | None = None
         review_regeneration = False
         artifact_exists = (
             required_artifact is not None and required_artifact.exists()
@@ -162,23 +163,28 @@ class ActiveRun:
             elif persisted_reason == "route_blocked":
                 reason = persisted_reason
             else:
-                missing_markers = _missing_completion_markers(
-                    self.path,
-                    self.workflow,
-                    current_phase,
-                    config_root=config_root,
-                    project_root=project_root,
-                )
-                reason = (
-                    "missing_completion_markers"
-                    if missing_markers
-                    else "phase_artifact_written_continue_required"
-                )
-                if not missing_markers:
-                    pending = pending_phase_approval(self.path)
-                    if pending is not None:
-                        reason = "phase_approval_required"
-                        next_command = f"{next_command} --approve {pending['token']}"
+                try:
+                    missing_markers = _missing_completion_markers(
+                        self.path,
+                        self.workflow,
+                        current_phase,
+                        config_root=config_root,
+                        project_root=project_root,
+                    )
+                except (OSError, ValueError) as exc:
+                    reason = "architecture_policy_unreadable"
+                    detail = str(exc)
+                else:
+                    reason = (
+                        "missing_completion_markers"
+                        if missing_markers
+                        else "phase_artifact_written_continue_required"
+                    )
+                    if not missing_markers:
+                        pending = pending_phase_approval(self.path)
+                        if pending is not None:
+                            reason = "phase_approval_required"
+                            next_command = f"{next_command} --approve {pending['token']}"
         payload = workflow_status_payload(
             status=structured_status,
             run=f"{self.workflow}/{self.run_id}",
@@ -188,6 +194,7 @@ class ActiveRun:
             required_artifact=required_artifact,
             next_command=next_command,
             missing_completion_markers=missing_markers,
+            detail=detail,
         )
         print(f"Run id     : {self.run_id}")
         print(f"Workflow   : {self.workflow}")
@@ -600,6 +607,7 @@ def _missing_completion_markers(
             task_text=str(meta.get("task", "")),
             concerns=run_concerns(meta),
             since=phase_since,
+            architecture_root=project,
         )
     )
     missing.extend(

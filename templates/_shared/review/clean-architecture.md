@@ -1,7 +1,40 @@
-# Review Angle - Clean Architecture
+# Review Angle - Architecture Contract
+
+Use the selected architecture contract supplied in this reviewer's own prompt.
+Output strictly markdown findings. Do not propose code unless asked.
+
+## Local mode
+
+Read the complete normative root and every `requires_docs` document included in
+the prompt. Assess every applicable requirement, permitted alternative, and
+exception against actual changed code and the approved design. Cite both the
+normative rule and implementation evidence for a violation; missing evidence is
+not a pass.
+
+Check the contract's dependency and ownership rules, action composition,
+persistence and cache policy, representation and error boundaries, dependency
+wiring, and testability wherever they apply. A feature-colocated or
+framework-aware design is valid when the selected contract permits it. Preserve
+shared security, data-integrity, cancellation, and interface-contract checks;
+architecture selection is not an exemption from them.
+
+An applicable required-rule violation produces `verdict: request-changes`.
+Record `must-avoid-check: pass|fail` for the selected contract's prohibitions.
+Retain the phase's completion markers and review-category coverage, explaining
+the selected-contract evidence or a permitted `n/a` for each category. Legacy
+Clean-named review categories record this assessment, not adoption of Clean
+layers or permission to skip the review. A fixed legacy
+`clean-architecture: applied` marker certifies selected-contract assessment
+where the workflow requires it; document the actual mode and contract rather
+than claiming an unselected Clean skill was read.
+
+The sections from **What to verify** through **Required completion gate** below
+are the Clean-mode rubric only. Local mode uses the full selected contract above
+and the phase's completion gate instead. **Output format** applies to both modes.
+
+## Clean mode
 
 Apply the `clean-architecture-core` skill resolved by this reviewer prompt.
-Output strictly markdown findings. Do not propose code unless asked.
 
 ## What to verify
 

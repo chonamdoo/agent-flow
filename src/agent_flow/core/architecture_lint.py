@@ -8,6 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from agent_flow.core.architecture_policy import architecture_snapshot, clean_role_lint_applies
 from agent_flow.core.profiles import active_profile_ids, load_profile_payload
 from agent_flow.core.worktree_isolation import git_safe
 
@@ -106,6 +107,11 @@ def lint_project(
     *,
     profile_root: Path | None = None,
 ) -> list[Finding]:
+    # Clean role 표는 Clean을 고른 프로젝트의 규칙이다. local·pending에 그 경로
+    # 토폴로지를 강요하면 선택이 의미를 잃는다. 여기서 비활성인 것은 "통과"가
+    # 아니라 "이 검사가 이 프로젝트의 기준이 아님"이다.
+    if not clean_role_lint_applies(architecture_snapshot(root)):
+        return []
     profile = load_profile_payload(profile_id, profile_root or root)
     architecture = profile.get("architecture")
     if not isinstance(architecture, dict):
@@ -1460,6 +1466,15 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"{','.join(unconfigured)}: architecture lint n/a "
                 "(architecture contract absent)"
+            )
+            return 0
+        # 비적용을 "passed"로 찍으면 필수 gate가 한 파일도 보지 않고 검증됐다고
+        # 기록한다. 이 모듈은 이미 비적용을 별도 문구로 내고 있으므로 같은 자리에 붙인다.
+        snapshot = architecture_snapshot(root)
+        if profile_ids and not clean_role_lint_applies(snapshot):
+            print(
+                f"{','.join(profile_ids)}: architecture lint n/a "
+                f"(architecture selection: {snapshot.selection.mode.value})"
             )
             return 0
         # 확장 출처는 `lint_profiles`가 보존해야 한다. react-native가 덧붙인 Android

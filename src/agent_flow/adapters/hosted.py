@@ -24,7 +24,8 @@ from typing import TYPE_CHECKING, NamedTuple
 from agent_flow.adapters.base import Adapter
 from agent_flow.artifact import bind_review_evidence, ensure_review_binding
 from agent_flow.core.local_skills import (
-    ARCHITECTURE_CONTRACT_FAMILY,
+    ARCHITECTURE_CONTRACT_REQUIREMENT,
+    architecture_contract_required,
     phase_skill_resolution,
 )
 from agent_flow.core.review_evidence import (
@@ -67,11 +68,7 @@ _BASE_REF_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/+@"
 )
 
-# `requires`가 있는 angle은 그 skill이 이 phase의 required 집합에 있을 때만 등록한다.
-# base_prompt는 angle마다 그대로 복제되므로(`_reviewer_jobs`) required 목록 하나가
-# angle 수 × provider 수만큼 늘어난다. 계층 계약을 요구하지 않는 변경에서 그 angle을
-# 그대로 띄우면 resolver 쪽 축소가 review phase에서 전부 사라진다 — 이 template이
-# `clean-architecture-core/SKILL.md`를 읽으라고 직접 지시하기 때문이다.
+# 계약 angle과 작성자 게이트는 같은 resolver 판정을 사용해야 리뷰 없는 통과가 없다.
 _BASE_REVIEW_ANGLES: tuple[dict[str, object], ...] = (
     {
         "id": "generalist",
@@ -84,7 +81,7 @@ _BASE_REVIEW_ANGLES: tuple[dict[str, object], ...] = (
     {
         "id": "architecture-design",
         "prompt": "templates/_shared/review/architecture-design.md",
-        "requires": ARCHITECTURE_CONTRACT_FAMILY,
+        "requires": ARCHITECTURE_CONTRACT_REQUIREMENT,
     },
     {
         "id": "state-integrity",
@@ -124,11 +121,8 @@ _BASE_REVIEW_ANGLES: tuple[dict[str, object], ...] = (
     {
         "id": "clean-architecture",
         "prompt": "templates/_shared/review/clean-architecture.md",
-        # 값은 이름 family다. 정확한 이름(`clean-architecture-core`)으로 보면
-        # routed-but-uninstalled 상태에서 dependency 확장이 일어나지 않아 angle이
-        # 빠지는데, 작성자 게이트는 family로 판정해 `applied`를 요구한다 —
-        # 두 술어가 갈리는 그 자리가 정확히 리뷰 없는 통과가 된다.
-        "requires": ARCHITECTURE_CONTRACT_FAMILY,
+        # legacy angle id는 유지하되 심사 기준은 프로젝트가 선택한 계약을 쓴다.
+        "requires": ARCHITECTURE_CONTRACT_REQUIREMENT,
     },
 )
 _UNCONDITIONAL_REVIEW_ANGLE_IDS = frozenset({"generalist", "types"})
@@ -708,6 +702,9 @@ def _applicable_angles(
 ) -> list[dict[str, object]]:
     skill_gated = [angle for angle in angles if "requires" in angle]
     required: set[str] = set()
+    # 계약 충족 여부는 작성자 게이트와 **같은 함수**로 판정한다. 여기서 이름을
+    # 다시 해석하면 두 판정이 갈리고, 그 자리가 리뷰 없는 통과가 된다.
+    contract_satisfied = False
     if skill_gated:
         for provider in providers:
             resolution = phase_skill_resolution(
@@ -719,14 +716,20 @@ def _applicable_angles(
                 task_text=adapter._task_text,
                 concerns=adapter._concerns,
                 host=provider,
+                architecture_root=project_root,
             )
             required.update(skill.name for skill in resolution.required)
+            contract_satisfied = contract_satisfied or architecture_contract_required(resolution)
     return [
         angle
         for angle in angles
         if (
             "requires" not in angle
-            or _angle_requirement_met(_angle_requirement_value(angle), required)
+            or _angle_requirement_met(
+                _angle_requirement_value(angle),
+                required,
+                contract_satisfied=contract_satisfied,
+            )
         )
         and _angle_selectors_match(angle, adapter)
     ]
@@ -767,10 +770,16 @@ def _angle_requirement_value(angle: Mapping[str, object]) -> str:
     return raw.strip()
 
 
-def _angle_requirement_met(requirement: str, required: set[str]) -> bool:
-    """`requires`는 이름 family다. 작성자 게이트와 같은 술어를 쓴다."""
-    if requirement == ARCHITECTURE_CONTRACT_FAMILY:
-        return any(ARCHITECTURE_CONTRACT_FAMILY in name for name in required)
+def _angle_requirement_met(
+    requirement: str, required: set[str], *, contract_satisfied: bool
+) -> bool:
+    """구조 계약을 요구하는 angle은 작성자 게이트와 같은 판정을 쓴다.
+
+    무엇이 계약인지는 프로젝트 선택이 정한다. 여기서 이름 조각으로 다시 판정하면
+    local 프로젝트에서 구조 리뷰가 통째로 사라진다.
+    """
+    if requirement == ARCHITECTURE_CONTRACT_REQUIREMENT:
+        return contract_satisfied
     return requirement in required
 
 

@@ -36,9 +36,9 @@ phases:
       tests, and contract drift.
       Each reviewer section must include `reviewer-source: sub-agent` and an
       independent verdict: approve or request-changes.
-      The Clean Architecture reviewer must record `must-avoid-check: pass|fail`;
-      a missing or failing marker blocks approval. That angle only runs when this
-      phase requires a clean-architecture skill — the reviewer list the runner
+      The selected architecture contract reviewer must record `must-avoid-check: pass|fail`;
+      a missing or failing marker blocks approval. That angle runs when this
+      phase requires an architecture contract — the reviewer list the runner
       printed is the fact. When it is absent, record `must-avoid-check: n/a`. Any request-changes from any
       reviewer makes the overall verdict request-changes.
       End with `## Overall` followed by exactly one verdict line:

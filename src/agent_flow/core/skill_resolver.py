@@ -9,8 +9,26 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Iterable, Sequence
 
-import yaml
-from yaml.nodes import MappingNode, ScalarNode
+
+from agent_flow.core.architecture_policy import (
+    MAX_ARCHITECTURE_DOCUMENT_BYTES,
+    ArchitectureContractError,
+    ArchitectureMode,
+    ArchitectureSnapshot,
+    ContractDocument,
+    architecture_snapshot,
+    contract_names_in,
+    contract_skill_name,
+    is_clean_architecture_skill,
+)
+from agent_flow.core.atomic_io import read_bounded_regular_file
+from agent_flow.core.installation import assert_install_complete
+from agent_flow.core.skill_metadata import (
+    GOVERNANCE_KEYS,
+    InvalidSkillFrontmatter,
+    is_safe_skill_name,
+    parse_skill_metadata,
+)
 
 # 우선순위 순서다. 앞쪽 root가 이기고, 같은 skill을 두 host에서 중복 로드하지 않는다.
 _DEFAULT_PROJECT_TEMPLATES = (
@@ -109,6 +127,12 @@ class ResolvedSkill:
 class SkillResolution:
     required: tuple[ResolvedSkill, ...] = ()
     optional: tuple[ResolvedSkill, ...] = ()
+    # 이 phase에서 프로젝트의 구조 계약으로 인정되는 required 이름. 작성자 게이트와
+    # reviewer angle이 같은 판정을 쓰도록, 판정 결과를 해석 결과에 함께 싣는다.
+    architecture_contract: tuple[str, ...] = ()
+    architecture_snapshot: ArchitectureSnapshot | None = None
+    architecture_documents: tuple[tuple[ContractDocument, str], ...] = ()
+    architecture_norms: tuple[ContractDocument, ...] = ()
 
     @property
     def missing(self) -> tuple[ResolvedSkill, ...]:
@@ -123,6 +147,7 @@ class SkillResolution:
 class PhaseSkills:
     required: tuple[str, ...] = ()
     optional: tuple[str, ...] = ()
+    replaceable_architecture: bool = False
 
     def is_empty(self) -> bool:
         return not self.required and not self.optional
@@ -151,13 +176,12 @@ class SkillCatalogEntry:
     lifecycle: str = "active"
     approval: str = "unattested"
     provenance: str = ""
+    architecture_modes: tuple[str, ...] = ()
+    architecture_dependencies: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 INVALID_GOVERNANCE_SCALAR = "<invalid-structured-value>"
 INVALID_FRONTMATTER = "<invalid-frontmatter>"
-_GOVERNANCE_KEYS = frozenset(
-    {"version", "owner", "lifecycle", "approval", "provenance"}
-)
 
 _CONTENT_EXCLUDED_NAMES = {
     ".agent-flow",
@@ -263,7 +287,7 @@ def active_host_roots(roots: Sequence[SkillRoot], host: str) -> tuple[SkillRoot,
 
 def resolve_skill(name: str, roots: Sequence[SkillRoot]) -> ResolvedSkill:
     """첫 매치가 이긴다. 어디에도 없으면 exists=False와 설치 안내를 담아 돌려준다."""
-    if not _is_safe_skill_name(name):
+    if not is_safe_skill_name(name):
         return ResolvedSkill(name=name, path=None, source="", exists=False, install_hint="")
     hints: list[str] = []
     for root in roots:
@@ -298,6 +322,7 @@ def resolve_phase_skills(
     concerns: Sequence[str] = (),
     host: str | None = None,
     env: dict[str, str] | None = None,
+    architecture_root: Path | None = None,
 ) -> SkillResolution:
     """phase 선언 + frontmatter 선언 + profile 표/어휘를 합쳐 해석한다.
 
@@ -308,8 +333,27 @@ def resolve_phase_skills(
     """
     # 지연 import: 두 모듈이 이 모듈을 되짚어 참조한다.
     from agent_flow.core.profile_routing import routed_profile_skills
+    from agent_flow.core.profiles import assert_architecture_override_compatible
     from agent_flow.core.skill_matching import REQUIRED as EXTERNAL_REQUIRED
     from agent_flow.core.skill_matching import match_external
+
+    contract_root = architecture_root or project_root
+    assert_install_complete(contract_root)
+    snapshot = architecture_snapshot(contract_root)
+    assert_install_complete(contract_root)
+    selection = snapshot.selection
+    if snapshot.declared:
+        assert_architecture_override_compatible(project_root, selection)
+    contract_name = contract_skill_name(selection)
+    contract_path = contract_root / selection.contract_path if selection.contract_path else None
+
+    def applicable(name: str) -> bool:
+        if name == contract_name:
+            return True
+        if selection.mode is not ArchitectureMode.CLEAN and is_clean_architecture_skill(name):
+            return False
+        entry = catalog_by_name.get(name)
+        return entry is None or not entry.architecture_modes or selection.mode.value in entry.architecture_modes
 
     roots = skill_roots(project_root, profile=profile, host=host, env=env)
     resolved_host = active_host(env) if host is None else host
@@ -318,12 +362,45 @@ def resolve_phase_skills(
     required_names: list[str] = list(declared.required)
     optional_names: list[str] = list(declared.optional)
 
-    catalog = discover_skill_catalog(project_root, resolved_roots)
+    catalog = discover_skill_catalog(
+        project_root, resolved_roots, exclude_names=(contract_name,) if contract_name else (),
+    )
+    if contract_name is not None and contract_path is not None:
+        assert snapshot.contract is not None
+        catalog += (
+            _catalog_entry(
+                contract_name, contract_path, "architecture-contract",
+                frontmatter=parse_skill_metadata(
+                    snapshot.contract.contents[0], source=str(contract_path),
+                ) or {},
+            ),
+        )
+    catalog_by_name = {entry.name: entry for entry in catalog}
+    if not declared.replaceable_architecture:
+        incompatible_required = [
+            name
+            for name in required_names
+            if (
+                selection.mode is not ArchitectureMode.CLEAN
+                and is_clean_architecture_skill(name)
+            )
+            or not applicable(name)
+        ]
+        if incompatible_required:
+            raise ArchitectureContractError(
+                f"architecture mode {selection.mode.value!r} is incompatible with explicit "
+                f"required workflow skills: {', '.join(incompatible_required)}; migrate "
+                "the custom workflow requirements or select a compatible architecture contract"
+            )
+    required_names = [name for name in required_names if applicable(name)]
+    optional_names = [name for name in optional_names if applicable(name)]
     # task 문구로만 켜져 offered로 내려간 이름. 명시된 concern이 그것을 다시 required로
     # 올릴 수 있어야 한다 — 그러지 않으면 강등을 되돌리라고 만든 탈출구가 정확히
     # 강등 대상에만 듣지 않는다.
     demoted: set[str] = set()
     for entry in catalog:
+        if not applicable(entry.name):
+            continue
         if entry.name in required_names or entry.name in optional_names:
             continue
         activation = entry_activation(entry, phase_id, changed_files, task_text)
@@ -349,6 +426,8 @@ def resolve_phase_skills(
         concerns=concerns,
         declared_skill_phases=declared_skill_phases,
     ):
+        if not applicable(routed.name):
+            continue
         if routed.name not in required_names:
             required_names.append(routed.name)
 
@@ -362,6 +441,8 @@ def resolve_phase_skills(
         concerns=concerns,
         env=env,
     ):
+        if not applicable(match.name):
+            continue
         if match.name in required_names:
             continue
         if match.name in optional_names:
@@ -380,19 +461,93 @@ def resolve_phase_skills(
         else:
             optional_names.append(match.name)
 
-    required_names = expand_dependencies(required_names, catalog)
+    if contract_name is not None and contract_name not in required_names:
+        required_names.append(contract_name)
+    required_names = expand_dependencies(required_names, catalog, architecture_mode=selection.mode)
+    for name in required_names:
+        entry = catalog_by_name.get(name)
+        if entry is not None and entry.lifecycle == INVALID_FRONTMATTER:
+            raise ValueError(
+                f"required skill {name!r} ({entry.source}) has invalid frontmatter metadata "
+                f"at {entry.path}; repair its YAML before resolving required dependencies"
+            )
+    incompatible = [name for name in required_names if not applicable(name)]
+    if incompatible:
+        raise ArchitectureContractError(
+            f"architecture mode {selection.mode.value!r} is incompatible with required "
+            f"skill dependencies: {', '.join(incompatible)}; declare architecture "
+            "applicability at the requiring skill instead of dropping its dependencies"
+        )
     optional_names = [name for name in optional_names if name not in required_names]
 
+    # 명시 선택 계약은 이름이 아니라 선언된 경로로 고정한다. 일반 skill은 drop-box가
+    # 저장소 파일보다 우선하는데, 그 우선순위를 계약에도 적용하면 같은 이름의 사설
+    # 문서가 규범을 대체하고 digest는 저장소 파일을 가리켜 둘이 갈린다.
+
     def resolve(name: str) -> ResolvedSkill:
+        if name == contract_name and contract_path is not None:
+            return ResolvedSkill(
+                name=name,
+                path=contract_path,
+                source="architecture-contract",
+                exists=True,
+                summary=_description_summary(catalog_by_name[name].description),
+            )
         found = matched.get(name)
         if found is not None:
             return found
         return resolve_skill(name, resolved_roots)
 
-    return SkillResolution(
-        required=tuple(resolve(name) for name in _stable_unique(required_names)),
+    unique_required = _stable_unique(required_names)
+    required = tuple(resolve(name) for name in unique_required)
+    norm_skills: Iterable[ResolvedSkill] = required
+    if contract_name is not None:
+        norm_names = set(expand_dependencies((contract_name,), catalog, architecture_mode=selection.mode))
+        norm_skills = (
+            skill for skill in required
+            if skill.name != contract_name and skill.name in norm_names
+        )
+    resolution = SkillResolution(
+        required=required,
         optional=tuple(resolve(name) for name in _stable_unique(optional_names)),
+        architecture_contract=contract_names_in(unique_required, selection),
+        architecture_snapshot=snapshot,
+        architecture_documents=tuple(zip(snapshot.contract.documents, snapshot.contract.contents, strict=True))
+        if snapshot.contract else (),
+        architecture_norms=_architecture_norms(contract_root, snapshot, norm_skills),
     )
+    assert_install_complete(contract_root)
+    return resolution
+
+
+def _architecture_norms(
+    root: Path, snapshot: ArchitectureSnapshot, required: Iterable[ResolvedSkill],
+) -> tuple[ContractDocument, ...]:
+    documents: dict[str, ContractDocument] = {}
+    if snapshot.contract is not None:
+        for document in snapshot.contract.documents:
+            absolute = str(root / document.path)
+            documents[absolute] = ContractDocument(absolute, document.sha256, document.bytes)
+    for skill in required:
+        if (
+            not skill.exists or skill.path is None
+            or (snapshot.contract is None and not is_clean_architecture_skill(skill.name))
+        ):
+            continue
+        for path in sorted({skill.path, *skill.path.parent.rglob("*.md")}):
+            try:
+                content, _ = read_bounded_regular_file(
+                    path, max_bytes=MAX_ARCHITECTURE_DOCUMENT_BYTES
+                )
+            except OSError as exc:
+                raise ArchitectureContractError(f"cannot read architecture norm {path}: {exc}") from exc
+            absolute = str(path.absolute())
+            documents[absolute] = ContractDocument(
+                absolute, hashlib.sha256(content).hexdigest(), len(content)
+            )
+    return tuple(documents.values())
+
+
 
 
 def _profile_skill_phases(
@@ -430,7 +585,7 @@ def _profile_skill_phases(
     if missing:
         bundled = find_kit_root() / "skills"
         for name in missing:
-            if not _is_safe_skill_name(name):
+            if not is_safe_skill_name(name):
                 continue
             metadata = _read_frontmatter(bundled / name / "SKILL.md") or {}
             declared = _string_tuple(metadata.get("workflowPhases"))
@@ -443,7 +598,7 @@ _CATALOG_CACHE: dict[tuple[tuple[str, ...], str], tuple["SkillCatalogEntry", ...
 
 
 def discover_skill_catalog(
-    project_root: Path, roots: Sequence[SkillRoot]
+    project_root: Path, roots: Sequence[SkillRoot], *, exclude_names: Sequence[str] = (),
 ) -> tuple[SkillCatalogEntry, ...]:
     """root들을 훑어 발견한 모든 SKILL.md를 카탈로그로 만든다.
 
@@ -451,7 +606,10 @@ def discover_skill_catalog(
     디스크 스탬프를 캐시 키에 넣는다 — template만 키로 쓰면 같은 프로세스 안에서
     skill이 갱신되거나 새로 깔려도 낡은 카탈로그를 계속 쓴다.
     """
-    files = catalog_files(roots)
+    files = tuple(
+        (source, path) for source, path in catalog_files(roots)
+        if path.parent.name not in exclude_names
+    )
     key = (tuple(root.template for root in roots), catalog_stamp(files))
     cached = _CATALOG_CACHE.get(key)
     if cached is not None:
@@ -460,7 +618,7 @@ def discover_skill_catalog(
     seen_files: set[str] = set()
     for source, skill_path in files:
         name = skill_path.parent.name
-        if name in entries or not _is_safe_skill_name(name):
+        if name in entries or not is_safe_skill_name(name):
             continue
         # 같은 파일이 여러 root에 걸린다(`~/.claude/skills/<n>` → `~/.agents/skills/<n>`
         # symlink가 이 머신 25개 중 15개). 이름이 달라도 같은 파일이면 한 번만 담는다.
@@ -512,7 +670,7 @@ def skill_prompt_block(
     "프로젝트를 먼저 훑고 그 다음 호출하라"가 더 나은 결과를 냈다. 게이트는 순서도
     읽음 여부도 보지 않으므로, 강제는 그대로 두고 순서만 사실대로 권한다.
     """
-    if not resolution.required and not resolution.optional:
+    if not resolution.required and not resolution.optional and resolution.architecture_snapshot is None:
         return ""
     lines = ["\n## Required skills for this phase", ""]
     # 훈련 데이터의 일반 통념과 이 파일이 갈리면 파일이 이긴다. 우리 skill은
@@ -560,6 +718,29 @@ def skill_prompt_block(
             "`agent-flow skills sync` owns that."
         )
         lines.append("")
+    if resolution.architecture_snapshot is not None:
+        snapshot = resolution.architecture_snapshot
+        lines.extend((
+            "## Selected architecture contract",
+            "",
+            f"Mode: `{snapshot.selection.mode.value}`. Snapshot SHA-256: `{snapshot.digest}`.",
+            "Use this selection for project architecture; shared security, correctness, "
+            "review independence, and workflow completion duties still apply.",
+        ))
+        if snapshot.selection.mode is ArchitectureMode.PENDING:
+            lines.append(
+                "Architecture is undecided. Continue only work that needs no architecture "
+                "decision; a missing standard is not permission to approve structural work."
+            )
+        for document, text in resolution.architecture_documents:
+            lines.extend((
+                "",
+                f"### Normative document: `{document.path}`",
+                f"SHA-256: `{document.sha256}`. Bytes: {document.bytes}.",
+                "",
+                text,
+            ))
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -588,15 +769,17 @@ def skill_summary(skill_path: Path) -> str:
     if cached is not None:
         return cached
     raw = (_read_frontmatter(skill_path) or {}).get("description")
-    summary = ""
-    if isinstance(raw, str):
-        text = " ".join(raw.split())
-        head = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0] if text else ""
-        if len(head) > _SUMMARY_MAX_CHARS:
-            head = f"{head[: _SUMMARY_MAX_CHARS - 1].rstrip()}…"
-        summary = head
+    summary = _description_summary(raw)
     _SUMMARY_CACHE[key] = summary
     return summary
+
+
+def _description_summary(raw: object) -> str:
+    if not isinstance(raw, str):
+        return ""
+    text = " ".join(raw.split())
+    head = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0] if text else ""
+    return f"{head[: _SUMMARY_MAX_CHARS - 1].rstrip()}…" if len(head) > _SUMMARY_MAX_CHARS else head
 
 
 def _profile_skill_source_roots(
@@ -667,12 +850,16 @@ def _match_template(template: str, name: str) -> Path | None:
     expanded = os.path.expanduser(template.replace("{skill}", name))
     if not any(char in expanded for char in _GLOB_CHARS):
         candidate = Path(expanded)
+        if is_clean_architecture_skill(name) and (candidate.exists() or candidate.is_symlink()):
+            return candidate
         return candidate if candidate.is_file() else None
     base, pattern = _split_glob(expanded)
     if base is None or not base.is_dir():
         return None
     for match in sorted(base.glob(pattern)):
-        if match.is_file():
+        if match.is_file() or (
+            is_clean_architecture_skill(name) and (match.exists() or match.is_symlink())
+        ):
             return match
     return None
 
@@ -702,14 +889,15 @@ def _split_glob(expanded: str) -> tuple[Path | None, str]:
     return base, str(Path(*remainder))
 
 
-def _catalog_entry(name: str, skill_path: Path, source: str) -> SkillCatalogEntry:
-    frontmatter = _read_frontmatter(skill_path) or {}
+def _catalog_entry(
+    name: str, skill_path: Path, source: str, *, frontmatter: dict | None = None,
+) -> SkillCatalogEntry:
+    if frontmatter is None:
+        frontmatter = _read_frontmatter(skill_path) or {}
     phases = _string_tuple(frontmatter.get("workflowPhases"))
     terms = tuple(term.lower() for term in _string_tuple(frontmatter.get("taskTerms")))
     globs = _string_tuple(frontmatter.get("pathGlobs"))
-    deps = _string_tuple(frontmatter.get("dependencies")) + _string_tuple(
-        frontmatter.get("requires")
-    )
+    deps = tuple(frontmatter.get("dependencies", ())) + tuple(frontmatter.get("requires", ()))
     metadata = frontmatter.get("metadata")
     keywords = (
         tuple(word.lower() for word in _string_tuple(metadata.get("keywords")))
@@ -724,6 +912,11 @@ def _catalog_entry(name: str, skill_path: Path, source: str) -> SkillCatalogEntr
         task_terms=terms,
         path_globs=globs,
         dependencies=deps,
+        architecture_modes=tuple(frontmatter.get("architecture_modes", ())),
+        architecture_dependencies=tuple(
+            (mode, tuple(names))
+            for mode, names in frontmatter.get("requires_by_architecture", {}).items()
+        ),
         selector_declared=(
             "taskTerms" in frontmatter or "pathGlobs" in frontmatter
         ),
@@ -744,6 +937,8 @@ def _catalog_entry(name: str, skill_path: Path, source: str) -> SkillCatalogEntr
     )
 
 
+
+
 def _governance_scalar(value: object, fallback: str) -> str:
     if value is None:
         return fallback
@@ -758,37 +953,23 @@ def _canonical_provenance(source: str) -> str:
 
 def _read_frontmatter(skill_path: Path) -> dict | None:
     try:
-        text = skill_path.read_text(encoding="utf-8")
-    except OSError:
+        if is_clean_architecture_skill(skill_path.parent.name):
+            payload, _ = read_bounded_regular_file(
+                skill_path, max_bytes=MAX_ARCHITECTURE_DOCUMENT_BYTES
+            )
+            text = payload.decode("utf-8")
+        else:
+            text = skill_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        if is_clean_architecture_skill(skill_path.parent.name):
+            raise ArchitectureContractError(f"cannot read architecture norm {skill_path}: {exc}") from exc
         return None
-    # CRLF로 저장된 SKILL.md도 같은 metadata를 내야 한다. LF만 받으면 그 파일은
-    # name/description/requires가 통째로 비고, JS 쪽 파서와 결과가 갈린다.
-    match = re.match(r"\A---\r?\n(?P<body>[\s\S]*?)\r?\n---", text)
-    if not match:
-        return _invalid_frontmatter() if re.match(r"\A---(?:\r?\n|\Z)", text) else None
-    body = match.group("body")
     try:
-        parsed = yaml.safe_load(body)
-        document = yaml.compose(body, Loader=yaml.SafeLoader)
-    except yaml.YAMLError:
-        return _invalid_frontmatter()
-    if not isinstance(parsed, dict) or not isinstance(document, MappingNode):
-        return _invalid_frontmatter()
-    governance_nodes = {}
-    for key_node, value_node in document.value:
-        if isinstance(key_node, ScalarNode) and key_node.value in _GOVERNANCE_KEYS:
-            governance_nodes[key_node.value] = value_node
-    for key, value_node in governance_nodes.items():
-        parsed[key] = (
-            value_node.value
-            if isinstance(value_node, ScalarNode)
-            else INVALID_GOVERNANCE_SCALAR
-        )
-    return parsed
+        return parse_skill_metadata(text, source=str(skill_path))
+    except InvalidSkillFrontmatter:
+        return {key: INVALID_FRONTMATTER for key in GOVERNANCE_KEYS}
 
 
-def _invalid_frontmatter() -> dict[str, str]:
-    return {key: INVALID_FRONTMATTER for key in _GOVERNANCE_KEYS}
 
 
 def selector_matches(
@@ -917,7 +1098,12 @@ def _glob_matches(pattern: str, candidate: str) -> bool:
     return False
 
 
-def expand_dependencies(names: Sequence[str], catalog: Sequence[SkillCatalogEntry]) -> list[str]:
+def expand_dependencies(
+    names: Sequence[str],
+    catalog: Sequence[SkillCatalogEntry],
+    *,
+    architecture_mode: ArchitectureMode = ArchitectureMode.CLEAN,
+) -> list[str]:
     by_name = {entry.name: entry for entry in catalog}
     out = list(names)
     queue = list(names)
@@ -925,7 +1111,8 @@ def expand_dependencies(names: Sequence[str], catalog: Sequence[SkillCatalogEntr
         entry = by_name.get(queue.pop())
         if entry is None:
             continue
-        for dependency in entry.dependencies:
+        conditional = dict(entry.architecture_dependencies).get(architecture_mode.value, ())
+        for dependency in (*entry.dependencies, *conditional):
             if dependency not in out:
                 out.append(dependency)
                 queue.append(dependency)
@@ -933,7 +1120,7 @@ def expand_dependencies(names: Sequence[str], catalog: Sequence[SkillCatalogEntr
 
 
 def _stable_unique(names: Iterable[str]) -> list[str]:
-    return list(dict.fromkeys(name for name in names if _is_safe_skill_name(name)))
+    return list(dict.fromkeys(name for name in names if is_safe_skill_name(name)))
 
 
 def _string_tuple(value: object) -> tuple[str, ...]:
@@ -945,9 +1132,3 @@ def _string_tuple(value: object) -> tuple[str, ...]:
     return ()
 
 
-def _is_safe_skill_name(value: object) -> bool:
-    name = str(value)
-    # `.`/`..`은 위 정규식을 통과하면서 경로를 한 단계 올린다. 이름으로 취급하지 않는다.
-    if name in {".", ".."} or set(name) <= {"."}:
-        return False
-    return bool(re.fullmatch(r"[A-Za-z0-9._-]+", name))

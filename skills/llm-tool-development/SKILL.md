@@ -3,12 +3,13 @@ name: llm-tool-development
 description: "Develop or review LLM function/tool schemas, dispatchers, execution authorization/approval, outcomes and replay, provider adapters, or MCP client/server tool implementations. Includes hosted-tool control integration; not ordinary tool invocation, connecting an existing MCP server, generic CLI tooling, or chat/prompt work without a tool execution boundary."
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [LLM tool development, tool calling implementation, tool calling review, function calling implementation, function calling review, tool dispatcher, tool execution authorization, MCP server implementation, MCP adapter development, MCP server review, MCP adapter review]
-requires: [clean-architecture-core]
+requires_by_architecture:
+  clean: [clean-architecture-core]
 ---
 
 # LLM Tool Development
 
-Apply `clean-architecture-core` and the implementation language's active guide. This capability is language-neutral: it neither selects Python nor introduces an agent framework. Resolve provider API/SDK and MCP revision/capabilities from the integration being changed. Reuse existing application actions and their authorization, idempotency, egress, and audit policies rather than duplicating business logic for the LLM.
+Apply the selected architecture contract (`clean-architecture-core` in Clean mode) and the implementation language's active guide. Local mode uses its full normative root and required references; execution authority, security, and effect-state safeguards below apply in every mode. This capability is language-neutral: it neither selects Python nor introduces an agent framework. Resolve provider API/SDK and MCP revision/capabilities from the integration being changed. Reuse existing application actions and their authorization, idempotency, egress, and audit policies rather than duplicating business logic for the LLM.
 
 ## Execution authority
 

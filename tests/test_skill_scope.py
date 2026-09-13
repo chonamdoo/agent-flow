@@ -460,14 +460,15 @@ def test_gated_angles_use_only_eligible_reviewer_providers(tmp_path, monkeypatch
     from agent_flow.cli_detect import CliInfo
 
     home = tmp_path / "home"
-    installed = home / ".codex" / "skills" / "probe-clean-architecture" / "SKILL.md"
+    installed = home / ".codex" / "skills" / "clean-architecture-core" / "SKILL.md"
     installed.parent.mkdir(parents=True)
     installed.write_text(
-        "---\nname: probe-clean-architecture\ndescription: architecture probe.\n"
+        "---\nname: clean-architecture-core\ndescription: architecture probe.\n"
         "workflowPhases: [review]\npathGlobs: [\"**/*.kt\"]\n---\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("AGENT_FLOW_REVIEWERS", raising=False)
     clis = {
         "claude": CliInfo("claude", ("claude",), ("-p",)),
         "codex": CliInfo("codex", ("codex",), ("exec",)),

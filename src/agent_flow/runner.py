@@ -25,8 +25,10 @@ Adapter contract:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import sys
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
@@ -35,6 +37,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, NamedTuple, Sequence
 
+from agent_flow.multi_review import eligible_reviewer_names
 from agent_flow.adapters.auto import detect_adapter
 from agent_flow.adapters.generic import STUB_SENTINEL
 from agent_flow.artifact import (
@@ -51,6 +54,14 @@ from agent_flow.artifact import (
 )
 from agent_flow.cli_detect import CliInfo, REVIEW_CLI_NAMES, detect_available_clis
 from agent_flow.pr_watch import _ci_execution_entry, _ci_execution_history, _valid_ci_revision
+from agent_flow.core.architecture_policy import (
+    MAX_ARCHITECTURE_DOCUMENT_BYTES,
+    ArchitectureMode,
+    architecture_snapshot,
+    evaluate_workflow_compatibility,
+)
+from agent_flow.core.atomic_io import read_bounded_regular_file
+from agent_flow.core.installation import assert_install_complete
 from agent_flow.core.command_evidence import (
     missing_feedback_evidence_markers,
     missing_test_evidence_markers,
@@ -129,7 +140,11 @@ from agent_flow.core.atomic_io import fsync_directory
 from agent_flow.core.artifacts import write_gate_results
 from agent_flow.core.gate_plan import deferred_check_names, profile_gate_commands
 from agent_flow.core.gates import GateCommand, run_gates
-from agent_flow.core.profiles import GATE_PHASE_ALL, active_profile_ids
+from agent_flow.core.profiles import (
+    GATE_PHASE_ALL,
+    active_profile_ids,
+    assert_architecture_override_compatible,
+)
 from agent_flow.core.review_evidence import (
     review_route_needs_regeneration,
     review_route_evidence,
@@ -158,7 +173,15 @@ from agent_flow.core.local_skills import (
     skill_markers_enforced,
 )
 from agent_flow.core.skill_scope import merge_scope
-from agent_flow.core.skill_resolver import PhaseSkills
+from agent_flow.core.profile_routing import routed_profile_skills
+from agent_flow.core.skill_resolver import (
+    PhaseSkills,
+    _profile_skill_phases,
+    active_host,
+    active_host_roots,
+    discover_skill_catalog,
+    skill_roots,
+)
 
 
 ARCHITECTURE_MODES = {"default", "ddd", "service-layer"}
@@ -212,6 +235,7 @@ class Phase:
     required_markers: tuple[str, ...] = ()
     artifact: str = ""
     skills: PhaseSkills | None = None
+    architecture_decision: str = "existing"
 
 
 class RouteDecision(NamedTuple):
@@ -396,6 +420,9 @@ class Runner:
         self.project_root = project_root
         self.state_root = state_root or project_root
         self.config_root = config_root or project_root
+        assert_install_complete(self.project_root)
+        if self.config_root != self.project_root:
+            assert_install_complete(self.config_root)
         self.workflow_name = workflow
         self.run_dir = run_dir
         self.architecture = architecture
@@ -485,6 +512,8 @@ class Runner:
             print(f"▶ resuming    : {self.run_dir.name}")
             print(f"▶ task        : {meta.get('task', '')}")
 
+        self._initialize_architecture_policy(mode)
+
         adapter = detect_adapter()
         self._adapter_name = adapter.name
         assert self.run_dir is not None
@@ -545,11 +574,40 @@ class Runner:
         phase_index = self._run_cursor(meta).phase_index
         while phase_index < len(self.phases):
             phase = self.phases[phase_index]
+            meta = read_meta(self.run_dir)
             leader_before = self._verify_host_phase_leader_baseline(
                 meta=meta,
                 phase=phase,
                 leader_root=leader_root,
             )
+            policy_reason = (
+                self._architecture_policy_block_reason()
+                or self._architecture_decision_block_reason(phase)
+            )
+            if policy_reason:
+                print(
+                    f"\n═══ phase '{phase.id}' is blocked: {policy_reason}. "
+                    f"{self._architecture_remediation(policy_reason)} ═══"
+                )
+                self._print_structured_status(
+                    status="blocked", phase=phase, reason=policy_reason,
+                )
+                return
+            norms_reason = self._refresh_architecture_norms(
+                phase, pin=phase.id in RUNNER_OWNED_PHASES or not self._has_artifact(phase),
+            )
+            if norms_reason in {"skill_scope_grew", "architecture_norms_unpinned"}:
+                norms_reason = self._invalidate_architecture_evidence_for_reentry(phase) or norms_reason
+            if norms_reason:
+                print(
+                    f"\n═══ phase '{phase.id}' is blocked: {norms_reason}. "
+                    f"{self._architecture_remediation(norms_reason)} ═══"
+                )
+                self._print_structured_status(
+                    status="blocked", phase=phase, reason=norms_reason,
+                )
+                return
+            meta = read_meta(self.run_dir)
             # 진입 시각은 phase를 **시작할 때** 찍는다. 실행 뒤에 찍으면 방금 쓴
             # artifact가 진입 시각보다 과거가 되어 stale로 오판된다. 전이가 다음
             # phase를 미리 stamp해 두었으면 다시 찍을 것이 없다.
@@ -587,6 +645,8 @@ class Runner:
                 blocked_reason = (
                     self._stale_artifact_block_reason(artifact, meta)
                     or self._artifact_block_reason(artifact)
+                    or self._architecture_policy_block_reason()
+                    or self._architecture_decision_block_reason(phase)
                 )
                 if blocked_reason:
                     print(
@@ -717,12 +777,17 @@ class Runner:
             blocked_reason = (
                 self._stale_artifact_block_reason(artifact, meta)
                 or self._artifact_block_reason(artifact)
+                or self._architecture_policy_block_reason()
+                or self._architecture_decision_block_reason(phase)
             )
+            if blocked_reason is None:
+                blocked_reason = self._refresh_architecture_norms(phase, pin=False)
+            if blocked_reason in {"skill_scope_grew", "architecture_norms_unpinned"}:
+                blocked_reason = self._invalidate_architecture_evidence_for_reentry(phase) or blocked_reason
             if blocked_reason:
                 print(
                     f"\n═══ phase '{phase.id}' is blocked. "
-                    f"{blocked_reason}. Update the artifact, then "
-                    f"`{self.next_command}`. ═══"
+                    f"{blocked_reason}. {self._architecture_remediation(blocked_reason)} ═══"
                 )
                 self._print_structured_status(
                     status="blocked",
@@ -2025,6 +2090,7 @@ class Runner:
             changed_files=changed_files(self.project_root),
             task_text=str(meta.get("task", "")),
             concerns=run_concerns(meta),
+            architecture_root=self.project_root,
         )
         return tuple(skill.name for skill in resolution.required)
 
@@ -2150,6 +2216,7 @@ class Runner:
                 task_text=str(meta.get("task", "")),
                 concerns=run_concerns(meta),
                 since=_meta_timestamp(meta.get("phase_entered_at")),
+                architecture_root=self.project_root,
             )
         )
         review_rejected = phase_review_rejected(
@@ -2217,6 +2284,216 @@ class Runner:
             and os.environ.get("AGENT_FLOW_GENERIC_MODE") != "stub-success"
         ):
             return "generic_stub_artifact"
+        return None
+
+    def _architecture_remediation(self, reason: str) -> str:
+        if reason == "architecture_decision_pending":
+            return (
+                "Select clean or local with `agent-flow architecture select` in the bound "
+                "checkout, then start a new run. Previous approval cannot be reused."
+            )
+        if reason in {"skill_scope_grew", "architecture_norms_unpinned"}:
+            return (
+                "This phase needs fresh architecture norm evidence; prior artifacts were preserved "
+                "outside the active phase. Continue to receive the contract and create new author/reviewer evidence."
+            )
+        if reason == "architecture_policy_unreadable":
+            return "Correct the reported declaration, document, or installation recovery error."
+        if reason == "architecture_contract_untracked":
+            return "Track the declaration and every selected contract document before continuing."
+        if reason == "architecture_policy_unpinned":
+            return (
+                "This run has no pinned architecture selection, so its previous selection cannot be "
+                "proven. Start a new run under the current declaration; previous approval cannot be reused."
+            )
+        if reason == "architecture_policy_drift":
+            return (
+                "Restore this run's pinned, tracked contract, or start a new run for a different "
+                "selection. Previous approval cannot be reused."
+            )
+        return f"Update the artifact, then `{self.next_command}`."
+
+    def _architecture_decision_block_reason(self, phase: Phase) -> str | None:
+        try:
+            assert_install_complete(self.project_root)
+            selection = architecture_snapshot(self.project_root).selection
+        except (OSError, ValueError) as exc:
+            print(f"agent-flow: {exc}", file=sys.stderr)
+            return "architecture_policy_unreadable"
+        decision = phase.architecture_decision
+        if selection.mode is ArchitectureMode.PENDING:
+            assert self.run_dir is not None
+            meta = read_meta(self.run_dir)
+            try:
+                host = getattr(self, "_adapter_name", None)
+                roots = active_host_roots(
+                    skill_roots(self.config_root, profile=self.profile, host=host),
+                    active_host() if host is None else host,
+                )
+                catalog = discover_skill_catalog(self.config_root, roots)
+                routed = routed_profile_skills(
+                    self.profile, phase_id=phase.id,
+                    changed_files=changed_files(self.project_root),
+                    task_text=str(meta.get("task", "")),
+                    concerns=run_concerns(meta),
+                    declared_skill_phases=_profile_skill_phases(
+                        self.config_root, self.profile, catalog,
+                    ),
+                )
+            except (OSError, ValueError) as exc:
+                print(f"agent-flow: {exc}", file=sys.stderr)
+                return "architecture_policy_unreadable"
+            if any(skill.group == "architecture" for skill in routed):
+                decision = "required"
+        return evaluate_workflow_compatibility(
+            selection, architecture_decision=decision,
+        )
+
+    def _refresh_architecture_norms(self, phase: Phase, *, pin: bool) -> str | None:
+        assert self.run_dir is not None
+        meta = read_meta(self.run_dir)
+        hosts = [self._adapter_name]
+        if phase.multi_review:
+            hosts.extend(eligible_reviewer_names())
+        manifests = {}
+        scope = changed_files(self.project_root)
+        try:
+            for host in dict.fromkeys(hosts):
+                resolution = phase_skill_resolution(
+                    self.config_root, phase.id, phase_skills=phase.skills,
+                    profile=self.profile, changed_files=scope,
+                    task_text=str(meta.get("task", "")), concerns=run_concerns(meta),
+                    host=host, architecture_root=self.project_root,
+                )
+                manifests[host] = {
+                    document.path: document.sha256
+                    for document in resolution.architecture_norms
+                }
+            pinned_documents = meta.get("architecture_norm_documents", {})
+            pinned_phases = meta.get("architecture_norm_phases", {})
+            if not _is_norm_manifest(pinned_documents):
+                raise ValueError("meta.json architecture_norm_documents must map document paths to SHA-256 digests")
+            if not isinstance(pinned_phases, dict) or any(
+                not isinstance(phase_id, str) or not isinstance(hosts, dict) or any(
+                    not isinstance(host, str) or not _is_norm_manifest(manifest)
+                    for host, manifest in hosts.items()
+                )
+                for phase_id, hosts in pinned_phases.items()
+            ):
+                raise ValueError("meta.json architecture_norm_phases must map phases and hosts to norm manifests")
+            if any(
+                pinned_documents.get(path) != digest
+                for phase_hosts in pinned_phases.values()
+                for manifest in phase_hosts.values()
+                for path, digest in manifest.items()
+            ):
+                raise ValueError("phase architecture norms disagree with the run's pinned documents")
+            for path, digest in pinned_documents.items():
+                content, _ = read_bounded_regular_file(
+                    Path(path), max_bytes=MAX_ARCHITECTURE_DOCUMENT_BYTES,
+                )
+                if hashlib.sha256(content).hexdigest() != digest:
+                    return "architecture_policy_drift"
+        except (OSError, ValueError) as exc:
+            print(f"agent-flow: {exc}", file=sys.stderr)
+            return "architecture_policy_unreadable"
+        pinned = pinned_phases.get(phase.id)
+        if any(
+            path in pinned_documents and pinned_documents[path] != digest
+            for manifest in manifests.values()
+            for path, digest in manifest.items()
+        ):
+            return "architecture_policy_drift"
+        has_evidence = self._has_artifact(phase)
+        if pinned is None and (not pin or has_evidence):
+            return "architecture_norms_unpinned" if any(manifests.values()) else None
+        previous = pinned or {}
+        previous_documents = {
+            path for manifest in previous.values() for path in manifest
+        }
+        grew = pinned is not None and any(
+            path not in previous_documents
+            for manifest in manifests.values()
+            for path in manifest
+        )
+        if grew and (not pin or has_evidence):
+            return "skill_scope_grew"
+        if pinned is not None and not grew:
+            return None
+        for host, manifest in manifests.items():
+            pinned_documents.update(manifest)
+            previous.setdefault(host, {}).update(manifest)
+        pinned_phases[phase.id] = previous
+        meta["architecture_norm_documents"] = pinned_documents
+        meta["architecture_norm_phases"] = pinned_phases
+        write_meta(self.run_dir, meta)
+        return None
+
+    def _invalidate_architecture_evidence_for_reentry(self, phase: Phase) -> str | None:
+        assert self.run_dir is not None
+        preserved: list[tuple[Path, Path, str]] = []
+        try:
+            for relative in sorted({self._artifact_rel(phase), f"{phase.id}.md"}):
+                artifact = self._attested_run_target(relative)
+                if artifact is None:
+                    raise ValueError(f"cannot safely preserve phase artifact {relative}")
+                if not artifact.exists():
+                    continue
+                text = artifact.read_bytes().decode("utf-8")
+                index = len(preserved) + 1
+                while (
+                    history := self.run_dir / f"{phase.id}-norms-{index}.md"
+                ).exists() or any(history == item[1] for item in preserved):
+                    index += 1
+                preserved.append((artifact, history, text))
+            for _, history, text in preserved:
+                write_run_subpath_text(self.run_dir, history, text)
+            meta = read_meta(self.run_dir)
+            phase_index = next(index for index, item in enumerate(self.phases) if item.id == phase.id)
+            self._advance_phase(meta, phase_index, blocked=False)
+            write_meta(self.run_dir, meta)
+            for artifact, _, _ in preserved:
+                artifact.unlink()
+            fsync_directory(self.run_dir)
+        except (OSError, ValueError, WorktreeIsolationError) as exc:
+            print(f"agent-flow: cannot re-enter {phase.id} with fresh norm evidence: {exc}", file=sys.stderr)
+            return "architecture_policy_unreadable"
+        return None
+
+    def _initialize_architecture_policy(self, mode: ResumeMode) -> None:
+        assert self.run_dir is not None
+        assert_install_complete(self.project_root)
+        meta = read_meta(self.run_dir)
+        if "architecture_digest" in meta:
+            return
+        snapshot = architecture_snapshot(self.project_root)
+        if mode is not ResumeMode.START and snapshot.declared:
+            return
+        meta["architecture_digest"] = snapshot.digest
+        meta["architecture_mode"] = snapshot.selection.mode.value
+        write_meta(self.run_dir, meta)
+
+    def _architecture_policy_block_reason(self) -> str | None:
+        if self.run_dir is None:
+            return "architecture_policy_unpinned"
+        try:
+            assert_install_complete(self.project_root)
+            if self.config_root != self.project_root:
+                assert_install_complete(self.config_root)
+            snapshot = architecture_snapshot(self.project_root)
+            if snapshot.declared:
+                assert_architecture_override_compatible(self.config_root, snapshot.selection)
+        except (OSError, ValueError) as exc:
+            print(f"agent-flow: {exc}", file=sys.stderr)
+            return "architecture_policy_unreadable"
+        meta = read_meta(self.run_dir)
+        pinned = meta.get("architecture_digest")
+        if pinned is None:
+            return "architecture_policy_unpinned"
+        if pinned != snapshot.digest:
+            return "architecture_policy_drift"
+        if snapshot.untracked:
+            return "architecture_contract_untracked"
         return None
 
     def _stale_artifact_block_reason(self, artifact: Path, meta: dict[str, Any]) -> str | None:
@@ -2308,6 +2585,15 @@ class Runner:
         )
 
 
+def _is_norm_manifest(value: object) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(path, str) and Path(path).is_absolute()
+        and isinstance(digest, str) and len(digest) == 64
+        and all(character in "0123456789abcdef" for character in digest)
+        for path, digest in value.items()
+    )
+
+
 def _find_kit_root() -> Path:
     """Locate the agent-flow kit root (contains workflows/ and profiles/)."""
     # artifact.py의 marker 검증과 같은 kit root를 봐야 routing/검증 YAML이 갈라지지 않는다.
@@ -2351,6 +2637,7 @@ def _phases_from_definition(definition: PhaseWorkflowDefinition) -> list[Phase]:
             required_markers=phase.required_markers,
             artifact=phase.artifact,
             skills=phase.skills,
+            architecture_decision=phase.architecture_decision,
         )
         for phase in definition.phases
     ]

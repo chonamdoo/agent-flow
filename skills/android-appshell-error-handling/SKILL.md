@@ -16,7 +16,7 @@ implementation or review.
 
 1. Use this for common errors whose UI or side effects must be owned above feature screens: `SessionExpired`, `Maintenance`, `Forbidden`, and server-wide business codes.
 2. Start by deciding whether `notify(error)` returns `true`; if it does, route the error to AppShell and keep feature `UiState` limited to local errors.
-3. If the task is ordinary screen `UiState`, ViewModel DI, `UiModel` mapping, or stateless Compose rendering without global hosts/root reset, use `android-clean-presentation-architecture` instead.
+3. If the task is ordinary screen `UiState`, ViewModel DI, `UiModel` mapping, or stateless Compose rendering without global hosts/root reset, use the selected contract's presentation guidance (`android-clean-presentation-architecture` in Clean mode) instead.
 
 
 ## When To Use
@@ -30,7 +30,7 @@ implementation or review.
 ## Do not use for
 
 - Feature-local validation or fetch errors that should render inline as screen `UiState`.
-- General ViewModel, Compose screen, DI, or presentation mapper design without AppShell-owned global error UI/root navigation; use `android-clean-presentation-architecture`.
+- General ViewModel, Compose screen, DI, or presentation mapper design without AppShell-owned global error UI/root navigation; use the selected contract's presentation guidance (`android-clean-presentation-architecture` in Clean mode).
 
 
 ## Shared Error Contract
@@ -68,10 +68,11 @@ Feature ViewModels notify common errors. They do not own `NavController`,
 
 - Retrofit CallAdapters may normalize API failures into the project's established
   failure representation.
-- Data mappers convert network/server failures into domain errors while preserving
-  the shared metadata contract; they do not create Compose UI models.
-- Presentation mappers project domain errors into feature-local or common-error
-  UI values. These are semantic roles, not required wrapper or class names.
+- In Clean mode, data mappers convert network/server failures into domain errors
+  while preserving shared metadata; presentation mappers project them into
+  feature-local or common-error UI values. Local mode uses the selected
+  contract's representation boundaries while preserving the same metadata and
+  UI ownership. These are semantic roles, not required wrapper or class names.
 - Remote data sources and repositories stay free of dialog, navigation, toast,
   snackbar, and Android UI concerns.
 - Do not add a `BaseViewModel` solely to centralize common error display.

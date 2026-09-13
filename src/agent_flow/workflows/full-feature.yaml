@@ -133,9 +133,10 @@ phases:
       `verdict: request-changes`.
 
   - id: ddd-design
+    architecture_decision: required
     skills:
       required: [ddd-architecture, clean-architecture, clean-architecture-core]
-    description: DDD first, then Clean Architecture design.
+    description: DDD first, then selected architecture contract design.
     required_markers:
       - "## Clean Architecture Boundary Map"
       - "clean-architecture: applied"
@@ -164,11 +165,14 @@ phases:
       Apply `.agent-flow/skills/ddd-architecture/SKILL.md` first to model the domain:
       Bounded Context, Ubiquitous Language, Entities, Value Objects,
       Aggregates, Domain Events, Domain Invariants, and Domain Flow.
-      Then apply `.agent-flow/skills/clean-architecture/SKILL.md` to define layer
-      boundaries, dependency direction, UseCase ports/impls, Repository
-      ports/adapters, Cache, Mapper, Composition Root, Testability, and SOLID
-      architecture validation.
-      Include these Clean Architecture subsections exactly:
+      Then apply this project's selected architecture contract, including its
+      complete root and required references, to define ownership, dependency,
+      action composition, persistence, cache, representation, wiring,
+      testability, and SOLID decisions. In Clean mode, use its layer,
+      UseCase port/impl, and Repository port/adapter rules; local mode uses
+      the selected contract's own boundaries instead.
+      Retain these legacy subsection names as coverage categories, recording
+      the selected-contract decision or permitted non-applicability for each:
       - `## Clean Architecture Boundary Map`
       - `## Dependency Rule`
       - `## Use Case Boundaries`
@@ -178,8 +182,11 @@ phases:
       - `## Composition Root`
       - `## Testability Boundary`
       If DDD is not appropriate, explicitly label the work as
-      `service-layer refactor` and still complete the Clean Architecture
-      boundary markers when code boundaries are touched.
+      `service-layer refactor` and still complete the architecture
+      boundary assessment when code boundaries are touched.
+      The fixed `clean-architecture: applied` marker records selected-contract
+      assessment here; identify the actual contract without claiming unselected
+      Clean skills were used.
       End with:
 
           ## Completion Gate
@@ -298,8 +305,8 @@ phases:
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
     prompt: |
       Apply code-generation-discipline. Implement the minimum code to pass red
-      tests. Apply `.agent-flow/skills/tdd/SKILL.md` and
-      `.agent-flow/skills/clean-architecture/SKILL.md`. Resolve required skills from active
+      tests. Apply `.agent-flow/skills/tdd/SKILL.md` and the architecture contract
+      skills this prompt lists as required. Resolve required skills from active
       profile metadata, installed skill index, changed files, and task scope.
       Read only the touched profile skill union before writing code.
       If a required local skill is missing for this host, record
@@ -352,8 +359,8 @@ phases:
       default: comment-authoring
     prompt: |
       Apply code-generation-discipline. Refactor only after green. Keep
-      behavior stable, apply `.agent-flow/skills/tdd/SKILL.md` and
-      `.agent-flow/skills/clean-architecture/SKILL.md`, read every required profile skill
+      behavior stable, apply `.agent-flow/skills/tdd/SKILL.md` and the architecture
+      contract skills this prompt lists as required, read every required profile skill
       before changing code, and summarize structural changes. Required skills
       come from active profile metadata, installed skill index, changed files,
       and task scope. If a required local skill is missing for this host,
@@ -421,6 +428,7 @@ phases:
           module-split: none
 
   - id: multi-review
+    architecture_decision: required
     skills:
       required: [code-generation-discipline, code-review, clean-architecture-core, clean-architecture, agent-flow-concise-output]
     description: Run implementation review with at least two independent sub-agent reviewers before approve. Runner routes approve→architecture-review, request-changes→fix-loop.
@@ -458,11 +466,11 @@ phases:
       read the per-angle artifacts the runner lists and aggregate them. At least
       two independent reviewer processes must have produced a verdict from the
       explicit per-angle templates and required skills injected in their prompts.
-      For architecture/SOLID findings, reviewers also apply
-      `.agent-flow/skills/clean-architecture-core/SKILL.md` and the compatibility markers
-      in `.agent-flow/skills/clean-architecture/SKILL.md`; any must-avoid or failing
-      checklist condition from the core skill makes the overall verdict
-      `request-changes`.
+      For architecture/SOLID findings, reviewers apply the full selected
+      architecture contract injected in their own prompts. Any applicable
+      must-avoid violation or failed required criterion makes the overall
+      verdict `request-changes`. Legacy Clean-named review markers certify
+      selected-contract assessment, not adoption of unselected layers.
       Any request-changes from any reviewer makes the overall verdict
       request-changes. Reviewers are installed Claude and Codex CLIs only.
       Never use OMP or controller-session work as a reviewer fallback. Each
@@ -521,9 +529,10 @@ phases:
       Output: artifacts/multi-review.md.
 
   - id: architecture-review
+    architecture_decision: required
     skills:
       required: [code-generation-discipline, ddd-architecture, clean-architecture-core, clean-architecture, architecture-reviewer]
-    description: Review implementation against DDD/Clean design. Runner routes approve→gates, request-changes→refactor.
+    description: Review implementation against domain and selected architecture design. Runner routes approve→gates, request-changes→refactor.
     multi_review: true
     required_markers:
       - "skills_checked: true"
@@ -565,13 +574,14 @@ phases:
       include `reviewer-source: sub-agent`. A failed required reviewer process
       blocks approval and must never be replaced by OMP or controller-session
       work.
-      Compare code against domain-grill.md and ddd-design.md. Check layer
-      violations, repository boundary leaks, naming drift, and dependency
-      direction. Apply `.agent-flow/skills/ddd-architecture/SKILL.md` first for domain fit,
-      then `.agent-flow/skills/clean-architecture-core/SKILL.md` plus compatibility markers
-      from `.agent-flow/skills/clean-architecture/SKILL.md` for boundaries and SOLID
-      validation. Any must-avoid or failing checklist condition from the core
-      skill makes the verdict `request-changes` for that reviewer. Any request-changes
+      Compare code against domain-grill.md and ddd-design.md. Check naming
+      drift and the selected contract's ownership and dependency rules.
+      Apply `.agent-flow/skills/ddd-architecture/SKILL.md` first for domain fit,
+      then the full architecture contract and required references injected in
+      this prompt for boundaries and SOLID validation. Clean-specific layer
+      and repository checks apply in Clean mode. Any applicable must-avoid
+      violation or failed required criterion makes the verdict `request-changes`
+      for that reviewer. Any request-changes
       from either reviewer makes the overall verdict request-changes.
       Output architecture-review.md with each reviewer section and end with
       `## Overall` followed by exactly one verdict line:
@@ -664,7 +674,7 @@ phases:
     prompt: |
       Apply code-generation-discipline while fixing review/gate failures. Read
       required profile skills before writing or judging code, or record that no
-      fixes were required. Apply `.agent-flow/skills/clean-architecture/SKILL.md` to any
+      fixes were required. Apply the required architecture contract skills to any
       boundary-affecting fix. Required skills come from active profile metadata,
       installed skill index, changed files, and task scope.
       If a required local skill is missing for this host, record

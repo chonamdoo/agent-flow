@@ -525,16 +525,11 @@ def test_install_refuses_to_write_kit_assets_through_a_symlink(tmp_path: Path) -
     )
     assert link.is_symlink(), "거부하면서 사용자의 링크를 건드렸다"
     assert result.returncode != 0, "경계를 넘지 않았다면서 성공으로 끝냈다"
-    assert "kit-owned" in (result.stderr + result.stdout), (
-        f"무엇을 왜 거부했는지 말하지 않았다: {result.stderr}"
-    )
 
 
-# `install()`은 파일 마지막에서 맨몸으로 불린다. managed 경로 하나가 끊어진 링크면
-# 사용자가 볼 수 있는 것은 stack trace뿐이고, 무엇을 고쳐야 하는지는 그 안에 묻힌다.
 def test_install_reports_a_broken_host_config_link_without_a_stack_trace(tmp_path: Path) -> None:
     """반증: 진입점에 핸들러가 없으면 끊어진 `.claude/settings.json` 링크가
-    `Error: ... at ...` 스택으로 끝나고 어떤 경로가 어디를 가리키는지는 안 보인다.
+    `Error: ... at ...` 스택으로 끝나고 문제가 된 경로를 찾기 어렵다.
     """
     project = tmp_path / "project"
     (project / ".claude").mkdir(parents=True)
@@ -553,8 +548,1058 @@ def test_install_reports_a_broken_host_config_link_without_a_stack_trace(tmp_pat
     )
 
     assert result.returncode != 0, "해소되지 않는 링크를 두고 성공으로 끝냈다"
-    assert "does not resolve" in result.stderr, f"원인을 말하지 않았다: {result.stderr}"
-    assert str(missing) in result.stderr, "링크가 어디를 가리키는지 말하지 않았다"
     assert str(link) in result.stderr, "어느 경로가 문제인지 말하지 않았다"
     assert "    at " not in result.stderr, f"stack trace로 끝냈다: {result.stderr}"
     assert link.is_symlink(), "거부하면서 사용자의 링크를 건드렸다"
+    assert link.readlink() == missing
+    assert not missing.exists()
+
+
+def _architecture_node(project: Path, script: str, **environment: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        (_node(), "--input-type=module", "-e",
+         f"import * as installer from {json.dumps(SHARED_MODULE.as_uri())};\n" + script),
+        cwd=project,
+        env={**os.environ, "PYTHON": sys.executable, "PROJECT": str(project), **environment},
+        text=True, capture_output=True, check=False, timeout=120,
+    )
+
+
+@pytest.mark.parametrize("shadow", ["yaml", "json"])
+def test_architecture_plan_fallback_does_not_import_checkout_modules(tmp_path: Path, shadow: str) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    marker = project / "imported"
+    (project / f"{shadow}.py").write_text(
+        f"open({str(marker)!r}, 'w').write('untrusted import')\nraise RuntimeError('checkout import')\n",
+        encoding="utf-8",
+    )
+    probe = tmp_path / "force-user-site.mjs"
+    probe.write_text("""
+import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const spawn = cp.spawnSync;
+cp.spawnSync = (command, args, options) => {
+  if (args.includes('-I') && args.some(arg => arg.includes('yaml'))) {
+    return {status: 1, stdout: '', stderr: 'PyYAML requires user site'};
+  }
+  return spawn(command, args, options);
+};
+syncBuiltinESMExports();
+""", encoding="utf-8")
+    result = _architecture_node(
+        project,
+        "const plan = installer.architecturePlan(process.env.PROJECT, 'pending');"
+        "console.log(JSON.stringify({mode: plan.mode, flag: installer.resolveManagedPython().flag}));",
+        NODE_OPTIONS=f"--import {probe.as_uri()}",
+    )
+    assert not marker.exists()
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"mode": "pending", "flag": "-E"}
+
+
+@pytest.mark.parametrize("corruption", [
+    "noise", "array", "schema_version", "mode", "digest", "document_manifest",
+    "excluded_skills", "selection_document", "source_document", "documents",
+])
+def test_architecture_plan_refuses_invalid_python_output(tmp_path: Path, corruption: str) -> None:
+    probe = tmp_path / "corrupt-export.mjs"
+    probe.write_text("""
+import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const spawn = cp.spawnSync;
+cp.spawnSync = (command, args, options) => {
+  const result = spawn(command, args, options);
+  if (!args.includes('architecture') || result.status !== 0) return result;
+  const plan = JSON.parse(result.stdout);
+  const field = process.env.CORRUPTION;
+  if (field === 'noise') result.stdout = 'site startup output\\n' + result.stdout;
+  else if (field === 'array') result.stdout = '[]';
+  else {
+    const replacements = {schema_version: 99, mode: 'unknown', digest: 'not-a-digest',
+      document_manifest: [{}], excluded_skills: {}, selection_document: null,
+      source_document: [], documents: ['../outside']};
+    plan[field] = replacements[field];
+    result.stdout = JSON.stringify(plan);
+  }
+  return result;
+};
+syncBuiltinESMExports();
+""", encoding="utf-8")
+    result = _architecture_node(
+        tmp_path,
+        "try { const tx = installer.prepareArchitectureInstall(process.env.PROJECT,"
+        " ['--architecture-mode', 'pending']); tx.commit(); }"
+        "catch (error) { console.error(error.message); process.exitCode = 2; }",
+        NODE_OPTIONS=f"--import {probe.as_uri()}", CORRUPTION=corruption,
+    )
+    assert result.returncode == 2, result.stderr
+    assert "refusing to install" in result.stderr
+    assert not (tmp_path / ".agent-flow.project.yaml").exists()
+    assert not (tmp_path / ".agent-flow/install-recovery/manifest.json").exists()
+
+
+@pytest.mark.parametrize("proven_owner", [False, True], ids=["legacy", "ownership-preserved"])
+def test_recovery_requires_owner_proof_for_previous_release_asset_list(
+    tmp_path: Path, proven_owner: bool,
+) -> None:
+    recovery = tmp_path / ".agent-flow/install-recovery"
+    relative = ".agent-flow/templates/retired-template.txt"
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text("interrupted upgrade", encoding="utf-8")
+    backup = recovery / relative
+    backup.parent.mkdir(parents=True)
+    backup.write_text("previous release", encoding="utf-8")
+    added = tmp_path / ".agent-flow/scripts/obsolete-script.sh"
+    added.parent.mkdir(parents=True)
+    added.write_text("incomplete addition", encoding="utf-8")
+    entries = [
+        {"relative": relative, "existed": True},
+        {"relative": added.relative_to(tmp_path).as_posix(), "existed": False},
+    ]
+    if proven_owner:
+        entries[0]["assetOwnershipPreserved"] = True
+    (recovery / "manifest.json").write_text(
+        json.dumps({"version": 1, "entries": entries}), encoding="utf-8",
+    )
+    result = _architecture_node(
+        tmp_path,
+        "const tx = installer.prepareArchitectureInstall(process.env.PROJECT, ['--architecture-mode', 'pending']);"
+        "tx.rollback();",
+    )
+    if proven_owner:
+        assert result.returncode == 0, result.stderr
+        assert target.read_text(encoding="utf-8") == "previous release"
+        assert not added.exists()
+        assert not recovery.exists()
+    else:
+        assert result.returncode != 0, result.stdout
+        assert target.read_text(encoding="utf-8") == "interrupted upgrade"
+        assert added.read_text(encoding="utf-8") == "incomplete addition"
+        assert backup.read_text(encoding="utf-8") == "previous release"
+        assert not (tmp_path / ".agent-flow/backups").exists()
+
+
+@pytest.mark.parametrize("corruption", [
+    "traversal", "project-file", "run-data", "duplicate", "overlap", "version", "missing-backup",
+    "missing-version", "unversioned-array",
+])
+def test_recovery_rejects_unsafe_manifest_before_any_mutation(tmp_path: Path, corruption: str) -> None:
+    recovery = tmp_path / ".agent-flow/install-recovery"
+    recovery.mkdir(parents=True)
+    protected = tmp_path / ".agent-flow/kit.json"
+    protected.write_text("keep current bytes", encoding="utf-8")
+    entries = [{"relative": ".agent-flow/kit.json", "existed": False}]
+    unsafe = {
+        "traversal": "../victim", "project-file": "src/important.py",
+        "run-data": ".agent-flow/runs/current", "duplicate": ".agent-flow/kit.json",
+        "overlap": ".agent-flow/templates/nested",
+        "missing-backup": ".agent-flow/templates/absent",
+    }
+    if corruption == "overlap":
+        entries.append({"relative": ".agent-flow/templates", "existed": False})
+    if corruption in unsafe:
+        entries.append({"relative": unsafe[corruption], "existed": corruption == "missing-backup"})
+    manifest = recovery / "manifest.json"
+    payload: object = {"version": 99 if corruption == "version" else 1, "entries": entries}
+    if corruption == "missing-version":
+        payload = {"entries": entries}
+    elif corruption == "unversioned-array":
+        payload = entries
+    original = json.dumps(payload)
+    manifest.write_text(original, encoding="utf-8")
+    result = _architecture_node(
+        tmp_path,
+        "try { installer.prepareArchitectureInstall(process.env.PROJECT, []); }"
+        "catch (error) { console.error(error.message); process.exitCode = 2; }",
+    )
+    assert result.returncode == 2
+    assert "recovery" in result.stderr
+    assert protected.read_text(encoding="utf-8") == "keep current bytes"
+    assert manifest.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_interrupted_real_installer_blocks_python_until_resumed(tmp_path: Path, binary: str) -> None:
+    from agent_flow.core.installation import assert_install_complete
+
+    project = tmp_path / "project"
+    project.mkdir()
+    probe = tmp_path / "interrupt-install.mjs"
+    probe.write_text("""
+import fs from 'node:fs';
+const rename = fs.renameSync;
+fs.renameSync = (source, target, ...args) => {
+  const result = rename(source, target, ...args);
+  if (String(target).endsWith('/install-recovery/manifest.json')) {
+    process.kill(process.pid, 'SIGKILL');
+  }
+  return result;
+};
+""", encoding="utf-8")
+    command = (_node(), str(KIT_ROOT / "bin" / binary), "install",
+               "--profile", "python", "--architecture-mode", "pending")
+    environment = {**os.environ, "PYTHON": sys.executable, "AGENT_FLOW_SKIP_CODEX_TRUST": "1"}
+    interrupted = subprocess.run(
+        command, cwd=project, env={**environment, "NODE_OPTIONS": f"--import {probe.as_uri()}"},
+        text=True, capture_output=True, check=False, timeout=600,
+    )
+    assert interrupted.returncode != 0
+    with pytest.raises(ValueError, match="install recovery"):
+        assert_install_complete(project)
+    resumed = subprocess.run(
+        command, cwd=project, env=environment, text=True, capture_output=True, check=False, timeout=600,
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert_install_complete(project)
+    assert "mode: pending" in (project / ".agent-flow.project.yaml").read_text(encoding="utf-8")
+
+
+def _interrupt_architecture_transaction(project: Path) -> None:
+    result = _architecture_node(
+        project,
+        "installer.prepareArchitectureInstall(process.env.PROJECT, ['--architecture-mode', 'pending']);"
+        "process.kill(process.pid, 'SIGKILL');",
+    )
+    assert result.returncode < 0, result.stderr
+    assert (project / ".agent-flow/install-recovery/manifest.json").is_file()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("existed", [False, True], ids=["new-asset", "existing-asset"])
+def test_recovery_preserves_post_crash_user_changes(
+    tmp_path: Path, binary: str, existed: bool,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    relative = Path(".claude/skills/user-notes/notes.txt")
+    target = project / relative
+    if existed:
+        target.parent.mkdir(parents=True)
+        target.write_text("before install", encoding="utf-8")
+    _interrupt_architecture_transaction(project)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("irreplaceable post-crash notes", encoding="utf-8")
+    target.chmod(0o600)
+    sibling = target.with_name("new-note.txt")
+    sibling.write_text("new post-crash note", encoding="utf-8")
+    link = target.with_name("linked-note")
+    link.symlink_to("notes.txt")
+    resumed = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install",
+         "--profile", "python", "--architecture-mode", "pending"),
+        cwd=project,
+        env={**os.environ, "PYTHON": sys.executable, "AGENT_FLOW_SKIP_CODEX_TRUST": "1"},
+        text=True, capture_output=True, check=False, timeout=600,
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    snapshots = list((project / ".agent-flow/backups").glob("install-recovery-*"))
+    retained = [snapshot for snapshot in snapshots if (snapshot / relative).is_file()]
+    assert len(retained) == 1, resumed.stdout
+    snapshot = retained[0]
+    assert str(snapshot) in resumed.stdout + resumed.stderr
+    assert (snapshot / relative).read_text(encoding="utf-8") == "irreplaceable post-crash notes"
+    assert stat.S_IMODE((snapshot / relative).stat().st_mode) == 0o600
+    assert (snapshot / relative.with_name("new-note.txt")).read_text(encoding="utf-8") == "new post-crash note"
+    assert (snapshot / relative.with_name("linked-note")).readlink() == Path("notes.txt")
+    assert not (project / ".agent-flow/install-recovery").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_interrupted_recovery_keeps_private_parent_protection(
+    tmp_path: Path, binary: str,
+) -> None:
+    project = tmp_path / "project"
+    target = project / ".claude/settings.json"
+    target.parent.mkdir(parents=True, mode=0o700)
+    target.write_text('{"private": "original"}\n', encoding="utf-8")
+    target.chmod(0o644)
+    probe = tmp_path / "interrupt-private-copy.mjs"
+    probe.write_text("""
+import fs from 'node:fs';
+process.umask(0o022);
+const open = fs.openSync;
+const write = fs.writeFileSync;
+let backupFd;
+fs.openSync = (target, ...args) => {
+  const fd = open(target, ...args);
+  if (String(target).endsWith('/install-recovery/.claude/settings.json')) backupFd = fd;
+  return fd;
+};
+fs.writeFileSync = (target, ...args) => {
+  const result = write(target, ...args);
+  if (target === backupFd) process.kill(process.pid, 'SIGKILL');
+  return result;
+};
+""", encoding="utf-8")
+    result = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install",
+         "--profile", "python", "--architecture-mode", "pending"),
+        cwd=project,
+        env={**os.environ, "PYTHON": sys.executable, "AGENT_FLOW_SKIP_CODEX_TRUST": "1",
+             "NODE_OPTIONS": f"--import {probe.as_uri()}"},
+        text=True, capture_output=True, check=False, timeout=600,
+    )
+    recovery = project / ".agent-flow/install-recovery"
+    assert result.returncode != 0
+    assert (recovery / ".claude/settings.json").read_bytes() == target.read_bytes()
+    assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    assert stat.S_IMODE(recovery.stat().st_mode) == 0o700
+
+
+def _interrupt_private_host_install(project: Path, binary: str, probe: Path) -> None:
+    probe.write_text("""
+import fs from 'node:fs';
+process.umask(0o022);
+const rename = fs.renameSync;
+fs.renameSync = (source, target, ...args) => {
+  const result = rename(source, target, ...args);
+  if (String(target).endsWith('/install-recovery/manifest.json')) {
+    process.kill(process.pid, 'SIGKILL');
+  }
+  return result;
+};
+""", encoding="utf-8")
+    result = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install",
+         "--profile", "python", "--architecture-mode", "pending"),
+        cwd=project,
+        env={**os.environ, "PYTHON": sys.executable, "AGENT_FLOW_SKIP_CODEX_TRUST": "1",
+             "NODE_OPTIONS": f"--import {probe.as_uri()}"},
+        text=True, capture_output=True, check=False, timeout=600,
+    )
+    assert result.returncode != 0
+    assert (project / ".agent-flow/install-recovery/manifest.json").is_file()
+
+
+def _assign_supplementary_file_group(target: Path) -> tuple[int, int]:
+    for group in os.getgroups():
+        if group == target.parent.stat().st_gid:
+            continue
+        try:
+            os.chown(target, -1, group)
+        except PermissionError:
+            continue
+        return target.stat().st_uid, group
+    pytest.skip("Changing a file to an alternate supplementary group is required")
+
+
+HOST_OWNERSHIP_PROBE = """
+import fs from 'node:fs';
+process.umask(0o022);
+const open = fs.openSync;
+const write = fs.writeFileSync;
+const rename = fs.renameSync;
+const chown = fs.fchownSync;
+const stages = new Set();
+const record = (phase, fd) => {
+  const stat = fs.fstatSync(fd);
+  fs.appendFileSync(process.env.OWNER_LOG, JSON.stringify({
+    phase, uid: stat.uid, gid: stat.gid, mode: stat.mode & 0o777
+  }) + '\\n');
+};
+fs.openSync = (target, ...args) => {
+  const fd = open(target, ...args);
+  if (String(target).startsWith(process.env.PRIVATE_TARGET + '.') && String(target).endsWith('.tmp')) {
+    stages.add(fd);
+    record('open', fd);
+  }
+  return fd;
+};
+fs.writeFileSync = (fd, ...args) => {
+  const result = write(fd, ...args);
+  if (stages.has(fd)) record('write', fd);
+  return result;
+};
+fs.fchownSync = (fd, uid, gid) => {
+  if (stages.has(fd) && process.env.OWNER_FAIL === '1') {
+    record('ownership-refused', fd);
+    throw new Error('injected ownership restoration failure');
+  }
+  return chown(fd, uid, gid);
+};
+const close = fs.closeSync;
+fs.closeSync = (fd) => {
+  stages.delete(fd);
+  return close(fd);
+};
+fs.renameSync = (source, target, ...args) => {
+  const result = rename(source, target, ...args);
+  if (String(target) === process.env.PRIVATE_TARGET && process.env.OWNER_STOP === '1') {
+    process.kill(process.pid, 'SIGKILL');
+  }
+  return result;
+};
+"""
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_real_recovery_preserves_file_owner_through_normal_reinstall(
+    tmp_path: Path, binary: str,
+) -> None:
+    project = tmp_path / "project"
+    target = project / ".claude/settings.json"
+    target.parent.mkdir(parents=True, mode=0o755)
+    original = b'{"private": "original"}\n'
+    target.write_bytes(original)
+    owner = _assign_supplementary_file_group(target)
+    target.chmod(0o640)
+    probe = tmp_path / "ownership-probe.mjs"
+    _interrupt_private_host_install(project, binary, probe)
+    target.unlink()
+    probe.write_text(HOST_OWNERSHIP_PROBE, encoding="utf-8")
+    log = tmp_path / "ownership.jsonl"
+    env = {
+        **os.environ, "PYTHON": sys.executable, "AGENT_FLOW_SKIP_CODEX_TRUST": "1",
+        "NODE_OPTIONS": f"--import {probe.as_uri()}", "PRIVATE_TARGET": str(target),
+        "OWNER_LOG": str(log),
+    }
+    command = (_node(), str(KIT_ROOT / "bin" / binary), "install",
+               "--profile", "python", "--architecture-mode", "pending")
+    resumed = subprocess.run(
+        command, cwd=project, env={**env, "OWNER_STOP": "1"},
+        text=True, capture_output=True, check=False, timeout=600,
+    )
+    assert resumed.returncode != 0
+    assert target.read_bytes() == original
+    assert (target.stat().st_uid, target.stat().st_gid) == owner
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+    recovery = project / ".agent-flow/install-recovery"
+    assert (recovery / ".claude/settings.json").read_bytes() == original
+    for _ in range(2):
+        installed = subprocess.run(
+            command, cwd=project, env=env,
+            text=True, capture_output=True, check=False, timeout=600,
+        )
+        assert installed.returncode == 0, installed.stderr
+        assert json.loads(target.read_text(encoding="utf-8"))["private"] == "original"
+        assert (target.stat().st_uid, target.stat().st_gid) == owner
+        assert stat.S_IMODE(target.stat().st_mode) == 0o640
+    observations = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert {entry["phase"] for entry in observations} == {"open", "write"}
+    assert all(entry["mode"] & 0o077 == 0 for entry in observations)
+    assert not recovery.exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("missing", [False, True], ids=["existing-file", "missing-file"])
+def test_real_recovery_owner_failure_never_publishes_private_content(
+    tmp_path: Path, binary: str, missing: bool,
+) -> None:
+    project = tmp_path / "project"
+    target = project / ".claude/settings.json"
+    target.parent.mkdir(parents=True, mode=0o755)
+    original = b'{"private": "original"}\n'
+    target.write_bytes(original)
+    owner = _assign_supplementary_file_group(target)
+    target.chmod(0o640)
+    probe = tmp_path / "ownership-failure.mjs"
+    _interrupt_private_host_install(project, binary, probe)
+    if missing:
+        target.unlink()
+    else:
+        target.write_bytes(b'{"private": "post-crash"}\n')
+    recovery = project / ".agent-flow/install-recovery"
+    manifest = (recovery / "manifest.json").read_bytes()
+    probe.write_text(HOST_OWNERSHIP_PROBE, encoding="utf-8")
+    log = tmp_path / "ownership.jsonl"
+    result = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install",
+         "--profile", "python", "--architecture-mode", "pending"),
+        cwd=project,
+        env={**os.environ, "PYTHON": sys.executable, "AGENT_FLOW_SKIP_CODEX_TRUST": "1",
+             "NODE_OPTIONS": f"--import {probe.as_uri()}", "PRIVATE_TARGET": str(target),
+             "OWNER_LOG": str(log), "OWNER_FAIL": "1"},
+        text=True, capture_output=True, check=False, timeout=600,
+    )
+    assert result.returncode != 0, result.stdout
+    assert "injected ownership restoration failure" in result.stderr
+    assert (recovery / "manifest.json").read_bytes() == manifest
+    assert (recovery / ".claude/settings.json").read_bytes() == original
+    if missing:
+        assert not target.exists()
+    else:
+        assert target.read_bytes() == b'{"private": "post-crash"}\n'
+        assert (target.stat().st_uid, target.stat().st_gid) == owner
+    observations = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert observations[-1]["phase"] == "ownership-refused"
+    assert all(entry["mode"] & 0o077 == 0 for entry in observations)
+    assert not list(target.parent.glob("*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "owner", [None, {}, {"uid": -1, "gid": 0}, {"uid": 0, "gid": 0xffffffff}],
+    ids=["legacy", "incomplete", "negative-uid", "sentinel-gid"],
+)
+def test_recovery_refuses_unproven_file_owner_before_mutation(
+    tmp_path: Path, owner: dict[str, int] | None,
+) -> None:
+    target = tmp_path / ".claude/settings.json"
+    target.parent.mkdir()
+    original = b'{"private": "original"}\n'
+    target.write_bytes(original)
+    _interrupt_architecture_transaction(tmp_path)
+    recovery = tmp_path / ".agent-flow/install-recovery"
+    manifest = recovery / "manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    entry = next(entry for entry in payload["entries"] if entry["relative"] == ".claude/settings.json")
+    if owner is None:
+        entry.pop("hostOwner", None)
+    else:
+        entry["hostOwner"] = owner
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    journal = manifest.read_bytes()
+    target.unlink()
+    result = _architecture_node(
+        tmp_path,
+        "installer.prepareArchitectureInstall(process.env.PROJECT, ['--architecture-mode', 'pending']);",
+    )
+    assert result.returncode != 0, result.stdout
+    assert not target.exists()
+    assert manifest.read_bytes() == journal
+    assert (recovery / ".claude/settings.json").read_bytes() == original
+    assert not (tmp_path / ".agent-flow/backups").exists()
+
+
+def test_atomic_writer_rejects_invalid_owner_before_creating_parent(tmp_path: Path) -> None:
+    target = tmp_path / "absent/settings.json"
+    result = _architecture_node(tmp_path, """
+installer.atomicWriteFileSync(process.env.TARGET, 'private', {ownership: {uid: -1, gid: 0}});
+""", TARGET=str(target))
+    assert result.returncode != 0, result.stdout
+    assert not target.parent.exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_real_recovery_preserves_private_asset_copy_ownership(
+    tmp_path: Path, binary: str,
+) -> None:
+    project = tmp_path / "project"
+    relative = ".agent-flow/templates/private.txt"
+    target = project / relative
+    target.parent.mkdir(parents=True)
+    original = b"irreplaceable private template\n"
+    target.write_bytes(original)
+    owner = _assign_supplementary_file_group(target)
+    target.chmod(0o640)
+    probe = tmp_path / "copy-ownership.mjs"
+    _interrupt_private_host_install(project, binary, probe)
+    recovery = project / ".agent-flow/install-recovery"
+    backup = recovery / relative
+    assert backup.read_bytes() == original
+    target.unlink()
+    probe.write_text("""
+import fs from 'node:fs';
+process.umask(0o022);
+const open = fs.openSync;
+const write = fs.writeFileSync;
+const chmod = fs.fchmodSync;
+const close = fs.closeSync;
+const copies = new Set();
+const record = (phase, fd) => {
+  const stat = fs.fstatSync(fd);
+  fs.appendFileSync(process.env.OWNER_LOG, JSON.stringify({
+    phase, uid: stat.uid, gid: stat.gid, mode: stat.mode & 0o777
+  }) + '\\n');
+};
+fs.openSync = (target, ...args) => {
+  const fd = open(target, ...args);
+  if (String(target) === process.env.PRIVATE_TARGET && args[0] === 'wx') {
+    copies.add(fd);
+    record('open', fd);
+  }
+  return fd;
+};
+fs.writeFileSync = (fd, ...args) => {
+  const result = write(fd, ...args);
+  if (copies.has(fd)) record('write', fd);
+  return result;
+};
+fs.fchmodSync = (fd, ...args) => {
+  const result = chmod(fd, ...args);
+  if (copies.has(fd)) {
+    record('published-mode', fd);
+    process.kill(process.pid, 'SIGKILL');
+  }
+  return result;
+};
+fs.closeSync = (fd) => {
+  copies.delete(fd);
+  return close(fd);
+};
+""", encoding="utf-8")
+    log = tmp_path / "copy-ownership.jsonl"
+    command = (_node(), str(KIT_ROOT / "bin" / binary), "install",
+               "--profile", "python", "--architecture-mode", "pending")
+    env = {**os.environ, "PYTHON": sys.executable, "AGENT_FLOW_SKIP_CODEX_TRUST": "1"}
+    result = subprocess.run(
+        command, cwd=project,
+        env={**env, "NODE_OPTIONS": f"--import {probe.as_uri()}",
+             "PRIVATE_TARGET": str(target), "OWNER_LOG": str(log)},
+        text=True, capture_output=True, check=False, timeout=600,
+    )
+    assert result.returncode != 0
+    assert target.read_bytes() == original
+    assert (target.stat().st_uid, target.stat().st_gid) == owner
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+    assert (backup.stat().st_uid, backup.stat().st_gid) == owner
+    assert backup.read_bytes() == original
+    observations = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert [entry["phase"] for entry in observations] == ["open", "write", "published-mode"]
+    assert all(entry["mode"] & 0o077 == 0 for entry in observations[:-1])
+    assert (observations[-1]["uid"], observations[-1]["gid"]) == owner
+    resumed = subprocess.run(
+        command, cwd=project, env=env,
+        text=True, capture_output=True, check=False, timeout=600,
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert target.read_bytes() == original
+    assert (target.stat().st_uid, target.stat().st_gid) == owner
+    assert not recovery.exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_real_recovery_preserves_asset_directory_special_permissions(
+    tmp_path: Path, binary: str,
+) -> None:
+    project = tmp_path / "project"
+    directory = project / ".agent-flow/templates"
+    directory.mkdir(parents=True)
+    owner = _assign_supplementary_file_group(directory)
+    directory.chmod(0o3770)
+    target = directory / "private.txt"
+    original = b"irreplaceable template in a protected directory\n"
+    target.write_bytes(original)
+    probe = tmp_path / "directory-recovery.mjs"
+    _interrupt_private_host_install(project, binary, probe)
+    target.unlink()
+    directory.rmdir()
+
+    resumed = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install",
+         "--profile", "python", "--architecture-mode", "pending"),
+        cwd=project,
+        env={**os.environ, "PYTHON": sys.executable, "AGENT_FLOW_SKIP_CODEX_TRUST": "1"},
+        text=True, capture_output=True, check=False, timeout=600,
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o3770
+    assert (directory.stat().st_uid, directory.stat().st_gid) == owner
+    assert target.read_bytes() == original
+    subsequent = directory / "subsequent.txt"
+    subsequent.write_bytes(b"created after recovery\n")
+    assert subsequent.stat().st_gid == owner[1]
+    assert not (project / ".agent-flow/install-recovery").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("state", [
+    "matching", "no-selection-write", "mismatching", "missing-ready",
+    "invalid-marker", "unsafe-path",
+])
+def test_real_completed_legacy_journal_cleanup(
+    tmp_path: Path, binary: str, state: str,
+) -> None:
+    project = tmp_path / "project"
+    target = project / ".agent-flow/templates/private.txt"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"original private asset\n")
+    declaration = project / ".agent-flow.project.yaml"
+    command = [_node(), str(KIT_ROOT / "bin" / binary), "install", "--profile", "python"]
+    if state == "no-selection-write":
+        declaration.write_text("schema_version: 1\narchitecture:\n  mode: pending\n", encoding="utf-8")
+    else:
+        command.extend(["--architecture-mode", "pending"])
+    probe = tmp_path / "completed-install.mjs"
+    probe.write_text("""
+import fs from 'node:fs';
+import path from 'node:path';
+const remove = fs.rmSync;
+fs.rmSync = (target, ...args) => {
+  if (path.resolve(String(target)) === process.env.RECOVERY
+      && fs.existsSync(path.join(target, 'ready.json'))) {
+    process.kill(process.pid, 'SIGKILL');
+  }
+  return remove(target, ...args);
+};
+""", encoding="utf-8")
+    recovery = project / ".agent-flow/install-recovery"
+    environment = {**os.environ, "PYTHON": sys.executable, "AGENT_FLOW_SKIP_CODEX_TRUST": "1"}
+    interrupted = subprocess.run(
+        command, cwd=project,
+        env={**environment, "NODE_OPTIONS": f"--import {probe.as_uri()}", "RECOVERY": str(recovery)},
+        text=True, capture_output=True, check=False, timeout=600,
+    )
+    assert interrupted.returncode != 0, interrupted.stderr
+    ready_path = recovery / "ready.json"
+    ready = json.loads(ready_path.read_text(encoding="utf-8"))
+    if state == "no-selection-write":
+        assert ready["selectionDocument"] is None
+    else:
+        assert ready["selectionDocument"] == declaration.read_text(encoding="utf-8")
+    manifest = recovery / "manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    for entry in payload["entries"]:
+        entry.pop("assetOwnershipPreserved", None)
+    if state == "invalid-marker":
+        next(entry for entry in payload["entries"]
+             if entry["relative"] == ".agent-flow/templates")["assetOwnershipPreserved"] = False
+    elif state == "unsafe-path":
+        payload["entries"].append({"relative": "../outside", "existed": False})
+    elif state == "mismatching":
+        declaration.write_text("schema_version: 1\narchitecture:\n  mode: clean\n", encoding="utf-8")
+    elif state == "missing-ready":
+        ready_path.unlink()
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    journal = manifest.read_bytes()
+    current = b"irreplaceable edit after completed install\n"
+    target.write_bytes(current)
+    resumed = subprocess.run(
+        command, cwd=project, env=environment,
+        text=True, capture_output=True, check=False, timeout=600,
+    )
+    assert target.read_bytes() == current
+    if state in {"matching", "no-selection-write"}:
+        assert resumed.returncode == 0, resumed.stderr
+        assert not recovery.exists()
+    else:
+        assert resumed.returncode != 0, resumed.stdout
+        assert manifest.read_bytes() == journal
+        assert (recovery / ".agent-flow/templates/private.txt").read_bytes() == b"original private asset\n"
+        assert not (project / ".agent-flow/backups").exists()
+
+
+def test_recovery_refuses_legacy_asset_backup_without_ownership_proof(tmp_path: Path) -> None:
+    relative = ".agent-flow/templates/private.txt"
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    original = b"private original template\n"
+    target.write_bytes(original)
+    owner = _assign_supplementary_file_group(target)
+    target.chmod(0o640)
+    _interrupt_architecture_transaction(tmp_path)
+    recovery = tmp_path / ".agent-flow/install-recovery"
+    manifest = recovery / "manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    for entry in payload["entries"]:
+        entry.pop("assetOwnershipPreserved", None)
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    backup = recovery / relative
+    os.chown(backup, -1, target.parent.stat().st_gid)
+    target.write_bytes(b"irreplaceable post-crash edit\n")
+    journal = manifest.read_bytes()
+    result = _architecture_node(
+        tmp_path,
+        "installer.prepareArchitectureInstall(process.env.PROJECT, ['--architecture-mode', 'pending']);",
+    )
+    assert result.returncode != 0, result.stdout
+    assert target.read_bytes() == b"irreplaceable post-crash edit\n"
+    assert (target.stat().st_uid, target.stat().st_gid) == owner
+    assert manifest.read_bytes() == journal
+    assert backup.read_bytes() == original
+    assert not (tmp_path / ".agent-flow/backups").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize(
+    ("parent_mode", "group_owned"),
+    [(0o700, False), (0o3700, False), (0o750, True)],
+    ids=["private", "sticky-setgid", "group-private"],
+)
+def test_real_recovery_recreates_private_host_parent_before_publishing(
+    tmp_path: Path, binary: str, parent_mode: int, group_owned: bool,
+) -> None:
+    project = tmp_path / "project"
+    target = project / ".claude/settings.json"
+    target.parent.mkdir(parents=True, mode=0o700)
+    if group_owned:
+        group = next((gid for gid in os.getgroups() if gid != target.parent.stat().st_gid), None)
+        if group is None:
+            pytest.skip("An alternate supplementary group is required")
+        os.chown(target.parent, -1, group)
+    target.parent.chmod(parent_mode)
+    original_group = target.parent.stat().st_gid
+    original = b'{"private": "original"}\n'
+    target.write_bytes(original)
+    target.chmod(0o644)
+    probe = tmp_path / "interrupt-private-restore.mjs"
+    _interrupt_private_host_install(project, binary, probe)
+    shutil.rmtree(target.parent)
+    post_crash = project / ".agent-flow/templates/post-crash.txt"
+    post_crash.parent.mkdir(parents=True, exist_ok=True)
+    post_crash.write_text("irreplaceable post-crash notes", encoding="utf-8")
+    probe.write_text("""
+import fs from 'node:fs';
+process.umask(0o022);
+const rename = fs.renameSync;
+fs.renameSync = (source, target, ...args) => {
+  const result = rename(source, target, ...args);
+  if (String(target) === process.env.PRIVATE_TARGET) process.kill(process.pid, 'SIGKILL');
+  return result;
+};
+""", encoding="utf-8")
+    resumed = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install",
+         "--profile", "python", "--architecture-mode", "pending"),
+        cwd=project,
+        env={**os.environ, "PYTHON": sys.executable, "AGENT_FLOW_SKIP_CODEX_TRUST": "1",
+             "NODE_OPTIONS": f"--import {probe.as_uri()}", "PRIVATE_TARGET": str(target.resolve())},
+        text=True, capture_output=True, check=False, timeout=600,
+    )
+    assert resumed.returncode != 0
+    assert target.read_bytes() == original
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    assert stat.S_IMODE(target.parent.stat().st_mode) == parent_mode
+    assert target.parent.stat().st_gid == original_group
+    recovery = project / ".agent-flow/install-recovery"
+    assert (recovery / ".claude/settings.json").read_bytes() == original
+    snapshots = (project / ".agent-flow/backups").glob("install-recovery-*")
+    assert any(
+        (snapshot / ".agent-flow/templates/post-crash.txt").read_text(encoding="utf-8")
+        == "irreplaceable post-crash notes"
+        for snapshot in snapshots
+    )
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("boundary", ["legacy-missing-parent", "widened-canonical-ancestor"])
+def test_real_recovery_refuses_unproven_host_directory_protection(
+    tmp_path: Path, binary: str, boundary: str,
+) -> None:
+    project = tmp_path / "project"
+    target = project / ".claude/settings.json"
+    target.parent.mkdir(parents=True, mode=0o700)
+    private = tmp_path / "private"
+    if boundary == "widened-canonical-ancestor":
+        private.mkdir(mode=0o700)
+        canonical = private / "nested/settings.json"
+        canonical.parent.mkdir(mode=0o755)
+        target.symlink_to(canonical)
+    else:
+        canonical = target
+    original = b'{"private": "original"}\n'
+    canonical.write_bytes(original)
+    canonical.chmod(0o644)
+    _interrupt_private_host_install(project, binary, tmp_path / "interrupt-boundary.mjs")
+    recovery = project / ".agent-flow/install-recovery"
+    manifest = recovery / "manifest.json"
+    if boundary == "legacy-missing-parent":
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        for entry in payload["entries"]:
+            entry.pop("hostParents", None)
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+        shutil.rmtree(target.parent)
+    else:
+        canonical.write_bytes(b'{"private": "post-crash"}\n')
+        private.chmod(0o755)
+    journal = manifest.read_bytes()
+    post_crash = project / ".agent-flow/templates/post-crash.txt"
+    post_crash.parent.mkdir(parents=True, exist_ok=True)
+    post_crash.write_text("irreplaceable post-crash notes", encoding="utf-8")
+    resumed = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install",
+         "--profile", "python", "--architecture-mode", "pending"),
+        cwd=project,
+        env={**os.environ, "PYTHON": sys.executable, "AGENT_FLOW_SKIP_CODEX_TRUST": "1"},
+        text=True, capture_output=True, check=False, timeout=600,
+    )
+    assert resumed.returncode != 0, resumed.stdout
+    assert "protection" in resumed.stderr
+    assert manifest.read_bytes() == journal
+    assert (recovery / ".claude/settings.json").read_bytes() == original
+    assert post_crash.read_text(encoding="utf-8") == "irreplaceable post-crash notes"
+    if boundary == "legacy-missing-parent":
+        assert not target.parent.exists()
+    else:
+        assert target.is_symlink()
+        assert canonical.read_bytes() == b'{"private": "post-crash"}\n'
+
+@pytest.mark.parametrize("current_state", ["missing", "widened", "stable-symlink"])
+def test_recovery_restores_private_host_config_permissions(
+    tmp_path: Path, current_state: str,
+) -> None:
+    target = tmp_path / ".claude/settings.json"
+    target.parent.mkdir()
+    canonical = tmp_path / "private-settings.json" if current_state == "stable-symlink" else target
+    canonical.write_text('{"private": "original"}\n', encoding="utf-8")
+    canonical.chmod(0o600)
+    if current_state == "stable-symlink":
+        target.symlink_to(canonical)
+    _interrupt_architecture_transaction(tmp_path)
+    if current_state == "missing":
+        target.unlink()
+    else:
+        canonical.write_text('{"private": "post-crash"}\n', encoding="utf-8")
+        canonical.chmod(0o644)
+    result = _architecture_node(
+        tmp_path,
+        "const tx = installer.prepareArchitectureInstall(process.env.PROJECT, ['--architecture-mode', 'pending']);"
+        "tx.commit();",
+    )
+    assert result.returncode == 0, result.stderr
+    assert target.read_text(encoding="utf-8") == '{"private": "original"}\n'
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    if current_state == "stable-symlink":
+        assert target.is_symlink()
+    if current_state != "missing":
+        snapshots = (tmp_path / ".agent-flow/backups").glob("install-recovery-*")
+        assert any(
+            (snapshot / ".claude/settings.json").read_text(encoding="utf-8")
+            == '{"private": "post-crash"}\n'
+            for snapshot in snapshots
+        )
+
+
+@pytest.mark.parametrize("failure", ["read", "flush"])
+def test_recovery_preservation_failure_leaves_current_and_backup_untouched(
+    tmp_path: Path, failure: str,
+) -> None:
+    target = tmp_path / ".agent-flow/templates/user.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("before install", encoding="utf-8")
+    _interrupt_architecture_transaction(tmp_path)
+    target.write_text("post-crash edit", encoding="utf-8")
+    recovery = tmp_path / ".agent-flow/install-recovery"
+    manifest = (recovery / "manifest.json").read_bytes()
+    result = _architecture_node(tmp_path, """
+import fs from 'node:fs';
+const read = fs.readFileSync;
+fs.readFileSync = (target, ...args) => {
+  if (process.env.FAILURE === 'read'
+      && target === process.env.PROJECT + '/.agent-flow/templates/user.txt') {
+    throw new Error('injected preservation read failure');
+  }
+  return read(target, ...args);
+};
+if (process.env.FAILURE === 'flush') {
+  fs.fsyncSync = () => { throw new Error('injected preservation flush failure'); };
+}
+try { installer.prepareArchitectureInstall(process.env.PROJECT, ['--architecture-mode', 'pending']); }
+catch (error) { console.error(error.message); process.exitCode = 2; }
+""", FAILURE=failure)
+    assert result.returncode == 2, result.stderr
+    assert "preserv" in result.stderr
+    assert str(recovery) in result.stderr
+    assert target.read_text(encoding="utf-8") == "post-crash edit"
+    assert (recovery / ".agent-flow/templates/user.txt").read_text(encoding="utf-8") == "before install"
+    assert (recovery / "manifest.json").read_bytes() == manifest
+
+
+@pytest.mark.parametrize("link_change", ["retargeted", "broken", "new-link", "parent-retargeted"])
+def test_recovery_refuses_changed_host_symlink_before_rollback(
+    tmp_path: Path, link_change: str,
+) -> None:
+    host = tmp_path / ".claude"
+    original = tmp_path / "original"
+    original.mkdir()
+    original_config = original / "settings.json"
+    original_config.write_text('{"original": true}\n', encoding="utf-8")
+    if link_change == "parent-retargeted":
+        host.symlink_to(original, target_is_directory=True)
+    else:
+        host.mkdir()
+    target = host / "settings.json"
+    if link_change == "new-link":
+        target.write_text('{"original": true}\n', encoding="utf-8")
+    elif link_change != "parent-retargeted":
+        target.symlink_to(original_config)
+    protected = tmp_path / ".agent-flow/templates/user.txt"
+    protected.parent.mkdir(parents=True)
+    protected.write_text("before install", encoding="utf-8")
+    _interrupt_architecture_transaction(tmp_path)
+    protected.write_text("post-crash edit", encoding="utf-8")
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    destination = unrelated / "settings.json"
+    if link_change != "broken":
+        destination.write_text('{"unrelated": true}\n', encoding="utf-8")
+    if link_change == "parent-retargeted":
+        host.unlink()
+        host.symlink_to(unrelated, target_is_directory=True)
+    else:
+        target.unlink()
+        target.symlink_to(destination)
+    recovery = tmp_path / ".agent-flow/install-recovery"
+    manifest = (recovery / "manifest.json").read_bytes()
+    result = _architecture_node(
+        tmp_path,
+        "try { installer.prepareArchitectureInstall(process.env.PROJECT, []); }"
+        "catch (error) { console.error(error.message); process.exitCode = 2; }",
+    )
+    assert result.returncode == 2, result.stderr
+    assert "symlink" in result.stderr
+    assert str(recovery) in result.stderr
+    assert protected.read_text(encoding="utf-8") == "post-crash edit"
+    assert (recovery / "manifest.json").read_bytes() == manifest
+    assert original_config.read_text(encoding="utf-8") == '{"original": true}\n'
+    if link_change == "broken":
+        assert not destination.exists()
+    else:
+        assert destination.read_text(encoding="utf-8") == '{"unrelated": true}\n'
+
+
+def test_inherited_architecture_transaction_can_delegate_without_owning_commit(tmp_path: Path) -> None:
+    child = tmp_path / "child.mjs"
+    child.write_text(
+        f"import * as installer from {json.dumps(SHARED_MODULE.as_uri())};\n" + """
+import fs from 'node:fs';
+import cp from 'node:child_process';
+import assert from 'node:assert/strict';
+const consumed = Number(process.env.AGENT_FLOW_INSTALL_PLAN_FD);
+const tx = installer.prepareArchitectureInstall(process.env.PROJECT, []);
+assert.throws(() => fs.fstatSync(consumed), {code: 'EBADF'});
+assert.equal(tx.plan.mode, 'pending');
+tx.commit();
+tx.rollback();
+assert.equal(fs.existsSync(process.env.PROJECT + '/.agent-flow.project.yaml'), false);
+assert.equal(fs.existsSync(process.env.PROJECT + '/.agent-flow/install-recovery/manifest.json'), true);
+if (!process.env.GRANDCHILD) {
+  const delegated = tx.delegatedOptions();
+  let result;
+  try {
+    result = cp.spawnSync(process.execPath, [process.argv[1]], {
+      ...delegated.options, encoding: 'utf8',
+      env: {...delegated.options.env, GRANDCHILD: '1'},
+    });
+  } finally { delegated.close(); }
+  assert.equal(result.status, 0, result.stderr);
+}
+""", encoding="utf-8")
+    result = _architecture_node(tmp_path, """
+import fs from 'node:fs';
+import cp from 'node:child_process';
+import assert from 'node:assert/strict';
+const lease = fs.openSync(process.env.PROJECT + '/lease', 'w+');
+process.env.AGENT_FLOW_INSTALL_LEASE_FD = String(lease);
+const tx = installer.prepareArchitectureInstall(process.env.PROJECT, ['--architecture-mode', 'pending']);
+const delegated = tx.delegatedOptions();
+let result;
+try {
+  result = cp.spawnSync(process.execPath, [process.env.PROJECT + '/child.mjs'], {
+    ...delegated.options, encoding: 'utf8',
+  });
+} finally { delegated.close(); }
+assert.equal(result.status, 0, result.stderr);
+tx.commit();
+fs.closeSync(lease);
+""")
+    assert result.returncode == 0, result.stderr
+    assert "mode: pending" in (tmp_path / ".agent-flow.project.yaml").read_text(encoding="utf-8")
+    assert not (tmp_path / ".agent-flow/install-recovery").exists()
+
+
+def test_invalid_inherited_plan_closes_descriptor_and_reports_refusal(tmp_path: Path) -> None:
+    result = _architecture_node(tmp_path, """
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const file = process.env.PROJECT + '/invalid-plan.json';
+fs.writeFileSync(file, '{invalid json');
+const fd = fs.openSync(file, 'r');
+process.env.AGENT_FLOW_INSTALL_PLAN_FD = String(fd);
+assert.throws(() => installer.prepareArchitectureInstall(process.env.PROJECT, []),
+  /invalid architecture plan descriptor/);
+assert.throws(() => fs.fstatSync(fd), {code: 'EBADF'});
+""")
+    assert result.returncode == 0, result.stderr

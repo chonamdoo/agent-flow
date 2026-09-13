@@ -7,7 +7,7 @@ description: Use during the full-feature architecture-review phase.
 
 Use during the full-feature architecture-review phase.
 
-Review implemented code against domain decisions and DDD/Clean Architecture. Aggregate only the per-angle artifacts produced by the runner's confined Claude/Codex reviewer subprocesses; do not launch reviewer CLIs yourself. Each reviewer section must include `reviewer-source: sub-agent`. OMP and controller-session work are never reviewer providers.
+Review implemented code against domain decisions and the selected architecture contract. Read its complete normative root and required references; use DDD checks when the run adopts DDD and Clean checks only in Clean mode. Aggregate only the per-angle artifacts produced by the runner's confined Claude/Codex reviewer subprocesses; do not launch reviewer CLIs yourself. Each reviewer section must include `reviewer-source: sub-agent`. OMP and controller-session work are never reviewer providers.
 
 Artifact template:
 

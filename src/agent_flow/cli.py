@@ -24,6 +24,15 @@ from agent_flow.core.artifacts import (
     write_recovery,
 )
 from agent_flow.core.architecture_lint import main as architecture_lint_main
+from agent_flow.core.architecture_policy import (
+    ArchitectureMode,
+    ArchitectureSelection,
+    architecture_plan_payload,
+    architecture_snapshot,
+    prepare_architecture_selection,
+    write_architecture_selection,
+)
+from agent_flow.core.installation import assert_install_complete
 from agent_flow.core.context_contract import (
     append_context_event,
     check_system_invariants,
@@ -52,6 +61,7 @@ from agent_flow.core.phase_workflow import (
     load_phase_workflow_definition,
 )
 from agent_flow.core.profiles import (
+    assert_architecture_override_compatible,
     DEFAULT_GATE_PHASE,
     GATE_PHASE_ALL,
     GATE_PHASES,
@@ -422,6 +432,26 @@ def main(argv: list[str] | None = None) -> int:
     architecture_lint_parser.add_argument("--profile", default="auto")
     architecture_lint_parser.add_argument("--files", nargs="*")
     architecture_lint_parser.add_argument("--worktree")
+
+    # 아키텍처 *선택*이다. `run --architecture`는 프롬프트 서술용 플래그이고 의미가
+    # 다르므로 같은 이름에 얹지 않는다.
+    architecture_parser = subparsers.add_parser("architecture")
+    architecture_subparsers = architecture_parser.add_subparsers(
+        dest="architecture_command", required=True
+    )
+    architecture_export = architecture_subparsers.add_parser("export")
+    architecture_export.add_argument("--root", default=".")
+    architecture_export.add_argument("--worktree")
+    architecture_export.add_argument("--format", choices=("json",), default="json")
+    architecture_export.add_argument("--mode", choices=tuple(mode.value for mode in ArchitectureMode))
+    architecture_export.add_argument("--skill")
+    architecture_select = architecture_subparsers.add_parser("select")
+    architecture_select.add_argument("--root", default=".")
+    architecture_select.add_argument("--worktree")
+    architecture_select.add_argument(
+        "--mode", required=True, choices=tuple(mode.value for mode in ArchitectureMode)
+    )
+    architecture_select.add_argument("--skill")
 
     eval_parser = subparsers.add_parser("eval")
     eval_parser.add_argument("--root", default=".")
@@ -1303,6 +1333,44 @@ def main(argv: list[str] | None = None) -> int:
         if args.files is not None:
             lint_args.extend(["--files", *args.files])
         return architecture_lint_main(lint_args)
+
+    if args.command == "architecture":
+        command_root = _command_project_root(root, requested_root, getattr(args, "worktree", None))
+        if command_root is None:
+            return 2
+        try:
+            assert_install_complete(command_root)
+            if args.mode is None:
+                if args.skill is not None:
+                    raise ValueError("--skill requires --mode local")
+                snapshot = architecture_snapshot(command_root)
+            else:
+                selection = ArchitectureSelection(
+                    mode=ArchitectureMode(args.mode), contract_path=args.skill
+                )
+                snapshot = prepare_architecture_selection(command_root, selection)
+            if snapshot.declared:
+                assert_architecture_override_compatible(command_root, snapshot.selection)
+            assert_install_complete(command_root)
+            if args.architecture_command == "select":
+                selection = snapshot.selection
+                contract = snapshot.contract
+                path = write_architecture_selection(command_root, selection)
+                assert_install_complete(command_root)
+                documents = len(contract.documents) if contract else 0
+                print(
+                    f"architecture: {selection.mode.value}  "
+                    f"contract: {selection.contract_path or '-'}  documents: {documents}  {path}"
+                )
+                for untracked in snapshot.untracked:
+                    print(f"warning: architecture document is untracked: {untracked}")
+                return 0
+            payload = architecture_plan_payload(snapshot)
+        except (ValueError, OSError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0
 
     if args.command == "eval":
         fixture_path = _resolve_project_path(root, args.fixtures) if args.fixtures else None

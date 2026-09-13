@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -91,7 +92,7 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(
     project = tmp_path / "project"
     project.mkdir()
 
-    result = _install_with(binary, project)
+    result = _install_with(binary, project, "--architecture-mode", "clean")
 
     assert result.returncode == 0, result.stderr
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
@@ -173,9 +174,9 @@ def test_app_shell_skills_install_shared_contract_dependency(tmp_path: Path) -> 
     }
 
     assert "app-shell-error-contract" in skills
-    assert skills["app-shell-error-contract"]["requires"] == ["clean-architecture-core"]
     for name in app_shell_skills:
-        assert skills[name]["requires"] == ["app-shell-error-contract"]
+        assert (project / skills[name]["path"]).is_file()
+    assert "clean-architecture-core" not in skills
     assert not any("missing required skill" in warning for warning in index["warnings"])
 
 
@@ -183,7 +184,7 @@ def test_clean_architecture_skills_install_core_and_platform_dependency_graph(tm
     project = tmp_path / "project"
     project.mkdir()
 
-    result = _install(project)
+    result = _install(project, "--architecture-mode", "clean")
 
     assert result.returncode == 0, result.stderr
     roots = (
@@ -212,7 +213,7 @@ def test_android_profile_installs_android_skills_and_common_dependencies_only(tm
     (project / "settings.gradle.kts").write_text("pluginManagement {}\n", encoding="utf-8")
     (project / "build.gradle.kts").write_text('plugins { id("com.android.application") }\n', encoding="utf-8")
 
-    result = _install(project)
+    result = _install(project, "--architecture-mode", "clean")
 
     assert result.returncode == 0, result.stderr
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
@@ -244,7 +245,7 @@ def test_multi_profile_install_uses_union_and_dependency_closure(tmp_path: Path)
     project = tmp_path / "mixed-project"
     project.mkdir()
 
-    result = _install(project, "--profile", "android", "--profile", "react-native")
+    result = _install(project, "--profile", "android", "--profile", "react-native", "--architecture-mode", "clean")
 
     assert result.returncode == 0, result.stderr
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
@@ -260,7 +261,7 @@ def test_reinstall_preserves_previously_selected_profile_skills(tmp_path: Path) 
     project = tmp_path / "mixed-project"
     project.mkdir()
 
-    first = _install(project, "--profile", "android", "--profile", "react-native")
+    first = _install(project, "--profile", "android", "--profile", "react-native", "--architecture-mode", "clean")
     assert first.returncode == 0, first.stderr
     second = _install(project, "--profile", "android")
     assert second.returncode == 0, second.stderr
@@ -276,7 +277,7 @@ def test_plain_reinstall_preserves_filtered_profile_selection(tmp_path: Path) ->
     project = tmp_path / "android-project"
     project.mkdir()
 
-    first = _install(project, "--profile", "android")
+    first = _install(project, "--profile", "android", "--architecture-mode", "clean")
     assert first.returncode == 0, first.stderr
     second = _install(project)
     assert second.returncode == 0, second.stderr
@@ -313,7 +314,7 @@ def test_plain_reinstall_preserves_filtered_selection_over_detected_profile(tmp_
     (project / "package.json").write_text('{"dependencies":{"react-native":"latest"}}\n', encoding="utf-8")
     (project / "settings.gradle.kts").write_text("pluginManagement {}\n", encoding="utf-8")
 
-    first = _install(project, "--profile", "android")
+    first = _install(project, "--profile", "android", "--architecture-mode", "clean")
     assert first.returncode == 0, first.stderr
     second = _install(project)
     assert second.returncode == 0, second.stderr
@@ -330,7 +331,7 @@ def test_filtered_reinstall_after_all_install_does_not_preserve_unselected_platf
     project = tmp_path / "android-project"
     project.mkdir()
 
-    first = _install(project)
+    first = _install(project, "--architecture-mode", "clean")
     assert first.returncode == 0, first.stderr
     second = _install(project, "--profile", "android")
     assert second.returncode == 0, second.stderr
@@ -350,7 +351,7 @@ def test_ios_project_auto_selects_ios_profile_skills(tmp_path: Path) -> None:
     project.mkdir()
     (project / "Package.swift").write_text("// swift-tools-version: 5.9\n", encoding="utf-8")
 
-    result = _install(project)
+    result = _install(project, "--architecture-mode", "clean")
 
     assert result.returncode == 0, result.stderr
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
@@ -374,7 +375,7 @@ def test_react_native_project_with_gradle_auto_selects_react_native_profile(tmp_
     (project / "package.json").write_text('{"dependencies":{"react-native":"latest"}}\n', encoding="utf-8")
     (project / "settings.gradle.kts").write_text("", encoding="utf-8")
 
-    result = _install(project)
+    result = _install(project, "--architecture-mode", "clean")
 
     assert result.returncode == 0, result.stderr
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
@@ -424,6 +425,143 @@ def test_skill_metadata_dependencies_are_indexed_and_auto_installed(tmp_path: Pa
     assert skills["consumer-skill"]["requires"] == ["dependency-skill"]
     assert (project / ".Codex" / "skills" / "dependency-skill" / "SKILL.md").exists()
     assert (project / ".claude" / "skills" / "dependency-skill" / "SKILL.md").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize(
+    ("opening", "closing", "newline"),
+    [(" \t--- \t", "\t--- ", "\n"), ("\ufeff \t--- \t", " \t---\t", "\r\n")],
+    ids=["whitespace-lf", "bom-whitespace-crlf"],
+)
+def test_framed_skill_installs_runtime_required_closure(
+    tmp_path: Path, binary: str, opening: str, closing: str, newline: str,
+) -> None:
+    project = tmp_path / "project"
+    skill = project / "skills" / "consumer-skill" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes(newline.join([
+        opening,
+        "name: consumer-skill",
+        "description: Enforce the selected dependency closure.",
+        "requires: [react-runtime-i18n]",
+        "requires_by_architecture:",
+        "  pending: [nextjs-auth-session]",
+        "  clean: [android-code-review]",
+        "architecture_modes: [pending]",
+        closing,
+        "Required behavior.",
+        "",
+    ]).encode("utf-8"))
+    env = {**os.environ, "HOME": str(tmp_path / "home")}
+
+    result = _install_with(
+        binary, project, "--profile", "python", "--architecture-mode", "pending",
+        "--skills", "consumer-skill", env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    index = json.loads((project / ".agent-flow/skills/index.json").read_text(encoding="utf-8"))
+    indexed = {entry["name"] for entry in index["skills"]}
+    expected = {"consumer-skill", "react-runtime-i18n", "nextjs-auth-session"}
+    assert expected <= indexed
+    assert "android-code-review" not in indexed
+    for name in expected:
+        assert (project / ".Codex/skills" / name / "SKILL.md").is_file()
+    probe = """
+import json
+from pathlib import Path
+from agent_flow.core.skill_resolver import PhaseSkills, resolve_phase_skills
+resolution = resolve_phase_skills(
+    project_root=Path.cwd(), phase_id="implement", host="codex",
+    phase_skills=PhaseSkills(required=("consumer-skill",)),
+)
+print(json.dumps({
+    "required": sorted(skill.name for skill in resolution.required),
+    "missing": sorted(skill.name for skill in resolution.missing),
+}))
+"""
+    runtime = subprocess.run(
+        (sys.executable, "-c", probe), cwd=project, capture_output=True, text=True,
+        env={**env, "PYTHONPATH": str(project / ".agent-flow/runtime/python")},
+        check=False, timeout=30,
+    )
+    assert runtime.returncode == 0, runtime.stderr
+    assert json.loads(runtime.stdout) == {"required": sorted(expected), "missing": []}
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize(
+    ("opening", "newline"),
+    [(" \t--- \t", "\n"), ("\ufeff \t--- \t", "\r\n")],
+    ids=["whitespace-lf", "bom-whitespace-crlf"],
+)
+@pytest.mark.parametrize("boundary", ["incompatible", "required-incompatible", "unterminated"])
+def test_framed_required_metadata_fails_closed_before_install(
+    tmp_path: Path, binary: str, opening: str, newline: str, boundary: str,
+) -> None:
+    project = tmp_path / "project"
+    skill = project / "skills" / "consumer-skill" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    metadata = (
+        "architecture_modes: [clean]"
+        if boundary == "incompatible"
+        else "requires: [react-runtime-i18n]"
+    )
+    closing = "---not-a-delimiter" if boundary == "unterminated" else " \t--- \t"
+    skill.write_bytes(newline.join([
+        opening, "name: consumer-skill", metadata, closing, "",
+    ]).encode("utf-8"))
+    if boundary == "required-incompatible":
+        dependency = project / "skills/react-runtime-i18n/SKILL.md"
+        dependency.parent.mkdir(parents=True)
+        dependency.write_bytes(newline.join([
+            opening, "name: react-runtime-i18n", "architecture_modes: [clean]",
+            " \t--- \t", "",
+        ]).encode("utf-8"))
+    before = skill.read_bytes()
+    env = {**os.environ, "HOME": str(tmp_path / "home")}
+
+    result = _install_with(
+        binary, project, "--profile", "python", "--architecture-mode", "pending",
+        "--skills", "consumer-skill", env=env,
+    )
+
+    assert result.returncode != 0
+    if boundary == "unterminated":
+        assert "unterminated frontmatter" in result.stderr
+    else:
+        assert "conflicts with" in result.stderr
+    assert not (project / ".agent-flow/kit.json").exists()
+    assert not (project / ".agent-flow.project.yaml").exists()
+    assert not (project / ".Codex/skills/consumer-skill").exists()
+    assert skill.read_bytes() == before
+
+
+def test_shared_frontmatter_keeps_body_null_and_summary_behavior() -> None:
+    probe = """
+import { splitFrontmatter, skillSummaryFromMarkdown } from "./lib/frontmatter.mjs";
+const framed = "\\ufeff \\t--- \\t\\r\\ndescription: First sentence. Second sentence.\\r\\n \\t---\\t\\r\\nBody";
+const unterminated = " \\t--- \\t\\ndescription: Hidden\\n---suffix\\n";
+console.log(JSON.stringify({
+  body: splitFrontmatter(framed),
+  summary: skillSummaryFromMarkdown(framed),
+  absent: splitFrontmatter("Body\\n---\\n"),
+  unterminated: splitFrontmatter(unterminated),
+  unterminatedSummary: skillSummaryFromMarkdown(unterminated),
+}));
+"""
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", probe), cwd=KIT_ROOT,
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "body": "description: First sentence. Second sentence.\n",
+        "summary": "First sentence.",
+        "absent": None,
+        "unterminated": None,
+        "unterminatedSummary": "",
+    }
 
 
 def test_installed_runtime_preserves_missing_skill_phase_contracts(tmp_path: Path) -> None:
@@ -884,7 +1022,7 @@ def test_explicit_profile_wins_over_detected_android(tmp_path: Path) -> None:
         'plugins { id("com.android.application") }\n', encoding="utf-8"
     )
 
-    result = _install(project, "--profile", "ios")
+    result = _install(project, "--profile", "ios", "--architecture-mode", "clean")
 
     assert result.returncode == 0, result.stderr
     profiles = project / ".agent-flow/profiles"
@@ -1390,10 +1528,9 @@ def test_no_hooks_removes_every_managed_hook_and_survives_reinstall(
     assert _install(project, "--force-managed").returncode == 0
     assert _hook_state(project)["registered"] == set()
 
-def test_standalone_no_hooks_prunes_stale_json_when_delegated_kit_fails(
+def test_failed_fresh_install_restores_existing_hook_configuration(
     tmp_path: Path,
 ) -> None:
-    """Standalone cleanup must not depend on delegated kit success."""
     import os
 
     project = tmp_path / "delegated-kit-failure"
@@ -1437,13 +1574,7 @@ def test_standalone_no_hooks_prunes_stale_json_when_delegated_kit_fails(
     assert not (project / ".agent-flow/kit.json").exists()
     for relative in (".claude/settings.json", ".Codex/hooks.json"):
         payload = json.loads((project / relative).read_text(encoding="utf-8"))
-        commands = [
-            hook["command"]
-            for entries in payload["hooks"].values()
-            for entry in entries
-            for hook in entry["hooks"]
-        ]
-        assert commands == ["./custom-hook.sh"]
+        assert payload == stale
     hooks = project / ".agent-flow/scripts/hooks"
     assert not list(hooks.glob("*.sh"))
     assert not list(hooks.glob("*.py"))
@@ -2425,7 +2556,7 @@ def test_legacy_kit_json_keeps_installed_at_and_gains_updated_at(
     """반증: updated_at을 기존 installed_at으로 backfill하면 없는 기록을 지어낸다.
 
     updated_at이 없던 설치본은 마지막 설치 시각을 모른다. 모르는 값을 꾸미는
-    대신 이번 install로 채운다. 읽을 수 없는 kit.json은 최초 설치와 같다.
+    대신 이번 install로 채운다. 읽을 수 없는 kit.json의 설치 시각도 이번 install로 채운다.
     """
     project = tmp_path / f"legacy-{binary}"
     project.mkdir()
@@ -2854,7 +2985,7 @@ def test_an_upgraded_skill_can_still_be_dropped_by_narrowing_the_profile(tmp_pat
     dropped = "android-clean-presentation-architecture"
     project = tmp_path / f"project-{binary}"
     project.mkdir()
-    assert _install_with(binary, project).returncode == 0
+    assert _install_with(binary, project, "--architecture-mode", "clean").returncode == 0
     skill_dir = project / ".agent-flow" / "skills" / dropped
     (skill_dir / "SKILL.md").write_text("---\nname: old\n---\n\n# 옛 판본\n", encoding="utf-8")
     _record_installed_hash(project, dropped)
@@ -3612,7 +3743,738 @@ def test_install_safety_works_without_isolated_pyyaml(
             for file in project.rglob("*") if file.is_file()
         } == before
     else:
-        assert result.returncode == 0, result.stderr
-        assert json.loads(
-            (project / ".agent-flow/kit.json").read_text(encoding="utf-8")
-        )["hooks"] is False
+        assert result.returncode != 0, result.stderr
+        assert not (project / ".agent-flow/kit.json").exists()
+        assert not (project / ".agent-flow.project.yaml").exists()
+
+
+def _installed_skill_names(project: Path) -> set[str]:
+    index = json.loads((project / ".agent-flow/skills/index.json").read_text(encoding="utf-8"))
+    selected = index.get("selection", {}).get("selected_skills")
+    if selected in (None, "all"):
+        return {path.name for path in (project / ".agent-flow/skills").iterdir() if path.is_dir()}
+    return set(selected)
+
+
+def _declare_architecture(project: Path, body: str) -> None:
+    (project / ".agent-flow.project.yaml").write_text(body, encoding="utf-8")
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("mode", ["clean", "local"])
+def test_git_install_reports_a_scoped_architecture_tracking_remedy(
+    tmp_path: Path, binary: str, mode: str,
+) -> None:
+    project = tmp_path / "team's project"
+    project.mkdir()
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    (project / "tracked.txt").write_text("base\n", encoding="utf-8")
+    for command in (
+        ("git", "init", "-b", "main"),
+        ("git", "config", "user.email", "t@t"),
+        ("git", "config", "user.name", "t"),
+        ("git", "add", "--", "tracked.txt"),
+        ("git", "commit", "-m", "init"),
+    ):
+        subprocess.run(command, cwd=project, check=True, capture_output=True, timeout=30)
+    unrelated = project / "unrelated-user-notes.txt"
+    unrelated.write_text("Do not stage this draft.\n", encoding="utf-8")
+    required = {".agent-flow.project.yaml"}
+    flags = ["--profile", "python", "--architecture-mode", mode]
+    if mode == "local":
+        contract = project / "skills/architecture/SKILL.md"
+        reference = "references/team's ownership rules.md"
+        document = contract.parent / reference
+        document.parent.mkdir(parents=True)
+        document.write_text("Features own state; adapters isolate external effects.\n", encoding="utf-8")
+        contract.write_text(
+            "---\nname: architecture\ndescription: Project structure\n"
+            f"requires_docs: [{json.dumps(reference)}]\n---\n\nKeep feature ownership explicit.\n",
+            encoding="utf-8",
+        )
+        required.update({"skills/architecture/SKILL.md", f"skills/architecture/{reference}"})
+        flags.extend(["--architecture-skill", "skills/architecture/SKILL.md"])
+
+    result = _install_with(binary, caller, "--root", str(project), *flags)
+
+    assert result.returncode == 0, result.stderr
+    indexed = subprocess.run(
+        ("git", "ls-files", "-z"), cwd=project, text=True, capture_output=True, check=True, timeout=30,
+    )
+    assert indexed.stdout == "tracked.txt\0", "install staged files without user approval"
+    output = result.stdout + result.stderr
+    commands = [
+        line.strip() for line in output.splitlines()
+        if line.strip().startswith("git ") and " add -- " in line
+    ]
+    assert len(commands) == 1, output
+    arguments = shlex.split(commands[0])
+    assert arguments[0] == "git"
+    subprocess.run(arguments, cwd=caller, check=True, capture_output=True, timeout=30)
+    staged = subprocess.run(
+        ("git", "diff", "--cached", "--name-only", "-z"),
+        cwd=project, text=True, capture_output=True, check=True, timeout=30,
+    )
+    assert set(staged.stdout.rstrip("\0").split("\0")) == required
+    assert unrelated.read_text(encoding="utf-8") == "Do not stage this draft.\n"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_non_git_install_does_not_require_architecture_staging(
+    tmp_path: Path, binary: str,
+) -> None:
+    result = _install_with(binary, tmp_path, "--profile", "python", "--architecture-mode", "clean")
+
+    assert result.returncode == 0, result.stderr
+    output = result.stdout + result.stderr
+    assert "architecture document is untracked:" not in output
+    assert not any(
+        line.strip().startswith("git ") and " add -- " in line
+        for line in output.splitlines()
+    )
+    assert yaml.safe_load((tmp_path / ".agent-flow.project.yaml").read_text())["architecture"]["mode"] == "clean"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_local_architecture_install_omits_the_clean_pack(tmp_path: Path, binary: str) -> None:
+    """local을 고른 프로젝트에 Clean 규범을 설치하면 선택이 의미를 잃는다."""
+    project = tmp_path / f"local-{binary}"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[project]\nname = 'probe'\n", encoding="utf-8")
+    skill = project / "skills" / "architecture"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: architecture\ndescription: 승인된 프로젝트 구조 규범\n---\n\n# 구조 규범\n",
+        encoding="utf-8",
+    )
+    _declare_architecture(
+        project,
+        "schema_version: 1\narchitecture:\n  mode: local\n  skill: skills/architecture/SKILL.md\n",
+    )
+
+    assert _install_with(binary, project, "--profile", "python").returncode == 0
+
+    installed = _installed_skill_names(project)
+    assert "clean-architecture" not in installed
+    # 공통 규율과 도메인 모델링은 선택과 무관하게 남는다. `ddd-architecture`를 Clean
+    # 팩으로 묶어 빼면 workflow의 DDD 단계가 설치되지 않은 이름을 계속 요구한다.
+    assert {"code-generation-discipline", "tdd", "ddd-architecture"} <= installed
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_clean_and_legacy_installs_keep_the_clean_pack(tmp_path: Path, binary: str) -> None:
+    """선언이 없는 기존 설치에서 Clean이 빠지면 그것이 조용한 정책 변경이다."""
+    for name, body in (("clean", "schema_version: 1\narchitecture:\n  mode: clean\n"), ("legacy", None)):
+        project = tmp_path / f"{name}-{binary}"
+        project.mkdir()
+        (project / "pyproject.toml").write_text("[project]\nname = 'probe'\n", encoding="utf-8")
+        if body is not None:
+            _declare_architecture(project, body)
+        else:
+            initial = _install_with(binary, project, "--profile", "python", "--architecture-mode", "clean")
+            assert initial.returncode == 0, initial.stderr
+            (project / ".agent-flow.project.yaml").unlink()
+        assert _install_with(binary, project, "--profile", "python").returncode == 0
+
+        assert "clean-architecture" in _installed_skill_names(project), name
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_reinstall_does_not_reintroduce_clean_after_switching_to_pending(
+    tmp_path: Path, binary: str
+) -> None:
+    """이전 선택과 합집합하면 local로 바꾼 프로젝트가 재설치 한 번에 Clean으로 돌아간다."""
+    project = tmp_path / f"switch-{binary}"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[project]\nname = 'probe'\n", encoding="utf-8")
+    assert _install_with(binary, project, "--profile", "python", "--architecture-mode", "clean").returncode == 0
+    assert "clean-architecture" in _installed_skill_names(project)
+
+    _declare_architecture(project, "schema_version: 1\narchitecture:\n  mode: pending\n")
+    assert _install_with(binary, project).returncode == 0
+
+    installed = _installed_skill_names(project)
+    assert "clean-architecture" not in installed
+    # 스택 선택은 그대로 유지된다. 아키텍처만 다시 계산한다.
+    assert "python-development-guide" in installed
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("source_root", ["skills", ".agent-flow/local-skills"])
+@pytest.mark.parametrize("mode", ["pending", "local"])
+def test_reinstall_excludes_project_local_clean_overrides(
+    tmp_path: Path, binary: str, source_root: str, mode: str,
+) -> None:
+    _skill(tmp_path / "skills/architecture", "Features own their state.")
+    override = tmp_path / source_root / "react-clean-architecture"
+    _skill(override, "Project-owned Clean rules without an architecture_modes declaration.")
+    original = (override / "SKILL.md").read_bytes()
+    initial = _install_with(binary, tmp_path, "--profile", "generic", "--architecture-mode", "clean")
+    assert initial.returncode == 0, initial.stderr
+    assert "react-clean-architecture" in _installed_skill_names(tmp_path)
+    assert (tmp_path / ".claude/skills/react-clean-architecture/SKILL.md").is_file()
+
+    flags = ("--architecture-mode", mode)
+    if mode == "local":
+        flags += ("--architecture-skill", "skills/architecture/SKILL.md")
+    switched = _install_with(binary, tmp_path, *flags)
+    assert switched.returncode == 0, switched.stderr
+    again = _install_with(binary, tmp_path)
+    assert again.returncode == 0, again.stderr
+
+    index = json.loads((tmp_path / ".agent-flow/skills/index.json").read_text(encoding="utf-8"))
+    assert "react-clean-architecture" not in _installed_skill_names(tmp_path)
+    assert "react-clean-architecture" not in {skill["name"] for skill in index["skills"]}
+    for host in (".claude", ".Codex", ".omp"):
+        assert not (tmp_path / host / "skills/react-clean-architecture").exists()
+    assert (override / "SKILL.md").read_bytes() == original
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("request_kind", ["explicit", "dependency"])
+def test_excluded_local_override_cannot_satisfy_an_incompatible_request(
+    tmp_path: Path, binary: str, request_kind: str,
+) -> None:
+    override = tmp_path / ".agent-flow/local-skills/react-clean-architecture"
+    _skill(override, "Project-owned Clean rules.")
+    original = (override / "SKILL.md").read_bytes()
+    requested = "react-clean-architecture"
+    if request_kind == "dependency":
+        requested = "team-rule"
+        consumer = tmp_path / "skills" / requested
+        consumer.mkdir(parents=True)
+        (consumer / "SKILL.md").write_text(
+            "---\nname: team-rule\nrequires: [react-clean-architecture]\n---\nTeam rules.\n",
+            encoding="utf-8",
+        )
+
+    result = _install_with(
+        binary, tmp_path, "--skills", requested, "--architecture-mode", "pending",
+    )
+
+    assert result.returncode != 0
+    assert "react-clean-architecture" in result.stderr
+    assert (override / "SKILL.md").read_bytes() == original
+    assert not (tmp_path / ".agent-flow/kit.json").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_flag_records_the_selection(tmp_path: Path, binary: str) -> None:
+    project = tmp_path / f"flag-{binary}"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[project]\nname = 'probe'\n", encoding="utf-8")
+
+    assert _install_with(
+        binary, project, "--profile", "python", "--architecture-mode", "pending"
+    ).returncode == 0
+
+    assert (project / ".agent-flow.project.yaml").read_text(encoding="utf-8") == (
+        "schema_version: 1\narchitecture:\n  mode: pending\n"
+    )
+    assert "clean-architecture" not in _installed_skill_names(project)
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_refuses_an_unresolvable_local_contract(tmp_path: Path, binary: str) -> None:
+    """검증 없이 통과시키면 다음 run이 도달할 수 없는 계약을 유효한 선택으로 읽는다."""
+    project = tmp_path / f"broken-{binary}"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[project]\nname = 'probe'\n", encoding="utf-8")
+    _declare_architecture(
+        project,
+        "schema_version: 1\narchitecture:\n  mode: local\n  skill: skills/architecture/SKILL.md\n",
+    )
+
+    result = _install_with(binary, project, "--profile", "python")
+
+    assert result.returncode != 0
+    assert not (project / ".agent-flow/kit.json").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("profile_args", [(), ("--profile", "python")])
+def test_fresh_headless_install_persists_pending(
+    tmp_path: Path, binary: str, profile_args: tuple[str, ...],
+) -> None:
+    result = _install_with(binary, tmp_path, *profile_args)
+
+    assert result.returncode == 0, result.stderr
+    declaration = yaml.safe_load((tmp_path / ".agent-flow.project.yaml").read_text())
+    assert declaration["architecture"] == {"mode": "pending"}
+    assert "pending" in result.stdout
+    names = _installed_skill_names(tmp_path)
+    assert {"code-generation-discipline", "ddd-architecture", "tdd", "write-for-work"} <= names
+    assert not {"clean-architecture", "clean-architecture-core", "python-api-clean-architecture"} & names
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_local_reinstall_keeps_custom_skills_and_other_selected_stacks(
+    tmp_path: Path, binary: str,
+) -> None:
+    first = _install_with(binary, tmp_path, "--profile", "android,python", "--architecture-mode", "clean")
+    assert first.returncode == 0, first.stderr
+    _skill(tmp_path / "skills/architecture", "Keep UI features colocated; platform boundaries own external effects.")
+    _skill(tmp_path / "skills/team-rule", "Preserve the team's release checks.")
+    contract = (tmp_path / "skills/architecture/SKILL.md").read_bytes()
+    custom = (tmp_path / "skills/team-rule/SKILL.md").read_bytes()
+
+    switched = _install_with(
+        binary, tmp_path, "--architecture-mode", "local",
+        "--architecture-skill", "skills/architecture/SKILL.md",
+    )
+    assert switched.returncode == 0, switched.stderr
+    declaration = (tmp_path / ".agent-flow.project.yaml").read_bytes()
+    again = _install_with(binary, tmp_path)
+    assert again.returncode == 0, again.stderr
+    assert (tmp_path / ".agent-flow.project.yaml").read_bytes() == declaration
+    assert (tmp_path / "skills/architecture/SKILL.md").read_bytes() == contract
+    assert (tmp_path / "skills/team-rule/SKILL.md").read_bytes() == custom
+    names = _installed_skill_names(tmp_path)
+    assert {"android-code-review", "python-development-guide", "team-rule", "write-for-work", "ddd-architecture"} <= names
+    assert not {
+        "clean-architecture", "clean-architecture-core", "android-clean-architecture",
+        "android-clean-presentation-architecture", "python-api-clean-architecture",
+    } & names
+    index = json.loads((tmp_path / ".agent-flow/skills/index.json").read_text())
+    assert set(index["selection"]["profiles"]) == {"android", "python"}
+    assert any(skill["name"] == "team-rule" for skill in index["skills"])
+    assert not (tmp_path / ".agent-flow/skills/android-clean-architecture").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("flags", [
+    ("--architecture-mode", "unknown"),
+    ("--architecture-mode", "local", "--architecture-skill", "skills/architecture/SKILL.md"),
+    ("--architecture-mode", "clean", "--architecture-skill", "skills/architecture/SKILL.md"),
+    ("--architecture-skill", "skills/architecture/SKILL.md"),
+])
+def test_invalid_architecture_request_preserves_installed_policy(
+    tmp_path: Path, binary: str, flags: tuple[str, ...],
+) -> None:
+    initial = _install_with(binary, tmp_path, "--profile", "python", "--architecture-mode", "clean")
+    assert initial.returncode == 0, initial.stderr
+    paths = [".agent-flow.project.yaml", ".agent-flow/kit.json", ".agent-flow/skills/index.json"]
+    before = {relative: (tmp_path / relative).read_bytes() for relative in paths}
+
+    result = _install_with(binary, tmp_path, *flags)
+
+    assert result.returncode != 0
+    assert {relative: (tmp_path / relative).read_bytes() for relative in paths} == before
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_failed_install_restores_policy_and_retry_publishes_local(
+    tmp_path: Path, binary: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    initial = _install_with(binary, project, "--profile", "android", "--architecture-mode", "clean")
+    assert initial.returncode == 0, initial.stderr
+    _skill(project / "skills/architecture", "Feature owners retain state; adapters isolate external effects.")
+    paths = [".agent-flow.project.yaml", ".agent-flow/kit.json", ".agent-flow/skills/index.json"]
+    before = {relative: (project / relative).read_bytes() for relative in paths}
+    hooks_before = _hook_state(project)
+    preload = tmp_path / "fail-publish.cjs"
+    preload.write_text(
+        "const fs = require('node:fs');\n"
+        "const rename = fs.renameSync;\n"
+        "fs.renameSync = (source, target) => {\n"
+        "  if (String(target).endsWith('/.agent-flow/kit.json')) throw new Error('injected install publication failure');\n"
+        "  return rename(source, target);\n"
+        "};\n"
+        "require('node:module').syncBuiltinESMExports();\n",
+        encoding="utf-8",
+    )
+    flags = ("--architecture-mode", "local", "--architecture-skill", "skills/architecture/SKILL.md")
+
+    failed = _install_with(binary, project, *flags, "--no-hooks", env={**os.environ, "NODE_OPTIONS": f"--require={preload}"})
+
+    assert failed.returncode != 0
+    assert {relative: (project / relative).read_bytes() for relative in paths} == before
+    assert _hook_state(project) == hooks_before
+    assert (project / ".agent-flow/skills/android-clean-architecture/SKILL.md").is_file()
+    assert not (project / ".agent-flow/install-recovery").exists()
+    retry = _install_with(binary, project, *flags)
+    assert retry.returncode == 0, retry.stderr
+    assert yaml.safe_load((project / ".agent-flow.project.yaml").read_text())["architecture"]["mode"] == "local"
+    assert "android-clean-architecture" not in _installed_skill_names(project)
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_corrupt_legacy_metadata_does_not_become_a_fresh_pending_install(
+    tmp_path: Path, binary: str,
+) -> None:
+    metadata = tmp_path / ".agent-flow/kit.json"
+    metadata.parent.mkdir()
+    metadata.write_text('{"installed_at":', encoding="utf-8")
+
+    result = _install_with(binary, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    repaired = _kit_json(tmp_path)
+    assert repaired["installed_at"] <= repaired["updated_at"]
+    assert not (tmp_path / ".agent-flow.project.yaml").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize(("choice", "mode"), [("1", "clean"), ("2", "local"), ("3", "pending")])
+def test_interactive_install_offers_three_architecture_choices(
+    tmp_path: Path, binary: str, choice: str, mode: str,
+) -> None:
+    if os.name != "posix":
+        pytest.skip("interactive terminal regression requires a POSIX PTY")
+    import pty
+
+    if mode == "local":
+        _skill(tmp_path / "skills/architecture", "Features own state and isolate external effects.")
+    master, slave = pty.openpty()
+    try:
+        os.write(master, f"{choice}\n".encode())
+        result = subprocess.run(
+            (_node(), str(KIT_ROOT / "bin" / binary), "install", "--profile", "python"),
+            cwd=tmp_path,
+            stdin=slave,
+            stdout=slave,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    finally:
+        os.close(master)
+        os.close(slave)
+
+    assert result.returncode == 0, result.stderr
+    declared = yaml.safe_load((tmp_path / ".agent-flow.project.yaml").read_text())
+    assert declared["architecture"]["mode"] == mode
+    if mode == "local":
+        assert declared["architecture"]["skill"] == "skills/architecture/SKILL.md"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_local_install_rejects_a_custom_clean_dependency_without_erasing_it(
+    tmp_path: Path, binary: str,
+) -> None:
+    _skill(tmp_path / "skills/architecture", "Features own state and isolate external effects.")
+    root = tmp_path / "skills/team-rule"
+    _skill(root, "This custom rule has an incompatible required dependency.")
+    manifest = root / "SKILL.md"
+    manifest.write_text(
+        "---\nname: team-rule\ndescription: Team rule\nrequires: [clean-architecture-core]\n---\n\nKeep strict layers.\n",
+        encoding="utf-8",
+    )
+    original = manifest.read_bytes()
+
+    result = _install_with(
+        binary, tmp_path, "--profile", "python", "--architecture-mode", "local",
+        "--architecture-skill", "skills/architecture/SKILL.md",
+    )
+
+    assert result.returncode != 0
+    assert "team-rule -> clean-architecture-core" in result.stderr
+    assert manifest.read_bytes() == original
+    assert not (tmp_path / ".agent-flow.project.yaml").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "requires: [ordinary-rule]\n"
+        "requires_by_architecture:\n"
+        "  clean: []\n"
+        "# The local branch remains part of this mapping.\n"
+        "  local: [required-rule]\n",
+        "requires:\n"
+        "# Comments do not end a block list either.\n"
+        "- 'ordinary-rule'\n"
+        "'requires_by_architecture': # Architecture-specific dependencies\n"
+        "    clean: []\n"
+        "# A column-zero comment is valid at any mapping depth.\n"
+        '    "local":\n'
+        '      - "required-rule" # Required even with trailing comments\n',
+    ],
+    ids=["reviewer-reproduction", "quoted-block-lists"],
+)
+def test_installer_conditional_dependency_closure_survives_yaml_comments(
+    tmp_path: Path, binary: str, declaration: str,
+) -> None:
+    from agent_flow.core.architecture_policy import ArchitectureMode
+
+    kit = tmp_path / "kit"
+    shutil.copytree(
+        KIT_ROOT, kit, symlinks=True,
+        ignore=shutil.ignore_patterns(".git", "node_modules", "__pycache__", ".agent-flow"),
+    )
+    project = tmp_path / "project"
+    _skill(project / "skills/architecture", "Features own their state.")
+    _skill(kit / "skills/ordinary-rule", "Always required.")
+    _skill(kit / "skills/required-rule", "Required by the local branch.")
+    probe = project / "skills/probe"
+    probe.mkdir(parents=True)
+    (probe / "SKILL.md").write_text(
+        f"---\nname: probe\ndescription: Conditional dependency probe\n{declaration}---\n"
+        "Apply the selected architecture rules.\n",
+        encoding="utf-8",
+    )
+    module = (kit / "lib/skill-selection.mjs").as_uri()
+    selection = subprocess.run(
+        [
+            _node(), "--input-type=module", "-e",
+            f"import {{ addDependencies }} from {json.dumps(module)};"
+            "const names = new Set(['probe']);"
+            f"addDependencies(names, {{kitRoot: {json.dumps(str(kit))}, "
+            f"projectRoot: {json.dumps(str(project))}, architectureMode: 'local'}});"
+            "console.log(JSON.stringify([...names]));",
+        ],
+        cwd=project, text=True, capture_output=True, check=False, timeout=10,
+    )
+    assert selection.returncode == 0, selection.stderr
+    expected = {"probe", "ordinary-rule", "required-rule"}
+    assert set(json.loads(selection.stdout)) == expected
+    roots = (
+        SkillRoot(source="project", template=str(project / "skills/{skill}/SKILL.md")),
+        SkillRoot(source="bundled", template=str(kit / "skills/{skill}/SKILL.md")),
+    )
+    catalog = discover_skill_catalog(project, roots)
+    assert set(expand_dependencies(["probe"], catalog, architecture_mode=ArchitectureMode.LOCAL)) == expected
+
+    result = subprocess.run(
+        [
+            _node(), str(kit / "bin" / binary), "install", "--skills", "probe",
+            "--architecture-mode", "local", "--architecture-skill", "skills/architecture/SKILL.md",
+        ],
+        cwd=project, text=True, capture_output=True, check=False, timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert expected <= _installed_skill_names(project)
+    for name in ("ordinary-rule", "required-rule"):
+        assert (project / ".agent-flow/skills" / name / "SKILL.md").is_file()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("source_root", ["skills", ".agent-flow/local-skills"])
+def test_installer_accepts_wrapped_project_local_metadata(
+    tmp_path: Path, binary: str, source_root: str,
+) -> None:
+    probe = tmp_path / source_root / "probe"
+    probe.mkdir(parents=True)
+    manifest = probe / "SKILL.md"
+    manifest.write_text(
+        "---\nname: probe\n"
+        "description: Use the team's established conventions\n"
+        "  when implementing a project feature.\n"
+        "metadata:\n"
+        "  notes: Keep existing module boundaries\n"
+        "    while introducing new behavior.\n"
+        "requires: [python-development-guide]\n"
+        "---\nFollow project conventions.\n",
+        encoding="utf-8",
+    )
+    original = manifest.read_bytes()
+
+    result = _install_with(
+        binary, tmp_path, "--skills", "probe", "--architecture-mode", "pending",
+    )
+
+    assert result.returncode == 0, result.stderr
+    index = json.loads((tmp_path / ".agent-flow/skills/index.json").read_text(encoding="utf-8"))
+    skills = {skill["name"]: skill for skill in index["skills"]}
+    assert {"probe", "python-development-guide"} <= skills.keys()
+    assert skills["probe"]["requires"] == ["python-development-guide"]
+    for host in (".claude", ".Codex", ".omp"):
+        assert (tmp_path / host / "skills/probe/SKILL.md").read_bytes() == original
+    assert (tmp_path / ".agent-flow/skills/python-development-guide/SKILL.md").is_file()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "requires_by_architecture:\n  clean: []\n  local:\n",
+        "requires_by_architecture:\n  clean: [false]\n  local: []\n",
+        "requires_by_architecture:\n  other: []\n  local: []\n",
+        "requires_by_architecture:\n  local: [required-rule]\n  local: []\n",
+        "requires_by_architecture:\n  local: []\n    requires: [required-rule]\n",
+        "requires:\n  required-rule: true\n",
+        "requires: [required-rule,,]\n",
+        "requires: [required-rule]\nrequires: []\n",
+        "requires [required-rule]\n",
+        "requires_by_architecture:\n  clean: []\n# Still in the mapping.\n  local: [false]\n",
+        "dependencies: [false]\n",
+    ],
+    ids=["null-branch", "typed-unselected-branch", "unknown-mode",
+         "duplicate-branch", "invalid-indentation", "requires-mapping", "empty-list-item",
+         "duplicate-field", "missing-field-colon", "typed-branch-after-comment", "typed-dependency"],
+)
+def test_installer_rejects_invalid_dependency_metadata(
+    tmp_path: Path, binary: str, declaration: str,
+) -> None:
+    _skill(tmp_path / "skills/architecture", "Features own their state.")
+    probe = tmp_path / "skills/probe"
+    probe.mkdir(parents=True)
+    manifest = probe / "SKILL.md"
+    manifest.write_text(
+        f"---\nname: probe\ndescription: Invalid dependency probe\n{declaration}---\n"
+        "This metadata must not lose required rules.\n",
+        encoding="utf-8",
+    )
+
+    result = _install_with(
+        binary, tmp_path, "--skills", "probe", "--architecture-mode", "local",
+        "--architecture-skill", "skills/architecture/SKILL.md",
+    )
+
+    assert result.returncode != 0
+    assert "requires" in result.stderr or "invalid" in result.stderr.lower()
+    assert not (tmp_path / ".agent-flow/kit.json").exists()
+
+
+@pytest.mark.parametrize("boundary", ["runtime", "agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("metadata", [
+    "name: probe\nshared: &shared\n  requires_by_architecture:\n"
+    "    local: [required-rule]\n<<: *shared\n",
+    "name: probe\nrequires_by_architecture:\n  <<: {local: [required-rule]}\n",
+    "name: probe\nextra:\n  <<: {label: metadata}\n",
+    "{name: probe, shared: &shared {requires: [required-rule]}, <<: *shared}\n",
+    "name: probe\n!!merge '<<': {requires: [required-rule]}\n",
+    "name: probe\n? <<\n: {requires: [required-rule]}\n",
+    '{name: probe, !<tag:yaml.org,2002:merge> "<<": {requires: [required-rule]}}\n',
+    "name: probe\n&key <<: {requires: [required-rule]}\n",
+    'name: probe\n!<tag:yaml.org,2002:%6derge> "<<": {requires: [required-rule]}\n',
+    "name: probe\nextra:\n  - <<: {requires: [required-rule]}\n",
+], ids=["top-level", "conditional", "extra-metadata", "flow-mapping", "explicit-tag",
+        "explicit-key", "flow-full-tag", "anchored-key", "encoded-tag", "sequence-mapping"])
+def test_normative_yaml_merge_is_rejected_at_both_boundaries(
+    tmp_path: Path, boundary: str, metadata: str,
+) -> None:
+    _skill(tmp_path / "skills/architecture", "Features own their state.")
+    _skill(tmp_path / "skills/required-rule", "A required rule.")
+    manifest = tmp_path / "skills/probe/SKILL.md"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(f"---\n{metadata}---\nApply the required rules.\n", encoding="utf-8")
+    original = manifest.read_bytes()
+    if boundary == "runtime":
+        roots = (SkillRoot(source="project", template=str(tmp_path / "skills/{skill}/SKILL.md")),)
+        with pytest.raises(ValueError, match="merge|frontmatter|metadata"):
+            discover_skill_catalog(tmp_path, roots)
+    else:
+        result = _install_with(
+            boundary, tmp_path, "--skills", "probe", "--architecture-mode", "local",
+            "--architecture-skill", "skills/architecture/SKILL.md",
+        )
+        assert result.returncode != 0, result.stdout
+        assert "invalid" in result.stderr.lower() or "merge" in result.stderr.lower()
+        assert not (tmp_path / ".agent-flow/kit.json").exists()
+    assert manifest.read_bytes() == original
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("description", [
+    "|\n  <<: *example\n  {<<: *example}",
+    '"first\n  <<: literal\n  last"',
+    "Explain bit shifts, <<",
+], ids=["block", "multiline-quoted", "plain-comma"])
+def test_merge_like_description_and_quoted_key_preserve_dependencies(
+    tmp_path: Path, binary: str, description: str,
+) -> None:
+    _skill(tmp_path / "skills/required-rule", "A required rule.")
+    manifest = tmp_path / "skills/probe/SKILL.md"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        f"---\nname: probe\ndescription: {description}\n'<<': literal\n"
+        'extra: {"description":"example, <<: literal"}\n'
+        "label: '{<<: *example}'\nrequires: [required-rule]\n---\nApply the required rule.\n",
+        encoding="utf-8",
+    )
+    result = _install_with(binary, tmp_path, "--skills", "probe", "--architecture-mode", "pending")
+    assert result.returncode == 0, result.stderr
+    expected = {"probe", "required-rule"}
+    assert expected <= _installed_skill_names(tmp_path)
+    roots = (SkillRoot(source="host", template=str(tmp_path / ".claude/skills/{skill}/SKILL.md")),)
+    catalog = discover_skill_catalog(tmp_path, roots)
+    assert set(expand_dependencies(["probe"], catalog)) == expected
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("metadata", [
+    "rule_names: &rules [required-rule]\nrequires: *rules\n",
+    "!!str requires: [required-rule]\n",
+    "requires_by_architecture:\n  clean: &rules [required-rule]\n  pending: *rules\n",
+], ids=["aliased-list", "tagged-key", "aliased-mode-branches"])
+def test_install_and_runtime_share_normative_yaml_semantics(
+    tmp_path: Path, binary: str, metadata: str,
+) -> None:
+    _skill(tmp_path / "skills/required-rule", "A required rule.")
+    manifest = tmp_path / "skills/probe/SKILL.md"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        f"---\nname: probe\n{metadata}---\nApply the required rule.\n",
+        encoding="utf-8",
+    )
+    original = manifest.read_bytes()
+    project_roots = (SkillRoot(source="project", template=str(tmp_path / "skills/{skill}/SKILL.md")),)
+    expected = set(expand_dependencies(["probe"], discover_skill_catalog(tmp_path, project_roots)))
+    assert expected == {"probe", "required-rule"}
+    result = _install_with(binary, tmp_path, "--skills", "probe", "--architecture-mode", "pending")
+    assert result.returncode == 0, result.stderr
+    assert expected <= _installed_skill_names(tmp_path)
+    host_roots = (SkillRoot(source="host", template=str(tmp_path / ".claude/skills/{skill}/SKILL.md")),)
+    assert set(expand_dependencies(["probe"], discover_skill_catalog(tmp_path, host_roots))) == expected
+    assert (tmp_path / ".claude/skills/probe/SKILL.md").read_bytes() == original
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("value", ["1_000", "2026-09-12"], ids=["underscored-integer", "date"])
+def test_installer_rejects_yaml_typed_dependency_scalars(
+    tmp_path: Path, binary: str, value: str,
+) -> None:
+    _skill(tmp_path / "skills" / value, "This identifier must be quoted when required.")
+    probe = tmp_path / "skills/probe"
+    probe.mkdir(parents=True)
+    manifest = probe / "SKILL.md"
+    manifest.write_text(
+        f"---\nname: probe\nrequires: [{value}]\n---\nApply the required rule.\n",
+        encoding="utf-8",
+    )
+    original = manifest.read_bytes()
+    roots = (SkillRoot(source="project", template=str(tmp_path / "skills/{skill}/SKILL.md")),)
+    with pytest.raises(ValueError, match="requires"):
+        discover_skill_catalog(tmp_path, roots)
+
+    result = _install_with(
+        binary, tmp_path, "--skills", "probe", "--architecture-mode", "pending",
+    )
+
+    assert result.returncode != 0
+    assert "invalid" in result.stderr.lower() or "requires" in result.stderr
+    assert manifest.read_bytes() == original
+    assert not (tmp_path / ".agent-flow/kit.json").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_installer_preserves_quoted_yaml_typed_dependency_identifiers(
+    tmp_path: Path, binary: str,
+) -> None:
+    for name in ("1_000", "2026-09-12"):
+        _skill(tmp_path / "skills" / name, "A quoted dependency identifier.")
+    probe = tmp_path / "skills/probe"
+    probe.mkdir(parents=True)
+    (probe / "SKILL.md").write_text(
+        "---\nname: probe\ndescription: 2026-09-12\n"
+        "requires: ['1_000', \"2026-09-12\"]\n---\nApply both required rules.\n",
+        encoding="utf-8",
+    )
+
+    result = _install_with(
+        binary, tmp_path, "--skills", "probe", "--architecture-mode", "pending",
+    )
+
+    assert result.returncode == 0, result.stderr
+    expected = {"probe", "1_000", "2026-09-12"}
+    assert expected <= _installed_skill_names(tmp_path)
+    roots = (SkillRoot(source="host", template=str(tmp_path / ".claude/skills/{skill}/SKILL.md")),)
+    catalog = discover_skill_catalog(tmp_path, roots)
+    assert set(expand_dependencies(["probe"], catalog)) == expected

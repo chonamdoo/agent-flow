@@ -40,14 +40,20 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
     Merely using an available tool or MCP server does not trigger development rules.
   - Read required skills at the paths resolved for the active host. Use offered
     skills only for matching work; do not invent host paths or install mid-run.
+- In pending mode, authors and reviewers must compare the actual changed scope
+  with an existing pattern and record why no architecture decision is needed.
+  New module ownership, dependency direction, persistence boundaries, or wiring
+  decisions require architecture selection first, even in a workflow without a
+  design phase. A missing architecture angle or an `n/a` marker is not evidence
+  that the scope is nonstructural; request changes instead of approving it.
 - For app-wide error handling, common dialog/snackbar/toast hosts, SessionExpired navigation, root navigation resets, or API/domain common error mapping, read the matching app-shell skill: `android-appshell-error-handling`, `react-app-shell-error-handling`, `react-native-app-shell-error-handling`, or `ios-app-shell-error-handling`.
-- For presentation-layer code generation, modification, and code review, also read the matching presentation architecture skill before writing or judging code:
+- For presentation-layer code generation, modification, and code review, apply the selected architecture contract's presentation rules. In local mode, read the full root and required references supplied by the resolver; pending cannot authorize a presentation architecture decision. In Clean mode, also read the matching presentation architecture skill before writing or judging code:
   - Android/Compose or Android-targeted KMP presentation: read `android-clean-presentation-architecture`.
   - React Web/Next.js presentation, confirmed by dependencies and source scope rather than TSX alone: read `react-clean-presentation-architecture`.
   - React Native/Expo presentation: read `react-native-clean-presentation-architecture`.
   - iOS/SwiftUI/UIKit presentation: read `ios-clean-presentation-architecture`.
   - Flutter/Dart presentation: read `flutter-clean-presentation-architecture`.
-- Presentation work must be state-based. Record `presentation-skill: android|flutter|react|react-native|ios|n/a`, `presentation-state-based-development: applied|n/a`, `presentation-state-review: pass|fail|n/a`, `ui-state-modeling: explicit|n/a`, `presentation-mapping-boundary: domain-to-uimodel|n/a`, and `di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a>` in the completion gate when relevant.
+- Presentation state ownership and behavior must be explicit under the selected contract. In Clean mode, presentation work must be state-based and use domain-to-UiModel mapping. Record `presentation-skill: android|flutter|react|react-native|ios|n/a`, `presentation-state-based-development: applied|n/a`, `presentation-state-review: pass|fail|n/a`, `ui-state-modeling: explicit|n/a`, `presentation-mapping-boundary: domain-to-uimodel|n/a`, and `di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a>` only for applicable checks; local mode records its actual presentation evidence and uses permitted `n/a` values rather than claiming an unselected Clean mapping.
 - Completion Gate markers must use concrete values that the marker parser accepts. Do not leave angle-bracket placeholders; use `n/a` only when the marker is genuinely not relevant.
 - For multiple UI platforms, retain platform-scoped evidence using the workflow's
   supported artifact structure. Do not put comma-separated platforms into a scalar

@@ -22,7 +22,7 @@ import { captureLegacySkillCopyReceipts, observeSkillContent, parseSkillMetadata
 import {
   activeInstallProfileIds,
   ensureInstallLease,
-  inheritedInstallLeaseOptions,
+  prepareArchitectureInstall,
   INSTALL_SAFETY_EXIT,
   AGENT_FLOW_COMMAND,
   ASSET_BACKUP_NOTICE_PREFIX,
@@ -656,7 +656,8 @@ function selectProjectSkills(installSelection = null) {
   }
   const allowed = installSelection?.skillNames || null;
   const skills = [...byName.values()]
-    .filter((skill) => !allowed || allowed.has(skill.name))
+    .filter((skill) => !installSelection?.architecturePlan?.excluded_skills?.includes(skill.name)
+      && (!allowed || allowed.has(skill.source === "bundled" ? skill.name : path.basename(path.dirname(skill.path)))))
     .sort((a, b) => a.name.localeCompare(b.name));
   warnings.push(...validateSkillDependencies(skills));
   const conflicts = skills.map((skill) => ({
@@ -670,9 +671,10 @@ function selectProjectSkills(installSelection = null) {
   return {
     version: 1,
     selection: {
-      mode: allowed ? "filtered" : "all",
+      mode: installSelection?.filtered ? "filtered" : "all",
       profiles: installSelection?.profiles || [],
       explicit_skills: installSelection?.explicitSkills || [],
+      selected_skills: allowed ? [...allowed].sort() : "all",
     },
     skills: skills.map(({ priority, warnings: _warnings, ...skill }) => skill),
     conflicts,
@@ -867,18 +869,21 @@ function legacyHostSkillRoot(linkPath) {
 
 
 
-function runKitInstall() {
-  // kit.mjs가 prompts/rules/bootstrap/concise-output의 canonical generator다.
-  // 여기서 먼저 실행하지 않으면 assertInstalled가 요구하는 파일이 빠진다.
-  // 단, kit.mjs는 yaml 가능한 python이 필요하므로 없는 환경에서는 경고 후 계속한다.
+function runKitInstall(architectureInstall) {
   const kitCli = path.join(path.dirname(fileURLToPath(import.meta.url)), "agent-flow-kit.mjs");
   // 자식은 이미 해석된 PROJECT를 cwd로 받는다. 상대 `--root`를 그대로 넘기면
   // 자식이 제 cwd 기준으로 한 번 더 풀어 다른 곳을 가리킨다.
   const forwarded = withoutInstallRootOption(INSTALL_ARGS).filter((arg) => arg !== "install");
   const args = [kitCli, "install", ...forwarded];
-  const result = spawnSync(process.execPath, args, {
-    cwd: PROJECT, encoding: "utf8", ...inheritedInstallLeaseOptions(),
-  });
+  const delegated = architectureInstall.delegatedOptions();
+  let result;
+  try {
+    result = spawnSync(process.execPath, args, {
+      cwd: PROJECT, encoding: "utf8", ...delegated.options,
+    });
+  } finally {
+    delegated.close();
+  }
   // kit.mjs의 stdout은 여기서 갇힌다. prune과 skill 갱신 알림만은 사용자가 무엇이
   // 바뀌었는지 아는 유일한 통로라 그대로 다시 낸다 — 실제 갱신은 자식이 하므로
   // 여기서 걸러 내면 install.mjs 경로가 통째로 무음이 된다.
@@ -944,15 +949,18 @@ function install() {
   if (!ensureInstallLease(PROJECT)) return;
   // 자식 kit install이 index를 다시 쓴다. 그 뒤에 읽으면 "사용자가 손댔는가"를
   // 가르는 hash가 방금 관측한 현재 내용으로 갱신돼 있어 오라클이 사라진다.
+  const architectureInstall = prepareArchitectureInstall(PROJECT, INSTALL_ARGS);
   const previousSkillIndex = readJsonIfExists(path.join(AF_DIR, "skills", "index.json"));
   captureLegacySkillCopyReceipts(PROJECT, previousSkillIndex);
-  const delegatedKitInstalled = runKitInstall();
+  try {
+  const delegatedKitInstalled = runKitInstall(architectureInstall);
   ensureDir(path.join(AF_DIR, "runs"));
   ensureDir(path.join(AF_DIR, "memory"));
   ensureDir(path.join(AF_DIR, "local-skills"));
 
   const profile = installProfile(PROJECT, INSTALL_ARGS, previousSkillIndex);
-  let installSelection = resolveInstallSelection({ args: INSTALL_ARGS, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: PROJECT });
+  const architectureMode = architectureInstall.plan.mode;
+  let installSelection = resolveInstallSelection({ args: INSTALL_ARGS, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: PROJECT, architectureMode, architecturePlan: architectureInstall.plan });
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, PROJECT);
 
   // 자식 kit install이 이미 두 루트 파일을 썼고 receipt까지 남겼다. 여기서 한 번 더
@@ -1170,9 +1178,7 @@ function install() {
     }
   }
   if (!delegatedKitInstalled) {
-    console.error("agent-flow install incomplete: delegated kit installation failed; success metadata was not published");
-    process.exitCode = 1;
-    return;
+    throw new Error("agent-flow install incomplete: delegated kit installation failed; previous policy restored");
   }
 
   // 이 파일이 kit.mjs가 쓴 kit.json을 덮는다. 먼저 읽지 않으면 최초 설치
@@ -1184,6 +1190,7 @@ function install() {
     version: "0.1.0",
     install_scope: "project",
     profile,
+    architecture: { mode: architectureInstall.plan.mode, digest: architectureInstall.plan.digest },
     profiles: installSelection.profiles,
     selected_skills: installSelection.skillNames ? [...installSelection.skillNames].sort() : "all",
     // 이 파일이 kit.mjs가 쓴 kit.json을 덮는다. 여기 안 남기면 hook 비활성이
@@ -1222,6 +1229,7 @@ function install() {
   };
   atomicWriteFileSync(path.join(AF_DIR, "kit.json"), JSON.stringify(kitJson, null, 2));
   syncManagedWorktreeHostHooks(PROJECT);
+  architectureInstall.commit();
 
   console.log(`agent-flow installed`);
   console.log(`  profile : ${profile}`);
@@ -1239,6 +1247,10 @@ function install() {
   console.log(`Next: /agent-flow <task>`);
   console.log(`      (or: agent-flow run "<task>")`);
   console.log(`(If 'agent-flow' isn't on PATH yet: pip install -e ${KIT_ROOT})`);
+  } catch (error) {
+    architectureInstall.rollback();
+    throw error;
+  }
 }
 
 

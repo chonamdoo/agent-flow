@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -81,6 +82,39 @@ def _required_for(
             profile=profile,
         ).required
     }
+
+
+def test_metadata_batch_uses_supplied_text_and_isolates_invalid_documents(tmp_path):
+    source = tmp_path / "SKILL.md"
+    source.write_text("---\nrequires: [changed-after-read]\n---\n", encoding="utf-8")
+    request = {
+        "schema_version": 1,
+        "documents": [
+            {
+                "source": str(source),
+                "text": "---\nrules: &rules [required-rule]\nrequires: *rules\n---\n",
+            },
+            {
+                "source": str(tmp_path / "invalid.md"),
+                "text": "---\nrequires_docs: [../outside.md]\n---\n",
+            },
+        ],
+    }
+    result = subprocess.run(
+        [sys.executable, "-m", "agent_flow.core.skill_metadata"],
+        input=json.dumps(request),
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+        env={**os.environ, "PYTHONPATH": SRC},
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    documents = json.loads(result.stdout)["documents"]
+    assert documents[0]["metadata"]["requires"] == ["required-rule"]
+    assert documents[0]["error"] is None
+    assert documents[1]["metadata"] is None
+    assert "requires_docs" in documents[1]["error"]
 
 
 

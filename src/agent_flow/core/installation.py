@@ -1,6 +1,7 @@
 """Serialize kit mutation with run registration across repository worktrees."""
 from __future__ import annotations
 
+from contextlib import ExitStack
 import os
 import sys
 from pathlib import Path
@@ -16,6 +17,36 @@ from agent_flow.core.worktree_isolation import (
 
 INSTALL_LEASE_FD_ENV = "AGENT_FLOW_INSTALL_LEASE_FD"
 INSTALL_SAFETY_EXIT = 75
+_INSTALL_RECOVERY_MANIFEST = ".agent-flow/install-recovery/manifest.json"
+
+
+def assert_install_complete(root: Path) -> None:
+    """Raise ValueError/OSError when interrupted installation requires recovery."""
+    if not all(hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY")):
+        raise OSError("installation readiness requires no-follow directory opening")
+    try:
+        checkout = root.resolve(strict=True)
+    except RuntimeError as exc:
+        raise OSError(f"installation root cannot be accessed: {root}: {exc}") from exc
+    with ExitStack() as opened:
+        parent_fd = os.open(checkout, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        opened.callback(os.close, parent_fd)
+        for segment in _INSTALL_RECOVERY_MANIFEST.split("/")[:-1]:
+            try:
+                parent_fd = os.open(
+                    segment, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd
+                )
+            except FileNotFoundError:
+                return
+            opened.callback(os.close, parent_fd)
+        try:
+            os.stat("manifest.json", dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        raise ValueError(
+            f"architecture install recovery is required: {_INSTALL_RECOVERY_MANIFEST}; "
+            "resume the installer before using architecture policy"
+        )
 
 
 def installation_lock_path(checkout_root: Path) -> Path:

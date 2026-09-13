@@ -5,6 +5,7 @@ workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refac
 taskTerms: [sdui, server-driven ui, server driven ui, dynamic screen, json rendering, component catalog]
 pathGlobs: ["**/sdui/**", "**/*UiNode*", "**/*ScreenComposer*", "**/*NodeRenderer*"]
 requires: [android-clean-architecture, android-clean-presentation-architecture]
+architecture_modes: [clean]
 ---
 
 # Android SDUI Architecture

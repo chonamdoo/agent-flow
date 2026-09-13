@@ -3,17 +3,18 @@ name: spring-boot-development-guide
 description: "Spring Boot Java/Kotlin server development and review involving MVC/WebFlux, Security, transactions, JPA/JDBC/R2DBC, Batch, or service operations. Use with confirmed Spring dependencies or an explicit Spring server task; not for Gradle/Kotlin alone, Android, Ktor-only servers, or unrelated language edits."
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [Spring Boot, Spring MVC, Spring WebFlux, Spring Security, Spring transaction, Spring JPA, Spring R2DBC, Spring Batch, Spring server]
-requires: [clean-architecture-core]
+requires_by_architecture:
+  clean: [clean-architecture-core]
 ---
 
 # Spring Boot Development
 
-Apply `clean-architecture-core`. For **Kotlin server code only**, also apply `kotlin-backend-development-guide`; Java-only work does not require the Kotlin guide. Resolve the actual Boot BOM, Framework/Security/Data versions, MVC or WebFlux stack, database driver, transaction manager, proxy mode, and migration setup before choosing APIs. Preserve a healthy MVC/JDBC application; Spring is not a reason to convert it to reactive execution.
+Apply the selected architecture contract (`clean-architecture-core` in Clean mode), including its full required references in local mode. For **Kotlin server code only**, also apply `kotlin-backend-development-guide`; Java-only work does not require the Kotlin guide. Resolve the actual Boot BOM, Framework/Security/Data versions, MVC or WebFlux stack, database driver, transaction manager, proxy mode, and migration setup before choosing APIs. Preserve a healthy MVC/JDBC application; Spring is not a reason to convert it to reactive execution.
 
 ## Business and transport contract
 
-- Composition owns beans and process lifecycle; inbound adapters own authentication extraction, request/response mapping, and wire schemas; application actions own orchestration and ports; domain policy stays framework-free. Provider DTOs and ORM entities remain outbound details. These are semantic roles, not a folder scaffold.
-- Choose the business consistency boundary before annotation placement. Pure application actions can be transaction-decorated at an adapter edge. Framework-aware application services are valid only as an explicit architecture choice; they do not authorize Spring/JPA imports in pure domain policy. A valid repository transaction is not itself a layering defect.
+- In Clean mode, composition owns beans and process lifecycle; inbound adapters own authentication extraction, request/response mapping, and wire schemas; application actions own orchestration and ports; domain policy stays framework-free. Provider DTOs and ORM entities remain outbound details. These are semantic roles, not a folder scaffold. In local mode, apply the selected contract's ownership and dependency rules instead.
+- Choose the business consistency boundary before annotation placement. Pure application actions can be transaction-decorated at an adapter edge. In Clean mode, framework-aware application services are valid only as an explicit architecture choice and do not authorize Spring/JPA imports in pure domain policy; local mode follows its selected framework-boundary rules. A valid repository transaction is not itself a layering defect. Consistency, authorization, recovery, and operations requirements apply in every mode.
 - Preserve one wire/OpenAPI source of truth: HTTP status/error envelope, enum behavior, missing/null and PATCH semantics, stable bounded pagination, and compatibility. Separate input validation, current-state application policy, domain invariants, and database constraints; keep sensitive implementation details out of responses.
 - Trust the authenticated principal/tenant, not body ownership/admin fields. Enforce endpoint/action/object/field authorization, including list/count/export scope, each bulk item, and worker execution. Security filter or method access alone does not prove tenant-safe data access.
 

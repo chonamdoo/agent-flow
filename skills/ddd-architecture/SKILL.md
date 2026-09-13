@@ -1,6 +1,6 @@
 ---
 name: ddd-architecture
-description: Domain-Driven Design skill for agent-flow design and final-review phases. Use when modeling bounded contexts, ubiquitous language, entities, value objects, aggregates, domain events, domain invariants, and domain flows; apply clean-architecture afterward when layer boundaries or dependency direction are involved.
+description: Domain-Driven Design skill for agent-flow design and final-review phases. Use when modeling bounded contexts, ubiquitous language, entities, value objects, aggregates, domain events, domain invariants, and domain flows; apply the selected architecture contract afterward when structural boundaries or dependency direction are involved.
 version: 2.0.0
 trigger:
   - "design"
@@ -17,15 +17,15 @@ phases_invoked: [design, final-review]
 # ddd-architecture skill
 
 This skill covers domain modeling only. It answers "what is the domain?"
-For layer boundaries, dependency direction, UseCase port/impl boundaries,
-Repository port/adapter boundaries, Cache, Mapper, Composition Root,
-Testability, and SOLID architecture validation, apply
-`clean-architecture` at the location provided by the active host after this skill.
-
-When both DDD and Clean Architecture are needed, apply order is:
+For structural boundaries, dependency direction, persistence, composition,
+testability, and SOLID validation, apply the selected architecture contract
+after this skill. Read its full root and required references in local mode.
+Use `clean-architecture` and its layer/port/adapter rules only in Clean mode.
+Pending is a wait for a structural standard, not permission to omit validation.
 
 1. `ddd-architecture`: define domain terms, contexts, models, invariants, and flows.
-2. `clean-architecture`: protect that model with layers, ports, adapters, and dependency rules.
+2. Selected architecture contract: protect that model with the project's
+   adopted ownership and dependency rules.
 
 ## Core principles
 

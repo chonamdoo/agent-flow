@@ -108,5 +108,16 @@
 212 tests/test_skill_catalog.py::test_strict_findings_exclude_advisory_routing_observations
 212 tests/test_skill_catalog.py::test_declared_skill_installed_only_for_another_host_is_missing
 
+# Unpublished architecture-selection contracts (0 until the PR is created).
+# Clean and local retain their required structural review; pending cannot
+# reuse evidence after its architecture decision changes.
+0 tests/test_architecture_selection.py::test_case_personal_project_keeps_clean_obligations
+0 tests/test_architecture_selection.py::test_case_agency_local_contract_replaces_clean_obligations
+0 tests/test_architecture_selection.py::test_case_pending_then_decided_requires_new_evidence
+0 tests/test_architecture_selection.py::test_pending_blocks_structural_decision_and_allows_local_change
+0 tests/test_architecture_selection.py::test_mode_never_changes_phase_graph_or_routes
+0 tests/test_architecture_selection.py::test_runner_blocks_a_mode_switch_used_to_escape_a_failed_review
+0 tests/test_custom_skill_install.py::test_reinstall_does_not_reintroduce_clean_after_switching_to_pending
+
 # Recorded but deliberately not pinned here.
 uncovered 164 the closed shared-hook-runtime attempt failed on an active-run marker race and on host-specific interpreter paths; neither reproduces deterministically in-process, so claiming coverage would be false comfort. The standing defense is the policy ban on another runtime/installer centralization.

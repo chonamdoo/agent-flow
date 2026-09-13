@@ -16,6 +16,7 @@ import { captureLegacySkillCopyReceipts, observeSkillContent, parseSkillMetadata
 import {
   activeInstallProfileIds,
   ensureInstallLease,
+  prepareArchitectureInstall,
   AGENT_FLOW_COMMAND,
   assertInstallRootIsFinal,
   assertKnownInstallArgs,
@@ -163,10 +164,13 @@ function installProject(requestedRoot) {
   const root = resolveInstallRoot(requestedRoot);
   if (!ensureInstallLease(root)) return;
   const agentFlowDir = path.join(root, ".agent-flow");
+  const architectureInstall = prepareArchitectureInstall(root, installArgs);
   const previousSkillIndex = readJsonIfExists(path.join(agentFlowDir, "skills", "index.json"));
   captureLegacySkillCopyReceipts(root, previousSkillIndex);
   const profile = installProfile(root, installArgs, previousSkillIndex);
-  let installSelection = resolveInstallSelection({ args: installArgs, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: root });
+  try {
+  const architectureMode = architectureInstall.plan.mode;
+  let installSelection = resolveInstallSelection({ args: installArgs, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: root, architectureMode, architecturePlan: architectureInstall.plan });
   const existingPayload = readExistingKit(agentFlowDir);
   // 명시 플래그 > 이전 설정 > 기본(켜짐)
   hooksDisabled = hooksFlagOff || (!hooksFlagOn && existingPayload?.hooks === false);
@@ -188,6 +192,7 @@ function installProject(requestedRoot) {
   const payload = {
     install_scope: "project",
     profile,
+    architecture: { mode: architectureInstall.plan.mode, digest: architectureInstall.plan.digest },
     profiles: installSelection.profiles,
     selected_skills: installSelection.skillNames ? [...installSelection.skillNames].sort() : "all",
     root: ".",
@@ -397,10 +402,15 @@ function installProject(requestedRoot) {
   atomicWriteFileSync(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`);
   syncManagedWorktreeHostHooks(root);
   syncSkillSources(root);
+  architectureInstall.commit();
   // root를 같이 낸다. `--root`를 줬든 cwd에서 유도했든, 어디에 설치됐는지 보이지
   // 않으면 잘못된 checkout에 깔린 것을 알 방법이 없다 - 실제로 leader 대신
   // worktree에 깔린 것을 한참 뒤에야 알아챘다.
   console.log(`agent-flow installed profile=${profile} root=${root}`);
+  } catch (error) {
+    architectureInstall.rollback();
+    throw error;
+  }
 }
 
 // 설치 시점에 1회만 돈다. 런타임에는 절대 호출하지 않는다 — 사용자에게 매번 물어보지 않기 위한 지점이다.
@@ -1819,7 +1829,8 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null) {
   }
   const allowed = installSelection?.skillNames || null;
   const skills = [...byName.values()]
-    .filter((skill) => skill.source !== "bundled" || !allowed || allowed.has(skill.name))
+    .filter((skill) => !installSelection?.architecturePlan?.excluded_skills?.includes(skill.name)
+      && (!allowed || allowed.has(skill.source === "bundled" ? skill.name : path.basename(path.dirname(skill.path)))))
     .sort((a, b) => a.name.localeCompare(b.name));
   warnings.push(...validateSkillDependencies(skills));
   const conflicts = [];
@@ -1835,9 +1846,10 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null) {
   return {
     version: 1,
     selection: {
-      mode: allowed ? "filtered" : "all",
+      mode: installSelection?.filtered ? "filtered" : "all",
       profiles: installSelection?.profiles || [],
       explicit_skills: installSelection?.explicitSkills || [],
+      selected_skills: allowed ? [...allowed].sort() : "all",
     },
     skills: skills.map(({ priority, warnings: _warnings, ...skill }) => skill),
     conflicts,
