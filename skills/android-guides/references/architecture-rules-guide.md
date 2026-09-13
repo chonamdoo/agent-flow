@@ -1,75 +1,60 @@
 # Android Architecture Rules
 
-Canonical layer and dependency-direction rules live in
-[clean-architecture-core](../../clean-architecture-core/SKILL.md); apply
-[android-clean-architecture](../../android-clean-architecture/SKILL.md) for
-Android mappings. Discover explicit project roles rather than judging folder names.
+Before applying this reference, read the required
+[clean-architecture-core](../../clean-architecture-core/SKILL.md) and
+[android-clean-architecture](../../android-clean-architecture/SKILL.md) in full.
+They own semantic rules and Android mappings. For presentation work, also read
+[android-clean-presentation-architecture](../../android-clean-presentation-architecture/SKILL.md)
+as required by the core's **Required Application** rule.
 
 ## Layer Ownership
 
-- Presentation owns Compose UI, ViewModels, UI state, navigation adapters,
-  UI values, and string/resource selection.
-- Domain owns entities, values, repository contracts, errors, and pure policy.
-- Application owns orchestration when needed; a UI state holder may use one
-  context's repository interface without a forwarding use case.
-- Data owns DTOs, sources, repository implementations, conversion, cache policy,
-  and transport/storage failure translation.
-- Network owns Retrofit/OkHttp setup, serialization, raw failures, and diagnostics.
+- Android presentation selects strings/resources alongside its Compose UI,
+  ViewModels, UI state, and navigation adapters.
+- Network adapter details include Retrofit/OkHttp setup and serialization.
+
+Apply the required core's **Semantic Layers** for ownership.
 
 ## Dependency Direction
 
-- Pure domain policy imports no Android, Retrofit, Room, Compose, Hilt, or
-  presentation implementation types.
-- Pure application orchestration keeps framework implementations behind ports.
-  Adopted application `@Inject constructor` metadata is allowed under the Android
-  adapter; it does not permit Hilt types in pure domain policy.
-- Data depends on domain/application contracts and external clients.
-- Presentation depends on domain/application contracts and UI/platform abstractions,
-  never repository implementations or raw clients.
+Apply the required core's **Dependency Rule** and Android adapter's **Hilt DI**,
+including its application `@Inject constructor` exception. Android, Retrofit,
+Room, Compose, and Hilt are framework implementations for this boundary.
+
 - Prefer navigation APIs or shared contracts over feature implementation dependencies.
 
 ## Data Source Responsibilities
 
-Keep transport interfaces, remote access/auth plumbing, local persistence/cache,
-DTOs, and data-domain conversion at their owning adapter boundaries. Map them to
-existing source roots and conventions; a package name is not proof of separation.
-Split sources and mappers when policy or change reasons differ. Preserve the
-core's simple-adapter and DB-only exceptions; no extra forwarding classes or
-identity copies are required.
+Apply the required core's **Repository And Source Boundary** and **Mapping
+Boundary**, including recorded simple-adapter, DB-only, and safe-representation
+exceptions. Locate Android implementations through the adapter's **Module
+Boundaries**, not by package names.
 
 ## Error Type Ownership
 
-Apply these rules to the project's established error/result representation:
-
-- Domain-facing errors and exposed severity/status/server-code value types belong
-  to domain/application contracts, not transport implementation modules.
-- Raw transport failures and diagnostics stay in the network adapter.
-- If the project defines no typed result wrapper, preserve its existing
-  `Result`/exception contract instead of introducing one as a review requirement.
+Apply the required core's full **Error Boundary**, including exposed error value
+ownership and the existing `Result`/exception contract exception.
 
 ## Error Flow
 
-- Remote sources may throw or return transport failures.
-- The owning data boundary converts those failures to established domain errors.
-- Use cases preserve that result contract, adding only business failure semantics.
-- Presentation maps domain/application outcomes into screen state and transient
-  effects; rendering receives UI-facing error values, not raw failures.
-- Routes collect state/events and execute navigation/platform UI. ViewModels do
-  not depend on `Router`, `NavController`, or `Context`.
+Apply the required core's **Error Boundary**. For screen error state and effects,
+apply Android presentation's **ViewModel Rule** and **Compose Screen Rule**;
+route wiring owns navigation/platform UI, not ViewModels.
 
 ## Review Questions
 
-- Are actual module/source-set dependencies consistent with these roles?
-- Are DTOs and persistence entities converted before crossing the adapter boundary?
-- Does repository source-of-truth policy remain explicit when local data exists?
-- Is failure translation owned once at each semantic boundary?
-- Do composables receive presentation-facing errors rather than transport types?
+- Are actual Android module/source-set dependencies mapped and checked?
+- Does the implementation satisfy the required core's **Repository And Source
+  Boundary**, **Mapping Boundary**, and **Error Boundary**?
 
 ## Anti-patterns
 
-- Retrofit, OkHttp, serialization, or raw failure types leaking into pure domain
-  or presentation.
-- Data conversion or source/cache policy leaking into consumers.
+Apply the required core's **Must Avoid** and **Error Boundary** in addition to
+these Android presentation constraints:
+
 - Domain-error to presentation-error mapping inside composables.
 - Base ViewModel, inherited error hooks, class delegation, or global event buses
   for ordinary feature error handling.
+
+For server-driven screens, apply Android presentation's **Server-Driven Screen
+Exception**; ordinary feature constraints do not erase its three scoped exceptions.

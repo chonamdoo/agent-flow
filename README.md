@@ -212,7 +212,7 @@ and after the fix, the comment pass and the reviews run again before verificatio
 
 ## Skills and profiles
 
-66 skills ship with the kit, and only the ones the changed files and the active profile call
+65 skills ship with the kit, and only the ones the changed files and the active profile call
 for are loaded. Reading all of them costs more context than the work can carry.
 
 They fall into architecture (`clean-architecture-core`, `ddd-architecture`,

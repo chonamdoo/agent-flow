@@ -4,7 +4,7 @@ description: Use when creating, modifying, or reviewing an iOS Clean Architectur
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [uistate, ui state, state holder, observableobject, swiftui view state, screen state, presentation layer]
 pathGlobs: ["**/*ViewModel.swift", "**/*UiState.swift", "**/Presentation/**"]
-requires: [clean-architecture-core]
+requires: [clean-architecture-core, ios-clean-architecture]
 ---
 
 # iOS Clean Presentation Architecture
@@ -29,24 +29,20 @@ For AppShell-owned global error hosts, queue acknowledgement, or root navigation
 
 ## Architecture Rule
 
-- `presentation` owns SwiftUI views, UIKit view controllers, state holders, UI events, presentation models, mappers, and navigation effects.
-- `domain` owns entities, use cases, repository protocols, and pure business rules.
-- `data` or `infrastructure` implements repository protocols and API/storage/native adapters.
-- Presentation code depends on domain use cases or ports, not concrete API clients, storage clients, or repository implementations.
+Apply the required `clean-architecture-core` **Semantic Layers**, **Dependency
+Rule**, **Mapping Boundary**, and **Error Boundary**. Apply the required
+`ios-clean-architecture` for platform composition and DI.
+
 - Platform APIs such as Keychain, CoreLocation, Photos, notifications, and analytics should be wrapped behind ports/adapters before reaching presentation state holders.
 
 ## Data and Error Boundary
 
 - URLSession, decoding, transport failures, Keychain, database, cache, and native
   SDK details stay in `data` or `infrastructure`.
-- Network/storage failure types are raw diagnostics until mapped by repository
-  implementations or data mappers into domain error/result types.
-- Use cases return domain result/error types and add only business-rule errors.
-- SwiftUI views and UIKit view controllers receive presentation state, events,
-  and `UiModel`/error UI models, not DTOs, URLSession responses, or raw storage
-  errors.
-- Presentation mappers convert domain models and domain errors into UI models
-  before state reaches SwiftUI/UIKit.
+
+
+Apply the required core's **Error Boundary** and **Mapping Boundary** for
+normalization and the values supplied to rendering.
 
 ## DI Rule
 
@@ -105,9 +101,8 @@ Discover the project's adopted screen/state-holder, UI-value, mapping, and
 component boundaries and actual architecture role mappings. Preserve existing
 packages and names rather than generating a fixed folder tree.
 
-Project domain/application values to the UI contract. An already safe immutable
-shape may use identity projection; do not require an identical copy or forwarding
-mapper. `UiModel` describes a responsibility, not a suffix whose absence fails review.
+Apply the required core's **Mapping Boundary** to presentation projections.
+`UiModel` describes a responsibility, not a suffix whose absence fails review.
 
 ## State Holder Rule
 
@@ -154,7 +149,7 @@ Split state-holder wiring from rendering:
 - native/platform APIs are wrapped before reaching the state holder
 - `UiState` is an enum or equivalent explicit type and covers not-ready/loading/refreshing/placeholder/empty/error/success/offline/permission states that can occur
 - `UiAction`, `UiEvent`, and `UiState` roles are explicit for branchy screens
-- domain data is mapped to `UiModel` before rendering
+- presentation projections satisfy the required core's **Mapping Boundary**.
 - presentation values follow adopted naming conventions; suffix or file count
   alone does not fail the state or architecture contract
 - state holder owns async orchestration and exposes callbacks/events

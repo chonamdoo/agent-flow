@@ -61,7 +61,6 @@ Read [`app-shell-error-contract`](../app-shell-error-contract/SKILL.md) before t
 ## Development Checklist
 
 - Keep global error state in AppShell/provider scope, not feature component local state.
-- Run AppShell recovery effects through the shared queue and acknowledgement contract.
 - For `SessionExpired`, replace the current browser history entry with the login route. An auth guard must block protected history entries reached through Back; browser APIs cannot erase the user's prior history.
 - For `Maintenance`, replace the current entry with the maintenance flow and guard routes that cannot run during maintenance.
 - In React Router, put global hosts in the root/layout route, not leaf routes.
@@ -77,14 +76,12 @@ Request changes when any of these are true:
   errors.
 - A feature owns the global snackbar/toast host.
 - Back navigation reaches a protected route without the auth guard rejecting or redirecting it.
-- The shared classification, deduplication, acknowledgement, retry, or metadata contract is violated.
 - React Router root/layout responsibilities are duplicated in leaf routes.
 - Next.js `error.tsx` or `global-error.tsx` is used as the primary API/domain
   common error channel.
 
 ## Platform-Specific Forbidden Patterns
 
-- Do not use React Error Boundaries as the main API/domain common error handler.
 - Route classified common errors through the AppShell queue rather than throwing
   them to bypass it via `error.tsx`, `global-error.tsx`, or a React Router error boundary.
   Framework-supported route-local missing-resource/status responses, including
@@ -98,9 +95,4 @@ Request changes when any of these are true:
 ## Tests To Expect
 
 - AppShell renders common errors and applies the router/auth recovery behavior.
-- Feature tests prove common errors call `notify` instead of rendering local
-  `UiState.Error`.
 
-## Completion Gate
-
-Use only the markers supplied by the active phase.

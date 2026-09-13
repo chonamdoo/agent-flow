@@ -54,8 +54,6 @@ UIKit structure:
 - Feature coordinators may request intents, but root coordinator performs common
   session flow changes.
 
-For common errors, feature views and ViewModels emit error intents rather than owning global UI or root recovery. Feature-local errors remain in feature state.
-
 ## Shared Error Contract
 
 Read [`app-shell-error-contract`](../app-shell-error-contract/SKILL.md) before the platform rules below. It is the source of truth for classification, queue identity, acknowledgement, retry, and metadata preservation.
@@ -63,7 +61,6 @@ Read [`app-shell-error-contract`](../app-shell-error-contract/SKILL.md) before t
 ## Development Checklist
 
 - Keep the global alert/sheet/snackbar/toast host in AppShell or the root coordinator.
-- Run root-flow side effects through the shared queue and acknowledgement contract.
 - For `SessionExpired`, clear `NavigationStack` path and switch to login flow.
 - For `Maintenance`, clear path and switch to maintenance flow when present.
 - Keep root-flow mutation on the main actor.
@@ -79,7 +76,6 @@ Request changes when any of these are true:
 - A feature view presents session-expired or maintenance UI instead of AppShell.
 - `SessionExpired` can leave authenticated routes in `NavigationStack` path or
   UIKit navigation stack after confirmation.
-- The shared classification, deduplication, acknowledgement, retry, or metadata contract is violated.
 - UIKit feature coordinators present global session alerts instead of delegating
   to the root coordinator.
 
@@ -90,9 +86,6 @@ Request changes when any of these are true:
 - Do not put global common error alerts in leaf SwiftUI views.
 - Do not present global `UIAlertController` from arbitrary feature view
   controllers.
-- Do not use crash handling or render fallback as the main API/domain common
-  error handler.
-- Do not let networking/interceptor code present UI or reset root navigation.
 
 ## Tests To Expect
 
@@ -101,6 +94,3 @@ Request changes when any of these are true:
 - ViewModel tests prove common errors notify instead of mutating root navigation
   or presenting alerts.
 
-## Completion Gate
-
-Use only the markers supplied by the active phase.

@@ -66,6 +66,7 @@ class RoutedSkill:
     name: str
     group: str
     missing_report: str = ""
+    selectors: tuple[str, ...] = ()
 
 
 def routed_profile_skills(
@@ -76,11 +77,13 @@ def routed_profile_skills(
     task_text: str = "",
     concerns: Sequence[str] = (),
     declared_skill_phases: Mapping[str, Collection[str]] | None = None,
+    preserve_routes: bool = False,
 ) -> tuple[RoutedSkill, ...]:
     """Route matching groups under explicit skill phases or the code-phase default."""
     if not isinstance(profile, dict):
         return ()
     routed: dict[str, RoutedSkill] = {}
+    routes: list[RoutedSkill] = []
     for group in _required_review_groups(profile):
         if not _selectors_match(
             group, changed_files=changed_files, task_text=task_text, concerns=concerns
@@ -90,7 +93,20 @@ def routed_profile_skills(
             group, phase_id=phase_id, declared_skill_phases=declared_skill_phases
         ):
             routed.setdefault(skill.name, skill)
-    return tuple(routed.values())
+            if preserve_routes:
+                from agent_flow.core.skill_resolver import _glob_matches, term_in
+
+                selectors = (
+                    *(f"path:{pattern}:{path}"
+                      for pattern in _string_list(group.get("path_globs"))
+                      for path in changed_files if _glob_matches(pattern, path)),
+                    *(f"task:{term}" for term in _string_list(group.get("task_terms"))
+                      if term_in(term, task_text)),
+                    *(f"concern:{concern}" for concern in _string_list(group.get("concerns"))
+                      if concern.lower() in {str(value).strip().lower() for value in concerns}),
+                )
+                routes.append(RoutedSkill(skill.name, skill.group, skill.missing_report, selectors))
+    return tuple(routes) if preserve_routes else tuple(routed.values())
 
 
 def routable_group_skills(profile: dict | None) -> frozenset[str]:

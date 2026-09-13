@@ -14,9 +14,7 @@ another host's installation. Use an in-scope skill only when the diff actually t
 it.
 
 Read selected `SKILL.md` files as plain text. Do not install, copy, link, or vendor
-Android skills. A skill the prompt reports as not installed is not a finding: record
-`skill-availability: degraded` and judge the change with the skills you do have. Never
-make absence a verdict — the code under review cannot fix this machine's installation.
+Android skills. Apply `code-generation-discipline` **Missing Required Skills**.
 If no Android-targeted platform/presentation work is in scope, use the active
 phase's applicable `n/a` markers rather than reviewing unrelated Kotlin as Android.
 
@@ -35,23 +33,19 @@ phase's applicable `n/a` markers rather than reviewing unrelated Kotlin as Andro
    boundaries, `StateFlow`, `SharedFlow`, `Channel`, `stateIn`, and event loss.
 6. KMP and domain types: expect/actual boundaries, platform interop shape,
    `@JvmInline value class` suitability, and Compose stability implications.
-7. Data/error boundaries: outbound Retrofit contracts, DTOs, persistence entities,
-   sources, and cache policy stay in their data/network adapters. Map transport
-   failures to the existing domain/application error contract and then to UI
-   results at presentation. Separate collaborators only where responsibilities
-   differ, following the core's simple-adapter exception. Judge these against the typed
-   error/result abstraction the project actually declares; when it declares
-   none, the existing `Result`/exception contract is the contract and a missing
-   abstraction is not a finding. For app-wide common errors, verify that
-   AppShell owns common dialog/snackbar/toast hosts and root navigation; feature
-   ViewModels only notify common errors and do not hold `NavController`,
-   `Context`, dialogs, or login-flow stack reset logic.
+7. Data/error boundaries: apply the selected architecture contract and its
+   required Android skills. In Clean mode, the required core owns Repository And
+   Source Boundary, Mapping Boundary, and Error Boundary, including the recorded
+   simple-adapter and existing `Result`/exception alternatives.
+   For app-wide common errors, apply the required
+   `android-appshell-error-handling` and its shared error contract for host,
+   notification, and root-navigation ownership. Android presentation owns
+   ViewModel platform-object restrictions.
 
 ## Output
 
-Use the standard review angle output. Cite local skill paths used in Calibration.
-When the prompt reported a required skill as not installed here, name it in
-Calibration as a coverage gap and keep the verdict on the code.
+Use the standard review angle output and `code-generation-discipline`
+**Missing Required Skills** for Calibration evidence.
 
 The run's own `skill-availability` and `skill-use-evidence` markers already
 record which required skills were resolved and opened, so this angle adds no

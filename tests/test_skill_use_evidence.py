@@ -352,9 +352,9 @@ def test_the_skill_and_command_evidence_layers_do_not_share_one_contract(tmp_pat
 
 
 def _clean_architecture_skill(root: Path) -> Path:
-    skill = root / "skills" / "clean-architecture" / "SKILL.md"
+    skill = root / "skills" / "clean-architecture-core" / "SKILL.md"
     skill.parent.mkdir(parents=True, exist_ok=True)
-    skill.write_text("# clean-architecture\n", encoding="utf-8")
+    skill.write_text("# clean-architecture-core\n", encoding="utf-8")
     return skill
 
 
@@ -388,12 +388,12 @@ def test_the_architecture_marker_rejects_n_a_when_the_skill_is_required(tmp_path
 
     missing = missing_local_skill_markers(
         _gate("skill-use-evidence: verified")
-        + "project-local-skills-used: alpha, clean-architecture\n"
+        + "project-local-skills-used: alpha, clean-architecture-core\n"
         + "clean-architecture: n/a\n"
         + "must-avoid-check: n/a\n",
         root,
         "implement",
-        phase_skills=PhaseSkills(required=("alpha", "clean-architecture")),
+        phase_skills=PhaseSkills(required=("alpha", "clean-architecture-core")),
         profile={},
     )
 

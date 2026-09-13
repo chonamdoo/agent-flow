@@ -4,7 +4,7 @@ description: Use when creating, modifying, or reviewing a React Native Clean Arc
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [uistate, ui state, state holder, screen state, navigation effect, presentation layer]
 pathGlobs: ["**/*UiState.ts", "**/*UiState.tsx", "**/presentation/**"]
-requires: [clean-architecture-core]
+requires: [clean-architecture-core, react-native-clean-architecture]
 ---
 
 # React Native Clean Presentation Architecture
@@ -30,35 +30,29 @@ For AppShell-owned global error hosts, queue acknowledgement, or root navigation
 
 ## Architecture Rule
 
-- `presentation` owns screens, components, state-holder hooks, UI events, presentation models, mappers, and navigation effects.
-- `domain` owns entities, use cases, repository interfaces, and pure business rules.
-- `data` or `infrastructure` implements repository interfaces and HTTP/storage/native-client adapters.
-- Presentation code depends on domain use cases or ports, not concrete native modules, API clients, or repository implementations.
-- Native platform APIs should be wrapped behind ports/adapters before reaching presentation state holders.
+Apply the required `clean-architecture-core` **Semantic Layers**, **Dependency
+Rule**, **Mapping Boundary**, and **Error Boundary**. Apply the required
+`react-native-clean-architecture` for platform composition and DI.
+
 - Permissions, linking, storage, sensors, and native modules should be represented as application/domain ports before presentation uses them.
 
 ## Data and Error Boundary
 
 - Fetch, HTTP clients, secure storage, AsyncStorage, native modules, permissions,
   and platform SDK details stay in `data`, `infrastructure`, or native adapters.
-- Network/storage/native failure types are raw diagnostics until mapped by
-  repository implementations or data mappers into domain error/result types.
-- Use cases return domain result/error types and add only business-rule errors.
-- Screens and components receive presentation state, events, and `UiModel`/error
-  UI models, not DTOs, `Response` objects, raw native errors, or storage errors.
-- Presentation mappers convert domain models and domain errors into UI models
-  before state reaches React Native screens.
 - Effects synchronize with native/external systems only; do not move
   domain-to-UI derivation or error mapping into `useEffect`.
+
+Apply the required core's **Error Boundary** and **Mapping Boundary** for
+normalization and the values supplied to rendering.
 
 ## DI Rule
 
 React Native runs on React, so it does not have a Hilt-equivalent official DI framework. Use this priority:
 
 1. Prefer explicit props for local dependencies.
-2. Compose app-level implementations in the dependency provider, but expose typed
-   use-case, repository-interface, or capability ports to presentation. Raw API,
-   storage, and native clients stay behind those ports.
+2. Apply the required React Native adapter's **DI Shape** for app-level provider
+   composition and typed port exposure.
 3. Use an external DI container only when the project already has class-heavy domain/application services or an existing container.
 4. If a TypeScript DI container is justified, prefer the repo's adopted tool. For a new choice, compare required lifetime and resolution behavior, RN/Expo compiler and runtime compatibility, metadata support, and test/preview substitution. `tsyringe` is one conditional candidate, not a popularity-based default.
 
@@ -76,10 +70,9 @@ Keep screen wiring, state ownership, UI values, mapping, and components in the
 project's adopted presentation boundary. Discover actual packages and role
 configuration instead of creating a prescribed tree or one file per concept.
 
-Map domain/application values to the representation the UI consumes. Identity
-projection is valid for an already safe immutable shape; no redundant model or
-forwarding mapper is required. Use the project's naming convention: `UiModel`
-describes a role, not a suffix whose absence alone blocks approval.
+Apply the required core's **Mapping Boundary** to presentation projections.
+Use the project's naming convention: `UiModel` describes a role, not a suffix
+whose absence alone blocks approval.
 
 ## State Holder Rule
 
@@ -137,7 +130,7 @@ Split state-holder wiring from rendering:
 - `uiState` is a discriminated union and covers not-ready, loading, refreshing, placeholder, empty, error, success, offline, and permission states that can occur
 - `uiState` has no contradictory booleans or duplicated derived fields
 - `UiAction`, `UiEvent`, and `UiState` roles are explicit for branchy screens
-- domain data is mapped to `UiModel` before rendering
+- presentation projections satisfy the required core's **Mapping Boundary**.
 - presentation values follow adopted naming conventions; suffix or file count
   alone is not a failed state or architecture contract
 - state-holder hook owns async orchestration and exposes callbacks

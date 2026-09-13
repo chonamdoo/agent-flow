@@ -115,7 +115,6 @@ def test_bundled_workflow_resolves_selected_architecture(tmp_path, mode, workflo
     """Verify that bundled workflow resolves selected architecture."""
     _selection(tmp_path, mode)
     _skill(tmp_path, "clean-architecture-core", "")
-    _skill(tmp_path, "clean-architecture", "requires: [clean-architecture-core]\n")
     package_root = KIT_ROOT / "src" / "agent_flow"
     if workflow_source == "installed-copy":
         kit_root = tmp_path / ".agent-flow"
@@ -137,7 +136,7 @@ def test_bundled_workflow_resolves_selected_architecture(tmp_path, mode, workflo
     names = {skill.name for skill in resolution.required}
     assert {"code-generation-discipline", "code-review", "architecture-reviewer"} <= names
     expected = {
-        "clean": {"clean-architecture", "clean-architecture-core"},
+        "clean": {"clean-architecture-core"},
         "local": {"architecture"},
         "pending": set(),
     }

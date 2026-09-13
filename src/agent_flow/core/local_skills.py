@@ -15,6 +15,7 @@ from agent_flow.core.skill_resolver import (
     CODE_PHASES,
     PhaseSkills,
     SkillResolution,
+    ResolutionContext,
     resolve_phase_skills,
     skill_prompt_block,
 )
@@ -222,6 +223,8 @@ def phase_skill_resolution(
     concerns: Sequence[str] = (),
     host: str | None = None,
     architecture_root: Path | None = None,
+    context: ResolutionContext | None = None,
+    provider_authority: str = "",
 ) -> SkillResolution:
     """Resolve all required skills for a workflow phase."""
     return resolve_phase_skills(
@@ -234,6 +237,8 @@ def phase_skill_resolution(
         concerns=concerns,
         host=host,
         architecture_root=architecture_root,
+        context=context,
+        provider_authority=provider_authority,
     )
 
 
@@ -248,9 +253,13 @@ def local_skill_prompt_block(
     concerns: Sequence[str] = (),
     host: str | None = None,
     architecture_root: Path | None = None,
+    resolution: SkillResolution | None = None,
+    context: ResolutionContext | None = None,
+    provider_authority: str = "",
+    role: str = "author",
 ) -> str:
     """Render resolved local skill content for a phase prompt."""
-    resolution = phase_skill_resolution(
+    resolution = resolution or phase_skill_resolution(
         project_root,
         phase_id,
         phase_skills=phase_skills,
@@ -260,10 +269,12 @@ def local_skill_prompt_block(
         concerns=concerns,
         host=host,
         architecture_root=architecture_root,
+        context=context,
+        provider_authority=provider_authority,
     )
     # 강제 지점과 같은 조건을 쓴다. 둘이 갈라지면 프롬프트가 다시 거짓말한다.
     enforced = skill_markers_enforced(phase_id)
-    block = skill_prompt_block(project_root, resolution, enforced=enforced)
+    block = skill_prompt_block(project_root, resolution, enforced=enforced, role=role)
     if not block:
         return ""
     routed_missing = _missing_routed_names(
@@ -275,7 +286,7 @@ def local_skill_prompt_block(
         resolution=resolution,
     )
     return block + _marker_instruction(
-        resolution, enforced=enforced, routed_missing=routed_missing
+        resolution, enforced=enforced, routed_missing=routed_missing, role=role,
     )
 
 
@@ -291,6 +302,8 @@ def missing_local_skill_markers(
     concerns: Sequence[str] = (),
     since: float | None = None,
     architecture_root: Path | None = None,
+    context: ResolutionContext | None = None,
+    provider_authority: str = "",
 ) -> list[str]:
     """Return completion markers for locally unavailable skills."""
     resolution = phase_skill_resolution(
@@ -302,6 +315,8 @@ def missing_local_skill_markers(
         task_text=task_text,
         concerns=concerns,
         architecture_root=architecture_root,
+        context=context,
+        provider_authority=provider_authority,
     )
     # skill 목록 주입은 모든 phase에 하지만, marker 강제는 코드 생성/리뷰 phase에만 건다.
     # commit·merge·pr-watch까지 막으면 얻는 것 없이 막히는 경로만 늘어난다.
@@ -468,6 +483,7 @@ def _marker_instruction(
     *,
     enforced: bool = True,
     routed_missing: Sequence[str] = (),
+    role: str = "author",
 ) -> str:
     expected = ", ".join(skill.name for skill in resolution.available_required) or "n/a"
     availability = "degraded" if resolution.missing else "pass"
@@ -478,7 +494,8 @@ def _marker_instruction(
     return "\n".join(
         [
             "",
-            "The `## Completion Gate` must include:",
+            "Review the author's `## Completion Gate` for these criteria:"
+            if role == "reviewer" else "The `## Completion Gate` must include:",
             "",
             "```text",
             f"skill-availability: {availability}",

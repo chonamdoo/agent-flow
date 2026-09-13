@@ -55,7 +55,6 @@ from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.kit_digest import warn_if_installed_kit_is_stale
 from agent_flow.core.kit_install import run_project_install
 from agent_flow.core.phase_workflow import (
-    ACCEPT_WORKFLOW_DRIFT_FLAG,
     DeclaredPhaseSkills,
     declared_phase_skills,
     load_phase_workflow_definition,
@@ -329,14 +328,6 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "accept the leader change reported by the previous run and re-baseline "
             "to it; only valid for the exact state that was reported"
-        ),
-    )
-    continue_parser.add_argument(
-        ACCEPT_WORKFLOW_DRIFT_FLAG,
-        action="store_true",
-        help=(
-            "re-baseline this run to the current workflow definition after the "
-            "definition changed underneath it (kit upgrades change it)"
         ),
     )
 
@@ -1034,7 +1025,6 @@ def main(argv: list[str] | None = None) -> int:
                 config_root=root,
                 next_command=_continue_command(root, args.worktree),
                 accept_leader_drift=args.accept_leader_drift,
-                accept_workflow_drift=args.accept_workflow_drift,
                 concerns=tuple(args.concerns),
             ).run(mode=ResumeMode.RESUME)
         except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
@@ -1110,12 +1100,16 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         active = find_active_run(state_root)
         if active is not None:
-            active.print_status(
-                next_command=_continue_command(root, args.worktree),
-                config_root=root,
-                project_root=run_root,
-            )
-            _print_pending_spec_change_status(active.path)
+            try:
+                active.print_status(
+                    next_command=_continue_command(root, args.worktree),
+                    config_root=root,
+                    project_root=run_root,
+                )
+                _print_pending_spec_change_status(active.path)
+            except (OSError, ValueError) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
             return 0
         if _legacy_js_state_exists(root):
             _print_legacy_js_state_migration(root)

@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from agent_flow.artifact import ActiveRun, approve_phase_artifact, write_meta
-from agent_flow.runner import Phase, Runner
+from agent_flow.artifact import ActiveRun, approve_phase_artifact, create_run, read_meta, write_meta
+from agent_flow.core.phase_workflow import load_phase_workflow_definition
+from agent_flow.runner import Runner
 
 
 @pytest.mark.parametrize("surface", ["continue", "status"])
@@ -17,24 +18,25 @@ def test_next_command_can_approve_only_the_displayed_artifact(tmp_path, monkeypa
         "id: approval-example\nphases:\n  - id: proposal\n    pause_after: true\n",
         encoding="utf-8",
     )
-    run_dir = project / ".agent-flow/runs/run-1"
-    run_dir.mkdir(parents=True)
+    definition = load_phase_workflow_definition(project / ".agent-flow", "approval-example")
+    run_dir = create_run(
+        project, "approval-example", "Review the operation scope.", workflow_definition=definition,
+    )
     artifact = run_dir / "proposal.md"
     artifact.write_text("Approved operation and target scope.\n", encoding="utf-8")
-    write_meta(run_dir, {
-        "run_id": "run-1", "workflow": "approval-example", "task": "Review the operation scope.",
-        "phase_index": 0, "current_phase": "proposal", "phase_entered_at": "2026-01-01T00:00:00+00:00",
-    })
-    phase = Phase(id="proposal", description="", artifact="proposal.md", pause_after=True)
-    runner = Runner.__new__(Runner)
-    runner.run_dir = run_dir
-    runner.workflow_name = "approval-example"
+    meta = read_meta(run_dir)
+    meta.update(
+        phase_index=0, current_phase="proposal", phase_entered_at="2026-01-01T00:00:00+00:00",
+    )
+    write_meta(run_dir, meta)
+    runner = Runner(project, run_dir=run_dir)
+    phase = runner.phases[0]
     runner.next_command = f"agent-flow continue --root {shlex.quote(str(project))}"
     monkeypatch.setattr(runner, "_emit_observation", lambda *args, **kwargs: None)
     assert runner._pause_for_approval(phase)
     if surface == "status":
         capsys.readouterr()
-        ActiveRun(run_dir, "run-1", "approval-example", "Review the operation scope.", "").print_status(
+        ActiveRun(run_dir, run_dir.name, "approval-example", "Review the operation scope.", "").print_status(
             next_command=runner.next_command, config_root=project, project_root=project,
         )
     output = capsys.readouterr().out

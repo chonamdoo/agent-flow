@@ -20,7 +20,7 @@ This skill covers domain modeling only. It answers "what is the domain?"
 For structural boundaries, dependency direction, persistence, composition,
 testability, and SOLID validation, apply the selected architecture contract
 after this skill. Read its full root and required references in local mode.
-Use `clean-architecture` and its layer/port/adapter rules only in Clean mode.
+Use `clean-architecture-core` and its layer/port/adapter rules only in Clean mode.
 Pending is a wait for a structural standard, not permission to omit validation.
 
 1. `ddd-architecture`: define domain terms, contexts, models, invariants, and flows.

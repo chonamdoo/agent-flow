@@ -174,8 +174,8 @@ def _declare(root: Path, body: str) -> None:
 def _clean_contract(root: Path) -> None:
     """Provision the Clean architecture contract fixture."""
     _write(
-        root, "skills/clean-architecture/SKILL.md",
-        "---\nname: clean-architecture\n---\n\nKeep domain policy independent of I/O.\n",
+        root, "skills/clean-architecture-core/SKILL.md",
+        "---\nname: clean-architecture-core\n---\n\nKeep domain policy independent of I/O.\n",
     )
     _declare(root, "schema_version: 1\narchitecture:\n  mode: clean\n")
     _track(root, "skills")
@@ -518,7 +518,7 @@ def test_run_architecture_flag_keeps_its_own_meaning(tmp_path, capsys):
     assert "invalid choice" in capsys.readouterr().err
 
 
-IMPLEMENT_DECLARED = ("code-generation-discipline", "tdd", "clean-architecture")
+IMPLEMENT_DECLARED = ("code-generation-discipline", "tdd", "clean-architecture-core")
 
 
 def _resolution(root: Path, monkeypatch, *, phase_id: str = "implement"):
@@ -553,9 +553,9 @@ def test_three_modes_resolve_distinct_required_contracts(tmp_path, monkeypatch):
     pending = _required_names(_resolution(pending_root, monkeypatch))
     local = _required_names(_resolution(local_root, monkeypatch))
 
-    assert "clean-architecture" in clean
-    assert "clean-architecture" not in pending
-    assert "clean-architecture" not in local
+    assert "clean-architecture-core" in clean
+    assert "clean-architecture-core" not in pending
+    assert "clean-architecture-core" not in local
     assert "architecture" in local
     # 공통 개발 규율은 세 모드에서 모두 남는다. 선택은 구조 규범만 바꾼다.
     assert {"code-generation-discipline", "tdd"} <= clean & pending & local
@@ -575,7 +575,7 @@ def test_legacy_absence_keeps_the_clean_obligation(tmp_path, monkeypatch):
     """선언 없는 기존 설치에서 Clean이 사라지면 그것이 조용한 정책 변경이다."""
     root = _git_project(tmp_path)
 
-    assert "clean-architecture" in _required_names(_resolution(root, monkeypatch))
+    assert "clean-architecture-core" in _required_names(_resolution(root, monkeypatch))
 
 
 def _architecture_angle_runs(root: Path, monkeypatch) -> bool:
@@ -930,7 +930,7 @@ def test_case_personal_project_keeps_clean_obligations(tmp_path, monkeypatch):
 
     required = _required_names(_resolution(root, monkeypatch))
 
-    assert "clean-architecture" in required
+    assert "clean-architecture-core" in required
     assert architecture_contract_required(_resolution(root, monkeypatch)) is True
     assert _architecture_angle_runs(root, monkeypatch) is True
     assert [finding.path for finding in _lint(root)] == ["src/core/unmapped/thing.py"]
@@ -946,7 +946,7 @@ def test_case_agency_local_contract_replaces_clean_obligations(tmp_path, monkeyp
     required = _required_names(resolution)
     snapshot = architecture_snapshot(root)
 
-    assert "clean-architecture" not in required
+    assert "clean-architecture-core" not in required
     assert "architecture" in required
     assert architecture_contract_required(resolution) is True
     assert _architecture_angle_runs(root, monkeypatch) is True
@@ -1030,7 +1030,7 @@ def test_ddd_stays_required_in_every_mode(tmp_path, monkeypatch):
     """
     from agent_flow.core.skill_resolver import PhaseSkills, resolve_phase_skills
 
-    declared = ("code-generation-discipline", "clean-architecture", "ddd-architecture")
+    declared = ("code-generation-discipline", "clean-architecture-core", "ddd-architecture")
     for name, declare in (
         ("clean", _clean_contract),
         ("pending", lambda root: _declare(root, "schema_version: 1\narchitecture:\n  mode: pending\n")),
@@ -1411,6 +1411,8 @@ def test_grown_norms_require_new_attempt_without_repining_old_bytes(tmp_path, mo
 def test_status_checks_the_bound_contract_not_the_leader_selection(tmp_path, monkeypatch):
     """Verify that status checks the bound contract not the leader selection."""
     from agent_flow.artifact import _missing_completion_markers, write_meta
+    from agent_flow.core.phase_workflow import load_phase_workflow_definition
+    from agent_flow.core.workflow_pin import workflow_pin_metadata
 
     monkeypatch.setenv("HOME", str(tmp_path / "isolated-home"))
     leader = _git_project(tmp_path, "leader")
@@ -1422,7 +1424,14 @@ def test_status_checks_the_bound_contract_not_the_leader_selection(tmp_path, mon
     )
     run_dir = leader / ".agent-flow/runs/status-contract"
     run_dir.mkdir(parents=True)
-    write_meta(run_dir, {"workflow": "default", "current_phase": "implement", "task": "Update title"})
+    definition = load_phase_workflow_definition(KIT_ROOT, "default")
+    write_meta(run_dir, {
+        "workflow": "default",
+        "current_phase": "implement",
+        "phase_index": next(i for i, phase in enumerate(definition.phases) if phase.id == "implement"),
+        "task": "Update title",
+        **workflow_pin_metadata(definition, workflow="default"),
+    })
     artifact = run_dir / "implement.md"
     content = (
         "## Completion Gate\n"

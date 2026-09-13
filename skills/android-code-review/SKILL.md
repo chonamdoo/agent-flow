@@ -1,6 +1,9 @@
 ---
 name: android-code-review
 description: Android Kotlin and Jetpack Compose review checklist for changed code, covering architecture boundaries, MVI/state correctness, Compose stability, coroutine safety, data layer behavior, testing, and Gradle hygiene. Use when reviewing Android, Kotlin, Compose, or KMP changes; do not use as a debugging workflow or for non-Android React/TypeScript/Python reviews.
+requires: [code-generation-discipline]
+requires_by_architecture:
+  clean: [android-clean-architecture]
 ---
 
 # Android Code Review
@@ -44,14 +47,15 @@ them:
 
 Resolve every required skill through the phase prompt and installed skill index. Read the exact path the resolver supplies; do not construct host home-directory paths or search another host's installation.
 
-A skill the prompt reports as not installed for this host is not a violation: record `skill-availability: degraded`, put its **bare skill name** in the comma-separated `missing-required-profile-skills:` marker, and write `missing local <group>: <skill>` only in prose/Calibration. Judge the change with the skills you do have. Do not turn absence into `verdict: request-changes` — installation is not something the code under review can change. Record the resolved paths actually read in the review artifact's `Calibration` section.
+Apply `code-generation-discipline`'s **Missing Required Skills** procedure.
 
 ## Review Order
 
 1. Scope: changed files, affected modules, generated files, Gradle changes.
 2. Requirement fit: what the user asked for versus what changed.
-3. Architecture: apply `clean-architecture` for dependency direction and layer
-   ownership, then Android-specific guides for platform details.
+3. Architecture: apply the selected contract for dependency direction and layer
+   ownership. In Clean mode, apply `clean-architecture-core` through the required
+   Android adapter; local mode uses its full selected root and references.
 4. UI state: loading/success/empty/error, event handling, lifecycle collection.
 5. Compose: stability, recomposition risk, lazy list keys, remembered work.
 6. Coroutine/Flow: cancellation, dispatcher choice, race conditions.
@@ -93,7 +97,7 @@ Approve only when:
 ## References
 
 - [code-review-checklist.md](../android-guides/references/code-review-checklist.md) when structuring the Android review.
-- [architecture-rules-guide.md](../android-guides/references/architecture-rules-guide.md) and [clean-architecture](../clean-architecture/SKILL.md) when dependency direction or layer ownership changed.
+- [architecture-rules-guide.md](../android-guides/references/architecture-rules-guide.md) and [clean-architecture-core](../clean-architecture-core/SKILL.md) when Clean-mode dependency direction or layer ownership changed.
 - [compose-performance-guide.md](../android-guides/references/compose-performance-guide.md) when Compose stability, recomposition, lazy lists, or frame-time work changed.
 - [kotlin-concurrency-guide.md](../android-guides/references/kotlin-concurrency-guide.md) when coroutines, Flow, dispatchers, or cancellation changed.
 - [data-layer-guide.md](../android-guides/references/data-layer-guide.md) when repositories, DTO/domain mapping, caching, or source-of-truth behavior changed.

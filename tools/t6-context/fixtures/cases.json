@@ -1,0 +1,896 @@
+[
+  {
+    "id": "ui-single-repository",
+    "category": "normal",
+    "mode": "clean",
+    "skills": [
+      "react-clean-architecture"
+    ],
+    "task": "Clean selected. A stable Catalog domain port belongs to one catalog context; it returns framework-free values, with no cross-context work, ordered side effects, or added business failure semantics. Its existing adapters normalize expected failures to unavailable and honor the supplied cooperative cancellation predicate, so cleanup stops obsolete work. No auth/common-error code is part of this port. The new client hook and view show not-ready/loading/empty/success/error, map the title value into render state, and handle an unexpected rejected promise without exposing its object. Review whether the hook may consume this one repository interface directly rather than introducing a forwarding use case. The app composition passes the same Catalog instance while mounted.",
+    "files": {
+      "presentation/CatalogState.ts": "import { useEffect, useState } from \"react\";\nimport { Catalog, CatalogResult } from \"../domain/Catalog\";\n\ntype RequestState =\n  | Readonly<{ phase: \"not-ready\" | \"loading\" | \"failed\" }>\n  | Readonly<{ phase: \"settled\"; result: CatalogResult }>;\nexport type CatalogUiState =\n  | Readonly<{ status: \"not-ready\" | \"loading\" | \"empty\" }>\n  | Readonly<{ status: \"success\"; title: string }>\n  | Readonly<{ status: \"error\"; message: string }>;\n\nfunction toCatalogUiState(request: RequestState): CatalogUiState {\n  switch (request.phase) {\n    case \"not-ready\": return { status: \"not-ready\" };\n    case \"loading\": return { status: \"loading\" };\n    case \"failed\": return { status: \"error\", message: \"Unable to load catalog.\" };\n    case \"settled\":\n      switch (request.result.kind) {\n        case \"success\": return { status: \"success\", title: request.result.title.text };\n        case \"empty\": return { status: \"empty\" };\n        case \"unavailable\": return { status: \"error\", message: \"Catalog unavailable.\" };\n      }\n  }\n}\n\nexport function useCatalogState(catalog: Catalog): CatalogUiState {\n  const [requestState, setRequestState] = useState<RequestState>({ phase: \"not-ready\" });\n  useEffect(() => {\n    let cancelled = false;\n    setRequestState({ phase: \"loading\" });\n    void catalog.title({ isCancelled: () => cancelled }).then(result => {\n      if (!cancelled) setRequestState({ phase: \"settled\", result });\n    }).catch(() => {\n      if (!cancelled) setRequestState({ phase: \"failed\" });\n    });\n    return () => { cancelled = true; };\n  }, [catalog]);\n  return toCatalogUiState(requestState);\n}\n",
+      "presentation/CatalogScreen.tsx": "import { Catalog } from \"../domain/Catalog\";\nimport { CatalogUiState, useCatalogState } from \"./CatalogState\";\n\nexport function CatalogScreen({ catalog }: { catalog: Catalog }) {\n  return <CatalogView uiState={useCatalogState(catalog)} />;\n}\nfunction CatalogView({ uiState }: { uiState: CatalogUiState }) {\n  switch (uiState.status) {\n    case \"not-ready\": return <p>Catalog not loaded.</p>;\n    case \"loading\": return <p role=\"status\">Loading catalog.</p>;\n    case \"empty\": return <p>No catalog available.</p>;\n    case \"error\": return <p role=\"alert\">{uiState.message}</p>;\n    case \"success\": return <h1>{uiState.title}</h1>;\n  }\n}\n",
+      "domain/Catalog.ts": "export type DomainTitle = Readonly<{ text: string }>;\nexport type CatalogResult =\n  | Readonly<{ kind: \"success\"; title: DomainTitle }>\n  | Readonly<{ kind: \"empty\" }>\n  | Readonly<{ kind: \"unavailable\" }>;\nexport interface Catalog {\n  title(cancellation: Readonly<{ isCancelled(): boolean }>): Promise<CatalogResult>;\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "ui-cross-context",
+    "category": "violation",
+    "mode": "clean",
+    "skills": [
+      "react-clean-architecture"
+    ],
+    "task": "Clean selected. The existing operation hook below owns observable UI state, duplicate-click prevention, cooperative unmount cancellation and local failure rendering; its renderer consumes uiState and checkout. The proposed useCheckoutState callback directly sequences separate Inventory and Payments domain contexts. Their adapter methods preserve normalized failure/cancellation contracts, but successful stock reservation followed by failed payment requires business compensation that is not owned by either individual port. Review the placement of that cross-context orchestration, not the already established hook state mechanics.",
+    "files": {
+      "presentation/CheckoutState.ts": "import { Inventory, Payments } from \"../domain/CheckoutPorts\";\nimport { useCheckoutOperation } from \"./operation\";\nexport function useCheckoutState(stock: Inventory, payments: Payments) {\n  return useCheckoutOperation(async cancellation => {\n    await stock.reserve(cancellation);\n    await payments.charge(cancellation);\n  });\n}\n",
+      "presentation/operation.ts": "import { useCallback, useEffect, useRef, useState } from \"react\";\nimport { Cancellation } from \"../domain/CheckoutPorts\";\ntype UiState = Readonly<{ status: \"ready\" | \"working\" | \"success\" }> | Readonly<{ status: \"error\"; message: string }>;\nexport function useCheckoutOperation(operation: (cancellation: Cancellation) => Promise<void>) {\n  const [uiState, setUiState] = useState<UiState>({ status: \"ready\" });\n  const active = useRef<{ cancelled: boolean } | null>(null);\n  useEffect(() => () => { if (active.current) active.current.cancelled = true; }, []);\n  const checkout = useCallback(async () => {\n    if (active.current) return;\n    const request = { cancelled: false };\n    active.current = request;\n    setUiState({ status: \"working\" });\n    try {\n      await operation({ isCancelled: () => request.cancelled });\n      if (!request.cancelled) setUiState({ status: \"success\" });\n    } catch {\n      if (!request.cancelled) setUiState({ status: \"error\", message: \"Checkout failed.\" });\n    } finally {\n      if (active.current === request) active.current = null;\n    }\n  }, [operation]);\n  return { uiState, checkout };\n}\n",
+      "domain/CheckoutPorts.ts": "export type Cancellation = Readonly<{ isCancelled(): boolean }>;\nexport interface Inventory { reserve(cancellation: Cancellation): Promise<void> }\nexport interface Payments { charge(cancellation: Cancellation): Promise<void> }\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "presentation/CheckoutState.ts",
+        "start_line": 3,
+        "end_line": 8
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "db-only-repository",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "python-api-clean-architecture"
+    ],
+    "task": "Clean selected. StoredLabel is an immutable domain value. The domain repository port returns StoredLabel or None for an absent key; boundary_errors is the established decorator that converts DB failures to domain errors without swallowing cancellation. Connection lifetime belongs to the composition root and transactions to the existing repository context. This database-only repository intentionally has no remote transport, cache, or separate identity mapper. Review whether those missing extra layers are defects.",
+    "files": {
+      "change.py": "from domain import StoredLabel\nfrom infrastructure.errors import boundary_errors\n\nclass SqlLabels:\n    def __init__(self, connection):\n        self._connection = connection\n\n    @boundary_errors\n    def get(self, key: str) -> StoredLabel | None:\n        row = self._connection.execute(\"SELECT label FROM labels WHERE id = ?\", (key,)).fetchone()\n        return None if row is None else StoredLabel(row[0])\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "recorded-simple-adapter",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "python-api-clean-architecture"
+    ],
+    "task": "Clean selected. Architecture decision records one simple outbound adapter owning HTTP and conversion because no separate source/cache policy exists. The domain port returns Label. HttpClient is confined to this data adapter; it normalizes failures through existing boundary_errors.",
+    "files": {
+      "change.py": "from domain import Label\nfrom infrastructure.errors import boundary_errors\n\nclass RemoteLabels:\n    def __init__(self, http):\n        self._http = http\n\n    @boundary_errors\n    def get(self, key):\n        response = self._http.get_label(key)\n        return Label(response[\"text\"])\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "identical-safe-representation",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "python-api-clean-architecture"
+    ],
+    "task": "Clean selected. Label is a frozen, framework-free string value object. The input and domain contracts intentionally have identical validation, semantics, lifetime, immutability and dependencies. The driving adapter already validates Label; review the absence of identity-copy model/mapper.",
+    "files": {
+      "change.py": "from dataclasses import dataclass\n\n@dataclass(frozen=True)\nclass Label:\n    text: str\n\ndef accept_label(value: Label) -> Label:\n    return value\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "usecase-orchestration",
+    "category": "normal",
+    "mode": "clean",
+    "skills": [
+      "python-api-clean-architecture"
+    ],
+    "task": "Clean selected. New application workflow composes stable domain ports, not use cases. BalanceRepository and TransferGateway are framework-free application contracts. Existing adapters normalize errors and transaction semantics are provided by the gateway.",
+    "files": {
+      "change.py": "class TransferWorkflow:\n    def __init__(self, balances, transfers):\n        self._balances = balances\n        self._transfers = transfers\n\n    def execute(self, account, amount):\n        balance = self._balances.balance(account)\n        return self._transfers.submit(account, amount, balance)\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "usecase-direct-call",
+    "category": "violation",
+    "mode": "clean",
+    "skills": [
+      "python-api-clean-architecture"
+    ],
+    "task": "Clean selected. Both classes below are application use cases, each exposing a user action. The new receipt use case invokes the charge use case directly. Review the dependency boundary, not formatting or naming.",
+    "files": {
+      "change.py": "class ChargeUseCase:\n    def execute(self):\n        return \"charged\"\n\nclass ReceiptUseCase:\n    def __init__(self, charge: ChargeUseCase):\n        self.charge = charge\n\n    def execute(self):\n        return self.charge.execute()\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "change.py",
+        "start_line": 5,
+        "end_line": 10
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "pure-policy-protocol",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "python-api-clean-architecture"
+    ],
+    "task": "Clean selected. A pure policy function and framework-neutral Protocol live beside a use case declaration. Importing the pure helper is not calling that use case. Review the supplied client only; all implementations remain behind ports.",
+    "files": {
+      "change.py": "from typing import Protocol\nfrom application.pricing import pure_discount\n\nclass Prices(Protocol):\n    def total(self) -> int: ...\n\nclass Quote:\n    def __init__(self, prices: Prices):\n        self.prices = prices\n\n    def execute(self):\n        return pure_discount(self.prices.total())\n",
+      "application/pricing.py": "def pure_discount(total: int) -> int:\n    return total - total // 10\n\nclass RepriceUseCase:\n    def __init__(self, prices):\n        self._prices = prices\n\n    def execute(self):\n        return pure_discount(self._prices.total())\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "android-application-inject",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "android-clean-architecture"
+    ],
+    "task": "Clean selected for Android. The approved architecture adopts Hilt constructor metadata on application use cases. Prices is a pure domain repository port; there is no container lookup, Android object, provider type, or domain framework import.",
+    "files": {
+      "application/QuoteUseCase.kt": "import javax.inject.Inject\nimport domain.Prices\n\nclass QuoteUseCase @Inject constructor(private val prices: Prices) {\n    suspend operator fun invoke() = prices.total()\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "android-domain-inject",
+    "category": "violation",
+    "mode": "clean",
+    "skills": [
+      "android-clean-architecture"
+    ],
+    "task": "Clean selected for Android. This file is pure domain business policy, not an application service. App-level Hilt metadata was adopted only for application constructors. Review the newly added dependency.",
+    "files": {
+      "domain/DiscountPolicy.kt": "package domain\nimport javax.inject.Inject\n\nclass DiscountPolicy @Inject constructor() {\n    fun discount(amount: Int) = amount / 10\n}\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "domain/DiscountPolicy.kt",
+        "start_line": 2,
+        "end_line": 4
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "sdui-event-direction",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "android-clean-presentation-architecture"
+    ],
+    "task": "Android Clean SDUI selected. The adopted SDK names UI-to-holder inputs Effect and holder-to-UI outputs Event. The existing wiring collects uiState with lifecycle awareness, feeds parsed state to stateless renderers, calls onEffect for user input, and supplies an AppShell-owned emitEvent callback for transient navigation. Review direction rather than suffix. This counter starts at real zero; there is no asynchronous loading path in this fixture.",
+    "files": {
+      "presentation/PageHolder.kt": "import kotlinx.coroutines.flow.MutableStateFlow\nimport kotlinx.coroutines.flow.asStateFlow\nimport kotlinx.coroutines.flow.update\n\nsealed interface PageState {\n    data class Content(val count: Int) : PageState\n}\nsealed interface Effect {\n    data object Increment : Effect\n    data object OpenDetails : Effect\n}\nsealed interface Event { data object Navigate : Event }\nclass PageHolder(private val emitEvent: (Event) -> Unit) {\n    private val mutableState = MutableStateFlow<PageState>(PageState.Content(0))\n    val uiState = mutableState.asStateFlow()\n    fun onEffect(input: Effect) {\n        when (input) {\n            Effect.Increment -> mutableState.update { state ->\n                when (state) {\n                    is PageState.Content -> state.copy(count = state.count + 1)\n                }\n            }\n            Effect.OpenDetails -> emitEvent(Event.Navigate)\n        }\n    }\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "sdui-client-tree",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "android-clean-presentation-architecture"
+    ],
+    "task": "Android Clean SDUI selected. ClientNode is already parsed, validated, immutable client presentation data, not a transport DTO. Shared mapping pipeline produces it. Review this screen entry: no additional per-screen UiModel or identity mapper is added; renderer is stateless.",
+    "files": {
+      "presentation/Page.kt": "@Composable\nfun Page(state: ClientNode, onAction: (NodeAction) -> Unit) {\n    ClientNodeRenderer(node = state, onAction = onAction)\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "sdui-shared-pipeline",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "android-clean-presentation-architecture"
+    ],
+    "task": "Android Clean SDUI selected. SharedPageHolder owns the whole identical fetch, map, immutable-state, error and action pipeline already reviewed. Subclasses only supply screen identity/context and neither override processing nor capture unrelated app responsibilities. Review new subclasses only.",
+    "files": {
+      "presentation/Pages.kt": "class CatalogHolder(context: PageContext) : SharedPageHolder(\"catalog\", context)\nclass OffersHolder(context: PageContext) : SharedPageHolder(\"offers\", context)\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "sdui-stateful-renderer",
+    "category": "violation",
+    "mode": "clean",
+    "skills": [
+      "android-clean-presentation-architecture"
+    ],
+    "task": "Android Clean SDUI selected. This leaf node renderer now fetches remote data and owns business loading state instead of rendering the parsed state supplied by its parent. Api is a raw network service.",
+    "files": {
+      "presentation/PriceNode.kt": "@Composable\nfun PriceNode(node: ClientNode, api: Api) {\n    var price by remember { mutableStateOf(0) }\n    LaunchedEffect(node.id) { price = api.loadPrice(node.id) }\n    Text(price.toString())\n}\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "presentation/PriceNode.kt",
+        "start_line": 2,
+        "end_line": 5
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "di-adopted-container",
+    "category": "normal",
+    "mode": "clean",
+    "skills": [
+      "react-clean-architecture"
+    ],
+    "task": "React Clean selected. TSyringe and its compiler decorator metadata setup are already adopted; reflect-metadata is loaded at bootstrap. App startup resolves concrete data implementation once and passes only typed application ports through Context. Review this app-edge composition, not a requirement for more factories.",
+    "files": {
+      "app/bootstrap.tsx": "import \"reflect-metadata\";\nimport { container } from \"tsyringe\";\nimport { SqlCatalog } from \"../data/SqlCatalog\";\nimport { CatalogProvider } from \"../presentation/CatalogContext\";\nconst catalog = container.resolve(SqlCatalog);\nexport const root = <CatalogProvider value={catalog}><App /></CatalogProvider>;\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "di-unadopted-direct",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "react-clean-architecture"
+    ],
+    "task": "React Clean selected. This project has not adopted a runtime container. Typed initializer injection and Context are the established composition. The SqlCatalog implements the domain port, CatalogProvider exposes only that port. Review whether adding TSyringe is required.",
+    "files": {
+      "app/bootstrap.tsx": "import { SqlCatalog } from \"../data/SqlCatalog\";\nimport { CatalogProvider } from \"../presentation/CatalogContext\";\nconst catalog = new SqlCatalog(database);\nexport const root = <CatalogProvider value={catalog}><App /></CatalogProvider>;\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "di-domain-container",
+    "category": "violation",
+    "mode": "clean",
+    "skills": [
+      "react-clean-architecture"
+    ],
+    "task": "React Clean selected. TSyringe is adopted at the app composition edge. This new pure domain policy imports the runtime container and retrieves its repository, extending DI ownership into pure policy.",
+    "files": {
+      "domain/discount.ts": "import { container } from \"tsyringe\";\nexport function discount() {\n  return container.resolve(\"prices\").current() / 10;\n}\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "domain/discount.ts",
+        "start_line": 1,
+        "end_line": 3
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "local-framework-allowed",
+    "category": "exception",
+    "mode": "local",
+    "skills": [],
+    "task": "Local architecture selected, not Clean. Existing feature-owned React Context wiring is preserved. This change adds a typed public port context; no cross-feature implementation import. Agent Flow discipline still applies.",
+    "files": {
+      "features/catalog/public.ts": "import { createContext } from \"react\";\nexport interface CatalogPort { title(): string }\nexport const CatalogContext = createContext<CatalogPort | null>(null);\n",
+      "skills/architecture/references/ownership.md": "Cross-feature imports must target public feature ports, never internal stores. Feature-owned framework wiring is allowed.\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "local_contract": "---\nname: architecture\nrequires_docs: [references/ownership.md]\n---\n# Selected local architecture\nFeature-colocated framework ownership is permitted. Dependency wiring may use React Context in feature modules. Pure Clean layer separation is not selected. Every cross-feature call must use a feature public port; importing a feature implementation is forbidden.\n"
+  },
+  {
+    "id": "local-ownership-violation",
+    "category": "violation",
+    "mode": "local",
+    "skills": [],
+    "task": "Local architecture selected. Billing imports catalog internal implementation rather than its public feature port. Review under the local contract, not Clean layers.",
+    "files": {
+      "features/billing/title.ts": "import { InternalCatalogStore } from \"../catalog/internal/store\";\nexport const billingTitle = new InternalCatalogStore().title();\n",
+      "skills/architecture/references/ownership.md": "Cross-feature imports must target public feature ports, never internal stores. Feature-owned framework wiring is allowed.\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "features/billing/title.ts",
+        "start_line": 1,
+        "end_line": 2
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": [],
+    "local_contract": "---\nname: architecture\nrequires_docs: [references/ownership.md]\n---\n# Selected local architecture\nFeature-colocated framework ownership is permitted. Dependency wiring may use React Context in feature modules. Pure Clean layer separation is not selected. Every cross-feature call must use a feature public port; importing a feature implementation is forbidden.\n"
+  },
+  {
+    "id": "pending-nonstructural",
+    "category": "normal",
+    "mode": "pending",
+    "skills": [],
+    "task": "Architecture is pending. Existing implementation already uses this pure helper in the same module. Only spelling of its result changes from Welcom to Welcome; no module ownership, wiring, persistence, dependencies, or presentation architecture decision changes. Compare this explicitly nonstructural change to that existing pattern.",
+    "files": {
+      "change.py": "def greeting(name: str) -> str:\n    return f\"Welcome, {name}\"\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "pending-structural",
+    "category": "violation",
+    "mode": "pending",
+    "skills": [],
+    "task": "Architecture is pending. The proposed new module below establishes persistence ownership and wires concrete SQLite storage directly into a new request entrypoint. No existing module boundary or architecture decision authorizes it. Review whether this step may proceed now.",
+    "files": {
+      "new_service/handler.py": "from sqlite3 import connect\n\ndef handle_request(key):\n    with connect(\"records.db\") as database:\n        return database.execute(\"SELECT value FROM records WHERE id = ?\", (key,)).fetchone()\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "new_service/handler.py",
+        "start_line": 1,
+        "end_line": 5
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": []
+  },
+  {
+    "id": "appshell-classification-common",
+    "category": "normal",
+    "mode": "clean",
+    "skills": [
+      "app-shell-error-contract"
+    ],
+    "task": "Clean selected. DomainError and toLocalUi are existing safe presentation contracts. notify synchronously returns true only when the AppShell queue takes ownership, including duplicate common occurrences. Review the new feature failure branch only; shared tests already cover queue behavior. This callback lives in the existing feature state-holder closure; setUiState is its observable React state setter, and the immutable prior render state contains the rest of the unchanged screen data. Only the error branch is changed.",
+    "files": {
+      "change.ts": "function onFailure(error: DomainError) {\n  if (commonErrors.notify(error)) return;\n  setUiState(previous => ({ ...previous, localError: toLocalUi(error) }));\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-classification"
+  },
+  {
+    "id": "appshell-classification-double-display",
+    "category": "violation",
+    "mode": "clean",
+    "skills": [
+      "app-shell-error-contract"
+    ],
+    "task": "Clean selected. notify returns true for SessionExpired and queues global UI. The feature also binds state.localError to an inline error panel. Review this changed failure branch. setUiState is the existing state-holder React setter, so this local error is observably rendered; other screen state remains unchanged.",
+    "files": {
+      "change.ts": "function onFailure(error: DomainError) {\n  commonErrors.notify(error);\n  setUiState(previous => ({ ...previous, localError: toLocalUi(error) }));\n}\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "change.ts",
+        "start_line": 2,
+        "end_line": 3
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-classification"
+  },
+  {
+    "id": "appshell-classification-local-forbidden",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "app-shell-error-contract"
+    ],
+    "task": "Clean selected. Product policy explicitly classifies DOCUMENT_FORBIDDEN (HTTP 403) as a document-local permission failure without expiring the authenticated session. The default classifier handles other product codes normally. Review this policy extension; not every 403 is a session error. onFailure is inside the established feature hook; setUiState is its observable immutable React state setter and toLocalUi preserves all supplied error metadata.",
+    "files": {
+      "change.ts": "function notify(error: DomainError): boolean {\n  if (error.code === \"DOCUMENT_FORBIDDEN\") return false;\n  return notifyConfiguredCommonError(error);\n}\nfunction onFailure(error: DomainError) {\n  if (!notify(error)) setUiState(previous => ({ ...previous, localError: toLocalUi(error) }));\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-classification"
+  },
+  {
+    "id": "appshell-queue-ack-after-success",
+    "category": "normal",
+    "mode": "clean",
+    "skills": [
+      "app-shell-error-contract"
+    ],
+    "task": "Clean selected. Queue.tryHandle atomically changes pending to handling, retaining the stable semantic key so duplicate pending/handling occurrences are ignored. Queue.retry restores pending; consume removes only this occurrence. recover is AppShell-owned and resolves only after recovery succeeds. Review this confirmation sequence; finally also runs on cancellation.",
+    "files": {
+      "change.ts": "async function confirm(id: string) {\n  const error = queue.tryHandle(id);\n  if (!error) return;\n  let succeeded = false;\n  try {\n    await recover(error);\n    succeeded = true;\n  } finally {\n    if (succeeded) queue.consume(id);\n    else queue.retry(id);\n  }\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-queue"
+  },
+  {
+    "id": "appshell-queue-premature-consumption",
+    "category": "violation",
+    "mode": "clean",
+    "skills": [
+      "app-shell-error-contract"
+    ],
+    "task": "Clean selected. consume removes the occurrence permanently. recover may reject or be cancelled during root navigation; no durable recovery or other retry state exists. Review the new confirmation code.",
+    "files": {
+      "change.ts": "async function confirm(id: string) {\n  const error = queue.tryHandle(id);\n  if (!error) return;\n  queue.consume(id);\n  await recover(error);\n}\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "change.ts",
+        "start_line": 4,
+        "end_line": 5
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-queue"
+  },
+  {
+    "id": "appshell-queue-new-occurrence-retry",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "app-shell-error-contract"
+    ],
+    "task": "Clean selected. Queue stores observable pending/handling/retryable-failure state; no consumed entry remains. Retrying preserves occurrence identity. After a consumed session-expiry incident, a distinct newly issued session token expires and is a genuinely new semantic occurrence. Review allowing this new error and retaining a cancelled recovery as retryable rather than immediately pending.",
+    "files": {
+      "change.ts": "queue.enqueue({ id: \"event-2\", semanticKey: \"expired:session-2\", error: sessionTwoExpired });\nqueue.markHandling(\"event-2\");\nqueue.markRetryableFailure(\"event-2\", cancelledRecovery);\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-queue"
+  },
+  {
+    "id": "appshell-lifetime-owner-survives-pause",
+    "category": "normal",
+    "mode": "clean",
+    "skills": [
+      "app-shell-error-contract"
+    ],
+    "task": "Clean selected. createObservableQueue returns an in-memory observable queue, owned once by AppShell for the signed-in session. Hiding a host unsubscribes only; it does not destroy queue state. Product promises collector-pause recovery within that lifetime, not process restart. Review ownership and pause behavior.",
+    "files": {
+      "change.ts": "const sessionQueue = createObservableQueue();\nfunction attachHost(render: (error: ErrorUi) => void) {\n  return sessionQueue.subscribe(render);\n}\nfunction report(error: ErrorUi) {\n  sessionQueue.enqueue(error);\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-lifetime"
+  },
+  {
+    "id": "appshell-lifetime-false-restart-guarantee",
+    "category": "violation",
+    "mode": "clean",
+    "skills": [
+      "app-shell-error-contract"
+    ],
+    "task": "Clean selected. Product now requires pending recovery after OS process termination. createObservableQueue is the existing in-memory store with stable-key deduplication, observable pending state and correct handling/acknowledgement behavior within its owner lifetime. No persistence, replay, server reconciliation or idempotent restart recovery mechanism exists. Review the newly claimed restart guarantee against this RAM-only implementation.",
+    "files": {
+      "change.ts": "const pending = createObservableQueue<ErrorUi>();\nexport const recoveryGuarantee = \"survives process restart\";\nexport function notify(error: ErrorUi) { pending.enqueue(error); }\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "change.ts",
+        "start_line": 1,
+        "end_line": 3
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-lifetime"
+  },
+  {
+    "id": "appshell-lifetime-server-outbox",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "app-shell-error-contract"
+    ],
+    "task": "Clean selected, UI-free Python API service. Restart-safe external email delivery is handled by the established transactional outbox with unique operation key, durable commit, idempotent worker and replay. No UI collector exists. Review whether this service needs the AppShell UI pending/handling queue in addition to the outbox.",
+    "files": {
+      "application/schedule_receipt.py": "def schedule_receipt(transaction, receipt):\n    transaction.outbox.enqueue_once(\n        operation_key=receipt.operation_key,\n        payload=receipt.to_email_payload(),\n    )\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-lifetime"
+  },
+  {
+    "id": "appshell-boundaries-preserved-metadata",
+    "category": "normal",
+    "mode": "clean",
+    "skills": [
+      "app-shell-error-contract"
+    ],
+    "task": "Clean selected. These data-boundary and presentation-boundary conversions use framework-free DomainError and ErrorUi records. CommonErrorNotifier is already in shared-presentation-contract, consumed by features and wired by AppShell. Queue stores ErrorUi unchanged. Review preservation of supplied metadata and the semantic mapping boundaries.",
+    "files": {
+      "change.ts": "function fromServer(dto: ServerFailure): DomainError {\n  return { kind: classify(dto.code), code: dto.code, title: dto.title,\n           message: dto.message, requestId: dto.requestId };\n}\nfunction toCommonUi(error: DomainError): ErrorUi {\n  return { kind: error.kind, code: error.code, title: error.title,\n           message: error.message, requestId: error.requestId };\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-boundaries"
+  },
+  {
+    "id": "appshell-boundaries-interceptor-ui",
+    "category": "violation",
+    "mode": "clean",
+    "skills": [
+      "app-shell-error-contract"
+    ],
+    "task": "Clean selected. This interceptor is a driven network adapter. The HTTP exception contains raw provider request/response objects. showGlobalDialog is an AppShell UI function. Review newly added failure handling; neither a presentation nor domain normalization boundary exists here.",
+    "files": {
+      "network/interceptor.ts": "function onHttpFailure(error: HttpException) {\n  appShell.showGlobalDialog(error);\n  return Promise.reject(error);\n}\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "network/interceptor.ts",
+        "start_line": 1,
+        "end_line": 3
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-boundaries"
+  },
+  {
+    "id": "appshell-boundaries-local-value-shape",
+    "category": "exception",
+    "mode": "local",
+    "skills": [
+      "app-shell-error-contract"
+    ],
+    "task": "Local architecture selected. The local contract permits a single safe, immutable framework-neutral FailureValue with code/title/message/requestId across feature-owned services and AppShell; it prescribes no Clean domain/data wrappers or module layout. Queue is AppShell-owned, features only notify, metadata is preserved. Review whether adding Clean layers or identity-copy models is required. The queue classifier always owns the two code literals admitted by this common-only callback. Feature-local failures use the separate unchanged local path; the callback cannot accept their codes.",
+    "files": {
+      "change.ts": "type FailureValue = Readonly<{\n  code: \"SESSION_EXPIRED\" | \"MAINTENANCE\";\n  title: string; message: string; requestId: string;\n}>;\nfunction reportCommonFailure(error: FailureValue) {\n  commonErrors.notify(error);\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "local_contract": "---\nname: architecture\n---\n# Local ownership\nFeature-owned framework wiring and a single immutable framework-neutral FailureValue across services, features and AppShell are allowed. AppShell owns global queue, UI and recovery; features only notify. Preserve code, title, message and requestId. No Clean module or domain/data wrapper arrangement is selected.\n",
+    "family": "appshell-boundaries"
+  },
+  {
+    "id": "appshell-platform-android-reset",
+    "category": "normal",
+    "mode": "clean",
+    "skills": [
+      "android-appshell-error-handling"
+    ],
+    "task": "Android Clean selected, Navigation3 adopted. This callback is owned by AppShell and runs on its UI dispatcher after confirmation, between existing queue handling and successful consumption. Login is a root route. Review only its successful session-expiry navigation effect.",
+    "files": {
+      "app/AppShellRecovery.kt": "fun recoverSession() {\n    rootBackStack.clear()\n    rootBackStack.add(Login)\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-platform-recovery"
+  },
+  {
+    "id": "appshell-platform-android-retained-stack",
+    "category": "violation",
+    "mode": "clean",
+    "skills": [
+      "android-appshell-error-handling"
+    ],
+    "task": "Android Clean selected, Navigation3 adopted. AppShell root stack currently contains authenticated routes. After SessionExpired confirmation this callback reports successful recovery and the queue consumes the error. Review whether protected routes remain reachable through Back.",
+    "files": {
+      "app/AppShellRecovery.kt": "fun recoverSession() {\n    rootBackStack.add(Login)\n}\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "app/AppShellRecovery.kt",
+        "start_line": 1,
+        "end_line": 2
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-platform-recovery"
+  },
+  {
+    "id": "appshell-platform-android-no-maintenance-route",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "android-appshell-error-handling"
+    ],
+    "task": "Android Clean selected. CommonError in this fixture is the existing sealed SessionExpired/Maintenance pair. Product has no maintenance root flow: the AppShell-owned maintenance dialog is informational. The surrounding confirmation handler enters handling, invokes this synchronous UI-dispatcher effect, then consumes only after successful return. dismissInformationalMaintenance closes the informational UI and does not mutate queue state; no maintenance navigation side effect is promised. Session expiry separately clears to Login. Review absence of an invented Maintenance route, not the existing queue state machine.",
+    "files": {
+      "app/AppShellRecovery.kt": "fun onConfirmed(error: CommonError) {\n    when (error) {\n        is SessionExpired -> resetRootTo(Login)\n        is Maintenance -> dismissInformationalMaintenance()\n    }\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-platform-recovery"
+  },
+  {
+    "id": "appshell-platform-ios-reset",
+    "category": "normal",
+    "mode": "clean",
+    "skills": [
+      "ios-app-shell-error-handling"
+    ],
+    "task": "iOS Clean selected, SwiftUI NavigationStack adopted. AppShell owns path and rootFlow on the main actor. This synchronous recovery is called after confirmation while the queue is handling; consumption follows successful return. Review navigation state only.",
+    "files": {
+      "app/AppShellRecovery.swift": "@MainActor\nfunc recoverSession() {\n    path.removeLast(path.count)\n    rootFlow = .login\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-platform-recovery"
+  },
+  {
+    "id": "appshell-platform-ios-feature-reset",
+    "category": "violation",
+    "mode": "clean",
+    "skills": [
+      "ios-app-shell-error-handling"
+    ],
+    "task": "iOS Clean selected. This object is a leaf feature ViewModel, not AppShell/root coordinator. rootNavigation is the actual global NavigationPath state. Review the feature taking ownership of common session recovery.",
+    "files": {
+      "features/CatalogViewModel.swift": "@MainActor\nfinal class CatalogViewModel {\n    func onSessionExpired() {\n        rootNavigation.path = NavigationPath()\n        rootNavigation.flow = .login\n    }\n}\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "features/CatalogViewModel.swift",
+        "start_line": 3,
+        "end_line": 5
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-platform-recovery"
+  },
+  {
+    "id": "appshell-platform-ios-existing-uikit",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "ios-app-shell-error-handling"
+    ],
+    "task": "iOS Clean selected. Existing app uses UIKit and a root AppCoordinator; no SwiftUI migration is selected. The coordinator owns the main-thread navigation controller and login factory. Review its confirmed-session recovery; existing queue handling and successful acknowledgement wrap this synchronous effect.",
+    "files": {
+      "app/AppCoordinator.swift": "@MainActor\nfunc recoverSession() {\n    navigationController.setViewControllers([makeLogin()], animated: false)\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-platform-recovery"
+  },
+  {
+    "id": "appshell-platform-react-replace-and-guard",
+    "category": "normal",
+    "mode": "clean",
+    "skills": [
+      "react-app-shell-error-handling"
+    ],
+    "task": "React Clean selected, React Router adopted. AppShell owns confirmed-session recovery; invalidateSession synchronously invalidates client auth state, and navigate replacement completes before queue consumption. The root protected-route guard is reapplied for Back navigation. Server endpoints separately enforce authorization. Review the recovery/Back behavior only. useSession is the existing auth context subscription; invalidation publishes to it. In the adopted router mode navigate returns a completion promise, and a rejection propagates to the queue retry path.",
+    "files": {
+      "app/AppShellRecovery.tsx": "async function recoverSession() {\n  invalidateSession();\n  await navigate(\"/login\", { replace: true });\n}\nfunction ProtectedRoute() {\n  const session = useSession();\n  if (!session.valid) return <Navigate to=\"/login\" replace />;\n  return <Outlet />;\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-platform-recovery"
+  },
+  {
+    "id": "appshell-platform-react-history-not-auth",
+    "category": "violation",
+    "mode": "clean",
+    "skills": [
+      "react-app-shell-error-handling"
+    ],
+    "task": "React Clean selected. The server Route Handler below removed its session authorization check because AppShell replaces browser history with /login. Direct HTTP calls remain possible. Review that security decision; browser history changes are not server authorization. accountDetails is the established application action and returns the existing response-safe view; accountIdFrom parses the public URL but supplies no authenticated identity or authorization. Those helpers do not authorize the request.",
+    "files": {
+      "app/api/account/route.ts": "export async function GET(request: Request) {\n  const account = await accountDetails.execute(accountIdFrom(request));\n  return Response.json(account.privateDetails);\n}\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "app/api/account/route.ts",
+        "start_line": 1,
+        "end_line": 3
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-platform-recovery"
+  },
+  {
+    "id": "appshell-platform-react-route-local-404",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "react-app-shell-error-handling"
+    ],
+    "task": "React Clean selected, React Router framework/data mode adopted. This loader returns a route-local missing-document 404. It is not SessionExpired, Maintenance, or a product-classified common error. Existing route error boundary renders the supported local 404 response. Review whether it must instead enqueue global common UI.",
+    "files": {
+      "routes/document.ts": "export async function loader({ params }: LoaderArgs) {\n  const document = await documentAction.find(params.id);\n  if (!document) throw new Response(\"Not Found\", { status: 404 });\n  return document;\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-platform-recovery"
+  },
+  {
+    "id": "appshell-platform-rn-root-reset",
+    "category": "normal",
+    "mode": "clean",
+    "skills": [
+      "react-native-app-shell-error-handling"
+    ],
+    "task": "React Native Clean selected with plain React Navigation, not Expo Router. AppShell owns the root navigator and common-error host. This confirmed recovery is wrapped by queue handling/consumption; Login is the only resulting root route. Review root navigation only.",
+    "files": {
+      "app/AppShellRecovery.ts": "function recoverSession() {\n  rootNavigation.dispatch(CommonActions.reset({\n    index: 0, routes: [{ name: \"Login\" }],\n  }));\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-platform-recovery"
+  },
+  {
+    "id": "appshell-platform-rn-second-container",
+    "category": "violation",
+    "mode": "clean",
+    "skills": [
+      "react-native-app-shell-error-handling"
+    ],
+    "task": "React Native Clean selected with Expo Router, which owns the root NavigationContainer. This is an ordinary application feature, not an isolated mini-app. The change adds a second independent container to recover common session errors from a leaf screen. Review ownership and container boundary. The installed React Navigation version supports NavigationIndependentTree; the issue is using another independent root here, not an obsolete component prop.",
+    "files": {
+      "features/CatalogScreen.tsx": "function CatalogScreen() {\n  return <NavigationIndependentTree><NavigationContainer>\n    <CatalogNavigator onSessionExpired={() => navigation.reset({ routes: [{ name: \"Login\" }] })} />\n  </NavigationContainer></NavigationIndependentTree>;\n}\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "features/CatalogScreen.tsx",
+        "start_line": 2,
+        "end_line": 4
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-platform-recovery"
+  },
+  {
+    "id": "appshell-platform-rn-isolated-miniapp",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "react-native-app-shell-error-handling"
+    ],
+    "task": "React Native Clean selected, plain React Navigation. Product explicitly embeds a genuinely isolated mini-app with its own auth lifetime and navigation; its root AppShell owns its common error host and reset. Isolation is recorded, not an ordinary feature workaround. The installed React Navigation version supports NavigationIndependentTree. Review the intentional separate root without requiring it to share the parent auth stack.",
+    "files": {
+      "miniapp/Root.tsx": "function IsolatedMiniAppRoot() {\n  return <NavigationIndependentTree>\n    <NavigationContainer><MiniAppShell /></NavigationContainer>\n  </NavigationIndependentTree>;\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-platform-recovery"
+  },
+  {
+    "id": "appshell-scoped-required-dependency",
+    "category": "normal",
+    "mode": "clean",
+    "skills": [
+      "app-shell-error-contract"
+    ],
+    "task": "Review this proposed AppShell capability metadata under the existing requires loader. The platform-specific capability always needs shared classification/queue/ack rules. Only Clean selection adds the Clean structural dependency via the shared contract. No alternative loader is introduced; snippets declare the intended edge structure.",
+    "files": {
+      "proposed-capability.yaml": "platform_adapter:\n  requires: [app-shell-error-contract]\nshared_contract:\n  requires_by_architecture:\n    clean: [clean-architecture-core]\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-scoped-delivery"
+  },
+  {
+    "id": "appshell-scoped-forced-clean-local",
+    "category": "violation",
+    "mode": "local",
+    "skills": [
+      "app-shell-error-contract"
+    ],
+    "task": "Local architecture selected. The proposed shared common-error capability below is now required by every platform adapter. Its unconditional dependency would impose Clean structural rules even for local selection. The local contract allows feature-colocated safe framework wiring and does not adopt Clean layers. Review the dependency applicability.",
+    "files": {
+      "proposed-capability.yaml": "name: proposed-common-error-contract\nrequires: [clean-architecture-core]\n"
+    },
+    "expected_verdict": "request-changes",
+    "expected_findings": [
+      {
+        "file": "proposed-capability.yaml",
+        "start_line": 1,
+        "end_line": 2
+      }
+    ],
+    "required_references": [],
+    "forbidden_skills": [],
+    "local_contract": "---\nname: architecture\n---\n# Local architecture\nFeature-colocated framework ownership is allowed. AppShell owns global UI and recovery while features notify. Preserve supplied error metadata. Clean Architecture is not selected, and common-error guidance must not force Clean ownership or representation rules.\n",
+    "family": "appshell-scoped-delivery"
+  },
+  {
+    "id": "appshell-scoped-feature-local-exception",
+    "category": "exception",
+    "mode": "clean",
+    "skills": [
+      "react-app-shell-error-handling"
+    ],
+    "task": "React Clean selected. This plain-React form has not adopted RHF or another form-state owner. The existing field component renders validation from this hook and emits synchronous valid/invalid callbacks after its unchanged local validator runs. No fetch, auth/session change, common-error classification, root flow, global host, or trusted-server authorization is in scope. Review absence of an AppShell queue or nextjs-auth-session wiring. The input value remains owned by the field and is not duplicated in this hook.",
+    "files": {
+      "features/form/validation.ts": "import { useCallback, useState } from \"react\";\ntype Validation = Readonly<{ status: \"untouched\" | \"valid\" }> | Readonly<{ status: \"invalid\"; message: string }>;\nexport function useEmailValidation() {\n  const [validation, setValidation] = useState<Validation>({ status: \"untouched\" });\n  const onInvalidEmail = useCallback((message: string) => setValidation({ status: \"invalid\", message }), []);\n  const onValidEmail = useCallback(() => setValidation({ status: \"valid\" }), []);\n  return { validation, onInvalidEmail, onValidEmail };\n}\n"
+    },
+    "expected_verdict": "approve",
+    "expected_findings": [],
+    "required_references": [],
+    "forbidden_skills": [],
+    "family": "appshell-scoped-delivery"
+  }
+]

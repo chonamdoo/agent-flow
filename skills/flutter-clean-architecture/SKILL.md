@@ -18,9 +18,8 @@ inside one package; create another package only for an actual consumer or
 independent boundary. A role does not prescribe a folder or package count.
 
 Pure domain policy stays free of Flutter types such as `Widget`, `BuildContext`,
-and `Color`. Shared notifier/queue interfaces use `shared-presentation-contract`;
-AppShell and feature presentation may consume it, but it imports no UI/data or
-AppShell/feature implementation.
+and `Color`. Apply the required core's **Semantic Layers** to shared notifier/queue
+contracts.
 
 Map all adopted source roots before claiming lint coverage. An architecture
 `roles` override replaces the list rather than appending: retain every intended
@@ -45,8 +44,6 @@ unmapped or inactive boundaries.
 - With Riverpod, override platform and network adapters through
   `ProviderScope(overrides: ...)` for tests, flavors, and previews instead of
   branching inside the graph.
-- Composition may construct clients. A presentation consumer reads a typed
-  action/port, not the raw HTTP client, plugin, or data implementation.
 - Use `get_it` only when the repo already registers services there. Keep its
   registration at app startup and out of domain and presentation code.
 

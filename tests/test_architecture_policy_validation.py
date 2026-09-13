@@ -56,9 +56,24 @@ def _cli(*args: str) -> int:
     return main(list(args))
 
 
+def _status_run(root: Path) -> Path:
+    from agent_flow.artifact import create_run, read_meta, write_meta
+    from agent_flow.core.phase_workflow import load_phase_workflow_definition
+
+    definition = load_phase_workflow_definition(KIT_ROOT, "default")
+    run_dir = create_run(root, "default", "Update title", workflow_definition=definition)
+    meta = read_meta(run_dir)
+    meta.update(
+        current_phase="implement",
+        phase_index=next(i for i, phase in enumerate(definition.phases) if phase.id == "implement"),
+    )
+    write_meta(run_dir, meta)
+    return run_dir
+
+
 def test_non_git_selection_remains_runnable(tmp_path, monkeypatch):
     """Verify that a non-Git selection remains runnable."""
-    from agent_flow.artifact import write_meta
+    from agent_flow.artifact import create_run
     from agent_flow.runner import ResumeMode, Runner
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -66,9 +81,7 @@ def test_non_git_selection_remains_runnable(tmp_path, monkeypatch):
     root.mkdir()
     contract = _contract(root)
     assert _cli("architecture", "select", "--root", str(root), "--mode", "local", "--skill", "skills/architecture/SKILL.md") == 0
-    run_dir = root / ".agent-flow/runs/non-git"
-    run_dir.mkdir(parents=True)
-    write_meta(run_dir, {"workflow": "default", "task": "Update local rules"})
+    run_dir = create_run(root, "default", "Update local rules")
     runner = Runner(root, run_dir=run_dir)
     runner._initialize_architecture_policy(ResumeMode.START)
 
@@ -80,16 +93,14 @@ def test_non_git_selection_remains_runnable(tmp_path, monkeypatch):
 @pytest.mark.parametrize("failure", ["declaration", "interrupted-install"])
 def test_status_reports_architecture_failure_separately_from_markers(repository, monkeypatch, capsys, failure):
     """Verify that status reports architecture failure separately from markers."""
-    from agent_flow.artifact import ActiveRun, write_meta
+    from agent_flow.artifact import ActiveRun
 
     monkeypatch.setenv("HOME", str(repository.parent / "home"))
+    run_dir = _status_run(repository)
     if failure == "declaration":
         source = _write(repository, policy.PROJECT_ARCHITECTURE_FILE, b"schema_version: 1\narchitecture: {mode: unknown}\n")
     else:
         source = _write(repository, ".agent-flow/install-recovery/manifest.json", b"{}")
-    run_dir = repository / ".agent-flow/runs/status-failure"
-    run_dir.mkdir(parents=True)
-    write_meta(run_dir, {"workflow": "default", "current_phase": "implement", "task": "Update title"})
     (run_dir / "implement.md").write_text("## Completion Gate\n", encoding="utf-8")
     active = ActiveRun(run_dir, run_dir.name, "default", "Update title", "")
 
@@ -108,7 +119,7 @@ def test_status_reports_pinned_drift_before_artifact_readiness(
     repository, monkeypatch, capsys, artifact_exists, changed_source
 ):
     """Verify that status reports pinned drift before artifact readiness."""
-    from agent_flow.artifact import ActiveRun, write_meta
+    from agent_flow.artifact import ActiveRun, read_meta, write_meta
     from agent_flow.runner import Runner
 
     monkeypatch.setenv("HOME", str(repository.parent / "home"))
@@ -118,14 +129,10 @@ def test_status_reports_pinned_drift_before_artifact_readiness(
         repository, "skills/architecture/references/rules.md", b"# Approved boundary\n"
     )
     subprocess.run(["git", "add", "."], cwd=repository, check=True)
-    run_dir = repository / ".agent-flow/runs/status-drift"
-    run_dir.mkdir(parents=True)
-    write_meta(run_dir, {
-        "workflow": "default",
-        "current_phase": "implement",
-        "task": "Update title",
-        "architecture_digest": policy.architecture_snapshot(repository).digest,
-    })
+    run_dir = _status_run(repository)
+    meta = read_meta(run_dir)
+    meta["architecture_digest"] = policy.architecture_snapshot(repository).digest
+    write_meta(run_dir, meta)
     if artifact_exists:
         (run_dir / "implement.md").write_text("## Completion Gate\n", encoding="utf-8")
     if changed_source == "selection":
@@ -153,19 +160,15 @@ def test_status_allows_unchanged_pinned_policy_to_await_artifact(
     repository, monkeypatch, capsys
 ):
     """Verify that status allows unchanged pinned policy to await artifact."""
-    from agent_flow.artifact import ActiveRun, write_meta
+    from agent_flow.artifact import ActiveRun, read_meta, write_meta
 
     monkeypatch.setenv("HOME", str(repository.parent / "home"))
     _declare(repository, "pending")
     subprocess.run(["git", "add", "."], cwd=repository, check=True)
-    run_dir = repository / ".agent-flow/runs/status-unchanged"
-    run_dir.mkdir(parents=True)
-    write_meta(run_dir, {
-        "workflow": "default",
-        "current_phase": "implement",
-        "task": "Update title",
-        "architecture_digest": policy.architecture_snapshot(repository).digest,
-    })
+    run_dir = _status_run(repository)
+    meta = read_meta(run_dir)
+    meta["architecture_digest"] = policy.architecture_snapshot(repository).digest
+    write_meta(run_dir, meta)
 
     ActiveRun(run_dir, run_dir.name, "default", "Update title", "").print_status(
         config_root=repository, project_root=repository

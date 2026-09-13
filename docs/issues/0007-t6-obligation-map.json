@@ -1,0 +1,191 @@
+{
+  "schema_version": 1,
+  "issue": "docs/issues/0007-architecture-context-refactor.md",
+  "artifact_kind": "static-obligation-map-collection",
+  "baseline_archive": "/tmp/agent-flow-t6-20260913-160840-baseline.tar",
+  "ledgers": [
+    {
+      "path": "docs/issues/0007-t6-core-obligations.json",
+      "sha256": "998a3fff05af51d465937f5a13e3b97c36dc943a03a562f7ee02a5599e2da5c4"
+    },
+    {
+      "path": "docs/issues/0007-t6-platform-obligations.json",
+      "sha256": "158b4a6499eaff1b6079f415ce67475d24e262cb6cf52d96bda38505ad046be3"
+    },
+    {
+      "path": "docs/issues/0007-t6-appshell-obligations.json",
+      "sha256": "ade3dc14cc6409f7a954e480e06515eae885a866b1b49e504c718024affab6ed"
+    }
+  ],
+  "authority_snapshots": [
+    {
+      "path": "lib/skill-selection.mjs",
+      "state": "present",
+      "sha256": "11855671d274452b8cf54d24fb2b4e31669a1e1d6c6ed73fe6b9760f98d8b461"
+    },
+    {
+      "path": "skills/android-appshell-error-handling/SKILL.md",
+      "state": "present",
+      "sha256": "fea4a87eb374ac612bda0eceaac31d6de06f33f17aa61aa1f1653c84c2c7940e"
+    },
+    {
+      "path": "skills/android-clean-architecture/SKILL.md",
+      "state": "present",
+      "sha256": "907621c42239181bae3cd1c70afb6ceb643c9bc32ba1af650bb130be0afd97f6"
+    },
+    {
+      "path": "skills/android-clean-presentation-architecture/SKILL.md",
+      "state": "present",
+      "sha256": "7ed8fedb4f5eb0f14d1f704f2b7195382393fab93d03d5ff7a3deabd5ff41ee1"
+    },
+    {
+      "path": "skills/android-code-review/SKILL.md",
+      "state": "present",
+      "sha256": "992f08d81789b902a34f9dfba996a72f647c09a6cb11e4194b264490448b2329"
+    },
+    {
+      "path": "skills/android-guides/references/architecture-rules-guide.md",
+      "state": "present",
+      "sha256": "a0141e187cbaae4b735461fc6281b677a79aafe9a7f433e874290dc1cc962e5f"
+    },
+    {
+      "path": "skills/android-guides/references/data-layer-guide.md",
+      "state": "present",
+      "sha256": "008527be536200cdca7b9b209fe54fec519e308791ddaee523391f0cf8a0450d"
+    },
+    {
+      "path": "skills/app-shell-error-contract/SKILL.md",
+      "state": "present",
+      "sha256": "a9856a22ec9b261db2d7577d70143a44fdfeedcceac5160036720e043a0c1e1c"
+    },
+    {
+      "path": "skills/clean-architecture-core/SKILL.md",
+      "state": "present",
+      "sha256": "1295d6630d825a73967580022227f0d00a3c3d4f8eaab82ce8eab41b59e9f2a8"
+    },
+    {
+      "path": "skills/clean-architecture/SKILL.md",
+      "state": "deleted-rule-free-alias",
+      "sha256": null
+    },
+    {
+      "path": "skills/clean-architecture/references/platform-standard.md",
+      "state": "deleted-rule-free-alias",
+      "sha256": null
+    },
+    {
+      "path": "skills/code-generation-discipline/SKILL.md",
+      "state": "present",
+      "sha256": "0eb453688bbc7fdbd2246fd893b6fb420c941982641c2c6fe0c414e1d1166a47"
+    },
+    {
+      "path": "skills/ddd-architecture/SKILL.md",
+      "state": "present",
+      "sha256": "19fd297850be0f6045807d55743f17d11f1a401779961fb19f9783474becf05d"
+    },
+    {
+      "path": "skills/flutter-clean-architecture/SKILL.md",
+      "state": "present",
+      "sha256": "41153d55396e3732133dfbe67e286bf0a5df97c2d8577253b9f56e78c67148b8"
+    },
+    {
+      "path": "skills/flutter-clean-presentation-architecture/SKILL.md",
+      "state": "present",
+      "sha256": "eef6a0cc9ff5041e7fac531be462d37113d8032994a5b83141b3e7aff4f834fe"
+    },
+    {
+      "path": "skills/ios-app-shell-error-handling/SKILL.md",
+      "state": "present",
+      "sha256": "0ce228e9877ec02e69f0a0181eae26ad3bf5ad1534a391b162f71a80ed1e35a4"
+    },
+    {
+      "path": "skills/ios-clean-architecture/SKILL.md",
+      "state": "present",
+      "sha256": "56637e28a2540b7e09849b159066f84974b193c6db9ba94cd2b61651b16e00f7"
+    },
+    {
+      "path": "skills/ios-clean-presentation-architecture/SKILL.md",
+      "state": "present",
+      "sha256": "4bb1c210ab42ded6d6a490b7875a2745723b4d9bd9c165fdcbe264395886fa5d"
+    },
+    {
+      "path": "skills/python-api-clean-architecture/SKILL.md",
+      "state": "present",
+      "sha256": "14b80df7a453e5fa4ca8256ae40dc177fd1927db993f17571c98c4093cbb58dd"
+    },
+    {
+      "path": "skills/react-app-shell-error-handling/SKILL.md",
+      "state": "present",
+      "sha256": "9d238c9a1e7e825844c8c3952c67b6b9e432413596dad80df75af149f0667a5c"
+    },
+    {
+      "path": "skills/react-clean-architecture/SKILL.md",
+      "state": "present",
+      "sha256": "1aabc5e3938a047d97e48c16d3641069f9640470c77709cbe5ea8c43bc111317"
+    },
+    {
+      "path": "skills/react-clean-presentation-architecture/SKILL.md",
+      "state": "present",
+      "sha256": "bd7599b6d566410f041c07c05a21bfff032fb4970fdd7887ddebef8a6998bd2a"
+    },
+    {
+      "path": "skills/react-native-app-shell-error-handling/SKILL.md",
+      "state": "present",
+      "sha256": "a922124e70386ea0d5cff6d3fb704cced355b181aba45685658606e8d497d54b"
+    },
+    {
+      "path": "skills/react-native-clean-architecture/SKILL.md",
+      "state": "present",
+      "sha256": "c571a18bf5d974bb9eca201e4658560ccea35d078d9e5ac621869afb2f4ee1db"
+    },
+    {
+      "path": "skills/react-native-clean-presentation-architecture/SKILL.md",
+      "state": "present",
+      "sha256": "fa995695a044f5c2991191cb41df21823a238878be5f122e155457174efdec95"
+    },
+    {
+      "path": "src/agent_flow/workflows/default.yaml",
+      "state": "present",
+      "sha256": "ee9d6851857852f335588b3ddb11ee73ff23f76146db6a4bb27a9a72c95bcf47"
+    },
+    {
+      "path": "src/agent_flow/workflows/full-feature.yaml",
+      "state": "present",
+      "sha256": "48b51223ab9842ca26606a1d74c2341d1ecf1af56bd10ada80669103f0dd2fab"
+    },
+    {
+      "path": "templates/_shared/review/android-chrisbanes.md",
+      "state": "present",
+      "sha256": "924ad3113132cabb7878a5bacb27068a51480a34035ddec16ca75f425a70141c"
+    },
+    {
+      "path": "templates/_shared/review/android-skills.md",
+      "state": "present",
+      "sha256": "d23c14648e0103db94b08665b4ce9e60bd78c89bff24b247ac1c4a49b019265a"
+    },
+    {
+      "path": "templates/_shared/review/architecture-design.md",
+      "state": "present",
+      "sha256": "4609d0c47bd88512ce2ef724fbcfe82d2610baf8280f86713759beded290aa1c"
+    },
+    {
+      "path": "templates/_shared/review/clean-architecture.md",
+      "state": "present",
+      "sha256": "e3e9da28632cf39923055f80ecac4075e9459445e6d2e9678c2a15f545687a2f"
+    }
+  ],
+  "interpretation": {
+    "core": "Each obligations[] entry carries old document/anchor/text/digest and full new destination excerpts. Includes all workflow phase/route/required-marker scalars and duplicate origins.",
+    "platform": "Each obligations[] entry carries source, destinations and requires_paths. Original unique platform obligations, marker enums and scoped exceptions map to themselves; required canonical owners carry relocated rules.",
+    "appshell": "Each documents[].obligations[] entry inherits document source digest, scope, consumers, delivery and evidence. destination_id resolves within destinations. Paired rule/exception IDs must be assessed together.",
+    "scope": "Architecture norm ownership and kit-owned alias consumers only. Runtime dedup/reuse/custom migration/pinned-run behavior and measurement live in their assigned implementation evidence, not this static rule map."
+  },
+  "acceptance_evidence": {
+    "source_mapping": "Populated for all owned source atoms; not a row-count proof of semantic preservation.",
+    "semantic_preservation": "Integration owner must compare each relocated rule with its full conditions/exceptions and required-reachable destination.",
+    "behavioral_parity": "Unexecuted by writers. Candidate fixture names and manual cases are not measured verdicts.",
+    "workflow_contract": "Phase ids/order/routes/required_markers intentionally unchanged; integration owner compares baseline definitions.",
+    "review_authority": "Author and every independent reviewer retain separate normative inputs. A reviewer assessment does not authorize writes or phase progression.",
+    "savings": "No claim; measurement owner records actual bytes/provider usage/call count/wall time separately."
+  }
+}

@@ -58,7 +58,6 @@ from agent_flow.core.architecture_lint import match_role
 from agent_flow.core.architecture_policy import (
     ArchitectureMode,
     architecture_norm_block_reason,
-    architecture_snapshot,
     architecture_snapshot_block_reason,
     evaluate_workflow_compatibility,
     is_clean_architecture_skill,
@@ -154,13 +153,16 @@ from agent_flow.core.review_evidence import (
 )
 from agent_flow.core.profile_resolution import resolve_profile
 from agent_flow.core.phase_workflow import (
-    ACCEPT_WORKFLOW_DRIFT_FLAG,
-    CorruptRunCursorError,
     CursorScope,
     PhaseWorkflowDefinition,
     RunCursor,
     find_kit_root,
     load_phase_workflow_definition,
+)
+from agent_flow.core.workflow_pin import (
+    WorkflowDefinitionPinError,
+    load_run_workflow_definition,
+    workflow_pin_metadata,
 )
 from agent_flow.core.report import write_run_report
 from agent_flow.core.markers import (
@@ -179,6 +181,7 @@ from agent_flow.core.skill_scope import merge_scope
 from agent_flow.core.profile_routing import routed_profile_skills
 from agent_flow.core.skill_resolver import (
     PhaseSkills,
+    ResolutionContext,
     _profile_skill_phases,
     active_host,
     active_host_roots,
@@ -414,7 +417,6 @@ class Runner:
         checkout_identity: str | None = None,
         checkout_registration_identity: str | None = None,
         accept_leader_drift: bool = False,
-        accept_workflow_drift: bool = False,
         concerns: Sequence[str] = (),
     ) -> None:
         """Initialize a runner for the repository and selected workflow."""
@@ -434,15 +436,17 @@ class Runner:
         self.checkout_identity = checkout_identity
         self.checkout_registration_identity = checkout_registration_identity
         self.accept_leader_drift = accept_leader_drift
-        self.accept_workflow_drift = accept_workflow_drift
         self.requested_concerns = run_concerns_value(concerns)
+        self._resolution_context = ResolutionContext()
         self.kit_root = _find_kit_root()
         if run_dir is not None:
             meta = read_meta(run_dir)
             self.workflow_name = meta.get("workflow", workflow)
             self.architecture = meta.get("architecture", architecture)
-        self.workflow = load_phase_workflow_definition(
-            self.kit_root, self.workflow_name
+        self.workflow = (
+            load_run_workflow_definition(self.kit_root, self.workflow_name, meta)
+            if run_dir is not None
+            else load_phase_workflow_definition(self.kit_root, self.workflow_name)
         )
         self.phases = _phases_from_definition(self.workflow)
         self.profile_id, self.profile = resolve_profile(self.kit_root, self.config_root)
@@ -494,6 +498,7 @@ class Runner:
                     checkout_registration_identity=(
                         self.checkout_registration_identity
                     ),
+                    workflow_definition=self.workflow,
                 )
             print(f"▶ run started : {self.run_dir.name}")
             print(f"▶ task        : {task}")
@@ -513,6 +518,14 @@ class Runner:
                     ),
                 ):
                     pass
+            locked_definition = load_run_workflow_definition(
+                self.kit_root, self.workflow_name, meta,
+            )
+            if locked_definition.digest != self.workflow.digest:
+                raise WorkflowDefinitionPinError("workflow definition changed before lifecycle locking")
+            if "workflow_definition" not in meta:
+                meta.update(workflow_pin_metadata(locked_definition, workflow=self.workflow_name))
+                write_meta(self.run_dir, meta)
             print(f"▶ resuming    : {self.run_dir.name}")
             print(f"▶ task        : {meta.get('task', '')}")
 
@@ -550,7 +563,8 @@ class Runner:
         # Inject profile snapshot into adapter so render_envelope can include
         # it. Both attributes are declared on the Adapter base class, so this
         # is plain instance-attribute assignment.
-        adapter._profile_snapshot = self.profile
+        adapter._profile_snapshot = deepcopy(self.profile)
+        adapter._resolution_context = self._phase_resolution_context()
         adapter._profile_id = self.profile_id
         adapter._architecture = self.architecture
         adapter._config_root = self.config_root
@@ -1528,49 +1542,7 @@ class Runner:
         return CursorScope.of(self.workflow, [phase.id for phase in self.phases])
 
     def _run_cursor(self, meta: dict[str, Any]) -> RunCursor:
-        assert self.run_dir is not None
-        cursor = RunCursor.from_meta(
-            meta,
-            self._cursor_scope(),
-            accept_workflow_drift=self.accept_workflow_drift,
-        )
-        if cursor.reanchored_from is not None:
-            # 승인된 drift가 run을 몇 phase 앞뒤로 옮겼다. 훨씬 작은 상태 변화인
-            # 중단된 전이 재개도 한 줄을 찍는다 — 이쪽이 조용하면 사용자는 재개가
-            # 어디서 다시 시작했는지 알 방법이 없다.
-            print(
-                f"  [re-anchor] workflow drift moved phase '{cursor.phase_id}' "
-                f"{cursor.reanchored_from} -> {cursor.phase_index}"
-            )
-        # 승인된 drift는 기록된 phase 이름으로 index를 다시 잡는다. 다시 잡은 값을
-        # 남기지 않으면 digest만 새로 찍힌 채 옛 index가 meta에 남고, 다음 실행은
-        # drift가 사라진 자리에서 index와 이름이 어긋나 `CorruptRunCursorError`로
-        # 막힌다. 재배치 여부는 커서가 직접 들고 온다 — 여기서 `기록된 index !=
-        # 커서 index`로 추론하면 digest가 어긋난 안에서만 참이 되는 비교를 결정적
-        # 분기로 쓰는 것이고, 그건 근거가 될 수 없다.
-        if (
-            meta.get("workflow_digest") != cursor.workflow_digest
-            or cursor.reanchored_from is not None
-        ):
-            # digest 기록이 없던 예전 run이거나, 사용자가 drift를 승인한 run이다.
-            # 어느 쪽이든 지금 정의로 다시 찍어야 다음 실행이 같은 기준을 본다.
-            #
-            # 단 `write_meta`는 **원자적 교체**다. `read_meta`는 손상·OSError·
-            # decode 실패를 stderr로 알리고 빈 dict를 돌려주므로, 읽히지 않은
-            # meta에 backfill을 걸면 run_id·task·task_digest·gate_nonce·checkout
-            # identity가 첫 `continue`에서 통째로 사라진다. `run_id`는 `create_run`이
-            # 항상 박는 값이라, 없다는 것은 이 dict가 meta.json의 내용이 아니라는
-            # 뜻이다 — 조용히 덮어쓰지 않고 여기서 멈춘다.
-            if not meta.get("run_id"):
-                raise CorruptRunCursorError(
-                    f"run meta at {self.run_dir / META_FILE} yielded no run_id; "
-                    f"refusing to rewrite it. Restore the file from backup, or clear "
-                    f"the run with `agent-flow abort`."
-                )
-            meta["workflow_digest"] = cursor.workflow_digest
-            meta["phase_index"] = cursor.phase_index
-            write_meta(self.run_dir, meta)
-        return cursor
+        return RunCursor.from_meta(meta, self._cursor_scope())
 
     def _fix_collector_targets(self) -> set[str]:
         """rejection verdict가 되돌려 보내는 target phase들. 이 집합으로 가는 route는
@@ -2091,6 +2063,12 @@ class Runner:
         print(f"  [recheck] {phase.id} status=blocked")
         return True
 
+    def _phase_resolution_context(self) -> ResolutionContext:
+        context = getattr(self, "_resolution_context", None)
+        if context is None:
+            context = self._resolution_context = ResolutionContext()
+        return context
+
     def _required_skill_names(self, phase: Phase, meta: dict[str, Any]) -> tuple[str, ...]:
         """게이트가 요구하게 될 required skill 이름. 강제 지점과 같은 입력을 쓴다."""
         resolution = phase_skill_resolution(
@@ -2102,6 +2080,7 @@ class Runner:
             task_text=str(meta.get("task", "")),
             concerns=run_concerns(meta),
             architecture_root=self.project_root,
+            context=self._phase_resolution_context(),
         )
         return tuple(skill.name for skill in resolution.required)
 
@@ -2229,6 +2208,7 @@ class Runner:
                 concerns=run_concerns(meta),
                 since=_meta_timestamp(meta.get("phase_entered_at")),
                 architecture_root=self.project_root,
+                context=self._phase_resolution_context(),
             )
         )
         review_rejected = phase_review_rejected(
@@ -2346,7 +2326,7 @@ class Runner:
         """Return why pending architecture selection blocks the current phase."""
         try:
             assert_install_complete(self.project_root)
-            selection = architecture_snapshot(self.project_root).selection
+            selection = self._phase_resolution_context().snapshot(self.project_root).selection
         except (OSError, ValueError) as exc:
             print(f"agent-flow: {exc}", file=sys.stderr)
             return "architecture_policy_unreadable"
@@ -2406,6 +2386,8 @@ class Runner:
                     profile=self.profile, changed_files=scope,
                     task_text=str(meta.get("task", "")), concerns=run_concerns(meta),
                     host=host, architecture_root=self.project_root,
+                    context=self._phase_resolution_context(),
+                    provider_authority=json.dumps((self._adapter_name, tuple(hosts))),
                 )
                 manifests[host] = {
                     document.path: document.sha256
@@ -2485,7 +2467,7 @@ class Runner:
         meta = read_meta(self.run_dir)
         if "architecture_digest" in meta:
             return
-        snapshot = architecture_snapshot(self.project_root)
+        snapshot = self._phase_resolution_context().snapshot(self.project_root)
         if mode is not ResumeMode.START and snapshot.declared:
             return
         meta["architecture_digest"] = snapshot.digest
@@ -2500,7 +2482,7 @@ class Runner:
             assert_install_complete(self.project_root)
             if self.config_root != self.project_root:
                 assert_install_complete(self.config_root)
-            snapshot = architecture_snapshot(self.project_root)
+            snapshot = self._phase_resolution_context().snapshot(self.project_root)
             if snapshot.declared:
                 assert_architecture_override_compatible(self.config_root, snapshot.selection)
         except (OSError, ValueError) as exc:

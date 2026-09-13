@@ -17,10 +17,8 @@ declarations, and profile role mappings. Keep the project's layout rather than
 creating a prescribed monorepo tree. Shared policy/contracts remain free of React
 Native runtime imports; native implementations belong to platform adapters.
 
-Map `shared-presentation-contract` to the existing neutral notifier/queue boundary
-used by AppShell and feature presentation. It imports no UI, data, AppShell, or
-feature implementation. No extra package is needed merely to satisfy a role name.
-An unregistered package path is missing lint coverage, not a successful check.
+Apply the required core's **Semantic Layers** and **Dependency Rule** to shared
+notifier/queue contracts and managed source-root coverage.
 
 ## DI Shape
 

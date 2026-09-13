@@ -48,8 +48,6 @@ The app's adopted top-level composition or framework root owns AppShell responsi
 - passes feature routes/screens only the callbacks or stores needed to notify
   errors.
 
-For common errors, screens emit intents rather than owning global UI or root recovery. Feature-local errors remain in screen state.
-
 ## Shared Error Contract
 
 Read [`app-shell-error-contract`](../app-shell-error-contract/SKILL.md) before the platform rules below. It is the source of truth for classification, queue identity, acknowledgement, retry, and metadata preservation.
@@ -57,7 +55,6 @@ Read [`app-shell-error-contract`](../app-shell-error-contract/SKILL.md) before t
 ## Development Checklist
 
 - Keep the global modal/snackbar/toast host at AppShell level.
-- Run root navigation recovery through the shared queue and acknowledgement contract.
 - For `SessionExpired`, reset the root navigator to the login flow.
 - For `Maintenance`, reset the root navigator to the maintenance flow when present.
 - Identify the installed router and version. In plain React Navigation, use auth-flow state or root `CommonActions.reset` from AppShell-owned code. For Expo or another framework-managed root, use its supported auth/recovery mechanism and import boundary without creating a second `NavigationContainer`.
@@ -72,7 +69,6 @@ Request changes when any of these are true:
 - Multiple `NavigationContainer` trees are introduced without a clear isolated
   mini-app reason.
 - `SessionExpired` can leave authenticated stack entries after successful confirmation.
-- The shared classification, deduplication, acknowledgement, retry, or metadata contract is violated.
 
 ## Platform-Specific Forbidden Patterns
 
@@ -81,16 +77,11 @@ Request changes when any of these are true:
   errors.
 - Do not nest independent `NavigationContainer` instances for ordinary feature
   screens.
-- Do not use a render crash boundary as the main API/domain common error handler.
 - Do not use an HTTP/interceptor layer to display React Native UI.
 
 ## Tests To Expect
 
-- A common error appears once in the global host without duplicate local rendering; a feature-local error remains local.
 - Successful session recovery removes authenticated routes and switches to login, including when back navigation is attempted.
-- Maintenance recovery reaches the configured maintenance root. Failed or cancelled recovery remains retryable according to the shared contract.
+- Maintenance recovery reaches the configured maintenance root.
 - Exercise the adopted router's observable recovery behavior rather than asserting a particular notifier method name.
 
-## Completion Gate
-
-Use only the markers supplied by the active phase.

@@ -16,10 +16,8 @@ Discover existing packages, app factories, entry adapters, imports, and active
 architecture role mappings. Keep the adopted layout; semantic roles do not
 prescribe a folder tree or require separate files for every responsibility.
 
-`app-shell` owns composition, `inbound-adapter` owns HTTP/tool schemas and response
-mapping, `application` owns actions/ports, `core-domain` owns pure policy, and
-`core-data` owns persistence/outbound adapters. A server without UI needs no
-presentation state holder or shared UI error queue.
+Apply the required core's **Semantic Layers** to server boundaries. A server
+without UI needs no presentation state holder or shared UI error queue.
 
 ## DI Shape
 
@@ -31,10 +29,6 @@ presentation state holder or shared UI error queue.
   belongs to the API/composition edge, not pure domain policy.
 - API handlers map inbound schemas to application commands and map results/errors
   to responses. Outbound provider DTOs and ORM entities stay in driven adapters.
-- Use cases may consume Clock, payment, transaction, and other stable ports.
-  Keep raw framework/client exceptions behind the adapter's error contract.
-- Apply the core's recorded simple-adapter exception: a DB-only repository needs
-  no invented remote source, cache, or forwarding mapper.
 
 ## Review Additions
 

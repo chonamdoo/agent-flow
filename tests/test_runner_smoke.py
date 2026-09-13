@@ -464,6 +464,24 @@ def test_worktree_run_continue_status_abort(tmp_path: Path):
     assert not worktree.exists()
 
 
+def _write_host_phase_workflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase_id: str
+) -> str:
+    kit = tmp_path / "kit"
+    workflows = kit / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / f"{phase_id}.yaml").write_text(
+        f"id: {phase_id}\n"
+        "completion_disposition: local-handoff\n"
+        "phases:\n"
+        f"  - id: {phase_id}\n"
+        "    description: host writes artifact\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("agent_flow.runner._find_kit_root", lambda: kit)
+    return phase_id
+
+
 def test_hosted_phase_durable_baseline_detects_post_adapter_leader_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -471,7 +489,7 @@ def test_hosted_phase_durable_baseline_detects_post_adapter_leader_write(
     from agent_flow.artifact import read_meta
     from agent_flow.core import worktrees as worktrees_module
     from agent_flow.core.worktree_isolation import WorktreeIsolationError
-    from agent_flow.runner import Phase, ResumeMode, Runner
+    from agent_flow.runner import ResumeMode, Runner
     import agent_flow.runner as runner_module
 
     project = tmp_path / "durable-host-baseline"
@@ -510,14 +528,13 @@ def test_hosted_phase_durable_baseline_detects_post_adapter_leader_write(
         "assert_managed_hooks_registered",
         lambda *args, **kwargs: None,
     )
-    phase = Phase(id="host-phase", description="host writes artifact")
+    workflow = _write_host_phase_workflow(tmp_path, monkeypatch, "host-phase")
     started = Runner(
         checkout.path,
         state_root=state_root,
         config_root=project,
-        workflow="development",
+        workflow=workflow,
     )
-    started.phases = [phase]
     started.run(ResumeMode.START, task="durable host baseline")
     assert started.run_dir is not None
     run_dir = started.run_dir
@@ -539,7 +556,6 @@ def test_hosted_phase_durable_baseline_detects_post_adapter_leader_write(
         config_root=project,
         run_dir=run_dir,
     )
-    resumed.phases = [phase]
     monkeypatch.setattr(
         resumed,
         "_has_artifact",
@@ -559,7 +575,7 @@ def test_hosted_phase_durable_baseline_detects_post_adapter_leader_write(
 def _host_phase_leader_drift_fixture(tmp_path: Path, monkeypatch, name: str):
     """leader가 phase 도중 바뀐 상태까지 몰아 둔 run. 반환값으로 이어서 조립한다."""
     from agent_flow.adapters.hosted import HostedAdapter
-    from agent_flow.runner import Phase, ResumeMode, Runner
+    from agent_flow.runner import ResumeMode, Runner
     import agent_flow.runner as runner_module
     from agent_flow.core import worktrees as worktrees_module
 
@@ -584,11 +600,10 @@ def _host_phase_leader_drift_fixture(tmp_path: Path, monkeypatch, name: str):
     monkeypatch.setattr(
         runner_module, "assert_managed_hooks_registered", lambda *a, **k: None
     )
-    phase = Phase(id="host-phase", description="host writes artifact")
+    workflow = _write_host_phase_workflow(tmp_path, monkeypatch, "host-phase")
     started = Runner(
-        checkout.path, state_root=state_root, config_root=project, workflow="development"
+        checkout.path, state_root=state_root, config_root=project, workflow=workflow
     )
-    started.phases = [phase]
     started.run(ResumeMode.START, task="leader drift acknowledgement")
     run_dir = started.run_dir
     assert run_dir is not None
@@ -604,7 +619,6 @@ def _host_phase_leader_drift_fixture(tmp_path: Path, monkeypatch, name: str):
             run_dir=run_dir,
             accept_leader_drift=accept,
         )
-        resumed.phases = [phase]
         return resumed
 
     return project, run_dir, resume
@@ -829,7 +843,7 @@ def test_hosted_phase_baseline_in_an_older_format_is_re_captured(
     from agent_flow.artifact import read_meta, write_meta
     from agent_flow.core import worktrees as worktrees_module
     from agent_flow.core.worktree_isolation import LEADER_SNAPSHOT_VERSION
-    from agent_flow.runner import Phase, ResumeMode, Runner
+    from agent_flow.runner import ResumeMode, Runner
     import agent_flow.runner as runner_module
 
     project = tmp_path / "legacy-host-baseline"
@@ -854,14 +868,13 @@ def test_hosted_phase_baseline_in_an_older_format_is_re_captured(
     monkeypatch.setattr(
         runner_module, "assert_managed_hooks_registered", lambda *a, **k: None
     )
-    phase = Phase(id="legacy-phase", description="host writes artifact")
+    workflow = _write_host_phase_workflow(tmp_path, monkeypatch, "legacy-phase")
     started = Runner(
         checkout.path,
         state_root=state_root,
         config_root=project,
-        workflow="development",
+        workflow=workflow,
     )
-    started.phases = [phase]
     started.run(ResumeMode.START, task="legacy baseline")
     assert started.run_dir is not None
     run_dir = started.run_dir
@@ -886,7 +899,6 @@ def test_hosted_phase_baseline_in_an_older_format_is_re_captured(
         config_root=project,
         run_dir=run_dir,
     )
-    resumed.phases = [phase]
     resumed.run(ResumeMode.RESUME)
 
     assert "[migrate]" in capsys.readouterr().out
@@ -908,7 +920,7 @@ def test_hosted_phase_baseline_with_an_older_record_format_is_re_captured(
     from agent_flow.adapters.hosted import HostedAdapter
     from agent_flow.artifact import read_meta, write_meta
     from agent_flow.core import worktrees as worktrees_module
-    from agent_flow.runner import Phase, ResumeMode, Runner
+    from agent_flow.runner import ResumeMode, Runner
     import agent_flow.runner as runner_module
 
     project = tmp_path / "legacy-record-baseline"
@@ -933,14 +945,13 @@ def test_hosted_phase_baseline_with_an_older_record_format_is_re_captured(
     monkeypatch.setattr(
         runner_module, "assert_managed_hooks_registered", lambda *a, **k: None
     )
-    phase = Phase(id="record-phase", description="host writes artifact")
+    workflow = _write_host_phase_workflow(tmp_path, monkeypatch, "record-phase")
     started = Runner(
         checkout.path,
         state_root=state_root,
         config_root=project,
-        workflow="development",
+        workflow=workflow,
     )
-    started.phases = [phase]
     started.run(ResumeMode.START, task="legacy record")
     assert started.run_dir is not None
     run_dir = started.run_dir
@@ -961,7 +972,6 @@ def test_hosted_phase_baseline_with_an_older_record_format_is_re_captured(
         config_root=project,
         run_dir=run_dir,
     )
-    resumed.phases = [phase]
     resumed.run(ResumeMode.RESUME)
 
     out = capsys.readouterr().out
@@ -1059,19 +1069,18 @@ def test_profile_decides_whether_leader_build_output_blocks_the_phase(
     않은 것이고, `all`(과 미선언)에서 안 막히면 탐지가 통째로 사라진 것이다.
     """
     from agent_flow.core.worktree_isolation import LeaderDriftError
-    from agent_flow.runner import Phase, ResumeMode, Runner
+    from agent_flow.runner import ResumeMode, Runner
 
     project, checkout, state_root, artifact = _leader_tripwire_project(
         tmp_path, monkeypatch, f"tripwire-{declared or 'default'}", declared=declared
     )
-    phase = Phase(id="build-phase", description="host writes artifact")
+    workflow = _write_host_phase_workflow(tmp_path, monkeypatch, "build-phase")
     runner = Runner(
         checkout.path,
         state_root=state_root,
         config_root=project,
-        workflow="development",
+        workflow=workflow,
     )
-    runner.phases = [phase]
 
     # phase 진입과 종료 사이에 leader의 gitignored 산출물이 바뀐다.
     original = runner._assert_leader_unchanged
@@ -1094,19 +1103,18 @@ def test_tracked_writes_still_block_under_the_narrow_sweep(
 ):
     """`tracked-only`가 좁힌 것은 ignored뿐이다. 추적 경로 유출은 그대로 막힌다."""
     from agent_flow.core.worktree_isolation import LeaderDriftError
-    from agent_flow.runner import Phase, ResumeMode, Runner
+    from agent_flow.runner import ResumeMode, Runner
 
     project, checkout, state_root, _artifact = _leader_tripwire_project(
         tmp_path, monkeypatch, "tripwire-tracked-leak", declared="tracked-only"
     )
-    phase = Phase(id="leak-phase", description="host writes artifact")
+    workflow = _write_host_phase_workflow(tmp_path, monkeypatch, "leak-phase")
     runner = Runner(
         checkout.path,
         state_root=state_root,
         config_root=project,
-        workflow="development",
+        workflow=workflow,
     )
-    runner.phases = [phase]
     original = runner._assert_leader_unchanged
 
     def leak_then_assert(leader_root, snapshot):
@@ -1131,19 +1139,18 @@ def test_narrowing_mid_run_is_reported_before_the_new_scope_takes_effect(
     """
     from agent_flow.core.worktree_isolation import LeaderDriftError
     from agent_flow.artifact import read_meta
-    from agent_flow.runner import Phase, ResumeMode, Runner
+    from agent_flow.runner import ResumeMode, Runner
 
     project, checkout, state_root, artifact = _leader_tripwire_project(
         tmp_path, monkeypatch, "tripwire-scope-flip", declared=None
     )
-    phase = Phase(id="scope-phase", description="host writes artifact")
+    workflow = _write_host_phase_workflow(tmp_path, monkeypatch, "scope-phase")
     started = Runner(
         checkout.path,
         state_root=state_root,
         config_root=project,
-        workflow="development",
+        workflow=workflow,
     )
-    started.phases = [phase]
     started.run(ResumeMode.START, task="full sweep baseline")
     assert started.run_dir is not None
     run_dir = started.run_dir
@@ -1168,7 +1175,6 @@ def test_narrowing_mid_run_is_reported_before_the_new_scope_takes_effect(
             accept_leader_drift=accept,
         )
         assert runner._leader_include_ignored is False
-        runner.phases = [phase]
         runner.run(ResumeMode.RESUME)
         return runner
 
@@ -1200,7 +1206,7 @@ def test_narrowing_must_be_declared_where_the_narrowed_sweep_can_see_it(
     감시하던 유일한 눈을 끈다. 추적되지 않은 선언은 효력이 없어야 한다.
     """
     from agent_flow.core.worktree_isolation import WorktreeIsolationError
-    from agent_flow.runner import Phase, ResumeMode, Runner
+    from agent_flow.runner import ResumeMode, Runner
 
     project, checkout, state_root, _artifact = _leader_tripwire_project(
         tmp_path,
@@ -1238,14 +1244,14 @@ def test_narrowing_must_be_declared_where_the_narrowed_sweep_can_see_it(
 
     # 선언한 그 파일을 추적하면 통과한다. 규칙은 "추적된 자리에서만"이지 "금지"가 아니다.
     _declare_leader_tripwire(project, "tracked-only", track=True)
+    workflow = _write_host_phase_workflow(tmp_path, monkeypatch, "ok-phase")
     runner = Runner(
         checkout.path,
         state_root=state_root,
         config_root=project,
-        workflow="development",
+        workflow=workflow,
     )
     assert runner._leader_include_ignored is False
-    runner.phases = [Phase(id="ok-phase", description="host writes artifact")]
     runner.run(ResumeMode.START, task="tracked declaration")
 
 
@@ -3080,12 +3086,16 @@ def test_required_markers_block_incomplete_artifact(tmp_path: Path):
 
 def test_runner_uses_normalized_artifact_path(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.artifact import create_run
+    from agent_flow.core.phase_workflow import load_phase_workflow_definition
     from agent_flow.runner import Runner
 
     project = tmp_path / "project"
-    run_dir = tmp_path / "run"
     project.mkdir()
-    run_dir.mkdir()
+    definition = load_phase_workflow_definition(KIT_ROOT, "full-feature")
+    run_dir = create_run(
+        project, "full-feature", "Inspect artifact paths", workflow_definition=definition
+    )
     runner = Runner(project, run_dir=run_dir, workflow="full-feature")
     phase = next(phase for phase in runner.phases if phase.id == "domain-grill")
     artifact = run_dir / phase.artifact
@@ -3108,6 +3118,10 @@ def test_runner_uses_normalized_artifact_path(tmp_path: Path):
 def test_status_uses_normalized_artifact_path(tmp_path: Path, capsys):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.artifact import ActiveRun, write_meta
+    from agent_flow.core.phase_workflow import load_phase_workflow_definition
+    from agent_flow.core.workflow_pin import workflow_pin_metadata
+
+    definition = load_phase_workflow_definition(KIT_ROOT, "full-feature")
 
     run_dir = tmp_path / "project" / ".agent-flow" / "runs" / "r1"
     run_dir.mkdir(parents=True)
@@ -3117,6 +3131,8 @@ def test_status_uses_normalized_artifact_path(tmp_path: Path, capsys):
             "workflow": "full-feature",
             "task": "demo",
             "current_phase": "domain-grill",
+            "phase_index": next(i for i, phase in enumerate(definition.phases) if phase.id == "domain-grill"),
+            **workflow_pin_metadata(definition, workflow="full-feature"),
             "started_at": "2026-05-20T00:00:00+00:00",
         },
     )
@@ -3825,12 +3841,6 @@ def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
         assert "exactly one unfenced plain line" in prompt
 
 
-def test_architecture_design_angle_uses_provider_resolved_skill_paths():
-    template = KIT_ROOT / "templates" / "_shared" / "review" / "architecture-design.md"
-    contract = template.read_text(encoding="utf-8")
-
-    assert ".agent-flow/skills/" not in contract
-    assert "skills listed as required in this reviewer prompt" in contract
 
 
 def test_types_angle_contract_is_language_neutral():

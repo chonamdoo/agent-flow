@@ -64,7 +64,20 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
   or permit checkout deletion; those remain runtime/controller decisions.
 - Record the generic profile-driven markers in the phase artifact's `## Completion Gate`: `profile-skill-selection: applied`, `active-profiles: <profile list>`, `changed-file-skill-resolution: applied`, `required-profile-skills: checked`, and `missing-required-profile-skills: none|<list>`.
 - If the prompt surfaces project-local code/review skill docs, read only those applicable docs, record `project-local-skills: checked`, `project-local-skills-used: <skill list>`, and `project-local-skill-docs: applied`. Design/Figma, hook, branch, PR, merge, and cleanup local skills do not satisfy or trigger this code/review marker. If no project-local code/review skill applies, record `project-local-skills: n/a` and `project-local-skills-used: n/a`.
-- Missing-skill handling lives here only; other docs point at this bullet instead of restating it. The phase prompt resolves required skills against the host you are running on and names the ones that are not installed there. A skill named as not installed is not a violation and not a finding: record `skill-availability: degraded`, put its **bare skill name** in the comma-separated `missing-required-profile-skills:` marker, and write the declared `missing local <group>: <skill>` sentence only in prose/Calibration. Continue with the skills you do have. Do not stop work, do not ask the user to install anything mid-run, and never turn absence into `verdict: request-changes` — installation is not something the code under review can change. Installation is owned by project setup and `agent-flow skills sync`.
+
+## Missing Required Skills
+
+The phase prompt resolves required skills against the current host and names
+those not installed there. A named missing skill is a coverage gap, not a code
+violation or finding. Record `skill-availability: degraded`, put its **bare skill
+name** in the comma-separated `missing-required-profile-skills:` marker, and
+retain the declared `missing local <group>: <skill>` sentence and source URL only
+in prose/Calibration. Record the resolved paths actually read in Calibration.
+Continue and complete the artifact or review with the skills available. Do not
+stop, ask for mid-run installation, or turn absence into
+`verdict: request-changes`; installation is not something the code under review
+can change. Project setup and `agent-flow skills sync` own installation.
+Other docs must point here rather than duplicate this procedure.
 
 ## Agent-Facing Documents
 
@@ -116,13 +129,34 @@ When extracting or evaluating reusable professional knowledge and procedures, us
   unevaluated rather than manufacturing a pass from the skill's own checklist.
 
 
+## SOLID Boundaries
+
+For each new class, module, or function in design, and each applicable changed
+boundary during implementation or review, assess all five principles:
+
+- **Single Responsibility:** one concrete reason to change.
+- **Open/Closed:** extend through composition or strategy at real variation
+  points rather than modifying stable policy; do not invent speculative extension
+  points.
+- **Liskov Substitution:** subtypes, implementations, and fakes preserve the
+  interface/supertype contract, with no surprise nulls or narrower preconditions.
+- **Interface Segregation:** consumers depend only on methods they use.
+- **Dependency Inversion:** high-level policy depends on abstractions rather than
+  concrete implementations.
+
+List violations with the offending name and principle. When the design
+introduces no abstractions, such as a one-line config change, record
+`n/a — change does not introduce new abstractions` and explain.
+During implementation and review, apply the concrete-defect blocking threshold
+in **During Implementation**; style differences alone remain non-blocking.
+
 ## During Implementation
 
 - Stay inside the requested scope.
 - Do not add unrelated refactors, formatting churn, docs, or error handling.
 - Prefer existing local patterns and helpers over new abstractions.
 - Add a new abstraction only when it removes real duplication or matches an existing pattern.
-- Single Responsibility — keep one concrete reason to change in each function, class, or module.
+- Apply every applicable principle in **SOLID Boundaries**.
 - Side Effects — isolate necessary effects at named boundaries; keep computation pure where practical.
 - Do Not Repeat Yourself — share repeated policy or logic, not coincidental syntax.
 - Parameter Grouping — group values that travel and change together; do not create a type for unrelated arguments.

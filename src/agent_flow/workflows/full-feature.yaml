@@ -135,7 +135,7 @@ phases:
   - id: ddd-design
     architecture_decision: required
     skills:
-      required: [ddd-architecture, clean-architecture, clean-architecture-core]
+      required: [ddd-architecture, code-generation-discipline, clean-architecture-core]
     description: DDD first, then selected architecture contract design.
     required_markers:
       - "## Clean Architecture Boundary Map"
@@ -285,7 +285,7 @@ phases:
 
   - id: green
     skills:
-      required: [code-generation-discipline, tdd, clean-architecture]
+      required: [code-generation-discipline, tdd, clean-architecture-core]
     description: TDD green phase.
     required_markers:
       - "skills_checked: true"
@@ -306,14 +306,8 @@ phases:
     prompt: |
       Apply code-generation-discipline. Implement the minimum code to pass red
       tests. Apply `.agent-flow/skills/tdd/SKILL.md` and the architecture contract
-      skills this prompt lists as required. Resolve required skills from active
-      profile metadata, installed skill index, changed files, and task scope.
-      Read only the touched profile skill union before writing code.
-      If a required local skill is missing for this host, record
-      `skill-availability: degraded`, put its bare name in
-      `missing-required-profile-skills:`, keep the declared
-      `missing local <group>: <skill>` sentence and source URL in prose/Calibration,
-      then complete the artifact with the skills available.
+      skills this prompt lists as required. Apply code-generation-discipline's
+      Before Starting skill resolution and Missing Required Skills procedure.
       End with:
 
           ## Completion Gate
@@ -337,7 +331,7 @@ phases:
 
   - id: refactor
     skills:
-      required: [code-generation-discipline, tdd, clean-architecture]
+      required: [code-generation-discipline, tdd, clean-architecture-core]
     description: TDD refactor phase.
     required_markers:
       - "skills_checked: true"
@@ -361,13 +355,9 @@ phases:
       Apply code-generation-discipline. Refactor only after green. Keep
       behavior stable, apply `.agent-flow/skills/tdd/SKILL.md` and the architecture
       contract skills this prompt lists as required, read every required profile skill
-      before changing code, and summarize structural changes. Required skills
-      come from active profile metadata, installed skill index, changed files,
-      and task scope. If a required local skill is missing for this host,
-      record `skill-availability: degraded`, put its bare name in
-      `missing-required-profile-skills:`, keep the declared
-      `missing local <group>: <skill>` sentence and source URL in prose/Calibration,
-      then complete the artifact with the skills available.
+      before changing code, and summarize structural changes. Apply
+      code-generation-discipline's Before Starting skill resolution and
+      Missing Required Skills procedure.
       End with:
 
           ## Completion Gate
@@ -430,7 +420,7 @@ phases:
   - id: multi-review
     architecture_decision: required
     skills:
-      required: [code-generation-discipline, code-review, clean-architecture-core, clean-architecture, agent-flow-concise-output]
+      required: [code-generation-discipline, code-review, clean-architecture-core, agent-flow-concise-output]
     description: Run implementation review with at least two independent sub-agent reviewers before approve. Runner routes approve→architecture-review, request-changes→fix-loop.
     multi_review: true
     required_markers:
@@ -479,12 +469,8 @@ phases:
       verdict line: `verdict: approve` or `verdict: request-changes`.
       Apply agent-flow-concise-output: one finding per line, concise
       prose, no emoji, and parser verdict markers unchanged.
-      Resolve required review skills from active profile metadata,
-      `.agent-flow/skills/index.json`, changed files, and task scope. Review
-      only the touched profile skill union. The skill list above was resolved
-      against your own host; a skill it names as not installed is a coverage gap,
-      not a finding. Record `skill-availability: degraded` and keep the verdict on
-      the code.
+      Apply code-generation-discipline's Before Starting skill resolution and
+      Missing Required Skills procedure for this host.
       The markers below are not the whole completion contract. The runner also
       verifies this run's `design-spec.md` ledger at this phase, and
       `verdict: approve` does not override it — an unmet item blocks phase
@@ -531,7 +517,7 @@ phases:
   - id: architecture-review
     architecture_decision: required
     skills:
-      required: [code-generation-discipline, ddd-architecture, clean-architecture-core, clean-architecture, architecture-reviewer]
+      required: [code-generation-discipline, ddd-architecture, clean-architecture-core, architecture-reviewer]
     description: Review implementation against domain and selected architecture design. Runner routes approve→gates, request-changes→refactor.
     multi_review: true
     required_markers:
@@ -588,11 +574,8 @@ phases:
       `verdict: approve` or `verdict: request-changes`.
       Apply agent-flow-concise-output for findings and keep verdict markers
       unchanged.
-      Before judging code, resolve required review skills from active profile
-      metadata, installed skill index, changed files, and task scope. Review
-      only the touched profile skill union. A required profile skill missing for this
-      host is a Calibration coverage gap, not a code finding: record
-      `skill-availability: degraded` and keep that reviewer verdict on the code.
+      Apply code-generation-discipline's Before Starting skill resolution and
+      Missing Required Skills procedure before judging code.
       End with:
 
           ## Completion Gate
@@ -651,7 +634,7 @@ phases:
 
   - id: fix-loop
     skills:
-      required: [code-generation-discipline, clean-architecture]
+      required: [code-generation-discipline, clean-architecture-core]
     description: Apply review and gate fixes. Runner routes back to review before QA.
     required_markers:
       - "skills_checked: true"
@@ -675,13 +658,8 @@ phases:
       Apply code-generation-discipline while fixing review/gate failures. Read
       required profile skills before writing or judging code, or record that no
       fixes were required. Apply the required architecture contract skills to any
-      boundary-affecting fix. Required skills come from active profile metadata,
-      installed skill index, changed files, and task scope.
-      If a required local skill is missing for this host, record
-      `skill-availability: degraded`, put its bare name in
-      `missing-required-profile-skills:`, keep the declared
-      `missing local <group>: <skill>` sentence and source URL in prose/Calibration,
-      then complete the artifact with the skills available.
+      boundary-affecting fix. Apply code-generation-discipline's Before Starting
+      skill resolution and Missing Required Skills procedure.
       End with:
 
           ## Completion Gate
@@ -774,7 +752,7 @@ phases:
 
   - id: pr-comment-fix
     skills:
-      required: [push-watch, code-generation-discipline, clean-architecture]
+      required: [push-watch, code-generation-discipline, clean-architecture-core]
     description: Address PR feedback; changed code returns through review and gates.
     routes:
       blocked: block
@@ -788,7 +766,7 @@ phases:
 
   - id: pr-ci-fix
     skills:
-      required: [push-watch, code-generation-discipline, clean-architecture]
+      required: [push-watch, code-generation-discipline, clean-architecture-core]
     description: Fix PR CI; changed code returns through review and gates.
     routes:
       blocked: block

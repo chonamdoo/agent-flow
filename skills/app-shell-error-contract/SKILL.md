@@ -18,6 +18,7 @@ Apply this semantic contract before the matching platform AppShell skill. Platfo
 - Common errors include `SessionExpired`, `Maintenance`, `Forbidden`, and product-defined server-wide codes such as `COMMON_*` unless the product flow explicitly classifies one locally.
 - Classify the product's error meaning; HTTP 403 alone does not imply a common
   error, expired session, or permission to reset navigation.
+- Do not use crash handling or render fallback boundaries as the main API/domain common error handler.
 
 ## Queue and acknowledgement
 
@@ -48,12 +49,22 @@ Apply this semantic contract before the matching platform AppShell skill. Platfo
   and exceptions out of domain/presentation. Local mode uses its declared
   representation boundaries while preserving the same metadata and safe UI
   behavior.
+- In Clean mode, data mappers convert network/server failures into domain errors
+  while preserving shared metadata; presentation mappers project them into
+  feature-local or common-error UI values. Local mode uses the selected
+  contract's representation boundaries while preserving the same metadata and
+  UI ownership. These are semantic roles, not required wrapper or class names.
 
 ## Review and tests
 
 Request changes when classification can render the same failure both globally and locally, deduplication can double-show it, acknowledgement can lose it before recovery succeeds, or metadata disappears.
+Apply the same request-changes policy to any violation of the classification,
+deduplication, acknowledgement, retry, or metadata rules above.
 
 Tests must cover common-versus-local classification, stable-key deduplication, `pending → handling → consumed`, failure/cancellation returning to a retryable state, and metadata preservation.
+Feature tests must prove common errors notify AppShell rather than also becoming
+feature-local error state. A common error appears once in the global host without
+duplicate local rendering; a feature-local error remains local.
 
 ## Completion gate
 

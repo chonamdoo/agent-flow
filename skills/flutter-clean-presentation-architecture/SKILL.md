@@ -4,7 +4,7 @@ description: Use when creating, modifying, or reviewing a Flutter Clean Architec
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [uistate, ui state, state holder, screen state, navigation effect, riverpod, asyncvalue, notifier, presentation layer]
 pathGlobs: ["**/*_ui_state.dart", "**/*_notifier.dart", "**/presentation/**"]
-requires: [clean-architecture-core]
+requires: [clean-architecture-core, flutter-clean-architecture]
 ---
 
 # Flutter Clean Presentation Architecture
@@ -24,35 +24,35 @@ For widget-level layout, constraint, adaptive sizing, disposal, child-widget key
 
 ## Architecture Rule
 
-- `presentation` owns screens, widgets, state-holder notifiers, UI events, presentation models, mappers, and navigation effects.
-- `domain` owns entities, use cases, repository interfaces, and pure business rules.
-- `data` implements repository interfaces and HTTP/storage/plugin adapters.
-- Presentation code depends on domain use cases or ports, not on `http`/`dio` clients, plugin classes, or repository implementations.
+Apply the required `clean-architecture-core` **Semantic Layers**, **Dependency
+Rule**, **Mapping Boundary**, and **Error Boundary**. Apply the required
+`flutter-clean-architecture` for platform composition and DI.
+
 - Flutter plugin and platform-channel APIs should be wrapped behind ports/adapters before reaching presentation state holders.
 - Permissions, deep links, secure storage, sensors, and `MethodChannel` calls should be represented as application/domain ports before presentation uses them.
 
 ## Data and Error Boundary
 
 - `http`/`dio` clients, `shared_preferences`, secure storage, `sqflite`/`drift`, plugins, permissions, and platform SDK detail stay in `data` or in platform adapters.
-- `DioException`, `SocketException`, `PlatformException`, and storage failures are raw diagnostics until a repository implementation or data mapper turns them into domain error/result types.
-- Use cases return domain result/error types and add only business-rule errors.
-- Screens and widgets receive presentation state, callbacks, and `UiModel`/error UI models, not DTOs, `Response` objects, raw `PlatformException`, or database rows.
-- Presentation mappers convert domain models and domain errors into UI models before state reaches widgets.
+- `DioException`, `SocketException`, `PlatformException`, and storage failures
+  are the raw diagnostics governed by the core **Error Boundary**.
 - Keep domain-to-UI derivation and error mapping in the mapper or notifier, not in `build`.
+
+Apply the required core's **Error Boundary** and **Mapping Boundary** for
+normalization and the values supplied to rendering.
 
 ## DI Rule
 
 Flutter has no framework-bundled DI container. Use this priority:
 
 1. Prefer constructor parameters for a dependency a single widget or notifier owns.
-2. Assemble app dependencies with the existing composition owner or provider graph. Presentation
-   consumes typed action, repository-interface, or capability ports; HTTP/storage/
-   plugin implementations remain inside composition and adapters.
-3. Use `get_it` only when the project already registers services there.
-4. When Riverpod is adopted, read dependencies through `ref`; otherwise preserve constructor or existing observable wiring. Reserve `BuildContext` for `Theme`, `MediaQuery`, localization, navigation, and dialogs.
+2. Apply the required Flutter adapter's **DI Shape** for the adopted graph,
+   Riverpod dependency lookup, and existing-only `get_it`.
+3. Otherwise preserve constructor or existing observable wiring. Reserve
+   `BuildContext` for `Theme`, `MediaQuery`, localization, navigation, and dialogs.
 
 When Riverpod is adopted, apply these provider rules; `flutter-clean-architecture` owns composition and overrides:
-- declare providers as top-level `final` variables, not inside `build`; a provider constructed per rebuild leaks its state
+- Do not construct providers inside `build`; a provider constructed per rebuild leaks its state.
 - expose a use case or repository through its own provider so a test can override that one edge
 - use the installed Riverpod version's auto-dispose mechanism for listener-scoped state; retain state deliberately when its declared route/restoration lifetime outlives listeners, with an explicit release owner
 - keep screen-local state out of unrelated app-level providers; restoration ownership does not make transient widget state global
@@ -68,8 +68,7 @@ Locate the project's adopted screen, notifier, UI-value, mapper, and widget
 boundaries and map their actual paths in the architecture profile. These are
 responsibilities, not a fixed tree or a required number of files/packages.
 
-Project domain/application values into the UI contract. An already safe immutable
-shape may use identity projection without a forwarding mapper or duplicate model.
+Apply the required core's **Mapping Boundary** to presentation projections.
 Follow adopted names; `UiModel` is a semantic role, not a mandatory suffix.
 
 ## State Holder Rule
@@ -119,7 +118,7 @@ Split state-holder wiring from rendering:
 - `UiState` is a sealed hierarchy or `AsyncValue` and covers not-ready, loading, refreshing, placeholder, empty, error, success, offline, and permission states that can occur
 - `UiState` has no contradictory booleans or duplicated derived fields
 - `UiAction`, `UiEvent`, and `UiState` roles are explicit for branchy screens
-- domain data is mapped to `UiModel` before rendering
+- presentation projections satisfy the required core's **Mapping Boundary**.
 - presentation values follow the project's naming convention; suffix or file count
   alone does not fail the state or architecture contract
 - the notifier owns async orchestration and exposes named action methods

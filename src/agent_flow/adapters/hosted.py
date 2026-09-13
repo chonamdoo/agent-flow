@@ -13,6 +13,7 @@ review flagged.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -21,12 +22,14 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple
 
+import yaml
+
 from agent_flow.adapters.base import Adapter
 from agent_flow.artifact import bind_review_evidence, ensure_review_binding, read_meta
+from agent_flow.cli_detect import cli_by_name
 from agent_flow.core.local_skills import (
     ARCHITECTURE_CONTRACT_REQUIREMENT,
     architecture_contract_required,
-    phase_skill_resolution,
 )
 from agent_flow.core.review_evidence import (
     ReviewerOutcome,
@@ -52,6 +55,7 @@ from agent_flow.multi_review import (
     Distribution,
     ReviewerJob,
     ReviewExecution,
+    _reviewer_launch_profile,
     distribute,
     eligible_reviewer_names,
     review_job_id,
@@ -739,16 +743,8 @@ def _applicable_angles(
     contract_satisfied = False
     if skill_gated:
         for provider in providers:
-            resolution = phase_skill_resolution(
-                adapter.config_root_or(project_root),
-                phase.id,
-                phase_skills=getattr(phase, "skills", None),
-                profile=adapter._profile_snapshot,
-                changed_files=adapter._changed_files,
-                task_text=adapter._task_text,
-                concerns=adapter._concerns,
-                host=provider,
-                architecture_root=project_root,
+            resolution = adapter.phase_resolution(
+                phase, project_root, skill_host=provider,
             )
             required.update(skill.name for skill in resolution.required)
             contract_satisfied = contract_satisfied or architecture_contract_required(resolution)
@@ -825,6 +821,11 @@ def _reviewer_jobs(
     providers: Sequence[str] | None = None,
 ) -> list[ReviewerJob]:
     providers = REVIEW_CLI_NAMES if providers is None else tuple(providers)
+    adapter._provider_authority = tuple(providers)
+    adapter._provider_launch_authority = yaml.safe_dump((
+        _reviewer_launch_profile(adapter.config_root_or(project_root)),
+        tuple((provider, repr(cli_by_name(provider))) for provider in providers),
+    ), sort_keys=True, allow_unicode=True)
     profile_angles = adapter.profile_review_angles()
     angles = _applicable_angles(
         _merge_review_angles(_BASE_REVIEW_ANGLES, profile_angles),
@@ -841,6 +842,7 @@ def _reviewer_jobs(
             project_root,
             prompt_variant=f"reviewer-base-{provider}",
             skill_host=provider,
+            role="reviewer",
         )
         for provider in providers
     }
@@ -853,6 +855,7 @@ def _reviewer_jobs(
             project_root,
             prompt_variant="reviewer-base-host",
             skill_host=adapter.name,
+            role="reviewer",
         )
     )
     review_input_prompt = (

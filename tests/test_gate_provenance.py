@@ -885,7 +885,8 @@ def test_a_gate_result_written_before_the_phase_is_replaced_by_the_runner(
     """
     import agent_flow.runner as runner_module
     from agent_flow.adapters.generic import GenericAdapter
-    from agent_flow.runner import Phase, ResumeMode, Runner
+    from agent_flow.core.phase_workflow import load_phase_workflow_definition
+    from agent_flow.runner import ResumeMode, Runner
 
     project = tmp_path / "project"
     project.mkdir()
@@ -896,7 +897,25 @@ def test_a_gate_result_written_before_the_phase_is_replaced_by_the_runner(
     )
     monkeypatch.setattr(runner_module, "detect_available_clis", lambda: [])
 
-    run_dir = create_run(project, "development", "replace the planted result")
+    kit = tmp_path / "kit"
+    workflows = kit / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "gate-provenance.yaml").write_text(
+        "id: gate-provenance\ncompletion_disposition: local-handoff\n"
+        "phases:\n"
+        "  - id: gates\n"
+        "    description: gates\n"
+        "    artifact: artifacts/gate-results.json\n"
+        "    routes: {green: after}\n"
+        "  - id: after\n"
+        "    description: stop here\n",
+        encoding="utf-8",
+    )
+    definition = load_phase_workflow_definition(kit, "gate-provenance")
+    run_dir = create_run(
+        project, "gate-provenance", "replace the planted result",
+        workflow_definition=definition,
+    )
     # gates에 이미 진입한 뒤 끊긴 run을 재현한다. 진입 시각이 과거여야 심어 둔
     # 파일이 stale로 걸러지지 않고 라우팅 입력 후보가 된다.
     meta = read_meta(run_dir)
@@ -939,16 +958,7 @@ def test_a_gate_result_written_before_the_phase_is_replaced_by_the_runner(
 
     monkeypatch.setattr(runner_module, "run_gates", fake_run_gates)
 
-    runner = Runner(project, run_dir=run_dir, workflow="development")
-    runner.phases = [
-        Phase(
-            id="gates",
-            description="gates",
-            artifact="artifacts/gate-results.json",
-            routes={"green": "after"},
-        ),
-        Phase(id="after", description="stop here"),
-    ]
+    runner = Runner(project, run_dir=run_dir)
     runner.run(ResumeMode.RESUME)
 
     payload = json.loads(planted.read_text(encoding="utf-8"))

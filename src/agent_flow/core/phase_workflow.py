@@ -14,10 +14,6 @@ from agent_flow.core.markers import normalize_required_markers
 from agent_flow.core.security import ensure_child_path, validate_safe_name
 from agent_flow.core.skill_resolver import PhaseSkills
 
-# drift 탈출구의 이름. 예외 메시지가 이 문자열을 지목하므로 flag를 세우는 CLI와
-# 같은 상수를 봐야 안내와 실제 명령이 갈리지 않는다.
-ACCEPT_WORKFLOW_DRIFT_FLAG = "--accept-workflow-drift"
-
 
 @dataclass(frozen=True)
 class PhaseDefinition:
@@ -58,6 +54,8 @@ class PhaseWorkflowDefinition:
     source: str
     digest: str
     completion_disposition: Literal["local-handoff", "integrated-cleanup"] = "integrated-cleanup"
+    source_bytes: bytes = b""
+    kit_owned: bool = False
 
     def to_json_dict(self) -> dict[str, Any]:
         # digest를 빼면 export가 `meta.workflow_digest`와 대조할 수 없다. drift
@@ -129,19 +127,12 @@ class RunCursor:
     workflow_digest: str
     phase_index: int
     phase_id: str | None
-    # 승인된 drift가 이름으로 자리를 다시 잡았을 때 그 **옛** index. 옮기지 않았으면
-    # ``None``. 호출자가 "기록된 index != 커서 index"로 재배치를 추론하면 안 되기
-    # 때문에 사실을 값으로 들려 보낸다 — 그 비교는 digest가 어긋난 안에서만 참이 될
-    # 수 있어서 재배치의 결정적 근거가 못 된다.
-    reanchored_from: int | None = None
 
     @classmethod
     def from_meta(
         cls,
         meta: Mapping[str, Any],
         scope: CursorScope,
-        *,
-        accept_workflow_drift: bool = False,
     ) -> RunCursor:
         raw_index = meta.get("phase_index", 0)
         if raw_index is None:
@@ -170,31 +161,15 @@ class RunCursor:
                 f"run cursor workflow_digest must be a string, got {recorded_digest!r}"
             )
         phase_id = raw_phase
-        reanchored_from: int | None = None
         if recorded_digest and recorded_digest != scope.digest:
-            if not accept_workflow_drift:
-                # workflow YAML은 kit이 배포한다. 업그레이드 한 번이 모든 프로젝트의
-                # 진행 중인 run을 막으므로 탈출구를 지목한다. "finish"는 이 예외가
-                # 막는 바로 그것이라 안내가 될 수 없다.
-                raise WorkflowDriftError(
-                    f"workflow {scope.workflow_id} changed after this run started: run "
-                    f"recorded {recorded_digest} but {scope.source} now hashes to "
-                    f"{scope.digest}. Re-baseline this run to the current definition with "
-                    f"`agent-flow continue {ACCEPT_WORKFLOW_DRIFT_FLAG}`, restore the "
-                    f"definition it started with, or abort the run."
-                )
-            # 승인된 drift에서 index는 더 이상 기준이 아니다. 새 정의가 현재 phase
-            # 앞에 phase를 끼워 넣거나 순서를 바꿨으면 옛 index는 다른 phase를
-            # 가리키고, 그대로 대조하면 우리가 안내한 그 명령이
-            # `CorruptRunCursorError`로 죽는다. 이름이 정본이므로 이름으로 자리를
-            # 다시 잡는다.
-            anchored = _reanchor_index(scope, raw_index, phase_id)
-            if anchored != raw_index:
-                reanchored_from, raw_index = raw_index, anchored
-        # digest 기록이 **없는** 예전 run은 drift가 아니다. 형식이 없던 시절의
-        # run을 drift로 보고하면 진행 중인 run이 근거 없이 막힌다. 호출자가 이
-        # 값으로 meta를 채워 넣는다.
-        cursor = cls(scope.digest, raw_index, phase_id, reanchored_from)
+            raise WorkflowDriftError(
+                f"workflow {scope.workflow_id} changed after this run started: run "
+                f"recorded {recorded_digest} but {scope.source} now hashes to "
+                f"{scope.digest}. Restore the definition it started with, or start "
+                "a separate run for the current definition. Existing records and "
+                "approvals remain unchanged."
+            )
+        cursor = cls(scope.digest, raw_index, phase_id)
         cursor.validate(scope)
         return cursor
 
@@ -230,27 +205,6 @@ class RunCursor:
                 f"run cursor phase_index {self.phase_index} names phase {expected!r} in "
                 f"workflow {scope.workflow_id} but meta records {self.phase_id!r}"
             )
-
-
-def _reanchor_index(scope: CursorScope, phase_index: int, phase_id: str | None) -> int:
-    """승인된 drift에서 기록된 phase 이름이 새 정의에서 앉는 자리.
-
-    이름이 없으면(새 run·완료 커서) 옮길 근거가 없으므로 기록된 index를 그대로
-    돌려주고 판정은 `validate`에 맡긴다.
-    """
-    if phase_id is None:
-        return phase_index
-    try:
-        return scope.phase_ids.index(phase_id)
-    except ValueError:
-        # 재배치할 자리가 없다. 여기서 drift 승인을 다시 권하면 사용자는 방금
-        # 실행해 실패한 명령을 또 실행하게 된다.
-        raise CorruptRunCursorError(
-            f"run cursor names phase {phase_id!r}, which workflow "
-            f"{scope.workflow_id} no longer defines ({scope.source}); accepting the "
-            f"drift cannot place this run. Restore the definition it started with, or "
-            f"clear the run with `agent-flow abort`."
-        ) from None
 
 
 @dataclass(frozen=True)
@@ -341,7 +295,9 @@ def declared_phase_skills(kit_root: Path) -> DeclaredPhaseSkills:
     return DeclaredPhaseSkills(tuple(dict.fromkeys(names)), tuple(errors))
 
 
-def load_phase_workflow_definition(kit_root: Path, name: str) -> PhaseWorkflowDefinition:
+def load_phase_workflow_definition(
+    kit_root: Path, name: str, *, expected_digest: str | None = None
+) -> PhaseWorkflowDefinition:
     """Load and validate a named workflow definition."""
     validate_safe_name(name, "workflow")
     path = kit_root / "workflows" / f"{name}.yaml"
@@ -354,9 +310,32 @@ def load_phase_workflow_definition(kit_root: Path, name: str) -> PhaseWorkflowDe
             raise FileNotFoundError(f"Workflow not found: {path}")
         path = packaged
     source_bytes = path.read_bytes()
-    # 파싱 결과가 아니라 **원문 바이트**를 해싱한다. prompt 문구나 순서만 바뀐 편집도
-    # 이 run이 실행하기로 한 정의가 바뀐 것이고, 정규화된 구조만 해싱하면 그 변경이
-    # 같은 값으로 접혀 drift 검출이 조용히 뚫린다.
+    digest = hashlib.sha256(source_bytes).hexdigest()
+    if expected_digest is not None and digest != expected_digest:
+        raise WorkflowDriftError(
+            f"workflow {name}: recorded definition {expected_digest} is unavailable; "
+            f"{path} hashes to {digest}. Restore the original definition or start "
+            "a new run. Existing approvals cannot be reused for changed definitions."
+        )
+    return parse_phase_workflow_definition(
+        source_bytes,
+        source=path,
+        name=name,
+        kit_owned=packaged is not None
+        and (path.resolve() == packaged.resolve() or source_bytes == packaged.read_bytes()),
+        pinned_legacy=expected_digest is not None,
+    )
+
+
+def parse_phase_workflow_definition(
+    source_bytes: bytes,
+    *,
+    source: Path,
+    name: str,
+    kit_owned: bool = False,
+    pinned_legacy: bool = False,
+) -> PhaseWorkflowDefinition:
+    path = source
     digest = hashlib.sha256(source_bytes).hexdigest()
     raw = yaml.safe_load(source_bytes.decode("utf-8")) or {}
     if not isinstance(raw, dict):
@@ -376,8 +355,8 @@ def load_phase_workflow_definition(kit_root: Path, name: str) -> PhaseWorkflowDe
         phases_raw,
         path,
         workflow_id,
-        replaceable_architecture=packaged is not None
-        and (path.resolve() == packaged.resolve() or source_bytes == packaged.read_bytes()),
+        replaceable_architecture=kit_owned,
+        pinned_legacy=pinned_legacy,
     )
     _validate_routes(phases, path)
     return PhaseWorkflowDefinition(
@@ -386,6 +365,8 @@ def load_phase_workflow_definition(kit_root: Path, name: str) -> PhaseWorkflowDe
         source=str(path),
         digest=digest,
         completion_disposition=completion_disposition,
+        source_bytes=source_bytes,
+        kit_owned=kit_owned,
     )
 
 
@@ -395,6 +376,7 @@ def _normalize_phases(
     workflow_id: str,
     *,
     replaceable_architecture: bool = False,
+    pinned_legacy: bool = False,
 ) -> list[PhaseDefinition]:
     """Parse and validate workflow phase definitions."""
     out: list[PhaseDefinition] = []
@@ -452,6 +434,7 @@ def _normalize_phases(
                     path,
                     phase_id,
                     replaceable_architecture=replaceable_architecture,
+                    pinned_legacy=pinned_legacy,
                 ),
                 architecture_decision=architecture_decision,
             )
@@ -465,6 +448,7 @@ def _phase_skills(
     phase_id: str,
     *,
     replaceable_architecture: bool = False,
+    pinned_legacy: bool = False,
 ) -> PhaseSkills | None:
     """Return the skills declared for a workflow phase."""
     if value is None:
@@ -480,7 +464,15 @@ def _phase_skills(
         required=_skill_names(value.get("required"), path, phase_id, "required"),
         optional=_skill_names(value.get("optional"), path, phase_id, "optional"),
         replaceable_architecture=replaceable_architecture,
+        pinned_legacy=pinned_legacy,
     )
+    if "clean-architecture" in skills.required and not pinned_legacy:
+        raise ValueError(
+            f"workflow {path}: phase {phase_id} requires obsolete skill "
+            "'clean-architecture'; migration required: replace the required name "
+            "with 'clean-architecture-core'. Installed aliases do not authorize "
+            "this declaration. Existing runs must use their pinned definition."
+        )
     return None if skills.is_empty() else skills
 
 

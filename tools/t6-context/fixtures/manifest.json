@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "fixture_version": 3,
+  "cases_sha256": "2931d5d413950e2cbc5f227e782142e39da4d6c365ca6b4ceef83549c0cbc4ae",
+  "oracle": "evals/skill_tasks.py::score_review",
+  "previous_cases_sha256": "33c9ac2ddb0dda0b4fff47edc5d26dd2e14c5816c262bbe1809f3bc20eedf497",
+  "repair_history": "repair-history-v3.json",
+  "execution_status": "unexecuted-v3-three-changed-cases",
+  "policy": "Only three case identities changed from evaluated v2: two code repairs and one bounded oracle-location calibration for the same defect. Original v2 corpus and observations remain immutable. Retain 45 exact-identity v2 observations as v2, not a homogeneous v3 rerun."
+}

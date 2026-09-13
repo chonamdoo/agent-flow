@@ -28,6 +28,7 @@ from agent_flow.cli import main
 from agent_flow.core.gates import GateCommand, run_gate
 from agent_flow.core.design_ledger import capture_design_ledger
 from agent_flow.core.phase_workflow import load_phase_workflow_definition
+from agent_flow.core.workflow_pin import workflow_pin_metadata
 from agent_flow.core.hook_integrity import find_install_root
 from agent_flow.core.kit_digest import kit_source_digest
 from agent_flow.core.profiles import load_profile
@@ -1943,7 +1944,7 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "skills" / "product-brief" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "plan-reviewer" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "clean-architecture-core" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "clean-architecture" / "SKILL.md").is_file())
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "clean-architecture").exists())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "android-clean-architecture" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "ios-clean-architecture" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "react-clean-architecture" / "SKILL.md").is_file())
@@ -5651,7 +5652,8 @@ if (codexContext !== undefined) {
             meta_path = run_dir / "meta.json"
             state = _read_node_phase(run_dir)
             state["current_phase"] = "red"
-            state["phase_index"] = 0
+            definition = load_phase_workflow_definition(project_root / ".agent-flow", state["workflow"])
+            state["phase_index"] = next(i for i, phase in enumerate(definition.phases) if phase.id == "red")
             meta_path.write_text(f"{json.dumps(state, indent=2)}\n", encoding="utf-8")
 
             next_result = subprocess.run(
@@ -5664,8 +5666,7 @@ if (codexContext !== undefined) {
             self.assertEqual(next_result.returncode, 0, next_result.stderr)
             self.assertIn("current_phase: red", next_result.stdout)
             unchanged = _read_node_phase(run_dir)
-            self.assertEqual(unchanged["current_phase"], "red")
-            self.assertEqual(unchanged["phase_index"], 0)
+            self.assertEqual(unchanged, state)
 
     @mock.patch.dict(
         os.environ,
@@ -12692,6 +12693,7 @@ def _set_node_phase(
             "phase_index": phase_index,
             "current_phase": phase_id,
             "phase_entered_at": "2020-01-01T00:00:00+00:00",
+            **workflow_pin_metadata(definition, workflow=workflow),
             **updates,
         }
     )

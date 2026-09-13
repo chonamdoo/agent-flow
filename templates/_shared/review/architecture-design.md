@@ -29,27 +29,15 @@ framework-specific evidence.
      against the implementation. Use the contract's own structural vocabulary;
      feature colocation and framework-aware boundaries are not defects by
      themselves. A missing rule or missing evidence is not a successful check.
-   - The following layer-specific checks apply only in Clean mode:
-   - Dependency direction points inward.
-   - UseCase, Repository, Cache, and Mapper boundaries match the design.
-   - Pure domain policy imports no UI, DB, HTTP, provider SDK, or framework.
-     Application wiring metadata and intentionally framework-aware orchestration
-     follow the adopted core/platform contract, not a blanket domain exception.
-   - Inbound schemas, outbound DTO/entities, application values, and UI models
-     retain their separate responsibilities without pointless identity copies.
-   - Composition root owns concrete wiring; consumers receive narrow ports.
-     Clock/payment/transaction/platform ports are valid application contracts.
-   - Judge mapped roles and actual dependencies, not a prescribed folder tree or
-     file count. Unmapped/inactive lint coverage is not a semantic pass.
-   - Preserve the core's single-context UI repository-interface exception.
-     Shared presentation ports remain neutral; servers need no UI queue.
+   - In Clean mode, apply the full required `clean-architecture-core` semantic
+     boundaries and exceptions against the design. In particular, compare the
+     design's use-case, repository, cache, mapping, and composition decisions;
+     the core is the rule owner rather than a second rubric in this angle.
 
 3. SOLID boundary validation
-   - SRP change reasons match the selected contract's boundaries.
-   - OCP extension points exist only where the design identified variation.
-   - LSP contracts hold for interfaces, fakes, and production implementations.
-   - ISP ports are consumer-focused.
-   - Dependency direction matches the selected contract.
+   - Apply `code-generation-discipline` **SOLID Boundaries** against the selected
+     contract and approved design: the design identifies the change reasons,
+     real variation points, contracts, consumer ports, and dependency direction.
 
 ## Output format
 

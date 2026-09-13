@@ -53,7 +53,7 @@ def test_every_visited_phase_is_traced_not_only_the_first(
     """
     import agent_flow.runner as runner_module
     from agent_flow.adapters.generic import GenericAdapter
-    from agent_flow.runner import Phase, ResumeMode, Runner
+    from agent_flow.runner import ResumeMode, Runner
 
     project = tmp_path / "project"
     project.mkdir()
@@ -64,12 +64,19 @@ def test_every_visited_phase_is_traced_not_only_the_first(
     )
     monkeypatch.setattr(runner_module, "detect_available_clis", lambda: [])
 
-    runner = Runner(project, workflow="development")
-    runner.phases = [
-        Phase(id="alpha", description="first"),
-        Phase(id="beta", description="second"),
-        Phase(id="gamma", description="third"),
-    ]
+    kit = tmp_path / "kit"
+    workflows = kit / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "phase-trace.yaml").write_text(
+        "id: phase-trace\ncompletion_disposition: local-handoff\n"
+        "phases:\n"
+        "  - id: alpha\n    description: first\n"
+        "  - id: beta\n    description: second\n"
+        "  - id: gamma\n    description: third\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner_module, "_find_kit_root", lambda: kit)
+    runner = Runner(project, workflow="phase-trace")
     runner.run(ResumeMode.START, task="trace every phase")
 
     run_dir = runner.run_dir
