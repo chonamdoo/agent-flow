@@ -25,7 +25,6 @@ Adapter contract:
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sys
@@ -43,6 +42,7 @@ from agent_flow.adapters.generic import STUB_SENTINEL
 from agent_flow.artifact import (
     ACTIVE_LOCK,
     META_FILE,
+    RUN_LIFECYCLE_LOCK,
     create_run,
     mark_inactive,
     read_meta,
@@ -56,14 +56,13 @@ from agent_flow.cli_detect import CliInfo, REVIEW_CLI_NAMES, detect_available_cl
 from agent_flow.pr_watch import _ci_execution_entry, _ci_execution_history, _valid_ci_revision
 from agent_flow.core.architecture_lint import match_role
 from agent_flow.core.architecture_policy import (
-    MAX_ARCHITECTURE_DOCUMENT_BYTES,
     ArchitectureMode,
+    architecture_norm_block_reason,
     architecture_snapshot,
     architecture_snapshot_block_reason,
     evaluate_workflow_compatibility,
     is_clean_architecture_skill,
 )
-from agent_flow.core.atomic_io import read_bounded_regular_file
 from agent_flow.core.installation import assert_install_complete
 from agent_flow.core.command_evidence import (
     missing_feedback_evidence_markers,
@@ -74,6 +73,7 @@ from agent_flow.core.command_evidence import (
 )
 from agent_flow.core.context_contract import run_relative_path
 from agent_flow.core.run_storage import RUNS_DIRNAME
+from agent_flow.core.review_scope import review_scope_block_reason
 from agent_flow.core.observation import (
     PHASE_ENTERED as OBS_PHASE_ENTERED,
     PHASE_EXITED as OBS_PHASE_EXITED,
@@ -214,7 +214,6 @@ _FIX_COLLECTOR_ROUTE_KEYS = frozenset({"request-changes", "blocked", "error", "f
 # 대상은 workflow가 선언한 artifact뿐이고, 이 파일이 그 범위에 들면 복구 근거가
 # 복구 대상과 함께 사라진다.
 TRANSITIONS_FILE = "transitions.jsonl"
-RUN_LIFECYCLE_LOCK = "lifecycle.lock"
 # Resume/advance는 run별 lease를 잡아 서로 다른 run을 막지 않는다. START는 run
 # 디렉터리가 생기기 전이라 runs 루트 lease를 쓰며, create_run의 active-run
 # 검증과 함께 새 run publication을 직렬화한다.
@@ -580,6 +579,13 @@ class Runner:
         while phase_index < len(self.phases):
             phase = self.phases[phase_index]
             meta = read_meta(self.run_dir)
+            scope_reason = review_scope_block_reason(meta, phase.id)
+            if scope_reason:
+                print(f"\n═══ phase '{phase.id}' is blocked: {scope_reason}. ═══")
+                self._print_structured_status(
+                    status="blocked", phase=phase, reason=scope_reason,
+                )
+                return
             leader_before = self._verify_host_phase_leader_baseline(
                 meta=meta,
                 phase=phase,
@@ -2389,6 +2395,11 @@ class Runner:
         manifests = {}
         scope = changed_files(self.project_root)
         try:
+            pinned_documents = meta.get("architecture_norm_documents", {})
+            pinned_phases = meta.get("architecture_norm_phases", {})
+            norm_reason = architecture_norm_block_reason(pinned_documents, pinned_phases)
+            if norm_reason is not None:
+                return norm_reason
             for host in dict.fromkeys(hosts):
                 resolution = phase_skill_resolution(
                     self.config_root, phase.id, phase_skills=phase.skills,
@@ -2400,31 +2411,6 @@ class Runner:
                     document.path: document.sha256
                     for document in resolution.architecture_norms
                 }
-            pinned_documents = meta.get("architecture_norm_documents", {})
-            pinned_phases = meta.get("architecture_norm_phases", {})
-            if not _is_norm_manifest(pinned_documents):
-                raise ValueError("meta.json architecture_norm_documents must map document paths to SHA-256 digests")
-            if not isinstance(pinned_phases, dict) or any(
-                not isinstance(phase_id, str) or not isinstance(hosts, dict) or any(
-                    not isinstance(host, str) or not _is_norm_manifest(manifest)
-                    for host, manifest in hosts.items()
-                )
-                for phase_id, hosts in pinned_phases.items()
-            ):
-                raise ValueError("meta.json architecture_norm_phases must map phases and hosts to norm manifests")
-            if any(
-                pinned_documents.get(path) != digest
-                for phase_hosts in pinned_phases.values()
-                for manifest in phase_hosts.values()
-                for path, digest in manifest.items()
-            ):
-                raise ValueError("phase architecture norms disagree with the run's pinned documents")
-            for path, digest in pinned_documents.items():
-                content, _ = read_bounded_regular_file(
-                    Path(path), max_bytes=MAX_ARCHITECTURE_DOCUMENT_BYTES,
-                )
-                if hashlib.sha256(content).hexdigest() != digest:
-                    return "architecture_policy_drift"
         except (OSError, ValueError) as exc:
             print(f"agent-flow: {exc}", file=sys.stderr)
             return "architecture_policy_unreadable"
@@ -2612,15 +2598,6 @@ class Runner:
             ),
         )
 
-
-def _is_norm_manifest(value: object) -> bool:
-    """Return whether a path names a pinned architecture norm manifest."""
-    return isinstance(value, dict) and all(
-        isinstance(path, str) and Path(path).is_absolute()
-        and isinstance(digest, str) and len(digest) == 64
-        and all(character in "0123456789abcdef" for character in digest)
-        for path, digest in value.items()
-    )
 
 
 def _find_kit_root() -> Path:

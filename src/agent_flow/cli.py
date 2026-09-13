@@ -204,6 +204,7 @@ from agent_flow.artifact import (
     mark_inactive,
     phase_review_rejected,
     read_meta,
+    select_publication_review_scope,
 )
 from agent_flow.runner import (
     ACCEPT_LEADER_DRIFT_FLAG,
@@ -569,6 +570,13 @@ def main(argv: list[str] | None = None) -> int:
     review_retry.add_argument("--root", default=".")
     review_retry.add_argument("--reviewer", required=True)
     review_retry.add_argument("--retry-after")
+    review_scope = review_command_subparsers.add_parser(
+        "scope",
+        help="Pin publication-only review in fix-loop; this run cannot approve a merge.",
+    )
+    review_scope.add_argument("--root", default=".")
+    review_scope.add_argument("--worktree")
+    review_scope.add_argument("--publication-base", required=True, metavar="COMMIT_OID")
 
     worktree_parser = subparsers.add_parser("worktree")
     worktree_subparsers = worktree_parser.add_subparsers(dest="worktree_command", required=True)
@@ -1590,6 +1598,29 @@ def main(argv: list[str] | None = None) -> int:
             except ValueError as exc:
                 print(str(exc), file=sys.stderr)
                 return 2
+            return 0
+        if args.review_command == "scope":
+            try:
+                if args.worktree is None:
+                    raise ValueError("publication review scope requires a bound worktree")
+                project_root, state_root = _worktree_context(
+                    root, args.worktree, prefer_pending_cleanup=False,
+                )
+                if project_root is None:
+                    return 2
+                active = find_active_run(state_root)
+                if active is None:
+                    raise ValueError("publication review scope requires an active run")
+                base_oid = select_publication_review_scope(
+                    active.path, project_root, base_oid=args.publication_base,
+                )
+            except (OSError, ValueError, RuntimeError) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
+            print("review_scope: publication")
+            print(f"publication_base: {base_oid}")
+            print("merge_approval: unavailable in this publication-only run")
+            print(f"next_command: {_continue_command(root, args.worktree)}")
             return 0
 
     if args.command == "worktree":

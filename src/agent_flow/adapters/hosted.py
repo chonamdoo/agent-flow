@@ -22,7 +22,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple
 
 from agent_flow.adapters.base import Adapter
-from agent_flow.artifact import bind_review_evidence, ensure_review_binding
+from agent_flow.artifact import bind_review_evidence, ensure_review_binding, read_meta
 from agent_flow.core.local_skills import (
     ARCHITECTURE_CONTRACT_REQUIREMENT,
     architecture_contract_required,
@@ -34,6 +34,10 @@ from agent_flow.core.review_evidence import (
     review_evidence_record,
     review_results_path,
     serialize_review_results,
+)
+from agent_flow.core.review_scope import (
+    publication_review_base,
+    validate_publication_review_base,
 )
 from agent_flow.core.skill_resolver import selector_matches
 from agent_flow.core.worktree_isolation import (
@@ -322,21 +326,39 @@ def _write_review_input_snapshot(
     *,
     base_branch: str | None = None,
 ) -> ReviewInputSnapshot:
-    """리뷰어가 받는 유일한 증거. 기준점은 선언된 base와의 merge-base다.
+    """리뷰 증거의 기준점은 기본적으로 merge-base, publication 범위에서는 고정 OID다.
 
     `HEAD` 기준으로 찍으면 작업이 이미 커밋된 브랜치에서는 모든 섹션이 비는데,
     같은 프롬프트가 리뷰어에게 샌드박스 안에서 `git diff`를 돌리지 말라고 말한다.
     그래서 리뷰어는 근거 없이 판정하게 된다 — 라운드 하나가 실제로 그렇게 무너졌다.
     """
+    try:
+        publication_base = publication_review_base(read_meta(run_dir))
+        if publication_base is not None:
+            validate_publication_review_base(project_root, publication_base)
+    except ValueError as exc:
+        raise WorktreeIsolationError(
+            f"could not precompute reviewer input: invalid publication review scope: {exc}"
+        ) from exc
     # 관측 하나당 상한을 전체 예산보다 낮게 잡는다. unborn HEAD 경로는 관측을
     # 셋까지 만들고, 합계가 예산을 넘으면 스냅샷 자체를 못 쓴다. 상한에 걸린
     # 섹션은 라운드를 죽이지 않고 머리말에 잘렸다고 적는다.
     observation_max_bytes = max(1, _REVIEW_INPUT_MAX_BYTES // 4)
-    baseline = _resolve_review_baseline(
-        project_root,
-        base_branch,
-        max_output_bytes=observation_max_bytes,
-    )
+    if publication_base is None:
+        baseline = _resolve_review_baseline(
+            project_root,
+            base_branch,
+            max_output_bytes=observation_max_bytes,
+        )
+    else:
+        baseline = _ReviewBaseline(
+            rev=publication_base,
+            detail=(
+                f"pinned publication base {publication_base} — every change "
+                "through the current working tree is below, committed and "
+                "uncommitted alike"
+            ),
+        )
     status = git_safe(
         "status",
         "--short",
@@ -361,7 +383,7 @@ def _write_review_input_snapshot(
     if baseline.note:
         notes.append(baseline.note)
     diff_observations = []
-    if _is_unborn_head_failure(diff):
+    if publication_base is None and _is_unborn_head_failure(diff):
         notes.append(
             "HEAD carries no commit yet, so the staged and working-tree diffs "
             "below stand in for a baseline diff"
@@ -445,6 +467,15 @@ def _write_review_input_snapshot(
         f"- phase: {phase_id}",
         f"- diff baseline: {baseline.detail}",
     ]
+    if publication_base is not None:
+        header.extend((
+            "- review scope: publication-only; not whole-PR or merge approval",
+            "- scope contract: judge defects introduced or worsened by this "
+            "delta, including security defects, without path or category exclusions; "
+            "surrounding code may be read for context",
+            "- prior findings: unchanged pre-baseline findings remain separately "
+            "recorded risks, not fixed findings or approval of the existing PR",
+        ))
     header.extend(f"- note: {note}" for note in notes)
     sections = [
         f"## {label}\n\n{result.stdout.rstrip() or '(empty)'}"
@@ -828,15 +859,21 @@ def _reviewer_jobs(
         "\n\n## Precomputed review input\n\n"
         f"Read `{review_input.path}` before judging the change. The controller "
         "captured it immediately before launching reviewers: its header names "
-        "the diff baseline — the merge-base of the declared base branch when one "
-        "is available, or of its remote-tracking counterpart when the declared "
-        "base is behind, so changes already committed on this branch are "
-        "included — and states in `- note:` lines whether the baseline skipped a "
+        "the diff baseline — a pinned OID for explicit publication-only scope, "
+        "otherwise the merge-base of the declared base branch when available "
+        "or its remote-tracking counterpart when the declared base is behind, "
+        "so committed changes since that baseline are included — and states "
+        "in `- note:` lines whether the baseline skipped a "
         "stale declared base, whether the snapshot was truncated, and whether it "
         "is a verified empty diff. The body holds `git status --short` and that "
         "diff. Inspect "
         "untracked files listed there directly. Do not run `git diff` inside "
-        "the reviewer sandbox. "
+        "the reviewer sandbox. When the header declares publication-only scope, "
+        "judge defects introduced or worsened by the pinned-base delta, including "
+        "security defects, with no path or category exclusions. Read surrounding "
+        "code for context as needed. Keep unchanged pre-baseline findings as "
+        "separately recorded risks; do not claim they are fixed. Publication-only "
+        "approval is not whole-PR approval and cannot authorize merge. "
         f"Its SHA-256 is `{review_input.digest}`; this digest is part of your "
         "prompt identity."
         if review_input is not None

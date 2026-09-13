@@ -3,8 +3,9 @@
 이 모듈이 소유하는 것은 "어떤 구조 규범을 필수로 적용하는가" 하나다. workflow의
 단계·순서·분기·완료 조건과 필수 스킬 준수 원칙은 여기서 바뀌지 않는다.
 
-계층: 이 파일의 값 타입과 파싱은 순수 도메인이다. `runner`, `adapters`, `cli`,
-설치기를 import 하지 않는다. 역방향 의존이 생기면 값 타입을 잘못 배치한 것이다.
+계층: 선택 구성과 규범 문서의 저장·검증을 담당하는 기술 어댑터다. 값 타입은 이
+구성 형식의 계약이며 순수 도메인 모델이 아니다. `runner`, `adapters`, `cli`,
+설치기를 import 하지 않고 실행·완료 정책은 호출자에게 남긴다.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from agent_flow.core.atomic_io import atomic_write_text
+from agent_flow.core.atomic_io import atomic_write_text, read_bounded_regular_file
 from agent_flow.core.worktree_isolation import git_repo_state, git_safe
 from agent_flow.core.skill_metadata import (
     ARCHITECTURE_MODES,
@@ -299,6 +300,16 @@ def _resolve_architecture_contract(
     )
 
 
+def _is_norm_manifest(value: object) -> bool:
+    """Return whether a path names a pinned architecture norm manifest."""
+    return isinstance(value, dict) and all(
+        isinstance(path, str) and Path(path).is_absolute()
+        and isinstance(digest, str) and len(digest) == 64
+        and all(character in "0123456789abcdef" for character in digest)
+        for path, digest in value.items()
+    )
+
+
 def architecture_snapshot(root: Path) -> ArchitectureSnapshot:
     """이 checkout의 선택과 규범 내용을 한 번에 고정한다."""
     with _repository_directory(root) as repository_fd:
@@ -319,6 +330,35 @@ def architecture_snapshot_block_reason(
         return "architecture_policy_drift"
     if snapshot.untracked:
         return "architecture_contract_untracked"
+    return None
+
+
+def architecture_norm_block_reason(
+    pinned_documents: Any, pinned_phases: Any
+) -> str | None:
+    if not _is_norm_manifest(pinned_documents):
+        raise ValueError("meta.json architecture_norm_documents must map document paths to SHA-256 digests")
+    if not isinstance(pinned_phases, dict) or any(
+        not isinstance(phase_id, str) or not isinstance(hosts, dict) or any(
+            not isinstance(host, str) or not _is_norm_manifest(manifest)
+            for host, manifest in hosts.items()
+        )
+        for phase_id, hosts in pinned_phases.items()
+    ):
+        raise ValueError("meta.json architecture_norm_phases must map phases and hosts to norm manifests")
+    if any(
+        pinned_documents.get(path) != digest
+        for phase_hosts in pinned_phases.values()
+        for manifest in phase_hosts.values()
+        for path, digest in manifest.items()
+    ):
+        raise ValueError("phase architecture norms disagree with the run's pinned documents")
+    for path, digest in pinned_documents.items():
+        content, _ = read_bounded_regular_file(
+            Path(path), max_bytes=MAX_ARCHITECTURE_DOCUMENT_BYTES,
+        )
+        if hashlib.sha256(content).hexdigest() != digest:
+            return "architecture_policy_drift"
     return None
 
 

@@ -180,6 +180,123 @@ def test_snapshot_carries_committed_work_of_the_branch(tmp_path: Path):
     assert "+committed" in content
 
 
+def test_publication_snapshot_excludes_prebaseline_work(tmp_path: Path):
+    from agent_flow.artifact import write_meta
+
+    project = tmp_path / "project"
+    _committed_feature_repo(project)
+    base_oid = _git(project, "rev-parse", "HEAD").strip()
+    (project / "repair.py").write_text("published repair\n", encoding="utf-8")
+    _git(project, "add", "repair.py")
+    _git(project, "commit", "-m", "repair")
+    (project / "repair.py").write_text("published repair\npending repair\n", encoding="utf-8")
+    run_dir = _run_dir(project)
+    write_meta(run_dir, {
+        "review_scope": {"kind": "publication", "base_oid": base_oid},
+    })
+
+    snapshot = _write_review_input_snapshot(
+        project, run_dir, "final-review", base_branch="main"
+    )
+
+    content = snapshot.read_text(encoding="utf-8")
+    assert "+committed" not in content
+    assert "+published repair" in content
+    assert "+pending repair" in content
+    assert base_oid in content
+
+
+def test_publication_snapshot_keeps_pinned_base_after_head_advances(tmp_path: Path):
+    from agent_flow.artifact import write_meta
+
+    project = tmp_path / "project"
+    _committed_feature_repo(project)
+    base_oid = _git(project, "rev-parse", "HEAD").strip()
+    run_dir = _run_dir(project)
+    write_meta(run_dir, {
+        "review_scope": {"kind": "publication", "base_oid": base_oid},
+    })
+    repair = project / "repair.py"
+    repair.write_text("first repair\n", encoding="utf-8")
+    _git(project, "add", "repair.py")
+    first = _write_review_input_snapshot(
+        project, run_dir, "final-review", base_branch="main"
+    ).read_text(encoding="utf-8")
+    assert "+first repair" in first
+
+    _git(project, "commit", "-m", "first repair")
+    repair.write_text("first repair\nsecond repair\n", encoding="utf-8")
+    _git(project, "add", "repair.py")
+    _git(project, "commit", "-m", "second repair")
+    repair.write_text("first repair\nsecond repair\npending repair\n", encoding="utf-8")
+    (project / "new.txt").write_text("untracked repair\n", encoding="utf-8")
+
+    latest = _write_review_input_snapshot(
+        project, run_dir, "final-review", base_branch="main"
+    ).read_text(encoding="utf-8")
+
+    assert "+committed" not in latest
+    assert "+first repair" in latest
+    assert "+second repair" in latest
+    assert "+pending repair" in latest
+    assert "?? new.txt" in latest
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        None,
+        {"kind": "publication"},
+        {"kind": "publication", "base_oid": "HEAD"},
+        {"kind": "publication", "base_oid": "0" * 40},
+        {"kind": "whole-pr", "base_oid": "0" * 40},
+    ],
+    ids=["null", "missing-base", "mutable-ref", "unresolved-oid", "unknown-kind"],
+)
+def test_publication_snapshot_rejects_invalid_scope_without_fallback(
+    tmp_path: Path, scope: object,
+):
+    from agent_flow.artifact import write_meta
+
+    project = tmp_path / "project"
+    _committed_feature_repo(project)
+    (project / "app.py").write_text("committed\npending repair\n", encoding="utf-8")
+    run_dir = _run_dir(project)
+    write_meta(run_dir, {"review_scope": scope})
+
+    with pytest.raises(WorktreeIsolationError):
+        _write_review_input_snapshot(
+            project, run_dir, "final-review", base_branch="main"
+        )
+
+    assert not (run_dir / "final-review-review-input.patch").exists()
+
+
+def test_publication_snapshot_rejects_nonancestor_base(tmp_path: Path):
+    from agent_flow.artifact import write_meta
+
+    project = tmp_path / "project"
+    _committed_feature_repo(project)
+    _git(project, "checkout", "-b", "other", "main")
+    (project / "other.py").write_text("other branch\n", encoding="utf-8")
+    _git(project, "add", "other.py")
+    _git(project, "commit", "-m", "other branch")
+    base_oid = _git(project, "rev-parse", "HEAD").strip()
+    _git(project, "checkout", "feat-x")
+    (project / "app.py").write_text("committed\npending repair\n", encoding="utf-8")
+    run_dir = _run_dir(project)
+    write_meta(run_dir, {
+        "review_scope": {"kind": "publication", "base_oid": base_oid},
+    })
+
+    with pytest.raises(WorktreeIsolationError):
+        _write_review_input_snapshot(
+            project, run_dir, "final-review", base_branch="main"
+        )
+
+    assert not (run_dir / "final-review-review-input.patch").exists()
+
+
 def test_snapshot_carries_uncommitted_work_alongside_committed(tmp_path: Path):
     project = tmp_path / "project"
     _committed_feature_repo(project)

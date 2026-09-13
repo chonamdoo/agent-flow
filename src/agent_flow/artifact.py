@@ -31,10 +31,11 @@ from typing import Any
 import yaml
 
 from agent_flow.core.architecture_policy import (
+    architecture_norm_block_reason,
     architecture_snapshot,
     architecture_snapshot_block_reason,
 )
-from agent_flow.core.atomic_io import atomic_write_text
+from agent_flow.core.atomic_io import atomic_write_text, fsync_directory, read_bounded_regular_file
 from agent_flow.core.design_value_check import missing_spec_item_evidence
 from agent_flow.core.installation import assert_install_complete, installation_lock_path
 from agent_flow.core.local_skills import (
@@ -55,6 +56,11 @@ from agent_flow.core.review_evidence import (
     ReviewEvidenceRecord,
     review_route_evidence,
 )
+from agent_flow.core.review_scope import (
+    publication_review_base,
+    review_scope_block_reason,
+    validate_publication_review_base,
+)
 from agent_flow.core.workflow_status import (
     print_structured_status,
     status_value,
@@ -64,12 +70,14 @@ from agent_flow.core.worktree_isolation import (
     FileLeaseUnavailable,
     exclusive_file_lease,
     write_run_artifact_text,
+    write_run_subpath_text,
     resolve_run_subpath,
 )
 
 
 META_FILE = "meta.json"
 ACTIVE_LOCK = "active.lock"
+RUN_LIFECYCLE_LOCK = "lifecycle.lock"
 
 
 @dataclass(frozen=True)
@@ -146,12 +154,20 @@ class ActiveRun:
                 architecture_reason = architecture_snapshot_block_reason(
                     snapshot, meta.get("architecture_digest")
                 )
+            if architecture_reason is None:
+                architecture_reason = architecture_norm_block_reason(
+                    meta.get("architecture_norm_documents", {}),
+                    meta.get("architecture_norm_phases", {}),
+                )
         except (OSError, ValueError) as exc:
             architecture_reason = "architecture_policy_unreadable"
             detail = str(exc)
         if architecture_reason is not None:
             structured_status = "blocked"
             reason = architecture_reason
+        elif scope_reason := review_scope_block_reason(meta, current_phase):
+            structured_status = "blocked"
+            reason = scope_reason
         elif required_artifact is not None and not artifact_exists:
             structured_status = "awaiting_host"
             reason = "missing_phase_artifact"
@@ -503,6 +519,50 @@ def approve_phase_artifact(run_dir: Path, *, token: str) -> dict[str, str]:
         meta["phase_approval"] = identity
         write_meta(run_dir, meta)
         return identity
+
+
+def select_publication_review_scope(
+    run_dir: Path, project_root: Path, *, base_oid: str,
+) -> str:
+    with exclusive_file_lease(run_dir / RUN_LIFECYCLE_LOCK):
+        with exclusive_file_lease(run_dir.parent / ACTIVE_LOCK):
+            meta = read_meta(run_dir)
+            if not (run_dir / ACTIVE_MARKER).is_file() or not meta.get("run_id"):
+                raise ValueError("publication review scope requires an active run")
+            if meta.get("current_phase") != "fix-loop":
+                raise ValueError("publication review scope can only be selected in fix-loop")
+            selected = publication_review_base(meta)
+            if selected is not None and selected != base_oid:
+                raise ValueError("publication review base is immutable for this run")
+            validate_publication_review_base(project_root, base_oid)
+            if selected is not None:
+                return selected
+            _archive_review_scope_evidence(run_dir)
+            meta["review_scope"] = {"kind": "publication", "base_oid": base_oid}
+            meta["review_nonce"] = secrets.token_hex(16)
+            meta.pop("phase_approval", None)
+            meta.pop("phase_approval_request", None)
+            write_meta(run_dir, meta)
+            return base_oid
+
+
+def _archive_review_scope_evidence(run_dir: Path) -> None:
+    paths = {run_dir / META_FILE}
+    for pattern in ("*review*.md", "*review*.json", "*review*.patch"):
+        paths.update(run_dir.glob(pattern))
+    contents: list[tuple[str, str]] = []
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        raw, _size = read_bounded_regular_file(path, max_bytes=32 * 1024 * 1024)
+        text = raw.decode("utf-8")
+        digest.update(path.name.encode("utf-8") + b"\0")
+        digest.update(hashlib.sha256(raw).digest())
+        contents.append((path.name, text))
+    archive = run_dir / "review-history" / digest.hexdigest()
+    for name, text in contents:
+        write_run_subpath_text(run_dir, archive / name, text)
+    for directory in (archive, archive.parent, run_dir):
+        fsync_directory(directory, strict=True)
 
 
 def ensure_review_binding(run_path: Path) -> ReviewBinding:
