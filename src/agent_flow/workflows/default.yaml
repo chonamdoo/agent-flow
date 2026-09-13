@@ -1,7 +1,7 @@
 id: default
 description: |
   Single full-cycle workflow applied to every project. The chain unifies
-  interview / docs / DDD / Clean Architecture / SOLID into one design phase,
+  interview / docs / DDD / selected architecture / SOLID into one design phase,
   then enforces TDD (test-first) implementation. AI infers depth per task —
   trivial fixes collapse phases, feature work expands them — but the order
   is invariant.
@@ -14,11 +14,12 @@ description: |
 
 phases:
   - id: design
+    architecture_decision: required
     skills:
       required: [grill-with-docs, grilling, domain-modeling, ddd-architecture, clean-architecture, clean-architecture-core]
     description: |
-      Unified design phase. Grill-style interview → docs → DDD model → Clean
-      Architecture layer map → SOLID check. Single artifact captures the
+      Unified design phase. Grill-style interview → docs → DDD model → selected
+      architecture boundary map → SOLID check. Single artifact captures the
       shared understanding plus the architectural blueprint. Mandatory for
       every project.
     required_markers:
@@ -75,16 +76,20 @@ phases:
       For trivial / non-domain changes (config, cosmetic), explicitly note
       "no domain model impact" and explain.
 
-      ## 4. Clean Architecture layer map
-      Apply `.agent-flow/skills/clean-architecture/SKILL.md` after the DDD model.
-      Map every proposed change to: domain / usecase / data / presentation.
-      For each layer touched, list:
+      ## 4. Architecture boundary map
+      Apply this project's selected architecture contract after the DDD model.
+      Read its full normative root and required references. Map every proposed
+      change to the ownership and dependency boundaries that contract defines.
+      For each boundary touched, list:
       - Concrete additions (new types, new methods)
       - Modifications to existing types
-      - Cross-layer interfaces affected
-      Verify dependency direction: inner layers must not import from outer.
-      Reject any design that creates outward dependency from domain.
-      Include these subsections exactly:
+      - Cross-boundary interfaces affected
+      Reject dependencies that violate the selected contract. In Clean mode,
+      map domain / usecase / data / presentation and enforce inward dependency
+      direction. Local mode uses its own structural rules instead.
+      Retain the following legacy subsection names as coverage categories,
+      documenting selected-contract decisions and permitted non-applicability;
+      their names do not require adopting Clean layers:
       - `## Clean Architecture Boundary Map`
       - `## Dependency Rule`
       - `## Use Case Boundaries`
@@ -240,9 +245,9 @@ phases:
 
       ### RED — failing tests first for behavior changes
       1. Translate the slice's acceptance criteria into test cases.
-      2. Tests target the layer declared by the design's Clean Architecture
-         map (domain test for domain logic, usecase test for orchestration,
-         data test for repository / mapper).
+      2. Tests target the behavior and boundary declared by the selected
+         contract's design map; in Clean mode this includes domain logic,
+         usecase orchestration, and repository / mapper data behavior.
       3. Tests use ubiquitous language from the DDD section (aggregate
          names, event names) — not technical jargon.
       4. Run tests. They MUST fail with assertion errors (not compile
@@ -253,8 +258,8 @@ phases:
       ### GREEN — minimum production code
       5. Implement only what the failing tests demand. No "while I'm here"
          additions. No speculative abstractions.
-      6. Apply `.agent-flow/skills/clean-architecture/SKILL.md` and honor layer assignment
-         from the design's Clean Architecture map.
+      6. Apply the architecture contract skills this prompt lists as required and
+         honor the boundary assignment from the design's architecture map.
       6a. Resolve required skills from active profile metadata, installed skill
           index, changed files, and task scope. Load only the touched profile
           skill union. If required skills are missing for this host,
@@ -262,8 +267,8 @@ phases:
           `missing-required-profile-skills:`, and keep the declared
           `missing local <group>: <skill>` sentence and source URL in prose/Calibration.
       7. Honor SOLID principles from the design's SOLID section.
-      8. For any data layer work, enforce the repository boundary from
-         `.agent-flow/skills/clean-architecture/SKILL.md`:
+      8. For persistence work, enforce the selected contract's ownership,
+         representation, consistency, and conversion rules. In Clean mode:
             - Repository interface is the domain/application port.
             - Repository implementation is the data/infrastructure adapter.
             - Repository is the single source of truth.
@@ -360,6 +365,7 @@ phases:
           module-split: none
 
   - id: final-review
+    architecture_decision: required
     skills:
       required: [code-generation-discipline, code-review, architecture-reviewer, clean-architecture, clean-architecture-core]
     description: |
@@ -415,7 +421,7 @@ phases:
       total:
         - Generalist (templates/_shared/review/architecture.md)
         - Architecture-design specialist (templates/_shared/review/architecture-design.md) — MANDATORY
-        - Clean Architecture specialist (templates/_shared/review/clean-architecture.md) — MANDATORY
+        - Selected architecture contract specialist (templates/_shared/review/clean-architecture.md) — MANDATORY
         - Plus angles declared in profile.review_angles
       Never use OMP or controller-session work as a reviewer fallback. Each
       reviewer section must include `reviewer-source: sub-agent`. Aggregate
@@ -426,10 +432,12 @@ phases:
       Resolve required review skills from active profile metadata,
       `.agent-flow/skills/index.json`, changed files, and task scope. Review
       only the touched profile skill union and record `skills_checked: true`.
-      If `.agent-flow/skills/clean-architecture-core/SKILL.md` is not applied after
-      compatibility markers from `.agent-flow/skills/clean-architecture/SKILL.md`, or any
-      must-avoid or failing checklist condition from the core skill is present,
-      the overall verdict is `verdict: request-changes`.
+      If the selected architecture contract, including its required references,
+      is not assessed, or any applicable must-avoid or required checklist
+      condition fails, the overall verdict is `verdict: request-changes`.
+      Legacy Clean-named review markers certify this selected-contract
+      assessment, not adoption of unselected layers. Keep every completion
+      responsibility and marker enum; use `n/a` only where the enum permits it.
       The skill list above was resolved against your own host; a skill
       it names as not installed is a coverage gap, not a finding. Record
       `skill-availability: degraded` and keep the verdict on the code.
@@ -543,7 +551,7 @@ phases:
       again. Follow the runner's printed next_command for each fix/review
       loop. Resolve required skills from active profile metadata, installed
       skill index, changed files, and task scope before writing or judging code.
-      Apply `.agent-flow/skills/clean-architecture/SKILL.md` to any boundary-affecting fix.
+      Apply the required architecture contract skills to any boundary-affecting fix.
       If a required local skill is missing for this host, record
       `skill-availability: degraded`, put its bare name in
       `missing-required-profile-skills:`, keep the declared

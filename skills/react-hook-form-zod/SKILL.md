@@ -14,7 +14,7 @@ Use for an actual React Web RHF form or a Zod resolver connected to one. A bare 
 - RHF owns input draft, dirty/touched state, and field errors. Existing RSC/query-cache boundaries own server data and refetch; the URL owns shareable filters; the screen state holder owns business progress, allowed actions, and domain-error presentation. Keep focus/hover state close to its consumer and use shared client state only when genuinely shared.
 - Do not mirror RHF values or field state into a ViewModel `uiState` or global store for synchronization. A custom hook shares logic, not state instances; Context alone guarantees neither lifetime nor render isolation.
 - Reusable UI primitives receive narrow label/value/error/callback/ref contracts. RHF field adapters may use `control`, `useWatch`, `useFormState`, or `useController` inside presentation. A small schema + form + existing save boundary is valid; file count and naming are not architecture evidence.
-- Keep draft input, parsed resolver output, application command, and wire DTO meanings distinct. Convert only where meaning differs; identical compatible shapes need no artificial model copies. Domain policy stays free of RHF/Zod/Next dependencies. Use `react-clean-presentation-architecture` when changing screen ownership or dependency wiring.
+- Keep draft input, parsed resolver output, application command, and wire DTO meanings distinct. Convert only where meaning differs; identical compatible shapes need no artificial model copies. In Clean mode, domain policy stays free of RHF/Zod/Next dependencies. Follow the selected architecture contract for screen ownership and dependency wiring (`react-clean-presentation-architecture` in Clean mode).
 
 ## Submission and Safety
 

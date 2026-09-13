@@ -118,6 +118,7 @@ class Adapter(ABC):
             task_text=self._task_text,
             concerns=self._concerns,
             host=skill_host,
+            architecture_root=project_root,
         )
         # 이전 phase의 수치는 대화 컨텍스트가 아니라 여기로만 건너온다.
         # 렌더러가 넣으므로 agent가 빼거나 잊을 수 없다.
@@ -150,6 +151,7 @@ class Adapter(ABC):
         return envelope
 
     def _render_architecture_block(self, phase: "Phase") -> str:
+        """Render the selected architecture contract for an agent prompt."""
         if self._architecture == "ddd":
             if phase.id in {"design", "slice-plan", "ddd-design", "architecture-review"}:
                 return (
@@ -157,7 +159,7 @@ class Adapter(ABC):
                     "DDD is explicit for this run. Do not complete this phase "
                     "as a shallow service split. Model the domain vocabulary, "
                     "context boundaries, objects, events, invariants, and "
-                    "domain flow before Clean Architecture boundary checks. "
+                    "domain flow before selected architecture contract checks. "
                     "If the artifact rejects DDD, label the work `service-layer "
                     "refactor` instead.\n\n"
                     "Required design vocabulary: Bounded Context, Aggregates, "

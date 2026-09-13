@@ -38,7 +38,7 @@ implementation or review.
 ## Do not use for
 
 - Feature-local validation or fetch errors that render inline.
-- Ordinary component/hook state or UI-model mapping; use `react-clean-presentation-architecture` instead.
+- Ordinary component/hook state or UI-model mapping; use the selected contract's presentation guidance (`react-clean-presentation-architecture` in Clean mode) instead.
 
 ## AppShell Role
 

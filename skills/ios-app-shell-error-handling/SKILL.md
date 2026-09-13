@@ -33,7 +33,7 @@ when the app already uses UIKit navigation.
 ## Do not use for
 
 - Feature-local validation or fetch errors that render inline.
-- Ordinary View/ViewModel state or UI-model mapping; use `ios-clean-presentation-architecture` instead.
+- Ordinary View/ViewModel state or UI-model mapping; use the selected contract's presentation guidance (`ios-clean-presentation-architecture` in Clean mode) instead.
 
 ## AppShell Role
 

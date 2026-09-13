@@ -77,7 +77,7 @@ The agent-flow block below is the canonical source for the Workflow Contract and
 |IMPORTANT: Paths only. Read a document when you need it; do not move its body here.
 |docs:{GETTING-STARTED.md,IDENTITY-AND-FREEZE-POLICY.md,mattpocock-skills-upstream-audit.md,PLAN.md,semantic-clean-architecture-code-review.md,semantic-clean-architecture-skill-audit.md,TEAM-ADOPTION.md,USAGE.md}
 |docs/adr:{0001-separate-core-from-environment-adapters.md,0002-use-stage-artifacts-for-subagent-first-workflows.md,0003-keep-team-orchestration-optional.md,0004-exclude-sandboxed-ai-cli-execution.md,0005-prefer-team-state-archive-before-delete.md,0006-add-domain-and-architecture-gates-to-full-feature.md,0006-use-push-watch-as-pr-automation-entrypoint.md,0007-hosted-remote-sandbox-queue-session-infra.md}
-|docs/issues:{0001-host-provider-discovery.md,0002-worktree-backed-run-start.md,0003-team-runtime-tracer.md,0004-installable-workflow-kit.md,0005-domain-ddd-full-feature-phases.md,0005-push-watch-workflow.md,0006-enforce-ddd-architecture-intent.md}
+|docs/issues:{0001-host-provider-discovery.md,0002-worktree-backed-run-start.md,0003-team-runtime-tracer.md,0004-installable-workflow-kit.md,0005-domain-ddd-full-feature-phases.md,0005-push-watch-workflow.md,0006-enforce-ddd-architecture-intent.md,0007-architecture-context-refactor.md}
 |docs/ko:{GETTING-STARTED.md,TEAM-ADOPTION.md}
 ```
 <!-- agent-flow:docs:end -->

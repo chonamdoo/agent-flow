@@ -3,16 +3,22 @@ name: kotlin-backend-development-guide
 description: "Kotlin/JVM server development and review: API authorization and wire contracts, persistence and migrations, server coroutines, workers, and operations. Use with confirmed Kotlin server dependencies or an explicit Kotlin server task; not for Android/Compose, KMP or Ktor client-only code, general Kotlin syntax, or Gradle files alone."
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [Kotlin backend, Kotlin server, Kotlin JVM server]
-requires: [clean-architecture-core]
+requires_by_architecture:
+  clean: [clean-architecture-core]
 ---
 
 # Kotlin Backend Development
 
-Apply `clean-architecture-core` first. Confirm the server source scope and actual framework, Kotlin, coroutine, database, and migration versions from project dependencies and configuration. A `.kt` file or Gradle build alone is not server evidence. Keep existing architecture and build choices; for a new service, consider a feature-oriented modular monolith before introducing independent deployment modules. Kotlin `internal` is a compilation-module boundary, not package privacy.
+Apply the selected architecture contract (`clean-architecture-core` in Clean mode), including its full required references in local mode. Confirm the server source scope and actual framework, Kotlin, coroutine, database, and migration versions from project dependencies and configuration. A `.kt` file or Gradle build alone is not server evidence. Keep existing architecture and build choices; for a new service, consider a feature-oriented modular monolith before introducing independent deployment modules. Kotlin `internal` is a compilation-module boundary, not package privacy.
 
 ## Complete the business boundary
 
 Before changing an entry point, identify its actor/tenant, allowed action and state transition, wire result, consistency boundary, and failure/recovery behavior. Use existing contracts rather than manufacturing a fixed number of layers.
+
+The next three role/boundary rules describe Clean mode. In local mode, use the
+selected contract's ownership and framework-dependency rules instead. The API,
+authorization, consistency, recovery, and operations obligations below apply in
+every mode; pending does not authorize a new structural decision.
 
 - `app-shell` composes dependencies and process lifecycle; `inbound-adapter` owns HTTP/worker input and response schemas; `application` owns actions and consumer-focused ports; `core-domain` owns pure policy; `core-data` owns persistence and outbound integrations. These are semantic roles, not required folders.
 - Keep provider SDK DTOs and ORM entities at outbound boundaries; HTTP request/response schemas at inbound boundaries; stable commands/results inside. Map where meaning changes, not to create forwarding types.

@@ -11,7 +11,7 @@ pathGlobs: ["**/metro.config.*", "**/react-native.config.*", "**/*.podspec", "**
 ## Use With
 
 - Always pair with `react-native-development-guide` for React Native or Expo implementation.
-- Pair with `react-native-clean-presentation-architecture` when changing presentation boundaries.
+- Apply the selected architecture contract when changing presentation boundaries (`react-native-clean-presentation-architecture` in Clean mode).
 - Pair with `react-development-guide` only when the RN task also changes shared React Web code.
 - Android/Kotlin skills when adding native Android integration.
 - Use `react-runtime-i18n` only when the task changes an actual React Web locale runtime. RN retains native locale, formatter, storage, and lifecycle adapters; shared message meaning does not require DOM or SSR behavior on native.

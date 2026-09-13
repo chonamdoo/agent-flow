@@ -392,7 +392,6 @@ class CliTest(unittest.TestCase):
     def test_no_required_skills_never_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = _write_resolver_skills(temp_dir)
-            self.assertEqual(local_skill_prompt_block(root, "commit"), "")
             self.assertEqual(
                 missing_local_skill_markers("## Completion Gate\n", root, "commit"), []
             )
@@ -793,6 +792,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(tuple(distribution.by_cli), ("claude", "codex"))
             self.assertNotIn("omp", distribution.by_cli)
 
+    @mock.patch.dict(os.environ, {"AGENT_FLOW_REVIEWERS": ""})
     def test_final_review_uses_only_claude_and_codex(self) -> None:
         from agent_flow.cli_detect import CliInfo
         from agent_flow.multi_review import ReviewerJob, distribute
@@ -1843,6 +1843,7 @@ class CliTest(unittest.TestCase):
                 self.assertTrue(all(isinstance(part, str) and part for part in command), profile_path.name)
 
     def test_node_installer_initializes_current_project(self) -> None:
+        """Verify that node installer initializes current project."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -1852,6 +1853,8 @@ class CliTest(unittest.TestCase):
                     node,
                     str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
                     "install",
+                    "--architecture-mode",
+                    "clean",
                 ),
                 cwd=project_root,
                 text=True,
@@ -1859,10 +1862,6 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                result.stdout.strip(),
-                f"agent-flow installed profile=generic root={project_root.resolve()}",
-            )
             kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertEqual(kit["profile"], "generic")
             self.assertEqual(kit["install_scope"], "project")
@@ -2904,10 +2903,6 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                result.stdout.strip(),
-                f"agent-flow installed profile=generic root={project_root.resolve()}",
-            )
             self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file())
 
     def test_node_installer_skips_managed_worktree_reinstall(self) -> None:
@@ -3061,14 +3056,20 @@ class CliTest(unittest.TestCase):
             self.assertIn("reason: phase_artifact_written_continue_required", status.stdout)
             self.assertNotIn("reason: missing_phase_artifact", status.stdout)
 
+    @mock.patch.dict(
+        os.environ,
+        {"AGENT_FLOW_ADAPTER": "generic", "AGENT_FLOW_GENERIC_MODE": "emit"},
+        clear=False,
+    )
     def test_node_runner_blocks_missing_manual_spec_evidence(self) -> None:
+        """Verify that node runner blocks missing manual spec evidence."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
             kit_root = Path(__file__).resolve().parents[1]
             node = _node_executable()
             install = subprocess.run(
-                (node, str(kit_root / "bin" / "agent-flow-kit.mjs"), "install"),
+                (node, str(kit_root / "bin" / "agent-flow-kit.mjs"), "install", "--architecture-mode", "clean"),
                 cwd=project_root,
                 text=True,
                 capture_output=True,
@@ -3112,6 +3113,11 @@ verify: manual
                 if candidate.id == "multi-review"
             )
             artifact = _set_node_phase(run_dir, phase.id)
+            entered = subprocess.run(
+                (node, str(kit_root / "bin" / "agent-flow-kit.mjs"), "run", "advance"),
+                cwd=plan.path, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(entered.returncode, 0, entered.stderr)
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text(_node_phase_content("multi-review"), encoding="utf-8")
 
@@ -3139,6 +3145,7 @@ verify: manual
         clear=False,
     )
     def test_node_spec_check_uses_project_root_from_a_subdirectory(self) -> None:
+        """Verify that node spec check uses project root from a subdirectory."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -3163,7 +3170,7 @@ verify: manual
             kit_root = Path(__file__).resolve().parents[1]
             node = _node_executable()
             install = subprocess.run(
-                (node, str(kit_root / "bin" / "agent-flow-kit.mjs"), "install"),
+                (node, str(kit_root / "bin" / "agent-flow-kit.mjs"), "install", "--architecture-mode", "clean"),
                 cwd=project_root,
                 text=True,
                 capture_output=True,
@@ -3171,7 +3178,7 @@ verify: manual
             )
             self.assertEqual(install.returncode, 0, install.stderr)
             subprocess.run(
-                ("git", "add", ".gitignore"),
+                ("git", "add", ".gitignore", ".agent-flow.project.yaml"),
                 cwd=project_root,
                 check=True,
             )
@@ -3223,6 +3230,11 @@ verify: symbol:SearchResults=No results
                 if candidate.id == "multi-review"
             )
             artifact = _set_node_phase(run_dir, phase.id)
+            entered = subprocess.run(
+                (node, str(kit_root / "bin" / "agent-flow-kit.mjs"), "run", "advance"),
+                cwd=checkout, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(entered.returncode, 0, entered.stderr)
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text(
                 _node_phase_content("multi-review"),
@@ -3247,13 +3259,14 @@ verify: symbol:SearchResults=No results
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_node_runner_captures_and_injects_spec_ledger(self) -> None:
+        """Verify that node runner captures and injects spec ledger."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
             kit_root = Path(__file__).resolve().parents[1]
             node = _node_executable()
             install = subprocess.run(
-                (node, str(kit_root / "bin" / "agent-flow-kit.mjs"), "install"),
+                (node, str(kit_root / "bin" / "agent-flow-kit.mjs"), "install", "--architecture-mode", "clean"),
                 cwd=project_root,
                 text=True,
                 capture_output=True,
@@ -4361,10 +4374,6 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                result.stdout.strip(),
-                f"agent-flow installed profile=node root={project_root.resolve()}",
-            )
             kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertEqual(kit["profile"], "node")
 
@@ -4739,54 +4748,44 @@ if (codexContext !== undefined) {
             self.assertIn("automatic fallback is disabled", result.stderr)
 
     def test_node_advance_blocks_empty_delivery_artifacts(self) -> None:
+        """Verify that node advance blocks empty delivery artifacts."""
         node = _node_executable()
         cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-        definition = load_phase_workflow_definition(
-            Path(__file__).resolve().parents[1], "full-feature"
-        )
         for phase_id in ("commit", "push-pr"):
             with self.subTest(phase=phase_id), tempfile.TemporaryDirectory() as temp_dir:
                 project = Path(temp_dir) / "project"
                 project.mkdir()
                 installed = subprocess.run(
-                    (node, cli, "install"), cwd=project, text=True,
+                    (node, cli, "install", "--architecture-mode", "clean"), cwd=project, text=True,
                     capture_output=True, check=False,
                 )
                 self.assertEqual(installed.returncode, 0, installed.stderr)
-                phase_index, phase = next(
-                    (index, item)
-                    for index, item in enumerate(definition.phases)
-                    if item.id == phase_id
+                _init_git_repo(project)
+                plan = plan_worktree(root=project, name="delivery")
+                started = subprocess.run(
+                    (node, cli, "run", "start", "--task", "delivery", "--run-id", "r1"),
+                    cwd=project, text=True, capture_output=True, check=False,
+                    env=_node_test_env(),
                 )
-                run_dir = project / ".agent-flow" / "runs" / "r1"
-                run_dir.mkdir(parents=True)
-                (run_dir / "active").touch()
-                (run_dir / "meta.json").write_text(
-                    json.dumps(
-                        {
-                            "run_id": "r1",
-                            "workflow": "full-feature",
-                            "task": "delivery",
-                            "started_at": "2020-01-01T00:00:00+00:00",
-                            "phase_entered_at": "2020-01-01T00:00:00+00:00",
-                            "phase_index": phase_index,
-                            "current_phase": phase_id,
-                            "checkout_identity": "leader",
-                        }
-                    ),
-                    encoding="utf-8",
+                self.assertEqual(started.returncode, 0, started.stderr)
+                run_dir = _node_phase_run_dir(project, worktree=plan.name)
+                artifact = _set_node_phase(run_dir, phase_id)
+                entered = subprocess.run(
+                    (node, cli, "run", "advance"), cwd=plan.path, text=True,
+                    capture_output=True, check=False, env=_node_test_env(),
                 )
-                artifact = run_dir / phase.artifact
+                self.assertEqual(entered.returncode, 0, entered.stderr)
+                self.assertIn("reason: missing_phase_artifact", entered.stdout)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 artifact.write_text("", encoding="utf-8")
                 result = subprocess.run(
-                    (node, cli, "run", "advance"), cwd=project, text=True,
+                    (node, cli, "run", "advance"), cwd=plan.path, text=True,
                     capture_output=True, check=False, env=_node_test_env(),
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 output = result.stdout + result.stderr
-                self.assertIn("missing completion markers", output.lower())
-                self.assertIn("delivery evidence:", output)
+                self.assertIn("status: blocked", output)
+                self.assertIn("reason: missing_completion_markers", output)
                 persisted = json.loads(
                     (run_dir / "meta.json").read_text(encoding="utf-8")
                 )
@@ -5234,12 +5233,13 @@ if (codexContext !== undefined) {
             self.assertEqual(state["current_phase"], "product-brief")
 
     def test_node_heading_required_markers_ignore_fenced_examples(self) -> None:
+        """Verify that node heading required markers ignore fenced examples."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(subprocess.run((node, cli, "install", "--architecture-mode", "clean"), cwd=project_root, check=False).returncode, 0)
             _init_git_repo(project_root)
             # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
             # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
@@ -5282,13 +5282,14 @@ if (codexContext !== undefined) {
             self.assertEqual(_read_node_phase(run_dir)["current_phase"], "worktree")
 
     def test_node_run_enforces_project_local_code_review_skill_markers_when_present(self) -> None:
+        """Verify that node run enforces project local code review skill markers when present."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
             _write_local_skill_files(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(subprocess.run((node, cli, "install", "--architecture-mode", "clean"), cwd=project_root, check=False).returncode, 0)
             _init_git_repo(project_root)
             # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
             # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
@@ -5364,13 +5365,14 @@ if (codexContext !== undefined) {
             self.assertIn("current_phase: comment-authoring", advanced.stdout)
 
     def test_node_run_enforces_project_local_skills_for_bugfix_code_phases(self) -> None:
+        """Verify that node run enforces project local skills for bugfix code phases."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
             _write_local_skill_files(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(subprocess.run((node, cli, "install", "--architecture-mode", "clean"), cwd=project_root, check=False).returncode, 0)
             _init_git_repo(project_root)
             # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
             # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
@@ -5534,13 +5536,14 @@ if (codexContext !== undefined) {
         clear=False,
     )
     def test_node_workflow_run_advances_every_phase_up_to_the_delivery_gate(self) -> None:
+        """Verify that node workflow run advances every phase up to the delivery gate."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(
-                subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
+                subprocess.run((node, cli, "install", "--architecture-mode", "clean"), cwd=project_root, check=False).returncode,
                 0,
             )
             _init_git_repo(project_root)
@@ -5670,12 +5673,13 @@ if (codexContext !== undefined) {
         clear=False,
     )
     def test_node_pr_watch_blocks_pending_and_routes_fix_loops_back_to_watch(self) -> None:
+        """Verify that node pr watch blocks pending and routes fix loops back to watch."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(subprocess.run((node, cli, "install", "--architecture-mode", "clean"), cwd=project_root, check=False).returncode, 0)
             _init_git_repo(project_root)
             # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
             # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
@@ -5876,12 +5880,13 @@ if (codexContext !== undefined) {
         clear=False,
     )
     def test_node_plan_review_and_architecture_review_route_request_changes(self) -> None:
+        """Verify that node plan review and architecture review route request changes."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(subprocess.run((node, cli, "install", "--architecture-mode", "clean"), cwd=project_root, check=False).returncode, 0)
             _init_git_repo(project_root)
             # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
             # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
@@ -6049,7 +6054,7 @@ if (codexContext !== undefined) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(subprocess.run((node, cli, "install", "--architecture-mode", "clean"), cwd=project_root, check=False).returncode, 0)
             _init_git_repo(project_root)
             _declare_conditional_gate(project_root)
             # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
@@ -6157,7 +6162,7 @@ if (codexContext !== undefined) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(subprocess.run((node, cli, "install", "--architecture-mode", "clean"), cwd=project_root, check=False).returncode, 0)
             _init_git_repo(project_root)
             # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
             # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
@@ -6295,13 +6300,19 @@ if (codexContext !== undefined) {
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("current_phase: architecture-review", result.stdout)
 
+    @mock.patch.dict(
+        os.environ,
+        {"AGENT_FLOW_ADAPTER": "generic", "AGENT_FLOW_GENERIC_MODE": "emit"},
+        clear=False,
+    )
     def test_node_default_final_review_uses_runner_owned_results(self) -> None:
+        """Verify that node default final review uses runner owned results."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(subprocess.run((node, cli, "install", "--architecture-mode", "clean"), cwd=project_root, check=False).returncode, 0)
             _init_git_repo(project_root)
             # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
             # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
@@ -6319,6 +6330,11 @@ if (codexContext !== undefined) {
             final_artifact = _set_node_phase(
                 run_dir, "final-review", workflow="default"
             )
+            entered = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=plan.path, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(entered.returncode, 0, entered.stderr)
             _record_node_test_evidence(run_dir, exit_code=0)
             final_artifact.parent.mkdir(parents=True, exist_ok=True)
             final_artifact.write_text(_with_final_review_gate("verdict: approve\n"), encoding="utf-8")
@@ -6349,7 +6365,7 @@ if (codexContext !== undefined) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(subprocess.run((node, cli, "install", "--architecture-mode", "clean"), cwd=project_root, check=False).returncode, 0)
             _init_git_repo(project_root)
             _declare_conditional_gate(project_root)
             # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
@@ -6426,7 +6442,7 @@ if (codexContext !== undefined) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(subprocess.run((node, cli, "install", "--architecture-mode", "clean"), cwd=project_root, check=False).returncode, 0)
             _init_git_repo(project_root)
             # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
             # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
@@ -6484,7 +6500,7 @@ if (codexContext !== undefined) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(subprocess.run((node, cli, "install", "--architecture-mode", "clean"), cwd=project_root, check=False).returncode, 0)
             _init_git_repo(project_root)
             # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
             # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.

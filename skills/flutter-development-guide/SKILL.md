@@ -11,7 +11,7 @@ Use this as a secondary checklist after user request, repo instructions, existin
 
 - Include widget code, layout constraints, navigation and routing, platform channels, platform views, list and image performance, lifecycle, disposal, accessibility, localization, offline and error states, and Flutter test coverage.
 - Exclude Dart language generalities, which belong to `dart-development-guide`, and native Android or iOS implementation details apart from the engine, channel-registration, and platform-view seams a Dart entry point depends on.
-- For presentation state ownership, provider graphs, and domain-to-UI mapping, apply `flutter-clean-presentation-architecture` instead of restating those rules here.
+- For presentation state ownership, provider graphs, and domain-to-UI mapping, apply the selected architecture contract's guidance (`flutter-clean-presentation-architecture` in Clean mode) instead of restating those rules here.
 
 ## Write
 

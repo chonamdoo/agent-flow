@@ -9,6 +9,7 @@ from typing import Any, cast, Literal
 
 import yaml
 
+from agent_flow.core.architecture_policy import ArchitectureMode, ArchitectureSelection
 from agent_flow.core.reviewer_launch import (
     ReviewerLaunchError,
     validate_reviewer_launch_declaration,
@@ -448,6 +449,25 @@ def _validate_gate_variants(
                 _gate_from_payload(gate, profile_id=profile_id)
         except ValueError as exc:
             raise ValueError(f"invalid profile gate_variants gate: {context}: {exc}") from exc
+
+
+def assert_architecture_override_compatible(
+    root: Path, selection: ArchitectureSelection,
+) -> None:
+    """Reject an architecture override incompatible with the active profile."""
+    if selection.mode is ArchitectureMode.CLEAN:
+        return
+    for path in (root / ".agent-flow" / "profiles").glob("*.local.yaml"):
+        try:
+            override = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise ValueError(f"cannot read profile override {path}: {exc}") from exc
+        if isinstance(override, dict) and "architecture" in override:
+            raise ValueError(
+                f"{path}: legacy architecture override conflicts with "
+                f"architecture mode {selection.mode.value}; migrate the override "
+                "to the selected project contract before proceeding"
+            )
 
 
 def apply_project_profile_override(

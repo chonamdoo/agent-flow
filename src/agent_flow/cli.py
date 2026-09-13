@@ -24,6 +24,15 @@ from agent_flow.core.artifacts import (
     write_recovery,
 )
 from agent_flow.core.architecture_lint import main as architecture_lint_main
+from agent_flow.core.architecture_policy import (
+    ArchitectureMode,
+    ArchitectureSelection,
+    architecture_plan_payload,
+    architecture_snapshot,
+    prepare_architecture_selection,
+    write_architecture_selection,
+)
+from agent_flow.core.installation import assert_install_complete
 from agent_flow.core.context_contract import (
     append_context_event,
     check_system_invariants,
@@ -52,6 +61,7 @@ from agent_flow.core.phase_workflow import (
     load_phase_workflow_definition,
 )
 from agent_flow.core.profiles import (
+    assert_architecture_override_compatible,
     DEFAULT_GATE_PHASE,
     GATE_PHASE_ALL,
     GATE_PHASES,
@@ -69,6 +79,7 @@ from agent_flow.core.local_skills import (
     resolved_profile,
 )
 from agent_flow.core import skill_catalog
+from agent_flow.core.skill_resolver import assert_architecture_selection_skills
 from agent_flow.core.skill_sync import parse_skill_sources, sync_skill_sources
 from agent_flow.core.review import summarize_reviews, write_review_summary
 from agent_flow.core.report import RUN_REPORT_FILENAME, write_run_report
@@ -193,6 +204,7 @@ from agent_flow.artifact import (
     mark_inactive,
     phase_review_rejected,
     read_meta,
+    select_publication_review_scope,
 )
 from agent_flow.runner import (
     ACCEPT_LEADER_DRIFT_FLAG,
@@ -257,6 +269,7 @@ def _with_install_shorthand(argv: list[str], commands: set[str]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the agent-flow command-line interface."""
     parser = argparse.ArgumentParser(prog="agent-flow")
     parser.add_argument(
         "--version",
@@ -423,6 +436,26 @@ def main(argv: list[str] | None = None) -> int:
     architecture_lint_parser.add_argument("--files", nargs="*")
     architecture_lint_parser.add_argument("--worktree")
 
+    # 아키텍처 *선택*이다. `run --architecture`는 프롬프트 서술용 플래그이고 의미가
+    # 다르므로 같은 이름에 얹지 않는다.
+    architecture_parser = subparsers.add_parser("architecture")
+    architecture_subparsers = architecture_parser.add_subparsers(
+        dest="architecture_command", required=True
+    )
+    architecture_export = architecture_subparsers.add_parser("export")
+    architecture_export.add_argument("--root", default=".")
+    architecture_export.add_argument("--worktree")
+    architecture_export.add_argument("--format", choices=("json",), default="json")
+    architecture_export.add_argument("--mode", choices=tuple(mode.value for mode in ArchitectureMode))
+    architecture_export.add_argument("--skill")
+    architecture_select = architecture_subparsers.add_parser("select")
+    architecture_select.add_argument("--root", default=".")
+    architecture_select.add_argument("--worktree")
+    architecture_select.add_argument(
+        "--mode", required=True, choices=tuple(mode.value for mode in ArchitectureMode)
+    )
+    architecture_select.add_argument("--skill")
+
     eval_parser = subparsers.add_parser("eval")
     eval_parser.add_argument("--root", default=".")
     eval_parser.add_argument("--fixtures")
@@ -537,6 +570,13 @@ def main(argv: list[str] | None = None) -> int:
     review_retry.add_argument("--root", default=".")
     review_retry.add_argument("--reviewer", required=True)
     review_retry.add_argument("--retry-after")
+    review_scope = review_command_subparsers.add_parser(
+        "scope",
+        help="Pin publication-only review in fix-loop; this run cannot approve a merge.",
+    )
+    review_scope.add_argument("--root", default=".")
+    review_scope.add_argument("--worktree")
+    review_scope.add_argument("--publication-base", required=True, metavar="COMMIT_OID")
 
     worktree_parser = subparsers.add_parser("worktree")
     worktree_subparsers = worktree_parser.add_subparsers(dest="worktree_command", required=True)
@@ -1304,6 +1344,56 @@ def main(argv: list[str] | None = None) -> int:
             lint_args.extend(["--files", *args.files])
         return architecture_lint_main(lint_args)
 
+    if args.command == "architecture":
+        command_root = _command_project_root(root, requested_root, getattr(args, "worktree", None))
+        if command_root is None:
+            return 2
+        try:
+            assert_install_complete(command_root)
+            if args.mode is None:
+                if args.skill is not None:
+                    raise ValueError("--skill requires --mode local")
+                snapshot = architecture_snapshot(command_root)
+            else:
+                selection = ArchitectureSelection(
+                    mode=ArchitectureMode(args.mode), contract_path=args.skill
+                )
+                snapshot = prepare_architecture_selection(command_root, selection)
+            if snapshot.declared:
+                assert_architecture_override_compatible(command_root, snapshot.selection)
+            assert_install_complete(command_root)
+            if args.architecture_command == "select":
+                if snapshot.selection.mode is not ArchitectureMode.PENDING:
+                    profile_root = _profile_source_root(
+                        root, requested_root, getattr(args, "worktree", None)
+                    )
+                    profiles = [
+                        load_profile_payload(profile_id, profile_root)
+                        for profile_id in active_profile_ids(profile_root)
+                    ]
+                    assert_architecture_selection_skills(
+                        profile_root, snapshot, profile=merged_profile_payload(profiles),
+                        architecture_root=command_root,
+                    )
+                selection = snapshot.selection
+                contract = snapshot.contract
+                path = write_architecture_selection(command_root, selection)
+                assert_install_complete(command_root)
+                documents = len(contract.documents) if contract else 0
+                print(
+                    f"architecture: {selection.mode.value}  "
+                    f"contract: {selection.contract_path or '-'}  documents: {documents}  {path}"
+                )
+                for untracked in snapshot.untracked:
+                    print(f"warning: architecture document is untracked: {untracked}")
+                return 0
+            payload = architecture_plan_payload(snapshot)
+        except (ValueError, OSError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0
+
     if args.command == "eval":
         fixture_path = _resolve_project_path(root, args.fixtures) if args.fixtures else None
         run_dir = _resolve_project_path(root, args.run_dir) if args.run_dir else None
@@ -1508,6 +1598,29 @@ def main(argv: list[str] | None = None) -> int:
             except ValueError as exc:
                 print(str(exc), file=sys.stderr)
                 return 2
+            return 0
+        if args.review_command == "scope":
+            try:
+                if args.worktree is None:
+                    raise ValueError("publication review scope requires a bound worktree")
+                project_root, state_root = _worktree_context(
+                    root, args.worktree, prefer_pending_cleanup=False,
+                )
+                if project_root is None:
+                    return 2
+                active = find_active_run(state_root)
+                if active is None:
+                    raise ValueError("publication review scope requires an active run")
+                base_oid = select_publication_review_scope(
+                    active.path, project_root, base_oid=args.publication_base,
+                )
+            except (OSError, ValueError, RuntimeError) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
+            print("review_scope: publication")
+            print(f"publication_base: {base_oid}")
+            print("merge_approval: unavailable in this publication-only run")
+            print(f"next_command: {_continue_command(root, args.worktree)}")
             return 0
 
     if args.command == "worktree":

@@ -26,11 +26,11 @@ You are reviewing this change through a **DDD lens**. The code under review is p
    - Is behavior on the entity/aggregate, or scattered into utility services?
    - Are domain rules expressed as methods, not branches in callers?
 
-6. **Clean Architecture handoff**
-   - If layer boundaries, repository ports/adapters, use cases, caches, or mappers
-     are involved, did the artifact apply `clean-architecture` after this DDD pass?
-   - Do not duplicate Clean Architecture findings here; record only the domain
-     model issue and let the Clean Architecture angle judge dependency boundaries.
+6. **Architecture handoff**
+   - If structural boundaries are involved, did the artifact apply the selected
+     architecture contract after this DDD pass, including all required references?
+   - Record only the domain model issue here; the independent architecture
+     angle judges structural rules. Clean-specific boundaries apply in Clean mode.
 
 ## Output format
 

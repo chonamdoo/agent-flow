@@ -175,22 +175,23 @@ class SkillReadEvidence:
     used_names: frozenset[str] = frozenset()
 
 
-# 계층 계약 문서의 이름 family. 정확한 이름은 스택마다 다르고(`react-clean-architecture`,
-# `python-api-clean-architecture`, `clean-architecture-core`) 설치 여부에 따라 dependency
-# 확장이 되거나 안 되므로, 판정은 이름 조각 하나로 한다.
-ARCHITECTURE_CONTRACT_FAMILY = "clean-architecture"
+# review angle이 "구조 계약이 필요한 angle"임을 선언하는 토큰. 값을 `clean-architecture`로
+# 두는 것은 이미 그렇게 선언한 profile들과의 호환 때문이고, **무엇이 계약인지는**
+# 이 문자열이 아니라 프로젝트 선택이 정한다(`architecture_policy`).
+ARCHITECTURE_CONTRACT_REQUIREMENT = "clean-architecture"
 
 
 def architecture_contract_required(resolution: SkillResolution) -> bool:
-    """이 phase가 계층 계약 문서를 요구하는가.
+    """이 phase가 구조 계약 문서를 요구하는가.
 
     작성자 게이트와 reviewer angle 게이트가 **같은 술어**를 써야 한다. 한쪽이 정확한
     이름을, 다른 쪽이 family를 보면 routed-but-uninstalled 상태에서 갈린다 — 그때
     작성자는 `applied`를 적으라고 요구받는데 그것을 검증할 angle은 등록되지 않는다.
+
+    무엇이 계약인지는 프로젝트 선택이 정하고, 그 판정은 resolver가 이미 끝냈다.
+    여기서 이름을 다시 해석하면 해석이 둘이 된다.
     """
-    return any(
-        ARCHITECTURE_CONTRACT_FAMILY in skill.name for skill in resolution.required
-    )
+    return bool(resolution.architecture_contract)
 
 
 def declared_concern_ids(profile: dict | None) -> set[str]:
@@ -220,7 +221,9 @@ def phase_skill_resolution(
     task_text: str = "",
     concerns: Sequence[str] = (),
     host: str | None = None,
+    architecture_root: Path | None = None,
 ) -> SkillResolution:
+    """Resolve all required skills for a workflow phase."""
     return resolve_phase_skills(
         project_root=project_root,
         phase_id=phase_id,
@@ -230,6 +233,7 @@ def phase_skill_resolution(
         task_text=task_text,
         concerns=concerns,
         host=host,
+        architecture_root=architecture_root,
     )
 
 
@@ -243,7 +247,9 @@ def local_skill_prompt_block(
     task_text: str = "",
     concerns: Sequence[str] = (),
     host: str | None = None,
+    architecture_root: Path | None = None,
 ) -> str:
+    """Render resolved local skill content for a phase prompt."""
     resolution = phase_skill_resolution(
         project_root,
         phase_id,
@@ -253,6 +259,7 @@ def local_skill_prompt_block(
         task_text=task_text,
         concerns=concerns,
         host=host,
+        architecture_root=architecture_root,
     )
     # 강제 지점과 같은 조건을 쓴다. 둘이 갈라지면 프롬프트가 다시 거짓말한다.
     enforced = skill_markers_enforced(phase_id)
@@ -283,7 +290,9 @@ def missing_local_skill_markers(
     task_text: str = "",
     concerns: Sequence[str] = (),
     since: float | None = None,
+    architecture_root: Path | None = None,
 ) -> list[str]:
+    """Return completion markers for locally unavailable skills."""
     resolution = phase_skill_resolution(
         project_root,
         phase_id,
@@ -292,6 +301,7 @@ def missing_local_skill_markers(
         changed_files=changed_files,
         task_text=task_text,
         concerns=concerns,
+        architecture_root=architecture_root,
     )
     # skill 목록 주입은 모든 phase에 하지만, marker 강제는 코드 생성/리뷰 phase에만 건다.
     # commit·merge·pr-watch까지 막으면 얻는 것 없이 막히는 경로만 늘어난다.
@@ -328,19 +338,8 @@ def missing_local_skill_markers(
         if diagnosis:
             missing.append(diagnosis)
 
-    # 계층 계약 문서가 required면 `clean-architecture: n/a`는 거짓이다. marker 자체는
-    # `applied|n/a`를 받는다 — 경계 경로를 건드리지 않는 변경에서 그 문서를 읽으라고
-    # 요구하면 축소가 무의미해지고, 그때 `applied`를 강요하면 읽지 않은 것을 적게 된다.
-    # 그래서 판정을 marker 문법이 아니라 이 phase의 required 집합으로 한다.
-    # 여기서 marker를 **새로 요구하지 않는다.** 어떤 phase가 어떤 marker를 적어야
-    # 하는지는 workflow가 정하고(`required_markers`), 이 층은 그 값이 계층 계약을
-    # 요구하는 phase에서 거짓이 되는 경우만 잡는다. 새 요구를 만들면 그 marker를
-    # 선언하지 않은 phase(full-feature의 `multi-review`는 `clean-architecture-review`를
-    # 쓴다)까지 막힌다.
-    #
-    # `n/a`만 거부하는 것으로는 부족하다 — `markers._line_matches_marker`는 `n/a`가
-    # 대안으로 있는 marker에 `optional`도 허용하므로, 그 한 단어가 게이트를 통과한다.
-    # 그래서 적힌 값이 허용 열거에 드는지를 본다.
+    # legacy marker 이름은 유지하지만 local에서도 선택 계약 심사를 완료해야 한다.
+    # workflow가 선언한 marker만 검사하며, n/a·optional로 필수 심사를 면제하지 않는다.
     if architecture_contract_required(resolution):
         if "clean-architecture" in values and values["clean-architecture"] != "applied":
             missing.append("clean-architecture: applied")

@@ -106,25 +106,30 @@ def _existing_mode(path: Path) -> int | None:
     return info.st_mode & 0o777 if stat.S_ISREG(info.st_mode) else None
 
 
-def fsync_directory(directory: Path) -> None:
-    """``directory`` 엔트리 변경을 디스크에 내려보낸다. 실패는 삼킨다.
+def fsync_directory(directory: Path, *, strict: bool = False) -> None:
+    """디렉터리 엔트리를 동기화한다. ``strict=True``는 IO 실패를 전달한다.
 
-    디렉터리 fsync는 이식성이 없다. Windows에는 디렉터리 fd 자체가 없고, 일부
-    파일시스템은 EINVAL을 낸다. 여기서 실패해도 rename은 이미 끝났으므로
-    내구성만 약해질 뿐 원자성은 유지된다 — 예외로 올리면 성공한 쓰기가 실패로 보인다.
+    디렉터리 fsync를 지원하지 않는 플랫폼과 파일시스템이 있다. 기본 호출은
+    rename 이후이므로 오류를 무시해 이미 반영된 쓰기를 실패로 보고하지 않는다.
+    상위 상태 저장 전에 내구성을 보장해야 하는 호출은 ``strict=True``로
+    동기화 실패 시 중단한다.
     """
     try:
         dir_fd = os.open(directory, os.O_RDONLY)
     except OSError:
+        if strict:
+            raise
         return
     try:
         os.fsync(dir_fd)
     except OSError:
-        pass
+        if strict:
+            raise
     finally:
-        # close도 EIO/ENOSPC를 낸다. rename은 이미 끝났으므로 여기서 예외를 올리면
-        # 성공한 쓰기가 실패로 보고되고 호출부가 무의미한 재시도를 한다.
+        # 기본 호출은 rename 이후다. close 실패를 쓰기 실패로 보고하면
+        # 호출부가 이미 반영된 작업을 다시 시도한다.
         try:
             os.close(dir_fd)
         except OSError:
-            pass
+            if strict:
+                raise

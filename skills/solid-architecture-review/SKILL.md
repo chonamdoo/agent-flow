@@ -1,13 +1,13 @@
 ---
 name: solid-architecture-review
-description: SOLID architecture review checklist for code review, final review, and architecture review. Use with clean-architecture-core when dependency direction, use case/repository boundaries, or platform architecture are also in scope.
+description: SOLID architecture review checklist for code review, final review, and architecture review. Use with the selected architecture contract when dependency direction, use case/repository boundaries, or platform architecture are also in scope.
 ---
 
 # SOLID Architecture Review
 
-Use this skill for SOLID-specific review. Load `clean-architecture-core` when
-layer boundaries, repository/source/cache/mapper rules, or DI direction are in
-scope.
+Use this skill for SOLID-specific review. Apply the selected architecture
+contract for structural boundaries and dependency direction. In Clean mode,
+load `clean-architecture-core`; local mode uses its full root and required references.
 
 ## Review Priority
 
@@ -48,10 +48,11 @@ scope.
 ### DIP
 
 - High-level policy depends on abstractions.
-- Concrete frameworks, transport clients, databases, SDKs, and UI runtimes stay
-  behind adapter interfaces or composition roots.
-- Pair this check with `clean-architecture-core` for repository/usecase/mapper
-  boundary details.
+- In Clean mode, concrete frameworks, transport clients, databases, SDKs, and UI
+  runtimes stay behind adapter interfaces or composition roots. Local mode
+  follows its selected contract's framework and dependency boundaries.
+- Pair this check with the selected architecture contract for structural
+  boundary details (`clean-architecture-core` in Clean mode).
 
 ## Review Output
 

@@ -31,6 +31,7 @@ class PhaseDefinition:
     required_markers: tuple[str, ...]
     artifact: str
     skills: PhaseSkills | None = None
+    architecture_decision: str = "existing"
 
 
 _PHASE_KEYS = frozenset(
@@ -45,6 +46,7 @@ _PHASE_KEYS = frozenset(
         "required_markers",
         "artifact",
         "skills",
+        "architecture_decision",
     }
 )
 
@@ -340,13 +342,14 @@ def declared_phase_skills(kit_root: Path) -> DeclaredPhaseSkills:
 
 
 def load_phase_workflow_definition(kit_root: Path, name: str) -> PhaseWorkflowDefinition:
+    """Load and validate a named workflow definition."""
     validate_safe_name(name, "workflow")
     path = kit_root / "workflows" / f"{name}.yaml"
     ensure_child_path(kit_root / "workflows", path, "workflow")
+    packaged = _packaged_workflow_path(name)
     if not path.exists():
         # 정의의 정본은 설치 가능한 패키지 자원이다. kit root 사본은 설치본이
         # 덮어쓸 수 있는 자리라 먼저 보지만, 없다고 실패하면 그 사본을 지울 수 없다.
-        packaged = _packaged_workflow_path(name)
         if packaged is None:
             raise FileNotFoundError(f"Workflow not found: {path}")
         path = packaged
@@ -369,7 +372,13 @@ def load_phase_workflow_definition(kit_root: Path, name: str) -> PhaseWorkflowDe
     phases_raw = raw.get("phases") or []
     if not isinstance(phases_raw, list) or not phases_raw:
         raise ValueError(f"workflow {path}: missing or empty `phases`")
-    phases = _normalize_phases(phases_raw, path, workflow_id)
+    phases = _normalize_phases(
+        phases_raw,
+        path,
+        workflow_id,
+        replaceable_architecture=packaged is not None
+        and (path.resolve() == packaged.resolve() or source_bytes == packaged.read_bytes()),
+    )
     _validate_routes(phases, path)
     return PhaseWorkflowDefinition(
         id=workflow_id,
@@ -380,7 +389,14 @@ def load_phase_workflow_definition(kit_root: Path, name: str) -> PhaseWorkflowDe
     )
 
 
-def _normalize_phases(phases_raw: list[object], path: Path, workflow_id: str) -> list[PhaseDefinition]:
+def _normalize_phases(
+    phases_raw: list[object],
+    path: Path,
+    workflow_id: str,
+    *,
+    replaceable_architecture: bool = False,
+) -> list[PhaseDefinition]:
+    """Parse and validate workflow phase definitions."""
     out: list[PhaseDefinition] = []
     seen_ids: set[str] = set()
     for index, item in enumerate(phases_raw):
@@ -409,6 +425,12 @@ def _normalize_phases(phases_raw: list[object], path: Path, workflow_id: str) ->
             )
         seen_ids.add(phase_id)
         routes = _routes(item.get("routes"), path, phase_id)
+        architecture_decision = item.get("architecture_decision", "existing")
+        if architecture_decision not in ("existing", "required"):
+            raise ValueError(
+                f"workflow {path}: phase {phase_id} architecture_decision "
+                "must be existing or required"
+            )
         out.append(
             PhaseDefinition(
                 id=phase_id,
@@ -425,13 +447,26 @@ def _normalize_phases(phases_raw: list[object], path: Path, workflow_id: str) ->
                     phase_id,
                     _default_artifact_for_phase(workflow_id, phase_id),
                 ),
-                skills=_phase_skills(item.get("skills"), path, phase_id),
+                skills=_phase_skills(
+                    item.get("skills"),
+                    path,
+                    phase_id,
+                    replaceable_architecture=replaceable_architecture,
+                ),
+                architecture_decision=architecture_decision,
             )
         )
     return out
 
 
-def _phase_skills(value: object, path: Path, phase_id: str) -> PhaseSkills | None:
+def _phase_skills(
+    value: object,
+    path: Path,
+    phase_id: str,
+    *,
+    replaceable_architecture: bool = False,
+) -> PhaseSkills | None:
+    """Return the skills declared for a workflow phase."""
     if value is None:
         return None
     if not isinstance(value, dict):
@@ -444,6 +479,7 @@ def _phase_skills(value: object, path: Path, phase_id: str) -> PhaseSkills | Non
     skills = PhaseSkills(
         required=_skill_names(value.get("required"), path, phase_id, "required"),
         optional=_skill_names(value.get("optional"), path, phase_id, "optional"),
+        replaceable_architecture=replaceable_architecture,
     )
     return None if skills.is_empty() else skills
 

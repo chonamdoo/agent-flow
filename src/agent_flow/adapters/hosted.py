@@ -22,9 +22,10 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple
 
 from agent_flow.adapters.base import Adapter
-from agent_flow.artifact import bind_review_evidence, ensure_review_binding
+from agent_flow.artifact import bind_review_evidence, ensure_review_binding, read_meta
 from agent_flow.core.local_skills import (
-    ARCHITECTURE_CONTRACT_FAMILY,
+    ARCHITECTURE_CONTRACT_REQUIREMENT,
+    architecture_contract_required,
     phase_skill_resolution,
 )
 from agent_flow.core.review_evidence import (
@@ -33,6 +34,10 @@ from agent_flow.core.review_evidence import (
     review_evidence_record,
     review_results_path,
     serialize_review_results,
+)
+from agent_flow.core.review_scope import (
+    publication_review_base,
+    validate_publication_review_base,
 )
 from agent_flow.core.skill_resolver import selector_matches
 from agent_flow.core.worktree_isolation import (
@@ -67,11 +72,7 @@ _BASE_REF_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/+@"
 )
 
-# `requires`가 있는 angle은 그 skill이 이 phase의 required 집합에 있을 때만 등록한다.
-# base_prompt는 angle마다 그대로 복제되므로(`_reviewer_jobs`) required 목록 하나가
-# angle 수 × provider 수만큼 늘어난다. 계층 계약을 요구하지 않는 변경에서 그 angle을
-# 그대로 띄우면 resolver 쪽 축소가 review phase에서 전부 사라진다 — 이 template이
-# `clean-architecture-core/SKILL.md`를 읽으라고 직접 지시하기 때문이다.
+# 계약 angle과 작성자 게이트는 같은 resolver 판정을 사용해야 리뷰 없는 통과가 없다.
 _BASE_REVIEW_ANGLES: tuple[dict[str, object], ...] = (
     {
         "id": "generalist",
@@ -84,7 +85,7 @@ _BASE_REVIEW_ANGLES: tuple[dict[str, object], ...] = (
     {
         "id": "architecture-design",
         "prompt": "templates/_shared/review/architecture-design.md",
-        "requires": ARCHITECTURE_CONTRACT_FAMILY,
+        "requires": ARCHITECTURE_CONTRACT_REQUIREMENT,
     },
     {
         "id": "state-integrity",
@@ -124,11 +125,8 @@ _BASE_REVIEW_ANGLES: tuple[dict[str, object], ...] = (
     {
         "id": "clean-architecture",
         "prompt": "templates/_shared/review/clean-architecture.md",
-        # 값은 이름 family다. 정확한 이름(`clean-architecture-core`)으로 보면
-        # routed-but-uninstalled 상태에서 dependency 확장이 일어나지 않아 angle이
-        # 빠지는데, 작성자 게이트는 family로 판정해 `applied`를 요구한다 —
-        # 두 술어가 갈리는 그 자리가 정확히 리뷰 없는 통과가 된다.
-        "requires": ARCHITECTURE_CONTRACT_FAMILY,
+        # legacy angle id는 유지하되 심사 기준은 프로젝트가 선택한 계약을 쓴다.
+        "requires": ARCHITECTURE_CONTRACT_REQUIREMENT,
     },
 )
 _UNCONDITIONAL_REVIEW_ANGLE_IDS = frozenset({"generalist", "types"})
@@ -328,21 +326,39 @@ def _write_review_input_snapshot(
     *,
     base_branch: str | None = None,
 ) -> ReviewInputSnapshot:
-    """리뷰어가 받는 유일한 증거. 기준점은 선언된 base와의 merge-base다.
+    """리뷰 증거의 기준점은 기본적으로 merge-base, publication 범위에서는 고정 OID다.
 
     `HEAD` 기준으로 찍으면 작업이 이미 커밋된 브랜치에서는 모든 섹션이 비는데,
     같은 프롬프트가 리뷰어에게 샌드박스 안에서 `git diff`를 돌리지 말라고 말한다.
     그래서 리뷰어는 근거 없이 판정하게 된다 — 라운드 하나가 실제로 그렇게 무너졌다.
     """
+    try:
+        publication_base = publication_review_base(read_meta(run_dir))
+        if publication_base is not None:
+            validate_publication_review_base(project_root, publication_base)
+    except ValueError as exc:
+        raise WorktreeIsolationError(
+            f"could not precompute reviewer input: invalid publication review scope: {exc}"
+        ) from exc
     # 관측 하나당 상한을 전체 예산보다 낮게 잡는다. unborn HEAD 경로는 관측을
     # 셋까지 만들고, 합계가 예산을 넘으면 스냅샷 자체를 못 쓴다. 상한에 걸린
     # 섹션은 라운드를 죽이지 않고 머리말에 잘렸다고 적는다.
     observation_max_bytes = max(1, _REVIEW_INPUT_MAX_BYTES // 4)
-    baseline = _resolve_review_baseline(
-        project_root,
-        base_branch,
-        max_output_bytes=observation_max_bytes,
-    )
+    if publication_base is None:
+        baseline = _resolve_review_baseline(
+            project_root,
+            base_branch,
+            max_output_bytes=observation_max_bytes,
+        )
+    else:
+        baseline = _ReviewBaseline(
+            rev=publication_base,
+            detail=(
+                f"pinned publication base {publication_base} — every change "
+                "through the current working tree is below, committed and "
+                "uncommitted alike"
+            ),
+        )
     status = git_safe(
         "status",
         "--short",
@@ -367,7 +383,7 @@ def _write_review_input_snapshot(
     if baseline.note:
         notes.append(baseline.note)
     diff_observations = []
-    if _is_unborn_head_failure(diff):
+    if publication_base is None and _is_unborn_head_failure(diff):
         notes.append(
             "HEAD carries no commit yet, so the staged and working-tree diffs "
             "below stand in for a baseline diff"
@@ -451,6 +467,15 @@ def _write_review_input_snapshot(
         f"- phase: {phase_id}",
         f"- diff baseline: {baseline.detail}",
     ]
+    if publication_base is not None:
+        header.extend((
+            "- review scope: publication-only; not whole-PR or merge approval",
+            "- scope contract: judge defects introduced or worsened by this "
+            "delta, including security defects, without path or category exclusions; "
+            "surrounding code may be read for context",
+            "- prior findings: unchanged pre-baseline findings remain separately "
+            "recorded risks, not fixed findings or approval of the existing PR",
+        ))
     header.extend(f"- note: {note}" for note in notes)
     sections = [
         f"## {label}\n\n{result.stdout.rstrip() or '(empty)'}"
@@ -706,8 +731,12 @@ def _applicable_angles(
     *,
     providers: Sequence[str],
 ) -> list[dict[str, object]]:
+    """Return review angles that apply to the active architecture."""
     skill_gated = [angle for angle in angles if "requires" in angle]
     required: set[str] = set()
+    # 계약 충족 여부는 작성자 게이트와 **같은 함수**로 판정한다. 여기서 이름을
+    # 다시 해석하면 두 판정이 갈리고, 그 자리가 리뷰 없는 통과가 된다.
+    contract_satisfied = False
     if skill_gated:
         for provider in providers:
             resolution = phase_skill_resolution(
@@ -719,14 +748,20 @@ def _applicable_angles(
                 task_text=adapter._task_text,
                 concerns=adapter._concerns,
                 host=provider,
+                architecture_root=project_root,
             )
             required.update(skill.name for skill in resolution.required)
+            contract_satisfied = contract_satisfied or architecture_contract_required(resolution)
     return [
         angle
         for angle in angles
         if (
             "requires" not in angle
-            or _angle_requirement_met(_angle_requirement_value(angle), required)
+            or _angle_requirement_met(
+                _angle_requirement_value(angle),
+                required,
+                contract_satisfied=contract_satisfied,
+            )
         )
         and _angle_selectors_match(angle, adapter)
     ]
@@ -767,10 +802,16 @@ def _angle_requirement_value(angle: Mapping[str, object]) -> str:
     return raw.strip()
 
 
-def _angle_requirement_met(requirement: str, required: set[str]) -> bool:
-    """`requires`는 이름 family다. 작성자 게이트와 같은 술어를 쓴다."""
-    if requirement == ARCHITECTURE_CONTRACT_FAMILY:
-        return any(ARCHITECTURE_CONTRACT_FAMILY in name for name in required)
+def _angle_requirement_met(
+    requirement: str, required: set[str], *, contract_satisfied: bool
+) -> bool:
+    """구조 계약을 요구하는 angle은 작성자 게이트와 같은 판정을 쓴다.
+
+    무엇이 계약인지는 프로젝트 선택이 정한다. 여기서 이름 조각으로 다시 판정하면
+    local 프로젝트에서 구조 리뷰가 통째로 사라진다.
+    """
+    if requirement == ARCHITECTURE_CONTRACT_REQUIREMENT:
+        return contract_satisfied
     return requirement in required
 
 
@@ -818,15 +859,21 @@ def _reviewer_jobs(
         "\n\n## Precomputed review input\n\n"
         f"Read `{review_input.path}` before judging the change. The controller "
         "captured it immediately before launching reviewers: its header names "
-        "the diff baseline — the merge-base of the declared base branch when one "
-        "is available, or of its remote-tracking counterpart when the declared "
-        "base is behind, so changes already committed on this branch are "
-        "included — and states in `- note:` lines whether the baseline skipped a "
+        "the diff baseline — a pinned OID for explicit publication-only scope, "
+        "otherwise the merge-base of the declared base branch when available "
+        "or its remote-tracking counterpart when the declared base is behind, "
+        "so committed changes since that baseline are included — and states "
+        "in `- note:` lines whether the baseline skipped a "
         "stale declared base, whether the snapshot was truncated, and whether it "
         "is a verified empty diff. The body holds `git status --short` and that "
         "diff. Inspect "
         "untracked files listed there directly. Do not run `git diff` inside "
-        "the reviewer sandbox. "
+        "the reviewer sandbox. When the header declares publication-only scope, "
+        "judge defects introduced or worsened by the pinned-base delta, including "
+        "security defects, with no path or category exclusions. Read surrounding "
+        "code for context as needed. Keep unchanged pre-baseline findings as "
+        "separately recorded risks; do not claim they are fixed. Publication-only "
+        "approval is not whole-PR approval and cannot authorize merge. "
         f"Its SHA-256 is `{review_input.digest}`; this digest is part of your "
         "prompt identity."
         if review_input is not None
