@@ -30,9 +30,13 @@ from typing import Any
 
 import yaml
 
+from agent_flow.core.architecture_policy import (
+    architecture_snapshot,
+    architecture_snapshot_block_reason,
+)
 from agent_flow.core.atomic_io import atomic_write_text
 from agent_flow.core.design_value_check import missing_spec_item_evidence
-from agent_flow.core.installation import installation_lock_path
+from agent_flow.core.installation import assert_install_complete, installation_lock_path
 from agent_flow.core.local_skills import (
     changed_files,
     missing_local_skill_markers,
@@ -40,6 +44,7 @@ from agent_flow.core.local_skills import (
 )
 from agent_flow.core.markers import missing_markers, normalize_required_markers
 from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
+from agent_flow.core.profiles import assert_architecture_override_compatible
 from agent_flow.core.run_storage import ACTIVE_MARKER, RUNS_DIRNAME, active_run_paths
 from agent_flow.core.security import validate_safe_name
 from agent_flow.core.skill_resolver import PhaseSkills
@@ -126,7 +131,27 @@ class ActiveRun:
         artifact_exists = (
             required_artifact is not None and required_artifact.exists()
         )
-        if required_artifact is not None and not artifact_exists:
+        architecture_reason: str | None = None
+        config = config_root or self.path
+        project = project_root or config
+        try:
+            assert_install_complete(project)
+            if config != project:
+                assert_install_complete(config)
+            snapshot = architecture_snapshot(project)
+            if snapshot.declared:
+                assert_architecture_override_compatible(config, snapshot.selection)
+            if snapshot.declared or "architecture_digest" in meta:
+                architecture_reason = architecture_snapshot_block_reason(
+                    snapshot, meta.get("architecture_digest")
+                )
+        except (OSError, ValueError) as exc:
+            architecture_reason = "architecture_policy_unreadable"
+            detail = str(exc)
+        if architecture_reason is not None:
+            structured_status = "blocked"
+            reason = architecture_reason
+        elif required_artifact is not None and not artifact_exists:
             structured_status = "awaiting_host"
             reason = "missing_phase_artifact"
         elif required_artifact is not None and artifact_exists:

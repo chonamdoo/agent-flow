@@ -95,6 +95,82 @@ def test_status_reports_architecture_failure_separately_from_markers(repository,
     assert not payload.get("missing_completion_markers")
 
 
+@pytest.mark.parametrize("artifact_exists", [False, True])
+@pytest.mark.parametrize("changed_source", ["selection", "reference"])
+def test_status_reports_pinned_drift_before_artifact_readiness(
+    repository, monkeypatch, capsys, artifact_exists, changed_source
+):
+    from agent_flow.artifact import ActiveRun, write_meta
+    from agent_flow.runner import Runner
+
+    monkeypatch.setenv("HOME", str(repository.parent / "home"))
+    selection = _declare(repository)
+    _contract(repository, "requires_docs: [references/rules.md]")
+    reference = _write(
+        repository, "skills/architecture/references/rules.md", b"# Approved boundary\n"
+    )
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    run_dir = repository / ".agent-flow/runs/status-drift"
+    run_dir.mkdir(parents=True)
+    write_meta(run_dir, {
+        "workflow": "default",
+        "current_phase": "implement",
+        "task": "Update title",
+        "architecture_digest": policy.architecture_snapshot(repository).digest,
+    })
+    if artifact_exists:
+        (run_dir / "implement.md").write_text("## Completion Gate\n", encoding="utf-8")
+    if changed_source == "selection":
+        selection.write_text(
+            "schema_version: 1\narchitecture: {mode: pending}\n", encoding="utf-8"
+        )
+    else:
+        reference.write_bytes(b"# Changed boundary\n")
+    active = ActiveRun(run_dir, run_dir.name, "default", "Update title", "")
+
+    active.print_status(config_root=repository, project_root=repository)
+
+    payload = json.loads(next(
+        line.removeprefix("status_json: ")
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("status_json: ")
+    ))
+    assert payload["status"] == "blocked"
+    assert payload["reason"] == "architecture_policy_drift"
+    assert not payload.get("missing_completion_markers")
+    assert Runner(repository, run_dir=run_dir)._architecture_policy_block_reason() == payload["reason"]
+
+
+def test_status_allows_unchanged_pinned_policy_to_await_artifact(
+    repository, monkeypatch, capsys
+):
+    from agent_flow.artifact import ActiveRun, write_meta
+
+    monkeypatch.setenv("HOME", str(repository.parent / "home"))
+    _declare(repository, "pending")
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    run_dir = repository / ".agent-flow/runs/status-unchanged"
+    run_dir.mkdir(parents=True)
+    write_meta(run_dir, {
+        "workflow": "default",
+        "current_phase": "implement",
+        "task": "Update title",
+        "architecture_digest": policy.architecture_snapshot(repository).digest,
+    })
+
+    ActiveRun(run_dir, run_dir.name, "default", "Update title", "").print_status(
+        config_root=repository, project_root=repository
+    )
+
+    payload = json.loads(next(
+        line.removeprefix("status_json: ")
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("status_json: ")
+    ))
+    assert payload["status"] == "awaiting_host"
+    assert payload["reason"] == "missing_phase_artifact"
+
+
 @pytest.mark.parametrize(
     "skill",
     ["absolute", "docs/rules.md", "skills/custom/SKILL.md", "skills/architecture/../SKILL.md", ""],

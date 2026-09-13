@@ -299,6 +299,18 @@ def architecture_snapshot(root: Path) -> ArchitectureSnapshot:
         return _snapshot_from_selection(root, selection, source_document, repository_fd)
 
 
+def architecture_snapshot_block_reason(
+    snapshot: ArchitectureSnapshot, pinned_digest: object
+) -> str | None:
+    if pinned_digest is None:
+        return "architecture_policy_unpinned"
+    if pinned_digest != snapshot.digest:
+        return "architecture_policy_drift"
+    if snapshot.untracked:
+        return "architecture_contract_untracked"
+    return None
+
+
 def prepare_architecture_selection(
     root: Path, selection: ArchitectureSelection
 ) -> ArchitectureSnapshot:

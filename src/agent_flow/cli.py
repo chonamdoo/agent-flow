@@ -79,6 +79,7 @@ from agent_flow.core.local_skills import (
     resolved_profile,
 )
 from agent_flow.core import skill_catalog
+from agent_flow.core.skill_resolver import assert_architecture_selection_skills
 from agent_flow.core.skill_sync import parse_skill_sources, sync_skill_sources
 from agent_flow.core.review import summarize_reviews, write_review_summary
 from agent_flow.core.report import RUN_REPORT_FILENAME, write_run_report
@@ -1353,6 +1354,18 @@ def main(argv: list[str] | None = None) -> int:
                 assert_architecture_override_compatible(command_root, snapshot.selection)
             assert_install_complete(command_root)
             if args.architecture_command == "select":
+                if snapshot.selection.mode is not ArchitectureMode.PENDING:
+                    profile_root = _profile_source_root(
+                        root, requested_root, getattr(args, "worktree", None)
+                    )
+                    profiles = [
+                        load_profile_payload(profile_id, profile_root)
+                        for profile_id in active_profile_ids(profile_root)
+                    ]
+                    assert_architecture_selection_skills(
+                        profile_root, snapshot, profile=merged_profile_payload(profiles),
+                        architecture_root=command_root,
+                    )
                 selection = snapshot.selection
                 contract = snapshot.contract
                 path = write_architecture_selection(command_root, selection)

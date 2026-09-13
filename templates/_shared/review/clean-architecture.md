@@ -160,7 +160,7 @@ solid-clean-architecture-check: applied
 ## Output format
 
 ```markdown
-## Clean Architecture review findings
+## Architecture Contract review findings
 
 ### Must-fix
 - <severity:high> [path:line] <boundary violation>. Why: <one sentence>.

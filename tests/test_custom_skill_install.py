@@ -207,6 +207,125 @@ def test_clean_architecture_skills_install_core_and_platform_dependency_graph(tm
         assert resolved.path.is_file()
 
 
+def test_pending_install_rejects_clean_selection_until_norms_are_provisioned(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    env = {**os.environ, "HOME": str(tmp_path / "home"), "AGENT_FLOW_HOST": "codex"}
+    installed = _install(project, "--profile", "python", "--architecture-mode", "pending", env=env)
+    assert installed.returncode == 0, installed.stderr
+    declaration = project / ".agent-flow.project.yaml"
+    original = declaration.read_bytes()
+    cli = (_node(), str(KIT_ROOT / "bin/agent-flow-kit.mjs"), "architecture")
+
+    exported = subprocess.run(
+        (*cli, "export", "--mode", "clean"), cwd=project, env=env,
+        text=True, capture_output=True, check=False, timeout=30,
+    )
+    assert exported.returncode == 0, exported.stderr
+    assert json.loads(exported.stdout)["mode"] == "clean"
+    assert declaration.read_bytes() == original
+    rejected = subprocess.run(
+        (*cli, "select", "--mode", "clean"), cwd=project, env=env,
+        text=True, capture_output=True, check=False, timeout=30,
+    )
+    assert rejected.returncode == 2, rejected.stderr
+    assert "clean-architecture-core" in rejected.stderr
+    assert declaration.read_bytes() == original
+
+    shutil.copytree(
+        KIT_ROOT / "skills/clean-architecture-core",
+        project / ".agent-flow/skills/clean-architecture-core",
+    )
+    missing_adapter = subprocess.run(
+        (*cli, "select", "--mode", "clean"), cwd=project, env=env,
+        text=True, capture_output=True, check=False, timeout=30,
+    )
+    assert missing_adapter.returncode == 2, missing_adapter.stderr
+    assert "python-api-clean-architecture" in missing_adapter.stderr
+    assert declaration.read_bytes() == original
+
+    provisioned = _install(project, "--profile", "python", "--architecture-mode", "clean", env=env)
+    assert provisioned.returncode == 0, provisioned.stderr
+    assert not (project / ".agent-flow/skills/android-clean-architecture").exists()
+    for mode in ("pending", "clean"):
+        selected = subprocess.run(
+            (*cli, "select", "--mode", mode), cwd=project, env=env,
+            text=True, capture_output=True, check=False, timeout=30,
+        )
+        assert selected.returncode == 0, selected.stderr
+        assert yaml.safe_load(declaration.read_text(encoding="utf-8"))["architecture"]["mode"] == mode
+
+
+def test_clean_selection_requires_active_host_norm_dependency_closure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_flow.cli import main
+    from agent_flow.core.skill_resolver import PhaseSkills, resolve_phase_skills
+    from agent_flow.core.architecture_policy import ArchitectureContractError
+
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("AGENT_FLOW_HOST", "codex")
+    declaration = project / ".agent-flow.project.yaml"
+    declaration.write_text("schema_version: 1\narchitecture:\n  mode: pending\n", encoding="utf-8")
+    original = declaration.read_bytes()
+    core = project / "skills/clean-architecture-core/SKILL.md"
+    core.parent.mkdir(parents=True)
+    core.write_text(
+        "---\nname: clean-architecture-core\nrequires: [team-boundaries]\n---\n"
+        "Use the team boundary rules.\n",
+        encoding="utf-8",
+    )
+    _skill(home / ".claude/skills/team-boundaries", "Keep domain policy independent.")
+
+    assert main(["architecture", "select", "--root", str(project), "--mode", "clean"]) == 2
+    assert declaration.read_bytes() == original
+    shared = home / ".agents/skills/team-boundaries"
+    _skill(shared, "Keep domain policy independent.")
+    assert main(["architecture", "select", "--root", str(project), "--mode", "clean"]) == 0
+    resolution = resolve_phase_skills(
+        project_root=project, phase_id="implement",
+        phase_skills=PhaseSkills(required=("clean-architecture-core",)), host="codex",
+    )
+    assert str(shared / "SKILL.md") in {document.path for document in resolution.architecture_norms}
+    (shared / "SKILL.md").unlink()
+    with pytest.raises(ArchitectureContractError, match="team-boundaries"):
+        resolve_phase_skills(
+            project_root=project, phase_id="implement",
+            phase_skills=PhaseSkills(required=("clean-architecture-core",)), host="codex",
+        )
+
+
+def test_local_selection_checks_dependencies_without_requiring_clean_skills(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_flow.cli import main
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AGENT_FLOW_HOST", "codex")
+    declaration = tmp_path / ".agent-flow.project.yaml"
+    declaration.write_text("schema_version: 1\narchitecture:\n  mode: pending\n", encoding="utf-8")
+    original = declaration.read_bytes()
+    contract = tmp_path / "skills/architecture/SKILL.md"
+    contract.parent.mkdir(parents=True)
+    contract.write_text(
+        "---\nname: architecture\nrequires: [team-boundaries]\n---\n"
+        "Use the team's chosen layering.\n",
+        encoding="utf-8",
+    )
+    args = ["architecture", "select", "--root", str(tmp_path), "--mode", "local",
+            "--skill", "skills/architecture/SKILL.md"]
+    assert main(args) == 2
+    assert declaration.read_bytes() == original
+    _skill(tmp_path / "skills/team-boundaries", "Keep domain policy independent.")
+    assert main(args) == 0
+    assert yaml.safe_load(declaration.read_text(encoding="utf-8"))["architecture"] == {
+        "mode": "local", "skill": "skills/architecture/SKILL.md",
+    }
+
+
 def test_android_profile_installs_android_skills_and_common_dependencies_only(tmp_path: Path) -> None:
     project = tmp_path / "android-project"
     project.mkdir()

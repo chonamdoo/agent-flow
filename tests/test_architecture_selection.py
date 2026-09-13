@@ -163,6 +163,15 @@ def _declare(root: Path, body: str) -> None:
     _track(root, PROJECT_ARCHITECTURE_FILE)
 
 
+def _clean_contract(root: Path) -> None:
+    _write(
+        root, "skills/clean-architecture/SKILL.md",
+        "---\nname: clean-architecture\n---\n\nKeep domain policy independent of I/O.\n",
+    )
+    _declare(root, "schema_version: 1\narchitecture:\n  mode: clean\n")
+    _track(root, "skills")
+
+
 def _local_contract(root: Path, *, references: tuple[str, ...] = ()) -> None:
     declared = "".join(f"  - {name}\n" for name in references)
     requires = f"requires_docs:\n{declared}" if references else ""
@@ -516,7 +525,7 @@ def _required_names(resolution) -> set[str]:
 def test_three_modes_resolve_distinct_required_contracts(tmp_path, monkeypatch):
     """SPEC-1. 선택이 실제로 다른 필수 규범을 만든다."""
     clean_root = _git_project(tmp_path, "clean")
-    _declare(clean_root, "schema_version: 1\narchitecture:\n  mode: clean\n")
+    _clean_contract(clean_root)
 
     pending_root = _git_project(tmp_path, "pending")
     _declare(pending_root, "schema_version: 1\narchitecture:\n  mode: pending\n")
@@ -586,7 +595,7 @@ def test_contract_dependent_angle_follows_the_selection(tmp_path, monkeypatch):
     from agent_flow.core.local_skills import architecture_contract_required
 
     for name, declare in (
-        ("clean", lambda root: _declare(root, "schema_version: 1\narchitecture:\n  mode: clean\n")),
+        ("clean", _clean_contract),
         ("pending", lambda root: _declare(root, "schema_version: 1\narchitecture:\n  mode: pending\n")),
         ("local", _local_contract),
     ):
@@ -895,7 +904,7 @@ def test_agency_fixture_uses_anonymized_naming(tmp_path, separate_hooks):
 def test_case_personal_project_keeps_clean_obligations(tmp_path, monkeypatch):
     """케이스 A. 개인 프로젝트에서 Clean을 고르면 기존 의무가 그대로다."""
     root = _clean_violating_project(tmp_path, "personal")
-    _declare(root, "schema_version: 1\narchitecture:\n  mode: clean\n")
+    _clean_contract(root)
 
     required = _required_names(_resolution(root, monkeypatch))
 
@@ -1001,7 +1010,7 @@ def test_ddd_stays_required_in_every_mode(tmp_path, monkeypatch):
 
     declared = ("code-generation-discipline", "clean-architecture", "ddd-architecture")
     for name, declare in (
-        ("clean", lambda root: _declare(root, "schema_version: 1\narchitecture:\n  mode: clean\n")),
+        ("clean", _clean_contract),
         ("pending", lambda root: _declare(root, "schema_version: 1\narchitecture:\n  mode: pending\n")),
         ("local", _local_contract),
     ):
@@ -1187,8 +1196,36 @@ def test_transitive_local_dependency_change_blocks_existing_run_evidence(tmp_pat
     assert artifact.read_text(encoding="utf-8") == old_evidence
 
 
-@pytest.mark.parametrize("phase_id", ["implement", "review"])
-def test_pending_development_blocks_grown_boundary_scope(tmp_path, phase_id):
+@pytest.mark.parametrize(
+    ("profile_id", "workflow", "phase_id", "local_path", "structural_path"),
+    [
+        ("python", "development", "implement", "app/title.py", "src/domain/catalog.py"),
+        ("python", "development", "review", "app/title.py", "src/domain/catalog.py"),
+        (
+            "spring", "development", "implement",
+            "src/main/kotlin/com/example/Title.kt", "src/main/kotlin/com/example/domain/Catalog.kt",
+        ),
+        (
+            "spring", "development", "review",
+            "src/main/java/com/example/Title.java", "src/main/java/com/example/application/Checkout.java",
+        ),
+        (
+            "spring", "bugfix", "implement-fix",
+            "src/main/kotlin/com/example/Title.kt", "src/main/kotlin/com/example/application/Checkout.kt",
+        ),
+        (
+            "spring", "bugfix", "review",
+            "src/main/java/com/example/Title.java", "src/main/java/com/example/domain/Catalog.java",
+        ),
+        (
+            "spring", "review", "review",
+            "src/main/kotlin/Title.kt", "src/main/kotlin/domain/Catalog.kt",
+        ),
+    ],
+)
+def test_pending_blocks_grown_boundary_scope(
+    tmp_path, profile_id, workflow, phase_id, local_path, structural_path,
+):
     from agent_flow.core.phase_workflow import load_phase_workflow_definition
     from agent_flow.core.profiles import load_profile_payload
     from agent_flow.runner import _phases_from_definition
@@ -1196,17 +1233,64 @@ def test_pending_development_blocks_grown_boundary_scope(tmp_path, phase_id):
     root = _git_project(tmp_path)
     _declare(root, "schema_version: 1\narchitecture:\n  mode: pending\n")
     runner = _pinned_runner(root)
-    runner.profile = load_profile_payload("python")
+    runner.profile = load_profile_payload(profile_id)
     phase = next(
-        phase for phase in _phases_from_definition(load_phase_workflow_definition(KIT_ROOT, "development"))
+        phase for phase in _phases_from_definition(load_phase_workflow_definition(KIT_ROOT, workflow))
         if phase.id == phase_id
     )
-    _write(root, "app/title.py", 'TITLE = "Updated title"\n')
+    _write(root, local_path, 'TITLE = "Updated title"\n' if profile_id == "python" else "class Title {}\n")
     assert runner._architecture_decision_block_reason(phase) is None
 
-    _write(root, "src/domain/catalog.py", "class Catalog:\n    pass\n")
+    _write(root, structural_path, "class Catalog:\n    pass\n" if profile_id == "python" else "class Catalog {}\n")
 
     assert runner._architecture_decision_block_reason(phase) == "architecture_decision_pending"
+
+
+def test_pending_allows_local_work_beside_existing_structural_roots(tmp_path):
+    from agent_flow.core.profiles import load_profile_payload
+
+    root = _git_project(tmp_path)
+    _declare(root, "schema_version: 1\narchitecture:\n  mode: pending\n")
+    _write(root, "src/main/kotlin/com/example/domain/Catalog.kt", "class Catalog {}\n")
+    _track(root, "src")
+    subprocess.run(
+        ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+         "commit", "-qm", "Existing domain model"], cwd=root, check=True,
+    )
+    runner = _pinned_runner(root)
+    runner.profile = load_profile_payload("spring")
+    _write(root, "src/main/kotlin/com/example/Title.kt", 'const val TITLE = "Updated title"\n')
+
+    assert runner._architecture_decision_block_reason(_workflow_phase("implement")) is None
+
+
+def test_pending_checks_structural_roles_in_a_profile_union(tmp_path):
+    from agent_flow.core.profiles import load_profile_payload
+
+    root = _git_project(tmp_path)
+    _declare(root, "schema_version: 1\narchitecture:\n  mode: pending\n")
+    runner = _pinned_runner(root)
+    runner.profile = {
+        "id": "multi-profile",
+        "profiles": [load_profile_payload("generic"), load_profile_payload("spring")],
+    }
+    _write(root, "src/main/java/com/example/domain/Catalog.java", "class Catalog {}\n")
+
+    assert runner._architecture_decision_block_reason(_workflow_phase("worktree")) is None
+    assert runner._architecture_decision_block_reason(_workflow_phase("implement")) == "architecture_decision_pending"
+
+
+def test_pending_generic_requires_explicit_structural_phase_evidence(tmp_path):
+    from agent_flow.core.profiles import load_profile_payload
+
+    root = _git_project(tmp_path)
+    _declare(root, "schema_version: 1\narchitecture:\n  mode: pending\n")
+    runner = _pinned_runner(root)
+    runner.profile = load_profile_payload("generic")
+    _write(root, "src/domain/catalog.py", "class Catalog:\n    pass\n")
+
+    assert runner._architecture_decision_block_reason(_workflow_phase("implement")) is None
+    assert runner._architecture_decision_block_reason(_workflow_phase("design")) == "architecture_decision_pending"
 
 
 def test_pending_blocks_declared_wiring_decision_outside_role_paths(tmp_path):
@@ -1326,7 +1410,8 @@ def test_status_checks_the_bound_contract_not_the_leader_selection(tmp_path, mon
     assert "project-local-skills-used: architecture" not in applied
 
 
-def test_pending_honors_the_same_declared_task_selector_as_resolution(tmp_path):
+@pytest.mark.parametrize("group", ["architecture", "domain-policy"])
+def test_pending_honors_the_same_declared_task_selector_as_resolution(tmp_path, group):
     from agent_flow.artifact import read_meta, write_meta
     from agent_flow.runner import Phase
 
@@ -1334,7 +1419,7 @@ def test_pending_honors_the_same_declared_task_selector_as_resolution(tmp_path):
     _declare(root, "schema_version: 1\narchitecture:\n  mode: pending\n")
     runner = _pinned_runner(root)
     runner.profile = {"skills": {"required_review": [
-        {"group": "architecture", "skills": ["clean-architecture-core"], "task_terms": ["boundary"]},
+        {"group": group, "skills": ["clean-architecture-core"], "task_terms": ["boundary"]},
     ]}}
     meta = read_meta(runner.run_dir)
     meta["task"] = "Adjust a boundary"

@@ -311,6 +311,64 @@ def resolve_skill(name: str, roots: Sequence[SkillRoot]) -> ResolvedSkill:
     )
 
 
+def assert_architecture_selection_skills(
+    project_root: Path,
+    snapshot: ArchitectureSnapshot,
+    *,
+    profile: dict | None = None,
+    architecture_root: Path | None = None,
+) -> None:
+    from agent_flow.core.profile_routing import routable_group_skills
+
+    selection = snapshot.selection
+    if selection.mode is ArchitectureMode.PENDING:
+        return
+    contract_root = architecture_root or project_root
+    roots = active_host_roots(skill_roots(project_root, profile=profile), active_host())
+    contract_name = contract_skill_name(selection)
+    catalog = discover_skill_catalog(
+        project_root, roots, exclude_names=(contract_name,) if contract_name else (),
+    )
+    if contract_name is not None:
+        assert snapshot.contract is not None
+        contract_path = contract_root / snapshot.contract.root.path
+        catalog += (
+            _catalog_entry(
+                contract_name, contract_path, "architecture-contract",
+                frontmatter=parse_skill_metadata(
+                    snapshot.contract.contents[0], source=str(contract_path),
+                ) or {},
+            ),
+        )
+        names = [contract_name]
+    else:
+        names = ["clean-architecture-core", *sorted(
+            name for name in routable_group_skills(profile) if is_clean_architecture_skill(name)
+        )]
+    required_names = expand_dependencies(names, catalog, architecture_mode=selection.mode)
+    by_name = {entry.name: entry for entry in catalog}
+    required: list[ResolvedSkill] = []
+    for name in required_names:
+        entry = by_name.get(name)
+        if entry is not None and entry.lifecycle == INVALID_FRONTMATTER:
+            raise ArchitectureContractError(
+                f"required architecture skill {name!r} has invalid frontmatter metadata at {entry.path}"
+            )
+        if (
+            selection.mode is not ArchitectureMode.CLEAN and is_clean_architecture_skill(name)
+        ) or (
+            name != contract_name and entry is not None and entry.architecture_modes
+            and selection.mode.value not in entry.architecture_modes
+        ):
+            raise ArchitectureContractError(
+                f"architecture mode {selection.mode.value!r} is incompatible with required "
+                f"skill dependency: {name}"
+            )
+        if name != contract_name:
+            required.append(resolve_skill(name, roots))
+    _architecture_norms(contract_root, snapshot, required)
+
+
 def resolve_phase_skills(
     *,
     project_root: Path,
@@ -500,13 +558,13 @@ def resolve_phase_skills(
 
     unique_required = _stable_unique(required_names)
     required = tuple(resolve(name) for name in unique_required)
-    norm_skills: Iterable[ResolvedSkill] = required
-    if contract_name is not None:
-        norm_names = set(expand_dependencies((contract_name,), catalog, architecture_mode=selection.mode))
-        norm_skills = (
-            skill for skill in required
-            if skill.name != contract_name and skill.name in norm_names
-        )
+    norm_names = set(expand_dependencies(
+        contract_names_in(unique_required, selection), catalog, architecture_mode=selection.mode,
+    ))
+    norm_skills = (
+        skill for skill in required
+        if skill.name != contract_name and skill.name in norm_names
+    )
     resolution = SkillResolution(
         required=required,
         optional=tuple(resolve(name) for name in _stable_unique(optional_names)),
@@ -529,10 +587,12 @@ def _architecture_norms(
             absolute = str(root / document.path)
             documents[absolute] = ContractDocument(absolute, document.sha256, document.bytes)
     for skill in required:
-        if (
-            not skill.exists or skill.path is None
-            or (snapshot.contract is None and not is_clean_architecture_skill(skill.name))
-        ):
+        if not skill.exists or skill.path is None:
+            if snapshot.declared:
+                raise ArchitectureContractError(
+                    f"missing required architecture skill: {skill.name}; provision the selected "
+                    "architecture skills before selecting or using this contract"
+                )
             continue
         for path in sorted({skill.path, *skill.path.parent.rglob("*.md")}):
             try:

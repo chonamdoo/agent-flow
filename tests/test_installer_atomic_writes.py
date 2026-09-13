@@ -1603,3 +1603,36 @@ assert.throws(() => installer.prepareArchitectureInstall(process.env.PROJECT, []
 assert.throws(() => fs.fstatSync(fd), {code: 'EBADF'});
 """)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("valid_json", [False, True], ids=["parse-and-close", "close-only"])
+def test_inherited_plan_preserves_primary_error_when_close_fails(
+    tmp_path: Path, valid_json: bool,
+) -> None:
+    result = _architecture_node(tmp_path, """
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const file = process.env.PROJECT + '/plan.json';
+fs.writeFileSync(file, process.env.VALID_JSON === 'yes' ? '{}' : '{invalid json');
+const fd = fs.openSync(file, 'r');
+process.env.AGENT_FLOW_INSTALL_PLAN_FD = String(fd);
+const close = fs.closeSync;
+fs.closeSync = descriptor => {
+  close(descriptor);
+  if (descriptor === fd) throw Object.assign(new Error('injected close failure'), {code: 'EIO'});
+};
+let failure;
+try { installer.prepareArchitectureInstall(process.env.PROJECT, []); }
+catch (error) { failure = error; }
+finally { fs.closeSync = close; }
+if (process.env.VALID_JSON === 'yes') {
+  assert.equal(failure?.code, 'EIO');
+} else {
+  assert.ok(failure?.cause instanceof SyntaxError);
+}
+assert.equal(process.env.AGENT_FLOW_INSTALL_PLAN_FD, undefined);
+assert.throws(() => fs.fstatSync(fd), {code: 'EBADF'});
+""", VALID_JSON="yes" if valid_json else "no")
+    assert result.returncode == 0, result.stderr
+    if not valid_json:
+        assert "injected close failure" in result.stderr

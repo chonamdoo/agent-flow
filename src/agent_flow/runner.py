@@ -54,11 +54,14 @@ from agent_flow.artifact import (
 )
 from agent_flow.cli_detect import CliInfo, REVIEW_CLI_NAMES, detect_available_clis
 from agent_flow.pr_watch import _ci_execution_entry, _ci_execution_history, _valid_ci_revision
+from agent_flow.core.architecture_lint import match_role
 from agent_flow.core.architecture_policy import (
     MAX_ARCHITECTURE_DOCUMENT_BYTES,
     ArchitectureMode,
     architecture_snapshot,
+    architecture_snapshot_block_reason,
     evaluate_workflow_compatibility,
+    is_clean_architecture_skill,
 )
 from agent_flow.core.atomic_io import read_bounded_regular_file
 from agent_flow.core.installation import assert_install_complete
@@ -2313,6 +2316,20 @@ class Runner:
             )
         return f"Update the artifact, then `{self.next_command}`."
 
+    def _architecture_scope_requires_decision(self, scope: Sequence[str]) -> bool:
+        for profile in self.profile.get("profiles", [self.profile]):
+            architecture = profile.get("architecture")
+            if not isinstance(architecture, dict):
+                continue
+            roles = architecture.get("roles")
+            if not isinstance(roles, list):
+                continue
+            for path in scope:
+                match = match_role(path, roles)
+                if match is not None and match.role.get("id") not in {"app-shell", "android-native"}:
+                    return True
+        return False
+
     def _architecture_decision_block_reason(self, phase: Phase) -> str | None:
         try:
             assert_install_complete(self.project_root)
@@ -2325,6 +2342,7 @@ class Runner:
             assert self.run_dir is not None
             meta = read_meta(self.run_dir)
             try:
+                scope = changed_files(self.project_root)
                 host = getattr(self, "_adapter_name", None)
                 roots = active_host_roots(
                     skill_roots(self.config_root, profile=self.profile, host=host),
@@ -2333,7 +2351,7 @@ class Runner:
                 catalog = discover_skill_catalog(self.config_root, roots)
                 routed = routed_profile_skills(
                     self.profile, phase_id=phase.id,
-                    changed_files=changed_files(self.project_root),
+                    changed_files=scope,
                     task_text=str(meta.get("task", "")),
                     concerns=run_concerns(meta),
                     declared_skill_phases=_profile_skill_phases(
@@ -2343,7 +2361,12 @@ class Runner:
             except (OSError, ValueError) as exc:
                 print(f"agent-flow: {exc}", file=sys.stderr)
                 return "architecture_policy_unreadable"
-            if any(skill.group == "architecture" for skill in routed):
+            if any(
+                skill.group == "architecture" or is_clean_architecture_skill(skill.name)
+                for skill in routed
+            ) or (
+                skill_markers_enforced(phase.id) and self._architecture_scope_requires_decision(scope)
+            ):
                 decision = "required"
         return evaluate_workflow_compatibility(
             selection, architecture_decision=decision,
@@ -2487,14 +2510,7 @@ class Runner:
             print(f"agent-flow: {exc}", file=sys.stderr)
             return "architecture_policy_unreadable"
         meta = read_meta(self.run_dir)
-        pinned = meta.get("architecture_digest")
-        if pinned is None:
-            return "architecture_policy_unpinned"
-        if pinned != snapshot.digest:
-            return "architecture_policy_drift"
-        if snapshot.untracked:
-            return "architecture_contract_untracked"
-        return None
+        return architecture_snapshot_block_reason(snapshot, meta.get("architecture_digest"))
 
     def _stale_artifact_block_reason(self, artifact: Path, meta: dict[str, Any]) -> str | None:
         entered_at = _meta_timestamp(
