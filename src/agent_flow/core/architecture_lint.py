@@ -110,6 +110,7 @@ def lint_project(
     # Clean role 표는 Clean을 고른 프로젝트의 규칙이다. local·pending에 그 경로
     # 토폴로지를 강요하면 선택이 의미를 잃는다. 여기서 비활성인 것은 "통과"가
     # 아니라 "이 검사가 이 프로젝트의 기준이 아님"이다.
+    """Lint the project's architecture boundaries and return violations."""
     if not clean_role_lint_applies(architecture_snapshot(root)):
         return []
     profile = load_profile_payload(profile_id, profile_root or root)
@@ -1451,6 +1452,7 @@ def package_segment(value: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the architecture linter command-line interface."""
     parser = argparse.ArgumentParser(prog="agent-flow architecture-lint")
     parser.add_argument("--root", default=".")
     parser.add_argument("--profile-root")

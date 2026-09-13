@@ -556,6 +556,7 @@ def test_install_reports_a_broken_host_config_link_without_a_stack_trace(tmp_pat
 
 
 def _architecture_node(project: Path, script: str, **environment: str) -> subprocess.CompletedProcess[str]:
+    """Build the Node installer script for an architecture plan."""
     return subprocess.run(
         (_node(), "--input-type=module", "-e",
          f"import * as installer from {json.dumps(SHARED_MODULE.as_uri())};\n" + script),
@@ -567,6 +568,7 @@ def _architecture_node(project: Path, script: str, **environment: str) -> subpro
 
 @pytest.mark.parametrize("shadow", ["yaml", "json"])
 def test_architecture_plan_fallback_does_not_import_checkout_modules(tmp_path: Path, shadow: str) -> None:
+    """Verify that architecture plan fallback does not import checkout modules."""
     project = tmp_path / "project"
     project.mkdir()
     marker = project / "imported"
@@ -603,6 +605,7 @@ syncBuiltinESMExports();
     "excluded_skills", "selection_document", "source_document", "documents",
 ])
 def test_architecture_plan_refuses_invalid_python_output(tmp_path: Path, corruption: str) -> None:
+    """Verify that architecture plan refuses invalid python output."""
     probe = tmp_path / "corrupt-export.mjs"
     probe.write_text("""
 import cp from 'node:child_process';
@@ -643,6 +646,7 @@ syncBuiltinESMExports();
 def test_recovery_requires_owner_proof_for_previous_release_asset_list(
     tmp_path: Path, proven_owner: bool,
 ) -> None:
+    """Verify that recovery requires owner proof for previous release asset list."""
     recovery = tmp_path / ".agent-flow/install-recovery"
     relative = ".agent-flow/templates/retired-template.txt"
     target = tmp_path / relative
@@ -686,6 +690,7 @@ def test_recovery_requires_owner_proof_for_previous_release_asset_list(
     "missing-version", "unversioned-array",
 ])
 def test_recovery_rejects_unsafe_manifest_before_any_mutation(tmp_path: Path, corruption: str) -> None:
+    """Verify that recovery rejects unsafe manifest before any mutation."""
     recovery = tmp_path / ".agent-flow/install-recovery"
     recovery.mkdir(parents=True)
     protected = tmp_path / ".agent-flow/kit.json"
@@ -722,6 +727,7 @@ def test_recovery_rejects_unsafe_manifest_before_any_mutation(tmp_path: Path, co
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_interrupted_real_installer_blocks_python_until_resumed(tmp_path: Path, binary: str) -> None:
+    """Verify that interrupted real installer blocks python until resumed."""
     from agent_flow.core.installation import assert_install_complete
 
     project = tmp_path / "project"
@@ -757,6 +763,7 @@ fs.renameSync = (source, target, ...args) => {
 
 
 def _interrupt_architecture_transaction(project: Path) -> None:
+    """Interrupt an architecture transaction at the requested step."""
     result = _architecture_node(
         project,
         "installer.prepareArchitectureInstall(process.env.PROJECT, ['--architecture-mode', 'pending']);"
@@ -771,6 +778,7 @@ def _interrupt_architecture_transaction(project: Path) -> None:
 def test_recovery_preserves_post_crash_user_changes(
     tmp_path: Path, binary: str, existed: bool,
 ) -> None:
+    """Verify that recovery preserves post crash user changes."""
     project = tmp_path / "project"
     project.mkdir()
     relative = Path(".claude/skills/user-notes/notes.txt")
@@ -810,6 +818,7 @@ def test_recovery_preserves_post_crash_user_changes(
 def test_interrupted_recovery_keeps_private_parent_protection(
     tmp_path: Path, binary: str,
 ) -> None:
+    """Verify that interrupted recovery keeps private parent protection."""
     project = tmp_path / "project"
     target = project / ".claude/settings.json"
     target.parent.mkdir(parents=True, mode=0o700)
@@ -850,6 +859,7 @@ fs.writeFileSync = (target, ...args) => {
 
 
 def _interrupt_private_host_install(project: Path, binary: str, probe: Path) -> None:
+    """Interrupt installation while publishing private host assets."""
     probe.write_text("""
 import fs from 'node:fs';
 process.umask(0o022);
@@ -875,6 +885,7 @@ fs.renameSync = (source, target, ...args) => {
 
 
 def _assign_supplementary_file_group(target: Path) -> tuple[int, int]:
+    """Assign the fixture file's supplementary group."""
     for group in os.getgroups():
         if group == target.parent.stat().st_gid:
             continue
@@ -939,6 +950,7 @@ fs.renameSync = (source, target, ...args) => {
 def test_real_recovery_preserves_file_owner_through_normal_reinstall(
     tmp_path: Path, binary: str,
 ) -> None:
+    """Verify that real recovery preserves file owner through normal reinstall."""
     project = tmp_path / "project"
     target = project / ".claude/settings.json"
     target.parent.mkdir(parents=True, mode=0o755)
@@ -988,6 +1000,7 @@ def test_real_recovery_preserves_file_owner_through_normal_reinstall(
 def test_real_recovery_owner_failure_never_publishes_private_content(
     tmp_path: Path, binary: str, missing: bool,
 ) -> None:
+    """Verify that real recovery owner failure never publishes private content."""
     project = tmp_path / "project"
     target = project / ".claude/settings.json"
     target.parent.mkdir(parents=True, mode=0o755)
@@ -1036,6 +1049,7 @@ def test_real_recovery_owner_failure_never_publishes_private_content(
 def test_recovery_refuses_unproven_file_owner_before_mutation(
     tmp_path: Path, owner: dict[str, int] | None,
 ) -> None:
+    """Verify that recovery refuses unproven file owner before mutation."""
     target = tmp_path / ".claude/settings.json"
     target.parent.mkdir()
     original = b'{"private": "original"}\n'
@@ -1064,6 +1078,7 @@ def test_recovery_refuses_unproven_file_owner_before_mutation(
 
 
 def test_atomic_writer_rejects_invalid_owner_before_creating_parent(tmp_path: Path) -> None:
+    """Verify that atomic writer rejects invalid owner before creating parent."""
     target = tmp_path / "absent/settings.json"
     result = _architecture_node(tmp_path, """
 installer.atomicWriteFileSync(process.env.TARGET, 'private', {ownership: {uid: -1, gid: 0}});
@@ -1076,6 +1091,7 @@ installer.atomicWriteFileSync(process.env.TARGET, 'private', {ownership: {uid: -
 def test_real_recovery_preserves_private_asset_copy_ownership(
     tmp_path: Path, binary: str,
 ) -> None:
+    """Verify that real recovery preserves private asset copy ownership."""
     project = tmp_path / "project"
     relative = ".agent-flow/templates/private.txt"
     target = project / relative
@@ -1164,6 +1180,7 @@ fs.closeSync = (fd) => {
 def test_real_recovery_preserves_asset_directory_special_permissions(
     tmp_path: Path, binary: str,
 ) -> None:
+    """Verify that real recovery preserves asset directory special permissions."""
     project = tmp_path / "project"
     directory = project / ".agent-flow/templates"
     directory.mkdir(parents=True)
@@ -1202,6 +1219,7 @@ def test_real_recovery_preserves_asset_directory_special_permissions(
 def test_real_completed_legacy_journal_cleanup(
     tmp_path: Path, binary: str, state: str,
 ) -> None:
+    """Verify that real completed legacy journal cleanup."""
     project = tmp_path / "project"
     target = project / ".agent-flow/templates/private.txt"
     target.parent.mkdir(parents=True)
@@ -1272,6 +1290,7 @@ fs.rmSync = (target, ...args) => {
 
 
 def test_recovery_refuses_legacy_asset_backup_without_ownership_proof(tmp_path: Path) -> None:
+    """Verify that recovery refuses legacy asset backup without ownership proof."""
     relative = ".agent-flow/templates/private.txt"
     target = tmp_path / relative
     target.parent.mkdir(parents=True)
@@ -1311,6 +1330,7 @@ def test_recovery_refuses_legacy_asset_backup_without_ownership_proof(tmp_path: 
 def test_real_recovery_recreates_private_host_parent_before_publishing(
     tmp_path: Path, binary: str, parent_mode: int, group_owned: bool,
 ) -> None:
+    """Verify that real recovery recreates private host parent before publishing."""
     project = tmp_path / "project"
     target = project / ".claude/settings.json"
     target.parent.mkdir(parents=True, mode=0o700)
@@ -1368,6 +1388,7 @@ fs.renameSync = (source, target, ...args) => {
 def test_real_recovery_refuses_unproven_host_directory_protection(
     tmp_path: Path, binary: str, boundary: str,
 ) -> None:
+    """Verify that real recovery refuses unproven host directory protection."""
     project = tmp_path / "project"
     target = project / ".claude/settings.json"
     target.parent.mkdir(parents=True, mode=0o700)
@@ -1420,6 +1441,7 @@ def test_real_recovery_refuses_unproven_host_directory_protection(
 def test_recovery_restores_private_host_config_permissions(
     tmp_path: Path, current_state: str,
 ) -> None:
+    """Verify that recovery restores private host config permissions."""
     target = tmp_path / ".claude/settings.json"
     target.parent.mkdir()
     canonical = tmp_path / "private-settings.json" if current_state == "stable-symlink" else target
@@ -1456,6 +1478,7 @@ def test_recovery_restores_private_host_config_permissions(
 def test_recovery_preservation_failure_leaves_current_and_backup_untouched(
     tmp_path: Path, failure: str,
 ) -> None:
+    """Verify that recovery preservation failure leaves current and backup untouched."""
     target = tmp_path / ".agent-flow/templates/user.txt"
     target.parent.mkdir(parents=True)
     target.write_text("before install", encoding="utf-8")
@@ -1491,6 +1514,7 @@ catch (error) { console.error(error.message); process.exitCode = 2; }
 def test_recovery_refuses_changed_host_symlink_before_rollback(
     tmp_path: Path, link_change: str,
 ) -> None:
+    """Verify that recovery refuses changed host symlink before rollback."""
     host = tmp_path / ".claude"
     original = tmp_path / "original"
     original.mkdir()
@@ -1541,6 +1565,7 @@ def test_recovery_refuses_changed_host_symlink_before_rollback(
 
 
 def test_inherited_architecture_transaction_can_delegate_without_owning_commit(tmp_path: Path) -> None:
+    """Verify that inherited architecture transaction can delegate without owning commit."""
     child = tmp_path / "child.mjs"
     child.write_text(
         f"import * as installer from {json.dumps(SHARED_MODULE.as_uri())};\n" + """
@@ -1591,6 +1616,7 @@ fs.closeSync(lease);
 
 
 def test_invalid_inherited_plan_closes_descriptor_and_reports_refusal(tmp_path: Path) -> None:
+    """Verify that invalid inherited plan closes descriptor and reports refusal."""
     result = _architecture_node(tmp_path, """
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
@@ -1609,6 +1635,7 @@ assert.throws(() => fs.fstatSync(fd), {code: 'EBADF'});
 def test_inherited_plan_preserves_primary_error_when_close_fails(
     tmp_path: Path, valid_json: bool,
 ) -> None:
+    """Verify that inherited plan preserves primary error when close fails."""
     result = _architecture_node(tmp_path, """
 import fs from 'node:fs';
 import assert from 'node:assert/strict';

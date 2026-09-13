@@ -59,6 +59,7 @@ class ArchitectureSelection:
     contract_path: str | None = None
 
     def __post_init__(self) -> None:
+        """Validate and normalize the selected architecture mode and contract path."""
         if not isinstance(self.mode, ArchitectureMode):
             raise ValueError(
                 f"architecture mode must be one of {_mode_values()}: {self.mode!r}"
@@ -112,10 +113,12 @@ def parse_architecture_document(text: str, *, source: str) -> ArchitectureSelect
 
 
 def _mode_values() -> str:
+    """Return the canonical architecture mode values."""
     return ", ".join(mode.value for mode in ArchitectureMode)
 
 
 def _parse_mode(value: object, *, source: str) -> ArchitectureMode:
+    """Parse an architecture mode from project configuration."""
     if not isinstance(value, str):
         raise ValueError(
             f"{source}: architecture mode must be one of {_mode_values()}: {value!r}"
@@ -129,6 +132,7 @@ def _parse_mode(value: object, *, source: str) -> ArchitectureMode:
 
 
 def _parse_contract_path(value: object, *, source: str) -> str | None:
+    """Validate and normalize a project-relative contract path."""
     if value is None:
         return None
     if not isinstance(value, str) or value != _CONTRACT_PATH:
@@ -140,6 +144,7 @@ def _parse_contract_path(value: object, *, source: str) -> str | None:
 
 def _validate_schema_version(value: object, *, source: str) -> None:
     # 모르는 버전에서 조용히 기본값으로 도는 것은 정책 변경이다. 비호환을 알린다.
+    """Validate the architecture selection schema version."""
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(
             f"{source}: schema_version must be the integer {SCHEMA_VERSION}: {value!r}"
@@ -154,6 +159,7 @@ def _validate_schema_version(value: object, *, source: str) -> None:
 def _reject_unsupported_keys(
     payload: Mapping[str, Any], supported: tuple[str, ...], *, source: str, scope: str
 ) -> None:
+    """Reject keys outside the architecture selection schema."""
     unsupported = sorted(str(key) for key in payload if key not in supported)
     if unsupported:
         raise ValueError(
@@ -163,6 +169,7 @@ def _reject_unsupported_keys(
 
 
 def _load_yaml_mapping(text: str, *, source: str) -> Mapping[str, Any]:
+    """Load a YAML document as a mapping with strict syntax checks."""
     try:
         loader = yaml.SafeLoader(text)
     except yaml.YAMLError as exc:
@@ -215,6 +222,7 @@ class ArchitectureContract:
 
     @property
     def root(self) -> ContractDocument:
+        """Return the document that defines the architecture contract root."""
         return self.documents[0]
 
 
@@ -244,6 +252,7 @@ def load_architecture_selection(root: Path) -> ArchitectureSelection | None:
 def _load_selection_document(
     repository_fd: int,
 ) -> tuple[ArchitectureSelection | None, ContractDocument | None]:
+    """Load and validate the project's architecture selection document."""
     with _open_document(repository_fd, PROJECT_ARCHITECTURE_FILE, allow_missing=True) as descriptor:
         if descriptor is None:
             return None, None
@@ -268,6 +277,7 @@ def resolve_architecture_contract(
 def _resolve_architecture_contract(
     root: Path, selection: ArchitectureSelection, repository_fd: int
 ) -> ArchitectureContract | None:
+    """Resolve the selected local contract and its normative documents."""
     if selection.mode is not ArchitectureMode.LOCAL:
         return None
     assert selection.contract_path is not None  # 생성자 불변식
@@ -302,6 +312,7 @@ def architecture_snapshot(root: Path) -> ArchitectureSnapshot:
 def architecture_snapshot_block_reason(
     snapshot: ArchitectureSnapshot, pinned_digest: object
 ) -> str | None:
+    """Return why an architecture snapshot cannot currently be used."""
     if pinned_digest is None:
         return "architecture_policy_unpinned"
     if pinned_digest != snapshot.digest:
@@ -329,6 +340,7 @@ def _snapshot_from_selection(
     source_document: ContractDocument | None,
     repository_fd: int,
 ) -> ArchitectureSnapshot:
+    """Build a pinned architecture snapshot from a validated selection."""
     contract = _resolve_architecture_contract(root, selection, repository_fd)
     untracked = _untracked_paths(root, [PROJECT_ARCHITECTURE_FILE]) if source_document else ()
     return ArchitectureSnapshot(
@@ -382,6 +394,7 @@ def write_architecture_selection(root: Path, selection: ArchitectureSelection) -
 
 
 def architecture_selection_document(selection: ArchitectureSelection) -> str:
+    """Serialize an architecture selection to its canonical project document."""
     lines = [f"schema_version: {SCHEMA_VERSION}", "architecture:", f"  mode: {selection.mode.value}"]
     if selection.contract_path is not None:
         lines.append(f"  skill: {selection.contract_path}")
@@ -406,6 +419,7 @@ CLEAN_ARCHITECTURE_SKILLS = frozenset({
 
 
 def is_clean_architecture_skill(name: str) -> bool:
+    """Return whether a skill belongs to the Clean architecture contract."""
     return name in CLEAN_ARCHITECTURE_SKILLS
 
 
@@ -454,6 +468,7 @@ def _snapshot_digest(
     contract: ArchitectureContract | None,
     source_document: ContractDocument | None,
 ) -> str:
+    """Compute the digest binding a selection to its contract documents."""
     lines = [
         f"schema_version={SCHEMA_VERSION}",
         f"declared={'yes' if declared else 'no'}",
@@ -470,6 +485,7 @@ def _snapshot_digest(
 def _validate_document_path(
     root: Path, relative: str, *, allow_missing: bool = False
 ) -> Path:
+    """Validate a normative document path relative to the contract root."""
     with _repository_directory(root) as repository_fd:
         with _open_document(repository_fd, relative, allow_missing=allow_missing):
             return root / relative
@@ -477,6 +493,7 @@ def _validate_document_path(
 
 @contextmanager
 def _repository_directory(root: Path) -> Iterator[int]:
+    """Open the repository directory used for descriptor-relative reads."""
     if not all(hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK")):
         raise ArchitectureContractError("architecture documents require no-follow directory opening")
     try:
@@ -498,6 +515,7 @@ def _repository_directory(root: Path) -> Iterator[int]:
 def _open_document(
     repository_fd: int, relative: str, *, allow_missing: bool = False
 ) -> Iterator[int | None]:
+    """Open a contract document without following symlinks."""
     segments = relative.split("/")
     if any(part in {"", ".", ".."} for part in segments) or "\\" in relative:
         raise ArchitectureContractError(f"architecture document path is not canonical: {relative!r}")
@@ -539,6 +557,7 @@ def _open_document(
 
 
 def _document_identity(relative: str, payload: bytes) -> ContractDocument:
+    """Return the stable filesystem identity of an opened document."""
     return ContractDocument(
         path=relative,
         sha256=hashlib.sha256(payload).hexdigest(),
@@ -547,6 +566,7 @@ def _document_identity(relative: str, payload: bytes) -> ContractDocument:
 
 
 def _read_document_bytes(descriptor: int, relative: str) -> bytes:
+    """Read an opened contract document within the configured size limit."""
     identity = os.fstat(descriptor)
     if not stat.S_ISREG(identity.st_mode):
         raise ArchitectureContractError(f"architecture document must be a regular file: {relative}")
@@ -565,6 +585,7 @@ def _read_document_bytes(descriptor: int, relative: str) -> bytes:
 def _read_contract_document(
     repository_fd: int, relative: str, *, kind: str
 ) -> tuple[ContractDocument, bytes]:
+    """Read and pin one validated architecture contract document."""
     with _open_document(repository_fd, relative) as descriptor:
         assert descriptor is not None
         payload = _read_document_bytes(descriptor, relative)
@@ -574,6 +595,7 @@ def _read_contract_document(
 def _validate_contract_document(
     relative: str, payload: bytes, *, kind: str
 ) -> tuple[ContractDocument, bytes]:
+    """Validate a contract document's path, metadata, and content."""
     try:
         text = payload.decode("utf-8")
     except UnicodeDecodeError as exc:

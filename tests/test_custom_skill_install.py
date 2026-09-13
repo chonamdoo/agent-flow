@@ -89,6 +89,7 @@ def test_project_skill_links_all_hosts_and_index_omits_body(tmp_path: Path) -> N
 def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(
     tmp_path: Path, binary: str
 ) -> None:
+    """Verify that bundled workflow skills are internal and host skills are registered."""
     project = tmp_path / "project"
     project.mkdir()
 
@@ -158,6 +159,7 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(
 
 
 def test_app_shell_skills_install_shared_contract_dependency(tmp_path: Path) -> None:
+    """Verify that app shell skills install shared contract dependency."""
     project = tmp_path / "project"
     project.mkdir()
 
@@ -181,6 +183,7 @@ def test_app_shell_skills_install_shared_contract_dependency(tmp_path: Path) -> 
 
 
 def test_clean_architecture_skills_install_core_and_platform_dependency_graph(tmp_path: Path) -> None:
+    """Verify that clean architecture skills install core and platform dependency graph."""
     project = tmp_path / "project"
     project.mkdir()
 
@@ -208,6 +211,7 @@ def test_clean_architecture_skills_install_core_and_platform_dependency_graph(tm
 
 
 def test_pending_install_rejects_clean_selection_until_norms_are_provisioned(tmp_path: Path) -> None:
+    """Verify that pending install rejects clean selection until norms are provisioned."""
     project = tmp_path / "project"
     project.mkdir()
     env = {**os.environ, "HOME": str(tmp_path / "home"), "AGENT_FLOW_HOST": "codex"}
@@ -259,6 +263,7 @@ def test_pending_install_rejects_clean_selection_until_norms_are_provisioned(tmp
 def test_clean_selection_requires_active_host_norm_dependency_closure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify that clean selection requires active host norm dependency closure."""
     from agent_flow.cli import main
     from agent_flow.core.skill_resolver import PhaseSkills, resolve_phase_skills
     from agent_flow.core.architecture_policy import ArchitectureContractError
@@ -301,6 +306,7 @@ def test_clean_selection_requires_active_host_norm_dependency_closure(
 def test_local_selection_checks_dependencies_without_requiring_clean_skills(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify that local selection checks dependencies without requiring clean skills."""
     from agent_flow.cli import main
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -327,6 +333,7 @@ def test_local_selection_checks_dependencies_without_requiring_clean_skills(
 
 
 def test_android_profile_installs_android_skills_and_common_dependencies_only(tmp_path: Path) -> None:
+    """Verify that android profile installs android skills and common dependencies only."""
     project = tmp_path / "android-project"
     project.mkdir()
     (project / "settings.gradle.kts").write_text("pluginManagement {}\n", encoding="utf-8")
@@ -361,6 +368,7 @@ def test_android_profile_installs_android_skills_and_common_dependencies_only(tm
 
 
 def test_multi_profile_install_uses_union_and_dependency_closure(tmp_path: Path) -> None:
+    """Verify that multi profile install uses union and dependency closure."""
     project = tmp_path / "mixed-project"
     project.mkdir()
 
@@ -377,6 +385,7 @@ def test_multi_profile_install_uses_union_and_dependency_closure(tmp_path: Path)
 
 
 def test_reinstall_preserves_previously_selected_profile_skills(tmp_path: Path) -> None:
+    """Verify that reinstall preserves previously selected profile skills."""
     project = tmp_path / "mixed-project"
     project.mkdir()
 
@@ -393,6 +402,7 @@ def test_reinstall_preserves_previously_selected_profile_skills(tmp_path: Path) 
 
 
 def test_plain_reinstall_preserves_filtered_profile_selection(tmp_path: Path) -> None:
+    """Verify that plain reinstall preserves filtered profile selection."""
     project = tmp_path / "android-project"
     project.mkdir()
 
@@ -411,6 +421,7 @@ def test_plain_reinstall_preserves_filtered_profile_selection(tmp_path: Path) ->
 
 
 def test_plain_reinstall_drops_a_profile_removed_from_the_kit(tmp_path: Path) -> None:
+    """Verify that plain reinstall drops a profile removed from the kit."""
     project = tmp_path / "retired-profile"
     project.mkdir()
     first = _install(project, "--profile", "android")
@@ -428,6 +439,7 @@ def test_plain_reinstall_drops_a_profile_removed_from_the_kit(tmp_path: Path) ->
 
 
 def test_plain_reinstall_preserves_filtered_selection_over_detected_profile(tmp_path: Path) -> None:
+    """Verify that plain reinstall preserves filtered selection over detected profile."""
     project = tmp_path / "rn-project"
     project.mkdir()
     (project / "package.json").write_text('{"dependencies":{"react-native":"latest"}}\n', encoding="utf-8")
@@ -447,6 +459,7 @@ def test_plain_reinstall_preserves_filtered_selection_over_detected_profile(tmp_
 
 
 def test_filtered_reinstall_after_all_install_does_not_preserve_unselected_platforms(tmp_path: Path) -> None:
+    """Verify that filtered reinstall after all install does not preserve unselected platforms."""
     project = tmp_path / "android-project"
     project.mkdir()
 
@@ -466,6 +479,7 @@ def test_filtered_reinstall_after_all_install_does_not_preserve_unselected_platf
 
 
 def test_ios_project_auto_selects_ios_profile_skills(tmp_path: Path) -> None:
+    """Verify that ios project auto selects ios profile skills."""
     project = tmp_path / "ios-project"
     project.mkdir()
     (project / "Package.swift").write_text("// swift-tools-version: 5.9\n", encoding="utf-8")
@@ -489,6 +503,7 @@ def test_ios_project_auto_selects_ios_profile_skills(tmp_path: Path) -> None:
 
 
 def test_react_native_project_with_gradle_auto_selects_react_native_profile(tmp_path: Path) -> None:
+    """Verify that react native project with gradle auto selects react native profile."""
     project = tmp_path / "rn-project"
     project.mkdir()
     (project / "package.json").write_text('{"dependencies":{"react-native":"latest"}}\n', encoding="utf-8")
@@ -505,6 +520,7 @@ def test_react_native_project_with_gradle_auto_selects_react_native_profile(tmp_
 
 
 def test_skill_metadata_dependencies_are_indexed_and_auto_installed(tmp_path: Path) -> None:
+    """Verify that indexed skill metadata dependencies install automatically."""
     project = tmp_path / "project"
     project.mkdir()
     dependency = project / "skills" / "dependency-skill"
@@ -555,6 +571,7 @@ def test_skill_metadata_dependencies_are_indexed_and_auto_installed(tmp_path: Pa
 def test_framed_skill_installs_runtime_required_closure(
     tmp_path: Path, binary: str, opening: str, closing: str, newline: str,
 ) -> None:
+    """Verify that framed skill installs runtime required closure."""
     project = tmp_path / "project"
     skill = project / "skills" / "consumer-skill" / "SKILL.md"
     skill.parent.mkdir(parents=True)
@@ -618,6 +635,7 @@ print(json.dumps({
 def test_framed_required_metadata_fails_closed_before_install(
     tmp_path: Path, binary: str, opening: str, newline: str, boundary: str,
 ) -> None:
+    """Verify that framed required metadata fails closed before install."""
     project = tmp_path / "project"
     skill = project / "skills" / "consumer-skill" / "SKILL.md"
     skill.parent.mkdir(parents=True)
@@ -657,6 +675,7 @@ def test_framed_required_metadata_fails_closed_before_install(
 
 
 def test_shared_frontmatter_keeps_body_null_and_summary_behavior() -> None:
+    """Verify that shared frontmatter keeps body null and summary behavior."""
     probe = """
 import { splitFrontmatter, skillSummaryFromMarkdown } from "./lib/frontmatter.mjs";
 const framed = "\\ufeff \\t--- \\t\\r\\ndescription: First sentence. Second sentence.\\r\\n \\t---\\t\\r\\nBody";
@@ -1135,6 +1154,7 @@ def test_react_native_carries_its_android_vocabulary_without_the_android_profile
 
 
 def test_explicit_profile_wins_over_detected_android(tmp_path: Path) -> None:
+    """Verify that explicit profile wins over detected android."""
     project = tmp_path / "gradle-as-ios"
     project.mkdir()
     (project / "build.gradle.kts").write_text(
@@ -1650,6 +1670,7 @@ def test_no_hooks_removes_every_managed_hook_and_survives_reinstall(
 def test_failed_fresh_install_restores_existing_hook_configuration(
     tmp_path: Path,
 ) -> None:
+    """Verify that failed fresh install restores existing hook configuration."""
     import os
 
     project = tmp_path / "delegated-kit-failure"
@@ -3822,6 +3843,7 @@ def test_install_rejects_an_unrelated_inherited_descriptor(tmp_path: Path, binar
 def test_install_safety_works_without_isolated_pyyaml(
     tmp_path: Path, binary: str, active_run: bool,
 ) -> None:
+    """Verify that install safety works without isolated PyYAML."""
     from agent_flow.artifact import create_run
 
     project = tmp_path / "project"
@@ -3868,6 +3890,7 @@ def test_install_safety_works_without_isolated_pyyaml(
 
 
 def _installed_skill_names(project: Path) -> set[str]:
+    """Return skill names installed in the fixture project."""
     index = json.loads((project / ".agent-flow/skills/index.json").read_text(encoding="utf-8"))
     selected = index.get("selection", {}).get("selected_skills")
     if selected in (None, "all"):
@@ -3876,6 +3899,7 @@ def _installed_skill_names(project: Path) -> set[str]:
 
 
 def _declare_architecture(project: Path, body: str) -> None:
+    """Write the fixture's architecture declaration."""
     (project / ".agent-flow.project.yaml").write_text(body, encoding="utf-8")
 
 
@@ -3884,6 +3908,7 @@ def _declare_architecture(project: Path, body: str) -> None:
 def test_git_install_reports_a_scoped_architecture_tracking_remedy(
     tmp_path: Path, binary: str, mode: str,
 ) -> None:
+    """Verify that Git install reports a scoped architecture tracking remedy."""
     project = tmp_path / "team's project"
     project.mkdir()
     caller = tmp_path / "caller"
@@ -3943,6 +3968,7 @@ def test_git_install_reports_a_scoped_architecture_tracking_remedy(
 def test_non_git_install_does_not_require_architecture_staging(
     tmp_path: Path, binary: str,
 ) -> None:
+    """Verify that a non-Git install does not require architecture staging."""
     result = _install_with(binary, tmp_path, "--profile", "python", "--architecture-mode", "clean")
 
     assert result.returncode == 0, result.stderr
@@ -4025,6 +4051,7 @@ def test_reinstall_does_not_reintroduce_clean_after_switching_to_pending(
 def test_reinstall_excludes_project_local_clean_overrides(
     tmp_path: Path, binary: str, source_root: str, mode: str,
 ) -> None:
+    """Verify that reinstall excludes project local clean overrides."""
     _skill(tmp_path / "skills/architecture", "Features own their state.")
     override = tmp_path / source_root / "react-clean-architecture"
     _skill(override, "Project-owned Clean rules without an architecture_modes declaration.")
@@ -4055,6 +4082,7 @@ def test_reinstall_excludes_project_local_clean_overrides(
 def test_excluded_local_override_cannot_satisfy_an_incompatible_request(
     tmp_path: Path, binary: str, request_kind: str,
 ) -> None:
+    """Verify that excluded local override cannot satisfy an incompatible request."""
     override = tmp_path / ".agent-flow/local-skills/react-clean-architecture"
     _skill(override, "Project-owned Clean rules.")
     original = (override / "SKILL.md").read_bytes()
@@ -4080,6 +4108,7 @@ def test_excluded_local_override_cannot_satisfy_an_incompatible_request(
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_install_flag_records_the_selection(tmp_path: Path, binary: str) -> None:
+    """Verify that install flag records the selection."""
     project = tmp_path / f"flag-{binary}"
     project.mkdir()
     (project / "pyproject.toml").write_text("[project]\nname = 'probe'\n", encoding="utf-8")
@@ -4116,6 +4145,7 @@ def test_install_refuses_an_unresolvable_local_contract(tmp_path: Path, binary: 
 def test_fresh_headless_install_persists_pending(
     tmp_path: Path, binary: str, profile_args: tuple[str, ...],
 ) -> None:
+    """Verify that fresh headless install persists pending."""
     result = _install_with(binary, tmp_path, *profile_args)
 
     assert result.returncode == 0, result.stderr
@@ -4131,6 +4161,7 @@ def test_fresh_headless_install_persists_pending(
 def test_local_reinstall_keeps_custom_skills_and_other_selected_stacks(
     tmp_path: Path, binary: str,
 ) -> None:
+    """Verify that local reinstall keeps custom skills and other selected stacks."""
     first = _install_with(binary, tmp_path, "--profile", "android,python", "--architecture-mode", "clean")
     assert first.returncode == 0, first.stderr
     _skill(tmp_path / "skills/architecture", "Keep UI features colocated; platform boundaries own external effects.")
@@ -4171,6 +4202,7 @@ def test_local_reinstall_keeps_custom_skills_and_other_selected_stacks(
 def test_invalid_architecture_request_preserves_installed_policy(
     tmp_path: Path, binary: str, flags: tuple[str, ...],
 ) -> None:
+    """Verify that invalid architecture request preserves installed policy."""
     initial = _install_with(binary, tmp_path, "--profile", "python", "--architecture-mode", "clean")
     assert initial.returncode == 0, initial.stderr
     paths = [".agent-flow.project.yaml", ".agent-flow/kit.json", ".agent-flow/skills/index.json"]
@@ -4186,6 +4218,7 @@ def test_invalid_architecture_request_preserves_installed_policy(
 def test_failed_install_restores_policy_and_retry_publishes_local(
     tmp_path: Path, binary: str,
 ) -> None:
+    """Verify that failed install restores policy and retry publishes local."""
     project = tmp_path / "project"
     project.mkdir()
     initial = _install_with(binary, project, "--profile", "android", "--architecture-mode", "clean")
@@ -4224,6 +4257,7 @@ def test_failed_install_restores_policy_and_retry_publishes_local(
 def test_corrupt_legacy_metadata_does_not_become_a_fresh_pending_install(
     tmp_path: Path, binary: str,
 ) -> None:
+    """Verify that corrupt legacy metadata does not become a fresh pending install."""
     metadata = tmp_path / ".agent-flow/kit.json"
     metadata.parent.mkdir()
     metadata.write_text('{"installed_at":', encoding="utf-8")
@@ -4241,6 +4275,7 @@ def test_corrupt_legacy_metadata_does_not_become_a_fresh_pending_install(
 def test_interactive_install_offers_three_architecture_choices(
     tmp_path: Path, binary: str, choice: str, mode: str,
 ) -> None:
+    """Verify that interactive install offers three architecture choices."""
     if os.name != "posix":
         pytest.skip("interactive terminal regression requires a POSIX PTY")
     import pty
@@ -4275,6 +4310,7 @@ def test_interactive_install_offers_three_architecture_choices(
 def test_local_install_rejects_a_custom_clean_dependency_without_erasing_it(
     tmp_path: Path, binary: str,
 ) -> None:
+    """Verify that local install rejects a custom clean dependency without erasing it."""
     _skill(tmp_path / "skills/architecture", "Features own state and isolate external effects.")
     root = tmp_path / "skills/team-rule"
     _skill(root, "This custom rule has an incompatible required dependency.")
@@ -4319,6 +4355,7 @@ def test_local_install_rejects_a_custom_clean_dependency_without_erasing_it(
 def test_installer_conditional_dependency_closure_survives_yaml_comments(
     tmp_path: Path, binary: str, declaration: str,
 ) -> None:
+    """Verify that installer conditional dependency closure survives YAML comments."""
     from agent_flow.core.architecture_policy import ArchitectureMode
 
     kit = tmp_path / "kit"
@@ -4378,6 +4415,7 @@ def test_installer_conditional_dependency_closure_survives_yaml_comments(
 def test_installer_accepts_wrapped_project_local_metadata(
     tmp_path: Path, binary: str, source_root: str,
 ) -> None:
+    """Verify that installer accepts wrapped project local metadata."""
     probe = tmp_path / source_root / "probe"
     probe.mkdir(parents=True)
     manifest = probe / "SKILL.md"
@@ -4431,6 +4469,7 @@ def test_installer_accepts_wrapped_project_local_metadata(
 def test_installer_rejects_invalid_dependency_metadata(
     tmp_path: Path, binary: str, declaration: str,
 ) -> None:
+    """Verify that installer rejects invalid dependency metadata."""
     _skill(tmp_path / "skills/architecture", "Features own their state.")
     probe = tmp_path / "skills/probe"
     probe.mkdir(parents=True)
@@ -4469,6 +4508,7 @@ def test_installer_rejects_invalid_dependency_metadata(
 def test_normative_yaml_merge_is_rejected_at_both_boundaries(
     tmp_path: Path, boundary: str, metadata: str,
 ) -> None:
+    """Verify that normative YAML merge is rejected at both boundaries."""
     _skill(tmp_path / "skills/architecture", "Features own their state.")
     _skill(tmp_path / "skills/required-rule", "A required rule.")
     manifest = tmp_path / "skills/probe/SKILL.md"
@@ -4499,6 +4539,7 @@ def test_normative_yaml_merge_is_rejected_at_both_boundaries(
 def test_merge_like_description_and_quoted_key_preserve_dependencies(
     tmp_path: Path, binary: str, description: str,
 ) -> None:
+    """Verify that merge like description and quoted key preserve dependencies."""
     _skill(tmp_path / "skills/required-rule", "A required rule.")
     manifest = tmp_path / "skills/probe/SKILL.md"
     manifest.parent.mkdir(parents=True)
@@ -4526,6 +4567,7 @@ def test_merge_like_description_and_quoted_key_preserve_dependencies(
 def test_install_and_runtime_share_normative_yaml_semantics(
     tmp_path: Path, binary: str, metadata: str,
 ) -> None:
+    """Verify that install and runtime share normative YAML semantics."""
     _skill(tmp_path / "skills/required-rule", "A required rule.")
     manifest = tmp_path / "skills/probe/SKILL.md"
     manifest.parent.mkdir(parents=True)
@@ -4550,6 +4592,7 @@ def test_install_and_runtime_share_normative_yaml_semantics(
 def test_installer_rejects_yaml_typed_dependency_scalars(
     tmp_path: Path, binary: str, value: str,
 ) -> None:
+    """Verify that installer rejects YAML typed dependency scalars."""
     _skill(tmp_path / "skills" / value, "This identifier must be quoted when required.")
     probe = tmp_path / "skills/probe"
     probe.mkdir(parents=True)
@@ -4577,6 +4620,7 @@ def test_installer_rejects_yaml_typed_dependency_scalars(
 def test_installer_preserves_quoted_yaml_typed_dependency_identifiers(
     tmp_path: Path, binary: str,
 ) -> None:
+    """Verify that installer preserves quoted YAML typed dependency identifiers."""
     for name in ("1_000", "2026-09-12"):
         _skill(tmp_path / "skills" / name, "A quoted dependency identifier.")
     probe = tmp_path / "skills/probe"

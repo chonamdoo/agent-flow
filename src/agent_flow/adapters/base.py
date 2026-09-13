@@ -151,6 +151,7 @@ class Adapter(ABC):
         return envelope
 
     def _render_architecture_block(self, phase: "Phase") -> str:
+        """Render the selected architecture contract for an agent prompt."""
         if self._architecture == "ddd":
             if phase.id in {"design", "slice-plan", "ddd-design", "architecture-review"}:
                 return (

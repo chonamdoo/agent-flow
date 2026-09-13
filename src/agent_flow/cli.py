@@ -268,6 +268,7 @@ def _with_install_shorthand(argv: list[str], commands: set[str]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the agent-flow command-line interface."""
     parser = argparse.ArgumentParser(prog="agent-flow")
     parser.add_argument(
         "--version",

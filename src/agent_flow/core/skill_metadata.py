@@ -25,6 +25,7 @@ class InvalidSkillFrontmatter(SkillMetadataError):
 
 
 def split_frontmatter(text: str, *, source: str) -> tuple[str | None, str]:
+    """Split a skill document into validated frontmatter and body."""
     lines = text.lstrip("\ufeff").splitlines(keepends=True)
     if not lines or lines[0].strip() != "---":
         return None, text
@@ -35,6 +36,7 @@ def split_frontmatter(text: str, *, source: str) -> tuple[str | None, str]:
 
 
 def reject_duplicate_keys(node: Node, *, source: str) -> None:
+    """Reject duplicate YAML keys in a skill metadata document."""
     active: set[int] = set()
     visited: set[int] = set()
     pending = [(node, False)]
@@ -67,6 +69,7 @@ def reject_duplicate_keys(node: Node, *, source: str) -> None:
 
 
 def _reject_merges(node: Node, *, source: str) -> None:
+    """Reject YAML merge keys from normative skill metadata."""
     pending = [node]
     visited: set[int] = set()
     while pending:
@@ -126,6 +129,7 @@ def parse_skill_metadata(
 
 
 def is_safe_skill_name(value: object) -> bool:
+    """Return whether a skill name is safe for dependency resolution."""
     name = str(value)
     if set(name) <= {"."}:
         return False
@@ -133,6 +137,7 @@ def is_safe_skill_name(value: object) -> bool:
 
 
 def _validate_skill_list(names: object, *, source: str, key: str) -> None:
+    """Validate a metadata field containing skill names."""
     if not isinstance(names, list) or any(
         not isinstance(name, str) or not is_safe_skill_name(name) for name in names
     ):
@@ -140,6 +145,7 @@ def _validate_skill_list(names: object, *, source: str, key: str) -> None:
 
 
 def _validate_normative_metadata(metadata: dict[str, Any], *, source: str) -> None:
+    """Validate normative dependency metadata for a skill."""
     for key in ("requires", "dependencies"):
         if key in metadata:
             _validate_skill_list(metadata[key], source=source, key=key)
@@ -174,6 +180,7 @@ def _validate_normative_metadata(metadata: dict[str, Any], *, source: str) -> No
 
 
 def _validate_reference(entry: object, *, source: str) -> str:
+    """Validate a normative document reference path."""
     if not isinstance(entry, str) or not entry.strip():
         raise SkillMetadataError(f"{source}: requires_docs entry must be a path: {entry!r}")
     segments = entry.split("/")
@@ -227,6 +234,7 @@ def parse_metadata_batch(payload: object) -> dict[str, Any]:
 
 
 def main() -> int:
+    """Validate skill metadata supplied over the command-line protocol."""
     try:
         result = parse_metadata_batch(json.load(sys.stdin))
         json.dump(result, sys.stdout, ensure_ascii=True, allow_nan=False)

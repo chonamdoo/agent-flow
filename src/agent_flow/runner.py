@@ -418,6 +418,7 @@ class Runner:
         accept_workflow_drift: bool = False,
         concerns: Sequence[str] = (),
     ) -> None:
+        """Initialize a runner for the repository and selected workflow."""
         if architecture not in ARCHITECTURE_MODES:
             raise ValueError(f"invalid architecture mode: {architecture!r}")
         self.project_root = project_root
@@ -469,6 +470,7 @@ class Runner:
             ) from exc
 
     def _run_lifecycle(self, mode: ResumeMode, task: str) -> None:
+        """Execute a lifecycle command under run locking and state checks."""
         if mode == ResumeMode.START:
             activation = (
                 worktree_run_activation(
@@ -2160,6 +2162,7 @@ class Runner:
         return tuple(recoverable)
 
     def _missing_required_markers(self, phase: Phase) -> list[str]:
+        """Return required completion markers absent from an artifact."""
         assert self.run_dir is not None
         artifact = self._existing_artifact_path(phase)
         if not artifact.exists():
@@ -2279,6 +2282,7 @@ class Runner:
         return artifact
 
     def _artifact_block_reason(self, artifact: Path) -> str | None:
+        """Return why the current phase artifact cannot advance."""
         if not artifact.exists():
             return None
         text = artifact.read_text(encoding="utf-8")
@@ -2290,6 +2294,7 @@ class Runner:
         return None
 
     def _architecture_remediation(self, reason: str) -> str:
+        """Return remediation text for an architecture policy block."""
         if reason == "architecture_decision_pending":
             return (
                 "Select clean or local with `agent-flow architecture select` in the bound "
@@ -2317,6 +2322,7 @@ class Runner:
         return f"Update the artifact, then `{self.next_command}`."
 
     def _architecture_scope_requires_decision(self, scope: Sequence[str]) -> bool:
+        """Return whether the current phase introduces an architecture decision."""
         for profile in self.profile.get("profiles", [self.profile]):
             architecture = profile.get("architecture")
             if not isinstance(architecture, dict):
@@ -2331,6 +2337,7 @@ class Runner:
         return False
 
     def _architecture_decision_block_reason(self, phase: Phase) -> str | None:
+        """Return why pending architecture selection blocks the current phase."""
         try:
             assert_install_complete(self.project_root)
             selection = architecture_snapshot(self.project_root).selection
@@ -2373,6 +2380,7 @@ class Runner:
         )
 
     def _refresh_architecture_norms(self, phase: Phase, *, pin: bool) -> str | None:
+        """Refresh pinned architecture norms and invalidate stale evidence."""
         assert self.run_dir is not None
         meta = read_meta(self.run_dir)
         hosts = [self._adapter_name]
@@ -2453,6 +2461,7 @@ class Runner:
         return None
 
     def _invalidate_architecture_evidence_for_reentry(self, phase: Phase) -> str | None:
+        """Clear architecture approval evidence before re-entering an author phase."""
         assert self.run_dir is not None
         preserved: list[tuple[Path, Path, str]] = []
         try:
@@ -2484,6 +2493,7 @@ class Runner:
         return None
 
     def _initialize_architecture_policy(self, mode: ResumeMode) -> None:
+        """Pin the selected architecture policy when starting a run."""
         assert self.run_dir is not None
         assert_install_complete(self.project_root)
         meta = read_meta(self.run_dir)
@@ -2497,6 +2507,7 @@ class Runner:
         write_meta(self.run_dir, meta)
 
     def _architecture_policy_block_reason(self) -> str | None:
+        """Return why the run's pinned architecture policy is unusable."""
         if self.run_dir is None:
             return "architecture_policy_unpinned"
         try:
@@ -2587,6 +2598,7 @@ class Runner:
         payload: str | None = None,
         payload_name: str | None = None,
     ) -> None:
+        """Record an observation about the current run."""
         if self.run_dir is None or self.run_dir_sealed:
             return
         record_observation(
@@ -2602,6 +2614,7 @@ class Runner:
 
 
 def _is_norm_manifest(value: object) -> bool:
+    """Return whether a path names a pinned architecture norm manifest."""
     return isinstance(value, dict) and all(
         isinstance(path, str) and Path(path).is_absolute()
         and isinstance(digest, str) and len(digest) == 64
@@ -2641,6 +2654,7 @@ def _cleanup_profile_contract(profile: dict[str, Any]) -> tuple[str, str]:
 
 
 def _phases_from_definition(definition: PhaseWorkflowDefinition) -> list[Phase]:
+    """Build runtime phase state from a validated workflow definition."""
     return [
         Phase(
             id=phase.id,

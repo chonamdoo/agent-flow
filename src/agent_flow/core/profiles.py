@@ -454,6 +454,7 @@ def _validate_gate_variants(
 def assert_architecture_override_compatible(
     root: Path, selection: ArchitectureSelection,
 ) -> None:
+    """Reject an architecture override incompatible with the active profile."""
     if selection.mode is ArchitectureMode.CLEAN:
         return
     for path in (root / ".agent-flow" / "profiles").glob("*.local.yaml"):

@@ -318,6 +318,7 @@ def assert_architecture_selection_skills(
     profile: dict | None = None,
     architecture_root: Path | None = None,
 ) -> None:
+    """Validate that selected architecture skills and dependencies are installed."""
     from agent_flow.core.profile_routing import routable_group_skills
 
     selection = snapshot.selection
@@ -406,6 +407,7 @@ def resolve_phase_skills(
     contract_path = contract_root / selection.contract_path if selection.contract_path else None
 
     def applicable(name: str) -> bool:
+        """Return whether a catalog entry applies to the active phase."""
         if name == contract_name:
             return True
         if selection.mode is not ArchitectureMode.CLEAN and is_clean_architecture_skill(name):
@@ -543,6 +545,7 @@ def resolve_phase_skills(
     # 문서가 규범을 대체하고 digest는 저장소 파일을 가리켜 둘이 갈린다.
 
     def resolve(name: str) -> ResolvedSkill:
+        """Resolve one skill and its transitive dependencies."""
         if name == contract_name and contract_path is not None:
             return ResolvedSkill(
                 name=name,
@@ -581,6 +584,7 @@ def resolve_phase_skills(
 def _architecture_norms(
     root: Path, snapshot: ArchitectureSnapshot, required: Iterable[ResolvedSkill],
 ) -> tuple[ContractDocument, ...]:
+    """Collect pinned normative documents for the selected architecture."""
     documents: dict[str, ContractDocument] = {}
     if snapshot.contract is not None:
         for document in snapshot.contract.documents:
@@ -613,6 +617,7 @@ def _architecture_norms(
 def _profile_skill_phases(
     project_root: Path, profile: dict | None, catalog: Sequence[SkillCatalogEntry]
 ) -> dict[str, tuple[str, ...]]:
+    """Return phase selectors declared by the active profiles."""
     from agent_flow.core.phase_workflow import find_kit_root
     from agent_flow.core.profile_routing import routable_group_skills
 
@@ -835,6 +840,7 @@ def skill_summary(skill_path: Path) -> str:
 
 
 def _description_summary(raw: object) -> str:
+    """Extract a concise summary from a skill description."""
     if not isinstance(raw, str):
         return ""
     text = " ".join(raw.split())
@@ -907,6 +913,7 @@ def _dedupe_roots(roots: Iterable[SkillRoot]) -> list[SkillRoot]:
 
 
 def _match_template(template: str, name: str) -> Path | None:
+    """Match a skill template against the active context."""
     expanded = os.path.expanduser(template.replace("{skill}", name))
     if not any(char in expanded for char in _GLOB_CHARS):
         candidate = Path(expanded)
@@ -934,6 +941,7 @@ def _iter_root_skills(template: str) -> list[Path]:
 
 
 def _split_glob(expanded: str) -> tuple[Path | None, str]:
+    """Split an expanded glob into its fixed root and relative pattern."""
     parts = Path(expanded).parts
     static: list[str] = []
     for part in parts:
@@ -952,6 +960,7 @@ def _split_glob(expanded: str) -> tuple[Path | None, str]:
 def _catalog_entry(
     name: str, skill_path: Path, source: str, *, frontmatter: dict | None = None,
 ) -> SkillCatalogEntry:
+    """Build a catalog entry for an installed skill."""
     if frontmatter is None:
         frontmatter = _read_frontmatter(skill_path) or {}
     phases = _string_tuple(frontmatter.get("workflowPhases"))
@@ -1000,6 +1009,7 @@ def _catalog_entry(
 
 
 def _governance_scalar(value: object, fallback: str) -> str:
+    """Normalize a governance value while preserving its configured fallback."""
     if value is None:
         return fallback
     if not isinstance(value, str):
@@ -1008,10 +1018,12 @@ def _governance_scalar(value: object, fallback: str) -> str:
 
 
 def _canonical_provenance(source: str) -> str:
+    """Return the canonical provenance label for a skill source."""
     return "local" if source == "project-local" else source
 
 
 def _read_frontmatter(skill_path: Path) -> dict | None:
+    """Read and validate a skill document's frontmatter."""
     try:
         if is_clean_architecture_skill(skill_path.parent.name):
             payload, _ = read_bounded_regular_file(
@@ -1145,6 +1157,7 @@ def entry_activation(
 
 
 def _glob_matches(pattern: str, candidate: str) -> bool:
+    """Return whether a path matches a configured skill glob."""
     # 대소문자를 접어서 본다. `fnmatch`는 POSIX에서 대소문자를 구분하므로
     # `Button.TSX`가 `**/*.tsx`에 안 걸린다. 확장자 표기 하나로 skill 강제가
     # 사라지는 쪽이 문서 한 장을 더 읽는 쪽보다 나쁘다.
@@ -1164,6 +1177,7 @@ def expand_dependencies(
     *,
     architecture_mode: ArchitectureMode = ArchitectureMode.CLEAN,
 ) -> list[str]:
+    """Expand required skill dependencies in stable order."""
     by_name = {entry.name: entry for entry in catalog}
     out = list(names)
     queue = list(names)
@@ -1180,6 +1194,7 @@ def expand_dependencies(
 
 
 def _stable_unique(names: Iterable[str]) -> list[str]:
+    """Return values in first-seen order without duplicates."""
     return list(dict.fromkeys(name for name in names if is_safe_skill_name(name)))
 
 
@@ -1190,5 +1205,4 @@ def _string_tuple(value: object) -> tuple[str, ...]:
     if isinstance(value, list):
         return tuple(str(item) for item in value if str(item).strip())
     return ()
-
 

@@ -18,6 +18,7 @@ def test_unknown_completion_disposition_cannot_fall_back_to_cleanup(tmp_path: Pa
 
 
 def test_custom_workflow_cannot_declare_bundled_replacement_authority(tmp_path: Path) -> None:
+    """Verify that custom workflow cannot declare bundled replacement authority."""
     workflows = tmp_path / "workflows"
     workflows.mkdir()
     (workflows / "default.yaml").write_text(

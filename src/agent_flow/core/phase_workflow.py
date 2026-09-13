@@ -342,6 +342,7 @@ def declared_phase_skills(kit_root: Path) -> DeclaredPhaseSkills:
 
 
 def load_phase_workflow_definition(kit_root: Path, name: str) -> PhaseWorkflowDefinition:
+    """Load and validate a named workflow definition."""
     validate_safe_name(name, "workflow")
     path = kit_root / "workflows" / f"{name}.yaml"
     ensure_child_path(kit_root / "workflows", path, "workflow")
@@ -395,6 +396,7 @@ def _normalize_phases(
     *,
     replaceable_architecture: bool = False,
 ) -> list[PhaseDefinition]:
+    """Parse and validate workflow phase definitions."""
     out: list[PhaseDefinition] = []
     seen_ids: set[str] = set()
     for index, item in enumerate(phases_raw):
@@ -464,6 +466,7 @@ def _phase_skills(
     *,
     replaceable_architecture: bool = False,
 ) -> PhaseSkills | None:
+    """Return the skills declared for a workflow phase."""
     if value is None:
         return None
     if not isinstance(value, dict):

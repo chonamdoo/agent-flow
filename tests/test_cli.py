@@ -1843,6 +1843,7 @@ class CliTest(unittest.TestCase):
                 self.assertTrue(all(isinstance(part, str) and part for part in command), profile_path.name)
 
     def test_node_installer_initializes_current_project(self) -> None:
+        """Verify that node installer initializes current project."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -3061,6 +3062,7 @@ class CliTest(unittest.TestCase):
         clear=False,
     )
     def test_node_runner_blocks_missing_manual_spec_evidence(self) -> None:
+        """Verify that node runner blocks missing manual spec evidence."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -3143,6 +3145,7 @@ verify: manual
         clear=False,
     )
     def test_node_spec_check_uses_project_root_from_a_subdirectory(self) -> None:
+        """Verify that node spec check uses project root from a subdirectory."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -3256,6 +3259,7 @@ verify: symbol:SearchResults=No results
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_node_runner_captures_and_injects_spec_ledger(self) -> None:
+        """Verify that node runner captures and injects spec ledger."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -4744,6 +4748,7 @@ if (codexContext !== undefined) {
             self.assertIn("automatic fallback is disabled", result.stderr)
 
     def test_node_advance_blocks_empty_delivery_artifacts(self) -> None:
+        """Verify that node advance blocks empty delivery artifacts."""
         node = _node_executable()
         cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
         for phase_id in ("commit", "push-pr"):
@@ -5228,6 +5233,7 @@ if (codexContext !== undefined) {
             self.assertEqual(state["current_phase"], "product-brief")
 
     def test_node_heading_required_markers_ignore_fenced_examples(self) -> None:
+        """Verify that node heading required markers ignore fenced examples."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -5276,6 +5282,7 @@ if (codexContext !== undefined) {
             self.assertEqual(_read_node_phase(run_dir)["current_phase"], "worktree")
 
     def test_node_run_enforces_project_local_code_review_skill_markers_when_present(self) -> None:
+        """Verify that node run enforces project local code review skill markers when present."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -5358,6 +5365,7 @@ if (codexContext !== undefined) {
             self.assertIn("current_phase: comment-authoring", advanced.stdout)
 
     def test_node_run_enforces_project_local_skills_for_bugfix_code_phases(self) -> None:
+        """Verify that node run enforces project local skills for bugfix code phases."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -5528,6 +5536,7 @@ if (codexContext !== undefined) {
         clear=False,
     )
     def test_node_workflow_run_advances_every_phase_up_to_the_delivery_gate(self) -> None:
+        """Verify that node workflow run advances every phase up to the delivery gate."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -5664,6 +5673,7 @@ if (codexContext !== undefined) {
         clear=False,
     )
     def test_node_pr_watch_blocks_pending_and_routes_fix_loops_back_to_watch(self) -> None:
+        """Verify that node pr watch blocks pending and routes fix loops back to watch."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -5870,6 +5880,7 @@ if (codexContext !== undefined) {
         clear=False,
     )
     def test_node_plan_review_and_architecture_review_route_request_changes(self) -> None:
+        """Verify that node plan review and architecture review route request changes."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -6295,6 +6306,7 @@ if (codexContext !== undefined) {
         clear=False,
     )
     def test_node_default_final_review_uses_runner_owned_results(self) -> None:
+        """Verify that node default final review uses runner owned results."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()

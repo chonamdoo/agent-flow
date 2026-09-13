@@ -106,6 +106,7 @@ class ActiveRun:
         config_root: Path | None = None,
         project_root: Path | None = None,
     ) -> None:
+        """Print the current run status and next available action."""
         artifacts = sorted(str(p.relative_to(self.path)) for p in self.path.rglob("*") if p.is_file())
         meta = read_meta(self.path)
         current_phase = meta.get("current_phase") or "-"
@@ -596,6 +597,7 @@ def _missing_completion_markers(
     config_root: Path | None = None,
     project_root: Path | None = None,
 ) -> list[str]:
+    """Return required completion markers absent from an artifact."""
     contract = _phase_contract(
         run_path,
         workflow,

@@ -31,10 +31,12 @@ from agent_flow.core.local_skills import architecture_contract_required  # noqa:
 
 
 def _payload(**architecture: object) -> dict[str, object]:
+    """Build a serialized architecture selection payload."""
     return {"schema_version": 1, "architecture": architecture}
 
 
 def _parse(**architecture: object) -> ArchitectureSelection:
+    """Parse an architecture selection payload."""
     return parse_architecture_selection(_payload(**architecture), source="probe.yaml")
 
 
@@ -104,6 +106,7 @@ def test_duplicate_yaml_key_is_rejected_instead_of_last_wins():
 
 
 def test_duplicate_key_inside_the_architecture_block_is_rejected():
+    """Verify that duplicate key inside the architecture block is rejected."""
     text = "schema_version: 1\narchitecture:\n  mode: clean\n  mode: pending\n"
 
     with pytest.raises(ValueError, match="duplicate"):
@@ -111,6 +114,7 @@ def test_duplicate_key_inside_the_architecture_block_is_rejected():
 
 
 def test_document_parses_the_same_selection_as_the_mapping():
+    """Verify that document parses the same selection as the mapping."""
     text = "schema_version: 1\narchitecture:\n  mode: local\n  skill: skills/architecture/SKILL.md\n"
 
     assert parse_architecture_document(text, source="probe.yaml") == _parse(
@@ -141,6 +145,7 @@ def test_contract_path_escaping_the_repository_is_rejected(contract_path):
 
 
 def _git_project(tmp_path: Path, name: str = "project") -> Path:
+    """Create an initialized Git project fixture."""
     root = tmp_path / name
     root.mkdir(parents=True)
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
@@ -148,10 +153,12 @@ def _git_project(tmp_path: Path, name: str = "project") -> Path:
 
 
 def _track(root: Path, *relative: str) -> None:
+    """Commit the current fixture files to Git."""
     subprocess.run(["git", "add", "--", *relative], cwd=root, check=True)
 
 
 def _write(root: Path, relative: str, text: str) -> Path:
+    """Write a file used by the current test fixture."""
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -159,11 +166,13 @@ def _write(root: Path, relative: str, text: str) -> Path:
 
 
 def _declare(root: Path, body: str) -> None:
+    """Write an architecture selection fixture."""
     _write(root, PROJECT_ARCHITECTURE_FILE, body)
     _track(root, PROJECT_ARCHITECTURE_FILE)
 
 
 def _clean_contract(root: Path) -> None:
+    """Provision the Clean architecture contract fixture."""
     _write(
         root, "skills/clean-architecture/SKILL.md",
         "---\nname: clean-architecture\n---\n\nKeep domain policy independent of I/O.\n",
@@ -173,6 +182,7 @@ def _clean_contract(root: Path) -> None:
 
 
 def _local_contract(root: Path, *, references: tuple[str, ...] = ()) -> None:
+    """Provision a project-local architecture contract fixture."""
     declared = "".join(f"  - {name}\n" for name in references)
     requires = f"requires_docs:\n{declared}" if references else ""
     patterns = (
@@ -388,12 +398,14 @@ def test_snapshot_digest_separates_the_three_modes(tmp_path):
 
 
 def _cli(*args: str) -> int:
+    """Invoke the CLI with the supplied project arguments."""
     from agent_flow.cli import main
 
     return main(list(args))
 
 
 def _export(root: Path, capsys) -> dict:
+    """Export the current architecture selection through the CLI."""
     assert _cli("architecture", "export", "--root", str(root)) == 0
     return json.loads(capsys.readouterr().out)
 
@@ -417,6 +429,7 @@ def test_export_returns_the_normalized_plan_as_json(tmp_path, capsys):
 
 
 def test_export_reports_legacy_absence_without_inventing_pending(tmp_path, capsys):
+    """Verify that export reports legacy absence without inventing pending."""
     root = _git_project(tmp_path)
 
     plan = _export(root, capsys)
@@ -435,6 +448,7 @@ def test_export_never_writes_the_selection_file(tmp_path, capsys):
 
 
 def test_select_records_the_selection_and_export_reads_it_back(tmp_path, capsys):
+    """Verify that select records the selection and export reads it back."""
     root = _git_project(tmp_path)
     _write(root, "skills/architecture/SKILL.md", "---\nname: architecture\n---\n\n# 구조 규범\n")
 
@@ -459,6 +473,7 @@ def test_select_rejects_an_unresolvable_contract_before_writing(tmp_path):
 
 
 def test_select_rejects_a_contract_path_for_clean_and_pending(tmp_path, capsys):
+    """Verify that select rejects a contract path for clean and pending."""
     root = _git_project(tmp_path)
 
     assert _cli(
@@ -519,6 +534,7 @@ def _resolution(root: Path, monkeypatch, *, phase_id: str = "implement"):
 
 
 def _required_names(resolution) -> set[str]:
+    """Return the required skill names from a resolution."""
     return {skill.name for skill in resolution.required}
 
 
@@ -624,6 +640,7 @@ def test_pending_has_no_contract_to_review_against(tmp_path, monkeypatch):
 
 
 def test_read_marker_alone_does_not_satisfy_contract_gate(tmp_path, monkeypatch):
+    """Verify that read marker alone does not satisfy contract gate."""
     from agent_flow.core.review_evidence import review_route_evidence
 
     root = _git_project(tmp_path)
@@ -685,6 +702,7 @@ def test_clean_role_lint_applies_only_in_clean_mode(tmp_path):
 
 @pytest.mark.parametrize("workflow", ["default", "development", "bugfix", "review", "full-feature"])
 def test_mode_never_changes_phase_graph_or_routes(tmp_path, workflow):
+    """Verify that mode never changes phase graph or routes."""
     from agent_flow.runner import Runner
 
     graphs = []
@@ -715,6 +733,7 @@ def _clean_violating_project(tmp_path: Path, name: str) -> Path:
 
 
 def _lint(root: Path) -> list:
+    """Run architecture linting against the fixture project."""
     from agent_flow.core.architecture_lint import lint_project
 
     return lint_project(
@@ -788,6 +807,7 @@ def test_runner_blocks_a_mode_switch_used_to_escape_a_failed_review(tmp_path):
 
 
 def test_runner_blocks_an_unreadable_declaration_instead_of_assuming_clean(tmp_path):
+    """Verify that runner blocks an unreadable declaration instead of assuming clean."""
     root = _git_project(tmp_path)
     _declare(root, "schema_version: 1\narchitecture:\n  mode: clean\n")
     runner = _pinned_runner(root)
@@ -848,6 +868,7 @@ AGENCY_HOOK = (
 
 
 def _agency_project(tmp_path: Path, name: str = "agency", *, separate_hooks=False) -> Path:
+    """Create the anonymized agency project fixture."""
     root = _git_project(tmp_path, name)
     for relative, content in AGENCY_FILES.items():
         _write(root, f"{AGENCY_ROOT}/{relative}", content)
@@ -890,6 +911,7 @@ def _agency_project(tmp_path: Path, name: str = "agency", *, separate_hooks=Fals
 
 @pytest.mark.parametrize("separate_hooks", [False, True], ids=["route-lib", "route-hooks"])
 def test_agency_fixture_uses_anonymized_naming(tmp_path, separate_hooks):
+    """Verify that agency fixture uses anonymized naming."""
     root = _agency_project(tmp_path, separate_hooks=separate_hooks)
     paths = set(subprocess.run(
         ["git", "ls-files"], cwd=root, check=True, text=True, capture_output=True,
@@ -1063,6 +1085,7 @@ def test_non_clean_lint_reports_not_applicable_instead_of_passed(tmp_path, capsy
 
 
 def _workflow_phase(phase_id):
+    """Return a workflow phase configured for the test scenario."""
     from agent_flow.core.phase_workflow import load_phase_workflow_definition
     from agent_flow.runner import _phases_from_definition
 
@@ -1071,6 +1094,7 @@ def _workflow_phase(phase_id):
 
 
 def test_pending_waits_at_a_phase_that_must_decide_boundaries(tmp_path):
+    """Verify that pending waits at a phase that must decide boundaries."""
     root = _git_project(tmp_path)
     _declare(root, "schema_version: 1\narchitecture:\n  mode: pending\n")
     runner = _pinned_runner(root)
@@ -1081,6 +1105,7 @@ def test_pending_waits_at_a_phase_that_must_decide_boundaries(tmp_path):
 
 
 def test_pending_does_not_block_a_phase_that_decides_nothing_structural(tmp_path):
+    """Verify that pending does not block a phase that decides nothing structural."""
     root = _git_project(tmp_path)
     _declare(root, "schema_version: 1\narchitecture:\n  mode: pending\n")
     runner = _pinned_runner(root)
@@ -1093,6 +1118,7 @@ def test_pending_does_not_block_a_phase_that_decides_nothing_structural(tmp_path
     _local_contract,
 ])
 def test_a_decided_project_passes_the_same_phase(tmp_path, declare):
+    """Verify that a decided project passes the same phase."""
     root = _git_project(tmp_path)
     declare(root)
     runner = _pinned_runner(root)
@@ -1101,6 +1127,7 @@ def test_a_decided_project_passes_the_same_phase(tmp_path, declare):
 
 
 def test_contract_change_during_first_author_turn_blocks_resume(tmp_path, monkeypatch):
+    """Verify that contract change during first author turn blocks resume."""
     from agent_flow.artifact import read_meta
     from agent_flow.core.worktrees import plan_worktree, worktree_runtime_root
     from tests.test_runner_smoke import _init_git_project, _run_cli
@@ -1135,6 +1162,7 @@ def test_contract_change_during_first_author_turn_blocks_resume(tmp_path, monkey
 
 
 def test_transitive_local_dependency_change_blocks_existing_run_evidence(tmp_path, monkeypatch):
+    """Verify that transitive local dependency change blocks existing run evidence."""
     from agent_flow.artifact import read_meta
     from agent_flow.core.worktrees import plan_worktree, worktree_runtime_root
     from tests.test_runner_smoke import _init_git_project, _run_cli
@@ -1226,6 +1254,7 @@ def test_transitive_local_dependency_change_blocks_existing_run_evidence(tmp_pat
 def test_pending_blocks_grown_boundary_scope(
     tmp_path, profile_id, workflow, phase_id, local_path, structural_path,
 ):
+    """Verify that pending blocks grown boundary scope."""
     from agent_flow.core.phase_workflow import load_phase_workflow_definition
     from agent_flow.core.profiles import load_profile_payload
     from agent_flow.runner import _phases_from_definition
@@ -1247,6 +1276,7 @@ def test_pending_blocks_grown_boundary_scope(
 
 
 def test_pending_allows_local_work_beside_existing_structural_roots(tmp_path):
+    """Verify that pending allows local work beside existing structural roots."""
     from agent_flow.core.profiles import load_profile_payload
 
     root = _git_project(tmp_path)
@@ -1265,6 +1295,7 @@ def test_pending_allows_local_work_beside_existing_structural_roots(tmp_path):
 
 
 def test_pending_checks_structural_roles_in_a_profile_union(tmp_path):
+    """Verify that pending checks structural roles in a profile union."""
     from agent_flow.core.profiles import load_profile_payload
 
     root = _git_project(tmp_path)
@@ -1281,6 +1312,7 @@ def test_pending_checks_structural_roles_in_a_profile_union(tmp_path):
 
 
 def test_pending_generic_requires_explicit_structural_phase_evidence(tmp_path):
+    """Verify that pending generic requires explicit structural phase evidence."""
     from agent_flow.core.profiles import load_profile_payload
 
     root = _git_project(tmp_path)
@@ -1294,6 +1326,7 @@ def test_pending_generic_requires_explicit_structural_phase_evidence(tmp_path):
 
 
 def test_pending_blocks_declared_wiring_decision_outside_role_paths(tmp_path):
+    """Verify that pending blocks declared wiring decision outside role paths."""
     from agent_flow.artifact import read_meta, write_meta
     from agent_flow.core.profiles import load_profile_payload
 
@@ -1311,6 +1344,7 @@ def test_pending_blocks_declared_wiring_decision_outside_role_paths(tmp_path):
 
 @pytest.mark.parametrize("initial_norm", [False, True], ids=["empty", "existing"])
 def test_grown_norms_require_new_attempt_without_repining_old_bytes(tmp_path, monkeypatch, initial_norm):
+    """Verify that grown norms require new attempt without repining old bytes."""
     from agent_flow.artifact import read_meta, write_meta
     from agent_flow.core.local_skills import local_skill_prompt_block
     from agent_flow.core.profiles import load_profile_payload
@@ -1375,6 +1409,7 @@ def test_grown_norms_require_new_attempt_without_repining_old_bytes(tmp_path, mo
 
 
 def test_status_checks_the_bound_contract_not_the_leader_selection(tmp_path, monkeypatch):
+    """Verify that status checks the bound contract not the leader selection."""
     from agent_flow.artifact import _missing_completion_markers, write_meta
 
     monkeypatch.setenv("HOME", str(tmp_path / "isolated-home"))
@@ -1412,6 +1447,7 @@ def test_status_checks_the_bound_contract_not_the_leader_selection(tmp_path, mon
 
 @pytest.mark.parametrize("group", ["architecture", "domain-policy"])
 def test_pending_honors_the_same_declared_task_selector_as_resolution(tmp_path, group):
+    """Verify that pending honors the same declared task selector as resolution."""
     from agent_flow.artifact import read_meta, write_meta
     from agent_flow.runner import Phase
 
@@ -1435,6 +1471,7 @@ def test_pending_honors_the_same_declared_task_selector_as_resolution(tmp_path, 
     ("architecture_norm_phases", {"implement": {"codex": []}}),
 ])
 def test_malformed_norm_pins_block_without_removing_evidence(tmp_path, monkeypatch, field, value):
+    """Verify that malformed norm pins block without removing evidence."""
     from agent_flow.artifact import read_meta, write_meta
     from agent_flow.runner import Phase
 
@@ -1455,6 +1492,7 @@ def test_malformed_norm_pins_block_without_removing_evidence(tmp_path, monkeypat
 
 
 def test_retired_norm_replaced_by_symlink_cannot_reuse_its_digest(tmp_path, monkeypatch):
+    """Verify that retired norm replaced by symlink cannot reuse its digest."""
     from agent_flow.artifact import read_meta, write_meta
     from agent_flow.runner import Phase
 
@@ -1477,6 +1515,7 @@ def test_retired_norm_replaced_by_symlink_cannot_reuse_its_digest(tmp_path, monk
 
 
 def _started_norm_run(tmp_path, monkeypatch, *, declared=False):
+    """Create a started run with pinned normative documents."""
     from agent_flow.core.worktrees import plan_worktree, worktree_runtime_root
     from tests.test_runner_smoke import _init_git_project, _run_cli
 
@@ -1507,6 +1546,7 @@ def _started_norm_run(tmp_path, monkeypatch, *, declared=False):
 
 
 def test_legacy_run_requires_fresh_norm_evidence(tmp_path, monkeypatch):
+    """Verify that legacy run requires fresh norm evidence."""
     from agent_flow.artifact import read_meta, write_meta
     from tests.test_runner_smoke import _run_cli
 
@@ -1548,6 +1588,7 @@ def test_legacy_run_requires_fresh_norm_evidence(tmp_path, monkeypatch):
 
 
 def test_declared_unpinned_policy_requires_new_run_without_restore_advice(tmp_path, monkeypatch):
+    """Verify that declared unpinned policy requires new run without restore advice."""
     from agent_flow.artifact import read_meta, write_meta
     from tests.test_runner_smoke import _run_cli
 
@@ -1572,6 +1613,7 @@ def test_declared_unpinned_policy_requires_new_run_without_restore_advice(tmp_pa
 
 @pytest.mark.parametrize("damage", ["corrupt-phase", "missing-global-pin"])
 def test_existing_norm_pin_damage_preserves_previous_evidence(tmp_path, monkeypatch, damage):
+    """Verify that existing norm pin damage preserves previous evidence."""
     from agent_flow.artifact import read_meta, write_meta
     from tests.test_runner_smoke import _run_cli
 
@@ -1597,6 +1639,7 @@ def test_existing_norm_pin_damage_preserves_previous_evidence(tmp_path, monkeypa
 
 
 def test_optional_reviewer_cli_with_same_norms_preserves_approval(tmp_path, monkeypatch):
+    """Verify that optional reviewer CLI with same norms preserves approval."""
     from agent_flow.core.skill_resolver import PhaseSkills
     from agent_flow.runner import Phase
 
@@ -1630,6 +1673,7 @@ def test_optional_reviewer_cli_with_same_norms_preserves_approval(tmp_path, monk
 def test_pending_architecture_routing_honors_declared_skill_phases(
     tmp_path, monkeypatch, allowed_phase, phase_id, blocked,
 ):
+    """Verify that pending architecture routing honors declared skill phases."""
     from agent_flow.runner import Phase
 
     monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))

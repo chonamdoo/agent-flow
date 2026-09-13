@@ -18,6 +18,7 @@ from agent_flow.core import architecture_policy as policy  # noqa: E402
 
 @pytest.fixture
 def repository(tmp_path: Path) -> Path:
+    """Create an isolated Git repository fixture."""
     root = tmp_path / "project"
     root.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
@@ -25,6 +26,7 @@ def repository(tmp_path: Path) -> Path:
 
 
 def _write(root: Path, relative: str, payload: bytes) -> Path:
+    """Write a file used by the current test fixture."""
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
@@ -32,6 +34,7 @@ def _write(root: Path, relative: str, payload: bytes) -> Path:
 
 
 def _declare(root: Path, mode: str = "local") -> Path:
+    """Write an architecture selection fixture."""
     skill = "  skill: skills/architecture/SKILL.md\n" if mode == "local" else ""
     return _write(
         root,
@@ -41,17 +44,20 @@ def _declare(root: Path, mode: str = "local") -> Path:
 
 
 def _contract(root: Path, header: str = "") -> Path:
+    """Write a local architecture contract fixture."""
     frontmatter = f"---\n{header}\n---\n" if header else ""
     return _write(root, "skills/architecture/SKILL.md", (frontmatter + "# Approved rules\n").encode())
 
 
 def _cli(*args: str) -> int:
+    """Invoke the CLI with the supplied project arguments."""
     from agent_flow.cli import main
 
     return main(list(args))
 
 
 def test_non_git_selection_remains_runnable(tmp_path, monkeypatch):
+    """Verify that a non-Git selection remains runnable."""
     from agent_flow.artifact import write_meta
     from agent_flow.runner import ResumeMode, Runner
 
@@ -73,6 +79,7 @@ def test_non_git_selection_remains_runnable(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("failure", ["declaration", "interrupted-install"])
 def test_status_reports_architecture_failure_separately_from_markers(repository, monkeypatch, capsys, failure):
+    """Verify that status reports architecture failure separately from markers."""
     from agent_flow.artifact import ActiveRun, write_meta
 
     monkeypatch.setenv("HOME", str(repository.parent / "home"))
@@ -100,6 +107,7 @@ def test_status_reports_architecture_failure_separately_from_markers(repository,
 def test_status_reports_pinned_drift_before_artifact_readiness(
     repository, monkeypatch, capsys, artifact_exists, changed_source
 ):
+    """Verify that status reports pinned drift before artifact readiness."""
     from agent_flow.artifact import ActiveRun, write_meta
     from agent_flow.runner import Runner
 
@@ -144,6 +152,7 @@ def test_status_reports_pinned_drift_before_artifact_readiness(
 def test_status_allows_unchanged_pinned_policy_to_await_artifact(
     repository, monkeypatch, capsys
 ):
+    """Verify that status allows unchanged pinned policy to await artifact."""
     from agent_flow.artifact import ActiveRun, write_meta
 
     monkeypatch.setenv("HOME", str(repository.parent / "home"))
@@ -176,6 +185,7 @@ def test_status_allows_unchanged_pinned_policy_to_await_artifact(
     ["absolute", "docs/rules.md", "skills/custom/SKILL.md", "skills/architecture/../SKILL.md", ""],
 )
 def test_invalid_cli_skill_preserves_a_usable_selection(repository, capsys, skill):
+    """Verify that invalid CLI skill preserves a usable selection."""
     selection_path = _declare(repository, "clean")
     previous = selection_path.read_bytes()
     ordinary_file = _write(repository, "docs/rules.md", b"# Rules\n")
@@ -189,6 +199,7 @@ def test_invalid_cli_skill_preserves_a_usable_selection(repository, capsys, skil
 
 
 def test_constructor_and_yaml_reject_the_same_noncanonical_contract():
+    """Verify that constructor and YAML reject the same noncanonical contract."""
     with pytest.raises(ValueError):
         policy.ArchitectureSelection(policy.ArchitectureMode.LOCAL, "skills/custom/SKILL.md")
     with pytest.raises(ValueError):
@@ -211,6 +222,7 @@ def test_constructor_and_yaml_reject_the_same_noncanonical_contract():
     ],
 )
 def test_invalid_frontmatter_cannot_erase_required_documents(repository, header):
+    """Verify that invalid frontmatter cannot erase required documents."""
     _declare(repository)
     _contract(repository, header)
 
@@ -219,12 +231,14 @@ def test_invalid_frontmatter_cannot_erase_required_documents(repository, header)
 
 
 def test_recursive_selection_yaml_is_a_declaration_error():
+    """Verify that recursive selection YAML is a declaration error."""
     with pytest.raises(ValueError, match="recursive YAML"):
         policy.parse_architecture_document("schema_version: 1\narchitecture: &cycle {mode: clean, nested: *cycle}\n", source="selection")
 
 
 @pytest.mark.parametrize("kind", ["directory", "dangling-symlink", "symlink"])
 def test_invalid_selection_file_never_becomes_legacy_clean(repository, kind):
+    """Verify that invalid selection file never becomes legacy clean."""
     path = repository / policy.PROJECT_ARCHITECTURE_FILE
     if kind == "directory":
         path.mkdir()
@@ -241,6 +255,7 @@ def test_invalid_selection_file_never_becomes_legacy_clean(repository, kind):
 @pytest.mark.parametrize("relative", ["skills/architecture/SKILL.md", "skills/architecture/references/rules.md"])
 @pytest.mark.parametrize("payload", [b"", b" \n\t", b"\xff", b"---\nname: architecture\n---\n"])
 def test_unusable_normative_documents_never_produce_a_snapshot(repository, relative, payload):
+    """Verify that unusable normative documents never produce a snapshot."""
     _declare(repository)
     _contract(repository, "requires_docs: [references/rules.md]")
     _write(repository, "skills/architecture/references/rules.md", b"# Required rules\n")
@@ -255,6 +270,7 @@ def test_unusable_normative_documents_never_produce_a_snapshot(repository, relat
     ["rules.md", "references/./rules.md", "references/../rules.md", "references//rules.md", "references/rules.txt", " references/rules.md", "references/rules.md\n"],
 )
 def test_references_must_be_canonical_markdown_paths(repository, reference):
+    """Verify that references must be canonical markdown paths."""
     _declare(repository)
     _contract(repository, f"requires_docs: [{json.dumps(reference)}]")
     _write(repository, "skills/architecture/references/rules.md", b"# Rules\n")
@@ -265,6 +281,7 @@ def test_references_must_be_canonical_markdown_paths(repository, reference):
 
 @pytest.mark.parametrize("linked_part", ["root", "references-directory", "reference"])
 def test_normative_symlinks_are_rejected_even_inside_repository(repository, linked_part):
+    """Verify that normative symlinks are rejected even inside repository."""
     _declare(repository)
     _contract(repository, "requires_docs: [references/rules.md]")
     reference = _write(repository, "skills/architecture/references/rules.md", b"# Rules\n")
@@ -283,6 +300,7 @@ def test_normative_symlinks_are_rejected_even_inside_repository(repository, link
 
 
 def test_contract_cannot_come_from_a_nested_repository(repository):
+    """Verify that contract cannot come from a nested repository."""
     _declare(repository)
     contract = _contract(repository)
     subprocess.run(["git", "init", "-q"], cwd=contract.parent, check=True)
@@ -292,6 +310,7 @@ def test_contract_cannot_come_from_a_nested_repository(repository):
 
 
 def test_export_reports_untracked_selection_and_exact_document_bytes(repository, capsys):
+    """Verify that export reports untracked selection and exact document bytes."""
     selection = _declare(repository)
     contract = _contract(repository, "requires_docs: [references/rules.md]")
     reference = _write(repository, "skills/architecture/references/rules.md", "# 실제 규칙\r\n".encode())
@@ -312,6 +331,7 @@ def test_export_reports_untracked_selection_and_exact_document_bytes(repository,
 
 
 def test_git_failure_cannot_publish_a_new_selection(repository, monkeypatch, capsys):
+    """Verify that Git failure cannot publish a new selection."""
     selection = _declare(repository, "clean")
     previous = selection.read_bytes()
     _contract(repository)
@@ -323,6 +343,7 @@ def test_git_failure_cannot_publish_a_new_selection(repository, monkeypatch, cap
 
 
 def test_selection_byte_change_invalidates_identical_semantic_policy(repository):
+    """Verify that selection byte change invalidates identical semantic policy."""
     selection = _declare(repository, "pending")
     pinned = policy.architecture_snapshot(repository)
     selection.write_bytes(selection.read_bytes() + b"# Changed approval source\n")
@@ -335,6 +356,7 @@ def test_selection_byte_change_invalidates_identical_semantic_policy(repository)
 
 
 def test_candidate_export_validates_without_publishing_and_round_trips(repository, capsys):
+    """Verify that candidate export validates without publishing and round trips."""
     selection = _declare(repository, "clean")
     previous = selection.read_bytes()
     _contract(repository)
@@ -351,6 +373,7 @@ def test_candidate_export_validates_without_publishing_and_round_trips(repositor
 
 
 def test_candidate_export_failure_preserves_selection(repository, capsys):
+    """Verify that candidate export failure preserves selection."""
     selection = _declare(repository, "pending")
     previous = selection.read_bytes()
 
@@ -370,6 +393,7 @@ def test_candidate_export_failure_preserves_selection(repository, capsys):
     ],
 )
 def test_symlink_replacement_at_open_cannot_pin_outside_bytes(repository, monkeypatch, relative):
+    """Verify that symlink replacement at open cannot pin outside bytes."""
     _declare(repository)
     _contract(repository, "requires_docs: [references/rules.md]")
     _write(repository, "skills/architecture/references/rules.md", b"# Approved reference\n")
@@ -383,6 +407,7 @@ def test_symlink_replacement_at_open_cannot_pin_outside_bytes(repository, monkey
     replaced = False
 
     def replace_before_open(path, flags, *args, **kwargs):
+        """Replace the target immediately before it is opened."""
         nonlocal replaced
         if not replaced and kwargs.get("dir_fd") is not None and path == target.name:
             replaced = True
@@ -397,6 +422,7 @@ def test_symlink_replacement_at_open_cannot_pin_outside_bytes(repository, monkey
 
 @pytest.mark.parametrize("relative", ["skills", "skills/architecture/references"])
 def test_opened_parent_survives_outside_symlink_replacement(repository, monkeypatch, relative):
+    """Verify that opened parent survives outside symlink replacement."""
     _declare(repository)
     _contract(repository, "requires_docs: [references/rules.md]")
     _write(repository, "skills/architecture/references/rules.md", b"# Approved reference\n")
@@ -409,6 +435,7 @@ def test_opened_parent_survives_outside_symlink_replacement(repository, monkeypa
     replaced = False
 
     def replace_after_open(path, flags, *args, **kwargs):
+        """Replace the path after its descriptor has been opened."""
         nonlocal replaced
         descriptor = original_open(path, flags, *args, **kwargs)
         if not replaced and kwargs.get("dir_fd") is not None and path == target.name:
@@ -429,11 +456,13 @@ def test_opened_parent_survives_outside_symlink_replacement(repository, monkeypa
 
 
 def test_selection_and_source_digest_use_the_same_opened_bytes(repository, monkeypatch):
+    """Verify that selection and source digest use the same opened bytes."""
     declaration = _declare(repository, "clean")
     approved_bytes = declaration.read_bytes()
     original_open = os.open
 
     def replace_after_open(path, flags, *args, **kwargs):
+        """Replace the path after its descriptor has been opened."""
         descriptor = original_open(path, flags, *args, **kwargs)
         if kwargs.get("dir_fd") is not None and path == declaration.name:
             declaration.unlink()
@@ -451,11 +480,13 @@ def test_selection_and_source_digest_use_the_same_opened_bytes(repository, monke
 
 @pytest.mark.parametrize("replacement", ["directory", "fifo"])
 def test_opened_contract_must_still_be_a_regular_file(repository, monkeypatch, replacement):
+    """Verify that opened contract must still be a regular file."""
     _declare(repository)
     contract = _contract(repository)
     original_open = os.open
 
     def replace_before_open(path, flags, *args, **kwargs):
+        """Replace the target immediately before it is opened."""
         if kwargs.get("dir_fd") is not None and path == contract.name:
             contract.unlink()
             if replacement == "directory":
@@ -471,6 +502,7 @@ def test_opened_contract_must_still_be_a_regular_file(repository, monkeypatch, r
 
 @pytest.mark.parametrize("mode", ["legacy", "clean", "local", "pending"])
 def test_interrupted_install_blocks_cli_until_recovery(repository, mode, capsys):
+    """Verify that interrupted install blocks CLI until recovery."""
     if mode != "legacy":
         _declare(repository, mode)
     if mode == "local":
@@ -490,10 +522,12 @@ def test_interrupted_install_blocks_cli_until_recovery(repository, mode, capsys)
 
 
 def test_install_starting_during_cli_snapshot_blocks_the_result(repository, monkeypatch, capsys):
+    """Verify that install starting during CLI snapshot blocks the result."""
     _declare(repository, "clean")
     original_open = os.open
 
     def interrupt_install(path, flags, *args, **kwargs):
+        """Simulate installation beginning during contract resolution."""
         descriptor = original_open(path, flags, *args, **kwargs)
         if kwargs.get("dir_fd") is not None and path == policy.PROJECT_ARCHITECTURE_FILE:
             _write(repository, ".agent-flow/install-recovery/manifest.json", b"[]")
@@ -512,6 +546,7 @@ def test_install_starting_during_cli_snapshot_blocks_the_result(repository, monk
     [policy.PROJECT_ARCHITECTURE_FILE, "skills/architecture/SKILL.md", "skills/architecture/references/rules.md"],
 )
 def test_oversized_documents_are_rejected_before_read(repository, monkeypatch, relative):
+    """Verify that oversized documents are rejected before read."""
     _declare(repository)
     _contract(repository, "requires_docs: [references/rules.md]")
     _write(repository, "skills/architecture/references/rules.md", b"Required rule.")
@@ -522,6 +557,7 @@ def test_oversized_documents_are_rejected_before_read(repository, monkeypatch, r
     original_read = os.read
 
     def reject_oversized_read(descriptor, size):
+        """Simulate a document exceeding the read size limit."""
         opened = os.fstat(descriptor)
         assert (opened.st_dev, opened.st_ino) != (identity.st_dev, identity.st_ino)
         return original_read(descriptor, size)
@@ -532,6 +568,7 @@ def test_oversized_documents_are_rejected_before_read(repository, monkeypatch, r
 
 
 def test_document_growth_after_stat_is_still_bounded(repository, monkeypatch):
+    """Verify that document growth after stat is still bounded."""
     _declare(repository)
     contract = _contract(repository)
     identity = contract.stat()
@@ -539,6 +576,7 @@ def test_document_growth_after_stat_is_still_bounded(repository, monkeypatch):
     delivered = 0
 
     def growing_document(descriptor, size):
+        """Simulate a document growing after its initial size check."""
         nonlocal delivered
         opened = os.fstat(descriptor)
         if (opened.st_dev, opened.st_ino) == (identity.st_dev, identity.st_ino):

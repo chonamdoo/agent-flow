@@ -453,6 +453,7 @@ def test_frontmatter_catalog_is_scoped_before_external_matching(tmp_path, monkey
 
 
 def test_gated_angles_use_only_eligible_reviewer_providers(tmp_path, monkeypatch):
+    """Verify that gated angles use only eligible reviewer providers."""
     from types import SimpleNamespace
 
     from agent_flow import multi_review

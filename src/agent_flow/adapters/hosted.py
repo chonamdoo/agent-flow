@@ -700,6 +700,7 @@ def _applicable_angles(
     *,
     providers: Sequence[str],
 ) -> list[dict[str, object]]:
+    """Return review angles that apply to the active architecture."""
     skill_gated = [angle for angle in angles if "requires" in angle]
     required: set[str] = set()
     # 계약 충족 여부는 작성자 게이트와 **같은 함수**로 판정한다. 여기서 이름을

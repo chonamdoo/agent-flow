@@ -223,6 +223,7 @@ def phase_skill_resolution(
     host: str | None = None,
     architecture_root: Path | None = None,
 ) -> SkillResolution:
+    """Resolve all required skills for a workflow phase."""
     return resolve_phase_skills(
         project_root=project_root,
         phase_id=phase_id,
@@ -248,6 +249,7 @@ def local_skill_prompt_block(
     host: str | None = None,
     architecture_root: Path | None = None,
 ) -> str:
+    """Render resolved local skill content for a phase prompt."""
     resolution = phase_skill_resolution(
         project_root,
         phase_id,
@@ -290,6 +292,7 @@ def missing_local_skill_markers(
     since: float | None = None,
     architecture_root: Path | None = None,
 ) -> list[str]:
+    """Return completion markers for locally unavailable skills."""
     resolution = phase_skill_resolution(
         project_root,
         phase_id,

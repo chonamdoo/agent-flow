@@ -85,6 +85,7 @@ def _required_for(
 
 
 def test_metadata_batch_uses_supplied_text_and_isolates_invalid_documents(tmp_path):
+    """Verify that metadata batch uses supplied text and isolates invalid documents."""
     source = tmp_path / "SKILL.md"
     source.write_text("---\nrequires: [changed-after-read]\n---\n", encoding="utf-8")
     request = {
