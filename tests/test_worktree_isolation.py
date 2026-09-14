@@ -247,6 +247,31 @@ def test_file_lease_rejects_path_replacement_while_locking(
     assert replaced is True
 
 
+def test_inherited_lease_refuses_a_descriptor_that_holds_no_lease(tmp_path: Path):
+    lock_path = tmp_path / "install.lock"
+    lock_path.write_bytes(b"")
+    unlocked = os.open(lock_path, os.O_RDWR)
+    try:
+        with pytest.raises(W_ISO.FileLeaseUnavailable):
+            W_ISO.claim_inherited_file_lease(lock_path, unlocked)
+    finally:
+        os.close(unlocked)
+
+
+def test_inherited_lease_accepts_a_descriptor_that_shares_a_live_holder(tmp_path: Path):
+    lock_path = tmp_path / "install.lock"
+    lock_path.write_bytes(b"")
+    holder = os.open(lock_path, os.O_RDWR)
+    W_ISO.fcntl.flock(holder, W_ISO.fcntl.LOCK_EX | W_ISO.fcntl.LOCK_NB)
+    inherited = os.dup(holder)
+    try:
+        W_ISO.claim_inherited_file_lease(lock_path, inherited)
+    finally:
+        os.close(inherited)
+        W_ISO.fcntl.flock(holder, W_ISO.fcntl.LOCK_UN)
+        os.close(holder)
+
+
 def test_sanitized_env_strips_leaky_git_vars():
     base = {"GIT_DIR": "/x/.git", "GIT_WORK_TREE": "/x", "GIT_COMMON_DIR": "/x/.git",
             "GIT_INDEX_FILE": "/x/index", "PATH": "/usr/bin", "HOME": "/home/u"}
