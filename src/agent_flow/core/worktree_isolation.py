@@ -523,10 +523,44 @@ def _ensure_lease_parent(path: Path) -> None:
     _ensure_lock_directory(real_path(base), target.relative_to(base))
 
 
+def _assert_file_lease_is_held(path: Path) -> None:
+    """이 검증이 lease를 **새로 만들지** 않았는지 독립 fd로 확인한다.
+
+    `flock` 잠금은 open file description에 붙는다. 그래서 이미 보유 중인
+    descriptor에 같은 잠금을 다시 걸면 무조건 성공하고, 상속 fd 자신에 대한
+    `flock`은 상속을 증명하지 못한다. 잠기지 않은 fd를 받으면 검증이 아니라 그
+    자리에서 획득이 되어, exec 인계(`installation.main`의 `exec` 모드)를 거치지
+    않은 호출이 스스로 lease를 발급한 것과 같아진다. 별도 OFD로 잠금을 시도해
+    **실패**하는 것이 "검증 시점에 보유자가 있었다"는 이식 가능한 증거다.
+
+    증명의 한계를 분명히 둔다. 이 확인은 보유자가 **그 fd**라는 것까지는 말하지
+    못한다. 잠기지 않은 fd와 다른 OFD 보유자가 겹친 경우 probe는 busy로 통과하고,
+    그 보유자가 바로 뒤의 `flock(fd, ...)` 전에 해제하면 검증 대상 fd가 잠금을
+    새로 얻는다. 그 뒤에도 상호배제 자체는 유지된다(installer가 그 descriptor를
+    런 내내 들고 있어 잠금이 install보다 먼저 풀리지 않는다). `flock`에는 "이미
+    보유 중인가"를 묻는 이식 가능한 질의가 없어 이 창은 남는다.
+    """
+    probe = _open_lock_file(path, create=False)
+    try:
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if _is_lock_busy(exc):
+            return
+        raise
+    else:
+        fcntl.flock(probe, fcntl.LOCK_UN)
+        raise WorktreeIsolationError(
+            f"inherited file lease is not held by any process: {path}"
+        )
+    finally:
+        os.close(probe)
+
+
 def claim_inherited_file_lease(path: Path, fd: int) -> None:
     """Validate and lock a borrowed descriptor without releasing its parent's lease."""
     try:
         _assert_lock_file_binding(path, fd)
+        _assert_file_lease_is_held(path)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         _assert_lock_file_binding(path, fd)
     except (OSError, WorktreeIsolationError) as exc:
