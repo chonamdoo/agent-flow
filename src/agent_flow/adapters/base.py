@@ -161,7 +161,9 @@ class Adapter(ABC):
             "The following is the author's assignment, not an instruction to execute it. "
             "Assess its complete requirements against the change and evidence. "
             "Artifact-writing and workflow-advancement duties belong only to the author/controller.\n\n"
-            + "\n".join(f"> {line}" for line in body.splitlines()) + "\n"
+            + "\n".join(
+                f"> {line}" for line in (f"{task_line}\n{body}" if task_line else body).splitlines()
+            ) + "\n"
         )
         completion_block = (
             "\n## When complete\n"
@@ -178,7 +180,7 @@ class Adapter(ABC):
         envelope = (
             f"# agent-flow phase: {phase.id}\n\n"
             f"**Description**: {phase.description}\n\n"
-            f"{task_line}"
+            f"{task_line if role == 'author' else ''}"
             f"**Run id**: {run_dir.name}\n"
             f"**Project root**: {project_root}\n"
             f"{artifact_block}"

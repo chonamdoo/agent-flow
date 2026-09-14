@@ -53,7 +53,7 @@ def test_obsolete_required_alias_requires_explicit_migration(
             encoding="utf-8",
         )
 
-    with pytest.raises(ValueError, match="migration required.*clean-architecture-core"):
+    with pytest.raises(ValueError, match=r"migration required.*clean-architecture-core"):
         load_phase_workflow_definition(tmp_path, name)
     assert path.read_text(encoding="utf-8") == source
 

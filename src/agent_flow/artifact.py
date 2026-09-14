@@ -137,6 +137,7 @@ class ActiveRun:
                 self.path,
                 self.workflow,
                 current_phase,
+                config_root=config_root,
             )
         except WorkflowDriftError as exc:
             print_structured_status(workflow_status_payload(
@@ -517,10 +518,15 @@ def pending_phase_approval(run_dir: Path) -> dict[str, str] | None:
     return identity if identity != meta.get("phase_approval") else None
 
 
-def approve_phase_artifact(run_dir: Path, *, token: str) -> dict[str, str]:
+def approve_phase_artifact(
+    run_dir: Path, *, token: str, config_root: Path | None = None
+) -> dict[str, str]:
     """Acknowledge these artifact bytes, not the caller's identity."""
     with exclusive_file_lease(run_dir.parent / ACTIVE_LOCK):
         meta = read_meta(run_dir)
+        load_run_workflow_definition(
+            find_kit_root(), meta.get("workflow", "unknown"), meta, config_root=config_root,
+        )
         identity = _phase_approval_identity(run_dir, meta)
         if identity is None or not secrets.compare_digest(identity["token"], token):
             raise ValueError("phase approval token does not match the current artifact and attempt")
@@ -641,8 +647,9 @@ def phase_review_rejected(
     aggregate_text: str,
     *,
     run_meta: Mapping[str, object] | None = None,
+    config_root: Path | None = None,
 ) -> bool:
-    contract = _phase_contract(run_path, workflow, phase_id)
+    contract = _phase_contract(run_path, workflow, phase_id, config_root=config_root)
     if not contract.multi_review:
         return False
     meta = run_meta if run_meta is not None else read_meta(run_path)
@@ -670,6 +677,7 @@ def _missing_completion_markers(
         run_path,
         workflow,
         phase_id,
+        config_root=config_root,
     )
     artifact = _existing_phase_artifact(
         run_path,
@@ -721,6 +729,7 @@ def _missing_completion_markers(
                 phase_id,
                 text,
                 run_meta=meta,
+                config_root=config_root,
             ),
         )
     )
@@ -746,16 +755,22 @@ def _parse_timestamp(value: object) -> float | None:
         return None
 
 
-def _required_markers(run_path: Path, workflow: str, phase_id: str) -> tuple[str, ...]:
-    return _phase_contract(run_path, workflow, phase_id).required_markers
+def _required_markers(
+    run_path: Path, workflow: str, phase_id: str, *, config_root: Path | None = None
+) -> tuple[str, ...]:
+    return _phase_contract(
+        run_path, workflow, phase_id, config_root=config_root,
+    ).required_markers
 
 
 def _phase_contract(
-    run_path: Path, workflow: str, phase_id: str
+    run_path: Path, workflow: str, phase_id: str, *, config_root: Path | None = None
 ) -> PhaseArtifactContract:
     meta = read_meta(run_path)
-    if meta.get("workflow") or "workflow_definition" in meta:
-        definition = load_run_workflow_definition(find_kit_root(), workflow, meta)
+    if (run_path / ACTIVE_MARKER).is_file() or meta.get("workflow") or "workflow_definition" in meta:
+        definition = load_run_workflow_definition(
+            find_kit_root(), workflow, meta, config_root=config_root,
+        )
         phase = next((item for item in definition.phases if item.id == phase_id), None)
         if phase is None:
             return PhaseArtifactContract(

@@ -6,8 +6,8 @@
   "previous_manifest_sha256": "1e2f75a7fdb4ab5f5b02342c60858853723f9c4b6f7b4654a89f54765418a805",
   "cases_sha256": "2931d5d413950e2cbc5f227e782142e39da4d6c365ca6b4ceef83549c0cbc4ae",
   "preserved_v2_artifacts": {
-    "cases": "/Users/namdoo/Developer/Aiproject/agent-workflow/.git/agent-flow/worktrees/feat-t6-architecture-context-refactor-docs-issues-0007-architecture-context-refactor.md-scope-acceptance-suite-profile-gates-run/.agent-flow/runs/20260913-160840/t6-fixtures-v2-cases.json",
-    "manifest": "/Users/namdoo/Developer/Aiproject/agent-workflow/.git/agent-flow/worktrees/feat-t6-architecture-context-refactor-docs-issues-0007-architecture-context-refactor.md-scope-acceptance-suite-profile-gates-run/.agent-flow/runs/20260913-160840/t6-fixtures-v2-manifest.json"
+    "cases": ".agent-flow/runs/20260913-160840/t6-fixtures-v2-cases.json",
+    "manifest": ".agent-flow/runs/20260913-160840/t6-fixtures-v2-manifest.json"
   },
   "reported_v2_evidence": {
     "source": "Main actual evaluation report",

@@ -1017,7 +1017,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         try:
             if args.approve:
-                approve_phase_artifact(resume_run_dir, token=args.approve)
+                approve_phase_artifact(resume_run_dir, token=args.approve, config_root=root)
             Runner(
                 run_root,
                 run_dir=resume_run_dir,
@@ -1474,6 +1474,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.phase,
                     artifact_text,
                     run_meta=run_meta,
+                    config_root=root,
                 )
                 print(
                     json.dumps(

@@ -2435,12 +2435,18 @@ def test_malformed_meta_does_not_crash(tmp_path: Path):
         worktree_runtime_root(root=project, name=plan.name) / ".agent-flow" / "runs"
     )
     active = next(p for p in runs_dir.iterdir() if (p / "active").exists())
-    # Corrupt the meta file
     (active / "meta.json").write_text("not-json{{{")
 
     r_status = _run_cli(["status", "--worktree", plan.name], project)
-    # status should still respond (degraded), not crash
-    assert r_status.returncode == 0
+    assert r_status.returncode == 2
+    assert "Traceback" not in r_status.stderr
+    payload = json.loads(next(
+        line.removeprefix("status_json: ")
+        for line in r_status.stdout.splitlines() if line.startswith("status_json: ")
+    ))
+    assert payload["reason"] == "workflow_definition_unavailable"
+    assert payload["next_command"] == ""
+    assert (active / "meta.json").read_text() == "not-json{{{"
 
 
 def test_non_utf8_meta_does_not_crash(tmp_path: Path, capsys):
@@ -3155,6 +3161,10 @@ def test_status_reports_review_evidence_regeneration(
     capsys,
 ) -> None:
     from agent_flow.artifact import ActiveRun, write_meta
+    from agent_flow.core.phase_workflow import load_phase_workflow_definition
+    from agent_flow.core.workflow_pin import workflow_pin_metadata
+
+    definition = load_phase_workflow_definition(KIT_ROOT, "default")
 
     run_dir = tmp_path / "project" / ".agent-flow" / "runs" / "r1"
     run_dir.mkdir(parents=True)
@@ -3168,6 +3178,8 @@ def test_status_reports_review_evidence_regeneration(
             "workflow": "default",
             "task": "demo",
             "current_phase": "final-review",
+            "phase_index": next(i for i, phase in enumerate(definition.phases) if phase.id == "final-review"),
+            **workflow_pin_metadata(definition, workflow="default"),
             "started_at": "2026-05-20T00:00:00+00:00",
         },
     )
@@ -5049,15 +5061,16 @@ def test_pause_for_approval_preserves_racing_accepted_identity(tmp_path, monkeyp
     from agent_flow.runner import Phase, Runner
 
     phase = Phase(id="implement", description="", pause_after=True)
-    run_dir = tmp_path / "runs" / "r1"
-    run_dir.mkdir(parents=True)
+    run_dir = artifact.create_run(tmp_path, "development", "Preserve concurrent approval")
     (run_dir / "implement.md").write_text("ready for approval\n", encoding="utf-8")
-    write_meta(run_dir, {
-        "run_id": "r1", "current_phase": phase.id, "phase_entered_at": "attempt",
+    meta = artifact.read_meta(run_dir)
+    meta.update({
+        "current_phase": phase.id, "phase_index": 1, "phase_entered_at": "attempt",
         "phase_approval_request": {
             "phase_id": phase.id, "phase_entered_at": "attempt", "artifact": "implement.md",
         },
     })
+    write_meta(run_dir, meta)
     pending = artifact.pending_phase_approval(run_dir)
     assert pending is not None
     runner = Runner.__new__(Runner)
@@ -5085,6 +5098,152 @@ def test_pause_for_approval_preserves_racing_accepted_identity(tmp_path, monkeyp
     assert artifact.read_meta(run_dir).get("phase_approval") == accepted
     assert runner._pause_for_approval(phase) is False
     assert artifact.pending_phase_approval(run_dir) is None
+
+
+class _PinPublicationFinished(Exception):
+    pass
+
+
+@pytest.fixture
+def legacy_pin_runner(tmp_path, monkeypatch):
+    from agent_flow import artifact, runner as runner_module
+    from agent_flow.core.workflow_pin import load_run_workflow_definition
+    from agent_flow.runner import Runner
+
+    run_dir = artifact.create_run(tmp_path, "development", "Preserve concurrent approval")
+    (run_dir / "implement.md").write_text("ready for approval\n", encoding="utf-8")
+    meta = artifact.read_meta(run_dir)
+    definition = load_run_workflow_definition(KIT_ROOT, "development", meta)
+    pin = meta.pop("workflow_definition")
+    meta.pop("workflow_definition_digest")
+    meta.update({
+        "current_phase": "implement", "phase_index": 1, "phase_entered_at": "attempt",
+        "phase_approval_request": {
+            "phase_id": "implement", "phase_entered_at": "attempt", "artifact": "implement.md",
+        },
+    })
+    write_meta(run_dir, meta)
+    pending = artifact.pending_phase_approval(run_dir)
+    assert pending is not None
+    runner = Runner.__new__(Runner)
+    runner.project_root = tmp_path
+    runner.config_root = tmp_path
+    runner.run_dir = run_dir
+    runner.kit_root = KIT_ROOT
+    runner.workflow_name = "development"
+    runner.workflow = definition
+    monkeypatch.setattr(runner_module, "assert_managed_hooks_registered", lambda *args: None)
+
+    def stop_after_publication(mode):
+        raise _PinPublicationFinished
+
+    monkeypatch.setattr(runner, "_initialize_architecture_policy", stop_after_publication)
+    return runner, pending, pin
+
+
+@pytest.mark.parametrize("arrival", ["metadata-read", "pin-publication"])
+def test_legacy_pin_publication_preserves_racing_accepted_identity(
+    legacy_pin_runner, monkeypatch, arrival,
+):
+    from agent_flow import artifact, runner as runner_module
+    from agent_flow.core.workflow_pin import load_run_workflow_definition
+    from agent_flow.core.worktree_isolation import FileLeaseUnavailable
+    from agent_flow.runner import ResumeMode
+
+    runner, pending, pin = legacy_pin_runner
+    accepted = None
+    attempted = False
+    contended = False
+
+    def approve_once():
+        nonlocal accepted, attempted, contended
+        if attempted:
+            return
+        attempted = True
+        try:
+            accepted = artifact.approve_phase_artifact(
+                runner.run_dir, token=pending["token"], config_root=runner.config_root,
+            )
+        except FileLeaseUnavailable:
+            contended = True
+
+    def read_while_approval_arrives(path):
+        meta = artifact.read_meta(path)
+        approve_once()
+        return meta
+
+    original_pin_metadata = runner_module.workflow_pin_metadata
+
+    def pin_while_approval_arrives(*args, **kwargs):
+        metadata = original_pin_metadata(*args, **kwargs)
+        approve_once()
+        return metadata
+
+    if arrival == "metadata-read":
+        monkeypatch.setattr(runner_module, "read_meta", read_while_approval_arrives)
+    else:
+        monkeypatch.setattr(runner_module, "workflow_pin_metadata", pin_while_approval_arrives)
+    with pytest.raises(_PinPublicationFinished):
+        runner.run(ResumeMode.RESUME)
+    assert attempted
+    assert contended == (arrival == "pin-publication")
+    if accepted is None:
+        accepted = artifact.approve_phase_artifact(
+            runner.run_dir, token=pending["token"], config_root=runner.config_root,
+        )
+    published = artifact.read_meta(runner.run_dir)
+    recovered = load_run_workflow_definition(runner.kit_root, runner.workflow_name, published)
+    assert recovered.source_bytes == pin["source_text"].encode("utf-8")
+    assert published["workflow_digest"] == runner.workflow.digest
+    assert published.get("phase_approval") == accepted
+    assert artifact.pending_phase_approval(runner.run_dir) is None
+
+
+@pytest.mark.parametrize("invalid", ["legacy-digest", "full-pin"])
+def test_legacy_pin_publication_rejects_invalid_metadata_without_writes(
+    legacy_pin_runner, invalid,
+):
+    from agent_flow import artifact
+    from agent_flow.core.workflow_pin import WorkflowDefinitionPinError
+    from agent_flow.runner import ResumeMode
+
+    runner, pending, _pin = legacy_pin_runner
+    artifact.approve_phase_artifact(
+        runner.run_dir, token=pending["token"], config_root=runner.config_root,
+    )
+    meta = artifact.read_meta(runner.run_dir)
+    if invalid == "legacy-digest":
+        meta["workflow_digest"] = "0" * 64
+    else:
+        meta["workflow_definition"] = None
+        meta["workflow_definition_digest"] = runner.workflow.digest
+    write_meta(runner.run_dir, meta)
+    before = (runner.run_dir / "meta.json").read_bytes()
+    with pytest.raises(WorkflowDefinitionPinError):
+        runner.run(ResumeMode.RESUME)
+    assert (runner.run_dir / "meta.json").read_bytes() == before
+
+
+def test_legacy_pin_publication_reports_active_lock_contention(legacy_pin_runner):
+    from agent_flow import artifact
+    from agent_flow.core.workflow_pin import load_run_workflow_definition
+    from agent_flow.core.worktree_isolation import (
+        WorktreeIsolationError, exclusive_file_lease,
+    )
+    from agent_flow.runner import ResumeMode
+
+    runner, _pending, pin = legacy_pin_runner
+    before = (runner.run_dir / "meta.json").read_bytes()
+    with exclusive_file_lease(runner.run_dir.parent / artifact.ACTIVE_LOCK):
+        with pytest.raises(WorktreeIsolationError):
+            runner.run(ResumeMode.RESUME)
+        assert (runner.run_dir / "meta.json").read_bytes() == before
+    with pytest.raises(_PinPublicationFinished):
+        runner.run(ResumeMode.RESUME)
+    recovered = load_run_workflow_definition(
+        runner.kit_root, runner.workflow_name, artifact.read_meta(runner.run_dir),
+    )
+    assert recovered.source_bytes == pin["source_text"].encode("utf-8")
 
 
 def test_red_transition_inspection_is_read_only_and_commit_publishes_evidence(tmp_path, monkeypatch):

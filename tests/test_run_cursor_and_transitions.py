@@ -1296,14 +1296,17 @@ def test_ci_repair_malformed_accounting_blocks_without_reset(tmp_path, monkeypat
 
 @pytest.mark.parametrize("change", ["bytes", "phase_entered_at", "run_id"])
 def test_phase_approval_is_bound_to_artifact_and_attempt(tmp_path, change):
-    from agent_flow.artifact import approve_phase_artifact, pending_phase_approval
+    from agent_flow.artifact import approve_phase_artifact, create_run, pending_phase_approval
 
+    tmp_path = create_run(tmp_path, "default", "Bind approval to the artifact and attempt")
     artifact = tmp_path / "design.md"
     artifact.write_text("approved scope\n", encoding="utf-8")
-    write_meta(tmp_path, {
-        "run_id": "run-1", "current_phase": "design", "phase_entered_at": "first",
+    meta = read_meta(tmp_path)
+    meta.update({
+        "current_phase": "design", "phase_index": 0, "phase_entered_at": "first",
         "phase_approval_request": {"phase_id": "design", "phase_entered_at": "first", "artifact": "design.md"},
     })
+    write_meta(tmp_path, meta)
     token = pending_phase_approval(tmp_path)["token"]
     approve_phase_artifact(tmp_path, token=token)
     assert pending_phase_approval(tmp_path) is None
@@ -1321,17 +1324,20 @@ def test_phase_approval_is_bound_to_artifact_and_attempt(tmp_path, change):
 
 
 def test_existing_pause_artifact_still_requires_explicit_approval(tmp_path, monkeypatch):
-    from agent_flow.artifact import approve_phase_artifact, pending_phase_approval
+    from agent_flow.artifact import approve_phase_artifact, create_run, pending_phase_approval
 
+    tmp_path = create_run(tmp_path, "default", "Bind design approval to the exact artifact")
     phase = Phase(id="design", description="", pause_after=True)
     runner = _runner(tmp_path, [phase])
     runner.profile = {}
     runner.next_command = "agent-flow continue"
     monkeypatch.setattr(runner, "_print_structured_status", lambda **kwargs: None)
-    write_meta(tmp_path, {
-        "run_id": "run-1", "phase_index": 0, "current_phase": "design", "phase_entered_at": "first",
+    meta = read_meta(tmp_path)
+    meta.update({
+        "phase_index": 0, "current_phase": "design", "phase_entered_at": "first",
         "task": "Bind design approval to the exact artifact.",
     })
+    write_meta(tmp_path, meta)
     (tmp_path / "design.md").write_text("approved scope\n", encoding="utf-8")
     assert runner._pause_for_approval(phase)
     assert runner._pause_for_approval(phase)

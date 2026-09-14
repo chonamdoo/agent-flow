@@ -159,6 +159,7 @@ def test_legacy_matching_definition_recovers_exact_obsolete_name(tmp_path: Path)
         "phase_approval": {"nonce": "legacy-approval"},
     }
     run, contents = _evidence(tmp_path, meta)
+    original_approval = copy.deepcopy(meta["phase_approval"])
 
     recovered = load_run_workflow_definition(tmp_path, "custom", meta)
 
@@ -172,7 +173,7 @@ def test_legacy_matching_definition_recovers_exact_obsolete_name(tmp_path: Path)
     path.write_text(SOURCE, encoding="utf-8")
     resumed = load_run_workflow_definition(tmp_path, "custom", bound)
     assert resumed.source_bytes == source.encode("utf-8")
-    assert bound["phase_approval"] == meta["phase_approval"]
+    assert bound["phase_approval"] == original_approval
     path.write_text(source, encoding="utf-8")
     with pytest.raises(ValueError, match="migration required"):
         load_phase_workflow_definition(tmp_path, "custom")

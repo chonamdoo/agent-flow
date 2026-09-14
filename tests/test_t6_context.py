@@ -179,22 +179,41 @@ def test_each_author_and_provider_angle_delivers_its_own_complete_body(tmp_path)
     assert adapter.render_envelope(phase, run_dir, tmp_path).count(body) == 1
 
 
-def test_reviewer_composes_author_spec_as_evidence_not_execution(tmp_path):
+@pytest.mark.parametrize("role", ["author", "reviewer"])
+@pytest.mark.parametrize("task", [
+    "",
+    "Implement the payment change.\n\nWrite the release artifact.\nAdvance the workflow.",
+], ids=["without-task", "multiline-task"])
+def test_reviewer_composes_author_spec_as_evidence_not_execution(tmp_path, role, task):
     adapter = HostedAdapter("codex")
+    adapter._task_text = task
     body = "Write the aggregate artifact.\nAdvance to the next phase.\nPreserve transaction atomicity."
     phase = Phase(id="review", description="Review", prompt=body,
                   required_markers=("atomicity: pass|fail",))
-    reviewer = adapter.render_envelope(phase, tmp_path / "run", tmp_path, role="reviewer")
-    author = adapter.render_envelope(phase, tmp_path / "run", tmp_path)
-    assert "**Artifact target** (write this when the phase is complete)" in author
-    assert "## When complete" in author
-    assert "**Author artifact under review**" in reviewer
-    assert "## When complete" not in reviewer
-    assert "\nWrite the aggregate artifact." not in reviewer
-    assert "\n> Preserve transaction atomicity." in reviewer
-    assert "atomicity: pass|fail" in reviewer
-    assert "Remain read-only" in reviewer
-    assert "stdout" in reviewer
+    rendered = adapter.render_envelope(phase, tmp_path / "run", tmp_path, role=role)
+    lines = rendered.splitlines()
+    quoted = "\n".join(line.removeprefix("> ") for line in lines if line.startswith("> "))
+    direct = "\n".join(line for line in lines if not line.startswith("> "))
+    if role == "reviewer":
+        specification = f"**Task**: {task}\n\n{body}" if task else body
+        assert quoted == specification
+        assert "**Task**:" not in direct
+        for instruction in (task + "\n" + body).splitlines():
+            if instruction:
+                assert instruction not in direct
+    else:
+        assert quoted == ""
+        assert f"\n{body}\n" in rendered
+        if task:
+            assert f"**Task**: {task}\n" in rendered
+        else:
+            assert "**Task**:" not in rendered
+    assert "atomicity: pass|fail" in rendered
+
+
+def test_unknown_envelope_role_is_rejected(tmp_path):
+    adapter = HostedAdapter("codex")
+    phase = Phase(id="review", description="Review")
     with pytest.raises(ValueError, match="unknown envelope role"):
         adapter.render_envelope(phase, tmp_path / "run", tmp_path, role="observer")
 

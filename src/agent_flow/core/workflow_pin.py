@@ -55,10 +55,15 @@ def workflow_pin_metadata(
 
 
 def load_run_workflow_definition(
-    kit_root: Path, name: str, meta: Mapping[str, Any]
+    kit_root: Path, name: str, meta: Mapping[str, Any], *, config_root: Path | None = None
 ) -> PhaseWorkflowDefinition:
     """Recover a verified definition without modifying run or approval records."""
-    validate_safe_name(name, "workflow")
+    if not isinstance(name, str):
+        raise _pin_error(name, "missing or invalid recorded workflow identity")
+    try:
+        validate_safe_name(name, "workflow")
+    except ValueError as exc:
+        raise _pin_error(name, "missing or invalid recorded workflow identity") from exc
     recorded_digest = meta.get("workflow_digest")
     if (
         meta.get("workflow") != name
@@ -70,12 +75,20 @@ def load_run_workflow_definition(
     if "workflow_definition" not in meta:
         if "workflow_definition_digest" in meta:
             raise _pin_error(name, "definition payload is missing")
-        try:
-            definition = load_phase_workflow_definition(
-                kit_root, name, expected_digest=recorded_digest
-            )
-        except (OSError, ValueError, yaml.YAMLError) as exc:
-            raise _pin_error(name, f"legacy definition cannot be recovered: {exc}") from exc
+        definition_roots = [kit_root]
+        if config_root is not None:
+            configured = config_root / ".agent-flow" / "workflows" / f"{name}.yaml"
+            if configured.exists() or configured.is_symlink():
+                definition_roots.insert(0, config_root / ".agent-flow")
+        for index, definition_root in enumerate(definition_roots):
+            try:
+                definition = load_phase_workflow_definition(
+                    definition_root, name, expected_digest=recorded_digest
+                )
+                break
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                if index == len(definition_roots) - 1:
+                    raise _pin_error(name, f"legacy definition cannot be recovered: {exc}") from exc
     else:
         definition = _load_pin(name, meta, recorded_digest)
     RunCursor.from_meta(meta, CursorScope.of(definition))

@@ -444,7 +444,9 @@ class Runner:
             self.workflow_name = meta.get("workflow", workflow)
             self.architecture = meta.get("architecture", architecture)
         self.workflow = (
-            load_run_workflow_definition(self.kit_root, self.workflow_name, meta)
+            load_run_workflow_definition(
+                self.kit_root, self.workflow_name, meta, config_root=self.config_root,
+            )
             if run_dir is not None
             else load_phase_workflow_definition(self.kit_root, self.workflow_name)
         )
@@ -518,14 +520,16 @@ class Runner:
                     ),
                 ):
                     pass
-            locked_definition = load_run_workflow_definition(
-                self.kit_root, self.workflow_name, meta,
-            )
-            if locked_definition.digest != self.workflow.digest:
-                raise WorkflowDefinitionPinError("workflow definition changed before lifecycle locking")
-            if "workflow_definition" not in meta:
-                meta.update(workflow_pin_metadata(locked_definition, workflow=self.workflow_name))
-                write_meta(self.run_dir, meta)
+            with exclusive_file_lease(self.run_dir.parent / ACTIVE_LOCK):
+                meta = read_meta(self.run_dir)
+                locked_definition = load_run_workflow_definition(
+                    self.kit_root, self.workflow_name, meta, config_root=self.config_root,
+                )
+                if locked_definition.digest != self.workflow.digest:
+                    raise WorkflowDefinitionPinError("workflow definition changed before lifecycle locking")
+                if "workflow_definition" not in meta:
+                    meta.update(workflow_pin_metadata(locked_definition, workflow=self.workflow_name))
+                    write_meta(self.run_dir, meta)
             print(f"▶ resuming    : {self.run_dir.name}")
             print(f"▶ task        : {meta.get('task', '')}")
 
@@ -2217,6 +2221,7 @@ class Runner:
             phase.id,
             text,
             run_meta=meta,
+            config_root=self.config_root,
         )
         missing.extend(
             missing_spec_item_evidence(
