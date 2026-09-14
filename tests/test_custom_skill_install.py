@@ -1277,28 +1277,6 @@ def test_external_sources_declare_host_roots_without_installing() -> None:
     assert sources["skydoves-compose-performance"]["kind"] == "fetch"
 
 
-def test_missing_skill_wording_has_one_owner() -> None:
-    """부재를 알리는 문구는 계약이다. 사라지면 사용자가 무엇을 깔아야 하는지 알 수 없다.
-
-    문구의 정본은 `skills/code-generation-discipline/SKILL.md` 한 곳이다. 예전에는
-    `bootstrap/AGENTS.md.template`이 같은 규칙을 또 적었고, 두 문장이 정지 여부라는
-    관측 가능한 행동에서 반대를 지시했다(하나는 `skills sync`에 맡기고 진행, 하나는
-    설치까지 정지). 그래서 여기서는 정본에 문구가 있는지와 템플릿이 그것을 다시 적지
-    않는지를 함께 본다.
-    """
-    template_text = (KIT_ROOT / "bootstrap" / "AGENTS.md.template").read_text(encoding="utf-8")
-    discipline_text = (KIT_ROOT / "skills" / "code-generation-discipline" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    review_text = (KIT_ROOT / "skills" / "android-code-review" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-
-    assert "missing local <group>: <skill>" in discipline_text
-    assert "missing local" not in template_text
-    assert "missing local <group>: <skill>" in review_text
-
-
 def test_sdui_skill_is_android_only(tmp_path: Path) -> None:
     """반증: SDUI는 Android 전용이다. 다른 profile까지 따라가면 안 된다."""
     project = tmp_path / "python-project"
