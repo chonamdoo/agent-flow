@@ -51,10 +51,10 @@ jobs:
           # `-n auto`는 runner의 코어 수를 쓴다. 이 스위트는 시간의 거의 전부가 자식
           # 프로세스 대기라 코어 수만큼 곧바로 줄어든다.
           if [ -n "$PYTEST_K" ]; then
-            PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider -o addopts="" \
+            PYTHONPATH=src python3 -m pytest tests -v -p no:cacheprovider -o addopts="" \
               -n auto --durations=20 -k "$PYTEST_K" 2>&1 | tee pytest.log
           else
-            PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider -o addopts="" \
+            PYTHONPATH=src python3 -m pytest tests -v -p no:cacheprovider -o addopts="" \
               -n auto --durations=20 2>&1 | tee pytest.log
           fi
           status=${PIPESTATUS[0]}

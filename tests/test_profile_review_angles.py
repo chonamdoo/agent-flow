@@ -139,3 +139,14 @@ def test_local_prompt_replacement_cannot_escape_review_template_directory(tmp_pa
         _review_project(tmp_path, [
             {"id": "generalist", "prompt": "../../../outside.md"},
         ])
+
+
+def test_misspelled_local_selector_cannot_become_unconditional(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="path_glob"):
+        _review_project(tmp_path, [
+            {
+                "id": "scoped",
+                "prompt": "templates/_shared/review/types.md",
+                "path_glob": ["apps/main/**"],
+            },
+        ])

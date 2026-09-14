@@ -1379,6 +1379,7 @@ def main(argv: list[str] | None = None) -> int:
                     assert_architecture_selection_skills(
                         profile_root, snapshot, profile=merged_profile_payload(profiles),
                         architecture_root=command_root,
+                        source_root=command_root,
                     )
                 selection = snapshot.selection
                 contract = snapshot.contract
@@ -3607,6 +3608,7 @@ def _run_skills_command(
             task_text=context["task_text"],
             concerns=context["concerns"],
             architecture_root=project_root,
+            source_root=project_root,
             context=resolution_context,
         )
         conditional_markers = phase.required_markers_by_architecture is not None
@@ -3631,6 +3633,7 @@ def _run_skills_command(
                     task_text=context["task_text"],
                     concerns=context["concerns"],
                     architecture_root=project_root,
+                    source_root=project_root,
                     resolution=resolution,
                 )
             )
@@ -3654,6 +3657,7 @@ def _run_skills_command(
                     task_text=context["task_text"],
                     concerns=context["concerns"],
                     architecture_root=project_root,
+                    source_root=project_root,
                     since=context["since"],
                     context=resolution_context,
                     conditional_architecture_markers=conditional_markers,
@@ -3663,10 +3667,10 @@ def _run_skills_command(
             return 0
 
         for skill in resolution.required:
-            state = skill.display_path(root) if skill.exists else f"MISSING ({skill.install_hint})"
+            state = skill.display_path(project_root) if skill.exists else f"MISSING ({skill.install_hint})"
             print(f"required {skill.name}: {state}")
         for skill in resolution.optional:
-            state = skill.display_path(root) if skill.exists else "not installed"
+            state = skill.display_path(project_root) if skill.exists else "not installed"
             print(f"optional {skill.name}: {state}")
         print(f"skill-availability: {'degraded' if resolution.missing else 'pass'}")
         return 0

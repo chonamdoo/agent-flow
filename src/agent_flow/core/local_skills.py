@@ -228,6 +228,7 @@ def phase_skill_resolution(
     concerns: Sequence[str] = (),
     host: str | None = None,
     architecture_root: Path | None = None,
+    source_root: Path | None = None,
     context: ResolutionContext | None = None,
     provider_authority: str = "",
 ) -> SkillResolution:
@@ -244,6 +245,7 @@ def phase_skill_resolution(
         concerns=concerns,
         host=host,
         architecture_root=architecture_root,
+        source_root=source_root,
         context=context,
         provider_authority=provider_authority,
     )
@@ -262,6 +264,7 @@ def local_skill_prompt_block(
     concerns: Sequence[str] = (),
     host: str | None = None,
     architecture_root: Path | None = None,
+    source_root: Path | None = None,
     resolution: SkillResolution | None = None,
     context: ResolutionContext | None = None,
     provider_authority: str = "",
@@ -280,12 +283,13 @@ def local_skill_prompt_block(
         concerns=concerns,
         host=host,
         architecture_root=architecture_root,
+        source_root=source_root,
         context=context,
         provider_authority=provider_authority,
     )
     # 강제 지점과 같은 조건을 쓴다. 둘이 갈라지면 프롬프트가 다시 거짓말한다.
     enforced = skill_markers_enforced(phase_id)
-    block = skill_prompt_block(project_root, resolution, enforced=enforced, role=role)
+    block = skill_prompt_block(source_root or project_root, resolution, enforced=enforced, role=role)
     if not block:
         return ""
     routed_missing = _missing_routed_names(
@@ -313,6 +317,7 @@ def missing_local_skill_markers(
     concerns: Sequence[str] = (),
     since: float | None = None,
     architecture_root: Path | None = None,
+    source_root: Path | None = None,
     context: ResolutionContext | None = None,
     provider_authority: str = "",
     conditional_architecture_markers: bool = False,
@@ -327,6 +332,7 @@ def missing_local_skill_markers(
         task_text=task_text,
         concerns=concerns,
         architecture_root=architecture_root,
+        source_root=source_root,
         context=context,
         provider_authority=provider_authority,
     )

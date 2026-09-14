@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -11,11 +12,11 @@ import yaml
 KIT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(KIT_ROOT / "src"))
 
-from agent_flow import runner as runner_module
+from agent_flow import multi_review, runner as runner_module
 from agent_flow.adapters.hosted import (
     HostedAdapter,
-    _prepare_reviewer_jobs,
     _reviewer_jobs,
+    _run_multi_review_distribution,
     _snapshot_document_scope,
     _write_review_input_snapshot,
     review_document_scope,
@@ -24,7 +25,9 @@ from agent_flow.artifact import read_meta, write_meta
 from agent_flow.core.phase_workflow import parse_phase_workflow_definition
 from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.core.skill_scope import scope_document_ids, scope_names
+from agent_flow.core.worktree_isolation import WorktreeIsolationError
 from agent_flow.runner import Phase, ResumeMode, Runner, _phases_from_definition
+from agent_flow.subprocess_pool import SubprocessResult
 
 
 def _git(root: Path, *args: str) -> str:
@@ -112,7 +115,7 @@ def _assert_documents(prompt: str, selected: set[str]) -> None:
 def _assert_reviewer_documents(root: Path, run_dir: Path, snapshot, selected: set[str], *, adapter=None) -> None:
     adapter = adapter or HostedAdapter("codex")
     phase = Phase(id="final-review", description="Review the captured change", skills=PhaseSkills())
-    jobs = _prepare_reviewer_jobs(
+    jobs, _ = _reviewer_jobs(
         phase, run_dir, root, adapter, review_input=snapshot, providers=("claude", "codex"),
     )
     assert {"generalist", "types"} <= {job.angle_id for job in jobs}
@@ -120,6 +123,41 @@ def _assert_reviewer_documents(root: Path, run_dir: Path, snapshot, selected: se
         for provider in ("claude", "codex"):
             _assert_documents(job.prompt_by_provider[provider], selected)
             assert snapshot.digest in job.prompt_by_provider[provider]
+
+
+def test_legacy_unconditional_scope_preserves_approval_but_contract_changes_block(project):
+    original_contract = (
+        "---\nname: architecture\nrequires_docs:\n"
+        "  - references/common.md\n  - references/unconditional.md\n"
+        "  - references/a.md\n  - references/b.md\n---\nROOT_NORM_BODY\n"
+    )
+    contract = _write(project, "skills/architecture/SKILL.md", original_contract)
+    _git(project, "add", "skills/architecture/SKILL.md")
+    _git(project, "commit", "-m", "Use the pre-scoped unconditional contract")
+    phase = Phase(id="implement", description="Preserve the legacy approval")
+    runner = _pin_runner(project, phase)
+    assert runner._grown_skill_names(phase) == ()
+    meta = read_meta(runner.run_dir)
+    meta["skill_scope"].pop("document_ids")
+    meta["phase_approval"] = {"approved": True}
+    write_meta(runner.run_dir, meta)
+    approved = "# Implementation\n\nverdict: approve\n"
+    artifact = _write(runner.run_dir, "implement.md", approved)
+    _write(project, "apps/b/model.py", "value = 2\n")
+
+    assert runner._architecture_policy_block_reason() is None
+    assert runner._grown_skill_names(phase) == ()
+    assert artifact.read_text(encoding="utf-8") == approved
+    assert read_meta(runner.run_dir)["phase_approval"] == {"approved": True}
+
+    contract.write_text(
+        original_contract.replace(
+            "  - references/b.md\n",
+            "  - path: references/b.md\n    pathGlobs: ['apps/b/**']\n",
+        ),
+        encoding="utf-8",
+    )
+    assert runner._architecture_policy_block_reason() == "architecture_policy_drift"
 
 
 @pytest.mark.parametrize("dirty", [False, True], ids=["committed-only", "committed-and-dirty"])
@@ -220,7 +258,7 @@ def test_reviewers_use_captured_scope_not_author_history_or_later_git_changes(pr
     _write(project, "apps/b/model.py", "value = 1\n")
     shrunk = _write_review_input_snapshot(project, runner.run_dir, "final-review", base_branch="main")
     assert shrunk.document_scope == ("apps/a/model.py",)
-    _assert_reviewer_documents(project, runner.run_dir, shrunk, {"a", "b"}, adapter=HostedAdapter("codex"))
+    _assert_reviewer_documents(project, runner.run_dir, shrunk, {"a"}, adapter=HostedAdapter("codex"))
 
 
 def test_scope_queries_preserve_published_snapshot_after_same_document_code_edits(project):
@@ -281,10 +319,21 @@ def test_unparseable_status_cannot_prove_a_document_subset(status):
     assert _snapshot_document_scope(status, ()) is None
 
 
-def test_reviewer_inspection_does_not_record_delivery_and_provider_history_is_separate(project):
+@pytest.mark.parametrize("failure", ["timeout", "rate-limit", "unavailable", "skipped-only"])
+def test_reviewer_inspection_does_not_record_delivery_and_provider_history_is_separate(
+    project, monkeypatch, failure,
+):
     phase = Phase(id="final-review", description="Review the captured change")
     runner = _pin_runner(project, phase)
+    meta = read_meta(runner.run_dir)
+    meta.update(
+        run_id=runner.run_dir.name,
+        current_phase=phase.id,
+        phase_entered_at="2000-01-01T00:00:00+00:00",
+    )
+    write_meta(runner.run_dir, meta)
     adapter = HostedAdapter("codex")
+    adapter._profile_snapshot = {"branching": {"base": "main"}}
     _write(project, "apps/b/model.py", "value = 2\n")
     earlier = _write_review_input_snapshot(project, runner.run_dir, phase.id, base_branch="main")
     before = (runner.run_dir / "meta.json").read_bytes()
@@ -293,14 +342,47 @@ def test_reviewer_inspection_does_not_record_delivery_and_provider_history_is_se
     )
     _assert_documents(preview[0].prompt_for("codex"), {"b"})
     assert (runner.run_dir / "meta.json").read_bytes() == before
-    _prepare_reviewer_jobs(
-        phase, runner.run_dir, project, adapter, review_input=earlier, providers=("claude",),
+    monkeypatch.setattr(
+        multi_review, "detect_available_clis",
+        lambda: [multi_review.cli_by_name(name) for name in ("claude", "codex")],
     )
+    monkeypatch.setattr(multi_review, "_cli_version", lambda _binary: None)
+    monkeypatch.setattr(multi_review, "assert_managed_hooks_registered", lambda *args: None)
+
+    def fake_run_parallel(jobs, *, should_start=None, on_result=None):
+        results = []
+        for job in jobs:
+            if should_start is not None and not should_start(job):
+                continue
+            if job.job_id.startswith("codex-"):
+                if failure == "skipped-only":
+                    continue
+                result = SubprocessResult(
+                    job_id=job.job_id,
+                    returncode=0,
+                    timed_out=failure == "timeout",
+                    stderr="rate limit" if failure == "rate-limit" else "",
+                    error="reviewer unavailable" if failure == "unavailable" else None,
+                )
+            elif job.job_id == "claude-generalist":
+                result = SubprocessResult(
+                    job_id=job.job_id, returncode=0,
+                    stdout="## Reviewer\nreviewer-source: sub-agent\nverdict: approve\n",
+                )
+            else:
+                result = SubprocessResult(job_id=job.job_id, timed_out=True)
+            results.append(result)
+            if on_result is not None:
+                on_result(result)
+        return results
+
+    monkeypatch.setattr(multi_review, "run_parallel", fake_run_parallel)
+    _run_multi_review_distribution(phase, runner.run_dir, project, adapter)
     _write(project, "apps/b/model.py", "value = 1\n")
     _write(project, "apps/a/model.py", "value = 2\n")
     current = _write_review_input_snapshot(project, runner.run_dir, phase.id, base_branch="main")
 
-    jobs = _prepare_reviewer_jobs(
+    jobs, _ = _reviewer_jobs(
         phase, runner.run_dir, project, adapter, review_input=current, providers=("claude", "codex"),
     )
 
@@ -347,6 +429,33 @@ def test_document_growth_reenters_before_approval_and_shrink_keeps_delivered_doc
     artifact.write_text(_completion("architecture"), encoding="utf-8")
     assert runner._stale_artifact_block_reason(artifact, read_meta(runner.run_dir)) is None
     assert runner._missing_required_markers(phase) == []
+
+
+def test_document_growth_preserves_unreadable_evidence_and_emits_blocked_status(project, capsys):
+    phase = Phase(id="implement", description="Apply existing behavior", artifact="artifacts/implement.md")
+    _write(project, "apps/a/model.py", "value = 2\n")
+    runner = _pin_runner(project, phase)
+    assert runner._grown_skill_names(phase) == ()
+    original = "# Implementation\n\nCompleted before application B changed.\nverdict: approve\n"
+    primary = _write(runner.run_dir, "artifacts/implement.md", original)
+    legacy = runner.run_dir / "implement.md"
+    legacy.write_bytes(b"\xff")
+    _write(project, "apps/b/model.py", "value = 3\n")
+
+    with pytest.raises(WorktreeIsolationError, match="^architecture_policy_unreadable$"):
+        runner._grown_skill_names(phase)
+
+    assert primary.read_text(encoding="utf-8") == original
+    assert legacy.read_bytes() == b"\xff"
+    payload = json.loads(next(
+        line.removeprefix("status_json: ")
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("status_json: ")
+    ))
+    assert payload["status"] == "blocked"
+    assert payload["reason"] == "architecture_policy_unreadable"
+    assert payload["current_phase"] == "implement"
+    assert payload["next_command"] == "agent-flow continue"
 
 
 def _completion(skills: str, architecture_key: str = "architecture-contract", value: str = "applied") -> str:

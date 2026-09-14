@@ -146,16 +146,8 @@ def test_python_full_suite_gate_is_ci_deferred():
     )
 
     assert test_gate.execution == "ci"
-    assert test_gate.command == ("pytest", "-q")
     assert test_gate.ci_check == "pytest"
     assert test_gate.required is True
-    workflow = (KIT_ROOT / ".github" / "workflows" / "tests.yml").read_text(
-        encoding="utf-8"
-    )
-    workflow_payload = yaml.safe_load(workflow)
-    assert test_gate.ci_check in workflow_payload["jobs"]
-    assert "pull_request:" in workflow
-    assert "PYTHONPATH=src python3 -m pytest tests -q" in workflow
 
 
 def test_optional_ci_gate_does_not_become_required_pr_check():

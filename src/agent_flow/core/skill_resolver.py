@@ -350,11 +350,16 @@ def skill_roots(
     profile: dict | None = None,
     host: str | None = None,
     env: dict[str, str] | None = None,
+    source_root: Path | None = None,
 ) -> tuple[SkillRoot, ...]:
     """탐색 순서대로 정렬된 root 목록. project → active host → 나머지 host → shared → profile 선언."""
     resolved_host = active_host(env) if host is None else host
+    repository_root = source_root or project_root
     roots = [
-        SkillRoot(source=source, template=str(project_root / template))
+        SkillRoot(
+            source=source,
+            template=str((repository_root if source == "project" else project_root) / template),
+        )
         for source, template in _DEFAULT_PROJECT_TEMPLATES
     ]
     ordered_hosts = [resolved_host] if resolved_host in _HOST_TEMPLATES else []
@@ -412,6 +417,7 @@ def assert_architecture_selection_skills(
     *,
     profile: dict | None = None,
     architecture_root: Path | None = None,
+    source_root: Path | None = None,
 ) -> None:
     """Validate that selected architecture skills and dependencies are installed."""
     from agent_flow.core.profile_routing import routable_group_skills
@@ -420,7 +426,9 @@ def assert_architecture_selection_skills(
     if selection.mode is ArchitectureMode.PENDING:
         return
     contract_root = architecture_root or project_root
-    roots = active_host_roots(skill_roots(project_root, profile=profile), active_host())
+    roots = active_host_roots(
+        skill_roots(project_root, profile=profile, source_root=source_root), active_host(),
+    )
     contract_name = contract_skill_name(selection)
     catalog = discover_skill_catalog(
         project_root, roots, exclude_names=(contract_name,) if contract_name else (),
@@ -479,6 +487,7 @@ def resolve_phase_skills(
     host: str | None = None,
     env: dict[str, str] | None = None,
     architecture_root: Path | None = None,
+    source_root: Path | None = None,
     context: ResolutionContext | None = None,
     provider_authority: str = "",
 ) -> SkillResolution:
@@ -514,7 +523,9 @@ def resolve_phase_skills(
         entry = catalog_by_name.get(name)
         return entry is None or not entry.architecture_modes or selection.mode.value in entry.architecture_modes
 
-    roots = skill_roots(project_root, profile=profile, host=host, env=env)
+    roots = skill_roots(
+        project_root, profile=profile, host=host, env=env, source_root=source_root,
+    )
     resolved_host = active_host(env) if host is None else host
     resolved_roots = active_host_roots(roots, resolved_host)
     declared = phase_skills or PhaseSkills()

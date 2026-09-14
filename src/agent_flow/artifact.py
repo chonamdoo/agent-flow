@@ -723,6 +723,7 @@ def _missing_completion_markers(
             concerns=run_concerns(meta),
             since=phase_since,
             architecture_root=project,
+            source_root=project,
             conditional_architecture_markers=contract.required_markers_by_architecture is not None,
         )
     )

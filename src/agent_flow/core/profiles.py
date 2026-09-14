@@ -643,6 +643,12 @@ def _validate_override_review_angles(angles: object, *, source: Path) -> None:
         raise ValueError(f"profile override review_angles must be a list of mappings: {source}")
     for index, angle in enumerate(angles):
         context = f"profile override review_angles[{index}]"
+        unsupported = sorted(
+            str(key) for key in angle
+            if key not in ("id", "prompt", "requires", "task_terms", "path_globs")
+        )
+        if unsupported:
+            raise ValueError(f"{context} has unsupported keys: {', '.join(unsupported)}: {source}")
         for field in ("id", "prompt", "requires"):
             if field == "requires" and field not in angle:
                 continue

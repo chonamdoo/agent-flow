@@ -61,6 +61,7 @@ from agent_flow.multi_review import (
     distribute,
     eligible_reviewer_names,
     review_job_id,
+    reviewer_provider_error,
     reviewer_result_error,
     run_distribution,
 )
@@ -254,7 +255,7 @@ def _run_multi_review_distribution(
         phase.id,
         base_branch=_profile_base_branch(adapter),
     )
-    jobs = _prepare_reviewer_jobs(
+    jobs, documents = _reviewer_jobs(
         phase,
         run_dir,
         project_root,
@@ -275,6 +276,24 @@ def _run_multi_review_distribution(
         config_root=adapter.config_root_or(project_root),
     )
     _write_review_results(distribution, execution.outcomes)
+    delivered_jobs = {
+        result.job_id
+        for result in execution.results
+        if reviewer_provider_error(result) is None
+    }
+    delivered_documents = {
+        provider: identities
+        for provider, identities in documents.items()
+        if identities and any(
+            review_job_id(provider, job) in delivered_jobs
+            for job in distribution.by_cli.get(provider, ())
+        )
+    }
+    if delivered_documents:
+        meta = read_meta(run_dir)
+        for provider, identities in delivered_documents.items():
+            record_reviewer_documents(meta, phase.id, provider, identities)
+        write_meta(run_dir, meta)
     return distribution, execution
 
 
@@ -336,13 +355,20 @@ class _ReviewInputObservation:
     document_scope: tuple[str, ...] | None
 
 
+class _ReviewInputUnavailable(WorktreeIsolationError):
+    """Publication limits only; observation and scope-integrity failures remain fatal."""
+
+
 def review_document_scope(
     project_root: Path, run_dir: Path, *, base_branch: str | None = None,
 ) -> tuple[str, ...] | None:
     """Observe review scope without publishing or replacing reviewer evidence."""
-    return _capture_review_input(
-        project_root, run_dir, "", base_branch=base_branch,
-    ).document_scope
+    try:
+        return _capture_review_input(
+            project_root, run_dir, "", base_branch=base_branch,
+        ).document_scope
+    except _ReviewInputUnavailable:
+        return None
 
 
 def _write_review_input_snapshot(
@@ -405,6 +431,7 @@ def _capture_review_input(
             ),
         )
     status = git_safe(
+        "-c", "core.quotepath=true",
         "status",
         "--porcelain=v1",
         "--untracked-files=all",
@@ -414,6 +441,7 @@ def _capture_review_input(
         max_output_bytes=observation_max_bytes,
     )
     diff = git_safe(
+        "-c", "core.quotepath=true",
         "diff",
         "--no-ext-diff",
         "--no-color",
@@ -438,6 +466,7 @@ def _capture_review_input(
             (
                 "git diff --cached",
                 git_safe(
+                    "-c", "core.quotepath=true",
                     "diff",
                     "--cached",
                     "--no-ext-diff",
@@ -453,6 +482,7 @@ def _capture_review_input(
             (
                 "git diff",
                 git_safe(
+                    "-c", "core.quotepath=true",
                     "diff",
                     "--no-ext-diff",
                     "--no-color",
@@ -500,7 +530,7 @@ def _capture_review_input(
     # 기준점을 못 잡아 아무것도 못 담은 것은 리뷰를 통과시키면 안 된다.
     if not status_lines and not has_diff:
         if baseline.base_unresolved:
-            raise WorktreeIsolationError(
+            raise _ReviewInputUnavailable(
                 "could not precompute reviewer input: no diff is available "
                 f"against declared base `{base_branch}` ({baseline.detail}); "
                 "reviewers would receive no evidence"
@@ -532,7 +562,7 @@ def _capture_review_input(
     content = "\n".join(header) + "\n\n" + "\n\n".join(sections) + "\n"
     encoded = content.encode("utf-8")
     if len(encoded) > _REVIEW_INPUT_MAX_BYTES:
-        raise WorktreeIsolationError(
+        raise _ReviewInputUnavailable(
             "could not precompute reviewer input: "
             f"snapshot exceeds {_REVIEW_INPUT_MAX_BYTES} bytes"
         )
@@ -905,28 +935,6 @@ def _angle_requirement_met(
     if requirement == ARCHITECTURE_CONTRACT_REQUIREMENT:
         return contract_satisfied
     return requirement in required
-
-def _prepare_reviewer_jobs(
-    phase: Phase,
-    run_dir: Path,
-    project_root: Path,
-    adapter: Adapter,
-    *,
-    review_input: ReviewInputSnapshot,
-    providers: Sequence[str],
-) -> list[ReviewerJob]:
-    """Prompt inspection must not claim delivery in run metadata."""
-    jobs, documents = _reviewer_jobs(
-        phase, run_dir, project_root, adapter,
-        review_input=review_input, providers=providers,
-    )
-    if documents:
-        meta = read_meta(run_dir)
-        for provider, identities in documents.items():
-            record_reviewer_documents(meta, phase.id, provider, identities)
-        write_meta(run_dir, meta)
-    return jobs
-
 
 
 def _reviewer_jobs(

@@ -112,6 +112,7 @@ class Adapter(ABC):
             profile=self._profile_snapshot, changed_files=self._changed_files,
             task_text=self._task_text, concerns=self._concerns, host=skill_host,
             architecture_root=project_root, context=self._resolution_context,
+            source_root=project_root,
             document_scope=document_scope,
             required_document_ids=required_document_ids,
             provider_authority=json.dumps((
@@ -160,6 +161,7 @@ class Adapter(ABC):
             concerns=self._concerns,
             host=skill_host,
             architecture_root=project_root,
+            source_root=project_root,
             resolution=resolution,
             role=role,
         )

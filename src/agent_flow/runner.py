@@ -2109,6 +2109,7 @@ class Runner:
             task_text=str(meta.get("task", "")),
             concerns=run_concerns(meta),
             architecture_root=self.project_root,
+            source_root=self.project_root,
             context=self._phase_resolution_context(),
             document_scope=self._phase_document_scope(phase),
             required_document_ids=scope_document_ids(meta, phase.id),
@@ -2139,6 +2140,13 @@ class Runner:
         if any(item.startswith("document:") for item in added) and artifact.exists():
             reason = self._invalidate_architecture_evidence_for_reentry(phase)
             if reason is not None:
+                print(
+                    f"\n═══ phase '{phase.id}' is blocked: {reason}. "
+                    f"{self._architecture_remediation(reason)} ═══"
+                )
+                self._print_structured_status(
+                    status="blocked", phase=phase, reason=reason,
+                )
                 raise WorktreeIsolationError(reason)
             meta = read_meta(self.run_dir)
             merge_scope(meta, phase.id, names, document_ids=documents)
@@ -2248,6 +2256,7 @@ class Runner:
                 concerns=run_concerns(meta),
                 since=_meta_timestamp(meta.get("phase_entered_at")),
                 architecture_root=self.project_root,
+                source_root=self.project_root,
                 context=self._phase_resolution_context(),
                 conditional_architecture_markers=phase.required_markers_by_architecture is not None,
             )
@@ -2380,7 +2389,10 @@ class Runner:
                 scope = changed_files(self.project_root)
                 host = getattr(self, "_adapter_name", None)
                 roots = active_host_roots(
-                    skill_roots(self.config_root, profile=self.profile, host=host),
+                    skill_roots(
+                        self.config_root, profile=self.profile, host=host,
+                        source_root=self.project_root,
+                    ),
                     active_host() if host is None else host,
                 )
                 catalog = discover_skill_catalog(self.config_root, roots)
@@ -2428,6 +2440,7 @@ class Runner:
                     profile=self.profile, changed_files=scope,
                     task_text=str(meta.get("task", "")), concerns=run_concerns(meta),
                     host=host, architecture_root=self.project_root,
+                    source_root=self.project_root,
                     context=self._phase_resolution_context(),
                     provider_authority=json.dumps((self._adapter_name, tuple(hosts))),
                 )

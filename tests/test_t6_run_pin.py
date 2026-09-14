@@ -756,6 +756,7 @@ def test_cli_skills_inspection_uses_current_checkout_not_newest_sibling_run(
     tmp_path, monkeypatch, capsys,
 ):
     from agent_flow.cli import main
+    from agent_flow.adapters.generic import GenericAdapter
     from agent_flow.core.worktrees import create_worktree, plan_worktree, worktree_runtime_root
     from tests.test_cli import _init_git_repo
 
@@ -764,6 +765,12 @@ def test_cli_skills_inspection_uses_current_checkout_not_newest_sibling_run(
     (leader_run / "active").unlink()
     own = create_worktree(root=project, plan=plan_worktree(root=project, name="own"))
     foreign = create_worktree(root=project, plan=plan_worktree(root=project, name="foreign"))
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "  - id: green\n", "  - id: green\n    artifact: green.md\n",
+        ),
+        encoding="utf-8",
+    )
     own_definition = load_phase_workflow_definition(kit, "custom")
     own_state = worktree_runtime_root(root=project, name=own.name)
     own_run = create_run(
@@ -781,25 +788,119 @@ def test_cli_skills_inspection_uses_current_checkout_not_newest_sibling_run(
     )
     for run in (own_run, foreign_run):
         meta = read_meta(run)
-        meta.update(current_phase="explore", phase_index=0)
+        meta.update(
+            current_phase="green" if run == own_run else "explore",
+            phase_index=1 if run == own_run else 0,
+        )
         write_meta(run, meta)
-    scoped = project / "skills" / "checkout-guide" / "SKILL.md"
+    scoped = own.path / "skills" / "checkout-guide" / "SKILL.md"
     scoped.parent.mkdir(parents=True)
     scoped.write_text(
         "---\nname: checkout-guide\ndescription: Checkout-scoped guide.\n"
         "workflowPhases: [green]\npathGlobs: [checkout-only.txt]\n---\nCheckout instructions.\n",
         encoding="utf-8",
     )
+    edited = own.path / "skills" / "pinned-guide" / "SKILL.md"
+    edited.write_text(
+        "---\nname: pinned-guide\ndescription: Edited checkout guide.\n"
+        "requires: [checkout-dependency, installed-guide]\n---\n"
+        "Use the checkout-specific policy, not the leader policy.\n",
+        encoding="utf-8",
+    )
+    dependency = own.path / "skills" / "checkout-dependency" / "SKILL.md"
+    dependency.parent.mkdir(parents=True)
+    dependency.write_text(
+        "---\nname: checkout-dependency\ndescription: Checkout dependency.\n---\n"
+        "Apply the checkout dependency policy.\n",
+        encoding="utf-8",
+    )
+    installed = project / ".agent-flow" / "skills" / "installed-guide" / "SKILL.md"
+    private = project / ".agent-flow" / "local-skills" / "private-guide" / "SKILL.md"
+    for document in (installed, private):
+        document.parent.mkdir(parents=True)
+        document.write_text(
+            f"---\nname: {document.parent.name}\ndescription: Leader-owned guidance.\n"
+            "workflowPhases: [green]\n---\nKeep the leader-installed policy.\n",
+            encoding="utf-8",
+        )
+    expected = {
+        "pinned-guide", "checkout-guide", "checkout-dependency", "installed-guide", "private-guide",
+    }
+    incomplete = own.path / "inspection.md"
+    complete = own.path / "inspection-complete.md"
+    complete.write_text(
+        incomplete.read_text(encoding="utf-8").replace(
+            "project-local-skills-used: pinned-guide",
+            "project-local-skills-used: " + ", ".join(sorted(expected)),
+        ),
+        encoding="utf-8",
+    )
+    (own_run / "green.md").write_text(incomplete.read_text(encoding="utf-8"), encoding="utf-8")
     (own.path / "checkout-only.txt").write_text("changed\n", encoding="utf-8")
     monkeypatch.chdir(own.path)
-    before = {run: (run / "meta.json").read_bytes() for run in (own_run, foreign_run)}
+    before = {
+        path: path.read_bytes()
+        for run in (leader_run, own_run, foreign_run)
+        for path in run.rglob("*") if path.is_file()
+    }
     for root in (own.path, project):
-        assert main(["skills", "resolve", "--root", str(root), "--phase", "green"]) == 0
+        options = ["--root", str(root), "--phase", "green"]
+        assert main(["skills", "resolve", *options]) == 0
         output = capsys.readouterr().out
-        assert "required pinned-guide:" in output
-        assert "required checkout-guide:" in output
+        for name in expected:
+            assert f"required {name}:" in output
+        assert "required pinned-guide: skills/pinned-guide/SKILL.md" in output
+        assert f"required installed-guide: {installed}" in output
+        assert f"required private-guide: {private}" in output
         assert "fresh-guide" not in output
-    assert {run: (run / "meta.json").read_bytes() for run in before} == before
+        assert main(["skills", "prompt", *options]) == 0
+        prompt = capsys.readouterr().out
+        assert "Edited checkout guide." in prompt
+        assert str(edited) in prompt
+        assert str(installed) in prompt
+        assert str(private) in prompt
+        assert str(project / "skills" / "pinned-guide" / "SKILL.md") not in prompt
+        assert main(["skills", "markers", *options, "--artifact", str(incomplete)]) == 0
+        missing = json.loads(capsys.readouterr().out)
+        used = next(marker for marker in missing if marker.startswith("project-local-skills-used:"))
+        assert set(used.split(": ", 1)[1].split(", ")) == expected
+        assert main(["skills", "markers", *options, "--artifact", str(complete)]) == 0
+        assert json.loads(capsys.readouterr().out) == []
+    runner = Runner(own.path, state_root=own_state, config_root=project, run_dir=own_run)
+    phase = next(phase for phase in runner.phases if phase.id == "green")
+    resolution = runner._required_skill_resolution(phase, read_meta(own_run))
+    assert {skill.name for skill in resolution.available_required} == expected
+    adapter = GenericAdapter()
+    adapter._config_root = project
+    adapter._changed_files = ("checkout-only.txt",)
+    envelope = adapter.render_envelope(phase, own_run, own.path)
+    assert "Edited checkout guide." in envelope
+    assert str(edited) in envelope
+    assert str(installed) in envelope
+    assert str(private) in envelope
+    find_active_run(own_state).print_status(config_root=project, project_root=own.path)
+    status = json.loads(next(
+        line.removeprefix("status_json: ")
+        for line in capsys.readouterr().out.splitlines() if line.startswith("status_json: ")
+    ))
+    assert status["reason"] == "missing_completion_markers"
+    assert used in status["missing_completion_markers"]
+    assert {
+        path: path.read_bytes()
+        for run in (leader_run, own_run, foreign_run)
+        for path in run.rglob("*") if path.is_file()
+    } == before
+    edited.unlink()
+    assert main(["skills", "resolve", "--root", str(own.path), "--phase", "green"]) == 0
+    deleted = capsys.readouterr().out
+    assert "required pinned-guide: MISSING" in deleted
+    assert "checkout-dependency" not in deleted
+    assert (project / "skills" / "pinned-guide" / "SKILL.md").is_file()
+    assert {
+        path: path.read_bytes()
+        for run in (leader_run, own_run, foreign_run)
+        for path in run.rglob("*") if path.is_file()
+    } == before
     (own_run / "active").unlink()
     source.write_text(
         source.read_text(encoding="utf-8").replace("fresh-guide", "unbound-guide"),
