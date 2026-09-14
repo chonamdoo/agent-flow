@@ -1540,10 +1540,14 @@ _SOURCE_SWAPS = {
         "fs.mkdirSync(source);\n"
         "fs.writeFileSync(source + '/child.txt', 'swapped child');",
     ),
+    # 교체는 rename으로 한다. 같은 경로에 unlink 뒤 다시 만들면 방금 해제된 inode
+    # 번호를 즉시 재사용하는 파일시스템(tmpfs, ext4)에서 신원 검사가 통과해, 테스트가
+    # 플랫폼에 따라 갈린다. 원본이 살아 있는 동안 새 링크를 만들어야 번호가 겹치지 않는다.
     "symlink-body": (
         "link", "readlinkSync",
-        "fs.unlinkSync(source);\n"
-        "fs.symlinkSync('swapped-target', source);",
+        "const next = project + '/.agent-flow/templates/next-link';\n"
+        "fs.symlinkSync('swapped-target', next);\n"
+        "fs.renameSync(next, source);",
     ),
 }
 
