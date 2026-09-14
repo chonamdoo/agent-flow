@@ -1488,13 +1488,13 @@ def test_recovery_preservation_failure_leaves_current_and_backup_untouched(
     manifest = (recovery / "manifest.json").read_bytes()
     result = _architecture_node(tmp_path, """
 import fs from 'node:fs';
-const read = fs.readFileSync;
-fs.readFileSync = (target, ...args) => {
+const open = fs.openSync;
+fs.openSync = (target, ...args) => {
   if (process.env.FAILURE === 'read'
       && target === process.env.PROJECT + '/.agent-flow/templates/user.txt') {
     throw new Error('injected preservation read failure');
   }
-  return read(target, ...args);
+  return open(target, ...args);
 };
 if (process.env.FAILURE === 'flush') {
   fs.fsyncSync = () => { throw new Error('injected preservation flush failure'); };
@@ -1508,6 +1508,169 @@ catch (error) { console.error(error.message); process.exitCode = 2; }
     assert target.read_text(encoding="utf-8") == "post-crash edit"
     assert (recovery / ".agent-flow/templates/user.txt").read_text(encoding="utf-8") == "before install"
     assert (recovery / "manifest.json").read_bytes() == manifest
+
+
+# 각 케이스는 교체가 끼어드는 자리를 하나만 고른다. 파일은 source open 직전(판정과
+# 읽기 사이), 디렉터리는 자식 열거 직후, symlink는 본문을 읽은 직후다.
+_SOURCE_SWAPS = {
+    # 판정 직후 rename으로 교체된다. 다른 에이전트 세션이 host config를 정상 갱신하는
+    # 방식이 바로 이것이라, 내용과 mode가 같은 inode에서 와야 한다.
+    "renamed-file": (
+        "user.txt", "openSync",
+        "const next = project + '/.agent-flow/templates/next';\n"
+        "fs.writeFileSync(next, 'after swap');\n"
+        "fs.chmodSync(next, 0o600);\n"
+        "fs.renameSync(next, source);",
+    ),
+    "symlink": (
+        "user.txt", "openSync",
+        "fs.unlinkSync(source);\n"
+        "fs.symlinkSync(project + '/outside.txt', source);",
+    ),
+    "fifo": (
+        "user.txt", "openSync",
+        "fs.unlinkSync(source);\n"
+        "cp.execFileSync('mkfifo', [source]);",
+    ),
+    # 같은 이름의 자식을 남겨 둔다. 자식이 사라지면 ENOENT로 끝나 신원 재확인까지
+    # 도달하지 못하고, 이 케이스가 지키려는 분기가 덮이지 않는다.
+    "directory": (
+        "nested", "readdirSync",
+        "fs.renameSync(source, source + '-moved');\n"
+        "fs.mkdirSync(source);\n"
+        "fs.writeFileSync(source + '/child.txt', 'swapped child');",
+    ),
+    "symlink-body": (
+        "link", "readlinkSync",
+        "fs.unlinkSync(source);\n"
+        "fs.symlinkSync('swapped-target', source);",
+    ),
+}
+
+
+@pytest.mark.parametrize("swap", sorted(_SOURCE_SWAPS))
+def test_recovery_snapshot_reads_the_inode_it_judged(tmp_path: Path, swap: str) -> None:
+    """Verify that a source replaced after the type check cannot be copied blindly."""
+    name, hook, swap_body = _SOURCE_SWAPS[swap]
+    templates = tmp_path / ".agent-flow/templates"
+    templates.mkdir(parents=True)
+    (tmp_path / "outside.txt").write_text("outside content\n", encoding="utf-8")
+    source = templates / name
+    if name == "nested":
+        source.mkdir()
+        (source / "child.txt").write_text("child", encoding="utf-8")
+    elif name == "link":
+        source.symlink_to("original-target")
+    else:
+        source.write_text("before swap", encoding="utf-8")
+        source.chmod(0o644)
+    result = _architecture_node(tmp_path, """
+import fs from 'node:fs';
+import cp from 'node:child_process';
+const project = process.env.PROJECT;
+const source = project + '/.agent-flow/templates/' + process.env.SOURCE_NAME;
+let swapped = false;
+const swapSource = () => {
+  if (swapped) return;
+  swapped = true;
+""" + swap_body + """
+};
+const hooked = fs[process.env.SWAP_HOOK];
+fs[process.env.SWAP_HOOK] = (target, ...args) => {
+  // open은 호출 전에, 열거·readlink는 호출 후에 교체한다. 닫으려는 창이 그 자리다.
+  if (target === source && process.env.SWAP_HOOK === 'openSync') swapSource();
+  const value = hooked(target, ...args);
+  if (target === source && process.env.SWAP_HOOK !== 'openSync') swapSource();
+  return value;
+};
+try {
+  const tx = installer.prepareArchitectureInstall(project, ['--architecture-mode', 'pending']);
+  const backup = project + '/.agent-flow/install-recovery/.agent-flow/templates/' + process.env.SOURCE_NAME;
+  console.log(JSON.stringify({
+    swapped,
+    content: fs.readFileSync(backup, 'utf8'),
+    mode: (fs.lstatSync(backup).mode & 0o777).toString(8),
+  }));
+  tx.commit();
+} catch (error) {
+  console.error(error.message);
+  process.exitCode = 2;
+}
+""", SOURCE_NAME=name, SWAP_HOOK=hook)
+    if swap == "renamed-file":
+        # 내용은 교체된 inode에서, mode도 같은 inode에서. 예전 mode(644)가 남으면
+        # rollback이 사용자가 가진 적 없는 조합을 되돌려 쓴다.
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout.splitlines()[0]) == {
+            "swapped": True, "content": "after swap", "mode": "600",
+        }
+        return
+    assert result.returncode == 2, result.stdout + result.stderr
+    expected = "ELOOP" if swap == "symlink" else (
+        "changed type while it was read" if swap == "fifo" else "changed while it was read"
+    )
+    assert expected in result.stderr
+    assert not (tmp_path / ".agent-flow/install-recovery/manifest.json").exists()
+    assert not (tmp_path / ".agent-flow.project.yaml").exists()
+
+
+# 복사 **전** `statSync`만 거짓 소유자를 준다. 기록이 그 값을 담고 있으면 백업 내용을
+# 읽은 inode가 아니라 판정 전의 경로를 신뢰한 것이다.
+_HOST_OWNER_PROBE = """
+import fs from 'node:fs';
+const statSync = fs.statSync;
+fs.statSync = (target, ...args) => {
+  const stat = statSync(target, ...args);
+  if (String(target).endsWith('hooks.json')) {
+    return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, {
+      uid: stat.uid + 1000, gid: stat.gid + 1000,
+    });
+  }
+  return stat;
+};
+const tx = installer.prepareArchitectureInstall(process.env.PROJECT, ['--architecture-mode', 'pending']);
+const manifest = JSON.parse(
+  fs.readFileSync(process.env.PROJECT + '/.agent-flow/install-recovery/manifest.json', 'utf8'),
+);
+console.log(JSON.stringify(manifest.entries
+  .filter(entry => entry.hostOwner !== undefined)
+  .map(entry => ({relative: entry.relative, uid: entry.hostOwner.uid, gid: entry.hostOwner.gid}))));
+tx.commit();
+"""
+
+
+def _recorded_host_owners(result: subprocess.CompletedProcess[str]) -> list[dict]:
+    assert result.returncode == 0, result.stderr
+    recorded = json.loads(result.stdout.splitlines()[0])
+    for entry in recorded:
+        assert (entry["uid"], entry["gid"]) == (os.getuid(), os.getgid()), entry
+    return recorded
+
+
+def test_recovery_records_the_owner_of_the_inode_it_copied(tmp_path: Path) -> None:
+    """Verify that a host config entry records the owner the copy observed."""
+    host = tmp_path / ".codex"
+    host.mkdir()
+    (host / "hooks.json").write_text('{"hooks": true}\n', encoding="utf-8")
+    recorded = _recorded_host_owners(_architecture_node(tmp_path, _HOST_OWNER_PROBE))
+    # 대소문자를 구분하지 않는 파일시스템에서는 `.Codex` 별칭 항목도 함께 잡힌다.
+    # 여기서 보는 것은 소유자 출처이므로 별칭 유무에 판정을 걸지 않는다.
+    assert ".codex/hooks.json" in {entry["relative"] for entry in recorded}
+
+
+def test_recovery_records_the_copied_owner_for_aliased_host_configs(tmp_path: Path) -> None:
+    """Verify that the deduped alias entry records the copied owner too."""
+    probe = tmp_path / "CaseProbe"
+    probe.write_text("probe", encoding="utf-8")
+    if not (tmp_path / "caseprobe").exists():
+        pytest.skip("host config aliases collide only on a case-insensitive filesystem")
+    probe.unlink()
+    host = tmp_path / ".Codex"
+    host.mkdir()
+    (host / "hooks.json").write_text('{"hooks": true}\n', encoding="utf-8")
+    recorded = _recorded_host_owners(_architecture_node(tmp_path, _HOST_OWNER_PROBE))
+    # 두 별칭이 같은 파일이므로 두 번째 항목은 copier의 중복 처리 분기를 밟는다.
+    assert {entry["relative"] for entry in recorded} == {".Codex/hooks.json", ".codex/hooks.json"}
 
 
 @pytest.mark.parametrize("link_change", ["retargeted", "broken", "new-link", "parent-retargeted"])
