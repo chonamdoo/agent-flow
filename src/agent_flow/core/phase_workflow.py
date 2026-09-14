@@ -134,6 +134,7 @@ class RunCursor:
         meta: Mapping[str, Any],
         scope: CursorScope,
     ) -> RunCursor:
+        """Validate persisted cursor fields against the pinned workflow scope."""
         raw_index = meta.get("phase_index", 0)
         if raw_index is None:
             raw_index = 0
@@ -335,6 +336,7 @@ def parse_phase_workflow_definition(
     kit_owned: bool = False,
     pinned_legacy: bool = False,
 ) -> PhaseWorkflowDefinition:
+    """Parse verified workflow bytes while retaining their identity and authority."""
     path = source
     digest = hashlib.sha256(source_bytes).hexdigest()
     raw = yaml.safe_load(source_bytes.decode("utf-8")) or {}

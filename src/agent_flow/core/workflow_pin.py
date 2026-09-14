@@ -20,6 +20,8 @@ from agent_flow.core.security import validate_safe_name
 
 
 class WorkflowDefinitionPinError(WorkflowDriftError):
+    """Report a pin that cannot safely authorize run continuation."""
+
     pass
 
 
@@ -98,6 +100,7 @@ def load_run_workflow_definition(
 def _load_pin(
     name: str, meta: Mapping[str, Any], recorded_digest: str
 ) -> PhaseWorkflowDefinition:
+    """Validate and parse the workflow definition bound into run metadata."""
     payload = meta["workflow_definition"]
     expected_keys = {
         "schema_version", "workflow", "source", "source_text", "kit_owned", "pinned_legacy"
@@ -136,11 +139,13 @@ def _load_pin(
 
 
 def _pin_digest(payload: dict[str, Any]) -> str:
+    """Bind a workflow payload to a canonical JSON digest."""
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _pin_error(name: str, reason: str) -> WorkflowDefinitionPinError:
+    """Build the fail-closed recovery error shared by pin validation paths."""
     return WorkflowDefinitionPinError(
         f"workflow {name}: {reason}. Restore this run's original definition and "
         "binding from backup, or start a new run for the current definition. "

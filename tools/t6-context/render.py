@@ -12,10 +12,12 @@ import time
 
 
 def identity(content: bytes) -> dict:
+    """Return the byte length and SHA-256 identity of captured content."""
     return {"sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content)}
 
 
 def delivered_bytes(prompt: bytes, bodies: list[bytes]) -> dict:
+    """Measure exact normative-body delivery and duplicate bytes in a prompt."""
     counts = [(body, prompt.count(body)) for body in dict.fromkeys(bodies) if body]
     return {"raw_input_bytes": len(prompt),
             "delivered_normative_bytes": sum(len(body) * count for body, count in counts),
@@ -23,6 +25,7 @@ def delivered_bytes(prompt: bytes, bodies: list[bytes]) -> dict:
 
 
 def validate_case_paths(case: dict) -> None:
+    """Reject fixture file paths that escape their synthetic project."""
     for name in case["files"]:
         relative = PurePosixPath(name)
         if relative.is_absolute() or ".." in relative.parts or "\\" in name:
@@ -42,12 +45,14 @@ def validate_case_paths(case: dict) -> None:
 
 
 def document_path(project: Path, path: Path) -> Path:
+    """Resolve a selected document while enforcing the project boundary."""
     if not path.resolve().is_relative_to(project.resolve()):
         raise ValueError(f"normative document escapes project: {path}")
     return path
 
 
 def required_reference_paths(project: Path, case: dict) -> tuple[Path, ...]:
+    """Resolve every declared reference required by a fixture case."""
     skills = project / "skills"
     paths = []
     for name in case.get("required_references", []):
@@ -59,6 +64,7 @@ def required_reference_paths(project: Path, case: dict) -> tuple[Path, ...]:
 
 
 def render(source: Path, project: Path, case: dict, provider: str, output: Path) -> None:
+    """Render immutable author, reviewer, and semantic measurement inputs for one case."""
     validate_case_paths(case)
     required_reference_paths(source, case)
     required_reference_paths(project, case)
@@ -175,6 +181,7 @@ def render(source: Path, project: Path, case: dict, provider: str, output: Path)
 
 
 def main() -> int:
+    """Parse standalone renderer arguments and render one fixture case."""
     parser = argparse.ArgumentParser()
     parser.add_argument("source", type=Path)
     parser.add_argument("project", type=Path)

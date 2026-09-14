@@ -33,6 +33,7 @@ SOURCE = (
 
 
 def _source(tmp_path: Path, content: str = SOURCE) -> Path:
+    """Write a workflow source fixture and return its path."""
     path = tmp_path / "workflows" / "custom.yaml"
     path.parent.mkdir(parents=True)
     path.write_text(content, encoding="utf-8")
@@ -40,6 +41,7 @@ def _source(tmp_path: Path, content: str = SOURCE) -> Path:
 
 
 def _meta(definition: PhaseWorkflowDefinition) -> dict[str, Any]:
+    """Build valid run metadata bound to a workflow definition."""
     return {
         "run_id": "existing-run",
         "workflow": "custom",
@@ -52,6 +54,7 @@ def _meta(definition: PhaseWorkflowDefinition) -> dict[str, Any]:
 
 
 def _evidence(tmp_path: Path, meta: dict[str, Any]) -> tuple[Path, dict[str, bytes]]:
+    """Create approval evidence whose bytes must remain unchanged."""
     run = tmp_path / "run"
     run.mkdir()
     contents = {
@@ -65,10 +68,12 @@ def _evidence(tmp_path: Path, meta: dict[str, Any]) -> tuple[Path, dict[str, byt
 
 
 def _assert_evidence(run: Path, contents: dict[str, bytes]) -> None:
+    """Assert that workflow-pin operations preserved every evidence byte."""
     assert {path.name: path.read_bytes() for path in run.iterdir()} == contents
 
 
 def test_in_flight_pin_preserves_full_definition_and_old_evidence(tmp_path: Path) -> None:
+    """Pin the full in-flight definition without changing prior evidence."""
     path = _source(tmp_path)
     definition = load_phase_workflow_definition(tmp_path, "custom")
     meta = _meta(definition)
@@ -95,6 +100,7 @@ def test_in_flight_pin_preserves_full_definition_and_old_evidence(tmp_path: Path
 
 
 def test_valid_pin_does_not_require_original_source_to_exist(tmp_path: Path) -> None:
+    """Load a valid pin even after its original source disappears."""
     path = _source(tmp_path)
     definition = load_phase_workflow_definition(tmp_path, "custom")
     meta = _meta(definition)
@@ -113,6 +119,7 @@ def test_valid_pin_does_not_require_original_source_to_exist(tmp_path: Path) -> 
 def test_invalid_pin_never_falls_back_or_mutates_old_evidence(
     tmp_path: Path, corruption: str
 ) -> None:
+    """Fail closed on invalid pins without fallback or evidence mutation."""
     _source(tmp_path)
     meta = _meta(load_phase_workflow_definition(tmp_path, "custom"))
     if corruption == "payload":
@@ -136,6 +143,7 @@ def test_invalid_pin_never_falls_back_or_mutates_old_evidence(
 
 
 def test_pin_cannot_reanchor_an_invalid_cursor(tmp_path: Path) -> None:
+    """Prevent a valid definition pin from reanchoring an invalid cursor."""
     _source(tmp_path)
     meta = _meta(load_phase_workflow_definition(tmp_path, "custom"))
     meta["phase_index"] = 0
@@ -148,6 +156,7 @@ def test_pin_cannot_reanchor_an_invalid_cursor(tmp_path: Path) -> None:
 
 
 def test_legacy_matching_definition_recovers_exact_obsolete_name(tmp_path: Path) -> None:
+    """Recover an obsolete legacy workflow only when its exact definition matches."""
     source = SOURCE.replace("clean-architecture-core", "clean-architecture")
     path = _source(tmp_path, source)
     meta = {
@@ -183,6 +192,7 @@ def test_legacy_matching_definition_recovers_exact_obsolete_name(tmp_path: Path)
 def test_unrecoverable_legacy_run_cannot_acquire_new_approval(
     tmp_path: Path, recorded_digest: str | None
 ) -> None:
+    """Deny new approval when a legacy run's definition cannot be recovered."""
     _source(tmp_path)
     meta = {
         "workflow": "custom",
@@ -202,6 +212,7 @@ def test_unrecoverable_legacy_run_cannot_acquire_new_approval(
 def test_pinned_kit_authority_survives_upgrade_without_granting_custom_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Preserve pinned kit authority across upgrades without granting it to custom workflows."""
     path = _source(tmp_path)
     monkeypatch.setattr(
         "agent_flow.core.phase_workflow._packaged_workflow_path", lambda name: path
@@ -233,6 +244,7 @@ def test_pinned_kit_authority_survives_upgrade_without_granting_custom_authority
 def test_matching_checksums_do_not_authorize_invalid_or_obsolete_new_pins(
     tmp_path: Path, source: str
 ) -> None:
+    """Do not let matching checksums authorize invalid or newly obsolete pins."""
     _source(tmp_path)
     meta = _meta(load_phase_workflow_definition(tmp_path, "custom"))
     payload = meta["workflow_definition"]

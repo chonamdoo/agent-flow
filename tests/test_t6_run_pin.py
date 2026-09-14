@@ -13,6 +13,7 @@ from agent_flow.runner import Runner
 
 
 def _workflow(root: Path, *, marker: str, artifact: str) -> Path:
+    """Write a workflow fixture with a caller-selected marker and artifact."""
     path = root / "workflows" / "custom.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -25,6 +26,7 @@ def _workflow(root: Path, *, marker: str, artifact: str) -> Path:
 
 
 def test_status_keeps_pinned_completion_contract_after_source_changes(tmp_path, monkeypatch, capsys):
+    """Keep status bound to the pinned completion contract after source changes."""
     kit = tmp_path / "kit"
     _workflow(kit, marker="reviewed", artifact="original.md")
     definition = load_phase_workflow_definition(kit, "custom")
@@ -51,6 +53,7 @@ def test_status_keeps_pinned_completion_contract_after_source_changes(tmp_path, 
 
 
 def test_run_rejects_definition_for_another_workflow_before_publication(tmp_path):
+    """Reject a mismatched workflow definition before publishing run state."""
     kit = tmp_path / "kit"
     _workflow(kit, marker="reviewed", artifact="original.md")
     definition = load_phase_workflow_definition(kit, "custom")
@@ -64,6 +67,7 @@ def test_run_rejects_definition_for_another_workflow_before_publication(tmp_path
 
 
 def test_cli_status_reports_invalid_pin_without_rewriting_evidence(tmp_path, capsys):
+    """Report an invalid pin without rewriting existing evidence."""
     from agent_flow.cli import main
 
     run = create_run(tmp_path, "development", "Inspect ownership")
@@ -89,6 +93,7 @@ def test_cli_status_reports_invalid_pin_without_rewriting_evidence(tmp_path, cap
 
 
 def test_missing_legacy_digest_keeps_diagnostics_without_authorizing_resume(tmp_path, capsys):
+    """Retain legacy diagnostics without authorizing resume when the digest is absent."""
     from agent_flow.cli import main
 
     run = create_run(tmp_path, "development", "Preserve original approval")
@@ -137,6 +142,7 @@ def test_missing_legacy_digest_keeps_diagnostics_without_authorizing_resume(tmp_
 
 
 def test_runner_constructor_keeps_pinned_phases_after_kit_changes(tmp_path, monkeypatch):
+    """Construct the runner from pinned phases after the installed kit changes."""
     kit = tmp_path / "kit"
     source = _workflow(kit, marker="reviewed", artifact="original.md")
     source.write_text(
@@ -176,6 +182,7 @@ def test_runner_constructor_keeps_pinned_phases_after_kit_changes(tmp_path, monk
 def test_runner_constructor_rejects_changed_legacy_definition_without_rewriting_evidence(
     tmp_path, monkeypatch
 ):
+    """Reject changed legacy definitions without rewriting their evidence."""
     kit = tmp_path / "kit"
     source = _workflow(kit, marker="reviewed", artifact="original.md")
     definition = load_phase_workflow_definition(kit, "custom")
@@ -196,6 +203,7 @@ def test_runner_constructor_rejects_changed_legacy_definition_without_rewriting_
 
 
 def test_runner_constructor_preserves_corrupt_metadata(tmp_path):
+    """Preserve corrupt metadata when runner construction fails closed."""
     run = create_run(tmp_path, "development", "Inspect ownership")
     meta_path = run / "meta.json"
     corrupt = b'{"run_id": "r1", "task": "ship it", "gate_nonce": "n1", "phase_index": 0'
@@ -208,6 +216,7 @@ def test_runner_constructor_preserves_corrupt_metadata(tmp_path):
 
 
 def test_retired_workflow_drift_flag_fails_before_approval_or_state_mutation(tmp_path, capsys):
+    """Reject the retired drift flag before approval or run-state mutation."""
     from agent_flow.cli import main
 
     run = create_run(tmp_path, "development", "Inspect ownership")
@@ -236,6 +245,7 @@ def test_retired_workflow_drift_flag_fails_before_approval_or_state_mutation(tmp
 
 @pytest.mark.parametrize("workflow", ["missing", "missing-legacy", None, 17, "", "../development"])
 def test_malformed_workflow_identity_blocks_status_and_approval(tmp_path, capsys, workflow):
+    """Block status continuation and approval for malformed workflow identities."""
     from agent_flow.artifact import approve_phase_artifact, pending_phase_approval
     from agent_flow.cli import main
 
@@ -287,6 +297,7 @@ def test_malformed_workflow_identity_blocks_status_and_approval(tmp_path, capsys
 
 @pytest.mark.parametrize("surface", ["approval", "continue"])
 def test_invalid_pin_cannot_record_pending_approval(tmp_path, capsys, surface):
+    """Prevent every approval surface from recording against an invalid pin."""
     from agent_flow.artifact import approve_phase_artifact, pending_phase_approval
     from agent_flow.cli import main
 
@@ -322,6 +333,7 @@ def test_invalid_pin_cannot_record_pending_approval(tmp_path, capsys, surface):
 
 
 def _configured_legacy_run(tmp_path, monkeypatch, *, private_state=False, kit_bound=False):
+    """Create a configured legacy run with optional private or kit-bound state."""
     config = tmp_path / "config"
     project = tmp_path / "checkout" if private_state else config
     project.mkdir(parents=True)
@@ -353,6 +365,7 @@ def _configured_legacy_run(tmp_path, monkeypatch, *, private_state=False, kit_bo
 def test_configured_legacy_custom_status_command_resumes_exact_definition(
     tmp_path, monkeypatch, capsys
 ):
+    """Resume a configured legacy custom run only from its exact definition."""
     from agent_flow.adapters.hosted import HostedAdapter
     from agent_flow.cli import main
 
@@ -387,6 +400,7 @@ def test_configured_legacy_custom_status_command_resumes_exact_definition(
 def test_configured_legacy_custom_in_private_state_uses_explicit_context(
     tmp_path, monkeypatch, capsys
 ):
+    """Use explicit configuration context for private-state legacy custom runs."""
     from agent_flow.artifact import approve_phase_artifact, pending_phase_approval
 
     config, project, state, kit, source, run = _configured_legacy_run(
@@ -428,6 +442,7 @@ def test_configured_legacy_custom_in_private_state_uses_explicit_context(
 def test_changed_configured_legacy_custom_recovers_exact_kit_definition(
     tmp_path, monkeypatch, capsys, original_location, replacement
 ):
+    """Recover the exact kit definition when configured legacy custom source changes."""
     from agent_flow.cli import main
 
     config, project, state, kit, source, run = _configured_legacy_run(
@@ -470,6 +485,7 @@ def test_changed_configured_legacy_custom_recovers_exact_kit_definition(
 def test_changed_configured_legacy_custom_blocks_when_neither_digest_matches(
     tmp_path, monkeypatch, capsys, replacement, packaged
 ):
+    """Block changed legacy custom runs when no candidate digest matches."""
     from agent_flow.artifact import approve_phase_artifact, pending_phase_approval
     from agent_flow.cli import main
 

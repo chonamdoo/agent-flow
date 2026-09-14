@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_module(name: str, path: Path):
+    """Load a measurement helper directly from its repository path."""
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -21,11 +22,13 @@ def load_module(name: str, path: Path):
 
 @pytest.fixture
 def harness(monkeypatch):
+    """Load the T6 measurement harness with its evaluation imports available."""
     monkeypatch.syspath_prepend(str(ROOT / "evals"))
     return load_module("t6_measurement", ROOT / "tools/t6-context/run.py")
 
 
 def test_accounting_counts_utf8_deliveries_not_selected_paths():
+    """Count delivered UTF-8 bodies rather than merely selected document paths."""
     renderer = load_module("t6_render", ROOT / "tools/t6-context/render.py")
     body = "규칙: 경계를 지킨다.\n".encode()
     prompt = b"header\n" + body + b"footer\n"
@@ -41,6 +44,7 @@ def test_accounting_counts_utf8_deliveries_not_selected_paths():
 
 
 def test_provider_usage_missing_is_not_zero(harness):
+    """Represent missing provider usage as unavailable instead of measured zero."""
     missing = harness.usage_from("codex", [{"type": "turn.completed"}])
     assert missing["input_tokens"] == "unavailable"
     measured = harness.usage_from("codex", [{"type": "turn.completed", "usage": {
@@ -53,6 +57,7 @@ def test_provider_usage_missing_is_not_zero(harness):
 
 
 def test_claude_aggregate_avoids_assistant_double_counting(harness):
+    """Avoid double-counting repeated Claude assistant usage events."""
     events = [
         {"type": "assistant", "message": {"id": "one", "usage": {"input_tokens": 4}}},
         {"type": "assistant", "message": {"id": "one", "usage": {"input_tokens": 4}}},
@@ -68,6 +73,7 @@ def test_claude_aggregate_avoids_assistant_double_counting(harness):
 
 
 def test_partial_or_inconsistent_usage_cannot_invent_uncached_tokens(harness):
+    """Refuse to derive uncached tokens from partial or inconsistent usage."""
     partial = harness.usage_from("claude", [{"type": "result", "usage": {"input_tokens": 4}}])
     assert partial["input_tokens"] == "unavailable"
     assert partial["uncached_tokens"] == "unavailable"
@@ -78,6 +84,7 @@ def test_partial_or_inconsistent_usage_cannot_invent_uncached_tokens(harness):
 
 
 def test_scoring_keeps_failure_categories_distinct(harness):
+    """Keep execution, fixture, response, and oracle failures distinguishable."""
     from skill_tasks import score_review
 
     case = {"expected_verdict": "request-changes", "expected_findings": [
@@ -87,6 +94,7 @@ def test_scoring_keeps_failure_categories_distinct(harness):
         {"file": "change.py", "line": 3, "reason": "The domain policy imports the runtime container."}]}
     execution = {"call_count": 1, "return_code": 0, "timed_out": False}
     def score(answer=response, run=execution, unchanged=True):
+        """Score one synthetic response under explicit execution and fixture state."""
         return harness.score(case, answer, run, fixture_unchanged=unchanged, scorer=score_review)
 
     assert score()["status"] == "matched-oracle"
@@ -106,6 +114,7 @@ def test_scoring_keeps_failure_categories_distinct(harness):
 
 
 def test_equal_failed_verdicts_are_not_parity_or_savings(harness):
+    """Do not claim parity or savings when both equal verdicts are failed measurements."""
     failed = {"score": {"status": "provider-failure"}, "response": {"verdict": "approve"}}
     result = harness.compare(failed, failed)
     assert result["semantic_parity"] == "unavailable"
@@ -120,6 +129,7 @@ def test_equal_failed_verdicts_are_not_parity_or_savings(harness):
 
 
 def test_modified_fixture_cannot_be_silently_rescored(harness, tmp_path):
+    """Reject silent rescoring after an immutable fixture changes."""
     source = ROOT / "tools/t6-context/fixtures"
     (tmp_path / "manifest.json").write_bytes((source / "manifest.json").read_bytes())
     content = json.loads((source / "cases.json").read_text(encoding="utf-8"))
@@ -130,6 +140,7 @@ def test_modified_fixture_cannot_be_silently_rescored(harness, tmp_path):
 
 
 def test_unsafe_archive_never_writes_outside_snapshot(harness, tmp_path):
+    """Prevent unsafe baseline members from escaping the snapshot directory."""
     import io
     import tarfile
 
@@ -144,6 +155,7 @@ def test_unsafe_archive_never_writes_outside_snapshot(harness, tmp_path):
 
 
 def test_standalone_renderer_rejects_escape_before_materialization(tmp_path):
+    """Reject fixture path escape before the standalone renderer creates files."""
     renderer = load_module("t6_render", ROOT / "tools/t6-context/render.py")
     project = tmp_path / "project"
     case = {"files": {"safe.py": "pass\n", "../escaped.py": "pass\n"}}
@@ -157,6 +169,7 @@ def test_standalone_renderer_rejects_escape_before_materialization(tmp_path):
     "../outside.md", "/tmp/t6-outside.md", "guide\\..\\outside.md", "C:/outside.md",
 ])
 def test_standalone_renderer_rejects_reference_escape_before_imports(tmp_path, reference):
+    """Reject reference escape before the renderer imports project code."""
     renderer = load_module("t6_render", ROOT / "tools/t6-context/render.py")
     project = tmp_path / "project"
     case = {"files": {"safe.py": "pass\n"}, "required_references": [reference]}
@@ -171,6 +184,7 @@ def test_standalone_renderer_rejects_reference_escape_before_imports(tmp_path, r
     {"required_references": [None]},
 ])
 def test_fixture_reference_schema_is_explicit(harness, tmp_path, fields):
+    """Require fixture references to use the explicit supported schema."""
     case = {"id": "invalid-reference-schema", "files": {"safe.py": "pass\n"}, **fields}
     cases = tmp_path / "cases.json"
     harness.save(cases, [case])
@@ -185,6 +199,7 @@ def test_fixture_reference_schema_is_explicit(harness, tmp_path, fields):
 
 @pytest.mark.parametrize("escape_skills_only", [False, True])
 def test_reference_symlink_escape_is_rejected_before_materialization(tmp_path, escape_skills_only):
+    """Reject reference symlinks that escape before materialization starts."""
     renderer = load_module("t6_render", ROOT / "tools/t6-context/render.py")
     source = tmp_path / "source"
     skills = source / "skills"
@@ -200,6 +215,7 @@ def test_reference_symlink_escape_is_rejected_before_materialization(tmp_path, e
 
 @pytest.fixture
 def local_reference_case(tmp_path):
+    """Create a local-contract fixture with one declared normative reference."""
     cases = json.loads((ROOT / "tools/t6-context/fixtures/cases.json").read_text(encoding="utf-8"))
     case = next(case for case in cases if case["id"] == "local-framework-allowed")
     reference = "architecture/references/ownership.md"
@@ -210,6 +226,7 @@ def local_reference_case(tmp_path):
 
 
 def render_reference_case(tmp_path, case, output):
+    """Render a reference fixture into an isolated output directory."""
     case_file = tmp_path / "case.json"
     case_file.write_text(json.dumps(case), encoding="utf-8")
     return subprocess.run(
@@ -221,6 +238,7 @@ def render_reference_case(tmp_path, case, output):
 
 
 def test_declared_reference_contributes_selected_normative_body(tmp_path, local_reference_case):
+    """Include a declared reference body in selected normative input accounting."""
     case, reference, output = local_reference_case
     result = render_reference_case(tmp_path, case, output)
     assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
@@ -232,6 +250,7 @@ def test_declared_reference_contributes_selected_normative_body(tmp_path, local_
 
 
 def test_reference_assertion_cannot_select_an_unresolved_document(tmp_path, local_reference_case):
+    """Prevent fixture assertions from selecting unresolved documents."""
     case, reference, output = local_reference_case
     unselected = "architecture/references/unselected.md"
     case["files"]["skills/" + unselected] = "An unselected rule must not become normative.\n"
@@ -243,6 +262,7 @@ def test_reference_assertion_cannot_select_an_unresolved_document(tmp_path, loca
 
 
 def test_fixture_and_response_unicode_survive_ascii_locale(harness, tmp_path):
+    """Preserve fixture and response Unicode under an ASCII process locale."""
     fixtures = tmp_path / "fixtures"
     fixtures.mkdir()
     cases = fixtures / "cases.json"
@@ -279,6 +299,7 @@ print(json.dumps([cases[0]["task"], response["findings"][0]["reason"]]))
 
 @pytest.mark.parametrize("identifier", ["../outside", "/tmp/t6-outside"])
 def test_unsafe_fixture_id_is_rejected_before_output_creation(harness, tmp_path, identifier):
+    """Reject unsafe fixture identifiers before creating measurement output."""
     fixtures = tmp_path / "fixtures"
     fixtures.mkdir()
     cases = fixtures / "cases.json"
@@ -299,6 +320,7 @@ def test_unsafe_fixture_id_is_rejected_before_output_creation(harness, tmp_path,
 
 @pytest.mark.parametrize("symlink_escape", [False, True])
 def test_runner_rejects_reference_escape_before_snapshot_creation(harness, tmp_path, symlink_escape):
+    """Reject reference escape before the measurement runner snapshots sources."""
     fixtures = tmp_path / "fixtures"
     fixtures.mkdir()
     source = tmp_path / "source"

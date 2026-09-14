@@ -485,6 +485,7 @@ def _marker_instruction(
     routed_missing: Sequence[str] = (),
     role: str = "author",
 ) -> str:
+    """Describe evidence markers for the author or reviewer receiving the prompt."""
     expected = ", ".join(skill.name for skill in resolution.available_required) or "n/a"
     availability = "degraded" if resolution.missing else "pass"
     if not enforced:

@@ -820,6 +820,7 @@ def _reviewer_jobs(
     review_input: ReviewInputSnapshot | None = None,
     providers: Sequence[str] | None = None,
 ) -> list[ReviewerJob]:
+    """Build provider-specific reviewer jobs from a single captured input."""
     providers = REVIEW_CLI_NAMES if providers is None else tuple(providers)
     adapter._provider_authority = tuple(providers)
     adapter._provider_launch_authority = yaml.safe_dump((

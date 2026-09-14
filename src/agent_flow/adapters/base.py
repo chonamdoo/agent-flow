@@ -51,6 +51,7 @@ class Adapter(ABC):
     name: str = "base"
 
     def __init__(self) -> None:
+        """Initialize adapter state shared across rendered phases."""
         self._profile_snapshot: dict[str, Any] = {}
         self._profile_id: str = "generic"
         self._architecture: str = "default"
@@ -98,6 +99,7 @@ class Adapter(ABC):
     def phase_resolution(
         self, phase: "Phase", project_root: Path, *, skill_host: str | None = None,
     ) -> SkillResolution:
+        """Resolve the immutable skill context used to render one phase."""
         return phase_skill_resolution(
             self.config_root_or(project_root), phase.id,
             phase_skills=getattr(phase, "skills", None),
@@ -225,6 +227,7 @@ class Adapter(ABC):
         return ""
 
     def _render_completion_gate_block(self, phase: "Phase", *, role: str = "author") -> str:
+        """Render the completion contract that applies to the selected role."""
         markers = getattr(phase, "required_markers", ())
         if not markers:
             return ""

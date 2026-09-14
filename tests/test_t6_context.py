@@ -29,11 +29,13 @@ from agent_flow.runner import Phase
 
 @pytest.fixture(autouse=True)
 def isolated_host(tmp_path, monkeypatch):
+    """Isolate host and home-based discovery state for every context test."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("AGENT_FLOW_HOST", "codex")
 
 
 def skill(root, name, body):
+    """Create a minimal skill document under the supplied project root."""
     path = root / "skills" / name / "SKILL.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
@@ -41,6 +43,7 @@ def skill(root, name, body):
 
 
 def local_contract(root, body, references=()):
+    """Install a local architecture contract with optional required references."""
     declared = f"requires_docs: [{', '.join(references)}]\n" if references else ""
     path = skill(root, "architecture", f"---\nname: contract\n{declared}---\n{body}")
     (root / ".agent-flow.project.yaml").write_text(
@@ -51,6 +54,7 @@ def local_contract(root, body, references=()):
 
 
 def yaml_profile(root):
+    """Create a profile containing typed YAML values that must survive resolution."""
     path = root / ".agent-flow" / "profiles" / "yaml-values.yaml"
     path.parent.mkdir(parents=True)
     path.write_text(
@@ -66,6 +70,7 @@ def yaml_profile(root):
 
 
 def resolve(root, context=None, **kwargs):
+    """Resolve implementation-phase skills with the context-test defaults."""
     return resolve_phase_skills(
         project_root=root, phase_id="implement", host="codex",
         context=context, **kwargs,
@@ -73,10 +78,12 @@ def resolve(root, context=None, **kwargs):
 
 
 def required_read_paths(prompt):
+    """Extract ordered skill paths from explicit prompt read instructions."""
     return [line.split("`")[1] for line in prompt.splitlines() if line.startswith("- Read `")]
 
 
 def test_exact_bodies_merge_all_document_identities_not_similar_text(tmp_path):
+    """Require deduplication by exact body while retaining every document identity."""
     payload = b"Do not cross the ownership boundary.\n"
     documents = (
         NormativeDocument(ContractDocument("one", "a", len(payload)), payload,
@@ -96,6 +103,7 @@ def test_exact_bodies_merge_all_document_identities_not_similar_text(tmp_path):
 
 
 def test_required_references_keep_digests_and_all_phase_profile_dependency_routes(tmp_path):
+    """Preserve reference digests and every phase, profile, and dependency route."""
     payload = "Every mutation requires authorization.\n"
     first = skill(tmp_path, "first", payload)
     second = skill(tmp_path, "second", payload)
@@ -132,6 +140,7 @@ def test_required_references_keep_digests_and_all_phase_profile_dependency_route
 
 @pytest.mark.parametrize("role", ["author", "reviewer"])
 def test_local_contract_and_equal_reference_paths_deliver_once(tmp_path, role):
+    """Deliver identical local-contract and reference bodies exactly once."""
     path = local_contract(tmp_path, "LOCAL_EXACT_BODY\n", ("references/one.md", "references/two.md"))
     payload = path.read_bytes()
     (path.parent / "references").mkdir()
@@ -159,6 +168,7 @@ def test_local_contract_and_equal_reference_paths_deliver_once(tmp_path, role):
 
 
 def test_each_author_and_provider_angle_delivers_its_own_complete_body(tmp_path):
+    """Give each author and provider-angle prompt one complete normative body."""
     body = "AUTHOR_AND_REVIEWER_NORM_BODY\n"
     local_contract(tmp_path, body)
     ordinary = skill(tmp_path, "ordinary", "REFERENCE_ONLY_AUTHOR_REVIEWER_NORM\n")
@@ -185,6 +195,7 @@ def test_each_author_and_provider_angle_delivers_its_own_complete_body(tmp_path)
     "Implement the payment change.\n\nWrite the release artifact.\nAdvance the workflow.",
 ], ids=["without-task", "multiline-task"])
 def test_reviewer_composes_author_spec_as_evidence_not_execution(tmp_path, role, task):
+    """Keep the author's specification quoted as reviewer evidence, not executable instructions."""
     adapter = HostedAdapter("codex")
     adapter._task_text = task
     body = "Write the aggregate artifact.\nAdvance to the next phase.\nPreserve transaction atomicity."
@@ -212,6 +223,7 @@ def test_reviewer_composes_author_spec_as_evidence_not_execution(tmp_path, role,
 
 
 def test_unknown_envelope_role_is_rejected(tmp_path):
+    """Reject envelope roles outside the author and reviewer contract."""
     adapter = HostedAdapter("codex")
     phase = Phase(id="review", description="Review")
     with pytest.raises(ValueError, match="unknown envelope role"):
@@ -219,6 +231,7 @@ def test_unknown_envelope_role_is_rejected(tmp_path):
 
 
 def test_same_timestamp_content_change_invalidates_resolution(tmp_path):
+    """Invalidate captured resolution when bytes change without an mtime change."""
     path = skill(tmp_path, "contract", "old obligation\n")
     context = ResolutionContext()
     args = {"phase_skills": PhaseSkills(required=("contract",))}
@@ -234,6 +247,7 @@ def test_same_timestamp_content_change_invalidates_resolution(tmp_path):
 
 
 def test_clean_reference_manifest_invalidates_unchanged_selection(tmp_path):
+    """Invalidate reused selection when a Clean reference manifest changes."""
     path = skill(tmp_path, "clean-architecture-core", "Core obligation.\n")
     ref = path.parent / "references" / "contract.md"
     ref.parent.mkdir()
@@ -256,6 +270,7 @@ def test_clean_reference_manifest_invalidates_unchanged_selection(tmp_path):
 
 
 def test_profile_scope_provider_authority_and_roots_invalidate_reuse(tmp_path):
+    """Bind cached resolutions to profile scope, provider authority, and roots."""
     skill(tmp_path, "one", "First norm\n")
     skill(tmp_path, "two", "Second norm\n")
     context = ResolutionContext()
@@ -276,6 +291,7 @@ def test_profile_scope_provider_authority_and_roots_invalidate_reuse(tmp_path):
 
 
 def test_provider_host_does_not_borrow_another_authority_reference(tmp_path):
+    """Prevent one provider host from borrowing another host's reference authority."""
     home = Path.home()
     for provider in ("claude", "codex"):
         path = home / f".{provider}" / "skills" / "contract" / "SKILL.md"
@@ -298,12 +314,14 @@ def test_provider_host_does_not_borrow_another_authority_reference(tmp_path):
 
 
 def test_ordinary_dependencies_and_references_use_same_captured_bytes(tmp_path, monkeypatch):
+    """Use one immutable capture for ordinary dependencies and references."""
     original = "---\nrequires: [original-dependency]\n---\nORIGINAL_RULE\n"
     path = skill(tmp_path, "contract", original)
     skill(tmp_path, "original-dependency", "DEPENDENCY_RULE\n")
     original_discover = skill_resolver.discover_skill_catalog
 
     def replace_after_capture(*args, **kwargs):
+        """Replace the source only after the resolver has captured its bytes."""
         catalog = original_discover(*args, **kwargs)
         path.write_text("---\nrequires: [replacement]\n---\nREPLACEMENT_RULE\n", encoding="utf-8")
         return catalog
@@ -322,6 +340,7 @@ def test_ordinary_dependencies_and_references_use_same_captured_bytes(tmp_path, 
 
 
 def test_cache_hit_keeps_install_recovery_boundary_live(tmp_path):
+    """Keep install-recovery validation active even when resolution hits the cache."""
     skill(tmp_path, "contract", "Required norm\n")
     context = ResolutionContext()
     args = {"phase_skills": PhaseSkills(required=("contract",))}
@@ -334,6 +353,7 @@ def test_cache_hit_keeps_install_recovery_boundary_live(tmp_path):
 
 
 def test_obsolete_custom_required_alias_is_not_silently_migrated(tmp_path):
+    """Fail closed instead of silently migrating an obsolete custom required alias."""
     skill(tmp_path, "clean-architecture", "Legacy norm\n")
     with pytest.raises(ArchitectureContractError, match="obsolete required skill"):
         resolve(tmp_path, phase_skills=PhaseSkills(required=("clean-architecture",)))
@@ -344,6 +364,7 @@ def test_obsolete_custom_required_alias_is_not_silently_migrated(tmp_path):
 
 
 def test_external_domains_and_terms_retain_every_selected_route(tmp_path):
+    """Retain every route selected through external domains and task terms."""
     path = Path.home() / ".codex" / "skills" / "audit" / "SKILL.md"
     path.parent.mkdir(parents=True)
     path.write_text("---\ndescription: security ownership audit\n---\nExternal norm.\n", encoding="utf-8")
@@ -371,6 +392,7 @@ def test_external_domains_and_terms_retain_every_selected_route(tmp_path):
 @pytest.mark.parametrize("role", ["author", "reviewer"])
 @pytest.mark.parametrize("alias_kind", ["symlink", "copy"])
 def test_equal_required_files_have_one_read_and_keep_both_routes(tmp_path, role, alias_kind):
+    """Emit one read for equal required files while preserving both provenance routes."""
     path = skill(tmp_path, "original", "SHARED_FILE_NORM\n")
     alias = tmp_path / "skills" / "another" / "SKILL.md"
     alias.parent.mkdir()
@@ -402,6 +424,7 @@ def test_equal_required_files_have_one_read_and_keep_both_routes(tmp_path, role,
 @pytest.mark.parametrize("mode", ["local", "pending", "clean"])
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "oversized"])
 def test_unselected_unsafe_clean_catalog_does_not_block_other_work(tmp_path, mode, unsafe_kind):
+    """Ignore unsafe Clean catalog entries that the active work did not select."""
     path = Path.home() / ".codex" / "skills" / "clean-architecture-core" / "SKILL.md"
     path.parent.mkdir(parents=True)
     if unsafe_kind == "symlink":
@@ -435,6 +458,7 @@ def test_unselected_unsafe_clean_catalog_does_not_block_other_work(tmp_path, mod
 
 
 def test_same_template_retains_source_routes_without_changing_precedence(tmp_path):
+    """Retain source routes for equal templates without changing precedence."""
     path = skill(tmp_path, "contract", "ONE_BODY_MULTIPLE_AUTHORITIES\n")
     template = str(tmp_path / "skills" / "{skill}" / "SKILL.md")
     profile = {"skill_sources": [
@@ -455,6 +479,7 @@ def test_same_template_retains_source_routes_without_changing_precedence(tmp_pat
 
 
 def test_same_template_host_routes_remain_distinct_and_host_scoped(tmp_path, monkeypatch):
+    """Keep equal-template host routes distinct and scoped to their host."""
     authority = tmp_path / "authority"
     skill(authority, "contract", "HOST_SCOPED_SHARED_PATH_NORM\n")
     template = str(authority / "skills" / "{skill}" / "SKILL.md")
@@ -480,6 +505,7 @@ def test_same_template_host_routes_remain_distinct_and_host_scoped(tmp_path, mon
 
 
 def test_yaml_profile_values_resolve_and_date_to_string_invalidates_capture(tmp_path):
+    """Preserve YAML value types and invalidate capture when a date becomes a string."""
     profile_path = yaml_profile(tmp_path)
     skill(tmp_path, "ordinary", "YAML_PROFILE_REQUIRED_NORM\n")
     profile = load_profile_payload("yaml-values", tmp_path)
@@ -508,6 +534,7 @@ def test_yaml_profile_values_resolve_and_date_to_string_invalidates_capture(tmp_
 
 
 def test_reviewer_launch_authority_accepts_yaml_values_and_preserves_date_type(tmp_path, monkeypatch):
+    """Preserve typed YAML values when reviewer launch authority is captured."""
     profile_path = yaml_profile(tmp_path)
     monkeypatch.setenv("AGENT_FLOW_PROFILE", "yaml-values")
     local_contract(tmp_path, "YAML_LAUNCH_LOCAL_NORM\n")

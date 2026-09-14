@@ -649,6 +649,7 @@ def phase_review_rejected(
     run_meta: Mapping[str, object] | None = None,
     config_root: Path | None = None,
 ) -> bool:
+    """Return whether bound review evidence rejects the selected phase."""
     contract = _phase_contract(run_path, workflow, phase_id, config_root=config_root)
     if not contract.multi_review:
         return False
@@ -758,6 +759,7 @@ def _parse_timestamp(value: object) -> float | None:
 def _required_markers(
     run_path: Path, workflow: str, phase_id: str, *, config_root: Path | None = None
 ) -> tuple[str, ...]:
+    """Load required markers from the run's verified workflow definition."""
     return _phase_contract(
         run_path, workflow, phase_id, config_root=config_root,
     ).required_markers
@@ -766,6 +768,7 @@ def _required_markers(
 def _phase_contract(
     run_path: Path, workflow: str, phase_id: str, *, config_root: Path | None = None
 ) -> PhaseArtifactContract:
+    """Resolve a phase contract without falling back from an invalid run pin."""
     meta = read_meta(run_path)
     if (run_path / ACTIVE_MARKER).is_file() or meta.get("workflow") or "workflow_definition" in meta:
         definition = load_run_workflow_definition(

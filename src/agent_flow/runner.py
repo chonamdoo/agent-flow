@@ -1546,6 +1546,7 @@ class Runner:
         return CursorScope.of(self.workflow, [phase.id for phase in self.phases])
 
     def _run_cursor(self, meta: dict[str, Any]) -> RunCursor:
+        """Validate run metadata against this runner's pinned workflow scope."""
         return RunCursor.from_meta(meta, self._cursor_scope())
 
     def _fix_collector_targets(self) -> set[str]:
@@ -2068,6 +2069,7 @@ class Runner:
         return True
 
     def _phase_resolution_context(self) -> ResolutionContext:
+        """Reuse one skill-input snapshot across phase resolutions in a run."""
         context = getattr(self, "_resolution_context", None)
         if context is None:
             context = self._resolution_context = ResolutionContext()

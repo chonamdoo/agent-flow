@@ -21,19 +21,23 @@ SOURCE_PATHS = ("src", "skills", "templates", "evals", "bin", "lib", "pyproject.
 
 
 def digest(data: bytes) -> str:
+    """Return the SHA-256 identity of immutable measurement bytes."""
     return hashlib.sha256(data).hexdigest()
 
 
 def save(path: Path, value: object) -> None:
+    """Write deterministic UTF-8 JSON evidence with a trailing newline."""
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def tree_identity(root: Path) -> dict[str, str]:
+    """Capture content identities for every source file in a snapshot."""
     return {path.relative_to(root).as_posix(): digest(path.read_bytes())
             for path in sorted(root.rglob("*")) if path.is_file() and "__pycache__" not in path.parts}
 
 
 def load_cases(directory: Path, *, source: Path | None = None) -> list[dict]:
+    """Load and validate the immutable fixture corpus and its references."""
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     content = (directory / "cases.json").read_bytes()
     if digest(content) != manifest["cases_sha256"]:
@@ -56,6 +60,7 @@ def load_cases(directory: Path, *, source: Path | None = None) -> list[dict]:
 
 
 def extract_baseline(archive: Path, destination: Path) -> None:
+    """Extract only repository source members from a safe baseline archive."""
     destination.mkdir(parents=True)
     with tarfile.open(archive) as bundle:
         for member in bundle.getmembers():
@@ -81,6 +86,7 @@ def extract_baseline(archive: Path, destination: Path) -> None:
 
 
 def snapshot_after(source: Path, destination: Path) -> None:
+    """Copy the selected post-change source set into measurement evidence."""
     destination.mkdir(parents=True)
     for name in SOURCE_PATHS:
         path = source / name
@@ -92,6 +98,7 @@ def snapshot_after(source: Path, destination: Path) -> None:
 
 def invoke(command: list[str], cwd: Path, evidence: Path, *, timeout: float,
            prompt: bytes | None = None, env: dict | None = None) -> dict:
+    """Run one measured subprocess and persist its raw execution evidence."""
     started = time.perf_counter()
     state = {"call_count": 0, "call_count_scope": "actual-subprocess-launches",
              "return_code": None, "timed_out": False, "launch_error": None}
@@ -120,6 +127,7 @@ def invoke(command: list[str], cwd: Path, evidence: Path, *, timeout: float,
 
 
 def events_from(raw: str) -> list[dict]:
+    """Parse dictionary events from a provider's JSON-lines output."""
     events = []
     for line in raw.splitlines():
         try:
@@ -132,6 +140,7 @@ def events_from(raw: str) -> list[dict]:
 
 
 def usage_from(provider: str, events: list[dict]) -> dict:
+    """Normalize provider usage without inventing unavailable token counts."""
     result = {"input_tokens": UNAVAILABLE, "cached_tokens": UNAVAILABLE,
               "uncached_tokens": UNAVAILABLE, "cache_creation_tokens": UNAVAILABLE,
               "provider_call_count": UNAVAILABLE, "usage_source": UNAVAILABLE}
@@ -169,6 +178,7 @@ def usage_from(provider: str, events: list[dict]) -> dict:
 
 
 def response_from(provider: str, events: list[dict], final: Path) -> object:
+    """Extract one structured provider response when the evidence is valid."""
     if provider == "codex":
         try:
             return json.loads(final.read_text(encoding="utf-8"))
@@ -186,6 +196,7 @@ def response_from(provider: str, events: list[dict], final: Path) -> object:
 
 
 def score(case: dict, response: object, execution: dict, *, fixture_unchanged: bool, scorer) -> dict:
+    """Classify measurement and oracle failures without collapsing their causes."""
     host_ok = (execution["call_count"] == 1 and execution["return_code"] == 0
                and not execution["timed_out"] and not execution.get("provider_reported_error", False))
     result = scorer(case, response, host_ok=host_ok and fixture_unchanged, reads=set(), config="baseline")
@@ -207,6 +218,7 @@ def score(case: dict, response: object, execution: dict, *, fixture_unchanged: b
 
 
 def compare(before: dict, after: dict) -> dict:
+    """Compare paired measurements only when both sides produced usable evidence."""
     measured = all(row.get("score", {}).get("status") in {"matched-oracle", "oracle-mismatch"} for row in (before, after))
     result = {"semantic_parity": "unavailable", "both_match_oracle": False, "byte_delta_after_minus_before": UNAVAILABLE}
     if measured:
@@ -217,6 +229,7 @@ def compare(before: dict, after: dict) -> dict:
 
 
 def provider_command(provider: str, executable: str, model: str, schema: Path, final: Path) -> list[str]:
+    """Build a non-interactive, tool-free command for the selected provider."""
     if provider == "codex":
         return [executable, "exec", "--ignore-user-config", "--sandbox", "read-only", "-c", 'approval_policy="never"',
                 "-c", "project_doc_max_bytes=0", "--skip-git-repo-check", "--ephemeral", "--json", "--model", model,
@@ -227,6 +240,7 @@ def provider_command(provider: str, executable: str, model: str, schema: Path, f
 
 
 def main() -> int:
+    """Run paired T6 fixture measurements and persist their provenance."""
     parser = argparse.ArgumentParser(description="Manual T6 paired measurement; never runner review approval.",
                                      epilog="See tools/t6-context/README.txt for scope, usage semantics, and evidence files.")
     parser.add_argument("--baseline-archive", type=Path, required=True)

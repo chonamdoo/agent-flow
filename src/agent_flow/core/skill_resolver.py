@@ -147,6 +147,7 @@ class NormativeDelivery:
 
     @property
     def inline(self) -> bool:
+        """Return whether this normative body is embedded in the prompt."""
         return any(document.inline for document in self.documents)
 
 
@@ -165,6 +166,7 @@ class SkillResolution:
 
     @property
     def delivery(self) -> tuple[NormativeDelivery, ...]:
+        """Group exact normative bodies while preserving every source route."""
         groups: dict[bytes, list[NormativeDocument]] = {}
         for document in self.normative_documents:
             groups.setdefault(document.content, []).append(document)
@@ -175,10 +177,12 @@ class SkillResolution:
 
     @property
     def delivered_normative_bytes(self) -> int:
+        """Return the byte count of normative bodies embedded in the prompt."""
         return sum(len(group.content) for group in self.delivery if group.inline)
 
     @property
     def duplicated_normative_bytes(self) -> int:
+        """Return bytes suppressed by exact-body delivery deduplication."""
         return sum(
             len(group.content) * (sum(item.inline for item in group.documents) - 1)
             for group in self.delivery if group.inline
@@ -235,16 +239,19 @@ class SkillCatalogEntry:
 
 class ResolutionContext:
     def __init__(self) -> None:
+        """Create an empty snapshot cache for immutable skill inputs."""
         self.catalog: dict[tuple[str, str, str, bytes], SkillCatalogEntry] = {}
         self.resolutions: dict[str, tuple[object, SkillResolution]] = {}
         self.snapshots: dict[Path, ArchitectureSnapshot] = {}
 
     def clear(self) -> None:
+        """Discard captured inputs so later resolution reads fresh bytes."""
         self.catalog.clear()
         self.resolutions.clear()
         self.snapshots.clear()
 
     def snapshot(self, root: Path) -> ArchitectureSnapshot:
+        """Reuse a root snapshot only while its captured inputs stay identical."""
         assert_install_complete(root)
         snapshot = architecture_snapshot(root)
         assert_install_complete(root)
@@ -916,6 +923,7 @@ def catalog_files(roots: Sequence[SkillRoot]) -> tuple[tuple[str, Path], ...]:
 
 
 def catalog_stamp(files: Sequence[tuple[str, Path]]) -> str:
+    """Return a stable digest for selected catalog paths and contents."""
     parts = []
     for source, skill_path in files:
         try:
@@ -1062,6 +1070,7 @@ _SUMMARY_MAX_CHARS = 140
 
 
 def skill_summary(skill_path: Path) -> str:
+    """Extract the summary used when a skill is routed by reference."""
     return _description_summary((_read_frontmatter(skill_path) or {}).get("description"))
 
 
@@ -1128,6 +1137,7 @@ def _template_host(template: str) -> str:
 
 
 def _dedupe_roots(roots: Iterable[SkillRoot]) -> list[SkillRoot]:
+    """Keep the first occurrence of each skill root."""
     seen: set[SkillRoot] = set()
     out: list[SkillRoot] = []
     for root in roots:
@@ -1431,4 +1441,3 @@ def _string_tuple(value: object) -> tuple[str, ...]:
     if isinstance(value, list):
         return tuple(str(item) for item in value if str(item).strip())
     return ()
-
