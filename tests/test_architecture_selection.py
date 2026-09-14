@@ -1616,7 +1616,8 @@ def test_legacy_run_requires_fresh_norm_evidence(tmp_path, monkeypatch):
     assert migrated["fix_loop_rounds"] == {"fix-loop": 2}
     awaiting = _run_cli(["continue", "--worktree", plan.name], root, environment)
     assert "status: awaiting_host" in awaiting.stdout
-    assert str(root / "skills/clean-architecture-core/SKILL.md") in awaiting.stdout
+    assert str(plan.path / "skills/clean-architecture-core/SKILL.md") in awaiting.stdout
+    assert str(root / "skills/clean-architecture-core/SKILL.md") not in awaiting.stdout
     assert not artifact.exists()
     artifact.write_text("# Explore\n\nFresh inspection under the delivered norm.\n", encoding="utf-8")
     advanced = _run_cli(["continue", "--worktree", plan.name], root, environment)

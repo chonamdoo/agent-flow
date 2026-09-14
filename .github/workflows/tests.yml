@@ -52,10 +52,10 @@ jobs:
           # 프로세스 대기라 코어 수만큼 곧바로 줄어든다.
           if [ -n "$PYTEST_K" ]; then
             PYTHONPATH=src python3 -m pytest tests -v -p no:cacheprovider -o addopts="" \
-              -n auto --durations=20 -k "$PYTEST_K" 2>&1 | tee pytest.log
+              -n auto --dist worksteal --durations=20 -k "$PYTEST_K" 2>&1 | tee pytest.log
           else
             PYTHONPATH=src python3 -m pytest tests -v -p no:cacheprovider -o addopts="" \
-              -n auto --durations=20 2>&1 | tee pytest.log
+              -n auto --dist worksteal --durations=20 2>&1 | tee pytest.log
           fi
           status=${PIPESTATUS[0]}
           set -e
