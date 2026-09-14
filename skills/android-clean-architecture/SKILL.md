@@ -27,24 +27,14 @@ the dependency direction, and a role outside lint activation has not been checke
 
 ## Roles
 
-- `app-shell` owns Application/activity entry, startup, root navigation, global
-  error hosts, and Hilt composition.
-- `core-domain` owns pure domain policy, values, errors, and repository contracts;
-  application orchestration consumes those contracts and other stable ports.
-- `core-data` owns repository implementations, source/cache policy, outbound
-  DTO/entity mapping, and data bindings.
+- `app-shell` owns Android Application/activity entry and Hilt composition.
 - If the project has a shared database role, data adapters may depend on it.
   Database code does not depend on data implementations, features, or AppShell;
   pure domain policy does not depend on the database. Otherwise keep persistence
   inside the existing data adapter boundary.
-- Network/platform roles own client setup, interceptors, qualifiers, native
-  capabilities, and failure mapping.
-- Navigation and feature API roles expose entry/route contracts; their
-  implementation/presentation roles own concrete graphs, screens, state holders,
-  UI values, and mapping.
-- `shared-presentation-contract` owns neutral notifier/queue interfaces consumed
-  by AppShell and feature presentation. Wire implementations at composition;
-  neither domain policy nor the contract imports AppShell or UI implementations.
+- Network/platform roles own Android client qualifiers and native capabilities.
+
+Apply the required core's **Semantic Layers** for all other role ownership.
 
 ## Hilt DI
 
@@ -63,29 +53,17 @@ the dependency direction, and a role outside lint activation has not been checke
 
 ## Data Boundary
 
-Keep Retrofit interfaces, outbound DTOs, persistence entities, and source/cache
-policy in the data/network adapter that owns them. Convert to domain/application
-values at that boundary. Compose separate sources and mappers when their policy
-or change reasons differ; a DB-only repository needs no remote/cache collaborator.
-
-Apply the core's recorded simple-adapter exception instead of adding forwarding
-classes. Presentation still receives contracts, never raw API services or ORM
-entities. Discover the existing binding locations rather than moving files to
-match an example layout.
+Keep Retrofit interfaces and their outbound DTOs in the owning data/network
+adapter. Discover the existing binding locations rather than moving files to
+match an example layout. Apply the required core's **Repository And Source
+Boundary** and **Mapping Boundary**, including their recorded exceptions.
 
 ## Presentation Boundary
 
-- Route/top-level wiring obtains ViewModel, collects state/events with lifecycle,
-  performs navigation/platform calls, and passes plain state/callbacks down.
-- Stateless rendering composables do not call `hiltViewModel()`, `viewModel()`,
-  lifecycle collection, or navigation APIs; route/top-level entry wiring owns them.
-- ViewModels inject use cases, one context's repository interface, and platform
-  abstractions — never repository impls, data sources, API services, DTOs,
-  `Context`, `Activity`, or `NavController`. A use case is required when the call
-  crosses contexts, orders multi-step side effects, or adds domain/business failure semantics.
-- UI state is immutable and explicit for loading/error/empty/offline/success
-  states that can occur.
-- Domain-to-UI mapping lives in presentation mappers.
+For ViewModel, UI state, route wiring, or Compose rendering, load
+`android-clean-presentation-architecture` through the core's **Required
+Application** rule. That skill owns Android state/lifecycle/stateless-rendering
+rules; this adapter does not select presentation work for a data-only change.
 
 ## Review Additions
 

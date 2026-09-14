@@ -1,0 +1,422 @@
+{
+  "schema_version": 1,
+  "fixture_version": 3,
+  "authorization": "Main requested repair of only the three failing v2 fixture identities; no runtime norms, target defect semantics or scorer changes.",
+  "previous_cases_sha256": "33c9ac2ddb0dda0b4fff47edc5d26dd2e14c5816c262bbe1809f3bc20eedf497",
+  "previous_manifest_sha256": "1e2f75a7fdb4ab5f5b02342c60858853723f9c4b6f7b4654a89f54765418a805",
+  "cases_sha256": "2931d5d413950e2cbc5f227e782142e39da4d6c365ca6b4ceef83549c0cbc4ae",
+  "preserved_v2_artifacts": {
+    "cases": ".agent-flow/runs/20260913-160840/t6-fixtures-v2-cases.json",
+    "manifest": ".agent-flow/runs/20260913-160840/t6-fixtures-v2-manifest.json"
+  },
+  "reported_v2_evidence": {
+    "source": "Main actual evaluation report",
+    "summary_paths": [
+      "/tmp/t6-live-v2-20260913-160840-1/summary.json",
+      "/tmp/t6-live-v2-20260913-160840-2/summary.json",
+      "/tmp/t6-live-v2-20260913-160840-3/summary.json",
+      "/tmp/t6-live-v2-20260913-160840-4/summary.json"
+    ],
+    "actual_cli_calls": 192,
+    "source_snapshots": "all stable",
+    "failed_rows": 6,
+    "failures": [
+      {
+        "case_id": "ui-single-repository",
+        "provider": "codex",
+        "sides": [
+          "before",
+          "after"
+        ],
+        "finding": "Render-only mapping performed in useEffect rather than a pure render derivation."
+      },
+      {
+        "case_id": "ui-cross-context",
+        "provider": "claude",
+        "sides": [
+          "before",
+          "after"
+        ],
+        "finding": "Correct orchestration findings cite declaration lines 3/4 outside oracle lines 5-7; line 6 compensation finding matched."
+      },
+      {
+        "case_id": "sdui-event-direction",
+        "provider": "codex",
+        "sides": [
+          "before",
+          "after"
+        ],
+        "finding": "Standalone data class must be a sealed UiState."
+      }
+    ],
+    "policy": "Keep complete original v2 successes, parity and failures as v2 observations; never relabel them a homogeneous v3 rerun."
+  },
+  "repairs": [
+    {
+      "case_id": "ui-single-repository",
+      "change": "The effect stores request lifecycle/domain result and private cancellation state only. A pure toCatalogUiState function derives the public immutable render union during render. Domain port, actual view, failures and cancellation remain represented.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "sdui-event-direction",
+      "change": "Use sealed PageState with Content(count) and exhaustive immutable StateFlow updates. Content(0) is the actual initial counter state; SDK Effect input/Event output directions remain unchanged.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "ui-cross-context",
+      "change": "Calibrate the same cross-context orchestration defect to its complete hook declaration and body.",
+      "oracle_change": "location-only",
+      "old_region": {
+        "file": "presentation/CheckoutState.ts",
+        "start_line": 5,
+        "end_line": 7
+      },
+      "new_region": {
+        "file": "presentation/CheckoutState.ts",
+        "start_line": 3,
+        "end_line": 8
+      },
+      "reason": "The owning hook declaration and callback expression at lines 3/4 are valid locations for the same cross-context orchestration defect. No expected defect or target verdict was added or removed; score_review is unchanged."
+    }
+  ],
+  "case_identity_encoding": "SHA-256 of UTF-8 json.dumps(case, ensure_ascii=False, sort_keys=True, separators=(comma, colon)); includes task, code, expected verdict/locations and scope.",
+  "crosswalk": [
+    {
+      "case_id": "ui-single-repository",
+      "v2_sha256": "593aa2bd87abcd4a22a74b43f5653c1b7a1b8a5a2a0d4115baec18c3a4b4ad32",
+      "v3_sha256": "850af15715ea62d2a57925f7180b96eeccc9ba040f9c2b1b80f04cd6c12fc42e",
+      "change": "code-repair",
+      "evidence_policy": "fresh-v3-pair-required"
+    },
+    {
+      "case_id": "ui-cross-context",
+      "v2_sha256": "4f7000fe9334a4e8bd150f4932e1c4f44c1b87ca0070b3fb072db3681a29bb4b",
+      "v3_sha256": "2eb852505922af8e5879df2378fbd58594c9e63705a74d75dce1a4398b24512b",
+      "change": "oracle-location-calibration",
+      "evidence_policy": "fresh-v3-pair-required"
+    },
+    {
+      "case_id": "db-only-repository",
+      "v2_sha256": "7d52221c08cf91c48da8a7e6ac8086635bae8f6cfc417850920204a9f73e1e01",
+      "v3_sha256": "7d52221c08cf91c48da8a7e6ac8086635bae8f6cfc417850920204a9f73e1e01",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "recorded-simple-adapter",
+      "v2_sha256": "55e90927144a066778c122ea2030e209396a04f428c6678697d6e0c04879b0ac",
+      "v3_sha256": "55e90927144a066778c122ea2030e209396a04f428c6678697d6e0c04879b0ac",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "identical-safe-representation",
+      "v2_sha256": "3ef18b59a23ee3588cbf8726e4700550dc61b545fdf375a2a7138be0fc32e41e",
+      "v3_sha256": "3ef18b59a23ee3588cbf8726e4700550dc61b545fdf375a2a7138be0fc32e41e",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "usecase-orchestration",
+      "v2_sha256": "7e0e90de4c554bfb53dac33292b2e698dabef41eb8145b0afbf08b3b7e6aa2b5",
+      "v3_sha256": "7e0e90de4c554bfb53dac33292b2e698dabef41eb8145b0afbf08b3b7e6aa2b5",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "usecase-direct-call",
+      "v2_sha256": "3f9c6538cfb6a5e73c6a0f2d1965d290b4522d723c4bb77a068b8e53fb91699b",
+      "v3_sha256": "3f9c6538cfb6a5e73c6a0f2d1965d290b4522d723c4bb77a068b8e53fb91699b",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "pure-policy-protocol",
+      "v2_sha256": "17062aacf7fa77bf7f9b2ddb39afd75b3e233eb282bc2f942fda0f7159b6a5c7",
+      "v3_sha256": "17062aacf7fa77bf7f9b2ddb39afd75b3e233eb282bc2f942fda0f7159b6a5c7",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "android-application-inject",
+      "v2_sha256": "c8e4a7f5f4e27c96c19c00f52b129ef4a3d11f35f39607bcfce76f84450b1423",
+      "v3_sha256": "c8e4a7f5f4e27c96c19c00f52b129ef4a3d11f35f39607bcfce76f84450b1423",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "android-domain-inject",
+      "v2_sha256": "4f8a1f14ac5170cb3a0aaa3428ad5f7673be7d7bceeb1594c32942a64a66b49c",
+      "v3_sha256": "4f8a1f14ac5170cb3a0aaa3428ad5f7673be7d7bceeb1594c32942a64a66b49c",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "sdui-event-direction",
+      "v2_sha256": "faaca6c0bdb71b31a929abe22c2f235b1a4fad36a646d962517a18c697763392",
+      "v3_sha256": "753c832eb858555f0cfd4953b9b1a17a3e930d3e152f2204a01c66da25ac09e1",
+      "change": "code-repair",
+      "evidence_policy": "fresh-v3-pair-required"
+    },
+    {
+      "case_id": "sdui-client-tree",
+      "v2_sha256": "fb90859f16ae1fc112f9c64e86ee45fc14ea304c33d6d3ff49b0adb4d68bd4b7",
+      "v3_sha256": "fb90859f16ae1fc112f9c64e86ee45fc14ea304c33d6d3ff49b0adb4d68bd4b7",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "sdui-shared-pipeline",
+      "v2_sha256": "c82353ef952e80908950a715298295632e1f8282493cd932a5a48a88032ace8c",
+      "v3_sha256": "c82353ef952e80908950a715298295632e1f8282493cd932a5a48a88032ace8c",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "sdui-stateful-renderer",
+      "v2_sha256": "a65ce0bcc380eb62556da3c25bf1f96fe77412ce136c36f264d0d22b9048469b",
+      "v3_sha256": "a65ce0bcc380eb62556da3c25bf1f96fe77412ce136c36f264d0d22b9048469b",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "di-adopted-container",
+      "v2_sha256": "b393ecd17f65c5f949574cd445b3ff63ebb83a66e61b88f723df2852b5131c4b",
+      "v3_sha256": "b393ecd17f65c5f949574cd445b3ff63ebb83a66e61b88f723df2852b5131c4b",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "di-unadopted-direct",
+      "v2_sha256": "fb326d8d65ccc34735f5fb08b7e1ad4dd4c800180f8d304efddb430e71998fc1",
+      "v3_sha256": "fb326d8d65ccc34735f5fb08b7e1ad4dd4c800180f8d304efddb430e71998fc1",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "di-domain-container",
+      "v2_sha256": "22c25813ad5287714f1acf6ed0d1bbbc2f586f487b45ea7f425153b6246d21d0",
+      "v3_sha256": "22c25813ad5287714f1acf6ed0d1bbbc2f586f487b45ea7f425153b6246d21d0",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "local-framework-allowed",
+      "v2_sha256": "7114aa7ccbe75db73167c7d62b11aba5a679ce72c5240e3dc89f022b72dd2019",
+      "v3_sha256": "7114aa7ccbe75db73167c7d62b11aba5a679ce72c5240e3dc89f022b72dd2019",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "local-ownership-violation",
+      "v2_sha256": "d8d8f29bcfdcdf161758638242746aec1334293ab806f889fa3cc4e8afc0870b",
+      "v3_sha256": "d8d8f29bcfdcdf161758638242746aec1334293ab806f889fa3cc4e8afc0870b",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "pending-nonstructural",
+      "v2_sha256": "c7985c3c2e713ab0faebbdd5efc2cfc3bb5997b8c9dd0bb8d2704067fb55a1dc",
+      "v3_sha256": "c7985c3c2e713ab0faebbdd5efc2cfc3bb5997b8c9dd0bb8d2704067fb55a1dc",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "pending-structural",
+      "v2_sha256": "90c203d3ca3d6e5a481578bf8f26c3d551a6023d7adbea04c87a3620d191a164",
+      "v3_sha256": "90c203d3ca3d6e5a481578bf8f26c3d551a6023d7adbea04c87a3620d191a164",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-classification-common",
+      "v2_sha256": "9f97b21144906aae07569c13da414d7f12bace52995a3d18db6b87e614450540",
+      "v3_sha256": "9f97b21144906aae07569c13da414d7f12bace52995a3d18db6b87e614450540",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-classification-double-display",
+      "v2_sha256": "0a471b45632792484459b4e6f046127a893dc528ccb25e84f87d110081e78c5a",
+      "v3_sha256": "0a471b45632792484459b4e6f046127a893dc528ccb25e84f87d110081e78c5a",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-classification-local-forbidden",
+      "v2_sha256": "201e0306aabd88e6074a1caadd8d62f8663cf928a953649903be4f87496df020",
+      "v3_sha256": "201e0306aabd88e6074a1caadd8d62f8663cf928a953649903be4f87496df020",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-queue-ack-after-success",
+      "v2_sha256": "98a96a49e5948ed76e1dcfdc9ab87133866e0bcfc1893f6718cac1449377a988",
+      "v3_sha256": "98a96a49e5948ed76e1dcfdc9ab87133866e0bcfc1893f6718cac1449377a988",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-queue-premature-consumption",
+      "v2_sha256": "9db69dc995f7e8926835518eafef9ace4d27cec1985bedbe11b88a3f1bd443ef",
+      "v3_sha256": "9db69dc995f7e8926835518eafef9ace4d27cec1985bedbe11b88a3f1bd443ef",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-queue-new-occurrence-retry",
+      "v2_sha256": "c499249b405f86cd8c5dbd4f587e04da71fed2d2dc22fb8e696a94b1c12419b0",
+      "v3_sha256": "c499249b405f86cd8c5dbd4f587e04da71fed2d2dc22fb8e696a94b1c12419b0",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-lifetime-owner-survives-pause",
+      "v2_sha256": "6a20d721d7d33ed6b031cb6561ae1626bbcfec0f0e509217321a3689905b5c24",
+      "v3_sha256": "6a20d721d7d33ed6b031cb6561ae1626bbcfec0f0e509217321a3689905b5c24",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-lifetime-false-restart-guarantee",
+      "v2_sha256": "c455b4ad762ac8e7e6288cd95bdbb733430918f7913ed93697cf56268215a71f",
+      "v3_sha256": "c455b4ad762ac8e7e6288cd95bdbb733430918f7913ed93697cf56268215a71f",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-lifetime-server-outbox",
+      "v2_sha256": "774ce72ea0f4c634d05c641083cba0848576d3d7017be2fe6a4c5ab4f47169a4",
+      "v3_sha256": "774ce72ea0f4c634d05c641083cba0848576d3d7017be2fe6a4c5ab4f47169a4",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-boundaries-preserved-metadata",
+      "v2_sha256": "38d855f18c6c9c184bf7bf8d0a4773f87d67e8977831a1994ae07a3d329c18f7",
+      "v3_sha256": "38d855f18c6c9c184bf7bf8d0a4773f87d67e8977831a1994ae07a3d329c18f7",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-boundaries-interceptor-ui",
+      "v2_sha256": "ffb7e925cf0684a72ec90cc2533f82ede3f1c586ffcd27cfbaae5e33101b02c2",
+      "v3_sha256": "ffb7e925cf0684a72ec90cc2533f82ede3f1c586ffcd27cfbaae5e33101b02c2",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-boundaries-local-value-shape",
+      "v2_sha256": "88f9ff1c7ec50b51e5bae77066b0990f036c964256d903646525cf71beec493c",
+      "v3_sha256": "88f9ff1c7ec50b51e5bae77066b0990f036c964256d903646525cf71beec493c",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-platform-android-reset",
+      "v2_sha256": "097d6ad2e2715373917f58123b66d54922c387c66ff51d2dcddd72deeb0a8663",
+      "v3_sha256": "097d6ad2e2715373917f58123b66d54922c387c66ff51d2dcddd72deeb0a8663",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-platform-android-retained-stack",
+      "v2_sha256": "479c60e2149b067db5e080e969838c9c215aef6f49ca890aa56afc015d6f97c8",
+      "v3_sha256": "479c60e2149b067db5e080e969838c9c215aef6f49ca890aa56afc015d6f97c8",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-platform-android-no-maintenance-route",
+      "v2_sha256": "aff06dbee9b1e0542504bf0772be65625738b6b6f49ab81d8ded49e70ecdb596",
+      "v3_sha256": "aff06dbee9b1e0542504bf0772be65625738b6b6f49ab81d8ded49e70ecdb596",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-platform-ios-reset",
+      "v2_sha256": "237bfc160bcde201baa8ffa0d5e169da319179cb6918f6ba662cddff072ed79e",
+      "v3_sha256": "237bfc160bcde201baa8ffa0d5e169da319179cb6918f6ba662cddff072ed79e",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-platform-ios-feature-reset",
+      "v2_sha256": "9563a4edd4b63f559f7d1258ac6a3c592b5286bb9395c972454327b5dfdf8296",
+      "v3_sha256": "9563a4edd4b63f559f7d1258ac6a3c592b5286bb9395c972454327b5dfdf8296",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-platform-ios-existing-uikit",
+      "v2_sha256": "8bbfe7218c4019df1f1fb99b18a80691c1f91165d24ac2f79b5665087c6c23ce",
+      "v3_sha256": "8bbfe7218c4019df1f1fb99b18a80691c1f91165d24ac2f79b5665087c6c23ce",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-platform-react-replace-and-guard",
+      "v2_sha256": "c1ab6eb286e62c86a79911b412db347da81f5951e2ef2de959ef3d0e1181e52a",
+      "v3_sha256": "c1ab6eb286e62c86a79911b412db347da81f5951e2ef2de959ef3d0e1181e52a",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-platform-react-history-not-auth",
+      "v2_sha256": "19bf709c9c24c66cdbbeddeef7c024ea18bd8918e2edd1697e0fa31b77b90705",
+      "v3_sha256": "19bf709c9c24c66cdbbeddeef7c024ea18bd8918e2edd1697e0fa31b77b90705",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-platform-react-route-local-404",
+      "v2_sha256": "5ad56d517af5b9f4b6b941a141e7a2af9427d27df900368ff5e894a41295cdba",
+      "v3_sha256": "5ad56d517af5b9f4b6b941a141e7a2af9427d27df900368ff5e894a41295cdba",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-platform-rn-root-reset",
+      "v2_sha256": "efcdf42492b3317eac876c473514f2cf567639360629818b4e439800a07cf991",
+      "v3_sha256": "efcdf42492b3317eac876c473514f2cf567639360629818b4e439800a07cf991",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-platform-rn-second-container",
+      "v2_sha256": "a3d6cad4a521f8fed6273e05dbe2a491f87ff82056ceb0934bdf3491a615b0b7",
+      "v3_sha256": "a3d6cad4a521f8fed6273e05dbe2a491f87ff82056ceb0934bdf3491a615b0b7",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-platform-rn-isolated-miniapp",
+      "v2_sha256": "b7ada9cfc2a3c369f7534bb3430ac1b8e9ad37ef6b65e50b9b71ba035a90759c",
+      "v3_sha256": "b7ada9cfc2a3c369f7534bb3430ac1b8e9ad37ef6b65e50b9b71ba035a90759c",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-scoped-required-dependency",
+      "v2_sha256": "c3f5282dc1cf4abf4ee99ff62bb7395b2e7233a34e88475f8acf97d5069814eb",
+      "v3_sha256": "c3f5282dc1cf4abf4ee99ff62bb7395b2e7233a34e88475f8acf97d5069814eb",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-scoped-forced-clean-local",
+      "v2_sha256": "81ac7e0cfba88660c60450e72b5a2165755a95bfac85895e8ff220965d9fd27b",
+      "v3_sha256": "81ac7e0cfba88660c60450e72b5a2165755a95bfac85895e8ff220965d9fd27b",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    },
+    {
+      "case_id": "appshell-scoped-feature-local-exception",
+      "v2_sha256": "a3b48b460cdaa93fdb397f3904ad584c4de702b9873172794a39fa7a9c451699",
+      "v3_sha256": "a3b48b460cdaa93fdb397f3904ad584c4de702b9873172794a39fa7a9c451699",
+      "change": "unchanged",
+      "evidence_policy": "case-identical-v2-evidence-retained-not-v3-rerun"
+    }
+  ],
+  "verification": "No validation or provider calls executed by the fixture writer. Main runs fresh pairs for the three changed cases only and keeps the 45 exact-identity v2 cases separately attributed."
+}

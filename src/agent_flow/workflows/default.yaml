@@ -16,7 +16,7 @@ phases:
   - id: design
     architecture_decision: required
     skills:
-      required: [grill-with-docs, grilling, domain-modeling, ddd-architecture, clean-architecture, clean-architecture-core]
+      required: [grill-with-docs, grilling, domain-modeling, ddd-architecture, code-generation-discipline, clean-architecture-core]
     description: |
       Unified design phase. Grill-style interview → docs → DDD model → selected
       architecture boundary map → SOLID check. Single artifact captures the
@@ -100,17 +100,8 @@ phases:
       - `## Testability Boundary`
 
       ## 5. SOLID check
-      For each new class/module/function, verify:
-      - **S**ingle Responsibility: does it have exactly one reason to change?
-      - **O**pen/Closed: extension via composition/strategy, modification
-        avoided?
-      - **L**iskov: subtypes preserve supertype contracts (no surprise nulls,
-        no narrower preconditions)?
-      - **I**nterface Segregation: clients depend only on methods they use?
-      - **D**ependency Inversion: depend on abstractions, not concretions?
-      List violations with the offending name and which principle. If none
-      apply (e.g. one-line config change), note "n/a — change does not
-      introduce new abstractions" and explain.
+      Apply every principle and the design evidence/applicability rules in
+      code-generation-discipline's SOLID Boundaries section.
 
       ## 6. Decision log (if applicable)
       If the design introduces or revisits an architectural decision, record
@@ -210,7 +201,7 @@ phases:
 
   - id: implement
     skills:
-      required: [code-generation-discipline, tdd, clean-architecture]
+      required: [code-generation-discipline, tdd, clean-architecture-core]
       optional: [codebase-design]
     description: |
       Behavior changes follow red → green → refactor per slice. Behavior-preserving
@@ -260,21 +251,13 @@ phases:
          additions. No speculative abstractions.
       6. Apply the architecture contract skills this prompt lists as required and
          honor the boundary assignment from the design's architecture map.
-      6a. Resolve required skills from active profile metadata, installed skill
-          index, changed files, and task scope. Load only the touched profile
-          skill union. If required skills are missing for this host,
-          record `skill-availability: degraded`, put their bare names in
-          `missing-required-profile-skills:`, and keep the declared
-          `missing local <group>: <skill>` sentence and source URL in prose/Calibration.
+      6a. Apply code-generation-discipline's Before Starting skill resolution
+          and Missing Required Skills procedure for this host.
       7. Honor SOLID principles from the design's SOLID section.
       8. For persistence work, enforce the selected contract's ownership,
-         representation, consistency, and conversion rules. In Clean mode:
-            - Repository interface is the domain/application port.
-            - Repository implementation is the data/infrastructure adapter.
-            - Repository is the single source of truth.
-            - DTOs, DB entities, data sources, and cache implementations do
-              not escape the data layer.
-            - Mappers convert at the relevant boundary.
+         representation, consistency, and conversion rules. In Clean mode,
+         apply clean-architecture-core's Repository And Source Boundary and
+         Mapping Boundary in full.
          For Android profile work, also apply
          `.agent-flow/skills/android-guides/references/data-layer-guide.md`.
       9. Run tests. All must PASS.
@@ -367,7 +350,7 @@ phases:
   - id: final-review
     architecture_decision: required
     skills:
-      required: [code-generation-discipline, code-review, architecture-reviewer, clean-architecture, clean-architecture-core]
+      required: [code-generation-discipline, code-review, architecture-reviewer, clean-architecture-core]
     description: |
       Final review. Requires at least two independent reviewer subprocesses
       from the Claude/Codex pool before approve. Profiles add stack-specific
@@ -429,18 +412,16 @@ phases:
       should-fix / note) and source angle. Cite paths as `path/to/file:line`.
       Apply agent-flow-concise-output: one finding per line, concise
       prose, no emoji, and parser verdict markers unchanged.
-      Resolve required review skills from active profile metadata,
-      `.agent-flow/skills/index.json`, changed files, and task scope. Review
-      only the touched profile skill union and record `skills_checked: true`.
+      Apply code-generation-discipline's Before Starting skill resolution and
+      record `skills_checked: true`.
       If the selected architecture contract, including its required references,
       is not assessed, or any applicable must-avoid or required checklist
       condition fails, the overall verdict is `verdict: request-changes`.
       Legacy Clean-named review markers certify this selected-contract
       assessment, not adoption of unselected layers. Keep every completion
       responsibility and marker enum; use `n/a` only where the enum permits it.
-      The skill list above was resolved against your own host; a skill
-      it names as not installed is a coverage gap, not a finding. Record
-      `skill-availability: degraded` and keep the verdict on the code.
+      Apply code-generation-discipline's Missing Required Skills procedure for
+      this host.
       The markers below are not the whole completion contract. The runner also
       verifies this run's `design-spec.md` ledger at this phase, and
       `verdict: approve` does not override it — an unmet item blocks phase
@@ -522,7 +503,7 @@ phases:
 
   - id: fix-loop
     skills:
-      required: [code-generation-discipline, clean-architecture]
+      required: [code-generation-discipline, clean-architecture-core]
     description: Address review findings. Tests stay green.
     required_markers:
       - "skills_checked: true"
@@ -549,14 +530,10 @@ phases:
       For each must-fix finding in final-review.md or gate-results.json, apply
       the change. After QA failures, return through review before running gates
       again. Follow the runner's printed next_command for each fix/review
-      loop. Resolve required skills from active profile metadata, installed
-      skill index, changed files, and task scope before writing or judging code.
+      loop. Apply code-generation-discipline's Before Starting skill resolution.
       Apply the required architecture contract skills to any boundary-affecting fix.
-      If a required local skill is missing for this host, record
-      `skill-availability: degraded`, put its bare name in
-      `missing-required-profile-skills:`, keep the declared
-      `missing local <group>: <skill>` sentence and source URL in prose/Calibration,
-      then complete the artifact with the skills available.
+      Apply code-generation-discipline's Missing Required Skills procedure for
+      this host.
       End with:
 
           ## Completion Gate
@@ -677,7 +654,7 @@ phases:
 
   - id: pr-comment-fix
     skills:
-      required: [push-watch, code-generation-discipline, clean-architecture]
+      required: [push-watch, code-generation-discipline, clean-architecture-core]
     description: Address PR feedback; changed code returns through review and gates.
     routes:
       blocked: block
@@ -691,7 +668,7 @@ phases:
 
   - id: pr-ci-fix
     skills:
-      required: [push-watch, code-generation-discipline, clean-architecture]
+      required: [push-watch, code-generation-discipline, clean-architecture-core]
     description: Fix PR CI; changed code returns through review and gates.
     routes:
       blocked: block

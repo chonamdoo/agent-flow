@@ -1,6 +1,7 @@
 ---
 name: clean-architecture-core
 description: Platform-neutral Clean Architecture contract for semantic layers, dependency direction, use cases, repository/source/cache/mapper boundaries, DI/composition-root placement, and cross-platform architecture review. Use before platform clean architecture skills and during design, implementation, architecture review, or code review.
+requires: [code-generation-discipline]
 ---
 
 # Clean Architecture Core
@@ -10,6 +11,20 @@ project adopts; platform adapters add framework details, not competing rules.
 Discover actual source roots, modules, dependency wiring, and architecture role
 configuration before judging coverage. Roles do not prescribe folders or a
 minimum number of modules, files, interfaces, or models.
+
+## Required Application
+
+Load this core before exactly the platform adapter required by the changed
+source: `android-clean-architecture`, `ios-clean-architecture`,
+`flutter-clean-architecture`, `react-clean-architecture`,
+`react-native-clean-architecture`, or `python-api-clean-architecture`.
+For UI state, ViewModels/controllers, screens/components, or route wiring, also
+load the matching presentation skill selected by `code-generation-discipline`.
+Shared semantic rules belong here; platform rules belong in their adapter.
+
+The active workflow owns legacy completion markers and their permitted enums.
+When it requires both legacy markers and this core's checklist, retain both;
+the removed `clean-architecture` skill name is not a marker or review-angle rename.
 
 ## Semantic Layers
 
@@ -73,23 +88,25 @@ AppShell / feature presentation -> Shared presentation contract
 ## Use Case Boundary
 
 - A use case represents one user intent or application action.
-- Public or multi-feature use cases should have a stable interface when another
-  module or platform adapter depends on the contract.
+- Use a stable interface and implementation when module size, a public contract,
+  calls from another feature/module/platform adapter, or DI binding requires it.
 - Use cases depend on stable domain/application ports and pure policies, including
   repository, Clock, payment, transaction, and platform-capability contracts.
   Name a port for its responsibility rather than disguising it as a repository.
+- Use cases handle application/domain values, not inbound/outbound DTOs,
+  persistence entities, raw transport failures, or UI models.
 - A use case must not directly call another use case. Share common logic through
   a domain service, policy, pure function, or explicitly named application
   workflow/orchestrator.
-- Adapters normalize raw transport/storage/provider failures at their boundary.
-  Use cases preserve that established result/error contract unless adding
-  business failure semantics; this is not permission to leak raw infrastructure
-  exceptions. Preserve cancellation rather than recasting it as a business error.
+- Apply the Error Boundary below; preserve cancellation rather than recasting it
+  as a business error.
 
 ## Repository And Source Boundary
 
 - Repository interfaces live in domain/application contracts.
 - Repository implementations live in data/infrastructure adapters.
+- A repository is the single source of truth for the data policy its consumer
+  needs; it coordinates only the sources and caches that policy actually uses.
 - Implementations return the domain/application values promised by the port,
   never outbound DTOs, ORM entities, raw responses, or UI models.
 - Separate remote/local sources, caches, and mappers when they own distinct
@@ -138,6 +155,29 @@ AppShell / feature presentation -> Shared presentation contract
   abstraction when it needs auth, headers, cache policy, retry, or shared client
   configuration.
 
+## Error Boundary
+
+- Domain-facing errors and exposed severity/status/server-code value types belong
+  to domain/application contracts, not transport implementation modules.
+- If the project defines no typed result wrapper, preserve its existing
+  `Result`/exception contract instead of introducing one as a review requirement.
+- Remote sources may throw or return transport failures.
+
+- Raw transport, storage, provider, and native failures stay in
+  data/infrastructure adapters.
+- Repository implementations or data mappers translate raw failures into the
+  established domain/application result and error contract.
+- Use cases preserve that result/error contract and add only business-rule
+  failure semantics. They do not leak raw infrastructure exceptions.
+- Presentation maps domain/application errors to UI error models before rendering.
+- UI components, views, and screens never receive DTOs, HTTP `Response`,
+  URLSession responses, native exception strings, or storage failure types.
+
+## SOLID Boundary
+
+Apply the complete `code-generation-discipline` **SOLID Boundaries** contract,
+including its design evidence, applicability exception, and blocking threshold.
+
 ## Must Avoid
 
 - Pure domain policy importing UI, DB, HTTP, provider SDK, serialization, or DI
@@ -162,6 +202,13 @@ AppShell / feature presentation -> Shared presentation contract
 ## Review Checklist
 
 Record these items in architecture or code review output:
+
+Check every applicable rule in **Must Avoid**, not only the checklist categories.
+An applicable must-avoid violation or failed required criterion produces
+`verdict: request-changes`. Apply recorded exceptions and adopted project
+conventions before judging a failure. Naming, file counts, missing unnecessary
+collaborators, and inactive/unmapped lint boundaries alone prove neither a
+semantic violation nor a successful check.
 
 Use `n/a` for `usecase-boundary` and `usecase-calls-usecase` only when no use-case
 implementation or composition is in scope; an existing applicable path must be

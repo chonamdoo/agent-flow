@@ -23,7 +23,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from agent_flow.cli import main
-from agent_flow.artifact import _missing_completion_markers
+from agent_flow.artifact import _missing_completion_markers, create_run
 from agent_flow.core.command_evidence import COMMANDS_RUN_LOG
 from agent_flow.core.design_ledger import (
     capture_design_ledger,
@@ -34,6 +34,8 @@ from agent_flow.core.design_value_check import (
     missing_design_value_implementations,
     missing_spec_item_evidence,
 )
+from agent_flow.core.phase_workflow import load_phase_workflow_definition
+from agent_flow.core.workflow_pin import workflow_pin_metadata
 from agent_flow.runner import Phase, Runner
 
 
@@ -194,11 +196,16 @@ def test_test_spec_requires_observed_passing_named_test(project, run_dir):
 
 
 def test_test_spec_evidence_is_scoped_to_the_run_not_review_entry(project, run_dir):
+    definition = load_phase_workflow_definition(REPO, "default")
     test_name = "test_empty_search_results_show_the_empty_state"
     _capture_spec_ledger(run_dir, f"test:{test_name}")
     (run_dir / "meta.json").write_text(
         json.dumps(
             {
+                "workflow": "default",
+                "current_phase": "final-review",
+                "phase_index": next(i for i, phase in enumerate(definition.phases) if phase.id == "final-review"),
+                **workflow_pin_metadata(definition, workflow="default"),
                 "task": "Show an empty state.",
                 "started_at": "1970-01-01T00:01:40+00:00",
                 "phase_entered_at": "1970-01-01T00:03:20+00:00",
@@ -368,7 +375,10 @@ def test_cli_records_manual_spec_after_chat_confirmation(project, run_dir):
     ) == ["SPEC-1: manual (no user approval record)"]
 
 
-def test_all_completion_paths_share_spec_evidence_check(project, run_dir):
+def test_all_completion_paths_share_spec_evidence_check(project):
+    run_dir = create_run(project, "default", "Check spec evidence")
+    (run_dir / "prd.md").write_text(LEDGER_SOURCE, encoding="utf-8")
+    capture_design_ledger(run_dir, "prd", LEDGER_SOURCE)
     _capture_spec_ledger(run_dir, "manual")
     (run_dir / "final-review.md").write_text(GATE, encoding="utf-8")
     runner = Runner(project, run_dir=run_dir)
@@ -443,6 +453,7 @@ def test_request_changes_routes_even_when_spec_evidence_is_missing(
     run_dir,
     capsys: pytest.CaptureFixture[str],
 ):
+    definition = load_phase_workflow_definition(REPO, "default")
     _capture_spec_ledger(run_dir, "manual", design_values="request-timeout: 30s\n")
     _write_code(project, "val requestTimeout = 10\n")
     review = "## Overall\nverdict: request-changes\n"
@@ -488,6 +499,9 @@ def test_request_changes_routes_even_when_spec_evidence_is_missing(
             {
                 "run_id": "r1",
                 "workflow": "default",
+                "current_phase": "final-review",
+                "phase_index": next(i for i, phase in enumerate(definition.phases) if phase.id == "final-review"),
+                **workflow_pin_metadata(definition, workflow="default"),
                 "task": "",
                 "review_nonce": nonce,
                 "phase_entered_at": entered_at,

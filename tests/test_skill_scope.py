@@ -214,6 +214,10 @@ def test_the_resume_gate_reports_the_growth_instead_of_demanding_it(
     phase 안에서 계층 경로 파일이 생기면, 다음 게이트는 marker를 요구하는 대신
     자란 이름을 알리고 같은 phase를 다시 연다.
     """
+    import yaml
+
+    from agent_flow.core.phase_workflow import parse_phase_workflow_definition
+
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("AGENT_FLOW_ADAPTER", "generic")
     monkeypatch.delenv("AGENT_FLOW_GENERIC_MODE", raising=False)
@@ -225,7 +229,17 @@ def test_the_resume_gate_reports_the_growth_instead_of_demanding_it(
 
     def runner(run_dir: Path | None = None) -> Runner:
         instance = Runner(project, run_dir=run_dir, workflow="development")
-        instance.phases = [phase]
+        if run_dir is None:
+            definition = instance.workflow
+            payload = yaml.safe_load(definition.source_bytes)
+            payload["phases"] = [item for item in payload["phases"] if item["id"] == phase.id]
+            instance.workflow = parse_phase_workflow_definition(
+                yaml.safe_dump(payload).encode(),
+                source=definition.source,
+                name="development",
+                kit_owned=definition.kit_owned,
+            )
+        instance.phases = _phases_from_definition(instance.workflow)
         instance.profile = _profile()
         return instance
 

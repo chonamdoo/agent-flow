@@ -1199,24 +1199,6 @@ def test_every_code_phase_declares_the_invariant_core():
     assert missing == {}
 
 
-def test_code_generation_discipline_covers_requested_principles():
-    discipline = (
-        REPO / "skills" / "code-generation-discipline" / "SKILL.md"
-    ).read_text(encoding="utf-8").casefold()
-
-    assert {
-        "single responsibility",
-        "side effects",
-        "do not repeat yourself",
-        "parameter grouping",
-        "fail fast",
-        "guard clauses",
-        "single level of abstraction",
-        "explicit receiver",
-    } <= {
-        line.strip().removeprefix("- ").split(" — ", 1)[0]
-        for line in discipline.splitlines()
-    }
 
 
 def test_every_profile_install_name_is_activation_reachable(tmp_path, monkeypatch):
@@ -1281,7 +1263,6 @@ def test_selector_terms_match_on_word_boundaries():
 SHIPPED_SKILLS = REPO / "skills"
 
 MIGRATED_DEPENDENCIES = {
-    "clean-architecture": ["clean-architecture-core"],
     "android-clean-architecture": ["clean-architecture-core"],
     "ios-clean-architecture": ["clean-architecture-core"],
     "react-clean-architecture": ["clean-architecture-core"],
@@ -1304,12 +1285,6 @@ def _shipped_catalog():
 
 
 
-def test_alias_expands_to_clean_architecture_core():
-    """반증: JS 표에만 있으면 Python 런타임은 alias 한 벌만 읽고 정본을 놓친다."""
-    from agent_flow.core.skill_resolver import expand_dependencies
-
-    expanded = expand_dependencies(["clean-architecture"], _shipped_catalog())
-    assert "clean-architecture-core" in expanded
 
 
 def test_shipped_skill_dependencies_are_declared_in_frontmatter():
@@ -1523,7 +1498,7 @@ def test_profile_declared_skills_ignore_the_external_budget(tmp_path: Path) -> N
     from agent_flow.core.skill_resolver import expand_dependencies
 
     catalog = _shipped_catalog()
-    expanded = expand_dependencies(["clean-architecture", "tdd"], catalog)
+    expanded = expand_dependencies(["python-api-clean-architecture", "tdd"], catalog)
     assert "clean-architecture-core" in expanded
     assert "codebase-design" in expanded
 

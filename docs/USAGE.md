@@ -91,6 +91,49 @@ This is a different axis from the stale-install warning: that one says the asset
 the project no longer match the kit and is fixed by installing again, this one says the kit
 itself is behind and is fixed by upgrading.
 
+## Workflow definition migration
+
+New runs store the exact workflow source and its digest binding in `meta.json`.
+Updating kit YAML does not change an already pinned run's phases, routes, or approval contract.
+
+| Existing run | Resume behavior |
+|---|---|
+| Complete, valid workflow pin | Uses the stored definition, even if kit YAML changes |
+| Legacy run with `workflow_digest` but no stored definition | Resumes only if the available original YAML matches that digest; the runner captures the verified definition under its lifecycle lease |
+| Missing identity, invalid pin, or unavailable original YAML | Blocks advancement without rewriting records or approvals |
+
+Before upgrading a runtime or replacing installed assets, finish unpinned runs with their
+original runtime and assets, or back up the full run directory together with its original
+kit assets, including workflow YAML and required skills. Runs created by older releases,
+including 0.2.11, are not guaranteed to
+resume after their original YAML has been overwritten. The loader does not search historical
+Git revisions or infer an old definition from the current kit.
+A verified legacy workflow that still names `clean-architecture` also needs its original
+skill installation; the resolver will not silently substitute a different norm.
+
+`--accept-workflow-drift` is no longer supported. This is an intentional compatibility change:
+the old command could rebase an existing run onto changed YAML and require fresh approval.
+The pinned-definition policy instead preserves the old approval contract. Do not replace
+`workflow_digest` with the current digest, remove binding fields, or overwrite new packaged
+YAML to make an old run pass.
+
+When a definition cannot be verified, `agent-flow status` still prints the recorded run
+identity, phase, artifact inventory, and a blocked `status_json`, then exits with code 2.
+The recorded phase is not verified; `required_artifact` is null and `next_command` is empty.
+This output is diagnostic, not permission to advance or approve the run.
+
+If the original definition cannot be recovered, ask the user to authorize ending the old
+run and starting a successor. In the selected worktree, after that approval:
+
+```bash
+agent-flow abort --root <leader-path> --worktree <worktree-name> --yes
+agent-flow run "<remaining work>" --workflow development --reuse-existing-worktree
+```
+
+`abort` preserves the old run's artifacts. Reference them from the successor's exploration
+artifact; do not transfer old approvals to the new definition. Choose the successor workflow
+for the remaining task rather than automatically restarting a larger lifecycle.
+
 ## Running
 
 Use it inside a Claude or Codex session.

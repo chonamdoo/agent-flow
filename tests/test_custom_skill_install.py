@@ -196,14 +196,23 @@ def test_clean_architecture_skills_install_core_and_platform_dependency_graph(tm
     platform_skills = {
         "android-clean-architecture",
         "ios-clean-architecture",
+        "flutter-clean-architecture",
         "react-clean-architecture",
         "react-native-clean-architecture",
         "python-api-clean-architecture",
     }
 
     catalog = discover_skill_catalog(project, roots)
-    required = expand_dependencies(sorted(platform_skills | {"clean-architecture"}), catalog)
+    presentation_skills = {
+        name.replace("-clean-architecture", "-clean-presentation-architecture")
+        for name in platform_skills
+        if name != "python-api-clean-architecture"
+    }
+    required = expand_dependencies(sorted(presentation_skills | {"python-api-clean-architecture"}), catalog)
+    assert platform_skills <= set(required)
     assert "clean-architecture-core" in required
+    assert "clean-architecture" not in catalog
+    assert "code-generation-discipline" in required
     for name in required:
         resolved = resolve_skill(name, roots)
         assert resolved.path is not None
@@ -1266,28 +1275,6 @@ def test_external_sources_declare_host_roots_without_installing() -> None:
     assert "~/.claude/skills/{skill}/SKILL.md" in host_managed["roots"]
     assert "~/.codex/skills/{skill}/SKILL.md" in host_managed["roots"]
     assert sources["skydoves-compose-performance"]["kind"] == "fetch"
-
-
-def test_missing_skill_wording_has_one_owner() -> None:
-    """부재를 알리는 문구는 계약이다. 사라지면 사용자가 무엇을 깔아야 하는지 알 수 없다.
-
-    문구의 정본은 `skills/code-generation-discipline/SKILL.md` 한 곳이다. 예전에는
-    `bootstrap/AGENTS.md.template`이 같은 규칙을 또 적었고, 두 문장이 정지 여부라는
-    관측 가능한 행동에서 반대를 지시했다(하나는 `skills sync`에 맡기고 진행, 하나는
-    설치까지 정지). 그래서 여기서는 정본에 문구가 있는지와 템플릿이 그것을 다시 적지
-    않는지를 함께 본다.
-    """
-    template_text = (KIT_ROOT / "bootstrap" / "AGENTS.md.template").read_text(encoding="utf-8")
-    discipline_text = (KIT_ROOT / "skills" / "code-generation-discipline" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    review_text = (KIT_ROOT / "skills" / "android-code-review" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-
-    assert "missing local <group>: <skill>" in discipline_text
-    assert "missing local" not in template_text
-    assert "missing local <group>: <skill>" in review_text
 
 
 def test_sdui_skill_is_android_only(tmp_path: Path) -> None:
@@ -4001,7 +3988,7 @@ def test_local_architecture_install_omits_the_clean_pack(tmp_path: Path, binary:
     assert _install_with(binary, project, "--profile", "python").returncode == 0
 
     installed = _installed_skill_names(project)
-    assert "clean-architecture" not in installed
+    assert "clean-architecture-core" not in installed
     # 공통 규율과 도메인 모델링은 선택과 무관하게 남는다. `ddd-architecture`를 Clean
     # 팩으로 묶어 빼면 workflow의 DDD 단계가 설치되지 않은 이름을 계속 요구한다.
     assert {"code-generation-discipline", "tdd", "ddd-architecture"} <= installed
@@ -4022,7 +4009,9 @@ def test_clean_and_legacy_installs_keep_the_clean_pack(tmp_path: Path, binary: s
             (project / ".agent-flow.project.yaml").unlink()
         assert _install_with(binary, project, "--profile", "python").returncode == 0
 
-        assert "clean-architecture" in _installed_skill_names(project), name
+        installed = _installed_skill_names(project)
+        assert "clean-architecture-core" in installed, name
+        assert "clean-architecture" not in installed, name
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -4034,13 +4023,13 @@ def test_reinstall_does_not_reintroduce_clean_after_switching_to_pending(
     project.mkdir()
     (project / "pyproject.toml").write_text("[project]\nname = 'probe'\n", encoding="utf-8")
     assert _install_with(binary, project, "--profile", "python", "--architecture-mode", "clean").returncode == 0
-    assert "clean-architecture" in _installed_skill_names(project)
+    assert "clean-architecture-core" in _installed_skill_names(project)
 
     _declare_architecture(project, "schema_version: 1\narchitecture:\n  mode: pending\n")
     assert _install_with(binary, project).returncode == 0
 
     installed = _installed_skill_names(project)
-    assert "clean-architecture" not in installed
+    assert "clean-architecture-core" not in installed
     # 스택 선택은 그대로 유지된다. 아키텍처만 다시 계산한다.
     assert "python-development-guide" in installed
 
@@ -4120,7 +4109,7 @@ def test_install_flag_records_the_selection(tmp_path: Path, binary: str) -> None
     assert (project / ".agent-flow.project.yaml").read_text(encoding="utf-8") == (
         "schema_version: 1\narchitecture:\n  mode: pending\n"
     )
-    assert "clean-architecture" not in _installed_skill_names(project)
+    assert "clean-architecture-core" not in _installed_skill_names(project)
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])

@@ -1,0 +1,392 @@
+{
+  "schema_version": 1,
+  "fixture_version": 2,
+  "authorization": "Main requested manual fixture-isolation repair after the observed v1 mismatch; no target verdict/defect or scorer changes authorized.",
+  "previous_cases_sha256": "778d16e1e9c8395bf568e0bea1218952cc70f99f4b3d026888bfe4d1d73a058f",
+  "previous_manifest_sha256": "d26ac7221b5221d9897cc8d2c6ce37835bb1aa478c4bbc969efb56dfdac78d2b",
+  "cases_sha256": "33c9ac2ddb0dda0b4fff47edc5d26dd2e14c5816c262bbe1809f3bc20eedf497",
+  "preserved_v1_artifacts": {
+    "cases": ".agent-flow/runs/20260913-160840/t6-fixtures-v1-cases.json",
+    "manifest": ".agent-flow/runs/20260913-160840/t6-fixtures-v1-manifest.json"
+  },
+  "observed_v1_mismatch": {
+    "evidence_root": "/tmp/t6-live-smoke-20260913-160840",
+    "case": "ui-single-repository",
+    "claude": {
+      "before": "request-changes",
+      "after": "approve"
+    },
+    "codex": {
+      "before": "request-changes",
+      "after": "approve"
+    },
+    "reason": "Baseline reviewers identified actual empty-string initial-state, missing async render-state/error, and unobservable public mutation defects unrelated to the intended direct-repository exception. The same presentation obligations remain authoritative after refactor. These observations remain mismatch evidence, not passes or proof of normative parity."
+  },
+  "verification": "No deterministic validation or provider calls executed for this repair. Main evaluates v2 separately; original outputs remain immutable.",
+  "scoring_contract": "expected_verdict, expected_findings, required_references, forbidden_skills and score_review remain unchanged for every case. No expected defect was added or removed.",
+  "location_mapping": [
+    {
+      "case_id": "ui-cross-context",
+      "target": "cross-context inventory/payment orchestration",
+      "old_call_lines": [
+        6,
+        7
+      ],
+      "new_call_lines": [
+        5,
+        6
+      ],
+      "old_oracle_region": [
+        5,
+        7
+      ],
+      "new_oracle_region": [
+        5,
+        7
+      ],
+      "reason": "The same target calls remain inside the existing location range; the new hook removes unrelated presentation-state defects."
+    },
+    {
+      "case_id": "appshell-classification-double-display",
+      "target": "common/global plus local display",
+      "old_oracle_region": [
+        2,
+        3
+      ],
+      "new_oracle_region": [
+        2,
+        3
+      ],
+      "reason": "Observable setter replaces only local assignment at line 3."
+    },
+    {
+      "case_id": "appshell-lifetime-false-restart-guarantee",
+      "target": "RAM-only process-restart guarantee",
+      "old_oracle_region": [
+        1,
+        3
+      ],
+      "new_oracle_region": [
+        1,
+        3
+      ],
+      "reason": "Use observable queue instead of Map at the same lines; persistence remains absent."
+    },
+    {
+      "case_id": "appshell-platform-react-history-not-auth",
+      "target": "missing server authorization",
+      "old_oracle_region": [
+        1,
+        3
+      ],
+      "new_oracle_region": [
+        1,
+        3
+      ],
+      "reason": "Application action replaces ambiguous data lookup at line 2, without adding authorization."
+    },
+    {
+      "case_id": "appshell-platform-rn-second-container",
+      "target": "ordinary feature second navigation root and common-error reset",
+      "old_oracle_region": [
+        2,
+        4
+      ],
+      "new_oracle_region": [
+        2,
+        4
+      ],
+      "reason": "Supported independent-tree wrapper occupies the same container lines."
+    }
+  ],
+  "audit": [
+    {
+      "case_id": "ui-single-repository",
+      "reason": "Observed baseline findings were real unrelated presentation defects: empty-string not-ready sentinel, missing loading/error branches, and unobservable public mutation. Replace the field with a React hook, immutable discriminated render state, domain-to-UI projection, rejection handling, cooperative cancellation and an actual pure view. Preserve the one-context direct repository decision and approve oracle. The repository interface and result values now physically live in domain/Catalog.ts, not the presentation module.",
+      "oracle_change": "none",
+      "status": "repaired-unexecuted"
+    },
+    {
+      "case_id": "ui-cross-context",
+      "reason": "Keep the original cross-context calls at the same finding lines, but show an existing observable operation hook with explicit states, failed-operation handling and cancellation; avoid an unrelated public mutable field/async state defect. Inventory, Payments and Cancellation contracts are supplied in domain/CheckoutPorts.ts rather than being declared in presentation.",
+      "oracle_change": "none",
+      "status": "repaired-unexecuted"
+    },
+    {
+      "case_id": "db-only-repository",
+      "reason": "Handle a missing DB row explicitly and normalize DB failures at the existing adapter boundary, preventing unrelated None indexing/raw storage exception defects.",
+      "oracle_change": "none",
+      "status": "repaired-unexecuted"
+    },
+    {
+      "case_id": "recorded-simple-adapter",
+      "status": "reviewed-unchanged",
+      "reason": "The supplied recorded simple-adapter boundary already normalizes failures with boundary_errors and maps provider text to the domain value; no additional reachable defect was identified in the scoped method.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "identical-safe-representation",
+      "status": "reviewed-unchanged",
+      "reason": "The frozen value has an explicitly identical validated input/domain contract; returning the same immutable value neither hides state nor leaks a transport representation.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "usecase-orchestration",
+      "status": "reviewed-unchanged",
+      "reason": "The workflow uses stable domain/application ports and leaves transaction/error contracts with their existing gateway; the fixture does not introduce UI state or another use-case call.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "usecase-direct-call",
+      "status": "reviewed-unchanged",
+      "reason": "The finding region contains the intended direct use-case dependency; constructors and synchronous result path do not introduce a separate transport/UI defect.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "pure-policy-protocol",
+      "reason": "Provide the actually imported pure helper instead of relying solely on a purity claim about an absent module. The Protocol remains a legitimate interface declaration.",
+      "oracle_change": "none",
+      "status": "repaired-unexecuted"
+    },
+    {
+      "case_id": "android-application-inject",
+      "status": "reviewed-unchanged",
+      "reason": "The adopted application-only constructor annotation and domain port are explicit; there is no state holder, raw framework runtime lookup or domain framework import to repair.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "android-domain-inject",
+      "status": "reviewed-unchanged",
+      "reason": "The pure-domain framework import is the intended violation at the existing finding lines; no unrelated UI or persistence behavior is introduced.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "sdui-event-direction",
+      "reason": "Replace unobservable mutable public state with read-only StateFlow and immutable updates; show an actual SDK-named input and output direction while retaining the naming exception.",
+      "oracle_change": "none",
+      "status": "repaired-unexecuted"
+    },
+    {
+      "case_id": "sdui-client-tree",
+      "status": "reviewed-unchanged",
+      "reason": "The supplied value is already the parsed immutable client render tree and the component simply forwards it with an action callback; no local async or mutable state is introduced.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "sdui-shared-pipeline",
+      "status": "reviewed-unchanged",
+      "reason": "Only new identity/context-only subclasses are changed; they do not add state, fetch logic or overrides beyond the already described shared pipeline.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "sdui-stateful-renderer",
+      "status": "reviewed-unchanged",
+      "reason": "Remote fetch, raw service injection and leaf-owned mutable business state are all consequences of the intended stateless-renderer violation within the oracle region.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "di-adopted-container",
+      "status": "reviewed-unchanged",
+      "reason": "The snippet is app-edge composition with previously adopted metadata and a stable port-typed provider; no consumer container lookup or UI state is introduced.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "di-unadopted-direct",
+      "status": "reviewed-unchanged",
+      "reason": "Direct construction occurs at app bootstrap and feeds a typed port provider; the absence of a new container is intentional and no interactive state is added.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "di-domain-container",
+      "status": "reviewed-unchanged",
+      "reason": "The domain container lookup remains the sole target dependency defect; no unrelated state or error path is present.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "local-framework-allowed",
+      "status": "reviewed-unchanged",
+      "reason": "The change only creates the selected local typed Context; there is no consuming hook or async state to leave incomplete.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "local-ownership-violation",
+      "status": "reviewed-unchanged",
+      "reason": "The internal cross-feature import directly violates the supplied local contract at the retained finding lines.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "pending-nonstructural",
+      "status": "reviewed-unchanged",
+      "reason": "The synchronous greeting spelling correction changes neither a dependency nor a state/lifetime boundary.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "pending-structural",
+      "status": "reviewed-unchanged",
+      "reason": "The new direct persistence boundary is intentionally unauthorised while architecture is pending; the original finding range covers that complete structural change.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-classification-common",
+      "reason": "Use the existing observable immutable UI-state setter instead of mutating a public state property; retain common-only versus local ownership.",
+      "oracle_change": "none",
+      "status": "repaired-unexecuted"
+    },
+    {
+      "case_id": "appshell-classification-double-display",
+      "reason": "Remove unrelated unobservable state mutation while preserving duplicate global/local rendering at the original finding lines.",
+      "oracle_change": "none",
+      "status": "repaired-unexecuted"
+    },
+    {
+      "case_id": "appshell-classification-local-forbidden",
+      "reason": "Make the local error branch observably update immutable state instead of mutating a public field; preserve product-local Forbidden classification.",
+      "oracle_change": "none",
+      "status": "repaired-unexecuted"
+    },
+    {
+      "case_id": "appshell-queue-ack-after-success",
+      "status": "reviewed-unchanged",
+      "reason": "The tryHandle/retry/consume collaborator contracts are explicit, finally retains recovery on failure/cancellation and consumption follows the awaited successful effect.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-queue-premature-consumption",
+      "status": "reviewed-unchanged",
+      "reason": "Only consumption ordering is changed; the queue and recover contracts are explicit and the defect remains at the original premature-consume/await lines.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-queue-new-occurrence-retry",
+      "status": "reviewed-unchanged",
+      "reason": "The semantic occurrence IDs differ and retryable failure retains the current occurrence; no consumption or duplicate-loss path is implied.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-lifetime-owner-survives-pause",
+      "status": "reviewed-unchanged",
+      "reason": "One session-owned observable queue outlives individual subscriptions and makes no persistence claim.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-lifetime-false-restart-guarantee",
+      "reason": "Use the existing observable in-memory queue instead of a bare unobservable Map, leaving only the unsupported process-restart guarantee at the original finding lines.",
+      "oracle_change": "none",
+      "status": "repaired-unexecuted"
+    },
+    {
+      "case_id": "appshell-lifetime-server-outbox",
+      "status": "reviewed-unchanged",
+      "reason": "The UI-free server uses its established transaction/outbox port; it makes no claim that UI acknowledgement guarantees delivery.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-boundaries-preserved-metadata",
+      "status": "reviewed-unchanged",
+      "reason": "Both scoped semantic mappers preserve all supplied fields and perform no I/O; the existing shared-presentation port ownership is explicit.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-boundaries-interceptor-ui",
+      "status": "reviewed-unchanged",
+      "reason": "Passing the raw HTTP exception to AppShell UI is the intended adapter ownership/representation violation at the original lines.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-boundaries-local-value-shape",
+      "reason": "Restrict this callback to the configured common codes in code so an ignored false notify result is not a separate dropped feature-local error bug; preserve identical safe local representation and all metadata.",
+      "oracle_change": "none",
+      "status": "repaired-unexecuted"
+    },
+    {
+      "case_id": "appshell-platform-android-reset",
+      "status": "reviewed-unchanged",
+      "reason": "The supplied AppShell/UI-dispatcher callback clears the protected stack and installs Login inside the stated queue boundary.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-platform-android-retained-stack",
+      "status": "reviewed-unchanged",
+      "reason": "Adding Login without clearing authenticated entries remains the explicit Back-reachability defect; the callback is AppShell-owned.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-platform-android-no-maintenance-route",
+      "reason": "Name the informational AppShell effect as dismissal rather than acknowledgement to avoid implying premature queue consumption; document the actual surrounding shared transition boundary.",
+      "oracle_change": "none",
+      "status": "repaired-unexecuted"
+    },
+    {
+      "case_id": "appshell-platform-ios-reset",
+      "status": "reviewed-unchanged",
+      "reason": "The main-actor AppShell effect clears the full path and switches the root, with existing queue handling around it.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-platform-ios-feature-reset",
+      "status": "reviewed-unchanged",
+      "reason": "The main-actor leaf ViewModel still directly mutates root navigation; ownership is the intended violation rather than an actor isolation defect.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-platform-ios-existing-uikit",
+      "status": "reviewed-unchanged",
+      "reason": "The existing main-actor root UIKit coordinator replaces its entire stack; the exception does not depend on a forced SwiftUI migration.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-platform-react-replace-and-guard",
+      "reason": "Await the router navigation result before recovery completion, and obtain session through the existing observable auth hook so the Back guard reacts to invalidation.",
+      "oracle_change": "none",
+      "status": "repaired-unexecuted"
+    },
+    {
+      "case_id": "appshell-platform-react-history-not-auth",
+      "reason": "Call the existing application action rather than an ambiguously named accounts data lookup, isolating missing trusted-server authorization at the unchanged finding lines.",
+      "oracle_change": "none",
+      "status": "repaired-unexecuted"
+    },
+    {
+      "case_id": "appshell-platform-react-route-local-404",
+      "status": "reviewed-unchanged",
+      "reason": "The loader uses an application action and the supported route-local 404 response; no common classification, global store or authentication decision is introduced.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-platform-rn-root-reset",
+      "status": "reviewed-unchanged",
+      "reason": "The AppShell-owned plain React Navigation reset produces only Login; no second container or unsupported framework import is added.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-platform-rn-second-container",
+      "reason": "Use the installed-version NavigationIndependentTree API rather than an obsolete independent prop, preserving the ordinary-feature second-root/feature-owned reset violation within its unchanged finding region.",
+      "oracle_change": "none",
+      "status": "repaired-unexecuted"
+    },
+    {
+      "case_id": "appshell-platform-rn-isolated-miniapp",
+      "status": "reviewed-unchanged",
+      "reason": "The independent tree uses an explicitly supported API and an explicitly isolated product/auth lifetime; ordinary-feature assumptions do not apply.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-scoped-required-dependency",
+      "status": "reviewed-unchanged",
+      "reason": "This is a proposed metadata edge review, not an installed new loader; shared requirement and Clean-only dependency scope are explicit.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-scoped-forced-clean-local",
+      "status": "reviewed-unchanged",
+      "reason": "The intended unconditional Clean dependency violates the supplied local selection at the unchanged metadata finding lines.",
+      "oracle_change": "none"
+    },
+    {
+      "case_id": "appshell-scoped-feature-local-exception",
+      "reason": "Replace a mutable form-field assignment with actual observable local validation state that distinguishes untouched, valid and invalid; no async/common-error path is suppressed.",
+      "oracle_change": "none",
+      "status": "repaired-unexecuted"
+    }
+  ]
+}

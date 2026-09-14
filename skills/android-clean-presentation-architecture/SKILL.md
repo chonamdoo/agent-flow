@@ -4,7 +4,7 @@ description: Defines Android Clean Architecture presentation-layer guidance for 
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [viewmodel, uistate, uievent, uiaction, uimodel, state holder, compose screen, screen state, presentation layer]
 pathGlobs: ["**/*ViewModel.kt", "**/*UiState.kt", "**/presentation/**/*Screen.kt", "**/presentation/src/main/**/*.kt", "**/presentation/src/commonMain/**/*.kt", "**/presentation/src/androidMain/**/*.kt"]
-requires: [clean-architecture-core]
+requires: [clean-architecture-core, android-clean-architecture]
 ---
 
 # Android Clean Presentation Architecture
@@ -39,25 +39,18 @@ Use this skill for Android feature work where presentation code should follow a 
 For Android/Compose or Android-targeted Kotlin/KMP implementation or review:
 - Load every matching local `compose-*`, `kotlin-*`, `navigation-3`, `edge-to-edge`, `adaptive`, and `testing-setup` `SKILL.md` named by the active Android profile.
 - Read the exact paths supplied by the active phase resolver and installed skill index; do not guess another host's installation paths.
-- Apply the missing-skill procedure in `code-generation-discipline` when a required skill is unavailable. Record degraded availability and the paths actually read; absence is not a code defect or grounds for request-changes.
+- When a required skill is unavailable, apply `code-generation-discipline` **Missing Required Skills**.
 
 ## Architecture Rule
 
-- `presentation` depends on domain contracts and platform/UI abstractions.
-- `domain` owns repository interfaces, use cases, and domain models.
-- `data` implements domain repositories and binds implementations to interfaces.
-- `network` provides Retrofit/API infrastructure.
-- A ViewModel may inject a single context's repository interface directly.
-  Require an application use case when it crosses contexts, orders meaningful
-  multi-step side effects, or adds business failure semantics. Place it according
-  to the adopted role mapping; do not add a pure forwarding wrapper.
-- Repositories/data map transport failures to domain errors; a presentation mapper converts domain/application errors into screen-specific UI results.
-- In every case presentation injects neither a repository implementation, nor a data source, nor an API service.
-- When the project uses a feature API/presentation split, keep public route/entry
-  contracts in its feature API role and screens/state holders/UI mapping in its
-  presentation role. Map actual source roots rather than requiring fixed paths.
-- DTOs, entities owned by data, Retrofit models, data sources, and data DI must not reach presentation.
+Apply the required `clean-architecture-core` **Semantic Layers**, **Dependency
+Rule**, **Mapping Boundary**, and **Error Boundary**. Apply the required
+`android-clean-architecture` for platform composition and DI.
+
+- Keep Retrofit/API infrastructure at the Android network adapter boundary.
 - Do not add `BaseViewModel`, `BaseUiState`, or inherited error hooks for new presentation work. Use explicit helpers and mappers.
+- The **Server-Driven Screen Exception** below is the scoped exception to the
+  shared abstract state-holder prohibition.
 
 ## Presentation Boundaries
 
@@ -65,29 +58,24 @@ Keep route/screen wiring, ViewModels, UI values/actions/events, mapping, and
 components in the project's adopted presentation boundary. These responsibilities
 do not require a fixed folder tree or one file per concept.
 
-Project domain/application values to the UI contract. Identity projection is
-valid for an already safe immutable shape without transport dependencies; do not
-create redundant models or forwarding mappers. Follow adopted naming conventions:
-`UiModel` is a semantic role, not a suffix whose absence alone fails review.
+Apply the required core's **Mapping Boundary** to presentation projections.
+Follow adopted naming conventions: `UiModel` is a semantic role, not a suffix
+whose absence alone fails review.
 
 ## DI Rule
 
-Application and entry points:
-- `@HiltAndroidApp` on the `Application`.
-- `@AndroidEntryPoint` on Activities or Fragments that host injected ViewModels.
+Apply the required Android adapter's **Hilt DI** for Application/host annotations,
+ViewModel injection, provider/binding choice, and network/data binding ownership.
+
 - Compose obtains ViewModels with `hiltViewModel()` only at the state-holder boundary.
 
 Binding ownership:
 - Android platform bindings belong at the app/platform composition boundary.
 - Serialization, HTTP clients, and API construction belong at the network adapter boundary.
-- Repository bindings and data providers belong at the data adapter/composition boundary.
 - Locate those roles in the existing project rather than creating a prescribed DI tree.
 
 Binding rule:
-- Use `@Provides` for constructing concrete objects that need factory logic or third-party builders.
-- Use `@Binds` for interface-to-implementation mappings.
 - Put shared app/data/network bindings in `SingletonComponent` only when the instance is app-wide.
-- Do not create Hilt modules for use cases that can use `@Inject constructor`.
 
 Route arguments and startup:
 - Use normal `@Inject` with `SavedStateHandle` when the adopted navigation and restoration contract supplies route values there.
@@ -99,9 +87,7 @@ Route arguments and startup:
 ## ViewModel Rule
 
 ViewModels are screen-level state holders:
-- annotate with `@HiltViewModel`
 - use normal or assisted constructor injection according to the route-argument contract above
-- inject use cases, a single context's repository interface, and platform abstractions
 - expose immutable screen state through `StateFlow`
 - keep mutable state private
 - accept user input through named callbacks for simple screens or a typed action handler for branchy screens
@@ -227,7 +213,7 @@ stateless-content rule — a node renderer is a content composable.
 
 ## Review Checklist
 
-- `ViewModel` constructor injects use cases, one context's repository interface, and platform abstractions — never a repository implementation, data source, or API service. A use case is required only for the cross-context, ordered-side-effect, or error-translation cases named in the Architecture Rule.
+- `ViewModel` dependencies satisfy the required core's **Dependency Rule**.
 - `uiState` is public immutable `StateFlow`; mutable state is private.
 - `UiState` is an immutable sealed interface; any stability annotation follows the verified `UiModel Stability` rule above.
 - `UiState` is explicit for not-ready/loading/refreshing/placeholder/empty/error/offline/permission/success states that can occur; no fake domain default.
@@ -243,9 +229,6 @@ stateless-content rule — a node renderer is a content composable.
 - the screen entry composable (a route, or the stateful overload of a same-named screen) collects with lifecycle APIs and passes state/callbacks downward.
 - that same entry composable owns state-holder acquisition, state collection, one-shot event collection, and navigation/platform calls; a multi-holder screen may receive its holders as parameters.
 - Stateless rendering composables do not obtain ViewModels, lifecycle flows, Hilt dependencies, or navigation APIs; the explicitly stateful screen entry owns that wiring.
-- `@Provides` and `@Binds` are placed in the layer that owns the constructed dependency.
-- assisted ViewModel factories pass only route values through assisted parameters.
-- use cases with `@Inject constructor` are not manually bound without need.
 - repositories/data sources do not store ad-hoc or app-wide `CoroutineScope` for UI-triggered work.
 - feature api exposes only public route/contracts; data-layer DTOs and implementations do not leak into presentation.
 

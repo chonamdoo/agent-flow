@@ -1,9 +1,10 @@
 # Android Data Layer Notes
 
-Canonical layer, repository, cache, mapper, and value-separation rules live in
-[clean-architecture-core](../../clean-architecture-core/SKILL.md). Apply
-[android-clean-architecture](../../android-clean-architecture/SKILL.md) for
-Android adapter details; this reference does not override either contract.
+Before applying this reference, read the required
+[clean-architecture-core](../../clean-architecture-core/SKILL.md) and
+[android-clean-architecture](../../android-clean-architecture/SKILL.md) in full.
+Their repository, cache, mapping, error, and Hilt contracts govern these Android
+checks; this reference does not override either contract.
 
 ## Android-specific checks
 
@@ -11,13 +12,7 @@ Android adapter details; this reference does not override either contract.
   data/infrastructure adapters.
 - `Flow`, `suspend`, paging, and dispatcher choices must match existing project
   conventions at the repository/data-source boundary.
-- Convert Room entities and Retrofit DTOs to domain/application values at the
-  owning boundary. No separate mapper class or identity copy is required when
-  safe representations already coincide.
-- Hilt modules or manual DI belong at composition. Pure domain policy imports
-  no Hilt types; adopted application `@Inject constructor` wiring metadata is
-  allowed under the Android adapter's explicit exception.
-- Network, database, and cache error types are translated before crossing into
-  domain/application contracts.
+- Apply the required core's **Mapping Boundary** to Room entities and Retrofit
+  DTOs at their owning Android adapters.
 - Offline, paging, and cache invalidation policy must be explicit when local
   storage or disk cache is involved.

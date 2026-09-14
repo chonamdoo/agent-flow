@@ -13,27 +13,10 @@ composition-root details only.
 ## Semantic Roles and Discovery
 
 Discover actual package exports, imports, route boundaries, dependency providers,
-and configured architecture roots before placing code. Map existing locations to
-responsibilities; these roles do not require separate folders or modules:
+and configured architecture roots before placing code. Apply the required core's
+**Semantic Layers**, **Dependency Rule**, and **Mapping Boundary** to those
+locations, preserving the repository's names and package shape.
 
-- `app-shell`: startup, dependency composition, root routing, and global UI hosts.
-- Feature API: public entry/route/capability contracts without presentation or
-  data implementation details.
-- `application`: actions and stable ports, including repository, Clock, payment,
-  transaction, and platform capabilities where the application needs them.
-- `core-domain`: framework-free business language, models, and policy.
-- `core-data`: outbound HTTP/storage adapters, persistence, and boundary mapping.
-- `inbound-adapter`: HTTP/tool input and response schemas, authenticated request
-  adaptation, and application action invocation.
-- Feature presentation: client state holders, render contracts, and UI.
-- `shared-presentation-contract`: framework-neutral notifier/queue contracts
-  consumed by AppShell and feature presentation, not an AppShell implementation
-  or a server-side UI queue.
-
-Preserve the repository's names and package shape. Colocation is valid when the
-dependency boundary remains clear; equal shapes need no forwarding mapper or
-copied model. Connect actual managed source roots to the profile's semantic
-roles; an unscanned location or empty lint result is not boundary evidence.
 Framework-neutral shared contracts must not import React runtime; explicitly
 React-specific UI/adapter packages may do so.
 
@@ -53,8 +36,6 @@ React-specific UI/adapter packages may do so.
   Interactive Client wrappers own hooks and browser effects. Respect RSC
   serializability rather than passing server clients or repository instances to
   a Client provider; a server-only page needs no empty hook or client conversion.
-- Apply the core's single-context state-holder repository-interface exception
-  without extending it to HTTP controller-to-ORM access.
 
 ## Review Additions
 

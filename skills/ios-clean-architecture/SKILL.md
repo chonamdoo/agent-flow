@@ -17,15 +17,11 @@ architecture role mappings. Preserve adopted boundaries; role names do not
 prescribe a folder tree. Include the source roots actually used before claiming
 architecture-lint coverage.
 
-Map neutral common-error notifier/queue interfaces as
-`shared-presentation-contract`. AppShell and feature presentation may depend on
-it; it imports neither UIKit/SwiftUI nor AppShell, feature, transport, or storage
-implementations. Application ports can represent time, payment, transactions,
-and platform capabilities without pretending to be repositories.
+Apply the required core's **Semantic Layers** and **Use Case Boundary** to
+shared presentation contracts and application ports.
 
 ## DI Shape
 
-- App shell owns the composition root.
 - Prefer local factories or a container assembled in app shell.
 - The composition root builds each shared collaborator once and hands the same
   instance to every consumer; express that with stored lazy properties or a

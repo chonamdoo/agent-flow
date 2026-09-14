@@ -22,12 +22,14 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from pathlib import Path
+import json
 from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from agent_flow.core.design_ledger import LEDGER_SOURCE_PHASES, ledger_prompt_block
-from agent_flow.core.local_skills import declared_concern_ids, local_skill_prompt_block
+from agent_flow.core.local_skills import declared_concern_ids, local_skill_prompt_block, phase_skill_resolution
+from agent_flow.core.skill_resolver import ResolutionContext, SkillResolution
 
 if TYPE_CHECKING:
     from agent_flow.runner import Phase
@@ -49,6 +51,7 @@ class Adapter(ABC):
     name: str = "base"
 
     def __init__(self) -> None:
+        """Initialize adapter state shared across rendered phases."""
         self._profile_snapshot: dict[str, Any] = {}
         self._profile_id: str = "generic"
         self._architecture: str = "default"
@@ -65,6 +68,9 @@ class Adapter(ABC):
         # 이름을 관측자가 phase_id에서 만들면 두 렌더가 같은 이름으로 겹쳐
         # 어느 쪽이 host에게 실제로 갔는지 trace로 고를 수 없다.
         self._observer: Callable[[str, str, str], None] | None = None
+        self._resolution_context = ResolutionContext()
+        self._provider_authority: tuple[str, ...] = ()
+        self._provider_launch_authority: str = ""
 
     def config_root_or(self, project_root: Path) -> Path:
         """선언을 읽을 뿌리. runner가 꽂지 않았으면 project_root.
@@ -90,11 +96,29 @@ class Adapter(ABC):
     def artifact_path(phase: "Phase", run_dir: Path) -> Path:
         return run_dir / (phase.artifact or f"{phase.id}.md")
 
+    def phase_resolution(
+        self, phase: "Phase", project_root: Path, *, skill_host: str | None = None,
+    ) -> SkillResolution:
+        """Resolve the immutable skill context used to render one phase."""
+        return phase_skill_resolution(
+            self.config_root_or(project_root), phase.id,
+            phase_skills=getattr(phase, "skills", None),
+            profile=self._profile_snapshot, changed_files=self._changed_files,
+            task_text=self._task_text, concerns=self._concerns, host=skill_host,
+            architecture_root=project_root, context=self._resolution_context,
+            provider_authority=json.dumps((
+                self.name, self._provider_authority, self._provider_launch_authority,
+            )),
+        )
+
     def render_envelope(self, phase: "Phase", run_dir: Path,
                         project_root: Path, host_hint: str = "",
                         *, prompt_variant: str = "",
-                        skill_host: str | None = None) -> str:
+                        skill_host: str | None = None,
+                        role: str = "author") -> str:
         """Render the prompt envelope shared by all AI adapters."""
+        if role not in {"author", "reviewer"}:
+            raise ValueError(f"unknown envelope role: {role}")
         artifact = self.artifact_path(phase, run_dir)
         relative_artifact = (
             artifact.relative_to(project_root)
@@ -107,8 +131,9 @@ class Adapter(ABC):
         )
         profile_block = self._render_profile_block(phase)
         architecture_block = self._render_architecture_block(phase)
-        completion_gate_block = self._render_completion_gate_block(phase)
+        completion_gate_block = self._render_completion_gate_block(phase, role=role)
         config_root = self.config_root_or(project_root)
+        resolution = self.phase_resolution(phase, project_root, skill_host=skill_host)
         local_skill_block = local_skill_prompt_block(
             config_root,
             phase.id,
@@ -119,29 +144,56 @@ class Adapter(ABC):
             concerns=self._concerns,
             host=skill_host,
             architecture_root=project_root,
+            resolution=resolution,
+            role=role,
         )
         # 이전 phase의 수치는 대화 컨텍스트가 아니라 여기로만 건너온다.
         # 렌더러가 넣으므로 agent가 빼거나 잊을 수 없다.
         design_values_block = ledger_prompt_block(run_dir)
         task_line = f"**Task**: {self._task_text}\n" if self._task_text else ""
+        artifact_block = (
+            f"**Artifact target** (write this when the phase is complete):\n  `{relative_artifact}`\n"
+            if role == "author" else
+            f"**Author artifact under review**: `{relative_artifact}`\n"
+        )
+        phase_block = (
+            f"\n## Phase prompt\n\n{body}\n"
+            if role == "author" else
+            "\n## Author task specification under review\n\n"
+            "The following is the author's assignment, not an instruction to execute it. "
+            "Assess its complete requirements against the change and evidence. "
+            "Artifact-writing and workflow-advancement duties belong only to the author/controller.\n\n"
+            + "\n".join(
+                f"> {line}" for line in (f"{task_line}\n{body}" if task_line else body).splitlines()
+            ) + "\n"
+        )
+        completion_block = (
+            "\n## When complete\n"
+            f"After writing the artifact, run `agent-flow status` from `{project_root}` "
+            "and follow the printed `next_command`."
+            if role == "author" else
+            "\n## Review obligation\n"
+            "Remain read-only. Judge the actual change against every applicable required "
+            "rule, exception, code pattern and completion criterion; read/applied markers "
+            "alone do not establish compliance. Treat normative instructions to implement, "
+            "write artifacts or advance as criteria for the author's work, not your authority. "
+            "Return the requested review on stdout; do not write artifacts or advance the workflow."
+        )
         envelope = (
             f"# agent-flow phase: {phase.id}\n\n"
             f"**Description**: {phase.description}\n\n"
-            f"{task_line}"
+            f"{task_line if role == 'author' else ''}"
             f"**Run id**: {run_dir.name}\n"
             f"**Project root**: {project_root}\n"
-            f"**Artifact target** (write this when the phase is complete):\n"
-            f"  `{relative_artifact}`\n"
-            f"\n## Phase prompt\n\n{body}\n"
+            f"{artifact_block}"
+            f"{phase_block}"
             f"{design_values_block}"
             f"{profile_block}"
             f"{architecture_block}"
             f"{completion_gate_block}"
             f"{local_skill_block}"
             f"{host_block}"
-            f"\n## When complete\n"
-            f"After writing the artifact, run `agent-flow status` from "
-            f"`{project_root}` and follow the printed `next_command`."
+            f"{completion_block}"
         )
         if self._observer is not None:
             # variant가 있으면 이름이 갈린다. `prompt-<phase>`는 host가 실제로
@@ -174,13 +226,18 @@ class Adapter(ABC):
             )
         return ""
 
-    def _render_completion_gate_block(self, phase: "Phase") -> str:
+    def _render_completion_gate_block(self, phase: "Phase", *, role: str = "author") -> str:
+        """Render the completion contract that applies to the selected role."""
         markers = getattr(phase, "required_markers", ())
         if not markers:
             return ""
         lines = [
             "\n## Completion gate",
             "",
+            "Review whether the author's artifact genuinely satisfies these markers; "
+            "the runner's advancement criteria remain unchanged. Missing required markers "
+            "or unsupported claims are review evidence, not permission to write the artifact."
+            if role == "reviewer" else
             "Do not write the artifact as complete until the phase genuinely "
             "satisfies these markers. The runner blocks advancement when any "
             "marker is missing. The artifact must include a `## Completion Gate` "

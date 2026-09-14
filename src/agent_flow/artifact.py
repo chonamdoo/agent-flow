@@ -44,7 +44,12 @@ from agent_flow.core.local_skills import (
     resolved_profile,
 )
 from agent_flow.core.markers import missing_markers, normalize_required_markers
-from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
+from agent_flow.core.phase_workflow import (
+    PhaseWorkflowDefinition,
+    WorkflowDriftError,
+    find_kit_root,
+    load_phase_workflow_definition,
+)
 from agent_flow.core.profiles import assert_architecture_override_compatible
 from agent_flow.core.run_storage import ACTIVE_MARKER, RUNS_DIRNAME, active_run_paths
 from agent_flow.core.security import validate_safe_name
@@ -61,6 +66,7 @@ from agent_flow.core.review_scope import (
     review_scope_block_reason,
     validate_publication_review_base,
 )
+from agent_flow.core.workflow_pin import load_run_workflow_definition, workflow_pin_metadata
 from agent_flow.core.workflow_status import (
     print_structured_status,
     status_value,
@@ -118,11 +124,32 @@ class ActiveRun:
         artifacts = sorted(str(p.relative_to(self.path)) for p in self.path.rglob("*") if p.is_file())
         meta = read_meta(self.path)
         current_phase = meta.get("current_phase") or "-"
-        contract = _phase_contract(
-            self.path,
-            self.workflow,
-            current_phase,
-        )
+        print(f"Run id     : {self.run_id}")
+        print(f"Workflow   : {self.workflow}")
+        print(f"Task       : {status_value(self.task)}")
+        print(f"Started at : {self.started_at}")
+        print(f"Phase      : {current_phase}")
+        print(f"Artifacts  : {len(artifacts)} written")
+        for a in artifacts:
+            print(f"  - {a}")
+        try:
+            contract = _phase_contract(
+                self.path,
+                self.workflow,
+                current_phase,
+                config_root=config_root,
+            )
+        except WorkflowDriftError as exc:
+            print_structured_status(workflow_status_payload(
+                status="blocked",
+                run=f"{self.workflow}/{self.run_id}",
+                task=self.task,
+                current_phase=current_phase,
+                reason="workflow_definition_unavailable",
+                next_command="",
+                detail=f"The recorded phase is not verified. {exc}",
+            ))
+            raise
         required_artifact = (
             _existing_phase_artifact(
                 self.path,
@@ -238,14 +265,6 @@ class ActiveRun:
             missing_completion_markers=missing_markers,
             detail=detail,
         )
-        print(f"Run id     : {self.run_id}")
-        print(f"Workflow   : {self.workflow}")
-        print(f"Task       : {status_value(self.task)}")
-        print(f"Started at : {self.started_at}")
-        print(f"Phase      : {current_phase}")
-        print(f"Artifacts  : {len(artifacts)} written")
-        for a in artifacts:
-            print(f"  - {a}")
         print_structured_status(payload)
 
 
@@ -306,6 +325,7 @@ def create_run(
     checkout_identity: str | None = None,
     checkout_registration_identity: str | None = None,
     concerns: Sequence[str] = (),
+    workflow_definition: PhaseWorkflowDefinition | None = None,
 ) -> Path:
     """Create a new run directory. Refuses if an active run exists."""
     if run_id is not None:
@@ -343,6 +363,8 @@ def create_run(
                     f"(task: {existing.task!r}). Use `agent-flow continue` to resume "
                     f"or `agent-flow abort` to clear."
                 )
+            definition = workflow_definition or load_phase_workflow_definition(find_kit_root(), workflow)
+            workflow_metadata = workflow_pin_metadata(definition, workflow=workflow)
 
             now = datetime.now(timezone.utc)
             if run_id is None:
@@ -382,9 +404,7 @@ def create_run(
                     # 디스크에 있으므로 same-user 적대적 위조까지 막는 층은 아니다.
                     "review_nonce": secrets.token_hex(16),
                 }
-                digest = _workflow_digest(workflow)
-                if digest is not None:
-                    meta["workflow_digest"] = digest
+                meta.update(workflow_metadata)
                 if architecture:
                     meta["architecture"] = architecture
                 if checkout_identity is not None:
@@ -409,17 +429,6 @@ def create_run(
         ) from exc
 
 
-def _workflow_digest(workflow: str) -> str | None:
-    """이 run이 실행하기로 한 workflow 원문의 sha256. 읽을 수 없으면 ``None``.
-
-    읽지 못한 경우를 실패로 올리지 않는다 — run 생성은 workflow 해석보다 앞선
-    단계이고, 여기서 막으면 정의를 고치려는 사용자가 run조차 열 수 없다. 값이
-    비면 cursor 검증이 drift 대신 "기록 없음"으로 취급하고 그때 채워 넣는다.
-    """
-    try:
-        return load_phase_workflow_definition(find_kit_root(), workflow).digest
-    except (OSError, RuntimeError, ValueError, yaml.YAMLError):
-        return None
 
 
 def _validate_checkout_identity(value: str) -> None:
@@ -509,10 +518,15 @@ def pending_phase_approval(run_dir: Path) -> dict[str, str] | None:
     return identity if identity != meta.get("phase_approval") else None
 
 
-def approve_phase_artifact(run_dir: Path, *, token: str) -> dict[str, str]:
+def approve_phase_artifact(
+    run_dir: Path, *, token: str, config_root: Path | None = None
+) -> dict[str, str]:
     """Acknowledge these artifact bytes, not the caller's identity."""
     with exclusive_file_lease(run_dir.parent / ACTIVE_LOCK):
         meta = read_meta(run_dir)
+        load_run_workflow_definition(
+            find_kit_root(), meta.get("workflow", "unknown"), meta, config_root=config_root,
+        )
         identity = _phase_approval_identity(run_dir, meta)
         if identity is None or not secrets.compare_digest(identity["token"], token):
             raise ValueError("phase approval token does not match the current artifact and attempt")
@@ -633,8 +647,10 @@ def phase_review_rejected(
     aggregate_text: str,
     *,
     run_meta: Mapping[str, object] | None = None,
+    config_root: Path | None = None,
 ) -> bool:
-    contract = _phase_contract(run_path, workflow, phase_id)
+    """Return whether bound review evidence rejects the selected phase."""
+    contract = _phase_contract(run_path, workflow, phase_id, config_root=config_root)
     if not contract.multi_review:
         return False
     meta = run_meta if run_meta is not None else read_meta(run_path)
@@ -662,6 +678,7 @@ def _missing_completion_markers(
         run_path,
         workflow,
         phase_id,
+        config_root=config_root,
     )
     artifact = _existing_phase_artifact(
         run_path,
@@ -713,6 +730,7 @@ def _missing_completion_markers(
                 phase_id,
                 text,
                 run_meta=meta,
+                config_root=config_root,
             ),
         )
     )
@@ -738,13 +756,35 @@ def _parse_timestamp(value: object) -> float | None:
         return None
 
 
-def _required_markers(run_path: Path, workflow: str, phase_id: str) -> tuple[str, ...]:
-    return _phase_contract(run_path, workflow, phase_id).required_markers
+def _required_markers(
+    run_path: Path, workflow: str, phase_id: str, *, config_root: Path | None = None
+) -> tuple[str, ...]:
+    """Load required markers from the run's verified workflow definition."""
+    return _phase_contract(
+        run_path, workflow, phase_id, config_root=config_root,
+    ).required_markers
 
 
 def _phase_contract(
-    run_path: Path, workflow: str, phase_id: str
+    run_path: Path, workflow: str, phase_id: str, *, config_root: Path | None = None
 ) -> PhaseArtifactContract:
+    """Resolve a phase contract without falling back from an invalid run pin."""
+    meta = read_meta(run_path)
+    if (run_path / ACTIVE_MARKER).is_file() or meta.get("workflow") or "workflow_definition" in meta:
+        definition = load_run_workflow_definition(
+            find_kit_root(), workflow, meta, config_root=config_root,
+        )
+        phase = next((item for item in definition.phases if item.id == phase_id), None)
+        if phase is None:
+            return PhaseArtifactContract(
+                artifact=None, required_markers=(), skills=None, multi_review=False,
+            )
+        return PhaseArtifactContract(
+            artifact=Path(phase.artifact),
+            required_markers=phase.required_markers,
+            skills=phase.skills,
+            multi_review=phase.multi_review,
+        )
     project_root = run_path.parents[2] if len(run_path.parents) >= 3 else None
     candidates: list[Path] = []
     if project_root is not None:

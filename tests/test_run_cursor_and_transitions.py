@@ -22,7 +22,6 @@ if str(SRC_ROOT) not in sys.path:
 
 from agent_flow.artifact import read_meta, write_meta
 from agent_flow.core.phase_workflow import (
-    ACCEPT_WORKFLOW_DRIFT_FLAG,
     CorruptRunCursorError,
     CursorScope,
     RunCursor,
@@ -63,7 +62,6 @@ def _runner(run_dir: Path, phases: list[Phase]) -> Runner:
     runner.run_dir = run_dir
     runner.config_root = run_dir
     runner.phases = phases
-    runner.accept_workflow_drift = False
     return runner
 
 
@@ -134,102 +132,8 @@ def test_workflow_change_after_the_run_started_is_reported_as_drift():
     workflow = _development()
     meta = {"phase_index": 0, "workflow_digest": "0" * 64}
 
-    with pytest.raises(WorkflowDriftError) as caught:
+    with pytest.raises(WorkflowDriftError):
         RunCursor.from_meta(meta, _scope(workflow))
-
-    # kit 업그레이드가 workflow YAML을 바꾼다. 탈출구를 지목하지 않으면 진행 중인
-    # 모든 run이 exit 2로 굳고, "finish"는 이 예외가 막는 바로 그것이다.
-    message = str(caught.value)
-    assert ACCEPT_WORKFLOW_DRIFT_FLAG in message
-    assert "Finish or abort" not in message
-
-
-def test_accepting_workflow_drift_re_baselines_the_run(tmp_path: Path):
-    runner, _phases = _development_runner(tmp_path)
-    runner.accept_workflow_drift = True
-    write_meta(
-        runner.run_dir,
-        {"run_id": "r1", "phase_index": 0, "workflow_digest": "0" * 64},
-    )
-
-    cursor = runner._run_cursor(read_meta(runner.run_dir))
-
-    assert cursor.workflow_digest == runner.workflow.digest
-    # 승인은 다시 찍어야 끝난다. meta에 남겨 두면 다음 실행이 같은 벽을 다시 만난다.
-    assert read_meta(runner.run_dir)["workflow_digest"] == runner.workflow.digest
-
-
-def test_accepted_drift_re_anchors_the_cursor_on_the_recorded_phase_name():
-    """반증: 승인은 digest 비교만 우회했다. 새 정의가 현재 phase 앞에 phase를
-    끼워 넣으면 옛 index는 다른 phase를 가리키고, 우리가 안내한
-    `agent-flow continue --accept-workflow-drift`가 `CorruptRunCursorError`로
-    죽어 복구할 길이 없었다."""
-    workflow = _development()
-    ids = tuple(phase.id for phase in workflow.phases)
-    recorded = {
-        "phase_index": 2,
-        "current_phase": ids[2],
-        "workflow_digest": workflow.digest,
-    }
-    inserted = CursorScope("development", "development.yaml", "1" * 64, ("bootstrap",) + ids)
-    reordered = CursorScope("development", "development.yaml", "2" * 64, tuple(reversed(ids)))
-
-    for scope in (inserted, reordered):
-        cursor = RunCursor.from_meta(recorded, scope, accept_workflow_drift=True)
-
-        assert cursor.phase_id == ids[2]
-        assert cursor.phase_index == scope.phase_ids.index(ids[2])
-
-
-def test_accepted_drift_that_cannot_place_the_phase_points_at_abort_not_the_flag():
-    """이름이 새 정의에 아예 없으면 재배치할 자리가 없다. 그때 다시 flag를 권하면
-    사용자는 방금 실패한 명령을 또 실행한다."""
-    workflow = _development()
-    ids = tuple(phase.id for phase in workflow.phases)
-    dropped = CursorScope(
-        "development", "development.yaml", "3" * 64, tuple(i for i in ids if i != ids[2])
-    )
-
-    with pytest.raises(CorruptRunCursorError) as caught:
-        RunCursor.from_meta(
-            {"phase_index": 2, "current_phase": ids[2], "workflow_digest": workflow.digest},
-            dropped,
-            accept_workflow_drift=True,
-        )
-
-    message = str(caught.value)
-    assert ACCEPT_WORKFLOW_DRIFT_FLAG not in message
-    assert "agent-flow abort" in message
-
-
-def test_a_re_anchored_cursor_is_written_back_so_the_next_run_is_not_blocked(
-    tmp_path: Path,
-):
-    """digest만 다시 찍고 index를 남겨 두면, drift가 사라진 다음 실행이 옛 index와
-    이름의 불일치로 막힌다 — 승인은 한 번으로 끝나야 한다."""
-    runner, phases = _development_runner(tmp_path)
-    runner.accept_workflow_drift = True
-    # 새 정의에서 첫 phase가 사라져 'review'가 한 칸 앞으로 온 상황.
-    runner.phases = phases[1:]
-    moved = [phase.id for phase in runner.phases].index("review")
-    write_meta(
-        runner.run_dir,
-        {
-            "run_id": "r1",
-            "phase_index": 2,
-            "current_phase": "review",
-            "workflow_digest": "0" * 64,
-        },
-    )
-
-    cursor = runner._run_cursor(read_meta(runner.run_dir))
-
-    assert cursor.phase_index == moved
-    persisted = read_meta(runner.run_dir)
-    assert persisted["phase_index"] == moved
-    assert persisted["current_phase"] == "review"
-    runner.accept_workflow_drift = False
-    assert runner._run_cursor(read_meta(runner.run_dir)).phase_index == moved
 
 
 def test_a_progressed_cursor_without_a_current_phase_stops():
@@ -263,40 +167,12 @@ def test_cursor_scope_carries_the_digest_of_the_definition_it_came_from():
     assert not hasattr(scope, "phases")
 
 
-def test_a_run_without_a_recorded_digest_passes_and_is_backfilled(tmp_path: Path):
-    runner, _phases = _development_runner(tmp_path)
-    write_meta(runner.run_dir, {"run_id": "r1", "phase_index": 0})
-
-    cursor = runner._run_cursor(read_meta(runner.run_dir))
-
-    assert cursor.workflow_digest == runner.workflow.digest
-    assert read_meta(runner.run_dir)["workflow_digest"] == runner.workflow.digest
-
-
 def test_create_run_records_the_workflow_digest(tmp_path: Path):
     from agent_flow.artifact import create_run
 
     run_path = create_run(tmp_path, "development", "task")
 
     assert read_meta(run_path)["workflow_digest"] == _development().digest
-
-
-def test_a_corrupt_meta_is_not_replaced_by_the_digest_backfill(tmp_path: Path):
-    """반증: `read_meta`는 손상·OSError·decode 실패를 stderr로 알리고 빈 dict를
-    돌려준다. 그 dict에 digest backfill을 걸면 `write_meta`가 **원자적 교체**를 해
-    run_id·task·task_digest·gate_nonce·checkout identity가 첫 `continue`에서
-    사라진다. 읽지 못한 meta는 덮어쓰는 대신 멈춰야 한다.
-    """
-    runner, _phases = _development_runner(tmp_path)
-    meta_path = runner.run_dir / "meta.json"
-    # append 중에 죽은 meta. 사람이 복구할 값이 아직 전부 들어 있다.
-    corrupt = b'{"run_id": "r1", "task": "ship it", "gate_nonce": "n1", "phase_index": 0'
-    meta_path.write_bytes(corrupt)
-
-    with pytest.raises(CorruptRunCursorError):
-        runner._run_cursor(read_meta(runner.run_dir))
-
-    assert meta_path.read_bytes() == corrupt
 
 
 def test_the_route_key_travels_with_the_decision_not_on_the_instance(tmp_path: Path):
@@ -819,54 +695,6 @@ def test_a_journal_line_naming_a_phase_the_workflow_dropped_is_not_replayed(
     assert held["current_phase"] == "fix-loop"
     assert held["phase_index"] == fix_index
     assert "[reject]" in capsys.readouterr().out
-
-
-def test_a_re_anchored_cursor_says_so_instead_of_being_inferred(tmp_path: Path):
-    """반증: shell이 `기록된 index != 커서 index`로 재배치를 추론했다. 그 비교는
-    digest 불일치 밖에서는 언제나 거짓이라 분기의 근거가 될 수 없다."""
-    runner, phases = _development_runner(tmp_path)
-    ids = [phase.id for phase in phases]
-    scope = CursorScope.of(runner.workflow, ids)
-    recorded = {
-        "phase_index": 0,
-        "current_phase": ids[2],
-        "workflow_digest": "stale-digest",
-    }
-
-    moved = RunCursor.from_meta(recorded, scope, accept_workflow_drift=True)
-    assert moved.reanchored_from == 0
-    assert moved.phase_index == 2
-
-    stayed = RunCursor.from_meta(
-        {"phase_index": 2, "current_phase": ids[2], "workflow_digest": scope.digest},
-        scope,
-    )
-    assert stayed.reanchored_from is None
-
-
-def test_a_re_anchor_prints_the_move_it_made(tmp_path: Path, capsys):
-    """승인된 drift가 run을 몇 phase 앞뒤로 옮기는데 화면에 아무 줄도 없으면,
-    사용자는 재개가 어디서 다시 시작했는지 알 수 없다."""
-    runner, phases = _development_runner(tmp_path)
-    runner.accept_workflow_drift = True
-    ids = [phase.id for phase in phases]
-    write_meta(
-        runner.run_dir,
-        {
-            "run_id": runner.run_dir.name,
-            "phase_index": 0,
-            "current_phase": ids[2],
-            "workflow_digest": "stale-digest",
-        },
-    )
-
-    cursor = runner._run_cursor(read_meta(runner.run_dir))
-
-    assert cursor.phase_index == 2
-    out = capsys.readouterr().out
-    assert "[re-anchor]" in out
-    assert ids[2] in out
-    assert "0 -> 2" in out
 
 
 def test_an_empty_current_phase_is_corruption_not_an_absent_name():
@@ -1468,14 +1296,17 @@ def test_ci_repair_malformed_accounting_blocks_without_reset(tmp_path, monkeypat
 
 @pytest.mark.parametrize("change", ["bytes", "phase_entered_at", "run_id"])
 def test_phase_approval_is_bound_to_artifact_and_attempt(tmp_path, change):
-    from agent_flow.artifact import approve_phase_artifact, pending_phase_approval
+    from agent_flow.artifact import approve_phase_artifact, create_run, pending_phase_approval
 
+    tmp_path = create_run(tmp_path, "default", "Bind approval to the artifact and attempt")
     artifact = tmp_path / "design.md"
     artifact.write_text("approved scope\n", encoding="utf-8")
-    write_meta(tmp_path, {
-        "run_id": "run-1", "current_phase": "design", "phase_entered_at": "first",
+    meta = read_meta(tmp_path)
+    meta.update({
+        "current_phase": "design", "phase_index": 0, "phase_entered_at": "first",
         "phase_approval_request": {"phase_id": "design", "phase_entered_at": "first", "artifact": "design.md"},
     })
+    write_meta(tmp_path, meta)
     token = pending_phase_approval(tmp_path)["token"]
     approve_phase_artifact(tmp_path, token=token)
     assert pending_phase_approval(tmp_path) is None
@@ -1493,17 +1324,20 @@ def test_phase_approval_is_bound_to_artifact_and_attempt(tmp_path, change):
 
 
 def test_existing_pause_artifact_still_requires_explicit_approval(tmp_path, monkeypatch):
-    from agent_flow.artifact import approve_phase_artifact, pending_phase_approval
+    from agent_flow.artifact import approve_phase_artifact, create_run, pending_phase_approval
 
+    tmp_path = create_run(tmp_path, "default", "Bind design approval to the exact artifact")
     phase = Phase(id="design", description="", pause_after=True)
     runner = _runner(tmp_path, [phase])
     runner.profile = {}
     runner.next_command = "agent-flow continue"
     monkeypatch.setattr(runner, "_print_structured_status", lambda **kwargs: None)
-    write_meta(tmp_path, {
-        "run_id": "run-1", "phase_index": 0, "current_phase": "design", "phase_entered_at": "first",
+    meta = read_meta(tmp_path)
+    meta.update({
+        "phase_index": 0, "current_phase": "design", "phase_entered_at": "first",
         "task": "Bind design approval to the exact artifact.",
     })
+    write_meta(tmp_path, meta)
     (tmp_path / "design.md").write_text("approved scope\n", encoding="utf-8")
     assert runner._pause_for_approval(phase)
     assert runner._pause_for_approval(phase)

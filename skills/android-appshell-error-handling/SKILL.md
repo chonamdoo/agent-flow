@@ -15,7 +15,7 @@ implementation or review.
 ## Quick start
 
 1. Use this for common errors whose UI or side effects must be owned above feature screens: `SessionExpired`, `Maintenance`, `Forbidden`, and server-wide business codes.
-2. Start by deciding whether `notify(error)` returns `true`; if it does, route the error to AppShell and keep feature `UiState` limited to local errors.
+2. Apply the required shared contract below before the Android-specific rules.
 3. If the task is ordinary screen `UiState`, ViewModel DI, `UiModel` mapping, or stateless Compose rendering without global hosts/root reset, use the selected contract's presentation guidance (`android-clean-presentation-architecture` in Clean mode) instead.
 
 
@@ -54,9 +54,7 @@ Feature ViewModels notify common errors. They do not own `NavController`,
 
 ## Development Checklist
 
-- Apply the shared notifier classification and queue contract.
 - Observe pending common errors from AppShell with lifecycle-aware Compose state.
-- After confirmation, run the Android AppShell side effect through the shared queue and acknowledgement contract.
 - For `SessionExpired`, clear the root back stack and add the login route after
   the user confirms.
 - For maintenance mode, clear the root back stack and add the maintenance route
@@ -68,11 +66,6 @@ Feature ViewModels notify common errors. They do not own `NavController`,
 
 - Retrofit CallAdapters may normalize API failures into the project's established
   failure representation.
-- In Clean mode, data mappers convert network/server failures into domain errors
-  while preserving shared metadata; presentation mappers project them into
-  feature-local or common-error UI values. Local mode uses the selected
-  contract's representation boundaries while preserving the same metadata and
-  UI ownership. These are semantic roles, not required wrapper or class names.
 - Remote data sources and repositories stay free of dialog, navigation, toast,
   snackbar, and Android UI concerns.
 - Do not add a `BaseViewModel` solely to centralize common error display.
@@ -98,19 +91,13 @@ Request changes when any of these are true:
 - Navi3 routes are used as common error dialog entries.
 - `SessionExpired` can be confirmed without clearing the root back stack to the
   login flow.
-- The shared classification, deduplication, acknowledgement, retry, or metadata contract is violated.
-- Common and local paths can render the same failure.
 
 ## Tests To Expect
 
 - The common-error UI displays the queued failure, accepts confirmation, and drives Android AppShell recovery.
 - `SessionExpired` confirmation clears the root back stack and adds the login
   route.
-- ViewModel tests prove common errors notify AppShell instead of also becoming
-  feature-local error state.
+- Apply the shared feature-classification test contract in ViewModel tests.
 - Mapper and CallAdapter tests cover non-2xx responses, connectivity failures,
   serialization failures, canceled calls, and metadata preservation.
 
-## Completion Gate
-
-Use only the markers supplied by the active phase.

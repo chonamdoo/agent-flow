@@ -4,7 +4,7 @@ description: Use when creating, modifying, or reviewing a React Clean Architectu
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [uistate, ui state, state holder, container component, presentation hook, screen state, presentation layer]
 pathGlobs: ["**/*UiState.ts", "**/*UiState.tsx", "**/presentation/**"]
-requires: [clean-architecture-core]
+requires: [clean-architecture-core, react-clean-architecture]
 ---
 
 # React Clean Presentation Architecture
@@ -29,10 +29,10 @@ For AppShell-owned global error hosts, queue acknowledgement, or root navigation
 
 ## Architecture Rule
 
-- `presentation` owns screens, components, state-holder hooks, UI events, presentation models, and mappers.
-- Pure domain policy owns entities, invariants, and business language; application owns use cases and ports under `clean-architecture-core`. Existing packages may colocate these semantic roles.
-- `data` or `infrastructure` implements outbound ports and HTTP/storage clients; inbound server adapters own HTTP/tool request and response schemas.
-- Presentation code consumes typed domain/application ports, not concrete API clients or repository implementations. The core's single-context state-holder repository-interface exception remains valid; it does not authorize HTTP controllers to call ORM implementations directly.
+Apply the required `clean-architecture-core` **Semantic Layers**, **Dependency
+Rule**, **Mapping Boundary**, and **Error Boundary**. Apply the required
+`react-clean-architecture` for platform composition and DI.
+
 - Components should receive plain props and callbacks; they should not construct domain/data dependencies.
 - Browser APIs, analytics, storage, routing, and other external systems should be wrapped behind ports/adapters before reaching state-holder hooks.
 
@@ -40,21 +40,21 @@ For AppShell-owned global error hosts, queue acknowledgement, or root navigation
 
 - Fetch, Next.js route handlers/server actions, HTTP clients, storage, cookies,
   and browser API details stay in `data`, `infrastructure`, or server adapters.
-- Transport/storage failure types are raw diagnostics until mapped by repository
-  implementations or data mappers into domain error/result types.
-- Use cases return normalized domain/application result and error contracts, adding business-rule errors where needed.
-- Components receive presentation state, events, and `UiModel`/error UI models,
-  not DTOs, `Response` objects, raw HTTP errors, or storage errors.
-- At the presentation boundary, project domain/application data and errors into the render contract. Convert shapes where their meaning differs; an already suitable immutable shape may use an identity projection without a copying model or mapper file.
 - Effects synchronize with external systems only; do not move domain-to-UI
   derivation or error mapping into `useEffect`.
+
+Apply the required core's **Error Boundary** and **Mapping Boundary** for
+normalization and the values supplied to rendering.
 
 ## DI Rule
 
 React has no Hilt-equivalent official DI framework. Use this priority:
 
 1. Prefer explicit props for local dependencies.
-2. Use React `Context` providers for app-level typed use cases/ports, feature flags, and configuration. Raw clients and implementations are created inside the composition root, not exposed through feature dependency hooks. Analytics/storage/browser capabilities reach state holders as typed ports.
+2. Apply the required React adapter's **DI Shape** for Context composition and
+   typed port exposure. Context also supplies app-level feature flags and
+   configuration; analytics/storage/browser capabilities reach state holders as
+   typed ports.
 3. Use an external DI container only when the project already has class-heavy domain/application services or an existing container.
 4. If introducing a TypeScript DI container is justified, prefer the current repo standard. If none exists, evaluate `tsyringe` as a candidate against the project's concrete requirements; popularity alone is not an adoption reason.
 
@@ -70,7 +70,7 @@ Provider rules:
 
 Discover the existing feature, route, dependency-provider, and model conventions before placing code. Keep screen wiring, render contracts, state-holder logic, and necessary boundary mapping near their consumers; separate files or packages only when a real responsibility or dependency boundary needs them.
 
-`UiState`, `UiModel`, and `use<Screen>ViewModel` describe roles, not a mandatory folder tree or file count. Preserve project naming conventions; an existing render contract need not be renamed just to acquire a suffix. Domain-to-presentation mapping remains explicit in meaning, but equal shapes do not require copying models or forwarding mappers.
+`UiState`, `UiModel`, and `use<Screen>ViewModel` describe roles, not a mandatory folder tree or file count. Preserve project naming conventions; an existing render contract need not be renamed just to acquire a suffix. Apply the required core's **Mapping Boundary** to presentation projections.
 
 ## State Holder Rule
 
@@ -128,7 +128,7 @@ Split client state-holder wiring from rendering where that responsibility exists
 - durable screen states are explicit; discriminated unions cover mutually exclusive not-ready, loading, refreshing, placeholder, empty, error, success, offline, and permission branches that can occur
 - `uiState` has no contradictory booleans or duplicated derived fields
 - `UiAction`, `UiEvent`, and `UiState` roles are explicit for branchy screens
-- domain/application data crosses an explicit presentation projection, with conversion where semantics differ and no pointless same-shape copies
+- presentation projections satisfy the required core's **Mapping Boundary**.
 - project naming is preserved; suffixes, hook names, and file counts alone do not fail review
 - interactive state holders own client orchestration and callbacks; server-only views retain server data/composition without artificial hooks
 - render components receive narrow props; RHF adapters may consume the form's own state

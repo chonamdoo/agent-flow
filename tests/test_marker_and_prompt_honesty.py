@@ -362,14 +362,13 @@ def test_sdui_review_angle_is_dispatched(copy):
 
 def test_stub_mode_does_not_bypass_markers_for_authored_artifacts(tmp_path, monkeypatch):
     """반증: 환경변수 하나가 마커 검사 **전체**를 끄면 그건 전면 킬스위치다."""
+    from agent_flow.artifact import create_run
     from agent_flow.runner import Phase, Runner
 
     project = tmp_path / "proj"
     (project / ".agent-flow").mkdir(parents=True)
     (project / ".agent-flow" / "kit.json").write_text('{"profile": "generic"}', encoding="utf-8")
-    run_dir = project / ".agent-flow" / "runs" / "r1"
-    run_dir.mkdir(parents=True)
-    (run_dir / "meta.json").write_text('{"run_id": "r1", "task": "t"}', encoding="utf-8")
+    run_dir = create_run(project, "default", "Check authored markers")
 
     monkeypatch.setenv("AGENT_FLOW_GENERIC_MODE", "stub-success")
     runner = Runner(project_root=project, run_dir=run_dir)
@@ -388,14 +387,13 @@ def test_stub_mode_does_not_bypass_markers_for_authored_artifacts(tmp_path, monk
 
 
 def test_stub_sentinel_is_absent_outside_stub_mode(tmp_path, monkeypatch):
+    from agent_flow.artifact import create_run
     from agent_flow.runner import Phase, Runner
 
     project = tmp_path / "proj"
     (project / ".agent-flow").mkdir(parents=True)
     (project / ".agent-flow" / "kit.json").write_text('{"profile": "generic"}', encoding="utf-8")
-    run_dir = project / ".agent-flow" / "runs" / "r1"
-    run_dir.mkdir(parents=True)
-    (run_dir / "meta.json").write_text('{"run_id": "r1", "task": "t"}', encoding="utf-8")
+    run_dir = create_run(project, "default", "Check stub isolation")
     monkeypatch.delenv("AGENT_FLOW_GENERIC_MODE", raising=False)
 
     runner = Runner(project_root=project, run_dir=run_dir)

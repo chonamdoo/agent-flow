@@ -9,6 +9,8 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Iterable, Sequence
 
+import yaml
+
 
 from agent_flow.core.architecture_policy import (
     MAX_ARCHITECTURE_DOCUMENT_BYTES,
@@ -124,6 +126,32 @@ class ResolvedSkill:
 
 
 @dataclass(frozen=True)
+class SkillRoute:
+    skill: str
+    kind: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class NormativeDocument:
+    document: ContractDocument
+    content: bytes
+    routes: tuple[SkillRoute, ...] = ()
+    inline: bool = False
+
+
+@dataclass(frozen=True)
+class NormativeDelivery:
+    content: bytes
+    documents: tuple[NormativeDocument, ...]
+
+    @property
+    def inline(self) -> bool:
+        """Return whether this normative body is embedded in the prompt."""
+        return any(document.inline for document in self.documents)
+
+
+@dataclass(frozen=True)
 class SkillResolution:
     required: tuple[ResolvedSkill, ...] = ()
     optional: tuple[ResolvedSkill, ...] = ()
@@ -133,6 +161,32 @@ class SkillResolution:
     architecture_snapshot: ArchitectureSnapshot | None = None
     architecture_documents: tuple[tuple[ContractDocument, str], ...] = ()
     architecture_norms: tuple[ContractDocument, ...] = ()
+    normative_documents: tuple[NormativeDocument, ...] = ()
+    routes: tuple[SkillRoute, ...] = ()
+
+    @property
+    def delivery(self) -> tuple[NormativeDelivery, ...]:
+        """Group exact normative bodies while preserving every source route."""
+        groups: dict[bytes, list[NormativeDocument]] = {}
+        for document in self.normative_documents:
+            groups.setdefault(document.content, []).append(document)
+        return tuple(
+            NormativeDelivery(content, tuple(documents))
+            for content, documents in groups.items()
+        )
+
+    @property
+    def delivered_normative_bytes(self) -> int:
+        """Return the byte count of normative bodies embedded in the prompt."""
+        return sum(len(group.content) for group in self.delivery if group.inline)
+
+    @property
+    def duplicated_normative_bytes(self) -> int:
+        """Return bytes suppressed by exact-body delivery deduplication."""
+        return sum(
+            len(group.content) * (sum(item.inline for item in group.documents) - 1)
+            for group in self.delivery if group.inline
+        )
 
     @property
     def missing(self) -> tuple[ResolvedSkill, ...]:
@@ -148,12 +202,13 @@ class PhaseSkills:
     required: tuple[str, ...] = ()
     optional: tuple[str, ...] = ()
     replaceable_architecture: bool = False
+    pinned_legacy: bool = False
 
     def is_empty(self) -> bool:
         return not self.required and not self.optional
 
 
-@dataclass
+@dataclass(frozen=True)
 class SkillCatalogEntry:
     """discover된 skill 하나의 활성화 선언. 전부 frontmatter에서 온다."""
 
@@ -178,7 +233,33 @@ class SkillCatalogEntry:
     provenance: str = ""
     architecture_modes: tuple[str, ...] = ()
     architecture_dependencies: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    read_error: str = ""
 
+
+
+class ResolutionContext:
+    def __init__(self) -> None:
+        """Create an empty snapshot cache for immutable skill inputs."""
+        self.catalog: dict[tuple[str, str, str, bytes], SkillCatalogEntry] = {}
+        self.resolutions: dict[str, tuple[object, SkillResolution]] = {}
+        self.snapshots: dict[Path, ArchitectureSnapshot] = {}
+
+    def clear(self) -> None:
+        """Discard captured inputs so later resolution reads fresh bytes."""
+        self.catalog.clear()
+        self.resolutions.clear()
+        self.snapshots.clear()
+
+    def snapshot(self, root: Path) -> ArchitectureSnapshot:
+        """Reuse a root snapshot only while its captured inputs stay identical."""
+        assert_install_complete(root)
+        snapshot = architecture_snapshot(root)
+        assert_install_complete(root)
+        previous = self.snapshots.get(root.resolve())
+        if previous == snapshot:
+            return previous
+        self.snapshots[root.resolve()] = snapshot
+        return snapshot
 
 INVALID_GOVERNANCE_SCALAR = "<invalid-structured-value>"
 INVALID_FRONTMATTER = "<invalid-frontmatter>"
@@ -382,6 +463,8 @@ def resolve_phase_skills(
     host: str | None = None,
     env: dict[str, str] | None = None,
     architecture_root: Path | None = None,
+    context: ResolutionContext | None = None,
+    provider_authority: str = "",
 ) -> SkillResolution:
     """phase 선언 + frontmatter 선언 + profile 표/어휘를 합쳐 해석한다.
 
@@ -397,9 +480,9 @@ def resolve_phase_skills(
     from agent_flow.core.skill_matching import match_external
 
     contract_root = architecture_root or project_root
-    assert_install_complete(contract_root)
-    snapshot = architecture_snapshot(contract_root)
-    assert_install_complete(contract_root)
+    context = context or ResolutionContext()
+    assert_install_complete(project_root)
+    snapshot = context.snapshot(contract_root)
     selection = snapshot.selection
     if snapshot.declared:
         assert_architecture_override_compatible(project_root, selection)
@@ -421,12 +504,17 @@ def resolve_phase_skills(
     declared = phase_skills or PhaseSkills()
     required_names: list[str] = list(declared.required)
     optional_names: list[str] = list(declared.optional)
+    routes = [SkillRoute(name, "phase-required", phase_id) for name in declared.required]
+    routes.extend(SkillRoute(name, "phase-optional", phase_id) for name in declared.optional)
+    contents: dict[Path, bytes] = {}
 
     catalog = discover_skill_catalog(
         project_root, resolved_roots, exclude_names=(contract_name,) if contract_name else (),
+        contents=contents, context=context, retain_aliases=True,
     )
     if contract_name is not None and contract_path is not None:
         assert snapshot.contract is not None
+        contents[contract_path] = snapshot.contract.contents[0].encode("utf-8")
         catalog += (
             _catalog_entry(
                 contract_name, contract_path, "architecture-contract",
@@ -436,6 +524,36 @@ def resolve_phase_skills(
             ),
         )
     catalog_by_name = {entry.name: entry for entry in catalog}
+    declared_skill_phases = _profile_skill_phases(project_root, profile, catalog)
+    capture = (
+        str(project_root.resolve()), str(contract_root.resolve()), phase_id, declared,
+        tuple(changed_files), task_text, tuple(concerns),
+        yaml.safe_dump(profile, sort_keys=True, allow_unicode=True),
+        resolved_host, provider_authority, resolved_roots, snapshot, catalog,
+        tuple((str(path), content) for path, content in contents.items()),
+        tuple(sorted(declared_skill_phases.items())),
+        (os.environ if env is None else env).get("AGENT_FLOW_EXTERNAL_SKILLS", ""),
+    )
+    previous = context.resolutions.get(resolved_host)
+    if previous is not None and previous[0] == capture:
+        cached = previous[1]
+        norm_names = {document.path for document in cached.architecture_norms}
+        current_norms = _architecture_norms(
+            contract_root, snapshot,
+            (skill for skill in cached.required
+             if skill.name != contract_name and skill.path is not None
+             and str(skill.path.absolute()) in norm_names),
+            contents=contents,
+        )
+        assert_install_complete(project_root)
+        assert_install_complete(contract_root)
+        if current_norms == cached.architecture_norms:
+            return cached
+    if "clean-architecture" in required_names and not declared.pinned_legacy:
+        raise ArchitectureContractError(
+            "obsolete required skill 'clean-architecture'; migrate the custom requirement "
+            "to 'clean-architecture-core' (existing runs require a verified workflow pin)"
+        )
     if not declared.replaceable_architecture:
         incompatible_required = [
             name
@@ -461,10 +579,20 @@ def resolve_phase_skills(
     for entry in catalog:
         if not applicable(entry.name):
             continue
-        if entry.name in required_names or entry.name in optional_names:
-            continue
         activation = entry_activation(entry, phase_id, changed_files, task_text)
         if activation is None:
+            continue
+        routes.append(SkillRoute(entry.name, "activation", f"{entry.source}:{activation}"))
+        routes.extend(
+            SkillRoute(entry.name, "path-selector", f"{pattern}:{path}")
+            for pattern in entry.path_globs for path in changed_files
+            if _glob_matches(pattern, path)
+        )
+        routes.extend(
+            SkillRoute(entry.name, "task-selector", term)
+            for term in entry.task_terms if term_in(term, task_text)
+        )
+        if entry.name in required_names or entry.name in optional_names:
             continue
         if activation == ACTIVATED_BY_TASK_TERMS and entry.source not in OWNED_SOURCES:
             # 설치된 남의 skill을 task 문구로 required로 올리면 후보 집합이 이 머신의
@@ -477,7 +605,6 @@ def resolve_phase_skills(
 
     # profile 표로 붙는 skill은 upstream 파일이라 frontmatter 선언이 없어도 required다.
     # Profile task aliases must preserve the same phase allowlists as frontmatter triggers.
-    declared_skill_phases = _profile_skill_phases(project_root, profile, catalog)
     for routed in routed_profile_skills(
         profile,
         phase_id=phase_id,
@@ -485,9 +612,11 @@ def resolve_phase_skills(
         task_text=task_text,
         concerns=concerns,
         declared_skill_phases=declared_skill_phases,
+        preserve_routes=True,
     ):
         if not applicable(routed.name):
             continue
+        routes.append(SkillRoute(routed.name, "profile", str(routed)))
         if routed.name not in required_names:
             required_names.append(routed.name)
 
@@ -500,9 +629,11 @@ def resolve_phase_skills(
         task_text=task_text,
         concerns=concerns,
         env=env,
+        preserve_routes=True,
     ):
         if not applicable(match.name):
             continue
+        routes.append(SkillRoute(match.name, "external", str(match)))
         if match.name in required_names:
             continue
         if match.name in optional_names:
@@ -514,7 +645,8 @@ def resolve_phase_skills(
             path=match.path,
             source=match.source,
             exists=match.path is not None,
-            summary=skill_summary(match.path) if match.path is not None else "",
+            summary=_description_summary(catalog_by_name[match.name].description)
+            if match.name in catalog_by_name else "",
         )
         if match.tier == EXTERNAL_REQUIRED:
             required_names.append(match.name)
@@ -523,9 +655,29 @@ def resolve_phase_skills(
 
     if contract_name is not None and contract_name not in required_names:
         required_names.append(contract_name)
+    if contract_name is not None:
+        routes.append(SkillRoute(contract_name, "architecture-selection", selection.mode.value))
     required_names = expand_dependencies(required_names, catalog, architecture_mode=selection.mode)
+    for name in _stable_unique(required_names):
+        entry = catalog_by_name.get(name)
+        if entry is None:
+            continue
+        routes.extend(SkillRoute(dependency, "dependency", name) for dependency in entry.dependencies)
+        routes.extend(
+            SkillRoute(dependency, "architecture-dependency", f"{name}:{selection.mode.value}")
+            for dependency in dict(entry.architecture_dependencies).get(selection.mode.value, ())
+        )
+    if "clean-architecture" in required_names and not declared.pinned_legacy:
+        raise ArchitectureContractError(
+            "obsolete required skill 'clean-architecture'; migrate its requiring profile "
+            "or skill dependency to 'clean-architecture-core'"
+        )
     for name in required_names:
         entry = catalog_by_name.get(name)
+        if entry is not None and entry.read_error:
+            raise ArchitectureContractError(
+                f"cannot read required skill {name!r} at {entry.path}: {entry.read_error}"
+            )
         if entry is not None and entry.lifecycle == INVALID_FRONTMATTER:
             raise ValueError(
                 f"required skill {name!r} ({entry.source}) has invalid frontmatter metadata "
@@ -557,10 +709,23 @@ def resolve_phase_skills(
         found = matched.get(name)
         if found is not None:
             return found
+        entry = catalog_by_name.get(name)
+        if entry is not None:
+            return ResolvedSkill(
+                name=name, path=entry.path, source=entry.source, exists=True,
+                summary=_description_summary(entry.description),
+            )
         return resolve_skill(name, resolved_roots)
 
     unique_required = _stable_unique(required_names)
     required = tuple(resolve(name) for name in unique_required)
+    if declared.pinned_legacy and any(
+        skill.name == "clean-architecture" and not skill.exists for skill in required
+    ):
+        raise ArchitectureContractError(
+            "verified legacy workflow requires its pinned 'clean-architecture' skill; "
+            "restore the pinned installation rather than silently replacing its norm"
+        )
     norm_names = set(expand_dependencies(
         contract_names_in(unique_required, selection), catalog, architecture_mode=selection.mode,
     ))
@@ -568,6 +733,31 @@ def resolve_phase_skills(
         skill for skill in required
         if skill.name != contract_name and skill.name in norm_names
     )
+    norms = _architecture_norms(contract_root, snapshot, norm_skills, contents=contents)
+    normative_documents: list[NormativeDocument] = []
+    for skill in required:
+        if not skill.exists or skill.path is None:
+            continue
+        content = contents.get(skill.path)
+        if content is None:
+            raise ArchitectureContractError(f"required skill was not captured: {skill.path}")
+        routes.extend(
+            SkillRoute(skill.name, "root", f"{root.source}:{root.host}:{root.template}:{root.install_hint}")
+            for root in resolved_roots
+            if _match_template(root.template, skill.name) == skill.path
+        )
+        document = ContractDocument(str(skill.path), hashlib.sha256(content).hexdigest(), len(content))
+        normative_documents.append(NormativeDocument(
+            document, content, tuple(route for route in routes if route.skill == skill.name),
+            inline=skill.name == contract_name,
+        ))
+    if snapshot.contract is not None:
+        for document, text in zip(snapshot.contract.documents[1:], snapshot.contract.contents[1:], strict=True):
+            normative_documents.append(NormativeDocument(
+                document, text.encode("utf-8"),
+                (SkillRoute(contract_name or "", "architecture-reference", document.path),),
+                inline=True,
+            ))
     resolution = SkillResolution(
         required=required,
         optional=tuple(resolve(name) for name in _stable_unique(optional_names)),
@@ -575,14 +765,19 @@ def resolve_phase_skills(
         architecture_snapshot=snapshot,
         architecture_documents=tuple(zip(snapshot.contract.documents, snapshot.contract.contents, strict=True))
         if snapshot.contract else (),
-        architecture_norms=_architecture_norms(contract_root, snapshot, norm_skills),
+        architecture_norms=norms,
+        normative_documents=tuple(normative_documents),
+        routes=tuple(routes),
     )
     assert_install_complete(contract_root)
+    assert_install_complete(project_root)
+    context.resolutions[resolved_host] = (capture, resolution)
     return resolution
 
 
 def _architecture_norms(
     root: Path, snapshot: ArchitectureSnapshot, required: Iterable[ResolvedSkill],
+    *, contents: dict[Path, bytes] | None = None,
 ) -> tuple[ContractDocument, ...]:
     """Collect pinned normative documents for the selected architecture."""
     documents: dict[str, ContractDocument] = {}
@@ -605,6 +800,11 @@ def _architecture_norms(
                 )
             except OSError as exc:
                 raise ArchitectureContractError(f"cannot read architecture norm {path}: {exc}") from exc
+            if contents is not None:
+                captured = contents.get(path)
+                if captured is not None and captured != content:
+                    raise ArchitectureContractError(f"architecture norm changed during capture: {path}")
+                contents[path] = content
             absolute = str(path.absolute())
             documents[absolute] = ContractDocument(
                 absolute, hashlib.sha256(content).hexdigest(), len(content)
@@ -659,26 +859,17 @@ def _profile_skill_phases(
     return phases
 
 
-_CATALOG_CACHE: dict[tuple[tuple[str, ...], str], tuple["SkillCatalogEntry", ...]] = {}
-
-
 def discover_skill_catalog(
     project_root: Path, roots: Sequence[SkillRoot], *, exclude_names: Sequence[str] = (),
+    contents: dict[Path, bytes] | None = None,
+    retain_aliases: bool = False,
+    context: ResolutionContext | None = None,
 ) -> tuple[SkillCatalogEntry, ...]:
-    """root들을 훑어 발견한 모든 SKILL.md를 카탈로그로 만든다.
-
-    한 번의 marker 검증에서 여러 번 불리고 매번 모든 SKILL.md를 읽는다.
-    디스크 스탬프를 캐시 키에 넣는다 — template만 키로 쓰면 같은 프로세스 안에서
-    skill이 갱신되거나 새로 깔려도 낡은 카탈로그를 계속 쓴다.
-    """
+    """Capture document bytes before parsing metadata; reuse only immutable entries."""
     files = tuple(
         (source, path) for source, path in catalog_files(roots)
         if path.parent.name not in exclude_names
     )
-    key = (tuple(root.template for root in roots), catalog_stamp(files))
-    cached = _CATALOG_CACHE.get(key)
-    if cached is not None:
-        return cached
     entries: dict[str, SkillCatalogEntry] = {}
     seen_files: set[str] = set()
     for source, skill_path in files:
@@ -688,13 +879,39 @@ def discover_skill_catalog(
         # 같은 파일이 여러 root에 걸린다(`~/.claude/skills/<n>` → `~/.agents/skills/<n>`
         # symlink가 이 머신 25개 중 15개). 이름이 달라도 같은 파일이면 한 번만 담는다.
         real = os.path.realpath(skill_path)
-        if real in seen_files:
+        if real in seen_files and not retain_aliases:
             continue
         seen_files.add(real)
-        entries[name] = _catalog_entry(name, skill_path, source)
-    result = tuple(entries.values())
-    _CATALOG_CACHE[key] = result
-    return result
+        try:
+            if is_clean_architecture_skill(name):
+                content, _ = read_bounded_regular_file(
+                    skill_path, max_bytes=MAX_ARCHITECTURE_DOCUMENT_BYTES,
+                )
+            else:
+                content = skill_path.read_bytes()
+        except OSError as exc:
+            entries[name] = SkillCatalogEntry(
+                name=name, path=skill_path, source=source, read_error=str(exc),
+            )
+            continue
+        if contents is not None:
+            contents[skill_path] = content
+        key = (name, str(skill_path), source, content)
+        entry = context.catalog.get(key) if context is not None else None
+        if entry is None:
+            try:
+                metadata = parse_skill_metadata(content.decode("utf-8"), source=str(skill_path)) or {}
+            except InvalidSkillFrontmatter:
+                metadata = {field: INVALID_FRONTMATTER for field in GOVERNANCE_KEYS}
+            entry = _catalog_entry(name, skill_path, source, frontmatter=metadata)
+            if context is not None:
+                context.catalog[key] = entry
+        entries[name] = entry
+    if context is not None:
+        current = {(entry.name, str(entry.path), entry.source, contents[entry.path])
+                   for entry in entries.values() if entry.path in contents} if contents is not None else set()
+        context.catalog = {key: entry for key, entry in context.catalog.items() if key in current}
+    return tuple(entries.values())
 
 
 def catalog_files(roots: Sequence[SkillRoot]) -> tuple[tuple[str, Path], ...]:
@@ -706,19 +923,19 @@ def catalog_files(roots: Sequence[SkillRoot]) -> tuple[tuple[str, Path], ...]:
 
 
 def catalog_stamp(files: Sequence[tuple[str, Path]]) -> str:
-    """카탈로그 무효화 스탬프. 내용 해시가 아니라 stat이다 — 실측 131개에 0.4ms."""
-    parts: list[str] = []
-    for _source, skill_path in files:
+    """Return a stable digest for selected catalog paths and contents."""
+    parts = []
+    for source, skill_path in files:
         try:
-            info = skill_path.stat()
+            parts.append((source, str(skill_path), hashlib.sha256(skill_path.read_bytes()).hexdigest()))
         except OSError:
             continue
-        parts.append(f"{skill_path}:{info.st_mtime_ns}:{info.st_size}")
-    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+    return hashlib.sha256(json.dumps(parts).encode("utf-8")).hexdigest()
 
 
 def skill_prompt_block(
-    project_root: Path, resolution: SkillResolution, *, enforced: bool = True
+    project_root: Path, resolution: SkillResolution, *, enforced: bool = True,
+    role: str = "author",
 ) -> str:
     """resolver 결과만 프롬프트에 넣는다. profile YAML 전량 dump를 대체한다.
 
@@ -735,6 +952,8 @@ def skill_prompt_block(
     "프로젝트를 먼저 훑고 그 다음 호출하라"가 더 나은 결과를 냈다. 게이트는 순서도
     읽음 여부도 보지 않으므로, 강제는 그대로 두고 순서만 사실대로 권한다.
     """
+    if role not in {"author", "reviewer"}:
+        raise ValueError(f"unknown envelope role: {role}")
     if not resolution.required and not resolution.optional and resolution.architecture_snapshot is None:
         return ""
     lines = ["\n## Required skills for this phase", ""]
@@ -748,6 +967,10 @@ def skill_prompt_block(
     lines.append("")
     if resolution.required:
         lines.append(
+            "Skim the actual change, then apply every required document below in your "
+            "review. Verify the author's completion evidence without writing it; a read "
+            "marker alone does not establish rule compliance:"
+            if role == "reviewer" else
             "First skim the files this phase actually changes, then read every one of "
             "these before you write or judge code. The completion gate takes your word "
             "for it — it blocks this phase until the artifact records a "
@@ -759,6 +982,12 @@ def skill_prompt_block(
             "— skim the change first, then read the ones that actually apply:"
         )
         lines.append("")
+        if resolution.normative_documents:
+            lines.extend((
+                "Use the required-read plan below once per exact body. Selected skills "
+                "here are provenance only, not additional read instructions:",
+                "",
+            ))
         for skill in resolution.required:
             if skill.exists:
                 lines.append(_skill_prompt_line(project_root, skill))
@@ -777,7 +1006,9 @@ def skill_prompt_block(
         missing = ", ".join(skill.name for skill in resolution.missing)
         lines.append(
             f"Not installed for this host: {missing}. This is not a violation — "
-            "record `skill-availability: degraded` and continue with the skills you do have. "
+            + ("Report this coverage gap in your review; " if role == "reviewer" else
+               "record `skill-availability: degraded` and continue with the skills you do have. ")
+            +
             "If you are reviewing, that absence is a coverage gap, not a finding: never make "
             "it a verdict. Do not ask the user to install anything mid-run; "
             "`agent-flow skills sync` owns that."
@@ -797,15 +1028,32 @@ def skill_prompt_block(
                 "Architecture is undecided. Continue only work that needs no architecture "
                 "decision; a missing standard is not permission to approve structural work."
             )
-        for document, text in resolution.architecture_documents:
-            lines.extend((
-                "",
-                f"### Normative document: `{document.path}`",
-                f"SHA-256: `{document.sha256}`. Bytes: {document.bytes}.",
-                "",
-                text,
-            ))
         lines.append("")
+    deliveries = resolution.delivery
+    if deliveries:
+        lines.extend(("## Required-read plan", ""))
+        for index, delivery in enumerate(deliveries, 1):
+            if delivery.inline:
+                lines.append(f"- Apply inline body {index} below; no file read is required for this body.")
+            else:
+                lines.append(f"- Read `{delivery.documents[0].document.path}`.")
+        lines.extend((
+            "",
+            "## Normative provenance and inline bodies",
+            "",
+            "All paths, digests, and routes below are provenance only, not additional "
+            "read instructions. Each plan entry satisfies every selection route for "
+            "that exact body; all selected obligations still apply.",
+            "",
+        ))
+    for index, delivery in enumerate(deliveries, 1):
+        lines.append(f"### Normative body {index}")
+        for item in delivery.documents:
+            document = item.document
+            lines.append(f"- `{document.path}` — SHA-256: `{document.sha256}`. Bytes: {document.bytes}.")
+            lines.extend(f"  - route: {route.kind} / {route.skill} / {route.detail}" for route in item.routes)
+        if delivery.inline:
+            lines.extend(("", delivery.content.decode("utf-8"), ""))
     return "\n".join(lines)
 
 
@@ -818,25 +1066,12 @@ def _skill_prompt_line(project_root: Path, skill: ResolvedSkill) -> str:
     return f"- `{skill.name}` ({skill.source}) — {location}{summary}"
 
 
-_SUMMARY_CACHE: dict[str, str] = {}
 _SUMMARY_MAX_CHARS = 140
 
 
 def skill_summary(skill_path: Path) -> str:
-    """frontmatter `description`의 첫 문장. 없으면 빈 문자열.
-
-    전문을 넣으면 목록이 곧 문서가 된다 — 압축이 목적이다. 한 문장이면 "이 변경이
-    이 skill의 scope에 걸리는가"를 판단하기에 충분하고, 아니면 파일을 열면 된다.
-    프로세스 수명 동안만 캐시한다. CLI는 단명이라 stale 위험이 없다.
-    """
-    key = str(skill_path)
-    cached = _SUMMARY_CACHE.get(key)
-    if cached is not None:
-        return cached
-    raw = (_read_frontmatter(skill_path) or {}).get("description")
-    summary = _description_summary(raw)
-    _SUMMARY_CACHE[key] = summary
-    return summary
+    """Extract the summary used when a skill is routed by reference."""
+    return _description_summary((_read_frontmatter(skill_path) or {}).get("description"))
 
 
 def _description_summary(raw: object) -> str:
@@ -902,12 +1137,13 @@ def _template_host(template: str) -> str:
 
 
 def _dedupe_roots(roots: Iterable[SkillRoot]) -> list[SkillRoot]:
-    seen: set[str] = set()
+    """Keep the first occurrence of each skill root."""
+    seen: set[SkillRoot] = set()
     out: list[SkillRoot] = []
     for root in roots:
-        if root.template in seen:
+        if root in seen:
             continue
-        seen.add(root.template)
+        seen.add(root)
         out.append(root)
     return out
 
@@ -1205,4 +1441,3 @@ def _string_tuple(value: object) -> tuple[str, ...]:
     if isinstance(value, list):
         return tuple(str(item) for item in value if str(item).strip())
     return ()
-

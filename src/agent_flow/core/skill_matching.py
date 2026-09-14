@@ -73,6 +73,7 @@ class ExternalMatch:
     # 설치돼 있는 skill을 "없다"고 보고한다.
     path: Path | None = None
     source: str = "host"
+    activation: tuple[str, ...] = ()
 
     def demoted(self) -> "ExternalMatch":
         return replace(self, tier=OFFERED)
@@ -105,6 +106,7 @@ def match_external(
     task_text: str = "",
     concerns: Sequence[str] = (),
     env: dict[str, str] | None = None,
+    preserve_routes: bool = False,
 ) -> tuple[ExternalMatch, ...]:
     """이번 phase/범위에서 활성화되는 설치 skill. 순서까지 결정론이다.
 
@@ -123,6 +125,7 @@ def match_external(
     haystack = task_text.lower()
     declared_concerns = {str(item).strip().lower() for item in concerns if str(item).strip()}
     matches: dict[str, ExternalMatch] = {}
+    routes: list[ExternalMatch] = []
     for domain in config.domains:
         if not _domain_active(
             domain, phase_id, changed_files, task_text, declared_concerns
@@ -138,13 +141,35 @@ def match_external(
             shared = next((term for term in terms if _term_in(term, haystack)), None)
             required = domain.id.lower() in declared_concerns or entry.name in config.pins
             tier = REQUIRED if required else OFFERED
+            if preserve_routes:
+                activation = (
+                    *((f"concern:{domain.id}",) if domain.id.lower() in declared_concerns else ()),
+                    *((f"pin:{entry.name}",) if entry.name in config.pins else ()),
+                    *(f"task:{term}" for term in domain.terms if _term_in(term, haystack)),
+                    *(f"path:{pattern}:{path}" for pattern in domain.path_globs
+                      for path in changed_files if selector_matches(
+                          task_terms=(), path_globs=(pattern,), changed_files=(path,), task_text="",
+                      )),
+                )
+                routes.extend(
+                    ExternalMatch(entry.name, domain.id, tier, term, entry.path, entry.source, activation)
+                    for term in terms
+                )
             existing = matches.get(entry.name)
             if existing is not None and (existing.tier == REQUIRED or tier == OFFERED):
                 continue
             matches[entry.name] = ExternalMatch(
                 entry.name, domain.id, tier, shared or terms[0], entry.path, entry.source
             )
-    return _truncate(matches.values(), config)
+    selected = _truncate(matches.values(), config)
+    if not preserve_routes:
+        return selected
+    return tuple(
+        replace(route, tier=match.tier)
+        for match in selected
+        for route in routes
+        if route.name == match.name
+    )
 
 
 def declared_domain_ids(profile: dict | None, *, env: dict[str, str] | None = None) -> set[str]:
