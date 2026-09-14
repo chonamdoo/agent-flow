@@ -8,8 +8,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from agent_flow.core.architecture_policy import architecture_snapshot, clean_role_lint_applies
-from agent_flow.core.profiles import active_profile_ids, load_profile_payload
+from agent_flow.core.architecture_policy import ArchitectureSnapshot, architecture_snapshot, clean_role_lint_applies
+from agent_flow.core.profiles import active_profile_ids, assert_architecture_override_compatible, load_profile_payload
 from agent_flow.core.worktree_isolation import git_safe
 
 
@@ -100,6 +100,22 @@ class RoleMatch:
     pattern: str
 
 
+def _lint_snapshot(root: Path, profile_root: Path | None) -> ArchitectureSnapshot:
+    snapshot = architecture_snapshot(root)
+    assert_architecture_override_compatible(root, snapshot.selection)
+    if profile_root is not None and profile_root != root:
+        assert_architecture_override_compatible(profile_root, snapshot.selection)
+    return snapshot
+
+
+@dataclass(frozen=True)
+class _LintResult:
+    findings: list[Finding]
+    candidates: int = 0
+    matched: int = 0
+    reason: str | None = None
+
+
 def lint_project(
     root: Path,
     profile_id: str,
@@ -107,24 +123,35 @@ def lint_project(
     *,
     profile_root: Path | None = None,
 ) -> list[Finding]:
-    # Clean role 표는 Clean을 고른 프로젝트의 규칙이다. local·pending에 그 경로
-    # 토폴로지를 강요하면 선택이 의미를 잃는다. 여기서 비활성인 것은 "통과"가
-    # 아니라 "이 검사가 이 프로젝트의 기준이 아님"이다.
     """Lint the project's architecture boundaries and return violations."""
-    if not clean_role_lint_applies(architecture_snapshot(root)):
-        return []
+    return _lint_project(root, profile_id, files, profile_root=profile_root).findings
+
+
+def _lint_project(
+    root: Path,
+    profile_id: str,
+    files: list[str] | None = None,
+    *,
+    profile_root: Path | None = None,
+) -> _LintResult:
+    if not clean_role_lint_applies(_lint_snapshot(root, profile_root)):
+        return _LintResult([], reason="architecture selection is not clean")
     profile = load_profile_payload(profile_id, profile_root or root)
     architecture = profile.get("architecture")
     if not isinstance(architecture, dict):
-        return []
+        return _LintResult([], reason="architecture contract absent")
     roles = architecture.get("roles")
-    if not isinstance(roles, list):
-        return []
+    if not isinstance(roles, list) or not roles:
+        return _LintResult([], reason="architecture contract absent")
     candidates = files if files is not None else changed_files(root)
     normalized_candidates = normalized_candidate_files(candidates)
+    count = len(normalized_candidates)
     if not architecture_lint_is_active(root, architecture, normalized_candidates):
-        return []
+        return _LintResult([], count, reason="activation_roots absent")
+    if not count:
+        return _LintResult([], reason="no source candidates")
     findings: list[Finding] = []
+    matched = 0
     managed_roots = architecture_managed_roots(roles)
     for rel_path in normalized_candidates:
         path = root / rel_path
@@ -137,6 +164,7 @@ def lint_project(
             ):
                 findings.append(Finding(rel_path, "path is outside profile architecture role mapping"))
             continue
+        matched += 1
         text = path.read_text(encoding="utf-8", errors="replace") if path.exists() and path.is_file() else ""
         findings.extend(validate_forbidden_tokens(rel_path, text, match.role))
         findings.extend(validate_package_suffix(rel_path, text, match.role, match.captures))
@@ -158,7 +186,10 @@ def lint_project(
     # 검사별로 처방하지 않고 집계 지점에서 한 번 접는다. 검사를 더할 때 dedupe를 다시
     # 붙일 자리가 없어야 한다. `dict.fromkeys`는 최초 등장 순서를 지키므로 출력이
     # 계속 변경 파일 순서를 따라간다.
-    return list(dict.fromkeys(findings))
+    return _LintResult(
+        list(dict.fromkeys(findings)), count, matched,
+        "no role matches" if matched == 0 else None,
+    )
 
 
 def lint_profiles(
@@ -168,16 +199,31 @@ def lint_profiles(
     *,
     profile_root: Path | None = None,
 ) -> dict[str, list[Finding]]:
+    return {
+        profile_id: result.findings
+        for profile_id, result in _lint_profiles(root, profile_ids, files, profile_root=profile_root).items()
+    }
+
+
+def _lint_profiles(
+    root: Path,
+    profile_ids: list[str],
+    files: list[str] | None = None,
+    *,
+    profile_root: Path | None = None,
+) -> dict[str, _LintResult]:
+    if not clean_role_lint_applies(_lint_snapshot(root, profile_root)):
+        return {profile_id: _LintResult([], reason="architecture selection is not clean") for profile_id in profile_ids}
     requested_profile_ids = list(profile_ids)
     candidates = normalized_candidate_files(files if files is not None else changed_files(root))
     profile_ids = expanded_lint_profile_ids(requested_profile_ids, candidates)
     source_root = profile_root or root
     if len(profile_ids) <= 1:
         return {
-            profile_id: lint_project(
+            profile_id: _lint_project(
                 root,
                 profile_id,
-                files=files,
+                files=candidates,
                 profile_root=source_root,
             )
             for profile_id in profile_ids
@@ -211,7 +257,7 @@ def lint_profiles(
         for profile_id in relevant_profiles:
             selected[profile_id].append(rel_path)
     return {
-        profile_id: lint_project(
+        profile_id: _lint_project(
             root,
             profile_id,
             files=profile_files,
@@ -1462,6 +1508,7 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.root).resolve()
     profile_root = Path(args.profile_root).resolve() if args.profile_root else root
     try:
+        snapshot = _lint_snapshot(root, profile_root)
         profile_ids = active_profile_ids(profile_root, args.profile)
         unconfigured = unconfigured_lint_profile_ids(profile_ids, profile_root)
         if profile_ids and len(unconfigured) == len(profile_ids):
@@ -1472,7 +1519,6 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         # 비적용을 "passed"로 찍으면 필수 gate가 한 파일도 보지 않고 검증됐다고
         # 기록한다. 이 모듈은 이미 비적용을 별도 문구로 내고 있으므로 같은 자리에 붙인다.
-        snapshot = architecture_snapshot(root)
         if profile_ids and not clean_role_lint_applies(snapshot):
             print(
                 f"{','.join(profile_ids)}: architecture lint n/a "
@@ -1484,59 +1530,33 @@ def main(argv: list[str] | None = None) -> int:
         candidates = normalized_candidate_files(
             args.files if args.files is not None else changed_files(root)
         )
-        findings_by_profile = lint_profiles(
+        results = _lint_profiles(
             root,
             profile_ids,
             files=candidates,
             profile_root=profile_root,
         )
-        profile_ids = list(findings_by_profile)
-        inactive = inactive_lint_profile_ids(
-            root,
-            profile_ids,
-            candidates,
-            profile_root=profile_root,
-        )
-        unconfigured = unconfigured_lint_profile_ids(profile_ids, profile_root)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    checked = [
-        profile_id
-        for profile_id in profile_ids
-        if profile_id not in inactive and profile_id not in unconfigured
-    ]
-    if not any(findings_by_profile.values()):
-        # 필수 gate가 한 파일도 검사하지 않고 "passed"를 찍으면 운영자는 통과와
-        # 비적용을 구분할 수 없다. 활성 조건을 도입한 순간부터 둘은 다른 사실이다.
-        if checked:
-            print(f"{','.join(checked)}: architecture lint passed")
-        if inactive:
-            print(f"{','.join(inactive)}: architecture lint n/a (activation_roots absent)")
-        if unconfigured:
-            print(f"{','.join(unconfigured)}: architecture lint n/a (architecture contract absent)")
-        return 0
-    # 실패 헤드라인도 profile별 판정 사실을 유지한다. 한 profile의 실패 때문에 다른
-    # profile의 통과와 비적용이 출력에서 사라지면 gate 결과를 구분할 수 없다.
-    failed = [profile_id for profile_id, findings in findings_by_profile.items() if findings]
-    passed = [profile_id for profile_id in checked if profile_id not in failed]
-    print(f"{','.join(failed)}: architecture lint failed", file=sys.stderr)
-    if passed:
-        print(f"{','.join(passed)}: architecture lint passed", file=sys.stderr)
-    if inactive:
+    failed = any(result.findings for result in results.values())
+    stream = sys.stderr if failed else sys.stdout
+    for profile_id, result in results.items():
+        if result.findings:
+            status = "failed"
+        elif result.reason:
+            status = f"n/a ({result.reason})"
+        else:
+            status = "passed"
         print(
-            f"{','.join(inactive)}: architecture lint n/a (activation_roots absent)",
-            file=sys.stderr,
+            f"{profile_id}: architecture lint {status}; "
+            f"source candidates={result.candidates}, role-matched={result.matched}, "
+            f"findings={len(result.findings)}",
+            file=stream,
         )
-    if unconfigured:
-        print(
-            f"{','.join(unconfigured)}: architecture lint n/a (architecture contract absent)",
-            file=sys.stderr,
-        )
-    for profile_id, findings in findings_by_profile.items():
-        for finding in findings:
-            print(f"- [{profile_id}] {finding.path}: {finding.message}", file=sys.stderr)
-    return 1
+        for finding in result.findings:
+            print(f"- [{profile_id}] {finding.path}: {finding.message}", file=stream)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

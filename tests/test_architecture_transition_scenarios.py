@@ -92,7 +92,7 @@ def _assert_prompts(root: Path, run_dir: Path, mode: str, *, config_root: Path |
     implement = next(phase for phase in runner.phases if phase.id == "implement")
     review = next(phase for phase in runner.phases if phase.id == "review")
     author = adapter.render_envelope(implement, run_dir, root, skill_host="codex")
-    jobs = _reviewer_jobs(review, run_dir, root, adapter, providers=("codex", "claude"))
+    jobs, _ = _reviewer_jobs(review, run_dir, root, adapter, providers=("codex", "claude"))
     assert "architecture-design" in {job.angle_id for job in jobs}
     prompts = [author, *(job.prompt_for(host) for job in jobs for host in ("codex", "claude"))]
     snapshot = architecture_snapshot(root)

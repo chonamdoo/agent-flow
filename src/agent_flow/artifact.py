@@ -47,6 +47,7 @@ from agent_flow.core.markers import missing_markers, normalize_required_markers
 from agent_flow.core.phase_workflow import (
     PhaseWorkflowDefinition,
     WorkflowDriftError,
+    effective_phase_markers,
     find_kit_root,
     load_phase_workflow_definition,
 )
@@ -99,6 +100,7 @@ class PhaseArtifactContract:
     required_markers: tuple[str, ...]
     skills: PhaseSkills | None
     multi_review: bool
+    required_markers_by_architecture: dict[str, tuple[str, ...]] | None = None
 
 
 class ActiveRunExists(RuntimeError):
@@ -688,14 +690,23 @@ def _missing_completion_markers(
     if not artifact.exists():
         return []
     text = artifact.read_text(encoding="utf-8")
-    missing = (
-        _missing_markers(text, contract.required_markers)
-        if contract.required_markers
-        else []
-    )
     config = config_root or run_path
     project = project_root or config
     meta = read_meta(run_path)
+    markers = contract.required_markers
+    if contract.required_markers_by_architecture is not None:
+        assert_install_complete(project)
+        if config != project:
+            assert_install_complete(config)
+        snapshot = architecture_snapshot(project)
+        if snapshot.declared:
+            assert_architecture_override_compatible(config, snapshot.selection)
+        if snapshot.declared or "architecture_digest" in meta:
+            reason = architecture_snapshot_block_reason(snapshot, meta.get("architecture_digest"))
+            if reason is not None:
+                raise ValueError(reason)
+        markers = effective_phase_markers(contract, snapshot.selection.mode)
+    missing = _missing_markers(text, markers)
     phase_since = _phase_entered_at(run_path)
     profile = resolved_profile(config)
     # 컨텍스트를 안 넘기면 `status`와 runner가 서로 다른 required 집합을 본다.
@@ -712,6 +723,7 @@ def _missing_completion_markers(
             concerns=run_concerns(meta),
             since=phase_since,
             architecture_root=project,
+            conditional_architecture_markers=contract.required_markers_by_architecture is not None,
         )
     )
     missing.extend(
@@ -756,13 +768,6 @@ def _parse_timestamp(value: object) -> float | None:
         return None
 
 
-def _required_markers(
-    run_path: Path, workflow: str, phase_id: str, *, config_root: Path | None = None
-) -> tuple[str, ...]:
-    """Load required markers from the run's verified workflow definition."""
-    return _phase_contract(
-        run_path, workflow, phase_id, config_root=config_root,
-    ).required_markers
 
 
 def _phase_contract(
@@ -784,6 +789,7 @@ def _phase_contract(
             required_markers=phase.required_markers,
             skills=phase.skills,
             multi_review=phase.multi_review,
+            required_markers_by_architecture=phase.required_markers_by_architecture,
         )
     project_root = run_path.parents[2] if len(run_path.parents) >= 3 else None
     candidates: list[Path] = []
@@ -811,6 +817,7 @@ def _phase_contract(
                         required_markers=phase.required_markers,
                         skills=phase.skills,
                         multi_review=phase.multi_review,
+                        required_markers_by_architecture=phase.required_markers_by_architecture,
                     )
         try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -822,6 +829,10 @@ def _phase_contract(
         for phase in phases:
             if not isinstance(phase, dict) or str(phase.get("id")) != phase_id:
                 continue
+            if "required_markers_by_architecture" in phase:
+                raise ValueError(
+                    f"workflow {path}: required_markers_by_architecture requires a valid phase definition"
+                )
             return PhaseArtifactContract(
                 artifact=Path(f"{phase_id}.md"),
                 required_markers=normalize_required_markers(

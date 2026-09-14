@@ -6,7 +6,7 @@ import hashlib
 from importlib import resources
 from pathlib import Path
 import re
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import yaml
 
@@ -28,6 +28,7 @@ class PhaseDefinition:
     artifact: str
     skills: PhaseSkills | None = None
     architecture_decision: str = "existing"
+    required_markers_by_architecture: dict[str, tuple[str, ...]] | None = None
 
 
 _PHASE_KEYS = frozenset(
@@ -40,6 +41,7 @@ _PHASE_KEYS = frozenset(
         "multi_review",
         "routes",
         "required_markers",
+        "required_markers_by_architecture",
         "artifact",
         "skills",
         "architecture_decision",
@@ -60,13 +62,36 @@ class PhaseWorkflowDefinition:
     def to_json_dict(self) -> dict[str, Any]:
         # digest를 빼면 export가 `meta.workflow_digest`와 대조할 수 없다. drift
         # 예외가 지목하는 값이 바로 이것이고, export는 유일한 기계 가독 뷰다.
+        phases = []
+        for phase in self.phases:
+            exported = asdict(phase)
+            if phase.required_markers_by_architecture is None:
+                del exported["required_markers_by_architecture"]
+            phases.append(exported)
         return {
             "id": self.id,
             "source": self.source,
             "digest": self.digest,
             "completion_disposition": self.completion_disposition,
-            "phases": [asdict(phase) for phase in self.phases],
+            "phases": phases,
         }
+
+
+class _PhaseMarkerContract(Protocol):
+    @property
+    def required_markers(self) -> tuple[str, ...]: ...
+
+    @property
+    def required_markers_by_architecture(self) -> dict[str, tuple[str, ...]] | None: ...
+
+
+def effective_phase_markers(phase: _PhaseMarkerContract, mode: str) -> tuple[str, ...]:
+    conditional = phase.required_markers_by_architecture
+    if conditional is None:
+        return phase.required_markers
+    if mode not in {"clean", "local", "pending"}:
+        raise ValueError(f"unknown architecture mode: {mode!r}")
+    return phase.required_markers + conditional.get(mode, ())
 
 
 class CorruptRunCursorError(ValueError):
@@ -439,9 +464,32 @@ def _normalize_phases(
                     pinned_legacy=pinned_legacy,
                 ),
                 architecture_decision=architecture_decision,
+                required_markers_by_architecture=(
+                    _architecture_markers(item["required_markers_by_architecture"], path, phase_id)
+                    if "required_markers_by_architecture" in item else None
+                ),
             )
         )
     return out
+
+
+def _architecture_markers(
+    value: object, path: Path, phase_id: str
+) -> dict[str, tuple[str, ...]]:
+    field = "required_markers_by_architecture"
+    prefix = f"workflow {path}: phase {phase_id} `{field}`"
+    if not isinstance(value, dict):
+        raise ValueError(f"{prefix} must be a mapping")
+    result: dict[str, tuple[str, ...]] = {}
+    for mode, markers in value.items():
+        if not isinstance(mode, str) or mode not in {"clean", "local", "pending"}:
+            raise ValueError(f"{prefix} has unknown architecture mode {mode!r}")
+        if not isinstance(markers, list) or any(
+            not isinstance(marker, str) or not marker.strip() for marker in markers
+        ):
+            raise ValueError(f"{prefix}.{mode} must be a list of non-empty strings")
+        result[mode] = tuple(markers)
+    return result
 
 
 def _phase_skills(

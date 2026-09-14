@@ -3833,7 +3833,7 @@ def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
     assert [job.angle_id for job in jobs] == [
         "generalist",
         "types",
@@ -3895,12 +3895,12 @@ def test_state_integrity_angle_uses_high_signal_selectors_only(tmp_path: Path):
 
     adapter._changed_files = ("src/ui/Copy.tsx",)
     adapter._task_text = "change button wording"
-    unrelated = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    unrelated, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
     assert [job.angle_id for job in unrelated] == ["generalist", "types"]
 
     adapter._changed_files = ("migrations/20260828_add_orders.sql",)
     adapter._task_text = ""
-    persistent_path = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    persistent_path, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
     assert [job.angle_id for job in persistent_path] == [
         "generalist",
         "types",
@@ -3909,7 +3909,7 @@ def test_state_integrity_angle_uses_high_signal_selectors_only(tmp_path: Path):
 
     adapter._changed_files = ("src/ui/Copy.tsx",)
     adapter._task_text = "prevent duplicate payment charge"
-    persistent_task = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    persistent_task, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
     assert [job.angle_id for job in persistent_task] == [
         "generalist",
         "types",
@@ -3965,13 +3965,11 @@ def test_multi_review_precomputes_diff_outside_reviewer_sandbox(tmp_path: Path):
         multi_review=True,
         skills=PhaseSkills(required=("clean-architecture-core",)),
     )
-    jobs = _reviewer_jobs(
-        phase,
-        run_dir,
-        project,
-        adapter,
-        review_input=snapshot,
-    )
+    jobs, _ = _reviewer_jobs(phase,
+    run_dir,
+    project,
+    adapter,
+    review_input=snapshot,)
     for job in jobs:
         prompt = job.prompt_for("claude")
         assert str(snapshot.path) in prompt
@@ -4145,7 +4143,7 @@ def test_multi_review_jobs_dedupe_profile_baseline(tmp_path: Path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
     assert [job.angle_id for job in jobs] == [
         "generalist",
         "types",
@@ -4172,7 +4170,7 @@ def test_multi_review_profile_override_keeps_baseline_angle_gate(tmp_path: Path)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
 
     assert [job.angle_id for job in jobs] == ["generalist", "types"]
 
@@ -4233,7 +4231,7 @@ def test_multi_review_profile_cannot_gate_unconditional_baseline_angles(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
 
     assert [job.angle_id for job in jobs] == ["generalist", "types"]
 
@@ -4298,7 +4296,7 @@ def test_multi_review_profile_can_override_baseline_prompt(tmp_path: Path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, project, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, project, adapter)
     assert [job.angle_id for job in jobs] == [
         "generalist",
         "types",
@@ -4437,7 +4435,7 @@ def test_multi_review_packaged_prompt_survives_project_templates_dir(tmp_path: P
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, project, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, project, adapter)
     assert [job.angle_id for job in jobs] == [
         "generalist",
         "types",
@@ -4874,7 +4872,7 @@ def test_a_review_angle_is_dropped_when_its_skill_is_not_required(tmp_path: Path
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
 
     assert [job.angle_id for job in jobs] == ["generalist", "types"]
 
@@ -4909,7 +4907,7 @@ def test_the_angle_gate_and_the_writer_gate_agree_on_a_routed_but_missing_skill(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, project, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, project, adapter)
     writer_missing = missing_local_skill_markers(
         "## Completion Gate\nclean-architecture: n/a\n",
         project,

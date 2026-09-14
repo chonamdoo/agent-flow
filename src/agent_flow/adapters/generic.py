@@ -22,6 +22,7 @@ from pathlib import Path
 
 from agent_flow.adapters.base import Adapter
 from agent_flow.core.design_ledger import capture_design_ledger
+from agent_flow.core.skill_resolver import SkillResolution
 from agent_flow.core.worktree_isolation import write_run_subpath_text
 
 
@@ -34,13 +35,17 @@ STUB_SENTINEL = "agent-flow generic stub-success"
 class GenericAdapter(Adapter):
     name = "generic"
 
-    def execute(self, phase, run_dir: Path, project_root: Path) -> bool:
+    def execute(
+        self, phase, run_dir: Path, project_root: Path, *,
+        resolution: SkillResolution | None = None,
+    ) -> bool:
         prompt = self.render_envelope(
             phase, run_dir, project_root,
             host_hint="No AI host detected. Paste the phase prompt into your "
                       "AI of choice; have it write the artifact at the path "
                       "above; then run `agent-flow status` and follow "
                       "`next_command`.",
+            resolution=resolution,
         )
         print(prompt)
         mode = os.environ.get("AGENT_FLOW_GENERIC_MODE", "emit")

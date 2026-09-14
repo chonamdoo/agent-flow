@@ -673,7 +673,10 @@ def _declared_references(contract_bytes: bytes, *, source: str) -> tuple[str, ..
         frontmatter = parse_skill_metadata(text, source=source, strict_duplicates=True)
     except SkillMetadataError as exc:
         raise ArchitectureContractError(f"{source}: invalid frontmatter: {exc}") from exc
-    return tuple(frontmatter.get("requires_docs", ())) if frontmatter is not None else ()
+    return tuple(
+        entry["path"] if isinstance(entry, dict) else entry
+        for entry in frontmatter.get("requires_docs", ())
+    ) if frontmatter is not None else ()
 
 
 

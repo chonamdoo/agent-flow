@@ -25,7 +25,7 @@ from agent_flow.core.skill_scope import (
     scope_names,
     scope_revision,
 )
-from agent_flow.runner import ResumeMode, Runner, _phases_from_definition
+from agent_flow.runner import Phase, ResumeMode, Runner, _phases_from_definition
 
 ARCHITECTURE_SKILL = "probe-architecture"
 LAYER_PATH = "src/core/domain/Order.kt"
@@ -326,8 +326,6 @@ def _host_scoped_profile() -> dict:
 
 
 def test_each_reviewer_prompt_resolves_skills_against_its_own_host(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
     from agent_flow import multi_review
     from agent_flow.adapters import hosted
     from agent_flow.cli_detect import CliInfo
@@ -348,14 +346,11 @@ def test_each_reviewer_prompt_resolves_skills_against_its_own_host(tmp_path, mon
     adapter = hosted.HostedAdapter("omp")
     adapter._profile_snapshot = _host_scoped_profile()
     adapter._changed_files = ("app/src/main/Main.kt",)
-    phase = SimpleNamespace(
+    phase = Phase(
         id="review",
         description="d",
         prompt="p",
-        artifact=None,
         multi_review=True,
-        required_markers=(),
-        skills=None,
     )
 
     monkeypatch.setattr(
@@ -367,7 +362,7 @@ def test_each_reviewer_prompt_resolves_skills_against_its_own_host(tmp_path, mon
         ],
     )
     monkeypatch.delenv("AGENT_FLOW_REVIEWERS", raising=False)
-    jobs = hosted._reviewer_jobs(phase, run_dir, project, adapter)
+    jobs, _ = hosted._reviewer_jobs(phase, run_dir, project, adapter)
 
     claude_prompt = jobs[0].prompt_for("claude")
     codex_prompt = jobs[0].prompt_for("codex")
@@ -404,8 +399,6 @@ def test_each_reviewer_prompt_resolves_skills_against_its_own_host(tmp_path, mon
 
 
 def test_phase_declared_skill_is_also_scoped_to_the_reviewer_host(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
     from agent_flow.adapters import hosted
     from agent_flow.core.skill_resolver import PhaseSkills
 
@@ -422,17 +415,15 @@ def test_phase_declared_skill_is_also_scoped_to_the_reviewer_host(tmp_path, monk
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     adapter = hosted.HostedAdapter("omp")
-    phase = SimpleNamespace(
+    phase = Phase(
         id="review",
         description="d",
         prompt="p",
-        artifact=None,
         multi_review=True,
-        required_markers=(),
         skills=PhaseSkills(required=(HOST_SCOPED_SKILL,)),
     )
 
-    job = hosted._reviewer_jobs(phase, run_dir, project, adapter)[0]
+    job = hosted._reviewer_jobs(phase, run_dir, project, adapter)[0][0]
 
     assert str(installed) in job.prompt_for("claude")
     assert str(installed) not in job.prompt_for("codex")
@@ -467,9 +458,6 @@ def test_frontmatter_catalog_is_scoped_before_external_matching(tmp_path, monkey
 
 
 def test_gated_angles_use_only_eligible_reviewer_providers(tmp_path, monkeypatch):
-    """Verify that gated angles use only eligible reviewer providers."""
-    from types import SimpleNamespace
-
     from agent_flow import multi_review
     from agent_flow.adapters import hosted
     from agent_flow.cli_detect import CliInfo
@@ -500,22 +488,15 @@ def test_gated_angles_use_only_eligible_reviewer_providers(tmp_path, monkeypatch
     run_dir.mkdir()
     adapter = hosted.HostedAdapter("omp")
     adapter._changed_files = ("app/src/main/Main.kt",)
-    phase = SimpleNamespace(
+    phase = Phase(
         id="review",
         description="d",
         prompt="p",
-        artifact=None,
         multi_review=True,
-        required_markers=(),
-        skills=None,
     )
 
-    claude_only = hosted._reviewer_jobs(
-        phase, run_dir, project, adapter, providers=("claude",)
-    )
-    codex_only = hosted._reviewer_jobs(
-        phase, run_dir, project, adapter, providers=("codex",)
-    )
+    claude_only, _ = hosted._reviewer_jobs(phase, run_dir, project, adapter, providers=("claude",))
+    codex_only, _ = hosted._reviewer_jobs(phase, run_dir, project, adapter, providers=("codex",))
 
     assert "clean-architecture" not in {job.angle_id for job in claude_only}
     assert "clean-architecture" in {job.angle_id for job in codex_only}

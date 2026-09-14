@@ -875,7 +875,7 @@ def test_review_phases_carry_their_phase_id_into_the_launch_policy(
             "a" * 64,
         ),
     )
-    monkeypatch.setattr(hosted, "_reviewer_jobs", lambda *a, **k: jobs)
+    monkeypatch.setattr(hosted, "_reviewer_jobs", lambda *a, **k: (jobs, {}))
     monkeypatch.setattr(hosted, "distribute", fake_distribute)
     monkeypatch.setattr(hosted, "run_distribution", fake_run_distribution)
     adapter = hosted.HostedAdapter("claude")
@@ -957,20 +957,16 @@ def test_override_with_non_string_keys_fails_as_a_declaration_error(tmp_path: Pa
 def test_host_and_reviewer_envelopes_are_observed_under_distinct_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    from types import SimpleNamespace
-
     from agent_flow.adapters import hosted
+    from agent_flow.runner import Phase
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    phase = SimpleNamespace(
+    phase = Phase(
         id="final-review",
         description="d",
         prompt="p",
-        artifact=None,
         multi_review=True,
-        required_markers=(),
-        skills=None,
     )
     observed: list[tuple[str, str, str]] = []
     adapter = hosted.HostedAdapter("claude")
@@ -978,7 +974,7 @@ def test_host_and_reviewer_envelopes_are_observed_under_distinct_names(
         (phase_id, payload_name, envelope)
     )
 
-    jobs = hosted._reviewer_jobs(phase, run_dir, tmp_path, adapter)
+    jobs, _ = hosted._reviewer_jobs(phase, run_dir, tmp_path, adapter)
     host_envelope = adapter.render_envelope(
         phase, run_dir, tmp_path, host_hint="host guidance"
     )

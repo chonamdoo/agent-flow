@@ -39,6 +39,7 @@ from typing import Any, NamedTuple, Sequence
 from agent_flow.multi_review import eligible_reviewer_names
 from agent_flow.adapters.auto import detect_adapter
 from agent_flow.adapters.generic import STUB_SENTINEL
+from agent_flow.adapters.hosted import review_document_scope
 from agent_flow.artifact import (
     ACTIVE_LOCK,
     META_FILE,
@@ -158,6 +159,7 @@ from agent_flow.core.phase_workflow import (
     RunCursor,
     find_kit_root,
     load_phase_workflow_definition,
+    effective_phase_markers,
 )
 from agent_flow.core.workflow_pin import (
     WorkflowDefinitionPinError,
@@ -177,11 +179,12 @@ from agent_flow.core.local_skills import (
     phase_skill_resolution,
     skill_markers_enforced,
 )
-from agent_flow.core.skill_scope import merge_scope
-from agent_flow.core.profile_routing import routed_profile_skills
+from agent_flow.core.skill_scope import merge_scope, scope_document_ids
+from agent_flow.core.profile_routing import IMPLEMENTATION_PHASES, REVIEW_PHASES, routed_profile_skills
 from agent_flow.core.skill_resolver import (
     PhaseSkills,
     ResolutionContext,
+    SkillResolution,
     _profile_skill_phases,
     active_host,
     active_host_roots,
@@ -241,6 +244,7 @@ class Phase:
     artifact: str = ""
     skills: PhaseSkills | None = None
     architecture_decision: str = "existing"
+    required_markers_by_architecture: dict[str, tuple[str, ...]] | None = None
 
 
 class RouteDecision(NamedTuple):
@@ -782,8 +786,10 @@ class Runner:
             # 그대로 보여 주므로 자람이 아니다. 여기서 안 잡으면 첫 게이트가 목록
             # 전체를 자람으로 보고 모든 phase가 한 번씩 헛되게 막힌다.
             self._grown_skill_names(phase)
+            resolution = self._required_skill_resolution(phase, read_meta(self.run_dir))
             completed = adapter.execute(
                 phase, run_dir=self.run_dir, project_root=self.project_root,
+                resolution=resolution,
             )
             if leader_before is not None:
                 self._assert_leader_unchanged(leader_root, leader_before)
@@ -2075,9 +2081,26 @@ class Runner:
             context = self._resolution_context = ResolutionContext()
         return context
 
-    def _required_skill_names(self, phase: Phase, meta: dict[str, Any]) -> tuple[str, ...]:
-        """게이트가 요구하게 될 required skill 이름. 강제 지점과 같은 입력을 쓴다."""
-        resolution = phase_skill_resolution(
+    def _phase_document_scope(self, phase: Phase) -> tuple[str, ...] | None:
+        snapshot = self._phase_resolution_context().snapshot(self.project_root)
+        if snapshot.selection.mode is not ArchitectureMode.LOCAL:
+            return None
+        if phase.id not in IMPLEMENTATION_PHASES and phase.id not in REVIEW_PHASES and not phase.multi_review:
+            return None
+        assert self.run_dir is not None
+        base = self.profile.get("branching", {}).get("base") or self.profile.get("pr", {}).get("target_branch")
+        return review_document_scope(
+            self.project_root, self.run_dir, base_branch=base,
+        )
+
+    def _effective_markers(self, phase: Phase) -> tuple[str, ...]:
+        if phase.required_markers_by_architecture is None:
+            return phase.required_markers
+        mode = self._phase_resolution_context().snapshot(self.project_root).selection.mode
+        return effective_phase_markers(phase, mode)
+
+    def _required_skill_resolution(self, phase: Phase, meta: dict[str, Any]) -> SkillResolution:
+        return phase_skill_resolution(
             self.config_root,
             phase.id,
             phase_skills=phase.skills,
@@ -2087,8 +2110,9 @@ class Runner:
             concerns=run_concerns(meta),
             architecture_root=self.project_root,
             context=self._phase_resolution_context(),
+            document_scope=self._phase_document_scope(phase),
+            required_document_ids=scope_document_ids(meta, phase.id),
         )
-        return tuple(skill.name for skill in resolution.required)
 
     def _grown_skill_names(self, phase: Phase) -> tuple[str, ...]:
         """프롬프트가 보여 준 뒤로 새로 required가 된 이름. 기록도 여기서 갱신한다.
@@ -2108,14 +2132,23 @@ class Runner:
         ):
             return ()
         meta = read_meta(self.run_dir)
-        added = merge_scope(meta, phase.id, self._required_skill_names(phase, meta))
+        resolution = self._required_skill_resolution(phase, meta)
+        names = tuple(skill.name for skill in resolution.required)
+        documents = resolution.required_document_ids
+        added = merge_scope(meta, phase.id, names, document_ids=documents)
+        if any(item.startswith("document:") for item in added) and artifact.exists():
+            reason = self._invalidate_architecture_evidence_for_reentry(phase)
+            if reason is not None:
+                raise WorktreeIsolationError(reason)
+            meta = read_meta(self.run_dir)
+            merge_scope(meta, phase.id, names, document_ids=documents)
         write_meta(self.run_dir, meta)
         return added
 
     def _expected_feedback_command(self, phase: Phase) -> str | None:
         if not any(
             marker.strip() == "feedback-green-exit:"
-            for marker in phase.required_markers
+            for marker in self._effective_markers(phase)
         ):
             return None
         expected: str | None = None
@@ -2124,7 +2157,7 @@ class Runner:
                 break
             if not any(
                 marker.strip() == "feedback-red-exit:"
-                for marker in candidate.required_markers
+                for marker in self._effective_markers(candidate)
             ):
                 continue
             artifact = self._existing_artifact_path(candidate)
@@ -2164,7 +2197,8 @@ class Runner:
         # 하나로 사람이 쓴 artifact까지 통째로 통과해서, 마커 검사 전면 킬스위치였다.
         if self._is_stub_authored(text):
             return []
-        missing = list(_missing_markers(text, phase.required_markers))
+        required_markers = self._effective_markers(phase)
+        missing = list(_missing_markers(text, required_markers))
         missing.extend(
             missing_delivery_evidence(
                 self.project_root,
@@ -2182,7 +2216,7 @@ class Runner:
                 phase.id,
                 text,
                 profile=self.profile,
-                required_markers=phase.required_markers,
+                required_markers=required_markers,
                 since=_meta_timestamp(meta.get("phase_entered_at")),
                 # 관측 로그는 저장소 전체가 공유한다. cwd를 좁히지 않으면 형제
                 # worktree에서 돈 테스트가 이 run의 증거로 잡힌다.
@@ -2195,7 +2229,7 @@ class Runner:
             missing_feedback_evidence_markers(
                 self.config_root,
                 text,
-                required_markers=phase.required_markers,
+                required_markers=required_markers,
                 expected_command=self._expected_feedback_command(phase),
                 recoverable_statuses=self._feedback_recoverable_statuses(phase),
                 since=_meta_timestamp(meta.get("phase_entered_at")),
@@ -2215,6 +2249,7 @@ class Runner:
                 since=_meta_timestamp(meta.get("phase_entered_at")),
                 architecture_root=self.project_root,
                 context=self._phase_resolution_context(),
+                conditional_architecture_markers=phase.required_markers_by_architecture is not None,
             )
         )
         review_rejected = phase_review_rejected(
@@ -2634,6 +2669,7 @@ def _phases_from_definition(definition: PhaseWorkflowDefinition) -> list[Phase]:
             artifact=phase.artifact,
             skills=phase.skills,
             architecture_decision=phase.architecture_decision,
+            required_markers_by_architecture=phase.required_markers_by_architecture,
         )
         for phase in definition.phases
     ]

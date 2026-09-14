@@ -23,21 +23,7 @@ phases:
       shared understanding plus the architectural blueprint. Mandatory for
       every project.
     required_markers:
-      - "## Clean Architecture Boundary Map"
-      - "## Dependency Rule"
-      - "## Use Case Boundaries"
-      - "usecase-interface: required|optional|n/a"
-      - "usecase-composition: none|domain-service|application-service|orchestrator|justified"
-      - "## Repository Boundaries"
-      - "## Cache Boundary"
-      - "cache-required: yes|no"
-      - "memory-cache: required|optional|n/a"
-      - "disk-cache: required|optional|n/a"
-      - "cache-invalidation-policy:"
-      - "## Mapping Boundary"
-      - "remote-dto-domain-mapper: required|optional|n/a"
-      - "entity-domain-mapper: required|optional|n/a"
-      - "domain-ui-mapper: required|optional|n/a"
+      - "## Architecture Boundary Map"
       - "## Composition Root"
       - "## Testability Boundary"
       - "solid-srp-change-reason:"
@@ -49,7 +35,27 @@ phases:
       - "spec-items:"
       - "## Design Values"
       - "design-values:"
+    required_markers_by_architecture:
+      clean:
+        - "## Dependency Rule"
+        - "## Use Case Boundaries"
+        - "usecase-interface: required|optional|n/a"
+        - "usecase-composition: none|domain-service|application-service|orchestrator|justified"
+        - "## Repository Boundaries"
+        - "## Cache Boundary"
+        - "cache-required: yes|no"
+        - "memory-cache: required|optional|n/a"
+        - "disk-cache: required|optional|n/a"
+        - "cache-invalidation-policy:"
+        - "## Mapping Boundary"
+        - "remote-dto-domain-mapper: required|optional|n/a"
+        - "entity-domain-mapper: required|optional|n/a"
+        - "domain-ui-mapper: required|optional|n/a"
     prompt: |
+      Follow the effective Completion gate below for this run’s selected architecture.
+      Clean mode additionally requires every listed Clean boundary heading and marker,
+      including all applicability exceptions; local mode assesses its own complete
+      contract instead. Pending mode does not authorize structural decisions.
       Produce the unified design document. Sections in order:
 
       ## 1. Interview (grill-with-docs + domain-modeling)
@@ -87,15 +93,8 @@ phases:
       Reject dependencies that violate the selected contract. In Clean mode,
       map domain / usecase / data / presentation and enforce inward dependency
       direction. Local mode uses its own structural rules instead.
-      Retain the following legacy subsection names as coverage categories,
-      documenting selected-contract decisions and permitted non-applicability;
-      their names do not require adopting Clean layers:
-      - `## Clean Architecture Boundary Map`
-      - `## Dependency Rule`
-      - `## Use Case Boundaries`
-      - `## Repository Boundaries`
-      - `## Cache Boundary`
-      - `## Mapping Boundary`
+      Use these common selected-contract subsections:
+      - `## Architecture Boundary Map`
       - `## Composition Root`
       - `## Testability Boundary`
 
@@ -146,15 +145,6 @@ phases:
       End with:
 
           ## Completion Gate
-          usecase-interface: required|optional|n/a
-          usecase-composition: none|domain-service|application-service|orchestrator|justified
-          cache-required: yes|no
-          memory-cache: required|optional|n/a
-          disk-cache: required|optional|n/a
-          cache-invalidation-policy: <policy or n/a>
-          remote-dto-domain-mapper: required|optional|n/a
-          entity-domain-mapper: required|optional|n/a
-          domain-ui-mapper: required|optional|n/a
           solid-srp-change-reason: <summary>
           solid-ocp-extension-points: <summary>
           solid-lsp-contracts: <summary>
@@ -213,18 +203,24 @@ phases:
       - "changed-file-skill-resolution: applied"
       - "required-profile-skills: checked"
       - "missing-required-profile-skills:"
-      - "clean-architecture: applied|n/a"
+      - "architecture-contract: applied|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
-      - "presentation-skill: android|flutter|react|react-native|ios|n/a"
-      - "presentation-state-based-development: applied|n/a"
-      - "presentation-state-review: pass|fail|n/a"
-      - "ui-state-modeling: explicit|n/a"
-      - "presentation-mapping-boundary: domain-to-uimodel|n/a"
-      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
       - "regression-test:"
       - "test-run-evidence: verified|unavailable"
+    required_markers_by_architecture:
+      clean:
+        - "presentation-skill: android|flutter|react|react-native|ios|n/a"
+        - "presentation-state-based-development: applied|n/a"
+        - "presentation-state-review: pass|fail|n/a"
+        - "ui-state-modeling: explicit|n/a"
+        - "presentation-mapping-boundary: domain-to-uimodel|n/a"
+        - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
     prompt: |
+      Follow the effective Completion gate below for this run’s selected architecture.
+      Clean mode additionally requires every listed Clean boundary heading and marker,
+      including all applicability exceptions; local mode assesses its own complete
+      contract instead. Pending mode does not authorize structural decisions.
       For each slice in slice-plan.md, apply the cycle for its change kind:
       Record `change-kind: bugfix|feature|behavior-preserving` in the completion
       gate. For behavior-preserving work, explain the unchanged contract in
@@ -291,15 +287,9 @@ phases:
           changed-file-skill-resolution: applied
           required-profile-skills: checked
           missing-required-profile-skills: none|<list>
-          clean-architecture: applied|n/a
+          architecture-contract: applied|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          presentation-skill: <android|flutter|react|react-native|ios|n/a>
-          presentation-state-based-development: <applied|n/a>
-          presentation-state-review: <pass|fail|n/a>
-          ui-state-modeling: <explicit|n/a>
-          presentation-mapping-boundary: <domain-to-uimodel|n/a>
-          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a>
           change-kind: <bugfix|feature|behavior-preserving>
           regression-test: <test id that reproduces the required behavior>
           behavior-preserving-reason: <unchanged contract, only for behavior-preserving work>
@@ -320,6 +310,7 @@ phases:
       - "refactor-scope: none"
       - "performance-optimization: none"
       - "module-split: none"
+    required_markers_by_architecture: {}
     routes:
       default: final-review
     prompt: |
@@ -366,35 +357,41 @@ phases:
       - "architecture-contract-check: pass|fail|n/a"
       - "codex-claude-parity-check: pass|fail"
       - "hook-parity-check: pass|fail"
-      - "clean-architecture: applied|n/a"
+      - "architecture-contract: applied|n/a"
       - "must-avoid-check: pass|fail|n/a"
-      - "shared-presentation-contract-placement: pass|fail|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
-      - "dependency-rule: pass|fail"
-      - "usecase-boundary: pass|fail|n/a"
-      - "usecase-calls-usecase: pass|fail|n/a"
-      - "repository-boundary: pass|fail"
-      - "cache-boundary: pass|fail|n/a"
-      - "memory-disk-cache-separated: pass|fail|n/a"
-      - "mapping-boundary: pass|fail|n/a"
-      - "dto-entity-domain-ui-separated: pass|fail"
       - "solid-boundary-check: pass|fail"
-      - "clean-architecture-review: applied"
-      - "usecase-interface-check: applied"
-      - "usecase-composition-check: applied"
-      - "cache-boundary-check: applied"
-      - "mapping-boundary-check: applied"
-      - "solid-clean-architecture-check: applied"
-      - "presentation-skill: android|flutter|react|react-native|ios|n/a"
-      - "presentation-state-review: pass|fail|n/a"
-      - "ui-state-modeling: explicit|n/a"
-      - "presentation-mapping-boundary: domain-to-uimodel|n/a"
-      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
+      - "architecture-contract-review: applied"
+      - "solid-architecture-check: applied"
+    required_markers_by_architecture:
+      clean:
+        - "shared-presentation-contract-placement: pass|fail|n/a"
+        - "dependency-rule: pass|fail"
+        - "usecase-boundary: pass|fail|n/a"
+        - "usecase-calls-usecase: pass|fail|n/a"
+        - "repository-boundary: pass|fail"
+        - "cache-boundary: pass|fail|n/a"
+        - "memory-disk-cache-separated: pass|fail|n/a"
+        - "mapping-boundary: pass|fail|n/a"
+        - "dto-entity-domain-ui-separated: pass|fail"
+        - "usecase-interface-check: applied"
+        - "usecase-composition-check: applied"
+        - "cache-boundary-check: applied"
+        - "mapping-boundary-check: applied"
+        - "presentation-skill: android|flutter|react|react-native|ios|n/a"
+        - "presentation-state-review: pass|fail|n/a"
+        - "ui-state-modeling: explicit|n/a"
+        - "presentation-mapping-boundary: domain-to-uimodel|n/a"
+        - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
     routes:
       approve: gates
       request-changes: fix-loop
     prompt: |
+      Follow the effective Completion gate below for this run’s selected architecture.
+      Clean mode additionally requires every listed Clean boundary heading and marker,
+      including all applicability exceptions; local mode assesses its own complete
+      contract instead. Pending mode does not authorize structural decisions.
       agent-flow already ran this phase's reviewers as confined subprocesses on
       installed Claude and Codex CLIs only. Do not launch reviewer CLIs
       yourself: read the per-angle artifacts the runner lists and aggregate
@@ -417,9 +414,8 @@ phases:
       If the selected architecture contract, including its required references,
       is not assessed, or any applicable must-avoid or required checklist
       condition fails, the overall verdict is `verdict: request-changes`.
-      Legacy Clean-named review markers certify this selected-contract
-      assessment, not adoption of unselected layers. Keep every completion
-      responsibility and marker enum; use `n/a` only where the enum permits it.
+      Keep every applicable completion responsibility and marker enum; use `n/a`
+      only where the enum permits it. Applied markers alone are not assessment.
       Apply code-generation-discipline's Missing Required Skills procedure for
       this host.
       The markers below are not the whole completion contract. The runner also
@@ -450,31 +446,13 @@ phases:
           architecture-contract-check: pass|fail|n/a
           codex-claude-parity-check: pass|fail
           hook-parity-check: pass|fail
-          clean-architecture: applied|n/a
+          architecture-contract: applied|n/a
           must-avoid-check: pass|fail|n/a
-          shared-presentation-contract-placement: pass|fail|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          dependency-rule: pass|fail
-          usecase-boundary: pass|fail|n/a
-          usecase-calls-usecase: pass|fail|n/a
-          repository-boundary: pass|fail
-          cache-boundary: pass|fail|n/a
-          memory-disk-cache-separated: pass|fail|n/a
-          mapping-boundary: pass|fail|n/a
-          dto-entity-domain-ui-separated: pass|fail
           solid-boundary-check: pass|fail
-          clean-architecture-review: applied
-          usecase-interface-check: applied
-          usecase-composition-check: applied
-          cache-boundary-check: applied
-          mapping-boundary-check: applied
-          solid-clean-architecture-check: applied
-          presentation-skill: <android|flutter|react|react-native|ios|n/a>
-          presentation-state-review: <pass|fail|n/a>
-          ui-state-modeling: <explicit|n/a>
-          presentation-mapping-boundary: <domain-to-uimodel|n/a>
-          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a>
+          architecture-contract-review: applied
+          solid-architecture-check: applied
 
   - id: gates
     description: Runner runs the profile gates itself after final-review approve. Routes fail→fix-loop, pass→commit.
@@ -512,21 +490,27 @@ phases:
       - "changed-file-skill-resolution: applied"
       - "required-profile-skills: checked"
       - "missing-required-profile-skills:"
-      - "clean-architecture: applied|n/a"
+      - "architecture-contract: applied|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
-      - "presentation-skill: android|flutter|react|react-native|ios|n/a"
-      - "presentation-state-based-development: applied|n/a"
-      - "presentation-state-review: pass|fail|n/a"
-      - "ui-state-modeling: explicit|n/a"
-      - "presentation-mapping-boundary: domain-to-uimodel|n/a"
-      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
       - "regression-test:"
       - "red-observed:"
       - "test-run-evidence: verified|unavailable"
+    required_markers_by_architecture:
+      clean:
+        - "presentation-skill: android|flutter|react|react-native|ios|n/a"
+        - "presentation-state-based-development: applied|n/a"
+        - "presentation-state-review: pass|fail|n/a"
+        - "ui-state-modeling: explicit|n/a"
+        - "presentation-mapping-boundary: domain-to-uimodel|n/a"
+        - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
     routes:
       default: comment-authoring
     prompt: |
+      Follow the effective Completion gate below for this run’s selected architecture.
+      Clean mode additionally requires every listed Clean boundary heading and marker,
+      including all applicability exceptions; local mode assesses its own complete
+      contract instead. Pending mode does not authorize structural decisions.
       For each must-fix finding in final-review.md or gate-results.json, apply
       the change. After QA failures, return through review before running gates
       again. Follow the runner's printed next_command for each fix/review
@@ -543,15 +527,9 @@ phases:
           changed-file-skill-resolution: applied
           required-profile-skills: checked
           missing-required-profile-skills: none|<list>
-          clean-architecture: applied|n/a
+          architecture-contract: applied|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          presentation-skill: <android|flutter|react|react-native|ios|n/a>
-          presentation-state-based-development: <applied|n/a>
-          presentation-state-review: <pass|fail|n/a>
-          ui-state-modeling: <explicit|n/a>
-          presentation-mapping-boundary: <domain-to-uimodel|n/a>
-          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a>
           regression-test: <test id that reproduces the required behavior>
           red-observed: <exit code of the failing run>
           test-run-evidence: verified|unavailable
@@ -564,6 +542,7 @@ phases:
     required_markers:
       - "commit-oid:"
       - "commit-subject:"
+    required_markers_by_architecture: {}
     description: Stage and commit using profile.commit_convention.
     prompt: |
       Group changes into logical commits per profile.commit_convention.style.
@@ -583,6 +562,7 @@ phases:
       - "remote-oid:"
       - "pr-url:"
       - "pr-base:"
+    required_markers_by_architecture: {}
     description: Push branch and create or reuse its PR against profile.pr.target_branch.
     prompt: |
       Before drafting or refreshing the PR body, apply agent-flow-concise-output

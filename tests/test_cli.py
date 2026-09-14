@@ -2324,6 +2324,58 @@ class CliTest(unittest.TestCase):
                         self.assertNotIn("/usr/bin/python3", text, shell_hook)
                         self.assertIn("AGENT_FLOW_HOOK_PYTHON", text, shell_hook)
 
+    def test_installed_prompts_keep_architecture_marker_groups_conditional(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            kit_root = Path(__file__).resolve().parents[1]
+            result = subprocess.run(
+                (_node_executable(), str(kit_root / "bin" / "agent-flow-kit.mjs"), "install"),
+                cwd=project_root,
+                env=_node_test_env(HOME=str(Path(temp_dir) / "home")),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            phases = {
+                phase.id: phase
+                for phase in load_phase_workflow_definition(kit_root, "full-feature").phases
+            }
+            prompts = project_root / ".agent-flow" / "prompts"
+            for phase_id in ("green", "prd", "plan-review"):
+                with self.subTest(phase=phase_id):
+                    phase = phases[phase_id]
+                    prompt = (prompts / f"{phase_id}.md").read_text(encoding="utf-8")
+                    if not phase.required_markers and phase.required_markers_by_architecture is None:
+                        self.assertNotIn("## Completion markers\n", prompt)
+                        continue
+                    markers = prompt.split("## Completion markers\n", 1)[1].split(
+                        "## Required skills\n", 1,
+                    )[0]
+                    conditional = phase.required_markers_by_architecture
+                    if conditional is None:
+                        self.assertNotIn("### Common markers", markers)
+                        self.assertNotIn("### Additional markers", markers)
+                        common = markers
+                    else:
+                        self.assertIn("`agent-flow-kit run next`", markers)
+                        common = markers.split(
+                            "### Common markers — all architecture modes\n", 1,
+                        )[1].split("### Additional markers", 1)[0]
+                        if not conditional:
+                            self.assertNotIn("### Additional markers", markers)
+                        for mode, required in conditional.items():
+                            group = markers.split(
+                                f"### Additional markers — architecture mode: `{mode}` only\n", 1,
+                            )[1].split("### Additional markers", 1)[0]
+                            for marker in required:
+                                self.assertIn(f"- `{marker}`", group)
+                                if marker not in phase.required_markers:
+                                    self.assertNotIn(f"- `{marker}`", common)
+                    for marker in phase.required_markers:
+                        self.assertIn(f"- `{marker}`", common)
+
     def test_node_installer_writes_cwd_independent_hook_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project with space"
@@ -12258,7 +12310,7 @@ def _node_implement_gate(*, local_skill: bool, run_dir=None) -> str:
         "## Completion Gate\n"
         "skills_checked: true\n"
         + _node_profile_skill_gate()
-        + "clean-architecture: applied\n"
+        + "architecture-contract: applied\n"
         + (_node_project_local_applied_gate() if local_skill else _node_project_local_gate())
         + _node_presentation_gate()
         + "regression-test: tests/test_x.py::test_bug\n"
@@ -12442,7 +12494,7 @@ def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
         + _node_presentation_gate()
     )
     clean_design_gate = (
-        "## Clean Architecture Boundary Map\n"
+        "## Architecture Boundary Map\n"
         "## Dependency Rule\n"
         "## Use Case Boundaries\n"
         "## Repository Boundaries\n"
@@ -12451,7 +12503,7 @@ def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
         "## Composition Root\n"
         "## Testability Boundary\n"
         "## Completion Gate\n"
-        "clean-architecture: applied\n"
+        "architecture-contract: applied\n"
         "usecase-interface: n/a\n"
         "usecase-composition: none\n"
         "cache-required: no\n"
@@ -12468,7 +12520,7 @@ def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
         "solid-dip-dependency-direction: inward\n"
     )
     clean_review_gate = (
-        "clean-architecture: applied\n"
+        "architecture-contract: applied\n"
         "must-avoid-check: pass\n"
         "dependency-rule: pass\n"
         "usecase-boundary: n/a\n"
@@ -12481,13 +12533,13 @@ def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
         "solid-boundary-check: pass\n"
     )
     clean_code_review_gate = (
-        "clean-architecture-review: applied\n"
+        "architecture-contract-review: applied\n"
         "must-avoid-check: pass\n"
         "usecase-interface-check: applied\n"
         "usecase-composition-check: applied\n"
         "cache-boundary-check: applied\n"
         "mapping-boundary-check: applied\n"
-        "solid-clean-architecture-check: applied\n"
+        "solid-architecture-check: applied\n"
     )
     if phase == "push-pr":
         return content + (
@@ -12568,7 +12620,7 @@ def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
             + "## Completion Gate\n"
             + "skills_checked: true\n"
             + _node_profile_skill_gate()
-            + "clean-architecture: applied\n"
+            + "architecture-contract: applied\n"
             + _node_project_local_gate(phase)
             + _node_presentation_gate()
             + "regression-test: tests/test_x.py::test_bug\n"
@@ -12579,13 +12631,13 @@ def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
         return (
             content
             + skills_gate
-            + "clean-architecture: applied\n"
+            + "architecture-contract: applied\n"
             + "regression-test: tests/test_x.py::test_bug\n"
             + "red-observed: 1\n"
             + "test-run-evidence: verified\n"
         )
     if phase in {"green", "refactor", "pr-comment-fix", "pr-ci-fix"}:
-        return content + skills_gate + "clean-architecture: applied\n"
+        return content + skills_gate + "architecture-contract: applied\n"
     if phase == "red":
         if run_dir is not None:
             _record_node_test_evidence(Path(run_dir), exit_code=1)
@@ -12605,14 +12657,14 @@ def _with_skills_gate(content: str, phase: str = "multi-review") -> str:
         "skills_checked: true\n"
         + _node_profile_skill_gate()
         + _node_review_parity_gate()
-        + "clean-architecture-review: applied\n"
+        + "architecture-contract-review: applied\n"
         + "must-avoid-check: pass\n"
         + _node_project_local_gate(phase)
         + "usecase-interface-check: applied\n"
         "usecase-composition-check: applied\n"
         "cache-boundary-check: applied\n"
         "mapping-boundary-check: applied\n"
-        "solid-clean-architecture-check: applied\n"
+        "solid-architecture-check: applied\n"
         + _node_presentation_gate()
     )
 
@@ -12623,7 +12675,7 @@ def _with_final_review_gate(content: str, dependency_rule: str = "pass", phase: 
         "skills_checked: true\n"
         + _node_profile_skill_gate()
         + _node_review_parity_gate()
-        + "clean-architecture: applied\n"
+        + "architecture-contract: applied\n"
         + "must-avoid-check: pass\n"
         + _node_project_local_gate(phase)
         + f"dependency-rule: {dependency_rule}\n"
@@ -12635,12 +12687,12 @@ def _with_final_review_gate(content: str, dependency_rule: str = "pass", phase: 
         "mapping-boundary: n/a\n"
         "dto-entity-domain-ui-separated: pass\n"
         "solid-boundary-check: pass\n"
-        "clean-architecture-review: applied\n"
+        "architecture-contract-review: applied\n"
         "usecase-interface-check: applied\n"
         "usecase-composition-check: applied\n"
         "cache-boundary-check: applied\n"
         "mapping-boundary-check: applied\n"
-        "solid-clean-architecture-check: applied\n"
+        "solid-architecture-check: applied\n"
         + _node_presentation_gate()
     )
 

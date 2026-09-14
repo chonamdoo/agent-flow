@@ -1319,6 +1319,106 @@ def _write_project_profile(root: Path, **declarations: object) -> Path:
     return source
 
 
+@pytest.mark.parametrize(
+    "angles",
+    [
+        None,
+        {},
+        ["specialist"],
+        [{"prompt": "templates/_shared/review/types.md"}],
+        [{"id": "specialist", "prompt": False}],
+        [{"id": "../escape", "prompt": "templates/_shared/review/types.md"}],
+        [{"id": "specialist", "prompt": "../escape.md"}],
+        [{"id": "specialist", "prompt": "templates/_shared/review/types.md", "requires": []}],
+        [{"id": "specialist", "prompt": "templates/_shared/review/types.md", "task_terms": "api"}],
+        [{"id": "specialist", "prompt": "templates/_shared/review/types.md", "path_globs": [""]}],
+    ],
+)
+def test_local_review_angles_reject_unconsumable_shapes(tmp_path: Path, angles: object) -> None:
+    _write_project_profile(tmp_path)
+    override = _write_override(tmp_path, "probe", yaml.safe_dump({"review_angles": angles}))
+
+    for load in (
+        lambda: load_profile_payload("probe", tmp_path),
+        lambda: load_runner_profile(KIT_ROOT, tmp_path),
+    ):
+        (tmp_path / ".agent-flow/kit.json").write_text('{"profile":"probe"}', encoding="utf-8")
+        with pytest.raises(ValueError) as caught:
+            load()
+        assert "review_angles" in str(caught.value)
+        assert str(override) in str(caught.value)
+
+
+def test_local_review_angles_preserve_existing_selector_and_requirement_meanings(tmp_path: Path) -> None:
+    _write_project_profile(tmp_path)
+    angles = [
+        {
+            "id": "  domain-review  ",
+            "prompt": " templates/_shared/review/types.md ",
+            "requires": " project-specific-skill ",
+            "task_terms": [],
+            "path_globs": [" **/*.py "],
+        },
+        {
+            "id": "architecture-review",
+            "prompt": "templates/_shared/review/types.md",
+            "requires": "architecture-contract",
+            "task_terms": [" Project Domain "],
+            "path_globs": [],
+        },
+    ]
+    _write_override(tmp_path, "probe", yaml.safe_dump({"review_angles": angles}))
+
+    assert load_profile_payload("probe", tmp_path)["review_angles"] == angles
+
+
+def test_local_review_angles_do_not_open_baseline_override(tmp_path: Path) -> None:
+    _write_project_profile(tmp_path)
+    _write_override(tmp_path, "probe", "review_angles: []\nbaseline: []\n")
+
+    with pytest.raises(ValueError, match="remove baseline"):
+        load_profile_payload("probe", tmp_path)
+
+
+@pytest.mark.parametrize(
+    "override_angles,expected_ids",
+    [
+        (None, ["shipped"]),
+        ([], []),
+        ([{"id": "local", "prompt": "templates/_shared/review/types.md"}], ["local"]),
+    ],
+)
+def test_local_review_angles_replace_only_the_selected_profile(
+    tmp_path: Path, override_angles: object, expected_ids: list[str],
+) -> None:
+    source = _write_project_profile(tmp_path, review_angles=[
+        {"id": "shipped", "prompt": "templates/_shared/review/types.md"},
+    ])
+    sibling = source.with_name("sibling.yaml")
+    sibling.write_text(yaml.safe_dump({
+        "id": "sibling",
+        "review_angles": [{"id": "sibling", "prompt": "templates/_shared/review/types.md"}],
+    }), encoding="utf-8")
+    (tmp_path / ".agent-flow/kit.json").write_text(
+        '{"profiles":["probe","sibling"]}', encoding="utf-8",
+    )
+    if override_angles is not None:
+        _write_override(tmp_path, "probe", yaml.safe_dump({"review_angles": override_angles}))
+
+    assert [
+        angle["id"] for angle in load_profile_payload("probe", tmp_path)["review_angles"]
+    ] == expected_ids
+    _, profile = load_runner_profile(KIT_ROOT, tmp_path)
+    assert [angle["id"] for angle in profile["review_angles"]] == [*expected_ids, "sibling"]
+
+    _write_project_profile(tmp_path, review_angles=[
+        {"id": "updated", "prompt": "templates/_shared/review/types.md"},
+    ])
+    _, updated = load_runner_profile(KIT_ROOT, tmp_path)
+    updated_ids = ["updated"] if override_angles is None else expected_ids
+    assert [angle["id"] for angle in updated["review_angles"]] == [*updated_ids, "sibling"]
+
+
 @pytest.mark.parametrize("capabilities", ["react-web", [None], {"react-web": True}])
 def test_project_capabilities_reject_invalid_declarations(tmp_path: Path, capabilities: object) -> None:
     source = _write_project_profile(tmp_path, capabilities=capabilities)

@@ -634,6 +634,48 @@ print(json.dumps({
     assert json.loads(runtime.stdout) == {"required": sorted(expected), "missing": []}
 
 
+@pytest.mark.parametrize(("entries", "valid"), [
+    (["references/common.md", {"path": "references/a.md", "pathGlobs": ["apps/a/**"]},
+      {"path": "references/always.md"}], True),
+    ([{"path": "references/a.md", "pathGlobs": []}], False),
+    ([{"path": "references/a.md", "pathGlobs": ["../apps/**"]}], False),
+    ([{"path": "references/a.md", "pathGlob": ["apps/a/**"]}], False),
+    (["references/a.md", {"path": "references/a.md"}], False),
+])
+def test_scoped_document_metadata_has_python_javascript_consumer_parity(tmp_path, entries, valid):
+    from agent_flow.core.skill_metadata import SkillMetadataError, parse_skill_metadata
+
+    path = tmp_path / "skills/probe/SKILL.md"
+    path.parent.mkdir(parents=True)
+    text = "---\n" + yaml.safe_dump({
+        "requires": ["scoped-dependency"], "requires_docs": entries,
+    }) + "---\n"
+    path.write_text(text, encoding="utf-8")
+    if valid:
+        assert parse_skill_metadata(text, source=str(path))["requires_docs"] == entries
+    else:
+        with pytest.raises(SkillMetadataError):
+            parse_skill_metadata(text, source=str(path))
+    module = (KIT_ROOT / "lib/skill-selection.mjs").as_uri()
+    code = (
+        f"import {{ addDependencies }} from {json.dumps(module)};"
+        "const names = new Set(['probe']);"
+        f"addDependencies(names, {{kitRoot: {json.dumps(str(KIT_ROOT))}, "
+        f"projectRoot: {json.dumps(str(tmp_path))}}});"
+        "console.log(JSON.stringify([...names].sort()));"
+    )
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", code),
+        cwd=tmp_path, capture_output=True, text=True, check=False, timeout=30,
+    )
+    if valid:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == ["probe", "scoped-dependency"]
+    else:
+        assert result.returncode != 0
+        assert "requires_docs" in result.stderr
+
+
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 @pytest.mark.parametrize(
     ("opening", "newline"),

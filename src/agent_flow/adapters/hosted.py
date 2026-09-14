@@ -12,6 +12,7 @@ review flagged.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -25,12 +26,13 @@ from typing import TYPE_CHECKING, NamedTuple
 import yaml
 
 from agent_flow.adapters.base import Adapter
-from agent_flow.artifact import bind_review_evidence, ensure_review_binding, read_meta
+from agent_flow.artifact import bind_review_evidence, ensure_review_binding, read_meta, write_meta
 from agent_flow.cli_detect import cli_by_name
 from agent_flow.core.local_skills import (
     ARCHITECTURE_CONTRACT_REQUIREMENT,
     architecture_contract_required,
 )
+from agent_flow.core.skill_scope import record_reviewer_documents, reviewer_document_ids
 from agent_flow.core.review_evidence import (
     ReviewerOutcome,
     complete_provider_names,
@@ -42,7 +44,7 @@ from agent_flow.core.review_scope import (
     publication_review_base,
     validate_publication_review_base,
 )
-from agent_flow.core.skill_resolver import selector_matches
+from agent_flow.core.skill_resolver import SkillResolution, selector_matches
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
     git_proves_ancestor,
@@ -199,7 +201,10 @@ class HostedAdapter(Adapter):
         self.name = host_name
         self._hint = _HOST_HINTS[host_name]
 
-    def execute(self, phase: Phase, run_dir: Path, project_root: Path) -> bool:
+    def execute(
+        self, phase: Phase, run_dir: Path, project_root: Path, *,
+        resolution: SkillResolution | None = None,
+    ) -> bool:
         host_hint = self._hint
         host_hint += (
             "\n\n### Host-session isolation boundary\n"
@@ -231,6 +236,7 @@ class HostedAdapter(Adapter):
             )
         prompt = self.render_envelope(
             phase, run_dir, project_root, host_hint=host_hint,
+            resolution=resolution,
         )
         print(prompt)
         return False  # host AI writes the artifact
@@ -248,7 +254,7 @@ def _run_multi_review_distribution(
         phase.id,
         base_branch=_profile_base_branch(adapter),
     )
-    jobs = _reviewer_jobs(
+    jobs = _prepare_reviewer_jobs(
         phase,
         run_dir,
         project_root,
@@ -321,6 +327,22 @@ def _write_review_results(
 class ReviewInputSnapshot:
     path: Path
     digest: str
+    document_scope: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class _ReviewInputObservation:
+    content: str
+    document_scope: tuple[str, ...] | None
+
+
+def review_document_scope(
+    project_root: Path, run_dir: Path, *, base_branch: str | None = None,
+) -> tuple[str, ...] | None:
+    """Observe review scope without publishing or replacing reviewer evidence."""
+    return _capture_review_input(
+        project_root, run_dir, "", base_branch=base_branch,
+    ).document_scope
 
 
 def _write_review_input_snapshot(
@@ -330,6 +352,25 @@ def _write_review_input_snapshot(
     *,
     base_branch: str | None = None,
 ) -> ReviewInputSnapshot:
+    observation = _capture_review_input(
+        project_root, run_dir, phase_id, base_branch=base_branch,
+    )
+    target = run_dir.resolve() / f"{phase_id}-review-input.patch"
+    write_run_artifact_text(run_dir, target, observation.content)
+    return ReviewInputSnapshot(
+        path=target,
+        digest=hashlib.sha256(observation.content.encode("utf-8")).hexdigest(),
+        document_scope=observation.document_scope,
+    )
+
+
+def _capture_review_input(
+    project_root: Path,
+    run_dir: Path,
+    phase_id: str,
+    *,
+    base_branch: str | None = None,
+) -> _ReviewInputObservation:
     """리뷰 증거의 기준점은 기본적으로 merge-base, publication 범위에서는 고정 OID다.
 
     `HEAD` 기준으로 찍으면 작업이 이미 커밋된 브랜치에서는 모든 섹션이 비는데,
@@ -365,7 +406,7 @@ def _write_review_input_snapshot(
         )
     status = git_safe(
         "status",
-        "--short",
+        "--porcelain=v1",
         "--untracked-files=all",
         cwd=project_root,
         optional_locks=False,
@@ -376,6 +417,7 @@ def _write_review_input_snapshot(
         "diff",
         "--no-ext-diff",
         "--no-color",
+        "--raw", "--patch", "--no-renames",
         baseline.rev,
         "--",
         cwd=project_root,
@@ -400,6 +442,7 @@ def _write_review_input_snapshot(
                     "--cached",
                     "--no-ext-diff",
                     "--no-color",
+                    "--raw", "--patch", "--no-renames",
                     "--",
                     cwd=project_root,
                     optional_locks=False,
@@ -413,6 +456,7 @@ def _write_review_input_snapshot(
                     "diff",
                     "--no-ext-diff",
                     "--no-color",
+                    "--raw", "--patch", "--no-renames",
                     "--",
                     cwd=project_root,
                     optional_locks=False,
@@ -423,7 +467,7 @@ def _write_review_input_snapshot(
         ))
     else:
         diff_observations.append((f"git diff {baseline.rev}", diff))
-    observations = [("git status --short", status), *diff_observations]
+    observations = [("git status --porcelain=v1", status), *diff_observations]
     failed = [
         f"{label}: {result.stderr.strip() or result.error or result.returncode}"
         for label, result in observations
@@ -492,12 +536,64 @@ def _write_review_input_snapshot(
             "could not precompute reviewer input: "
             f"snapshot exceeds {_REVIEW_INPUT_MAX_BYTES} bytes"
         )
-    target = run_dir.resolve() / f"{phase_id}-review-input.patch"
-    write_run_artifact_text(run_dir, target, content)
-    return ReviewInputSnapshot(
-        path=target,
-        digest=hashlib.sha256(encoded).hexdigest(),
+    return _ReviewInputObservation(
+        content=content,
+        document_scope=(
+            None if truncated or baseline.base_unresolved
+            else _snapshot_document_scope(status.stdout, [result.stdout for _, result in diff_observations])
+        ),
     )
+
+
+def _snapshot_document_scope(status: str, diffs: Sequence[str]) -> tuple[str, ...] | None:
+    paths: set[str] = set()
+    for diff in diffs:
+        headers = [line for line in diff.splitlines() if line.startswith(":")]
+        if diff.strip() and not headers:
+            return None
+        for header in headers:
+            metadata, separator, raw = header.partition("\t")
+            if not separator or not re.fullmatch(r":[0-7]{6} [0-7]{6} [0-9a-f]+ [0-9a-f]+ [A-Z][0-9]*", metadata):
+                return None
+            path = _snapshot_path(raw)
+            if path is None:
+                return None
+            paths.add(path)
+    for line in status.splitlines():
+        if not line.strip():
+            continue
+        if len(line) < 4 or line[2] != " " or not re.fullmatch(r"[ MADRCU?!]{2}", line[:2]):
+            return None
+        raw_paths = (line[3:],)
+        if "R" in line[:2] or "C" in line[:2]:
+            renamed = re.fullmatch(
+                r'("(?:\\.|[^"\\])*"|[^\s"]+) -> ("(?:\\.|[^"\\])*"|[^\s"]+)',
+                line[3:],
+            )
+            if renamed is None:
+                return None
+            raw_paths = renamed.groups()
+        for raw in raw_paths:
+            path = _snapshot_path(raw)
+            if path is None:
+                return None
+            paths.add(path)
+    return tuple(sorted(paths))
+
+
+def _snapshot_path(raw: str) -> str | None:
+    try:
+        value = ast.literal_eval(raw) if raw.startswith('"') else raw
+        if raw.startswith('"') and re.search(r"\\[0-7]{3}", raw):
+            value = value.encode("latin-1").decode("utf-8")
+    except (SyntaxError, ValueError, UnicodeError):
+        return None
+    if (
+        not isinstance(value, str) or not value or value.startswith("/")
+        or ".." in value.split("/") or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        return None
+    return value
 
 
 @dataclass(frozen=True)
@@ -810,6 +906,28 @@ def _angle_requirement_met(
         return contract_satisfied
     return requirement in required
 
+def _prepare_reviewer_jobs(
+    phase: Phase,
+    run_dir: Path,
+    project_root: Path,
+    adapter: Adapter,
+    *,
+    review_input: ReviewInputSnapshot,
+    providers: Sequence[str],
+) -> list[ReviewerJob]:
+    """Prompt inspection must not claim delivery in run metadata."""
+    jobs, documents = _reviewer_jobs(
+        phase, run_dir, project_root, adapter,
+        review_input=review_input, providers=providers,
+    )
+    if documents:
+        meta = read_meta(run_dir)
+        for provider, identities in documents.items():
+            record_reviewer_documents(meta, phase.id, provider, identities)
+        write_meta(run_dir, meta)
+    return jobs
+
+
 
 def _reviewer_jobs(
     phase: Phase,
@@ -819,7 +937,7 @@ def _reviewer_jobs(
     *,
     review_input: ReviewInputSnapshot | None = None,
     providers: Sequence[str] | None = None,
-) -> list[ReviewerJob]:
+) -> tuple[list[ReviewerJob], dict[str, tuple[str, ...]]]:
     """Build provider-specific reviewer jobs from a single captured input."""
     providers = REVIEW_CLI_NAMES if providers is None else tuple(providers)
     adapter._provider_authority = tuple(providers)
@@ -836,17 +954,21 @@ def _reviewer_jobs(
         providers=providers,
     )
     jobs: list[ReviewerJob] = []
-    base_prompt_by_provider = {
-        provider: adapter.render_envelope(
-            phase,
-            run_dir,
-            project_root,
-            prompt_variant=f"reviewer-base-{provider}",
-            skill_host=provider,
-            role="reviewer",
+    meta = read_meta(run_dir)
+    base_prompt_by_provider: dict[str, str] = {}
+    rendered_documents: dict[str, tuple[str, ...]] = {}
+    for provider in providers:
+        resolution = adapter.phase_resolution(
+            phase, project_root, skill_host=provider,
+            document_scope=review_input.document_scope if review_input is not None else None,
+            required_document_ids=reviewer_document_ids(meta, phase.id, provider),
         )
-        for provider in providers
-    }
+        base_prompt_by_provider[provider] = adapter.render_envelope(
+            phase, run_dir, project_root,
+            prompt_variant=f"reviewer-base-{provider}",
+            skill_host=provider, role="reviewer", resolution=resolution,
+        )
+        rendered_documents[provider] = resolution.required_document_ids
     fallback_prompt = (
         ""
         if providers
@@ -869,7 +991,7 @@ def _reviewer_jobs(
         "so committed changes since that baseline are included — and states "
         "in `- note:` lines whether the baseline skipped a "
         "stale declared base, whether the snapshot was truncated, and whether it "
-        "is a verified empty diff. The body holds `git status --short` and that "
+        "is a verified empty diff. The body holds `git status --porcelain=v1` and that "
         "diff. Inspect "
         "untracked files listed there directly. Do not run `git diff` inside "
         "the reviewer sandbox. When the header declares publication-only scope, "
@@ -920,7 +1042,7 @@ def _reviewer_jobs(
                 for provider, prompt in base_prompt_by_provider.items()
             },
         ))
-    return jobs
+    return jobs, rendered_documents
 
 
 def _review_angle_output(run_dir: Path, phase_id: str, angle_id: str) -> Path:

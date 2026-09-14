@@ -138,6 +138,15 @@ class NormativeDocument:
     content: bytes
     routes: tuple[SkillRoute, ...] = ()
     inline: bool = False
+    selected: bool = True
+
+    @property
+    def identity(self) -> str:
+        payload = (
+            self.document.path, self.document.sha256,
+            tuple(sorted({(route.skill, route.kind, route.detail) for route in self.routes})),
+        )
+        return hashlib.sha256(repr(payload).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -165,11 +174,16 @@ class SkillResolution:
     routes: tuple[SkillRoute, ...] = ()
 
     @property
+    def required_document_ids(self) -> tuple[str, ...]:
+        return tuple(document.identity for document in self.normative_documents if document.selected)
+
+    @property
     def delivery(self) -> tuple[NormativeDelivery, ...]:
         """Group exact normative bodies while preserving every source route."""
         groups: dict[bytes, list[NormativeDocument]] = {}
         for document in self.normative_documents:
-            groups.setdefault(document.content, []).append(document)
+            if document.selected:
+                groups.setdefault(document.content, []).append(document)
         return tuple(
             NormativeDelivery(content, tuple(documents))
             for content, documents in groups.items()
@@ -458,6 +472,8 @@ def resolve_phase_skills(
     phase_skills: PhaseSkills | None = None,
     profile: dict | None = None,
     changed_files: Sequence[str] = (),
+    document_scope: Sequence[str] | None = None,
+    required_document_ids: Sequence[str] = (),
     task_text: str = "",
     concerns: Sequence[str] = (),
     host: str | None = None,
@@ -528,6 +544,7 @@ def resolve_phase_skills(
     capture = (
         str(project_root.resolve()), str(contract_root.resolve()), phase_id, declared,
         tuple(changed_files), task_text, tuple(concerns),
+        None if document_scope is None else tuple(document_scope), tuple(required_document_ids),
         yaml.safe_dump(profile, sort_keys=True, allow_unicode=True),
         resolved_host, provider_authority, resolved_roots, snapshot, catalog,
         tuple((str(path), content) for path, content in contents.items()),
@@ -752,12 +769,38 @@ def resolve_phase_skills(
             inline=skill.name == contract_name,
         ))
     if snapshot.contract is not None:
-        for document, text in zip(snapshot.contract.documents[1:], snapshot.contract.contents[1:], strict=True):
+        metadata = parse_skill_metadata(
+            snapshot.contract.contents[0], source=snapshot.contract.root.path,
+        ) or {}
+        references = metadata.get("requires_docs", ())
+        scope_paths = None if document_scope is None else set(document_scope)
+        select_all = scope_paths is None or bool(scope_paths.intersection(
+            {document.path for document in snapshot.contract.documents}
+            | ({snapshot.source_document.path} if snapshot.source_document is not None else set())
+            | {
+                Path(document.path).relative_to(contract_root).as_posix()
+                for document in norms if Path(document.path).is_relative_to(contract_root)
+            }
+        ))
+        retained_ids = set(required_document_ids)
+        for declaration, document, text in zip(
+            references, snapshot.contract.documents[1:], snapshot.contract.contents[1:], strict=True,
+        ):
+            patterns = declaration.get("pathGlobs", ()) if isinstance(declaration, dict) else ()
+            selected = select_all or not patterns or any(
+                _glob_matches(pattern, candidate)
+                for pattern in patterns for candidate in scope_paths or ()
+            )
             normative_documents.append(NormativeDocument(
                 document, text.encode("utf-8"),
                 (SkillRoute(contract_name or "", "architecture-reference", document.path),),
-                inline=True,
+                inline=True, selected=selected,
             ))
+            if not selected and normative_documents[-1].identity in retained_ids:
+                previous = normative_documents[-1]
+                normative_documents[-1] = NormativeDocument(
+                    previous.document, previous.content, previous.routes, inline=True,
+                )
     resolution = SkillResolution(
         required=required,
         optional=tuple(resolve(name) for name in _stable_unique(optional_names)),
@@ -1029,6 +1072,14 @@ def skill_prompt_block(
                 "decision; a missing standard is not permission to approve structural work."
             )
         lines.append("")
+    if any(not document.selected for document in resolution.normative_documents):
+        lines.extend((
+            "The full contract remains pinned. This required-read plan selects the root, "
+            "unconditional references, and references required by the verified document scope "
+            "or already delivered in this phase. Other conditional references are not "
+            "reviewed by this delivery; do not claim their rules were assessed.",
+            "",
+        ))
     deliveries = resolution.delivery
     if deliveries:
         lines.extend(("## Required-read plan", ""))
