@@ -688,10 +688,25 @@ function normalizeExportedPhase(phase, name, index) {
     description,
     instruction: prompt || description,
     required_markers: requiredMarkers,
+    ...(phase.required_markers_by_architecture === undefined ? {} : {
+      required_markers_by_architecture: normalizeExportedArchitectureMarkers(
+        phase.required_markers_by_architecture, name, index,
+      ),
+    }),
     multi_review: normalizeExportedBoolean(phase.multi_review, name, index, "multi_review"),
     routes: normalizeExportedRoutes(phase.routes, name, index),
     skills: normalizeExportedSkills(phase.skills, name, index),
   };
+}
+
+function normalizeExportedArchitectureMarkers(value, name, index) {
+  const field = "required_markers_by_architecture";
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`workflow export ${name}: phase ${index} ${field} must be an object`);
+  }
+  return Object.fromEntries(Object.entries(value).map(([mode, markers]) => [
+    mode, normalizeExportedStringList(markers, name, index, `${field}.${mode}`),
+  ]));
 }
 
 function normalizeExportedSkills(value, name, index) {
@@ -2375,9 +2390,16 @@ function pushWatchTickPromptMarkdown() {
 }
 
 function phasePrompt(phase) {
-  const markers = phase.required_markers?.length
-    ? `\n\n## Completion markers\n\nThe runner blocks this phase until the artifact includes a \`## Completion Gate\` section with these marker lines:\n\n${phase.required_markers.map((marker) => `- \`${marker}\``).join("\n")}\n`
-    : "";
+  let markers = "";
+  if (phase.required_markers_by_architecture !== undefined) {
+    const common = phase.required_markers.map((marker) => `- \`${marker}\``).join("\n");
+    const conditional = Object.entries(phase.required_markers_by_architecture).map(
+      ([mode, required]) => `### Additional markers — architecture mode: \`${mode}\` only\n\n${required.map((marker) => `- \`${marker}\``).join("\n") || "No additional markers declared."}`,
+    ).join("\n\n");
+    markers = `\n\n## Completion markers\n\nThis is an installed workflow reference, not the active run's selected marker set. Run \`agent-flow-kit run next\` for the required markers resolved by the Python runner from the active run's pinned workflow and architecture context. In \`## Completion Gate\`, include the common markers and only the additional group selected by that runtime output; groups for other modes do not apply.\n\n### Common markers — all architecture modes\n\n${common || "No common markers declared."}\n\n${conditional || "No architecture-specific marker groups declared; runtime architecture selection still applies."}\n`;
+  } else if (phase.required_markers?.length) {
+    markers = `\n\n## Completion markers\n\nThe runner blocks this phase until the artifact includes a \`## Completion Gate\` section with these marker lines:\n\n${phase.required_markers.map((marker) => `- \`${marker}\``).join("\n")}\n`;
+  }
   // skill 목록은 여기에 굽지 않는다. install 시점 스냅샷은 새 skill이 설치되면 바로 stale해진다.
   // 실제 목록은 `agent-flow-kit run next` / `status`가 매번 resolver로 다시 만든다.
   const skillNote = "\n\n## Required skills\n\nRun `agent-flow-kit run next` for the resolved skill list for this phase — it is computed live, not baked here.\n";

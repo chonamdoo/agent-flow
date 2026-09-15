@@ -438,6 +438,54 @@ def test_snapshot_refuses_to_ship_no_evidence_when_base_is_unusable(tmp_path: Pa
         )
 
 
+def test_author_scope_is_unknown_when_declared_base_has_no_evidence(tmp_path: Path):
+    from agent_flow.adapters.hosted import review_document_scope
+
+    project = tmp_path / "project"
+    _committed_feature_repo(project)
+
+    assert review_document_scope(
+        project, _run_dir(project), base_branch="release/absent",
+    ) is None
+
+
+@pytest.mark.parametrize("committed", [False, True], ids=["untracked", "committed"])
+def test_review_scope_preserves_literal_paths_with_quotepath_disabled(
+    tmp_path: Path, committed: bool,
+):
+    from agent_flow.adapters.hosted import review_document_scope
+
+    project = tmp_path / "project"
+    _init_repo(project)
+    _git(project, "checkout", "-b", "feat-x")
+    _git(project, "config", "core.quotepath", "false")
+    path = r"apps/Ã©/file\123.py"
+    changed_file = project / path
+    changed_file.parent.mkdir(parents=True)
+    changed_file.write_text("changed\n", encoding="utf-8")
+    if committed:
+        _git(project, "add", "--", path)
+        _git(project, "commit", "-m", "change quoted path")
+
+    assert review_document_scope(
+        project, _run_dir(project), base_branch="main",
+    ) == (path,)
+    assert _git(project, "config", "--get", "core.quotepath").strip() == "false"
+
+
+def test_author_scope_does_not_require_a_publishable_snapshot(tmp_path: Path, monkeypatch):
+    from agent_flow.adapters import hosted
+
+    project = tmp_path / "project"
+    _init_repo(project)
+    run_dir = _run_dir(project)
+    monkeypatch.setattr(hosted, "_REVIEW_INPUT_MAX_BYTES", 128)
+
+    assert hosted.review_document_scope(project, run_dir) is None
+    with pytest.raises(WorktreeIsolationError, match="snapshot exceeds"):
+        hosted._write_review_input_snapshot(project, run_dir, "review")
+
+
 def test_snapshot_states_a_verified_empty_diff_for_review_only_work(tmp_path: Path):
     project = tmp_path / "project"
     _init_repo(project)
@@ -455,7 +503,7 @@ def test_snapshot_refuses_a_tracked_change_without_a_diff(tmp_path: Path, monkey
     from agent_flow.adapters import hosted
 
     def fake_git_safe(*args, **kwargs):
-        stdout = " M app.py\n" if args[0] == "status" else ""
+        stdout = " M app.py\n" if "status" in args else ""
         return SafeCommandResult(
             args=("git", *args), returncode=0, stdout=stdout, stderr=""
         )
@@ -473,7 +521,7 @@ def test_snapshot_reports_truncation_instead_of_failing_the_round(
     from agent_flow.adapters import hosted
 
     def fake_git_safe(*args, **kwargs):
-        stdout = " M app.py\n" if args[0] == "status" else "+partial hunk\n"
+        stdout = " M app.py\n" if "status" in args else "+partial hunk\n"
         return SafeCommandResult(
             args=("git", *args),
             returncode=-9,
@@ -509,6 +557,8 @@ def test_snapshot_still_fails_closed_on_a_broken_git(tmp_path: Path, monkeypatch
 
     with pytest.raises(WorktreeIsolationError, match="could not precompute"):
         hosted._write_review_input_snapshot(tmp_path, _run_dir(tmp_path), "review")
+    with pytest.raises(WorktreeIsolationError, match="could not precompute"):
+        hosted.review_document_scope(tmp_path, _run_dir(tmp_path))
 
 
 def test_profile_base_branch_prefers_branching_base():

@@ -29,6 +29,8 @@ from agent_flow.core.architecture_policy import (
     ArchitectureSelection,
     architecture_plan_payload,
     architecture_snapshot,
+    architecture_snapshot_block_reason,
+    load_architecture_selection,
     prepare_architecture_selection,
     write_architecture_selection,
 )
@@ -54,9 +56,11 @@ from agent_flow.core.gate_plan import deferred_check_names, profile_gate_command
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.kit_digest import warn_if_installed_kit_is_stale
 from agent_flow.core.kit_install import run_project_install
+from agent_flow.core.markers import missing_markers
 from agent_flow.core.phase_workflow import (
     DeclaredPhaseSkills,
     declared_phase_skills,
+    effective_phase_markers,
     load_phase_workflow_definition,
 )
 from agent_flow.core.profiles import (
@@ -78,13 +82,14 @@ from agent_flow.core.local_skills import (
     resolved_profile,
 )
 from agent_flow.core import skill_catalog
-from agent_flow.core.skill_resolver import assert_architecture_selection_skills
+from agent_flow.core.skill_resolver import ResolutionContext, assert_architecture_selection_skills
 from agent_flow.core.skill_sync import parse_skill_sources, sync_skill_sources
 from agent_flow.core.review import summarize_reviews, write_review_summary
 from agent_flow.core.report import RUN_REPORT_FILENAME, write_run_report
 from agent_flow.core.query import explain_run, query_run
 from agent_flow.core.security import resolve_project_path
 from agent_flow.core.tool_lint import lint_tools
+from agent_flow.core.workflow_pin import load_run_workflow_definition
 from agent_flow.core.watch import write_watch_snapshot
 from agent_flow.core.workflow_status import (
     print_structured_status,
@@ -202,7 +207,9 @@ from agent_flow.artifact import (
     find_active_runs,
     mark_inactive,
     phase_review_rejected,
+    phase_spec_checkpoint,
     read_meta,
+    run_concerns,
     select_publication_review_scope,
 )
 from agent_flow.runner import (
@@ -475,7 +482,9 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--refresh", action="store_true")
         if name in {"resolve", "prompt", "markers"}:
             sub.add_argument("--phase", required=True)
-            sub.add_argument("--workflow", default="default")
+            sub.add_argument("--workflow")
+            sub.add_argument("--fresh", action="store_true")
+            sub.add_argument("--task")
         if name == "markers":
             sub.add_argument("--artifact", required=True)
             # 읽음 증거를 현재 phase로 한정한다. 없으면 과거 기록까지 인정돼 강제가 약해진다.
@@ -1110,16 +1119,19 @@ def main(argv: list[str] | None = None) -> int:
             except (OSError, ValueError) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
+            _print_architecture_selection_guidance(run_root)
             return 0
         if _legacy_js_state_exists(root):
             _print_legacy_js_state_migration(root)
             return 2
         if not (state_root / ".agent-flow" / "runs").exists():
             print("진행 중인 run 없음.")
+            _print_architecture_selection_guidance(run_root)
             return 0
         # run 디렉터리는 있는데 활성 표식이 없다. `bin/agent-flow-kit.mjs`와 기존
         # 테스트가 이 문자열을 그대로 읽으므로 문구를 바꾸지 않는다.
         print("no runs")
+        _print_architecture_selection_guidance(run_root)
         return 0
 
     if args.command == "report":
@@ -1368,6 +1380,7 @@ def main(argv: list[str] | None = None) -> int:
                     assert_architecture_selection_skills(
                         profile_root, snapshot, profile=merged_profile_payload(profiles),
                         architecture_root=command_root,
+                        source_root=command_root,
                     )
                 selection = snapshot.selection
                 contract = snapshot.contract
@@ -1412,7 +1425,21 @@ def main(argv: list[str] | None = None) -> int:
             return 1 if any(finding.severity == "error" for finding in findings) else 0
 
     if args.command == "skills":
-        return _run_skills_command(args, root)
+        try:
+            project_root, state_root = root, root
+            if args.skills_command in {"resolve", "prompt", "markers"}:
+                if inferred_worktree is not None:
+                    project_root, state_root = _worktree_context(root, inferred_worktree)
+                    if project_root is None:
+                        return 2
+                elif unadopted_checkout is not None:
+                    project_root, state_root = unadopted_checkout, None
+            return _run_skills_command(
+                args, root, project_root=project_root, state_root=state_root,
+            )
+        except (OSError, ValueError, RuntimeError, yaml.YAMLError) as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
 
     if args.command == "workflow":
         if args.workflow_command == "export":
@@ -1436,11 +1463,23 @@ def main(argv: list[str] | None = None) -> int:
                 print(render_spec_changes(changes))
                 return 0
             if args.spec_command == "approve":
-                expected = manual_spec_approval_statement(run_dir, args.spec_id)
+                project = root
+                if inferred_worktree is not None:
+                    project, _ = _worktree_context(root, inferred_worktree)
+                    if project is None:
+                        return 2
+                elif unadopted_checkout is not None:
+                    project = unadopted_checkout
+                expected = manual_spec_approval_statement(
+                    run_dir, args.spec_id, project_root=project,
+                )
                 approval_path = record_manual_spec_approval(
                     run_dir,
                     args.spec_id,
                     expected,
+                    project_root=project,
+                    profile=resolved_profile(root),
+                    config_root=root,
                 )
                 print(f"SPEC approved: {approval_path}")
                 return 0
@@ -1465,6 +1504,12 @@ def main(argv: list[str] | None = None) -> int:
                     if args.project_root
                     else root
                 )
+                if not args.project_root and inferred_worktree is not None:
+                    project, _ = _worktree_context(root, inferred_worktree)
+                    if project is None:
+                        return 2
+                elif not args.project_root and unadopted_checkout is not None:
+                    project = unadopted_checkout
                 context = _spec_run_context(run_dir)
                 run_meta = _read_run_state(run_dir)
                 workflow = str(run_meta.get("workflow", ""))
@@ -1488,6 +1533,9 @@ def main(argv: list[str] | None = None) -> int:
                             since=context["since"],
                             evidence_root=root,
                             review_rejected=review_rejected,
+                            checkpoint=phase_spec_checkpoint(
+                                run_dir, args.phase, artifact, config_root=root,
+                            ),
                         ),
                         ensure_ascii=False,
                     )
@@ -3464,7 +3512,9 @@ def _workflow_declarations() -> DeclaredPhaseSkills:
     return declared_phase_skills(kit_root)
 
 
-def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
+def _run_skills_command(
+    args: argparse.Namespace, root: Path, *, project_root: Path, state_root: Path | None,
+) -> int:
     try:
         profile_ids = active_profile_ids(root, getattr(args, "profile", None) or "auto")
         payloads = [load_profile_payload(profile_id, root) for profile_id in profile_ids]
@@ -3537,7 +3587,24 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
 
     if args.skills_command in {"resolve", "prompt", "markers"}:
         try:
-            definition = load_phase_workflow_definition(_find_kit_root(), args.workflow)
+            active = (
+                find_active_run(state_root)
+                if state_root is not None and not args.fresh else None
+            )
+            meta = read_meta(active.path) if active is not None else {}
+            if active is not None:
+                definition = load_run_workflow_definition(
+                    _find_kit_root(), meta.get("workflow"), meta, config_root=root,
+                )
+                if args.workflow is not None and args.workflow != definition.id:
+                    raise ValueError(
+                        f"active workflow is {definition.id!r}, not {args.workflow!r}; "
+                        "use --fresh to inspect the current kit without run context"
+                    )
+            else:
+                definition = load_phase_workflow_definition(
+                    _find_kit_root(), args.workflow or "default",
+                )
         except (OSError, ValueError, yaml.YAMLError) as exc:
             print(str(exc), file=sys.stderr)
             return 2
@@ -3546,14 +3613,36 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
             # 조용히 "요구 없음"으로 답하면 gate가 통과해 버린다. phase가
             # workflow에 없다는 건 상태가 어긋났다는 뜻이므로 fail-closed다.
             print(
-                f"phase {args.phase!r} is not in workflow {args.workflow!r}",
+                f"phase {args.phase!r} is not in workflow {definition.id!r}",
                 file=sys.stderr,
             )
             return 2
         merged = merged_profile_payload(payloads)
-        # 호출자가 컨텍스트를 넘겨주길 기대하면 경로마다 갈라진다(JS는 안 넘겨서 자동
-        # 활성화가 통째로 죽었다). 여기서 직접 도출해 모든 호출자가 같은 답을 받게 한다.
-        context = _skill_context(root, args)
+        context = _skill_context(project_root, args, meta)
+        resolution_context = ResolutionContext()
+
+        resolution = phase_skill_resolution(
+            root,
+            phase.id,
+            phase_skills=phase.skills,
+            profile=merged,
+            changed_files=context["changed_files"],
+            task_text=context["task_text"],
+            concerns=context["concerns"],
+            architecture_root=project_root,
+            source_root=project_root,
+            context=resolution_context,
+        )
+        conditional_markers = phase.required_markers_by_architecture is not None
+        snapshot = resolution.architecture_snapshot
+        mode = snapshot.selection.mode.value if snapshot is not None else ArchitectureMode.CLEAN.value
+        if conditional_markers and active is not None:
+            if snapshot is None:
+                raise ValueError("architecture_policy_unreadable")
+            reason = architecture_snapshot_block_reason(snapshot, meta.get("architecture_digest"))
+            if reason is not None:
+                raise ValueError(reason)
+        required_markers = effective_phase_markers(phase, mode)
 
         if args.skills_command == "prompt":
             sys.stdout.write(
@@ -3564,43 +3653,46 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
                     profile=merged,
                     changed_files=context["changed_files"],
                     task_text=context["task_text"],
+                    concerns=context["concerns"],
+                    architecture_root=project_root,
+                    source_root=project_root,
+                    resolution=resolution,
                 )
             )
+            if conditional_markers and required_markers:
+                print("\n## Workflow completion requirements\n")
+                print("\n".join(f"- {marker}" for marker in required_markers))
             return 0
 
         if args.skills_command == "markers":
-            artifact = _resolve_project_path(root, args.artifact)
+            artifact = _resolve_project_path(project_root, args.artifact)
             text = artifact.read_text(encoding="utf-8") if artifact.is_file() else ""
-            print(
-                json.dumps(
-                    missing_local_skill_markers(
-                        text,
-                        root,
-                        phase.id,
-                        phase_skills=phase.skills,
-                        profile=merged,
-                        changed_files=context["changed_files"],
-                        task_text=context["task_text"],
-                        since=context["since"],
-                    ),
-                    ensure_ascii=False,
+            missing = missing_markers(text, required_markers)
+            missing.extend(
+                missing_local_skill_markers(
+                    text,
+                    root,
+                    phase.id,
+                    phase_skills=phase.skills,
+                    profile=merged,
+                    changed_files=context["changed_files"],
+                    task_text=context["task_text"],
+                    concerns=context["concerns"],
+                    architecture_root=project_root,
+                    source_root=project_root,
+                    since=context["since"],
+                    context=resolution_context,
+                    conditional_architecture_markers=conditional_markers,
                 )
             )
+            print(json.dumps(list(dict.fromkeys(missing)), ensure_ascii=False))
             return 0
 
-        resolution = phase_skill_resolution(
-            root,
-            phase.id,
-            phase_skills=phase.skills,
-            profile=merged,
-            changed_files=context["changed_files"],
-            task_text=context["task_text"],
-        )
         for skill in resolution.required:
-            state = skill.display_path(root) if skill.exists else f"MISSING ({skill.install_hint})"
+            state = skill.display_path(project_root) if skill.exists else f"MISSING ({skill.install_hint})"
             print(f"required {skill.name}: {state}")
         for skill in resolution.optional:
-            state = skill.display_path(root) if skill.exists else "not installed"
+            state = skill.display_path(project_root) if skill.exists else "not installed"
             print(f"optional {skill.name}: {state}")
         print(f"skill-availability: {'degraded' if resolution.missing else 'pass'}")
         return 0
@@ -3608,24 +3700,31 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
     return 2
 
 
-def _skill_context(root: Path, args: argparse.Namespace) -> dict:
-    """활성 run에서 task/변경파일/phase 진입시각을 도출한다.
+def _print_architecture_selection_guidance(root: Path) -> None:
+    try:
+        selection = load_architecture_selection(root)
+    except (OSError, ValueError):
+        return
+    if selection is None:
+        print("Architecture: no selection declared; using the compatibility default (clean).")
+        return
+    if selection.mode is not ArchitectureMode.PENDING:
+        return
+    print("Architecture: pending; no selected contract.")
+    print(
+        "Select Clean or a project-local contract before making structural decisions; "
+        "nonstructural changes may continue using existing patterns."
+    )
 
-    CLI 인자로도 override할 수 있지만 기본값이 있어야 JS wrapper와 `status`가
-    Python runner와 같은 결론에 도달한다.
-    """
+
+def _skill_context(root: Path, args: argparse.Namespace, meta: dict) -> dict:
     task = getattr(args, "task", None)
     since = getattr(args, "since", None)
-    if task is None or since is None:
-        meta = _active_run_meta(root)
-        if task is None:
-            task = str(meta.get("task", ""))
-        if since is None:
-            since = _run_meta_timestamp(meta)
     return {
-        "task_text": task or "",
-        "since": since,
+        "task_text": str(meta.get("task", "")) if task is None else task,
+        "since": _run_meta_timestamp(meta) if since is None else since,
         "changed_files": changed_files(root),
+        "concerns": run_concerns(meta),
     }
 
 
@@ -3701,42 +3800,6 @@ def _spec_run_context(run_dir: Path) -> dict:
         "since": since,
     }
 
-
-def _active_run_meta(root: Path) -> dict:
-    """Return the newest Python-authoritative active run metadata."""
-    candidates: list[dict] = []
-    for state_root in _skill_state_roots(root):
-        try:
-            active = find_active_run(state_root)
-        except OSError:
-            continue
-        if active is None:
-            continue
-        meta = read_meta(active.path)
-        if meta:
-            candidates.append(meta)
-    if not candidates:
-        return {}
-    dated = [(ts, meta) for meta in candidates if (ts := _run_meta_timestamp(meta)) is not None]
-    if dated:
-        return max(dated, key=lambda pair: pair[0])[1]
-    return candidates[0]
-
-
-
-
-def _skill_state_roots(root: Path):
-    """run meta가 있을 수 있는 자리들. leader와 관리형 worktree 런타임 루트."""
-    yield root
-    try:
-        names = known_worktree_names(root=root)
-    except (OSError, RuntimeError):
-        return
-    for name in names:
-        try:
-            yield worktree_runtime_root(root=root, name=name)
-        except (OSError, RuntimeError, ValueError):
-            continue
 
 
 def _run_meta_timestamp(meta: dict) -> float | None:

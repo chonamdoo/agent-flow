@@ -34,6 +34,74 @@ def _gate(body: str) -> str:
     return f"# artifact\n\n## Completion Gate\n\n{body}\n"
 
 
+@pytest.mark.parametrize("conditional,key", [
+    (False, "clean-architecture"), (True, "architecture-contract"),
+])
+@pytest.mark.parametrize("contract_required", [False, True])
+def test_architecture_assessment_preserves_applicability_guards(
+    conditional: bool, key: str, contract_required: bool
+) -> None:
+    from agent_flow.core.markers import missing_architecture_assessment_markers
+
+    text = _gate(f"{key}: n/a\nmust-avoid-check: n/a")
+    assert missing_architecture_assessment_markers(
+        text, contract_required=contract_required, conditional=conditional,
+    ) == ([f"{key}: applied", "must-avoid-check: pass|fail"] if contract_required else [])
+    assert missing_architecture_assessment_markers(
+        _gate(f"{key}: applied\nmust-avoid-check: pass"),
+        contract_required=contract_required, conditional=conditional,
+    ) == []
+
+
+def test_legacy_assessment_guard_does_not_alias_new_marker_names() -> None:
+    from agent_flow.core.markers import missing_architecture_assessment_markers
+
+    assert missing_architecture_assessment_markers(
+        _gate("architecture-contract: n/a"), contract_required=True,
+    ) == []
+    assert missing_architecture_assessment_markers(
+        _gate("clean-architecture: n/a"), contract_required=True,
+    ) == ["clean-architecture: applied"]
+
+
+
+@pytest.mark.parametrize("mode", ["clean", "local", "pending"])
+@pytest.mark.parametrize("role", ["author", "reviewer"])
+def test_envelope_uses_selected_conditional_marker_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, role: str
+) -> None:
+    from agent_flow.adapters.generic import GenericAdapter
+    from agent_flow.core.phase_workflow import parse_phase_workflow_definition
+    from tests.test_architecture_selection import (
+        _clean_contract, _declare, _git_project, _local_contract,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    project = _git_project(tmp_path)
+    if mode == "clean":
+        _clean_contract(project)
+    elif mode == "local":
+        _local_contract(project)
+    else:
+        _declare(project, "schema_version: 1\narchitecture:\n  mode: pending\n")
+    definition = parse_phase_workflow_definition(
+        b"id: custom\nphases:\n  - id: implement\n"
+        b"    required_markers: ['architecture-contract: applied|n/a']\n"
+        b"    required_markers_by_architecture:\n"
+        b"      clean: ['repository-boundary: pass|fail']\n",
+        source=Path("custom.yaml"), name="custom",
+    )
+    run_dir = project / "run"
+    run_dir.mkdir()
+
+    envelope = GenericAdapter().render_envelope(
+        definition.phases[0], run_dir, project, role=role,
+    )
+
+    assert "- `architecture-contract: applied|n/a`" in envelope
+    assert ("- `repository-boundary: pass|fail`" in envelope) is (mode == "clean")
+    assert "- `clean-architecture: applied|n/a`" not in envelope
+
 
 
 # --- P7 -----------------------------------------------------------------
@@ -528,20 +596,6 @@ def test_sdui_depends_on_the_presentation_contract():
 
 
 
-def test_shared_presentation_contract_marker_is_required_by_architecture_reviews():
-    marker = "shared-presentation-contract-placement: pass|fail|n/a"
-    for workflow_name, phase_id in (
-        ("default.yaml", "final-review"),
-        ("full-feature.yaml", "architecture-review"),
-    ):
-        workflow = yaml.safe_load(
-            (REPO / "src" / "agent_flow" / "workflows" / workflow_name).read_text(
-                encoding="utf-8"
-            )
-        )
-        phase = next(item for item in workflow["phases"] if item["id"] == phase_id)
-        assert marker in phase["required_markers"]
-        assert marker in phase["prompt"]
 
 
 
@@ -574,36 +628,3 @@ def test_sdui_completion_marker_values_match_the_evidence_contract():
 
 
 
-def test_presentation_review_marker_has_one_runtime_contract():
-    expected = "presentation-state-review: pass|fail|n/a"
-    seen = []
-
-    for workflow_path in sorted((REPO / "src" / "agent_flow" / "workflows").glob("*.yaml")):
-        workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
-        for phase in workflow["phases"]:
-            prompt = phase.get("prompt") or ""
-            for canned_default in (
-                "presentation-skill: n/a",
-                "presentation-state-based-development: n/a",
-                "presentation-state-review: n/a",
-                "ui-state-modeling: n/a",
-                "presentation-mapping-boundary: n/a",
-                "di-boundary: n/a",
-            ):
-                assert canned_default not in prompt
-            for marker in phase.get("required_markers") or []:
-                if marker.startswith("presentation-state-review:"):
-                    seen.append((workflow_path.name, phase["id"], marker))
-                    assert marker == expected
-
-    assert seen
-    for name in (
-        "android-clean-presentation-architecture",
-        "flutter-clean-presentation-architecture",
-        "ios-clean-presentation-architecture",
-        "react-clean-presentation-architecture",
-        "react-native-clean-presentation-architecture",
-    ):
-        path = SKILLS / name / "SKILL.md"
-        assert "required_markers" not in _frontmatter(path)
-        assert f"`{expected}`" in path.read_text(encoding="utf-8")

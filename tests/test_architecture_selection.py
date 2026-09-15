@@ -1084,6 +1084,33 @@ def test_non_clean_lint_reports_not_applicable_instead_of_passed(tmp_path, capsy
     assert "passed" not in printed
 
 
+def test_non_clean_lint_rejects_project_architecture_override(tmp_path, capsys):
+    from agent_flow.core.architecture_lint import main as architecture_lint_main
+
+    root = _clean_violating_project(tmp_path, "probe")
+    _declare(root, "schema_version: 1\narchitecture:\n  mode: pending\n")
+    override = root / ".agent-flow/profiles/python.local.yaml"
+    override.parent.mkdir(parents=True, exist_ok=True)
+    override.write_text("architecture:\n  roles: []\n", encoding="utf-8")
+
+    exit_code = architecture_lint_main(
+        ["--root", str(root), "--profile-root", str(KIT_ROOT), "--profile", "python",
+         "--files", "src/core/unmapped/thing.py"]
+    )
+    printed = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "architecture" in printed.err
+    assert "n/a" not in printed.out
+
+    from agent_flow.core.architecture_lint import lint_profiles, lint_project
+
+    with pytest.raises(ValueError, match="legacy architecture override conflicts"):
+        lint_project(root, "python", files=[], profile_root=KIT_ROOT)
+    with pytest.raises(ValueError, match="legacy architecture override conflicts"):
+        lint_profiles(root, ["python"], files=[], profile_root=KIT_ROOT)
+
+
 def _workflow_phase(phase_id):
     """Return a workflow phase configured for the test scenario."""
     from agent_flow.core.phase_workflow import load_phase_workflow_definition
@@ -1430,6 +1457,7 @@ def test_status_checks_the_bound_contract_not_the_leader_selection(tmp_path, mon
         "current_phase": "implement",
         "phase_index": next(i for i, phase in enumerate(definition.phases) if phase.id == "implement"),
         "task": "Update title",
+        "architecture_digest": architecture_snapshot(checkout).digest,
         **workflow_pin_metadata(definition, workflow="default"),
     })
     artifact = run_dir / "implement.md"
@@ -1588,7 +1616,8 @@ def test_legacy_run_requires_fresh_norm_evidence(tmp_path, monkeypatch):
     assert migrated["fix_loop_rounds"] == {"fix-loop": 2}
     awaiting = _run_cli(["continue", "--worktree", plan.name], root, environment)
     assert "status: awaiting_host" in awaiting.stdout
-    assert str(root / "skills/clean-architecture-core/SKILL.md") in awaiting.stdout
+    assert str(plan.path / "skills/clean-architecture-core/SKILL.md") in awaiting.stdout
+    assert str(root / "skills/clean-architecture-core/SKILL.md") not in awaiting.stdout
     assert not artifact.exists()
     artifact.write_text("# Explore\n\nFresh inspection under the delivered norm.\n", encoding="utf-8")
     advanced = _run_cli(["continue", "--worktree", plan.name], root, environment)

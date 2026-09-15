@@ -1,0 +1,5 @@
+gates:
+  - id: lint-boundaries
+    command: ["pnpm", "run", "lint"]
+    required: true
+    phase: pre-commit

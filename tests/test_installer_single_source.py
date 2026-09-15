@@ -153,6 +153,8 @@ def _run_bash_tool_call(root: Path, source: str) -> tuple[str, str]:
 def _run_command_result_handler(
     root: Path,
     source: str,
+    events: list[dict[str, object]] | None = None,
+    context_cwd: Path | None = None,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     hooks = _seed_install(root)
     shutil.copy2(
@@ -164,6 +166,8 @@ def _run_command_result_handler(
         "import json, sys\n"
         "from pathlib import Path\n"
         "payload = json.load(sys.stdin)\n"
+        "payload['_hook'] = sys.argv[1] if len(sys.argv) > 1 else Path(__file__).name\n"
+        "payload['_spawn_cwd'] = str(Path.cwd())\n"
         f"with Path({str(binding_log)!r}).open('a', encoding='utf-8') as stream:\n"
         "    stream.write(json.dumps(payload) + '\\n')\n"
     )
@@ -172,11 +176,17 @@ def _run_command_result_handler(
         "record-skill-read.py",
         "worktree-tripwire.py",
     ):
-        (hooks / script_name).write_text("pass\n", encoding="utf-8")
-    (hooks / "guard-host-worktree.sh").write_text("exit 0\n", encoding="utf-8")
+        (hooks / script_name).write_text(
+            binding_recorder if script_name == "worktree-tripwire.py" else "pass\n",
+            encoding="utf-8",
+        )
+    (hooks / "guard-host-worktree.sh").write_text(
+        'exec python3 "$(dirname "$0")/bind-host-worktree.py" guard-host-worktree.sh\n',
+        encoding="utf-8",
+    )
 
     target = _install_extension(root, source)
-    events = [
+    default_events = [
         {
             "type": "tool_result",
             "toolName": "bash",
@@ -222,13 +232,15 @@ def _run_command_result_handler(
             "isError": False,
         },
     ]
+    if events is None:
+        events = default_events
     driver = (
         f"import ext from {json.dumps(str(target))};\n"
         "const handlers = {};\n"
         "const pi = { setLabel() {}, on(name, fn) { (handlers[name] = handlers[name] || []).push(fn); } };\n"
         "ext(pi);\n"
         f"const events = {json.dumps(events)};\n"
-        f"const ctx = {{ cwd: {json.dumps(str(root))}, sessionManager: {{ getSessionId() {{ return 'session-1'; }} }} }};\n"
+        f"const ctx = {{ cwd: {json.dumps(str(context_cwd or root))}, sessionManager: {{ getSessionId() {{ return 'session-1'; }} }} }};\n"
         "async function run() {\n"
         "  for (const event of events) {\n"
         "    await handlers.tool_result[0](event, ctx);\n"
@@ -241,7 +253,7 @@ def _run_command_result_handler(
     )
     result = subprocess.run(
         (_node(), "--input-type=module", "-e", driver),
-        cwd=root,
+        cwd=root.parent,
         check=False,
         capture_output=True,
         text=True,
@@ -256,7 +268,9 @@ def _run_command_result_handler(
     binding_events = [
         json.loads(line) for line in binding_log.read_text(encoding="utf-8").splitlines()
     ]
-    return command_events, binding_events
+    return command_events, [
+        event for event in binding_events if event["_hook"] == "bind-host-worktree.py"
+    ]
 
 
 
@@ -418,6 +432,72 @@ def test_omp_extension_normalizes_v17_bash_result_exit_codes(tmp_path: Path):
         "Process running in background",
         "Deadline exceeded",
     ]
+
+
+def test_omp_recorder_cwd_does_not_change_guard_context(tmp_path: Path):
+    root = tmp_path
+    session = root / "session"
+    session.mkdir()
+    bound = session / "bound directory"
+    bound.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (session / "link").symlink_to(outside, target_is_directory=True)
+    inputs = [str(bound), "link/../bound directory", "../outside"]
+    events = []
+    starts = []
+    for cwd in inputs:
+        resolved = cwd if os.path.isabs(cwd) else os.path.abspath(session / cwd)
+        completed = subprocess.run(
+            ("pwd", "-P"), cwd=resolved, capture_output=True, text=True, check=True
+        )
+        starts.append(completed.stdout.strip())
+        events.append({
+            "type": "tool_result",
+            "toolName": "bash",
+            "input": {"command": "pwd -P", "cwd": cwd},
+            "content": [{"type": "text", "text": completed.stdout}],
+            "details": {"exitCode": completed.returncode},
+            "isError": False,
+        })
+    commands, _ = _run_command_result_handler(
+        root, _extension_source(), events, context_cwd=session
+    )
+    assert [entry["cwd"] for entry in commands] == starts
+    assert [entry["exit_code"] for entry in commands] == [0, 0, 0]
+    guards = [
+        json.loads(line)
+        for line in (root / ".agent-flow" / "binding-events.jsonl").read_text().splitlines()
+    ]
+    for index, event in enumerate(events):
+        received = guards[index * 3:index * 3 + 3]
+        assert [entry.pop("_hook") for entry in received] == [
+            "bind-host-worktree.py", "guard-host-worktree.sh", "worktree-tripwire.py"
+        ]
+        assert [entry.pop("_spawn_cwd") for entry in received] == [str(session)] * 3
+        assert received[0] == received[1] == received[2]
+        assert received[0]["cwd"] == str(session)
+        assert received[0]["tool_input"] == event["input"]
+        assert event["input"]["cwd"] == inputs[index]
+
+
+def test_omp_recorder_keeps_unresolved_cwd_compatibility(tmp_path: Path):
+    inputs = [None, "", "~/elsewhere", "file:///elsewhere", "local:/elsewhere",
+              "@../elsewhere", ":/elsewhere", "/", "\u00a0elsewhere", "C:\\elsewhere"]
+    events = []
+    for cwd in inputs:
+        tool_input = {"command": "cd elsewhere && pwd"}
+        if cwd is not None:
+            tool_input["cwd"] = cwd
+        events.append({
+            "type": "tool_result", "toolName": "bash", "input": tool_input,
+            "content": [{"type": "text", "text": "unverified cwd"}],
+            "details": {"exitCode": 7}, "isError": True,
+        })
+    commands, bindings = _run_command_result_handler(tmp_path, _extension_source(), events)
+    assert [entry["cwd"] for entry in commands] == [str(tmp_path)] * len(inputs)
+    assert [entry["exit_code"] for entry in commands] == [7] * len(inputs)
+    assert [entry["tool_input"] for entry in bindings] == [event["input"] for event in events]
 
 
 

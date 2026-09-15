@@ -17,6 +17,7 @@ phases:
       - "regression-test:"
       - "red-observed:"
       - "test-run-evidence: verified|unavailable"
+    required_markers_by_architecture: {}
     prompt: |
       Fix only the reproduced defect. Keep the change scoped to the failing behavior
       and update or add the narrowest regression test that proves the fix.
@@ -45,6 +46,7 @@ phases:
     multi_review: true
     required_markers:
       - "must-avoid-check: pass|fail|n/a"
+    required_markers_by_architecture: {}
     routes:
       approve: qa
       request-changes: implement-fix

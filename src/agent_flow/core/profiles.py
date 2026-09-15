@@ -83,6 +83,7 @@ PROJECT_OVERRIDE_KEYS: tuple[str, ...] = (
     "execution",
     "gates",
     "pr",
+    "review_angles",
 )
 
 # 배포 role이 선언했으면 동명 override role도 반드시 다시 선언해야 하는 키.
@@ -614,6 +615,8 @@ def _validate_project_profile_override_shape(
         _assert_override_keeps_shipped_role_declarations(roles, packaged, source=source)
     _validate_override_leader_tripwire(override, source=source)
     _validate_override_execution(override, source=source)
+    if "review_angles" in override:
+        _validate_override_review_angles(override["review_angles"], source=source)
     if "commit_convention" in override:
         convention = override["commit_convention"]
         allowed = {"style": {"conventional", "tagged", "freeform"}, "co_author": {"include", "skip"}}
@@ -633,6 +636,44 @@ def _validate_project_profile_override_shape(
             _gate_from_payload(item, profile_id=profile_id)
     except ValueError as exc:
         raise ValueError(f"invalid profile override gate: {source}: {exc}") from exc
+
+
+def _validate_override_review_angles(angles: object, *, source: Path) -> None:
+    if not isinstance(angles, list) or not all(isinstance(angle, dict) for angle in angles):
+        raise ValueError(f"profile override review_angles must be a list of mappings: {source}")
+    for index, angle in enumerate(angles):
+        context = f"profile override review_angles[{index}]"
+        unsupported = sorted(
+            str(key) for key in angle
+            if key not in ("id", "prompt", "requires", "task_terms", "path_globs")
+        )
+        if unsupported:
+            raise ValueError(f"{context} has unsupported keys: {', '.join(unsupported)}: {source}")
+        for field in ("id", "prompt", "requires"):
+            if field == "requires" and field not in angle:
+                continue
+            value = angle.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{context}.{field} must be a non-empty string: {source}")
+        angle_id = angle["id"].strip()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", angle_id):
+            raise ValueError(f"{context}.id is not a valid review angle id: {source}")
+        prompt_path = Path(angle["prompt"].strip())
+        if (
+            prompt_path.is_absolute()
+            or prompt_path.parts[:3] != ("templates", "_shared", "review")
+            or len(prompt_path.parts) != 4
+            or not prompt_path.parts[-1].endswith(".md")
+        ):
+            raise ValueError(f"{context}.prompt is not a valid review angle prompt path: {source}")
+        for field in ("task_terms", "path_globs"):
+            if field not in angle:
+                continue
+            values = angle[field]
+            if not isinstance(values, list) or any(
+                not isinstance(value, str) or not value.strip() for value in values
+            ):
+                raise ValueError(f"{context}.{field} must be a list of non-empty strings: {source}")
 
 
 def _validate_override_execution(override: dict[str, Any], *, source: Path) -> None:

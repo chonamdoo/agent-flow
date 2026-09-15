@@ -46,6 +46,41 @@ def scope_names(meta: dict[str, Any], phase_id: str) -> tuple[str, ...]:
     return tuple(str(name) for name in names)
 
 
+def scope_document_ids(meta: dict[str, Any], phase_id: str) -> tuple[str, ...]:
+    record = _record(meta, phase_id)
+    if record is None:
+        return ()
+    values = record.get("document_ids", [])
+    if not isinstance(values, list) or any(not isinstance(value, str) or not value for value in values):
+        raise ValueError("invalid phase document delivery scope")
+    return tuple(values)
+
+
+def reviewer_document_ids(meta: dict[str, Any], phase_id: str, provider: str) -> tuple[str, ...]:
+    record = _record(meta, phase_id)
+    if record is None:
+        return ()
+    providers = record.get("reviewer_document_ids", {})
+    if not isinstance(providers, dict):
+        raise ValueError("invalid reviewer document delivery scope")
+    values = providers.get(provider, [])
+    if not isinstance(values, list) or any(not isinstance(value, str) or not value for value in values):
+        raise ValueError("invalid reviewer document delivery identities")
+    return tuple(values)
+
+
+def record_reviewer_documents(
+    meta: dict[str, Any], phase_id: str, provider: str, identities: Sequence[str],
+) -> None:
+    previous = reviewer_document_ids(meta, phase_id, provider)
+    if _record(meta, phase_id) is None:
+        merge_scope(meta, phase_id, ())
+    record = _record(meta, phase_id)
+    assert record is not None
+    providers = record.setdefault("reviewer_document_ids", {})
+    providers[provider] = sorted(set(previous) | set(identities))
+
+
 def scope_revision(meta: dict[str, Any], phase_id: str) -> int:
     record = _record(meta, phase_id)
     if record is None:
@@ -55,7 +90,8 @@ def scope_revision(meta: dict[str, Any], phase_id: str) -> int:
 
 
 def merge_scope(
-    meta: dict[str, Any], phase_id: str, names: Sequence[str]
+    meta: dict[str, Any], phase_id: str, names: Sequence[str],
+    *, document_ids: Sequence[str] | None = None,
 ) -> tuple[str, ...]:
     """meta를 갱신하고 **새로 늘어난 이름**을 돌려준다.
 
@@ -71,11 +107,18 @@ def merge_scope(
             "revision": 1,
             "names": list(incoming),
         }
+        if document_ids is not None:
+            meta[SCOPE_KEY]["document_ids"] = sorted(set(document_ids))
         return ()
     known = set(scope_names(meta, phase_id))
     added = tuple(name for name in incoming if name not in known)
-    if not added:
+    previous_documents = set(scope_document_ids(meta, phase_id))
+    incoming_documents = set(document_ids or ())
+    new_documents = incoming_documents - previous_documents if "document_ids" in record else set()
+    if document_ids is not None:
+        record["document_ids"] = sorted(previous_documents | incoming_documents)
+    if not added and not new_documents:
         return ()
     record["names"] = sorted(known | set(added))
     record["revision"] = scope_revision(meta, phase_id) + 1
-    return added
+    return (*added, *(f"document:{identity}" for identity in sorted(new_documents)))

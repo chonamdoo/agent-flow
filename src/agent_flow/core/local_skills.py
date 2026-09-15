@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from agent_flow.core.markers import completion_gate_marker_values
+from agent_flow.core.markers import (
+    completion_gate_marker_values,
+    missing_architecture_assessment_markers,
+)
 from agent_flow.core.profiles import active_profile_ids, load_profile_payload
 from agent_flow.core.profile_routing import routed_profile_skills
 from agent_flow.core.worktree_isolation import git_repo_state, git_safe
@@ -219,10 +222,13 @@ def phase_skill_resolution(
     phase_skills: PhaseSkills | None = None,
     profile: dict | None = None,
     changed_files: Sequence[str] = (),
+    document_scope: Sequence[str] | None = None,
+    required_document_ids: Sequence[str] = (),
     task_text: str = "",
     concerns: Sequence[str] = (),
     host: str | None = None,
     architecture_root: Path | None = None,
+    source_root: Path | None = None,
     context: ResolutionContext | None = None,
     provider_authority: str = "",
 ) -> SkillResolution:
@@ -233,10 +239,13 @@ def phase_skill_resolution(
         phase_skills=phase_skills,
         profile=profile,
         changed_files=changed_files,
+        document_scope=document_scope,
+        required_document_ids=required_document_ids,
         task_text=task_text,
         concerns=concerns,
         host=host,
         architecture_root=architecture_root,
+        source_root=source_root,
         context=context,
         provider_authority=provider_authority,
     )
@@ -249,10 +258,13 @@ def local_skill_prompt_block(
     phase_skills: PhaseSkills | None = None,
     profile: dict | None = None,
     changed_files: Sequence[str] = (),
+    document_scope: Sequence[str] | None = None,
+    required_document_ids: Sequence[str] = (),
     task_text: str = "",
     concerns: Sequence[str] = (),
     host: str | None = None,
     architecture_root: Path | None = None,
+    source_root: Path | None = None,
     resolution: SkillResolution | None = None,
     context: ResolutionContext | None = None,
     provider_authority: str = "",
@@ -265,16 +277,19 @@ def local_skill_prompt_block(
         phase_skills=phase_skills,
         profile=profile,
         changed_files=changed_files,
+        document_scope=document_scope,
+        required_document_ids=required_document_ids,
         task_text=task_text,
         concerns=concerns,
         host=host,
         architecture_root=architecture_root,
+        source_root=source_root,
         context=context,
         provider_authority=provider_authority,
     )
     # 강제 지점과 같은 조건을 쓴다. 둘이 갈라지면 프롬프트가 다시 거짓말한다.
     enforced = skill_markers_enforced(phase_id)
-    block = skill_prompt_block(project_root, resolution, enforced=enforced, role=role)
+    block = skill_prompt_block(source_root or project_root, resolution, enforced=enforced, role=role)
     if not block:
         return ""
     routed_missing = _missing_routed_names(
@@ -302,8 +317,10 @@ def missing_local_skill_markers(
     concerns: Sequence[str] = (),
     since: float | None = None,
     architecture_root: Path | None = None,
+    source_root: Path | None = None,
     context: ResolutionContext | None = None,
     provider_authority: str = "",
+    conditional_architecture_markers: bool = False,
 ) -> list[str]:
     """Return completion markers for locally unavailable skills."""
     resolution = phase_skill_resolution(
@@ -315,6 +332,7 @@ def missing_local_skill_markers(
         task_text=task_text,
         concerns=concerns,
         architecture_root=architecture_root,
+        source_root=source_root,
         context=context,
         provider_authority=provider_authority,
     )
@@ -353,16 +371,11 @@ def missing_local_skill_markers(
         if diagnosis:
             missing.append(diagnosis)
 
-    # legacy marker 이름은 유지하지만 local에서도 선택 계약 심사를 완료해야 한다.
-    # workflow가 선언한 marker만 검사하며, n/a·optional로 필수 심사를 면제하지 않는다.
-    if architecture_contract_required(resolution):
-        if "clean-architecture" in values and values["clean-architecture"] != "applied":
-            missing.append("clean-architecture: applied")
-        if "must-avoid-check" in values and values["must-avoid-check"] not in {
-            "pass",
-            "fail",
-        }:
-            missing.append("must-avoid-check: pass|fail")
+    missing.extend(missing_architecture_assessment_markers(
+        text,
+        contract_required=architecture_contract_required(resolution),
+        conditional=conditional_architecture_markers,
+    ))
 
     # L3: 자기신고는 표시용이다. resolver가 required로 판정하고 실제로 있는 것만 요구한다.
     if values.get("project-local-skills") != "checked":

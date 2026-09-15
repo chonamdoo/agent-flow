@@ -209,7 +209,7 @@ def test_author_and_each_reviewer_receive_complete_bound_contract(tmp_path):
     phase = Phase(id="final-review", description="Review selected contract", skills=PhaseSkills())
     run_dir = checkout / ".agent-flow" / "runs" / "r1"
     author = adapter.render_envelope(phase, run_dir, checkout, skill_host="codex")
-    jobs = _reviewer_jobs(phase, run_dir, checkout, adapter, providers=("codex",))
+    jobs, _ = _reviewer_jobs(phase, run_dir, checkout, adapter, providers=("codex",))
     assert {"clean-architecture", "architecture-design"} <= {job.angle_id for job in jobs}
     prompts = [author, *(job.prompt_by_provider["codex"] for job in jobs)]
     for prompt in prompts:
@@ -273,6 +273,137 @@ def test_contract_delivery_and_dependencies_use_the_same_opened_bytes(tmp_path, 
     assert "ORIGINAL_REFERENCE_NORM" in prompt
     assert "immutable-rule" in prompt
     assert "OUTSIDE_CONTENT" not in prompt
+
+
+def _scoped_contract(root):
+    _selection(root, "local")
+    contract = _skill(
+        root, "architecture",
+        "requires_docs:\n"
+        "  - references/common.md\n"
+        "  - path: references/unconditional.md\n"
+        "  - path: references/a.md\n"
+        "    pathGlobs: ['apps/a/**', 'shared/**', '**/*.shared']\n"
+        "  - path: references/b.md\n"
+        "    pathGlobs: ['apps/b/**', 'shared/**']\n",
+        "SCOPED_ROOT_BODY",
+    )
+    (contract.parent / "references").mkdir()
+    for name in ("common", "unconditional", "a", "b"):
+        (contract.parent / "references" / f"{name}.md").write_text(
+            f"NORM_BODY_{name}", encoding="utf-8",
+        )
+    return contract
+
+
+@pytest.mark.parametrize(("scope", "selected"), [
+    (None, {"a", "b"}),
+    ((), set()),
+    (("apps/a/model.py",), {"a"}),
+    (("apps/a/old.py", "apps/b/new.py"), {"a", "b"}),
+    (("shared/model.py",), {"a", "b"}),
+    (("ROOT.SHARED",), {"a"}),
+    ((".agent-flow.project.yaml",), {"a", "b"}),
+    (("skills/architecture/SKILL.md",), {"a", "b"}),
+    (("skills/architecture/references/a.md",), {"a", "b"}),
+])
+@pytest.mark.parametrize("role", ["author", "reviewer"])
+def test_scoped_contract_delivers_only_required_bodies(tmp_path, scope, selected, role):
+    from agent_flow.core.local_skills import local_skill_prompt_block
+
+    _scoped_contract(tmp_path)
+    prompt = local_skill_prompt_block(
+        tmp_path, "implement", host="codex", document_scope=scope,
+        changed_files=("apps/b/unrelated-activation.py",), role=role,
+    )
+    assert "SCOPED_ROOT_BODY" in prompt
+    assert "NORM_BODY_common" in prompt
+    assert "NORM_BODY_unconditional" in prompt
+    for name in ("a", "b"):
+        assert (f"NORM_BODY_{name}" in prompt) == (name in selected)
+
+
+def test_unselected_reference_remains_pinned_and_blocks_drift(tmp_path):
+    from agent_flow.core.architecture_policy import architecture_snapshot_block_reason
+
+    contract = _scoped_contract(tmp_path)
+    arguments = dict(project_root=tmp_path, phase_id="implement", host="codex",
+                     document_scope=("apps/a/model.py",))
+    before = resolve_phase_skills(**arguments)
+    reference = contract.parent / "references/b.md"
+    assert str(reference) in {item.path for item in before.architecture_norms}
+    reference.write_text("UNSELECTED_CHANGED_BODY", encoding="utf-8")
+    after = resolve_phase_skills(**arguments)
+    assert architecture_snapshot_block_reason(
+        after.architecture_snapshot, before.architecture_snapshot.digest,
+    ) == "architecture_policy_drift"
+    reference.unlink()
+    with pytest.raises(ArchitectureContractError):
+        resolve_phase_skills(**arguments)
+
+
+def test_unselected_reference_still_requires_git_tracking(tmp_path):
+    import subprocess
+    from agent_flow.core.architecture_policy import architecture_snapshot_block_reason
+
+    _scoped_contract(tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "rm", "--cached", "skills/architecture/references/b.md"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    resolution = resolve_phase_skills(
+        project_root=tmp_path, phase_id="implement", host="codex",
+        document_scope=("apps/a/model.py",),
+    )
+    snapshot = resolution.architecture_snapshot
+    assert snapshot.untracked == ("skills/architecture/references/b.md",)
+    assert architecture_snapshot_block_reason(
+        snapshot, snapshot.digest,
+    ) == "architecture_contract_untracked"
+
+
+def test_scope_growth_keeps_route_identity_despite_equal_bytes_and_scope_shrink(tmp_path):
+    from agent_flow.core.local_skills import local_skill_prompt_block
+    from agent_flow.core.skill_resolver import ResolutionContext
+
+    contract = _scoped_contract(tmp_path)
+    for name in ("a", "b"):
+        (contract.parent / "references" / f"{name}.md").write_text(
+            "EQUAL_SCOPED_BODY", encoding="utf-8",
+        )
+    arguments = dict(project_root=tmp_path, phase_id="implement", host="codex",
+                     context=ResolutionContext())
+    first = resolve_phase_skills(**arguments, document_scope=("apps/a/model.py",))
+    grown = resolve_phase_skills(**arguments, document_scope=("apps/b/model.py",),
+                                 required_document_ids=first.required_document_ids)
+    assert set(first.required_document_ids) < set(grown.required_document_ids)
+    shrunk = resolve_phase_skills(**arguments, document_scope=(),
+                                  required_document_ids=grown.required_document_ids)
+    assert shrunk.required_document_ids == grown.required_document_ids
+    prompt = local_skill_prompt_block(tmp_path, "implement", resolution=shrunk)
+    assert prompt.count("EQUAL_SCOPED_BODY") == 1
+    assert "route: architecture-reference / architecture / skills/architecture/references/a.md" in prompt
+    assert "route: architecture-reference / architecture / skills/architecture/references/b.md" in prompt
+
+
+def test_changed_dependency_norm_selects_every_contract_document(tmp_path):
+    from agent_flow.core.local_skills import local_skill_prompt_block
+
+    root = _scoped_contract(tmp_path)
+    root.write_text(
+        root.read_text(encoding="utf-8").replace(
+            "requires_docs:", "requires: [shared-policy]\nrequires_docs:",
+        ),
+        encoding="utf-8",
+    )
+    _skill(tmp_path, "shared-policy", "")
+    prompt = local_skill_prompt_block(
+        tmp_path, "implement", host="codex", document_scope=("skills/shared-policy/SKILL.md",),
+    )
+    assert "NORM_BODY_a" in prompt
+    assert "NORM_BODY_b" in prompt
 
 
 @pytest.mark.parametrize(

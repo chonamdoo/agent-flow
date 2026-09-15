@@ -99,6 +99,58 @@ def test_in_flight_pin_preserves_full_definition_and_old_evidence(tmp_path: Path
     assert fresh.digest != resumed.digest
 
 
+@pytest.mark.parametrize("mode", ["clean", "local", "pending"])
+def test_old_pin_preserves_marker_export_and_python_guard_classification(
+    tmp_path: Path, mode: str
+) -> None:
+    from agent_flow.core.markers import (
+        missing_architecture_assessment_markers,
+        missing_markers,
+    )
+    from agent_flow.core.phase_workflow import effective_phase_markers
+
+    original = SOURCE.replace(
+        "required_markers: [verdict]",
+        "required_markers: ['clean-architecture: applied|n/a', 'must-avoid-check: pass|fail|n/a']",
+    )
+    path = _source(tmp_path, original)
+    definition = load_phase_workflow_definition(tmp_path, "custom")
+    exported = definition.to_json_dict()
+    meta = _meta(definition)
+    original_meta = copy.deepcopy(meta)
+    run, evidence = _evidence(tmp_path, meta)
+    path.write_text(
+        "id: custom\nphases:\n  - id: review\n"
+        "    required_markers: ['architecture-contract: applied|n/a']\n"
+        "    required_markers_by_architecture: {}\n",
+        encoding="utf-8",
+    )
+
+    resumed = load_run_workflow_definition(tmp_path, "custom", meta)
+    phase = resumed.phases[1]
+    markers = effective_phase_markers(phase, mode)
+    invalid = "## Completion Gate\nclean-architecture: n/a\nmust-avoid-check: n/a\n"
+    valid = "## Completion Gate\nclean-architecture: applied\nmust-avoid-check: pass\n"
+
+    assert missing_markers(invalid, markers) == []
+    assert missing_architecture_assessment_markers(
+        invalid, contract_required=True,
+        conditional=phase.required_markers_by_architecture is not None,
+    ) == ["clean-architecture: applied", "must-avoid-check: pass|fail"]
+    assert missing_markers(valid, markers) == []
+    assert missing_architecture_assessment_markers(
+        valid, contract_required=True,
+        conditional=phase.required_markers_by_architecture is not None,
+    ) == []
+    assert missing_markers(
+        "## Completion Gate\narchitecture-contract: applied\nmust-avoid-check: pass\n",
+        markers,
+    ) == ["clean-architecture: applied|n/a"]
+    assert resumed.to_json_dict() == exported
+    assert meta == original_meta
+    _assert_evidence(run, evidence)
+
+
 def test_valid_pin_does_not_require_original_source_to_exist(tmp_path: Path) -> None:
     """Load a valid pin even after its original source disappears."""
     path = _source(tmp_path)
@@ -258,3 +310,156 @@ def test_matching_checksums_do_not_authorize_invalid_or_obsolete_new_pins(
         load_run_workflow_definition(tmp_path, "custom", meta)
 
     _assert_evidence(run, contents)
+
+
+@pytest.mark.parametrize("mode", ["clean", "local", "pending"])
+def test_artifact_completion_selects_bound_conditional_obligations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mode: str
+) -> None:
+    from agent_flow.artifact import ActiveRun, _missing_completion_markers, write_meta
+    from agent_flow.core.architecture_policy import architecture_snapshot
+    from tests.test_architecture_selection import (
+        _clean_contract, _declare, _git_project, _local_contract,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    project = _git_project(tmp_path)
+    if mode == "clean":
+        _clean_contract(project)
+    elif mode == "local":
+        _local_contract(project)
+    else:
+        _declare(project, "schema_version: 1\narchitecture:\n  mode: pending\n")
+    _source(project,
+        "id: custom\nphases:\n  - id: inspect\n"
+        "    required_markers: ['architecture-contract: applied']\n"
+        "    required_markers_by_architecture:\n"
+        "      clean: ['repository-boundary: pass|fail']\n"
+    )
+    definition = load_phase_workflow_definition(project, "custom")
+    run = project / ".agent-flow/runs/r1"
+    run.mkdir(parents=True)
+    write_meta(run, {
+        "workflow": "custom", "current_phase": "inspect", "phase_index": 0,
+        "architecture_digest": architecture_snapshot(project).digest,
+        **workflow_pin_metadata(definition, workflow="custom"),
+    })
+    artifact = run / "inspect.md"
+    artifact.write_text("## Completion Gate\narchitecture-contract: applied\n")
+    missing = _missing_completion_markers(
+        run, "custom", "inspect", config_root=project, project_root=project,
+    )
+    ActiveRun(
+        path=run, run_id="r1", workflow="custom", task="Inspect existing boundaries", started_at="",
+    ).print_status(config_root=project, project_root=project)
+    status = capsys.readouterr().out
+    expected_reason = (
+        "missing_completion_markers" if mode == "clean" else "phase_artifact_written_continue_required"
+    )
+    assert f"reason: {expected_reason}" in status
+    assert missing == (["repository-boundary: pass|fail"] if mode == "clean" else [])
+    artifact.write_text(
+        "## Completion Gate\narchitecture-contract: applied\nrepository-boundary: pass\n"
+    )
+    assert _missing_completion_markers(
+        run, "custom", "inspect", config_root=project, project_root=project,
+    ) == []
+
+
+def test_artifact_completion_keeps_legacy_python_guards_under_old_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_flow.artifact import _missing_completion_markers, write_meta
+    from agent_flow.core.architecture_policy import architecture_snapshot
+    from tests.test_architecture_selection import _git_project, _local_contract
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    project = _git_project(tmp_path)
+    _local_contract(project)
+    source = _source(project,
+        "id: custom\nphases:\n  - id: implement\n"
+        "    skills:\n      required: [architecture]\n"
+        "    required_markers: ['clean-architecture: applied|n/a', 'must-avoid-check: pass|fail|n/a']\n"
+    )
+    definition = load_phase_workflow_definition(project, "custom")
+    run = project / ".agent-flow/runs/r1"
+    run.mkdir(parents=True)
+    write_meta(run, {
+        "workflow": "custom", "current_phase": "implement", "phase_index": 0,
+        "architecture_digest": architecture_snapshot(project).digest,
+        **workflow_pin_metadata(definition, workflow="custom"),
+    })
+    before = (run / "meta.json").read_bytes()
+    source.write_text(
+        "id: custom\nphases:\n  - id: implement\n"
+        "    required_markers: ['architecture-contract: applied|n/a']\n"
+        "    required_markers_by_architecture: {}\n"
+    )
+    artifact = run / "implement.md"
+    content = (
+        "## Completion Gate\nclean-architecture: n/a\nmust-avoid-check: n/a\n"
+        "skill-availability: pass\nskill-use-evidence: unavailable\n"
+        "project-local-skills: checked\nproject-local-skills-used: architecture\n"
+        "project-local-skill-docs: applied\n"
+    )
+    artifact.write_text(content)
+    assert _missing_completion_markers(
+        run, "custom", "implement", config_root=project, project_root=project,
+    ) == ["clean-architecture: applied", "must-avoid-check: pass|fail"]
+    artifact.write_text(content.replace("architecture: n/a", "architecture: applied").replace(
+        "must-avoid-check: n/a", "must-avoid-check: pass",
+    ))
+    assert _missing_completion_markers(
+        run, "custom", "implement", config_root=project, project_root=project,
+    ) == []
+    assert (run / "meta.json").read_bytes() == before
+
+
+def test_artifact_completion_rejects_changed_architecture_before_selecting_markers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_flow.artifact import _missing_completion_markers, write_meta
+    from agent_flow.core.architecture_policy import architecture_snapshot
+    from tests.test_architecture_selection import _clean_contract, _declare, _git_project
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    project = _git_project(tmp_path)
+    _clean_contract(project)
+    _source(project,
+        "id: custom\nphases:\n  - id: inspect\n"
+        "    required_markers_by_architecture:\n"
+        "      clean: ['repository-boundary: pass|fail']\n"
+    )
+    definition = load_phase_workflow_definition(project, "custom")
+    run = project / ".agent-flow/runs/r1"
+    run.mkdir(parents=True)
+    write_meta(run, {
+        "workflow": "custom", "current_phase": "inspect", "phase_index": 0,
+        "architecture_digest": architecture_snapshot(project).digest,
+        **workflow_pin_metadata(definition, workflow="custom"),
+    })
+    (run / "inspect.md").write_text("## Completion Gate\n")
+    _declare(project, "schema_version: 1\narchitecture:\n  mode: pending\n")
+    with pytest.raises(ValueError, match="architecture_policy_drift"):
+        _missing_completion_markers(
+            run, "custom", "inspect", config_root=project, project_root=project,
+        )
+
+
+def test_invalid_conditional_workflow_cannot_use_legacy_artifact_fallback(tmp_path: Path) -> None:
+    from agent_flow.artifact import _missing_completion_markers
+
+    project = tmp_path / "project"
+    workflows = project / ".agent-flow/workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "custom.yaml").write_text(
+        "id: custom\nphases:\n  - id: inspect\n"
+        "    required_markers_by_architecture:\n      typo: ['evidence: applied']\n"
+    )
+    run = project / ".agent-flow/runs/r1"
+    run.mkdir(parents=True)
+    (run / "inspect.md").write_text("## Completion Gate\n")
+    with pytest.raises(ValueError, match="required_markers_by_architecture"):
+        _missing_completion_markers(
+            run, "custom", "inspect", config_root=project, project_root=project,
+        )

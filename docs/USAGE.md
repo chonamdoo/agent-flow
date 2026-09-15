@@ -66,6 +66,175 @@ npx <path-to-this-kit> install --root <project-path>
 
 Install always happens in the leader checkout. Running it inside a linked worktree is blocked.
 
+## Architecture selection
+
+Choose the project's architecture before starting a run. The tracked root file
+`.agent-flow.project.yaml` is the selection authority; `.agent-flow/` remains
+gitignored installed assets. `run --architecture` is prompt context, not this selection.
+
+| Mode | Contract |
+|---|---|
+| `clean` | Bundled Clean Architecture core and applicable platform norms |
+| `local` | The project contract at exactly `skills/architecture/SKILL.md` and its declared references |
+| `pending` | No selected contract yet; existing-pattern local work is allowed, but work requiring a structural decision blocks until selection |
+
+A project without the selection file keeps the compatibility default, `clean`; absence
+does not mean `pending`. Human-readable `status` explains an absent selection or `pending`.
+That guidance does not change JSON, exit codes, `next_command`, or the run's pinned selection.
+
+Choose one of these commands, rather than running all three:
+
+```bash
+agent-flow architecture select --mode clean
+agent-flow architecture select --mode local --skill skills/architecture/SKILL.md
+agent-flow architecture select --mode pending
+```
+
+`--skill` is required for `local` and rejected for the other modes. It is not an arbitrary
+path: create the local contract at the fixed path before selecting it. Selection checks
+the contract, references, and required skills before writing the file. Inspect the result:
+
+```bash
+agent-flow architecture export --format json
+```
+
+The local selection file has this shape:
+
+```yaml
+schema_version: 1
+architecture:
+  mode: local
+  skill: skills/architecture/SKILL.md
+```
+
+Track `.agent-flow.project.yaml`, the contract root, and **every** declared reference in
+Git before starting the run. `select` can warn about untracked documents; that is not a
+waiver of the run's tracking requirement. For a local contract:
+
+```bash
+git add .agent-flow.project.yaml skills/architecture/SKILL.md skills/architecture/references
+```
+
+Omit the references directory from that command if the contract declares none.
+The installer honors the selection: `local` and `pending` exclude bundled Clean-specific
+skills, while `clean` retains them. Project-owned norms are not installed copies to edit
+under `.agent-flow/`. Install or refresh assets only in the leader with no active runs.
+For an existing run, follow [Workflow definition migration](#workflow-definition-migration);
+changing selection, contract bytes, or a declared reference triggers the existing drift
+block rather than changing its approved contract.
+
+### Conditional local references
+
+Declare normative references in the frontmatter of `skills/architecture/SKILL.md`.
+Links in its body alone do not make a document required.
+
+```yaml
+---
+name: architecture
+description: Project architecture contract
+requires_docs:
+  - references/common.md
+  - path: references/app-a.md
+    pathGlobs:
+      - apps/a/**
+      - packages/shared/**
+  - path: references/app-b.md
+    pathGlobs:
+      - apps/b/**
+      - packages/shared/**
+---
+```
+
+Paths resolve beneath `skills/architecture/`. Strings are always required; an object with
+only `path` is also unconditional. Objects accept only `path` and optional `pathGlobs`.
+Duplicate reference paths, including duplicates across string/object forms, are rejected.
+Reference paths must be canonical `references/*.md` paths; nested reference directories
+are allowed, but empty, `.`/`..`, backslash, or non-Markdown paths are not.
+
+When present, `pathGlobs` must be a nonempty list of nonempty checkout-relative POSIX
+patterns. Absolute paths, backslashes, empty or `.`/`..` segments, control characters,
+negation, and brace expansion are rejected. Matching reuses the existing skill matcher:
+case folding and Python `fnmatch`, with leading `**/` also matching root-level paths.
+Python `*` can cross `/`; these are **not** gitignore/minimatch patterns or architecture
+role patterns. Python metadata validation is authoritative; the installer consumes its
+validated projection rather than maintaining a second YAML parser.
+
+| Proven change scope | Required delivery |
+|---|---|
+| App A only | Root, unconditional references, and references matching A |
+| Apps A and B | Union of both selections |
+| No changes, proved by a complete snapshot | Root and unconditional references |
+| Unknown, unresolved, or truncated scope | All documents; observation failures remain failures |
+| Rename or deletion | Match both old/new rename paths and deleted paths |
+| Selection file, contract root, or declared reference changes | Select all documents; existing selection/norm drift checks still apply first |
+
+The author receives all documents in early or unresolved phases. Where a phase has a
+proven code scope, it uses the existing review baseline's committed branch changes plus
+staged, working-tree, and untracked changes. Each independent reviewer uses the scope of
+the snapshot actually delivered to its job. An empty Git status does not remove documents
+needed by already committed work. Existing review-base and publication-scope rules remain.
+
+Scope growth adds required document identities to the phase input and requires re-entry
+before an artifact lacking those documents can complete. Scope shrinkage does not remove
+documents already required in that phase. Put shared paths in every affected reference's
+conditions, as above, or keep that reference unconditional: task text and dependency
+inference do not establish shared ownership.
+
+Conditional delivery reduces prompt content, **not** capture or pinning. The root and all
+declared references are still read, checked for safety/tracking, and digest-pinned,
+including conditions in the root bytes. A change to an unselected reference still blocks
+on drift. The common root is always delivered; do not claim an omitted reference was reviewed.
+
+### Architecture lint in a monorepo
+
+Architecture role lint remains a Clean-mode check. A non-Clean `architecture` profile
+override is rejected by both direct lint and the CLI; `local`/`pending` without that
+override remain `n/a`. Local contract review does not activate the built-in Clean role rules.
+
+For Clean projects, use concrete app prefixes in
+`.agent-flow/profiles/<profile>.local.yaml`. For example, adapt Next.js role paths from
+`src/features/<feature>/api` to `apps/store/src/features/<feature>/api`, and the paired
+presentation path to `apps/store/src/features/<feature>/presentation`. Likewise prefix
+core paths such as `src/core/domain/<context>` with `apps/store/`. Keep each app's
+paired roles, managed roots, and any activation/module declarations consistent.
+
+`architecture.roles` is a whole-list override, not an appended path patch. Preserve the
+other roles and constraints you still need, and restate required shipped declarations
+for reused role IDs. `apps/*` is not a newly added role engine: existing wildcard,
+placeholder, specificity, pair, and activation semantics are unchanged. A path such as
+`productList` does not acquire an `api` or `presentation` role just by adding an app prefix.
+
+```bash
+agent-flow architecture-lint --profile nextjs --files apps/store/src/features/catalog/api/model.ts
+```
+
+The report separates source candidates, role-matched files, and findings per profile.
+Absent contracts, inactive roots, no source candidates, and zero role matches are `n/a`,
+not a checked pass. Matched valid input can pass; violations fail. Exit policy is unchanged:
+`n/a` and valid input return 0; the lint consumer returns 1 for findings or configuration/
+discovery errors. Invalid CLI arguments can return 2. Unmatched paths are not proof of
+structural compliance.
+
+### Architecture-specific completion markers
+
+Fresh workflow definitions use neutral common requirements, including
+`## Architecture Boundary Map` and the phase's `architecture-contract` markers.
+`required_markers_by_architecture` adds the selected mode's requirements to
+`required_markers`. Its only mode keys are `clean`, `local`, and `pending`, each containing
+a marker list. Prompt generation, marker checking, and completion use the same effective
+requirements from the validated selection.
+
+Clean-only dependency, UseCase, repository, mapping, cache, and platform obligations retain
+their enums and exceptions. Local review must assess the selected root and required
+references; a single `applied` line is not proof of that review. `pending` still blocks
+structural decisions. This is not a marker DSL in `requires_docs` or blanket permission
+to answer `n/a`.
+
+Old pinned definitions without the conditional field retain their old marker names,
+requirements, and legacy validation. They are not aliased or automatically migrated to
+new names. Use the existing [migration procedure](#workflow-definition-migration) when
+the old definition cannot be verified; do not rewrite approvals or accept workflow drift.
+
 ## Update check
 
 `run`, `start`, `status`, and `continue` check for a newer release at most once a day and print
@@ -300,6 +469,30 @@ host's activation/trust requirements and observed command evidence. Managed
 provider confinement currently has a verified macOS `sandbox-exec` backend only;
 other operating systems fail closed instead of receiving the same isolation claim.
 
+#### Bound run or fresh inspection
+
+Run these commands in the selected checkout (or pass its path with `--root`):
+
+```bash
+agent-flow skills resolve --phase green
+agent-flow skills prompt --phase green
+agent-flow skills markers --phase green --artifact <artifact-path>
+agent-flow skills resolve --fresh --workflow full-feature --phase green
+```
+
+The first three examples assume an active `full-feature` run. `resolve`, `prompt`, and
+`markers` use that checkout's active run's validated workflow pin when `--workflow` is
+omitted or names the same workflow. Another phase in that pinned definition can be
+inspected; it need not be the current cursor phase. An explicit different workflow without
+`--fresh`, or a phase absent from the selected definition, is rejected with exit 2.
+
+`--fresh` inspects current kit YAML using the explicit workflow or `default` and does not
+borrow the active run's task, time, or concerns. With no active run, the same current-kit
+selection applies. Bound inspection carries the run context; explicit `--task` and the
+`markers` command's `--since` override remain available. Inspection does not rewrite the
+pin, cursor, or approvals. Malformed pins do not fall back to live YAML; see
+[Workflow definition migration](#workflow-definition-migration).
+
 ### PR watching
 
 ```bash
@@ -387,27 +580,33 @@ The runner parses the active profile and injects it into every phase prompt. The
 the actual values, not "go look it up somewhere." The active profile is set by `profile` in
 `.agent-flow/kit.json` or by the `AGENT_FLOW_PROFILE` environment variable.
 
-The Android profile, as an example:
+### Durable review angles
+
+Put project overrides in `.agent-flow/profiles/<profile>.local.yaml`, not the installed
+`<profile>.yaml` that install/update replaces. `review_angles` replaces the complete
+capability-expanded profile list; entries are not merged by ID. For example, this
+`android.local.yaml` keeps two profile angles:
 
 ```yaml
-branching:
-  strategy: trunk
-  worktree: required        # a branch alone will not do
-  naming: { prefix: "feat/", slug_style: kebab-case }
-
-gates:
-  - architecture-lint  (pre-commit, required)
-  - build              (pre-push,   required, timeout_s 1800)
-  - test               (pre-push,   required, timeout_s 1800)
-
 review_angles:
-  - architecture-design
-  - android-skills
-  - compose-stability
-  - test-edge
-  - sdui
-  - udf
+  - id: android-skills
+    prompt: templates/_shared/review/android-skills.md
+  - id: test-edge
+    prompt: templates/_shared/review/test-edge.md
 ```
+
+Omitting `review_angles` preserves the distributed list. `review_angles: []` removes
+profile angles only: mandatory system baseline angles `generalist` and `types` still run
+and cannot be gated or removed through this override. Multi-profile composition happens
+after each profile's list replacement. `skills` and baseline overrides remain rejected.
+
+Each entry requires a nonempty `id` and `prompt`. IDs use lowercase letters, digits, and
+hyphens, begin with a letter or digit, and are at most 64 characters. Prompts use the
+existing `templates/_shared/review/<name>.md` path. Optional `requires` is a nonempty
+string; `task_terms` and `path_globs` are lists of nonempty strings. Existing requirement
+and selector precedence, built-in prompt priority, and prompt path restrictions remain.
+An invalid list/entry shape is rejected rather than silently ignored. Keep the local file
+when updating installed assets.
 
 The build, test, and lint commands come only from the active profile's `gates`. Verification
 commands that are not in a gate are not repeated at will.

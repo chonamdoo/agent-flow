@@ -35,6 +35,12 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: tests/fixtures/mixed-architecture/package.json
+      - name: Install mixed architecture fixture dependencies
+        working-directory: tests/fixtures/mixed-architecture
+        run: pnpm install --frozen-lockfile
       # 기본은 전 스위트다. package.json의 `test`는 일부만 돌려서 CI 기준으로 쓸 수
       # 없다. workflow_dispatch에서 pytest_k를 준 경우에만 그 선택으로 좁힌다.
       - name: pytest
@@ -51,11 +57,11 @@ jobs:
           # `-n auto`는 runner의 코어 수를 쓴다. 이 스위트는 시간의 거의 전부가 자식
           # 프로세스 대기라 코어 수만큼 곧바로 줄어든다.
           if [ -n "$PYTEST_K" ]; then
-            PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider -o addopts="" \
-              -n auto --durations=20 -k "$PYTEST_K" 2>&1 | tee pytest.log
+            PYTHONPATH=src python3 -m pytest tests -v -p no:cacheprovider -o addopts="" \
+              -n auto --dist worksteal --durations=20 -k "$PYTEST_K" 2>&1 | tee pytest.log
           else
-            PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider -o addopts="" \
-              -n auto --durations=20 2>&1 | tee pytest.log
+            PYTHONPATH=src python3 -m pytest tests -v -p no:cacheprovider -o addopts="" \
+              -n auto --dist worksteal --durations=20 2>&1 | tee pytest.log
           fi
           status=${PIPESTATUS[0]}
           set -e

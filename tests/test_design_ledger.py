@@ -443,18 +443,24 @@ def test_concurrent_manual_spec_approvals_preserve_both(tmp_path):
     )
 
 
+@pytest.mark.parametrize("change_kind", ["requirement", "due"])
 @pytest.mark.parametrize(
     "failing_writer",
     ["record_spec_confirmation", "write_ledger", "_write_capture_state"],
 )
 def test_spec_confirmation_replays_after_each_intent_step(
-    tmp_path, monkeypatch, failing_writer
+    tmp_path, monkeypatch, failing_writer, change_kind
 ):
     _capture(tmp_path, "design", SPEC_ARTIFACT)
     changed = SPEC_ARTIFACT.replace(
         "Empty search results show the empty state.",
         "Empty search results show a retry action.",
     )
+    if change_kind == "due":
+        changed = SPEC_ARTIFACT.replace(
+            "verify: test:test_empty_search_results_show_the_empty_state",
+            "verify: test:test_empty_search_results_show_the_empty_state\ndue: pre-merge",
+        )
     (tmp_path / "design.md").write_text(changed, encoding="utf-8")
     original = getattr(DESIGN_LEDGER, failing_writer)
 
@@ -474,6 +480,67 @@ def test_spec_confirmation_replays_after_each_intent_step(
     assert confirmation == tmp_path / SPEC_CONFIRMATION_FILE
     assert pending_spec_changes_for_run(tmp_path) == ()
     assert read_ledger(tmp_path).errors == ()
+    assert read_ledger(tmp_path).spec_items == parse_spec_item_section(changed).items
+
+@pytest.mark.parametrize("declaration", [
+    "due: tomorrow\nSPEC-1: Keep scope.\nverify: manual",
+    "SPEC-1: Keep scope.\nverify: manual\ndue: tomorrow",
+    "SPEC-1: Keep scope.\nverify: manual\ndue:",
+    "SPEC-1: Keep scope.\nverify: manual\ndue: review\ndue: pre-merge",
+])
+def test_spec_due_rejects_malformed_declarations(tmp_path, declaration):
+    text = f"## Spec Items\n{declaration}\n"
+    assert parse_spec_item_section(text).errors
+    with pytest.raises(ValueError):
+        _capture(tmp_path, "design", text)
+
+
+def test_spec_due_change_requires_confirmation_and_preserves_other_approvals(tmp_path):
+    text = (
+        "## Spec Items\nSPEC-1: Confirm delivery.\nverify: manual\n"
+        "SPEC-2: Confirm unchanged implementation.\nverify: manual\n"
+    )
+    _capture(tmp_path, "design", text)
+    for spec_id in ("SPEC-1", "SPEC-2"):
+        record_manual_spec_approval(
+            tmp_path, spec_id, manual_spec_approval_statement(tmp_path, spec_id),
+        )
+    (tmp_path / "design.md").write_text(
+        text.replace("Confirm delivery.\nverify: manual", "Confirm delivery.\nverify: manual\ndue: pre-merge"),
+        encoding="utf-8",
+    )
+    changes = pending_spec_changes_for_run(tmp_path)
+    assert [(change.kind, change.spec_id) for change in changes] == [("modified", "SPEC-1")]
+    assert changes[0].before.due == "review"
+    assert changes[0].after.due == "pre-merge"
+    assert read_ledger(tmp_path).spec_items[0].due == "review"
+    assert read_manual_spec_approvals(tmp_path) == {"SPEC-1", "SPEC-2"}
+
+    confirm_current_spec_changes(tmp_path)
+
+    assert read_ledger(tmp_path).errors == ()
+    assert read_ledger(tmp_path).spec_items[0].due == "pre-merge"
+    assert read_manual_spec_approvals(tmp_path) == {"SPEC-2"}
+    assert pending_spec_changes_for_run(tmp_path) == ()
+
+
+def test_explicit_review_due_preserves_legacy_fingerprint_and_approval(tmp_path):
+    text = "## Spec Items\nSPEC-1: Keep approval.\nverify: manual\n"
+    _capture(tmp_path, "design", text)
+    statement = manual_spec_approval_statement(tmp_path, "SPEC-1")
+    record_manual_spec_approval(tmp_path, "SPEC-1", statement)
+    legacy_digest = read_ledger(tmp_path).spec_digest
+    confirmed = json.loads((tmp_path / SPEC_CONFIRMATION_FILE).read_text())
+    for item in confirmed["items"]:
+        item.pop("due", None)
+    (tmp_path / SPEC_CONFIRMATION_FILE).write_text(json.dumps(confirmed))
+    _capture(tmp_path, "design", text + "due: review\n")
+
+    assert pending_spec_changes_for_run(tmp_path) == ()
+    assert read_ledger(tmp_path).spec_digest == legacy_digest
+    assert manual_spec_approval_statement(tmp_path, "SPEC-1") == statement
+    assert read_manual_spec_approvals(tmp_path) == {"SPEC-1"}
+
 
 def test_source_spec_items_require_one_valid_verifier(tmp_path):
     artifact = """## Spec Items
