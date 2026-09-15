@@ -1,0 +1,8 @@
+{
+  "name": "@mixed-example/main",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "eslint src --format json --max-warnings 0"
+  }
+}
