@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, NamedTuple, Sequence
+from typing import Any, Literal, NamedTuple, Sequence
 
 from agent_flow.multi_review import eligible_reviewer_names
 from agent_flow.adapters.auto import detect_adapter
@@ -48,6 +48,7 @@ from agent_flow.artifact import (
     mark_inactive,
     read_meta,
     phase_review_rejected,
+    phase_spec_checkpoint,
     pending_phase_approval,
     run_concerns,
     run_concerns_value,
@@ -84,11 +85,14 @@ from agent_flow.core.observation import (
 )
 from agent_flow.core.design_ledger import (
     LEDGER_SOURCE_PHASES,
+    LEDGER_FILE,
     capture_design_ledger,
     missing_design_value_markers,
     parse_declared_concerns,
 )
 from agent_flow.core.design_value_check import (
+    SPEC_PRE_MERGE_PHASES,
+    SPEC_PUBLICATION_PHASES,
     missing_design_value_implementations,
     missing_spec_item_evidence,
 )
@@ -608,6 +612,19 @@ class Runner:
                     status="blocked", phase=phase, reason=scope_reason,
                 )
                 return
+            entry_missing = self._missing_entry_spec_evidence(
+                phase.id,
+                checkpoint=phase_spec_checkpoint(
+                    self.run_dir, phase.id, self._existing_artifact_path(phase),
+                    config_root=self.config_root, required_markers=self._effective_markers(phase),
+                ) if phase.id == "merge" else None,
+            )
+            if entry_missing:
+                self._print_structured_status(
+                    status="blocked", phase=phase, reason="missing_completion_markers",
+                    missing_completion_markers=entry_missing,
+                )
+                return
             leader_before = self._verify_host_phase_leader_baseline(
                 meta=meta,
                 phase=phase,
@@ -890,6 +907,13 @@ class Runner:
                 )
                 return
 
+        terminal_missing = self._missing_entry_spec_evidence("terminal")
+        if terminal_missing:
+            self._print_structured_status(
+                status="blocked", phase=None, reason="missing_completion_markers",
+                missing_completion_markers=terminal_missing,
+            )
+            return
         report_path = write_run_report(self.run_dir)
         cleanup_journal = read_meta(self.run_dir).get("cleanup_journal")
         disposition = getattr(self.workflow, "completion_disposition", "integrated-cleanup")
@@ -1070,6 +1094,54 @@ class Runner:
             leader_root=leader_root,
             snapshot=snapshot,
         )
+
+    def _missing_entry_spec_evidence(
+        self, phase_id: str, *, checkpoint: Literal["pre-merge", "post-merge"] | None = None,
+    ) -> list[str]:
+        assert self.run_dir is not None
+        if phase_id not in SPEC_PUBLICATION_PHASES | SPEC_PRE_MERGE_PHASES:
+            return []
+        if not (self.run_dir / LEDGER_FILE).exists() and not any(
+            phase.id in LEDGER_SOURCE_PHASES for phase in self.phases
+        ):
+            return []
+        for source in self.phases:
+            if source.id in LEDGER_SOURCE_PHASES:
+                artifact = self._existing_artifact_path(source)
+                if artifact.is_file() and self._is_stub_authored(artifact.read_text(encoding="utf-8")):
+                    return []
+        if not (self.run_dir / LEDGER_FILE).is_file():
+            return ["spec-ledger: design-spec.md is missing"]
+        meta = read_meta(self.run_dir)
+        return missing_spec_item_evidence(
+            self.project_root, self.run_dir, phase_id, "",
+            task_text=str(meta.get("task", "")), profile=self.profile,
+            since=_meta_timestamp(meta.get("started_at")), evidence_root=self.config_root,
+            checkpoint=checkpoint,
+        )
+
+    def _check_spec_transition(self, from_index: int, to_index: int) -> None:
+        if to_index <= from_index:
+            return
+        crossed = self.phases[from_index + 1:to_index + 1]
+        if any(phase.id in {"merge", "merge-approval"} for phase in crossed):
+            checkpoint = "pre-merge"
+        elif to_index >= len(self.phases):
+            checkpoint = "terminal"
+        elif self.phases[to_index].id in SPEC_PRE_MERGE_PHASES:
+            checkpoint = self.phases[to_index].id
+        elif any(phase.id in SPEC_PUBLICATION_PHASES for phase in crossed):
+            checkpoint = "push-pr"
+        else:
+            checkpoint = ""
+        if checkpoint:
+            missing = self._missing_entry_spec_evidence(checkpoint)
+            if missing:
+                raise WorktreeIsolationError("; ".join(missing))
+        for phase in crossed:
+            reason = review_scope_block_reason(read_meta(self.run_dir), phase.id)
+            if reason:
+                raise WorktreeIsolationError(reason)
 
     def _next_index(self, current_index: int, phase: Phase) -> RouteDecision:
         """route가 가리키는 다음 자리와 그렇게 판정한 key.
@@ -1288,6 +1360,8 @@ class Runner:
                     f"current phase is {current_phase or 'complete'}"
                 )
             phase = self.phases[transition.from_index]
+            if not transition.blocked:
+                self._check_spec_transition(transition.from_index, transition.to_index)
             if phase.id == "pr-watch" and transition.ci_repair_state is not None:
                 observation = json.loads(
                     resolve_run_subpath(self.run_dir, Path("pr-feedback.json")).read_text(encoding="utf-8")
@@ -1524,6 +1598,8 @@ class Runner:
                 or str(meta.get("phase_entered_at", "")) != transition.source_attempt
             ):
                 return
+            if not transition.blocked:
+                self._check_spec_transition(transition.from_index, target_index)
             print(
                 f"  [resume] completing interrupted transition "
                 f"{transition.from_phase} -> {transition.to_phase or 'complete'}"
@@ -2280,6 +2356,10 @@ class Runner:
                 since=_meta_timestamp(meta.get("started_at")),
                 evidence_root=self.config_root,
                 review_rejected=review_rejected,
+                checkpoint=phase_spec_checkpoint(
+                    self.run_dir, phase.id, artifact, config_root=self.config_root,
+                    required_markers=required_markers,
+                ),
             )
         )
         missing.extend(
@@ -2578,6 +2658,7 @@ class Runner:
         reason: str,
         required_artifact: Path | None = None,
         report: Path | None = None,
+        missing_completion_markers: list[str] | None = None,
     ) -> None:
         assert self.run_dir is not None
         meta = read_meta(self.run_dir)
@@ -2595,6 +2676,7 @@ class Runner:
             required_artifact=required_artifact,
             report=report,
             next_command=next_command,
+            missing_completion_markers=missing_completion_markers,
         )
         # 사람이 읽는 blocker는 stdout으로만 나가고 사라진다. 같은 판정을
         # trace에도 남겨야 실패한 run을 나중에 재현하거나 eval로 옮길 수 있다.

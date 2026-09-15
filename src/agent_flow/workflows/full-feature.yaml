@@ -73,9 +73,13 @@ phases:
 
           SPEC-<n>: <requirement>
           verify: test:<name> | symbol:<symbol>=<value> | manual
+          due: review | pre-merge
 
       Every item must have exactly one verifier. Record `spec-items: none` only
       when the run task contains no user instruction.
+      `due` is optional and defaults to `review`. Use `pre-merge` only for
+      requirements whose evidence depends on publication. A due-only change
+      requires the same user confirmation as a requirement or verifier change.
 
       Do not ask for separate approval of the initial SPEC list. If the list is
       changed later, the workflow status reports only added, modified, and
@@ -476,14 +480,18 @@ phases:
       Missing Required Skills procedure for this host.
       The markers below are not the whole completion contract. The runner also
       verifies this run's `design-spec.md` ledger at this phase, and
-      `verdict: approve` does not override it — an unmet item blocks phase
-      completion. Every SPEC item needs evidence in the form its `verify:`
-      declares:
+      `verdict: approve` does not override it — an unmet review-due item blocks
+      phase completion and publication. Explicit pre-merge items remain pending,
+      not satisfied. Every due item needs the evidence its `verify:` declares:
         - `test:<name>` — an observed test command that ran that name and exited 0
         - `symbol:<symbol>=<value>` — the value added in a changed file that
           contains the symbol
         - `manual` — explicit user confirmation in chat, followed by the agent
           recording it with `agent-flow spec approve`
+      Before merge or merge approval, the runner rechecks every item, including
+      review-due items. For pre-merge manual items, first meet the recorded
+      prerequisites on the current published HEAD, then obtain user confirmation
+      and record it. A HEAD change requires fresh approval.
       Recorded design values must appear in the diff. When a value reaches the
       code through a token, declare it as
       `design-values-implemented: <key>=<token>` and that token must be in the
@@ -771,6 +779,8 @@ phases:
       approve: merge
       default: block
     prompt: |
+      Entry requires evidence for all confirmed SPEC items, including pre-merge
+      items. SPEC approval and merge approval remain separate authorizations.
       Ask the user for explicit merge approval. Do not merge yet. Output
       merge-approval.md with exactly `verdict: approve` only after approval.
 
@@ -779,6 +789,7 @@ phases:
       optional: [resolving-merge-conflicts]
     description: Merge after explicit user approval.
     prompt: |
+      Entry rechecks every confirmed SPEC item against the current publication.
       Merge only after explicit user approval. If the merge or rebase hits
       conflicts, apply `.agent-flow/skills/resolving-merge-conflicts/SKILL.md` before
       completing. Record merge strategy, target branch, and merge commit.

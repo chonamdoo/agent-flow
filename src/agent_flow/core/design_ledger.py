@@ -20,14 +20,21 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import urlsplit
 
 from agent_flow.core.atomic_io import atomic_write_text, fsync_directory
+from agent_flow.core.artifacts import read_deferred_ci_checks
 from agent_flow.core.command_evidence import is_concrete_test_selector
+from agent_flow.core.delivery_evidence import _delivery_fields, missing_delivery_evidence
+from agent_flow.core.gate_plan import deferred_check_names, profile_gate_commands
 from agent_flow.core.markers import (
     completion_gate_marker_values,
     unfenced_markdown_text,
 )
-from agent_flow.core.worktree_isolation import exclusive_file_lease
+from agent_flow.core.phase_workflow import find_kit_root
+from agent_flow.core.profile_resolution import resolve_profile
+from agent_flow.core.workflow_pin import load_run_workflow_definition
+from agent_flow.core.worktree_isolation import exclusive_file_lease, git_safe, resolve_run_subpath
 
 LEDGER_FILE = "design-spec.md"
 LEDGER_SECTION = "design values"
@@ -52,6 +59,7 @@ class SpecItem:
     spec_id: str
     requirement: str
     verification: str
+    due: str = "review"
 
 @dataclass(frozen=True)
 class SpecParseResult:
@@ -183,6 +191,8 @@ def parse_spec_item_section(text: str) -> SpecParseResult:
     current_requirement = ""
     current_verification = ""
     current_verification_count = 0
+    current_due = "review"
+    current_due_count = 0
     current_duplicate = False
     in_section = False
     section_seen = False
@@ -191,8 +201,13 @@ def parse_spec_item_section(text: str) -> SpecParseResult:
     def finish_current() -> None:
         nonlocal current_id, current_requirement, current_verification
         nonlocal current_verification_count, current_duplicate
+        nonlocal current_due, current_due_count
         if not current_id:
             return
+        if current_due_count > 1:
+            errors.append(f"{current_id}: exactly one due line allowed")
+        if current_due not in {"review", "pre-merge"}:
+            errors.append(f"{current_id}: due: review | pre-merge (invalid due: {current_due})")
         if current_verification_count == 0:
             errors.append(
                 f"{current_id}: verify: test:<name> | symbol:<symbol>=<value> | manual "
@@ -208,18 +223,21 @@ def parse_spec_item_section(text: str) -> SpecParseResult:
                 f"{current_id}: verify: test:<name> | symbol:<symbol>=<value> | manual "
                 f"(invalid verifier: {current_verification})"
             )
-        elif not current_duplicate:
+        elif not current_duplicate and current_due_count <= 1 and current_due in {"review", "pre-merge"}:
             items.append(
                 SpecItem(
                     spec_id=current_id,
                     requirement=current_requirement,
                     verification=current_verification,
+                    due=current_due,
                 )
             )
         current_id = ""
         current_requirement = ""
         current_verification = ""
         current_verification_count = 0
+        current_due = "review"
+        current_due_count = 0
         current_duplicate = False
 
     for line in unfenced_markdown_text(text).splitlines():
@@ -258,6 +276,13 @@ def parse_spec_item_section(text: str) -> SpecParseResult:
         if candidate.lower().startswith("spec-"):
             finish_current()
             errors.append(f"SPEC item has invalid syntax: {candidate}")
+            continue
+        if candidate.lower().startswith("due:"):
+            if not current_id:
+                errors.append(f"{candidate} (due without a SPEC item)")
+                continue
+            current_due_count += 1
+            current_due = candidate.partition(":")[2].strip()
             continue
         if candidate.lower().startswith("verify:"):
             if not current_id:
@@ -301,6 +326,7 @@ def write_ledger(run_dir: Path, ledger: DesignLedger) -> Path:
             (
                 f"{item.spec_id}: {item.requirement}",
                 f"verify: {item.verification}",
+                f"due: {item.due}",
             )
         )
     if not ledger.spec_items:
@@ -397,7 +423,9 @@ def read_ledger(run_dir: Path) -> DesignLedger:
         errors=tuple(dict.fromkeys(errors)),
     )
 
-def read_manual_spec_approvals(run_dir: Path) -> frozenset[str]:
+def read_manual_spec_approvals(
+    run_dir: Path, *, project_root: Path | None = None,
+) -> frozenset[str]:
     payload = _read_json(run_dir / MANUAL_SPEC_APPROVALS_FILE)
     if not isinstance(payload, dict) or not isinstance(payload.get("approvals"), list):
         return frozenset()
@@ -409,6 +437,9 @@ def read_manual_spec_approvals(run_dir: Path) -> frozenset[str]:
         for item in ledger.spec_items
         if item.verification.strip().lower() == "manual"
     }
+    head = _current_spec_head(project_root) if any(
+        item.due == "pre-merge" for item in expected.values()
+    ) else ""
     approved: set[str] = set()
     for raw in payload["approvals"]:
         if not isinstance(raw, dict):
@@ -417,24 +448,38 @@ def read_manual_spec_approvals(run_dir: Path) -> frozenset[str]:
         item = expected.get(spec_id)
         if item is None:
             continue
+        approval_head = head if item.due == "pre-merge" else ""
+        if item.due == "pre-merge" and (
+            not head or raw.get("publication_head") != head
+        ):
+            continue
         fingerprint = _spec_fingerprint(item)
         if (
             raw.get("spec_fingerprint") == fingerprint
-            and raw.get("statement") == _manual_approval_statement(item)
+            and raw.get("statement") == _manual_approval_statement(item, approval_head)
         ):
             approved.add(spec_id)
     return frozenset(approved)
 
 
-def manual_spec_approval_statement(run_dir: Path, spec_id: str) -> str:
+def manual_spec_approval_statement(
+    run_dir: Path, spec_id: str, *, project_root: Path | None = None,
+) -> str:
     item = _manual_spec_item(run_dir, spec_id)
-    return _manual_approval_statement(item)
+    head = _current_spec_head(project_root) if item.due == "pre-merge" else ""
+    if item.due == "pre-merge" and not head:
+        raise ValueError("pre-merge SPEC approval requires the current publication HEAD")
+    return _manual_approval_statement(item, head)
 
 
 def record_manual_spec_approval(
     run_dir: Path,
     spec_id: str,
     statement: str,
+    *,
+    project_root: Path | None = None,
+    profile: dict | None = None,
+    config_root: Path | None = None,
 ) -> Path:
     with exclusive_file_lease(
         run_dir / SPEC_MUTATION_LOCK_FILE,
@@ -442,25 +487,39 @@ def record_manual_spec_approval(
     ):
         _resume_spec_confirmation_intent(run_dir)
         item = _manual_spec_item(run_dir, spec_id)
-        expected_statement = _manual_approval_statement(item)
+        head = ""
+        if item.due == "pre-merge":
+            if project_root is None:
+                raise ValueError("pre-merge SPEC approval requires the bound project root")
+            missing = missing_spec_publication_evidence(
+                project_root, run_dir, profile=profile, config_root=config_root,
+            )
+            if missing:
+                raise ValueError("; ".join(missing))
+            head = _current_spec_head(project_root)
+            if not head:
+                raise ValueError("cannot prove current publication HEAD")
+        expected_statement = _manual_approval_statement(item, head)
         if statement.strip() != expected_statement:
             raise ValueError(f"approval statement must be: {expected_statement}")
-        approved = read_manual_spec_approvals(run_dir) | {item.spec_id}
-        ledger = read_ledger(run_dir)
-        manual_items = {
-            candidate.spec_id: candidate
-            for candidate in ledger.spec_items
-            if candidate.verification.strip().lower() == "manual"
-        }
+        approved = read_manual_spec_approvals(run_dir, project_root=project_root)
+        payload = _read_json(run_dir / MANUAL_SPEC_APPROVALS_FILE)
+        previous = payload.get("approvals") if isinstance(payload, dict) else None
+        if not isinstance(previous, list):
+            previous = []
         approvals = [
-            {
-                "spec_id": approved_id,
-                "spec_fingerprint": _spec_fingerprint(manual_items[approved_id]),
-                "statement": _manual_approval_statement(manual_items[approved_id]),
-            }
-            for approved_id in sorted(approved)
-            if approved_id in manual_items
+            raw for raw in previous
+            if isinstance(raw, dict) and str(raw.get("spec_id", "")).upper() in approved
+            and str(raw.get("spec_id", "")).upper() != item.spec_id
         ]
+        record = {
+            "spec_id": item.spec_id,
+            "spec_fingerprint": _spec_fingerprint(item),
+            "statement": expected_statement,
+        }
+        if head:
+            record["publication_head"] = head
+        approvals.append(record)
         path = run_dir / MANUAL_SPEC_APPROVALS_FILE
         _write_json_atomic(path, {"approvals": approvals})
         return path
@@ -506,6 +565,7 @@ def read_confirmed_spec_items(run_dir: Path) -> tuple[SpecItem, ...]:
         spec_id = raw.get("spec_id")
         requirement = raw.get("requirement")
         verification = raw.get("verification")
+        due = raw.get("due", "review")
         if (
             not isinstance(spec_id, str)
             or re.fullmatch(r"SPEC-[1-9]\d*", spec_id) is None
@@ -514,6 +574,7 @@ def read_confirmed_spec_items(run_dir: Path) -> tuple[SpecItem, ...]:
             or not requirement.strip()
             or not isinstance(verification, str)
             or not _valid_spec_verification(verification)
+            or due not in ("review", "pre-merge")
         ):
             return ()
         seen.add(spec_id)
@@ -522,6 +583,7 @@ def read_confirmed_spec_items(run_dir: Path) -> tuple[SpecItem, ...]:
                 spec_id=spec_id,
                 requirement=requirement.strip(),
                 verification=verification.strip(),
+                due=due,
             )
         )
     return tuple(items)
@@ -535,14 +597,7 @@ def record_spec_confirmation(
     _write_json_atomic(
         path,
         {
-            "items": [
-                {
-                    "spec_id": item.spec_id,
-                    "requirement": item.requirement,
-                    "verification": item.verification,
-                }
-                for item in items
-            ]
+            "items": [_spec_item_payload(item) for item in items]
         },
     )
     return path
@@ -688,6 +743,7 @@ def render_spec_changes(changes: tuple[SpecChange, ...]) -> str:
                     (
                         f"- {change.after.spec_id}: {change.after.requirement}",
                         f"  verify: {change.after.verification}",
+                        f"  due: {change.after.due}",
                     )
                 )
             elif kind == "deleted":
@@ -696,6 +752,7 @@ def render_spec_changes(changes: tuple[SpecChange, ...]) -> str:
                     (
                         f"- {change.before.spec_id}: {change.before.requirement}",
                         f"  verify: {change.before.verification}",
+                        f"  due: {change.before.due}",
                     )
                 )
             else:
@@ -715,6 +772,11 @@ def render_spec_changes(changes: tuple[SpecChange, ...]) -> str:
                             f"  verify after: {change.after.verification}",
                         )
                     )
+                if change.before.due != change.after.due:
+                    lines.extend((
+                        f"  due before: {change.before.due}",
+                        f"  due after: {change.after.due}",
+                    ))
         sections.append("\n".join(lines))
     return "\n\n".join(sections)
 
@@ -740,13 +802,97 @@ def _manual_spec_item(run_dir: Path, spec_id: str) -> SpecItem:
         raise ValueError(f"{canonical_id} does not use manual verification")
     return item
 
-def _manual_approval_statement(item: SpecItem) -> str:
-    return f"APPROVE {item.spec_id} {_spec_fingerprint(item)[:12]}"
+def _manual_approval_statement(item: SpecItem, head: str = "") -> str:
+    statement = f"APPROVE {item.spec_id} {_spec_fingerprint(item)[:12]}"
+    return f"{statement} HEAD {head}" if item.due == "pre-merge" else statement
 
 
 def _spec_fingerprint(item: SpecItem) -> str:
     payload = "\0".join((item.spec_id, item.requirement, item.verification))
+    if item.due != "review":
+        payload += f"\0due:{item.due}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _current_spec_head(project_root: Path | None) -> str:
+    if project_root is None:
+        return ""
+    result = git_safe(
+        "rev-parse", "--verify", "HEAD^{commit}", cwd=project_root, optional_locks=False,
+    )
+    head = result.stdout.strip().lower() if result.ok else ""
+    return head if re.fullmatch(r"[0-9a-f]{40,64}", head) else ""
+
+
+def missing_spec_publication_evidence(
+    project_root: Path, run_dir: Path, *, profile: dict | None = None,
+    post_merge: bool = False,
+    config_root: Path | None = None,
+) -> list[str]:
+    artifact = _source_artifact_path(run_dir, "push-pr")
+    meta = _read_json(run_dir / "meta.json")
+    if isinstance(meta, dict) and (meta.get("workflow") or "workflow_definition" in meta):
+        try:
+            definition = load_run_workflow_definition(
+                find_kit_root(), str(meta.get("workflow", "")), meta,
+                config_root=config_root or project_root,
+            )
+            phase = next((item for item in definition.phases if item.id == "push-pr"), None)
+            if phase is None:
+                return ["pre-merge SPEC: workflow has no push-pr publication phase"]
+            canonical = resolve_run_subpath(run_dir, Path(phase.artifact))
+            if canonical.is_file():
+                artifact = canonical
+        except (OSError, ValueError, RuntimeError) as exc:
+            return [f"pre-merge SPEC: publication contract is unavailable: {exc}"]
+    if artifact is None:
+        return ["pre-merge SPEC: push-pr publication evidence is missing"]
+    try:
+        text = artifact.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ["pre-merge SPEC: push-pr publication evidence is unreadable"]
+    missing = missing_delivery_evidence(
+        project_root, "push-pr", text, profile=profile, post_merge=post_merge,
+    )
+    if missing:
+        return missing
+    fields, missing = _delivery_fields(text, ("pr-url", "remote-oid"))
+    if missing:
+        return missing
+    url = urlsplit(fields["pr-url"])
+    match = re.fullmatch(r"/([^/]+/[^/]+)/pull/([1-9]\d*)/?", url.path)
+    if not url.netloc or match is None:
+        return ["pre-merge SPEC: cannot resolve published PR identity"]
+    try:
+        active_profile = profile
+        if not active_profile or not active_profile.get("id"):
+            _, active_profile = resolve_profile(
+                find_kit_root(), config_root or project_root,
+            )
+        profile_ids = active_profile.get("active_profiles") or [active_profile["id"]]
+        configured_checks = deferred_check_names(profile_gate_commands(
+            profile_ids, root=config_root or project_root, phase="all", execution="ci",
+        ))
+        required_checks = tuple(dict.fromkeys((
+            *configured_checks, *read_deferred_ci_checks(run_dir),
+        )))
+    except (OSError, UnicodeError, ValueError) as exc:
+        return [f"pre-merge SPEC: cannot verify required CI gates: {exc}"]
+    from agent_flow.pr_watch import fetch_pr
+
+    snapshot = fetch_pr(
+        int(match.group(2)), repo=f"{url.netloc}/{match.group(1)}",
+        required_checks=required_checks, require_ready=True,
+    )
+    if (
+        snapshot.head.lower() != fields["remote-oid"].lower()
+        or _current_spec_head(project_root) != fields["remote-oid"].lower()
+    ):
+        return ["pre-merge SPEC: CI observation does not match current publication HEAD"]
+    expected_status = "merged" if post_merge else "green"
+    if snapshot.status != expected_status:
+        return [f"pre-merge SPEC: expected {expected_status} publication ({snapshot.status})"]
+    return []
 
 
 def _design_values_digest(values: tuple[tuple[str, str], ...]) -> str:
@@ -909,6 +1055,7 @@ def _spec_items_from_intent(raw: object, *, label: str) -> tuple[SpecItem, ...]:
         spec_id = value.get("spec_id")
         requirement = value.get("requirement")
         verification = value.get("verification")
+        due = value.get("due", "review")
         if (
             not isinstance(spec_id, str)
             or re.fullmatch(r"SPEC-[1-9]\d*", spec_id) is None
@@ -917,6 +1064,7 @@ def _spec_items_from_intent(raw: object, *, label: str) -> tuple[SpecItem, ...]:
             or not requirement.strip()
             or not isinstance(verification, str)
             or not _valid_spec_verification(verification)
+            or due not in ("review", "pre-merge")
         ):
             raise ValueError(f"SPEC confirmation intent {label} is malformed")
         seen.add(spec_id)
@@ -925,6 +1073,7 @@ def _spec_items_from_intent(raw: object, *, label: str) -> tuple[SpecItem, ...]:
                 spec_id=spec_id,
                 requirement=requirement.strip(),
                 verification=verification.strip(),
+                due=due,
             )
         )
     return tuple(items)
@@ -964,6 +1113,7 @@ def _spec_item_payload(item: SpecItem) -> dict[str, str]:
         "spec_id": item.spec_id,
         "requirement": item.requirement,
         "verification": item.verification,
+        "due": item.due,
     }
 
 
@@ -1111,7 +1261,7 @@ def ledger_prompt_block(run_dir: Path) -> str:
     )
     if ledger.spec_items:
         specs = "\n".join(
-            f"{item.spec_id}: {item.requirement}\nverify: {item.verification}"
+            f"{item.spec_id}: {item.requirement}\nverify: {item.verification}\ndue: {item.due}"
             for item in ledger.spec_items
         )
         manual_instruction = (
@@ -1125,8 +1275,11 @@ def ledger_prompt_block(run_dir: Path) -> str:
         spec_block = (
             "### Confirmed Spec Items\n\n"
             f"{specs}\n\n"
-            "Every confirmed SPEC item must be satisfied by its recorded "
-            "verification evidence.\n\n"
+            "Review-due items (the default) require evidence before publication. "
+            "Explicit pre-merge items remain pending, not satisfied, at review; "
+            "all items require evidence before merge or terminal completion. "
+            "Pre-merge manual approval binds the current published HEAD; a new "
+            "HEAD requires fresh user approval after its prerequisites are met.\n\n"
             f"{manual_instruction}"
         )
     else:

@@ -207,6 +207,7 @@ from agent_flow.artifact import (
     find_active_runs,
     mark_inactive,
     phase_review_rejected,
+    phase_spec_checkpoint,
     read_meta,
     run_concerns,
     select_publication_review_scope,
@@ -1462,11 +1463,23 @@ def main(argv: list[str] | None = None) -> int:
                 print(render_spec_changes(changes))
                 return 0
             if args.spec_command == "approve":
-                expected = manual_spec_approval_statement(run_dir, args.spec_id)
+                project = root
+                if inferred_worktree is not None:
+                    project, _ = _worktree_context(root, inferred_worktree)
+                    if project is None:
+                        return 2
+                elif unadopted_checkout is not None:
+                    project = unadopted_checkout
+                expected = manual_spec_approval_statement(
+                    run_dir, args.spec_id, project_root=project,
+                )
                 approval_path = record_manual_spec_approval(
                     run_dir,
                     args.spec_id,
                     expected,
+                    project_root=project,
+                    profile=resolved_profile(root),
+                    config_root=root,
                 )
                 print(f"SPEC approved: {approval_path}")
                 return 0
@@ -1491,6 +1504,12 @@ def main(argv: list[str] | None = None) -> int:
                     if args.project_root
                     else root
                 )
+                if not args.project_root and inferred_worktree is not None:
+                    project, _ = _worktree_context(root, inferred_worktree)
+                    if project is None:
+                        return 2
+                elif not args.project_root and unadopted_checkout is not None:
+                    project = unadopted_checkout
                 context = _spec_run_context(run_dir)
                 run_meta = _read_run_state(run_dir)
                 workflow = str(run_meta.get("workflow", ""))
@@ -1514,6 +1533,9 @@ def main(argv: list[str] | None = None) -> int:
                             since=context["since"],
                             evidence_root=root,
                             review_rejected=review_rejected,
+                            checkpoint=phase_spec_checkpoint(
+                                run_dir, args.phase, artifact, config_root=root,
+                            ),
                         ),
                         ensure_ascii=False,
                     )

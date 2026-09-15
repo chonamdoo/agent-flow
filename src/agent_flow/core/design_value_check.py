@@ -15,11 +15,12 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import shlex
 import stat
 from pathlib import Path
-from typing import Sequence
+from typing import Literal, Sequence
 
 from agent_flow.core.command_evidence import (
     is_test_command_execution,
@@ -29,14 +30,19 @@ from agent_flow.core.command_evidence import (
 from agent_flow.core.design_ledger import (
     LEDGER_SOURCE_PHASES,
     parse_spec_item_section,
+    missing_spec_publication_evidence,
     read_manual_spec_approvals,
     read_ledger,
 )
 from agent_flow.core.markers import completion_gate_marker_values
+from agent_flow.core.phase_workflow import find_kit_root
+from agent_flow.core.workflow_pin import load_run_workflow_definition
 from agent_flow.core.worktree_isolation import git_repo_state, git_safe
 
 # 구현을 판정하는 phase. 여기서 안 잡으면 gates는 build/test만 보고 통과시킨다.
 DESIGN_VALUE_PHASES = frozenset({"final-review", "multi-review"})
+SPEC_PUBLICATION_PHASES = frozenset({"commit", "push-pr", "pr-watch"})
+SPEC_PRE_MERGE_PHASES = frozenset({"merge", "merge-approval", "cleanup", "handoff", "pre-merge", "terminal"})
 
 IMPLEMENTED_MARKER = "design-values-implemented:"
 _FALLBACK_BASES = ("main", "master")
@@ -55,6 +61,7 @@ def missing_spec_item_evidence(
     since: float | None = None,
     evidence_root: Path | None = None,
     review_rejected: bool = False,
+    checkpoint: Literal["pre-merge", "post-merge"] | None = None,
 ) -> list[str]:
     if phase_id in LEDGER_SOURCE_PHASES:
         parsed = parse_spec_item_section(text)
@@ -84,17 +91,39 @@ def missing_spec_item_evidence(
                 "(the run task contains user instructions; 'none' is not allowed)"
             )
         return missing
-    if phase_id not in DESIGN_VALUE_PHASES:
+    if phase_id not in DESIGN_VALUE_PHASES | SPEC_PUBLICATION_PHASES | SPEC_PRE_MERGE_PHASES:
         return []
     ledger = read_ledger(run_dir)
+    if not ledger.exists and phase_id not in DESIGN_VALUE_PHASES and not any(
+        (run_dir / relative).is_file()
+        for source in LEDGER_SOURCE_PHASES
+        for relative in (f"{source}.md", f"artifacts/{source}.md")
+    ):
+        meta_path = run_dir / "meta.json"
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
+            if not isinstance(meta, dict) or "workflow_definition" not in meta:
+                return []
+            definition = load_run_workflow_definition(
+                find_kit_root(), str(meta.get("workflow", "")), meta,
+                config_root=evidence_root or project_root,
+            )
+            if not any(phase.id in LEDGER_SOURCE_PHASES for phase in definition.phases):
+                return []
+        except (OSError, ValueError, RuntimeError) as exc:
+            return [f"spec-ledger: workflow contract is unavailable: {exc}"]
     if not ledger.exists:
         return ["spec-ledger: design-spec.md is missing"]
     if ledger.errors:
         return [f"spec-ledger: {error}" for error in ledger.errors]
     if task_text.strip() and not ledger.spec_items:
         return ["spec-ledger: no SPEC items for a non-empty task"]
-    if review_rejected:
+    if review_rejected and phase_id in DESIGN_VALUE_PHASES:
         return []
+    items = tuple(
+        item for item in ledger.spec_items
+        if item.due == "review" or phase_id in SPEC_PRE_MERGE_PHASES
+    )
     evidence = read_command_evidence(
         evidence_root or project_root,
         since=since,
@@ -102,13 +131,24 @@ def missing_spec_item_evidence(
     )
     changed = (
         changed_file_evidence(project_root, profile=profile)
-        if any(item.verification.lower().startswith("symbol:") for item in ledger.spec_items)
+        if any(item.verification.lower().startswith("symbol:") for item in items)
         else {}
     )
-    manual_approvals = read_manual_spec_approvals(run_dir)
+    manual_approvals = read_manual_spec_approvals(run_dir, project_root=project_root)
     test_commands = resolve_test_command_tokens(profile)
     unmet: list[str] = []
-    for item in ledger.spec_items:
+    if phase_id in SPEC_PRE_MERGE_PHASES and (
+        any(item.due == "pre-merge" for item in items)
+        or phase_id in {"merge", "merge-approval", "pre-merge"}
+    ):
+        unmet.extend(missing_spec_publication_evidence(
+            project_root, run_dir, profile=profile,
+            config_root=evidence_root,
+            post_merge=checkpoint == "post-merge" or (
+                checkpoint is None and phase_id in {"cleanup", "handoff", "terminal"}
+            ),
+        ))
+    for item in items:
         lowered = item.verification.lower()
         if lowered.startswith("test:"):
             test_name = item.verification.partition(":")[2].strip()

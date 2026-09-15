@@ -4815,19 +4815,19 @@ def test_push_pr_evidence_uses_profile_target_branch(
         text=True,
     ).stdout.strip()
     pr_url = "https://example.test/pull/1"
+    pr_data = {
+        "url": pr_url,
+        "baseRefName": "release",
+        "headRefName": "feat/release-target",
+        "headRefOid": head,
+        "state": "OPEN",
+    }
 
     def fake_gh(command, **_kwargs):
         return SafeCommandResult(
             args=tuple(command),
             returncode=0,
-            stdout=json.dumps(
-                {
-                    "url": pr_url,
-                    "baseRefName": "release",
-                    "headRefName": "feat/release-target",
-                    "headRefOid": head,
-                }
-            ),
+            stdout=json.dumps(pr_data),
             stderr="",
         )
 
@@ -4853,6 +4853,27 @@ def test_push_pr_evidence_uses_profile_target_branch(
         profile={"pr": {"target_branch": "main"}},
     )
     assert "delivery evidence: pr-base must match profile target main" in mismatch
+
+    subprocess.run(
+        ["git", "push", "origin", "--delete", "feat/release-target"],
+        cwd=project, check=True, capture_output=True, text=True,
+    )
+    pr_data["state"] = "MERGED"
+    assert missing_delivery_evidence(
+        project, "push-pr", artifact, profile={"pr": {"target_branch": "release"}},
+    )
+    assert missing_delivery_evidence(
+        project, "push-pr", artifact, profile={"pr": {"target_branch": "release"}},
+        post_merge=True,
+    ) == []
+    for field, value in (("state", "OPEN"), ("headRefOid", "0" * 40), ("baseRefName", "main")):
+        original = pr_data[field]
+        pr_data[field] = value
+        assert missing_delivery_evidence(
+            project, "push-pr", artifact, profile={"pr": {"target_branch": "release"}},
+            post_merge=True,
+        )
+        pr_data[field] = original
 
 
 def test_a_review_angle_is_dropped_when_its_skill_is_not_required(tmp_path: Path):

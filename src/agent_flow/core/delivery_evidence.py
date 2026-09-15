@@ -29,6 +29,7 @@ def missing_delivery_evidence(
     text: str,
     *,
     profile: dict[str, Any] | None = None,
+    post_merge: bool = False,
 ) -> list[str]:
     if phase_id == "commit":
         return _missing_commit_evidence(project_root, text)
@@ -40,6 +41,7 @@ def missing_delivery_evidence(
             project_root,
             text,
             target_branch=target_branch,
+            post_merge=post_merge,
         )
     return []
 
@@ -140,6 +142,7 @@ def _missing_push_pr_evidence(
     text: str,
     *,
     target_branch: str,
+    post_merge: bool = False,
 ) -> list[str]:
     fields, errors = _delivery_fields(
         text,
@@ -181,7 +184,7 @@ def _missing_push_pr_evidence(
     remotes = git_safe("remote", cwd=project_root, optional_locks=False)
     if not remotes.ok or fields["remote"] not in remotes.stdout.splitlines():
         errors.append("delivery evidence: named git remote is unavailable")
-    else:
+    elif not post_merge:
         remote_ref = f"refs/heads/{branch_name}"
         remote = git_safe(
             "ls-remote", "--heads", fields["remote"], remote_ref,
@@ -205,7 +208,7 @@ def _missing_push_pr_evidence(
     pr = run_safe_command(
         (
             "gh", "pr", "view", fields["pr-url"], "--json",
-            "url,baseRefName,headRefName,headRefOid",
+            "url,baseRefName,headRefName,headRefOid" + (",state" if post_merge else ""),
         ),
         cwd=project_root,
         env=sanitized_worker_env(),
@@ -221,6 +224,8 @@ def _missing_push_pr_evidence(
         return errors
     if not isinstance(payload, dict):
         return [*errors, "delivery evidence: gh returned invalid pull request evidence"]
+    if post_merge and payload.get("state") != "MERGED":
+        errors.append("delivery evidence: completed merge requires a live MERGED pull request")
 
     actual_url = payload.get("url")
     if (
