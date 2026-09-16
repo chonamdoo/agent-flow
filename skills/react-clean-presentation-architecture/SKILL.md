@@ -90,8 +90,8 @@ State patterns:
 - derive render-only values during render instead of duplicating state
 - keep request ids, abort controllers, internal pagination cursors, and rollback bookkeeping private; expose selected values, visible pagination state, and optimistic displayed results through observable props/state rather than hiding them in refs
 - preserve cancellation with `AbortController` or the project’s existing request cancellation pattern
-- let RHF own form values, dirty/touched state, and field errors once; keep server data in its RSC/query-cache boundary and shareable filters in the URL. Do not mirror draft state into `uiState`. Custom hooks share logic, not state instances; Context does not guarantee state lifetime or render isolation.
-- when RHF draft, validation, reset, field adapters, or submit behavior changes, read `react-hook-form-zod`
+- let the form library already in use own form values, dirty/touched state, and field errors once; keep server data in its RSC/query-cache boundary and shareable filters in the URL. Do not mirror draft state into `uiState`. Custom hooks share logic, not state instances; Context does not guarantee state lifetime or render isolation.
+- when draft, validation, reset, field adapters, or submit behavior changes, read `react-hook-form-zod` for RHF or `react-tanstack-form` for TanStack Form; use the actual library's installed-version contract
 
 `UiState`, `UiAction`, and `UiEvent` roles:
 - `UiState` is durable render data. It must be enough to redraw the screen from props/state.
@@ -120,7 +120,7 @@ Split client state-holder wiring from rendering where that responsibility exists
 - screen component receives plain `uiState` and callbacks
 - child components receive only the data/callbacks they need
 - presentational components should not import use cases, repositories, API clients, or DI containers
-- keep form input, focus, hover, selection, and animation state at their appropriate owner; RHF field adapters may use `control`, `useWatch`, `useFormState`, and `useController` within presentation without lifting every field into a parent state holder
+- keep form input, focus, hover, selection, and animation state at their appropriate owner; form-library field adapters may consume narrow subscriptions within presentation without lifting every field into a parent state holder
 
 ## Review Checklist
 
@@ -131,7 +131,7 @@ Split client state-holder wiring from rendering where that responsibility exists
 - presentation projections satisfy the required core's **Mapping Boundary**.
 - project naming is preserved; suffixes, hook names, and file counts alone do not fail review
 - interactive state holders own client orchestration and callbacks; server-only views retain server data/composition without artificial hooks
-- render components receive narrow props; RHF adapters may consume the form's own state
+- render components receive narrow props; form-library adapters may consume the form's own state
 - reducer logic, when present, is pure and side-effect free
 - effects are only for external systems, not derivable state
 - composition roots own implementation creation; client wiring consumes typed ports and owns browser effects; Server pages retain metadata and respect RSC serialization

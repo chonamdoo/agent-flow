@@ -30,6 +30,7 @@ Use this as a secondary checklist after user request, repo instructions, existin
 ## Conditional Capabilities
 
 - RHF form draft, subscriptions, validation, initialization, field adapters, or submit changes: read `react-hook-form-zod`; generic TSX or an unrelated `watch`, `reset`, or `Controller` is not enough.
+- TanStack Form draft, subscriptions, validation, initialization, field composition, arrays, wizards, submit, or SSR integration changes: read `react-tanstack-form` and check installed versions; generic TSX, TanStack Query alone, or RHF-only work is not enough.
 - Public React Web URL indexing, metadata, canonical, JSON-LD, bot responses, or SEO-related cache changes: read `react-web-seo`; internal authenticated UI does not need SEO work by default.
 - Existing React Web Storybook stories/configuration, meaningful state or interaction reproduction, or explicit adoption design: read `react-storybook`; ordinary component work does not require introducing Storybook.
 

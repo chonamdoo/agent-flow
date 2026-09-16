@@ -1229,7 +1229,8 @@ def test_framework_detection_matches_shared_javascript_fixtures(tmp_path: Path, 
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == case["profile"]
         selected = load_profile_payload(case["profile"], tmp_path)
-        assert ("react-hook-form-zod" in selected.get("skills", {}).get("install", [])) == case.get("react_web", False)
+        for skill in ("react-hook-form-zod", "react-tanstack-form"):
+            assert (skill in selected.get("skills", {}).get("install", [])) == case.get("react_web", False)
 
 
 @pytest.mark.parametrize("profile_id", ["spring", "ktor"])

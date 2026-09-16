@@ -695,15 +695,18 @@ def test_the_opt_in_concern_reaches_a_path_the_globs_exclude():
     "task,concerns,expected",
     [
         ("Fix React Hook Form dirty reset", [], "react-hook-form-zod"),
-        ("폼 초기화 정책 수정", [], "react-hook-form-zod"),
+        ("RHF 폼 초기화 정책 수정", [], "react-hook-form-zod"),
         ("Update form adapter", ["react-hook-form-zod"], "react-hook-form-zod"),
+        ("TanStack Form 폼 초기화", [], "react-tanstack-form"),
+        ("폼 구독 및 폼 초기화 정책 수정", [], None),
+        ("Update Zod form schema", [], None),
         ("검색 색인 개선", [], "react-web-seo"),
         ("Fix Storybook focus", [], "react-storybook"),
         ("툴콜 승인 인자 검증", [], "llm-tool-development"),
     ],
 )
 def test_react_capabilities_route_by_intent_not_all_tsx(
-    tmp_path: Path, profile_id: str, task: str, concerns: list[str], expected: str,
+    tmp_path: Path, profile_id: str, task: str, concerns: list[str], expected: str | None,
 ) -> None:
     (tmp_path / "package.json").write_text('{"dependencies":{"react":"19"}}', encoding="utf-8")
     payload = load_profile_payload(profile_id, tmp_path)
@@ -711,13 +714,35 @@ def test_react_capabilities_route_by_intent_not_all_tsx(
         payload, phase_id="implement", changed_files=["src/components/Label.tsx"],
         task_text="Change label color",
     ))
-    optional = {"react-hook-form-zod", "react-web-seo", "react-storybook", "llm-tool-development"}
+    optional = {"react-hook-form-zod", "react-tanstack-form", "react-web-seo", "react-storybook", "llm-tool-development"}
     assert baseline.isdisjoint(optional)
     activated = _names(routed_profile_skills(
         payload, phase_id="implement", changed_files=["src/components/Label.tsx"],
         task_text=task, concerns=concerns,
     ))
-    assert activated & optional == {expected}
+    assert activated & optional == ({expected} if expected else set())
+
+
+@pytest.mark.parametrize(
+    "dependencies,task,concerns,expected",
+    [
+        ({"react": "19"}, "TanStack Form 폼 초기화", [], {"react-tanstack-form"}),
+        ({"react": "19"}, "Update form adapter", ["react-tanstack-form"], {"react-tanstack-form"}),
+        ({"react": "19"}, "Fix RHF dirty reset", [], {"react-hook-form-zod"}),
+        ({"react": "19"}, "Change label color", [], set()),
+        ({}, "TanStack Form validation", ["react-tanstack-form"], set()),
+        ({"react": "19", "react-native": "0.80"}, "TanStack Form validation", ["react-tanstack-form"], set()),
+    ],
+)
+def test_tanstack_form_capability_routes_only_for_react_web(
+    tmp_path: Path, dependencies: dict, task: str, concerns: list[str], expected: set[str],
+) -> None:
+    (tmp_path / "package.json").write_text(json.dumps({"dependencies": dependencies}), encoding="utf-8")
+    names = _names(routed_profile_skills(
+        load_profile_payload("typescript", tmp_path), phase_id="implement",
+        changed_files=["src/components/Form.tsx"], task_text=task, concerns=concerns,
+    ))
+    assert names & {"react-tanstack-form", "react-hook-form-zod"} == expected
 
 
 @pytest.mark.parametrize("profile_id,adapter", [("spring", "spring-boot-development-guide"), ("ktor", "ktor-development-guide")])
@@ -729,18 +754,20 @@ def test_kotlin_backend_routes_its_adapter_without_android(profile_id: str, adap
 
 
 @pytest.mark.parametrize("dependencies", [{}, {"react-native": "0.80", "react": "19"}, {"expo": "53", "react": "19"}])
-def test_react_web_concern_cannot_activate_without_web_dependencies(tmp_path: Path, dependencies: dict) -> None:
+@pytest.mark.parametrize("skill", ["react-hook-form-zod", "react-tanstack-form"])
+def test_react_web_concern_cannot_activate_without_web_dependencies(tmp_path: Path, dependencies: dict, skill: str) -> None:
     (tmp_path / "package.json").write_text(json.dumps({"dependencies": dependencies}), encoding="utf-8")
     names = _names(routed_profile_skills(
         load_profile_payload("typescript", tmp_path), phase_id="review", changed_files=["Screen.tsx"],
-        task_text="React Hook Form", concerns=["react-hook-form-zod"],
+        task_text=skill, concerns=[skill],
     ))
-    assert "react-hook-form-zod" not in names
+    assert skill not in names
 
 
 _PORTFOLIO_WEB = {
     "react-scroll-restoration", "react-runtime-i18n",
     "ga4-ecommerce-events", "datadog-rum-sourcemaps",
+    "react-tanstack-form",
 }
 _PORTFOLIO = _PORTFOLIO_WEB | {"nextjs-auth-session", "webview-json-rpc-bridge"}
 
@@ -773,6 +800,9 @@ def _portfolio_resolution(tmp_path, monkeypatch, profile_id, dependencies, task,
         ("node", {"react": "19"}, "Datadog 소스맵 업로드 릴리스 확인", "datadog-rum-sourcemaps"),
         ("nextjs", {"react": "19", "next": "16"}, "Fix Next.js authentication authorization", "nextjs-auth-session"),
         ("nextjs", {"react": "19", "next": "16"}, "Next.js 세션 쿠키 경계 수정", "nextjs-auth-session"),
+        ("typescript", {"react": "19"}, "Fix @tanstack/react-form validation", "react-tanstack-form"),
+        ("node", {"react": "19"}, "탄스택 폼 제출 오류 수정", "react-tanstack-form"),
+        ("nextjs", {"react": "19", "next": "16"}, "Fix tanstack-form server validation", "react-tanstack-form"),
     ],
 )
 def test_portfolio_full_resolver_scopes_explicit_tasks(
@@ -806,6 +836,7 @@ def test_bridge_full_resolver_reaches_native_and_web_hosts(tmp_path, monkeypatch
     ("ios", {}, "Fix native bridge module registration", []),
     ("python", {}, "Implement WebView JSON-RPC", ["webview-json-rpc-bridge"]),
     ("nextjs", {"react": "19", "next": "16"}, "Change label color", []),
+    ("typescript", {"react": "19"}, "Fix TanStack Query cache invalidation", []),
 ])
 def test_portfolio_full_resolver_rejects_nearby_non_targets(tmp_path, monkeypatch, profile_id, dependencies, task, concerns):
     resolution = _portfolio_resolution(

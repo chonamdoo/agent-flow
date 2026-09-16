@@ -7,6 +7,7 @@ skills:
     - react-clean-presentation-architecture
     - react-app-shell-error-handling
     - react-hook-form-zod
+    - react-tanstack-form
     - react-web-seo
     - react-storybook
     - react-scroll-restoration
@@ -56,9 +57,14 @@ skills:
       missing: "missing local React architecture: <skill>"
     - group: react-hook-form-zod
       skills: [react-hook-form-zod]
-      task_terms: ["react hook form", "react-hook-form", "rhf", "zod form", "zod 폼", "폼 구독", "폼 초기화"]
+      task_terms: ["react hook form", "react-hook-form", "rhf", "zodResolver"]
       concerns: [react-hook-form-zod]
       missing: "missing local React forms: <skill>"
+    - group: react-tanstack-form
+      skills: [react-tanstack-form]
+      task_terms: ["TanStack Form", "tanstack-form", "@tanstack/react-form", "탄스택 폼"]
+      concerns: [react-tanstack-form]
+      missing: "missing local TanStack Form: <skill>"
     - group: react-web-seo
       skills: [react-web-seo]
       task_terms: ["seo", "canonical url", "검색 색인", "검색 노출", "json-ld"]

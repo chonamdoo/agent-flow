@@ -12,7 +12,7 @@ Storybook is opt-in. Apply to an existing React Web Storybook surface or explici
 ## State and Interaction Contract
 
 - Reproduce meaningful, actually possible component/screen states with typed args and existing render contracts. Include loading/error/empty/success only when they can occur; do not create impossible combinations to fill a checklist. Follow existing naming and fixture conventions rather than adding model copies or provider layers for their own sake.
-- An `error` prop fixture proves the error presentation. To claim RHF validation behavior, mount the actual form instance, resolver, and field adapter; exercise input, blur, invalid submit, correction, and resubmit. Read `react-hook-form-zod` only for this form branch. A story that bypasses validation cannot stand in for it.
+- An `error` prop fixture proves the error presentation. To claim form validation behavior, mount the actual form instance, validators/resolver, and field adapter; exercise input, blur, invalid submit, correction, and resubmit. Read `react-hook-form-zod` for RHF or `react-tanstack-form` for TanStack Form only when this branch applies. A story that bypasses validation cannot stand in for it.
 - Assert the observable contract: visible state, accessible errors, focus, and meaningful submission values/outcomes. A mocked function being called alone does not establish a correct user flow or server persistence.
 
 ## Isolation and Safety
