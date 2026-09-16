@@ -6,8 +6,8 @@ Read when changing play functions, visual/a11y coverage, form stories, or lifecy
 
 - Scope queries to the story's canvas through supported APIs. Prefer roles, accessible names, and labels. For portals outside the canvas, query the intentional overlay root without accidentally selecting Storybook's own controls.
 - Await user interactions and asynchronous observations/assertions as required by the installed runner. Avoid timing sleeps and incidental render-count assertions. Inspect the resulting screen/values/focus rather than only recording mock calls.
-- For actual RHF validation evidence, instantiate the real form with its schema and adapter. Input and blur must reach RHF; invalid submit must display/announce errors and focus the intended field; correction must permit a meaningful parsed submission. A prop-only error fixture remains useful for rendering, but does not exercise this path.
-- For async form stories, control the application port or network boundary so a realistic accepted or rejected outcome reaches the actual form logic. Use relevant record-change, newer-edit, or delayed-response scenarios from `react-hook-form-zod` when the changed behavior concerns them; do not add every race scenario to every story.
+- For actual form validation evidence, instantiate the real form with its schema and adapter. Input and blur must reach the installed form library; invalid submit must display/announce errors and focus the intended field; correction must permit a meaningful submission with the required transformed output. A prop-only error fixture remains useful for rendering, but does not exercise this path.
+- For async form stories, control the application port or network boundary so a realistic accepted or rejected outcome reaches the actual form logic. Use relevant record-change, newer-edit, or delayed-response scenarios from `react-hook-form-zod` or `react-tanstack-form`, matching the installed library; do not add every race scenario to every story.
 - Fixtures should satisfy the existing discriminated state contract. Do not cast impossible combinations through types simply to obtain a screenshot.
 
 ## Isolate Execution

@@ -3488,6 +3488,7 @@ _NEW_HOST_SKILLS = {
     "ktor-development-guide",
     "llm-tool-development",
     "react-hook-form-zod",
+    "react-tanstack-form",
     "react-web-seo",
     "react-storybook",
     "react-scroll-restoration",
@@ -3528,7 +3529,7 @@ def test_installer_entrypoints_consume_framework_fixtures(tmp_path: Path, binary
     if case["profile"] in {"node", "typescript", "nextjs", "python"}:
         expected_host_skills.add("llm-tool-development")
     if case.get("react_web"):
-        expected_host_skills.update({"react-hook-form-zod", "react-web-seo", "react-storybook"})
+        expected_host_skills.update({"react-hook-form-zod", "react-tanstack-form", "react-web-seo", "react-storybook"})
         expected_host_skills.update({
             "react-scroll-restoration",
             "react-runtime-i18n",
@@ -3545,6 +3546,12 @@ def test_installer_entrypoints_consume_framework_fixtures(tmp_path: Path, binary
             directory = tmp_path / host / "skills" / name
             if name in expected_host_skills:
                 assert (directory / "SKILL.md").is_file(), (case["id"], host, name)
+                if name == "react-tanstack-form":
+                    source = KIT_ROOT / "skills" / name
+                    for reference in (source / "references").rglob("*"):
+                        if reference.is_file():
+                            installed = directory / reference.relative_to(source)
+                            assert installed.read_bytes() == reference.read_bytes(), (case["id"], host, reference.name)
             else:
                 assert not directory.exists(), (case["id"], host, name)
                 assert not directory.is_symlink(), (case["id"], host, name)
