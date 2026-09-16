@@ -12563,6 +12563,7 @@ def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
         "solid-boundary-check: pass\n"
     )
     clean_code_review_gate = (
+        "architecture-contract: applied\n"
         "architecture-contract-review: applied\n"
         "must-avoid-check: pass\n"
         "usecase-interface-check: applied\n"
@@ -12687,6 +12688,7 @@ def _with_skills_gate(content: str, phase: str = "multi-review") -> str:
         "skills_checked: true\n"
         + _node_profile_skill_gate()
         + _node_review_parity_gate()
+        + "architecture-contract: applied\n"
         + "architecture-contract-review: applied\n"
         + "must-avoid-check: pass\n"
         + _node_project_local_gate(phase)
