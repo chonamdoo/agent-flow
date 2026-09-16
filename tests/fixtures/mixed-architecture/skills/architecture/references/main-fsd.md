@@ -26,6 +26,8 @@ Default to no entity promotion. Promote only when multiple slices need the same 
 
 I18n is a separate top-level locale concern, not a business slice or a shared segment. The original internal spelling was .lib, not _lib. Both i18n→shared and shared→i18n are explicitly excluded from lint zones while their direction remains unresolved. Do not silently ban either direction or require a refactor as if a decision had already been made. This exception is distinct from known-debt shared-UI fetching, which remains forbidden for new code.
 
+The follow-up synthetic-fixture policy allows app/widgets/features/entities to consume i18n and forbids i18n from importing those four layers, including their public entries. I18n remains a separate locale concern rather than sharing a layer rank with shared. The i18n↔shared exclusion and the public-entry/server-surface rules remain in force. This follow-up resolves the earlier blanket directional deferral; it is not a reconstruction of the original photo policy.
+
 ## Review evidence
 
 Review layer direction, slice isolation, segment placement, public APIs, shared business independence, server/client surfaces, and entity-promotion justification against changed Main files. Emit Main evidence only for Main changes; leave unrelated surface markers inapplicable rather than implying review. The app/shared no-slice cases and i18n/shared exclusions need valid examples alongside deliberate failures. Automated boundary checks do not prove that a product concept deserves an entity.

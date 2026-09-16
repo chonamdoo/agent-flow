@@ -164,6 +164,7 @@ class Adapter(ABC):
             source_root=project_root,
             resolution=resolution,
             role=role,
+            conditional_architecture_markers=phase.required_markers_by_architecture is not None,
         )
         # 이전 phase의 수치는 대화 컨텍스트가 아니라 여기로만 건너온다.
         # 렌더러가 넣으므로 agent가 빼거나 잊을 수 없다.

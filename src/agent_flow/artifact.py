@@ -30,12 +30,14 @@ from typing import Any, Literal
 
 import yaml
 
+from agent_flow.core import run_storage
 from agent_flow.core.architecture_policy import (
     architecture_norm_block_reason,
     architecture_snapshot,
     architecture_snapshot_block_reason,
 )
 from agent_flow.core.atomic_io import atomic_write_text, fsync_directory, read_bounded_regular_file
+from agent_flow.core.design_ledger import SpecPublicationObserver
 from agent_flow.core.design_value_check import (
     SPEC_PRE_MERGE_PHASES,
     SPEC_PUBLICATION_PHASES,
@@ -87,7 +89,6 @@ from agent_flow.core.worktree_isolation import (
 
 
 META_FILE = "meta.json"
-ACTIVE_LOCK = "active.lock"
 RUN_LIFECYCLE_LOCK = "lifecycle.lock"
 
 
@@ -127,6 +128,7 @@ class ActiveRun:
         next_command: str = "agent-flow continue",
         config_root: Path | None = None,
         project_root: Path | None = None,
+        publication_observer: SpecPublicationObserver | None = None,
     ) -> None:
         """Print the current run status and next available action."""
         artifacts = sorted(str(p.relative_to(self.path)) for p in self.path.rglob("*") if p.is_file())
@@ -204,9 +206,10 @@ class ActiveRun:
                 project, self.path, checkpoint, "", task_text=str(meta.get("task", "")),
                 profile=resolved_profile(config), since=_parse_timestamp(meta.get("started_at")),
                 evidence_root=config,
+                publication_observer=publication_observer,
                 checkpoint=phase_spec_checkpoint(
                     self.path, current_phase, required_artifact, config_root=config,
-                    required_markers=contract.required_markers,
+                    required_markers=effective_phase_markers(contract, snapshot.selection.mode),
                 ),
             )
             if contract.spec_ledger_required and not (self.path / "design-spec.md").is_file():
@@ -265,6 +268,7 @@ class ActiveRun:
                         current_phase,
                         config_root=config_root,
                         project_root=project_root,
+                        publication_observer=publication_observer,
                     )
                 except (OSError, ValueError) as exc:
                     reason = "architecture_policy_unreadable"
@@ -380,7 +384,7 @@ def create_run(
     try:
         with (
             shared_file_lease(installation_lock_path(checkout_root or project_root)),
-            exclusive_file_lease(runs_dir / ACTIVE_LOCK),
+            exclusive_file_lease(runs_dir / run_storage.ACTIVE_LOCK),
         ):
             existing = find_active_run(project_root)
             if existing is not None:
@@ -548,7 +552,7 @@ def approve_phase_artifact(
     run_dir: Path, *, token: str, config_root: Path | None = None
 ) -> dict[str, str]:
     """Acknowledge these artifact bytes, not the caller's identity."""
-    with exclusive_file_lease(run_dir.parent / ACTIVE_LOCK):
+    with exclusive_file_lease(run_dir.parent / run_storage.ACTIVE_LOCK):
         meta = read_meta(run_dir)
         load_run_workflow_definition(
             find_kit_root(), meta.get("workflow", "unknown"), meta, config_root=config_root,
@@ -565,7 +569,7 @@ def select_publication_review_scope(
     run_dir: Path, project_root: Path, *, base_oid: str,
 ) -> str:
     with exclusive_file_lease(run_dir / RUN_LIFECYCLE_LOCK):
-        with exclusive_file_lease(run_dir.parent / ACTIVE_LOCK):
+        with exclusive_file_lease(run_dir.parent / run_storage.ACTIVE_LOCK):
             meta = read_meta(run_dir)
             if not (run_dir / ACTIVE_MARKER).is_file() or not meta.get("run_id"):
                 raise ValueError("publication review scope requires an active run")
@@ -607,7 +611,7 @@ def _archive_review_scope_evidence(run_dir: Path) -> None:
 
 def ensure_review_binding(run_path: Path) -> ReviewBinding:
     """Return the run identity for review evidence, backfilling old runs once."""
-    with exclusive_file_lease(run_path.parent / ACTIVE_LOCK):
+    with exclusive_file_lease(run_path.parent / run_storage.ACTIVE_LOCK):
         meta = read_meta(run_path)
         run_id = meta.get("run_id")
         phase_entered_at = meta.get("phase_entered_at")
@@ -638,7 +642,7 @@ def bind_review_evidence(
     record: ReviewEvidenceRecord,
 ) -> None:
     """Publish the result binding only while the run attempt is still current."""
-    with exclusive_file_lease(run_path.parent / ACTIVE_LOCK):
+    with exclusive_file_lease(run_path.parent / run_storage.ACTIVE_LOCK):
         meta = read_meta(run_path)
         if (
             meta.get("run_id") != run_id
@@ -698,6 +702,7 @@ def _missing_completion_markers(
     *,
     config_root: Path | None = None,
     project_root: Path | None = None,
+    publication_observer: SpecPublicationObserver | None = None,
 ) -> list[str]:
     """Return required completion markers absent from an artifact."""
     contract = _phase_contract(
@@ -761,6 +766,7 @@ def _missing_completion_markers(
             profile=profile,
             since=_parse_timestamp(meta.get("started_at")),
             evidence_root=config,
+            publication_observer=publication_observer,
             checkpoint=phase_spec_checkpoint(
                 run_path, phase_id, artifact, config_root=config, required_markers=markers,
             ),
@@ -923,6 +929,7 @@ def phase_spec_checkpoint(
     artifact: Path | None,
     *,
     config_root: Path | None = None,
+    project_root: Path | None = None,
     required_markers: tuple[str, ...] | None = None,
 ) -> Literal["post-merge"] | None:
     if phase_id != "merge" or artifact is None or not artifact.is_file():
@@ -934,7 +941,8 @@ def phase_spec_checkpoint(
         contract = _phase_contract(
             run_path, str(meta.get("workflow", "")), phase_id, config_root=config_root,
         )
-        required_markers = contract.required_markers
+        snapshot = architecture_snapshot(project_root or config_root or run_path)
+        required_markers = effective_phase_markers(contract, snapshot.selection.mode)
     text = artifact.read_text(encoding="utf-8")
     return None if not text.strip() or _missing_markers(text, required_markers) else "post-merge"
 

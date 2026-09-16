@@ -3983,6 +3983,7 @@ def test_review_input_snapshot_uses_extended_git_timeout(
 ):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.adapters import hosted
+    from agent_flow.core import review_input
     from agent_flow.core.commands import SafeCommandResult
 
     timeouts = []
@@ -3996,13 +3997,13 @@ def test_review_input_snapshot_uses_extended_git_timeout(
             stderr="",
         )
 
-    monkeypatch.setattr(hosted, "git_safe", fake_git_safe)
+    monkeypatch.setattr(review_input, "git_safe", fake_git_safe)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
     hosted._write_review_input_snapshot(tmp_path, run_dir, "final-review")
 
-    assert timeouts == [hosted._REVIEW_INPUT_TIMEOUT_S] * 2
+    assert timeouts == [review_input._REVIEW_INPUT_TIMEOUT_S] * 2
 
 
 
@@ -4088,9 +4089,10 @@ def test_review_input_snapshot_rejects_total_overflow(
     monkeypatch,
 ):
     from agent_flow.adapters import hosted
+    from agent_flow.core import review_input
     from agent_flow.core.commands import SafeCommandResult
 
-    monkeypatch.setattr(hosted, "_REVIEW_INPUT_MAX_BYTES", 64)
+    monkeypatch.setattr(review_input, "_REVIEW_INPUT_MAX_BYTES", 64)
 
     def fake_git_safe(*args, **kwargs):
         return SafeCommandResult(
@@ -4100,7 +4102,7 @@ def test_review_input_snapshot_rejects_total_overflow(
             stderr="",
         )
 
-    monkeypatch.setattr(hosted, "git_safe", fake_git_safe)
+    monkeypatch.setattr(review_input, "git_safe", fake_git_safe)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
@@ -5064,6 +5066,8 @@ def test_pr_fix_refreshes_review_for_code_changes_not_discussion(tmp_path, mutat
     if mutation == "committed":
         for args in (("add", "."), ("commit", "-m", "fix")):
             subprocess.run(("git", *args), cwd=project, check=True, capture_output=True)
+    assert runner._invalidate_architecture_evidence_for_reentry(phases[4]) is None
+    artifact.write_text("fixed against refreshed norms\n", encoding="utf-8")
     for name in ("multi-review", "architecture-review", "gates"):
         (run_dir / f"{name}.md").write_text("old approval\n", encoding="utf-8")
     transition = runner._plan_transition(4, phases[4])
@@ -5245,6 +5249,7 @@ def test_legacy_pin_publication_rejects_invalid_metadata_without_writes(
 
 def test_legacy_pin_publication_reports_active_lock_contention(legacy_pin_runner):
     from agent_flow import artifact
+    from agent_flow.core.run_storage import ACTIVE_LOCK
     from agent_flow.core.workflow_pin import load_run_workflow_definition
     from agent_flow.core.worktree_isolation import (
         WorktreeIsolationError, exclusive_file_lease,
@@ -5253,7 +5258,7 @@ def test_legacy_pin_publication_reports_active_lock_contention(legacy_pin_runner
 
     runner, _pending, pin = legacy_pin_runner
     before = (runner.run_dir / "meta.json").read_bytes()
-    with exclusive_file_lease(runner.run_dir.parent / artifact.ACTIVE_LOCK):
+    with exclusive_file_lease(runner.run_dir.parent / ACTIVE_LOCK):
         with pytest.raises(WorktreeIsolationError):
             runner.run(ResumeMode.RESUME)
         assert (runner.run_dir / "meta.json").read_bytes() == before

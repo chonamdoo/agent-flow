@@ -121,9 +121,11 @@ phases:
     description: Break PRD into independently shippable slices.
     prompt: |
       Create a small-slice implementation plan. Each slice must be testable,
-      independently reviewable, and have explicit verification. If architecture
-      mode is `ddd`, every slice must declare layer scope using domain,
-      application, infrastructure, and presentation. Output: artifacts/slice-plan.md.
+      independently reviewable, and have explicit verification. Record each
+      slice's boundary scope in the selected architecture contract's own terms.
+      DDD is a separate modeling axis: record the bounded contexts and domain
+      concerns for each slice when DDD is selected.
+      Output: artifacts/slice-plan.md.
 
   - id: plan-review
     skills:
@@ -258,11 +260,8 @@ phases:
       `.agent-flow/skills/index.json`, changed files, and task scope. Read only
       the touched profile skill union before writing tests. Unrelated
       platform skill absence must not block. Save the failure summary and
-      command output. If a required local skill is missing for this host, record
-      `skill-availability: degraded`, put its bare name in
-      `missing-required-profile-skills:`, keep the declared
-      `missing local <group>: <skill>` sentence and source URL in prose/Calibration,
-      then complete the artifact with the skills available.
+      command output. For missing required skills, follow the Missing Required
+      Skills section of `.agent-flow/skills/code-generation-discipline/SKILL.md`.
       End with:
 
           ## Completion Gate
@@ -472,8 +471,7 @@ phases:
       request-changes. Reviewers are installed Claude and Codex CLIs only.
       Never use OMP or controller-session work as a reviewer fallback. Each
       reviewer section must include `reviewer-source: sub-agent`. Record
-      per-reviewer verdicts and end with `## Overall` followed by exactly one
-      verdict line: `verdict: approve` or `verdict: request-changes`.
+      per-reviewer verdicts.
       Apply agent-flow-concise-output: one finding per line, concise
       prose, no emoji, and parser verdict markers unchanged.
       Apply code-generation-discipline's Before Starting skill resolution and
@@ -496,7 +494,7 @@ phases:
       code through a token, declare it as
       `design-values-implemented: <key>=<token>` and that token must be in the
       diff.
-      Also include:
+      Include the Completion Gate before the final Overall section:
 
           ## Completion Gate
           skills_checked: true
@@ -515,6 +513,8 @@ phases:
           solid-architecture-check: applied
 
       Output: artifacts/multi-review.md.
+      End with `## Overall` followed by exactly one verdict line:
+      `verdict: approve` or `verdict: request-changes`.
 
   - id: architecture-review
     architecture_decision: required
@@ -577,14 +577,12 @@ phases:
       violation or failed required criterion makes the verdict `request-changes`
       for that reviewer. Any request-changes
       from either reviewer makes the overall verdict request-changes.
-      Output architecture-review.md with each reviewer section and end with
-      `## Overall` followed by exactly one verdict line:
-      `verdict: approve` or `verdict: request-changes`.
+      Output architecture-review.md with each reviewer section.
       Apply agent-flow-concise-output for findings and keep verdict markers
       unchanged.
       Apply code-generation-discipline's Before Starting skill resolution and
       Missing Required Skills procedure before judging code.
-      End with:
+      Include the Completion Gate before the final Overall section:
 
           ## Completion Gate
           skills_checked: true
@@ -601,6 +599,9 @@ phases:
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
           solid-boundary-check: pass|fail
+
+      End with `## Overall` followed by exactly one verdict line:
+      `verdict: approve` or `verdict: request-changes`.
 
   - id: gates
     description: Runner runs the profile gates itself after reviewer approve. Routes fail→fix-loop, pass→commit.

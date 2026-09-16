@@ -21,11 +21,12 @@ if str(SRC_ROOT) not in sys.path:
 
 from agent_flow.adapters.hosted import (  # noqa: E402
     HostedAdapter,
-    _base_candidate_refs,
     _profile_base_branch,
     _write_review_input_snapshot as _capture_review_input_snapshot,
 )
 from agent_flow.core.commands import SafeCommandResult  # noqa: E402
+from agent_flow.core import review_input  # noqa: E402
+from agent_flow.core.review_input import _base_candidate_refs, review_document_scope  # noqa: E402
 from agent_flow.core.worktree_isolation import WorktreeIsolationError  # noqa: E402
 
 
@@ -389,11 +390,9 @@ def test_snapshot_prefers_the_remote_base_when_ordering_cannot_be_proven(
     tmp_path: Path,
     monkeypatch,
 ):
-    from agent_flow.adapters import hosted
-
     project = tmp_path / "project"
     _remote_ahead_repo(project)
-    monkeypatch.setattr(hosted, "git_proves_ancestor", lambda **kwargs: False)
+    monkeypatch.setattr(review_input, "git_proves_ancestor", lambda **kwargs: False)
 
     snapshot = _write_review_input_snapshot(
         project, _run_dir(project), "final-review", base_branch="main"
@@ -439,13 +438,11 @@ def test_snapshot_refuses_to_ship_no_evidence_when_base_is_unusable(tmp_path: Pa
 
 
 def test_author_scope_is_unknown_when_declared_base_has_no_evidence(tmp_path: Path):
-    from agent_flow.adapters.hosted import review_document_scope
-
     project = tmp_path / "project"
     _committed_feature_repo(project)
 
     assert review_document_scope(
-        project, _run_dir(project), base_branch="release/absent",
+        project, {}, base_branch="release/absent",
     ) is None
 
 
@@ -453,8 +450,6 @@ def test_author_scope_is_unknown_when_declared_base_has_no_evidence(tmp_path: Pa
 def test_review_scope_preserves_literal_paths_with_quotepath_disabled(
     tmp_path: Path, committed: bool,
 ):
-    from agent_flow.adapters.hosted import review_document_scope
-
     project = tmp_path / "project"
     _init_repo(project)
     _git(project, "checkout", "-b", "feat-x")
@@ -468,7 +463,7 @@ def test_review_scope_preserves_literal_paths_with_quotepath_disabled(
         _git(project, "commit", "-m", "change quoted path")
 
     assert review_document_scope(
-        project, _run_dir(project), base_branch="main",
+        project, {}, base_branch="main",
     ) == (path,)
     assert _git(project, "config", "--get", "core.quotepath").strip() == "false"
 
@@ -479,9 +474,9 @@ def test_author_scope_does_not_require_a_publishable_snapshot(tmp_path: Path, mo
     project = tmp_path / "project"
     _init_repo(project)
     run_dir = _run_dir(project)
-    monkeypatch.setattr(hosted, "_REVIEW_INPUT_MAX_BYTES", 128)
+    monkeypatch.setattr(review_input, "_REVIEW_INPUT_MAX_BYTES", 128)
 
-    assert hosted.review_document_scope(project, run_dir) is None
+    assert review_document_scope(project, {}) is None
     with pytest.raises(WorktreeIsolationError, match="snapshot exceeds"):
         hosted._write_review_input_snapshot(project, run_dir, "review")
 
@@ -508,7 +503,7 @@ def test_snapshot_refuses_a_tracked_change_without_a_diff(tmp_path: Path, monkey
             args=("git", *args), returncode=0, stdout=stdout, stderr=""
         )
 
-    monkeypatch.setattr(hosted, "git_safe", fake_git_safe)
+    monkeypatch.setattr(review_input, "git_safe", fake_git_safe)
 
     with pytest.raises(WorktreeIsolationError, match="tracked change"):
         hosted._write_review_input_snapshot(tmp_path, _run_dir(tmp_path), "review")
@@ -530,7 +525,7 @@ def test_snapshot_reports_truncation_instead_of_failing_the_round(
             output_truncated=True,
         )
 
-    monkeypatch.setattr(hosted, "git_safe", fake_git_safe)
+    monkeypatch.setattr(review_input, "git_safe", fake_git_safe)
 
     snapshot = hosted._write_review_input_snapshot(
         tmp_path, _run_dir(tmp_path), "review"
@@ -553,12 +548,12 @@ def test_snapshot_still_fails_closed_on_a_broken_git(tmp_path: Path, monkeypatch
             error="git is gone",
         )
 
-    monkeypatch.setattr(hosted, "git_safe", fake_git_safe)
+    monkeypatch.setattr(review_input, "git_safe", fake_git_safe)
 
     with pytest.raises(WorktreeIsolationError, match="could not precompute"):
         hosted._write_review_input_snapshot(tmp_path, _run_dir(tmp_path), "review")
     with pytest.raises(WorktreeIsolationError, match="could not precompute"):
-        hosted.review_document_scope(tmp_path, _run_dir(tmp_path))
+        review_document_scope(tmp_path, {})
 
 
 def test_profile_base_branch_prefers_branching_base():

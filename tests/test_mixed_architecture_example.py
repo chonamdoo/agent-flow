@@ -76,8 +76,15 @@ def _assert_lint_passes(project: Path, *, app: str | None = None) -> list[dict]:
         ("widgets/catalog/ui/catalog.tsx", "@/entities/product/model/product", "import-x/no-restricted-paths"),
         ("entities/product/index.ts", "./index.server", "import-x/no-restricted-paths"),
         ("features/cart/ui/cart.client.tsx", "@/entities/product/index.server", "mixed/client-server"),
+        ("i18n/messages.ts", "@/app/page", "import-x/no-restricted-paths"),
+        ("i18n/messages.ts", "@/widgets/catalog", "import-x/no-restricted-paths"),
+        ("i18n/messages.ts", "@/features/cart", "import-x/no-restricted-paths"),
+        ("i18n/messages.ts", "../entities/product", "import-x/no-restricted-paths"),
     ],
-    ids=["upward", "sibling-relative", "private-entry", "universal-server-export", "client-server"],
+    ids=[
+        "upward", "sibling-relative", "private-entry", "universal-server-export", "client-server",
+        "i18n-app", "i18n-widgets", "i18n-features", "i18n-entities-relative",
+    ],
 )
 def test_main_boundaries_detect_and_recover(
     mixed_project: Path, relative_importer: str, dependency: str, rule_id: str,
@@ -88,6 +95,16 @@ def test_main_boundaries_detect_and_recover(
         f'import * as boundaryProbe from "{dependency}";\nexport {{ boundaryProbe }};',
         rule_id,
     )
+
+
+def test_i18n_consumers_and_shared_exception_remain_valid(mixed_project: Path) -> None:
+    importer = mixed_project / "apps/main/src/entities/product/model/product.ts"
+    original = importer.read_text(encoding="utf-8")
+    importer.write_text(
+        original + '\nexport { locale } from "@/i18n/locale";\n', encoding="utf-8",
+    )
+    _assert_lint_passes(mixed_project)
+    _assert_lint_passes(mixed_project, app="main")
 
 
 def _assert_violation_and_recovery(

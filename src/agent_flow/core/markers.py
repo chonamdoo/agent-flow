@@ -53,7 +53,7 @@ def missing_architecture_assessment_markers(
     values = completion_gate_marker_values(text)
     key = "architecture-contract" if conditional else "clean-architecture"
     missing: list[str] = []
-    if key in values and values[key] != "applied":
+    if (conditional or key in values) and values.get(key) != "applied":
         missing.append(f"{key}: applied")
     if "must-avoid-check" in values and values["must-avoid-check"] not in {"pass", "fail"}:
         missing.append("must-avoid-check: pass|fail")

@@ -17,12 +17,13 @@ from agent_flow.adapters.hosted import (
     HostedAdapter,
     _reviewer_jobs,
     _run_multi_review_distribution,
-    _snapshot_document_scope,
     _write_review_input_snapshot,
-    review_document_scope,
 )
 from agent_flow.artifact import read_meta, write_meta
+from agent_flow.core.local_skills import local_skill_prompt_block
+from agent_flow.core.markers import completion_gate_marker_values, missing_architecture_assessment_markers
 from agent_flow.core.phase_workflow import parse_phase_workflow_definition
+from agent_flow.core.review_input import _snapshot_document_scope, review_document_scope
 from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.core.skill_scope import scope_document_ids, scope_names
 from agent_flow.core.worktree_isolation import WorktreeIsolationError
@@ -280,6 +281,43 @@ def test_scope_queries_preserve_published_snapshot_after_same_document_code_edit
     assert not (runner.run_dir / "implement-review-input.patch").exists()
 
 
+@pytest.mark.parametrize("publication", [False, True], ids=["branch", "publication"])
+def test_runner_and_reviewer_preserve_mixed_change_scope(project, publication):
+    _write(project, "apps/a/prior.py", "prior = 1\n")
+    _git(project, "add", "apps/a/prior.py")
+    _git(project, "commit", "-m", "Record earlier branch work")
+    base_oid = _git(project, "rev-parse", "HEAD").strip()
+    phase = Phase(id="final-review", description="Review mixed changes")
+    runner = _pin_runner(project, phase)
+    if publication:
+        meta = read_meta(runner.run_dir)
+        meta["review_scope"] = {"kind": "publication", "base_oid": base_oid}
+        write_meta(runner.run_dir, meta)
+    _write(project, "apps/a/committed.py", "committed = 1\n")
+    _git(project, "add", "apps/a/committed.py")
+    _git(project, "commit", "-m", "Commit reviewable work")
+    _write(project, "apps/a/staged.py", "staged = 1\n")
+    _git(project, "add", "apps/a/staged.py")
+    _write(project, "apps/a/model.py", "value = 2\n")
+    (project / "apps/b/model.py").unlink()
+    _write(project, "apps/b/untracked.py", "untracked = 1\n")
+    expected = {
+        "apps/a/committed.py", "apps/a/staged.py", "apps/a/model.py",
+        "apps/b/model.py", "apps/b/untracked.py",
+    }
+    if not publication:
+        expected.add("apps/a/prior.py")
+
+    snapshot = _write_review_input_snapshot(project, runner.run_dir, phase.id, base_branch="main")
+    published = snapshot.path.read_bytes()
+    metadata = read_meta(runner.run_dir)
+
+    assert snapshot.document_scope == tuple(sorted(expected))
+    assert runner._phase_document_scope(phase) == snapshot.document_scope
+    assert snapshot.path.read_bytes() == published
+    assert read_meta(runner.run_dir) == metadata
+
+
 def test_unknown_next_phase_receives_all_documents_after_narrow_code_phase(project, monkeypatch, capsys):
     monkeypatch.setattr(runner_module, "assert_managed_hooks_registered", lambda *args: None)
     _write(project, "apps/a/model.py", "value = 2\n")
@@ -310,7 +348,7 @@ def test_porcelain_status_selects_untracked_document_paths_with_always_color(pro
     snapshot = _write_review_input_snapshot(project, run_dir, "final-review", base_branch="main")
 
     assert snapshot.document_scope == ("apps/a/new.py",)
-    assert review_document_scope(project, run_dir, base_branch="main") == snapshot.document_scope
+    assert review_document_scope(project, {}, base_branch="main") == snapshot.document_scope
     _assert_reviewer_documents(project, run_dir, snapshot, {"a"})
 
 
@@ -458,6 +496,24 @@ def test_document_growth_preserves_unreadable_evidence_and_emits_blocked_status(
     assert payload["next_command"] == "agent-flow continue"
 
 
+def test_pr_watch_cold_start_reports_unavailable_gh(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-c", """
+from agent_flow.pr_watch import fetch_pr
+print(fetch_pr(225, repo="owner/repo").status)
+"""],
+        cwd=tmp_path,
+        env={
+            **os.environ, "PYTHONPATH": str(KIT_ROOT / "src"),
+            "PYTHONDONTWRITEBYTECODE": "1", "PATH": "",
+        },
+        capture_output=True, text=True, timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "error"
+
+
 def _completion(skills: str, architecture_key: str = "architecture-contract", value: str = "applied") -> str:
     return (
         "# Implementation\n\n## Architecture Boundary Map\nExisting feature ownership is preserved.\n\n"
@@ -498,6 +554,69 @@ def test_runner_conditional_markers_require_clean_sections_only_in_clean_mode(pr
     artifact.write_text(_completion(skills, value="n/a"), encoding="utf-8")
     assert "architecture-contract: applied" in runner._missing_required_markers(phase)
 
+
+
+@pytest.mark.parametrize(("mode", "contract_required"), [
+    ("local", True), ("clean", True), ("clean", False), ("pending", False),
+])
+def test_empty_conditional_phase_requires_selected_assessment(project, mode, contract_required):
+    skills = "architecture"
+    required = ()
+    if mode != "local":
+        _write(project, ".agent-flow.project.yaml", f"schema_version: 1\narchitecture:\n  mode: {mode}\n")
+        if mode == "clean":
+            _write(project, "skills/clean-architecture-core/SKILL.md", "---\nname: clean-architecture-core\n---\nKeep domain behavior independent.\n")
+            required = ("clean-architecture-core",)
+            skills = "clean-architecture-core"
+        if not contract_required:
+            _write(project, "skills/alpha/SKILL.md", "---\nname: alpha\n---\nPreserve current behavior.\n")
+            required = ("alpha",)
+            skills = "alpha"
+        _git(project, "add", ".agent-flow.project.yaml", "skills")
+        _git(project, "commit", "-m", "Select assessment contract")
+    phase = Phase(
+        id="implement", description="Apply selected contract", skills=PhaseSkills(required=required),
+        required_markers_by_architecture={},
+    )
+    runner = _pin_runner(project, phase)
+    artifact = runner.run_dir / "implement.md"
+    complete = _completion(skills).replace("must-avoid-check: pass\n", "")
+    artifact.write_text(complete.replace("architecture-contract: applied\n", ""), encoding="utf-8")
+
+    prompt = local_skill_prompt_block(
+        project, phase.id, phase_skills=phase.skills, profile=runner.profile,
+        conditional_architecture_markers=True,
+    )
+    marker_template = prompt.rsplit("```text\n", 1)[1].split("```", 1)[0]
+    marker_values = completion_gate_marker_values("## Completion Gate\n" + marker_template)
+    assert ("architecture-contract" in marker_values) is contract_required
+    assert missing_architecture_assessment_markers(
+        "## Completion Gate\n" + marker_template,
+        contract_required=contract_required, conditional=True,
+    ) == []
+    expected = ["architecture-contract: applied"] if contract_required else []
+    assert runner._missing_required_markers(phase) == expected
+    artifact.write_text(complete.replace("architecture-contract: applied", "architecture-contract: n/a"), encoding="utf-8")
+    assert runner._missing_required_markers(phase) == expected
+    artifact.write_text(complete, encoding="utf-8")
+    assert runner._missing_required_markers(phase) == []
+
+
+def test_conditional_review_cannot_omit_declared_must_avoid_assessment(project):
+    phase = Phase(
+        id="review", description="Review selected contract",
+        required_markers=("must-avoid-check: pass|fail|n/a",),
+        required_markers_by_architecture={},
+    )
+    runner = _pin_runner(project, phase)
+    artifact = runner.run_dir / "review.md"
+    complete = _completion("architecture")
+    artifact.write_text(complete.replace("must-avoid-check: pass\n", ""), encoding="utf-8")
+    assert runner._missing_required_markers(phase) == ["must-avoid-check: pass|fail|n/a"]
+    artifact.write_text(complete.replace("must-avoid-check: pass", "must-avoid-check: n/a"), encoding="utf-8")
+    assert runner._missing_required_markers(phase) == ["must-avoid-check: pass|fail"]
+    artifact.write_text(complete, encoding="utf-8")
+    assert runner._missing_required_markers(phase) == []
 
 @pytest.mark.parametrize("required", [False, True], ids=["not-required", "required"])
 def test_old_phase_without_conditional_field_keeps_legacy_na_guard(project, required):

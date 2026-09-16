@@ -104,6 +104,7 @@ def _gate_text(resolution: SkillResolution, *, omit: str | None = None) -> str:
         f"project-local-skills-used: {used}\n"
         "project-local-skill-docs: applied\n"
         f"missing-required-profile-skills: {', '.join(skill.name for skill in resolution.missing) or 'none'}\n"
+        f"architecture-contract: {'applied' if architecture_contract_required(resolution) else 'n/a'}\n"
         "must-avoid-check: pass\n"
     )
 

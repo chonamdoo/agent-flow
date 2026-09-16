@@ -269,6 +269,7 @@ def local_skill_prompt_block(
     context: ResolutionContext | None = None,
     provider_authority: str = "",
     role: str = "author",
+    conditional_architecture_markers: bool = False,
 ) -> str:
     """Render resolved local skill content for a phase prompt."""
     resolution = resolution or phase_skill_resolution(
@@ -302,6 +303,11 @@ def local_skill_prompt_block(
     )
     return block + _marker_instruction(
         resolution, enforced=enforced, routed_missing=routed_missing, role=role,
+        architecture_markers=missing_architecture_assessment_markers(
+            "",
+            contract_required=architecture_contract_required(resolution),
+            conditional=conditional_architecture_markers,
+        ),
     )
 
 
@@ -497,6 +503,7 @@ def _marker_instruction(
     enforced: bool = True,
     routed_missing: Sequence[str] = (),
     role: str = "author",
+    architecture_markers: Sequence[str] = (),
 ) -> str:
     """Describe evidence markers for the author or reviewer receiving the prompt."""
     expected = ", ".join(skill.name for skill in resolution.available_required) or "n/a"
@@ -514,6 +521,7 @@ def _marker_instruction(
             "```text",
             f"skill-availability: {availability}",
             "skill-use-evidence: verified|unavailable",
+            *architecture_markers,
             "project-local-skills: checked",
             f"project-local-skills-used: {expected}",
             APPLIED_MARKER,

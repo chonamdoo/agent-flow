@@ -53,6 +53,19 @@ def test_architecture_assessment_preserves_applicability_guards(
     ) == []
 
 
+@pytest.mark.parametrize("contract_required", [False, True])
+def test_conditional_assessment_cannot_be_omitted_when_required(contract_required: bool) -> None:
+    from agent_flow.core.markers import missing_architecture_assessment_markers
+
+    assert missing_architecture_assessment_markers(
+        _gate(""), contract_required=contract_required, conditional=True,
+    ) == (["architecture-contract: applied"] if contract_required else [])
+    assert missing_architecture_assessment_markers(
+        _gate("architecture-contract: applied"),
+        contract_required=contract_required, conditional=True,
+    ) == []
+
+
 def test_legacy_assessment_guard_does_not_alias_new_marker_names() -> None:
     from agent_flow.core.markers import missing_architecture_assessment_markers
 

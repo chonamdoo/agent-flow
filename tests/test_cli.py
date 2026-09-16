@@ -4822,6 +4822,7 @@ if (codexContext !== undefined) {
                 )
                 self.assertEqual(started.returncode, 0, started.stderr)
                 run_dir = _node_phase_run_dir(project, worktree=plan.name)
+                _capture_node_spec_source(run_dir, _node_spec_gate(run_dir))
                 artifact = _set_node_phase(run_dir, phase_id)
                 entered = subprocess.run(
                     (node, cli, "run", "advance"), cwd=plan.path, text=True,
@@ -5750,6 +5751,7 @@ if (codexContext !== undefined) {
                 managed_worktrees_root(project_root) / "feat-demo"
             )
             _set_node_phase(run_dir, "pr-watch")
+            _capture_node_spec_source(run_dir, _node_spec_gate(run_dir))
 
             watch = run_dir / _node_phase_artifact("pr-watch")
             watch.parent.mkdir(parents=True, exist_ok=True)
@@ -5912,10 +5914,37 @@ if (codexContext !== undefined) {
             self.assertEqual(back_to_watch_again.returncode, 0, back_to_watch_again.stderr)
             self.assertIn("current_phase: pr-watch", back_to_watch_again.stdout)
 
+            remote = Path(temp_dir) / "remote.git"
+            subprocess.run(
+                ("git", "init", "--bare", str(remote)),
+                check=True, capture_output=True, text=True,
+            )
+            subprocess.run(
+                ("git", "remote", "add", "origin", str(remote)),
+                cwd=plan.path, check=True,
+            )
+            subprocess.run(
+                ("git", "push", "origin", "HEAD"),
+                cwd=plan.path, check=True, capture_output=True, text=True,
+            )
+            head = subprocess.run(
+                ("git", "rev-parse", "HEAD"),
+                cwd=plan.path, check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            (run_dir / _node_phase_artifact("push-pr")).write_text(
+                "remote: origin\n"
+                f"branch: {plan.branch}\n"
+                f"remote-oid: {head}\n"
+                "pr-url: https://github.com/acme/demo/pull/7\n"
+                "pr-base: main\n",
+                encoding="utf-8",
+            )
             check_data["statusCheckRollup"][0]["conclusion"] = "SUCCESS"
             check_data["statusCheckRollup"][0]["detailsUrl"] = "https://github.com/acme/demo/actions/runs/2/job/2"
             check_data["statusCheckRollup"][0]["completedAt"] = "2026-09-11T11:00:00Z"
             check_data["reviewDecision"] = "APPROVED"
+            check_data["baseRefName"] = "main"
+            check_data["headRefName"] = plan.branch
             observe(check_data)
             ready = subprocess.run(
                 (node, cli, "run", "advance"),
@@ -5923,6 +5952,7 @@ if (codexContext !== undefined) {
                 text=True,
                 capture_output=True,
                 check=False,
+                env=env,
             )
             self.assertEqual(ready.returncode, 0, ready.stderr)
             self.assertIn("current_phase: merge-approval", ready.stdout)

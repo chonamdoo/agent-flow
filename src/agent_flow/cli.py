@@ -51,6 +51,7 @@ from agent_flow.core.design_ledger import (
     record_manual_spec_approval,
     render_spec_changes,
 )
+from agent_flow.spec_publication import observe_spec_publication
 from agent_flow.core.design_value_check import missing_spec_item_evidence
 from agent_flow.core.gate_plan import deferred_check_names, profile_gate_commands
 from agent_flow.core.gates import GateCommand, run_gates
@@ -1114,6 +1115,7 @@ def main(argv: list[str] | None = None) -> int:
                     next_command=_continue_command(root, args.worktree),
                     config_root=root,
                     project_root=run_root,
+                    publication_observer=observe_spec_publication,
                 )
                 _print_pending_spec_change_status(active.path)
             except (OSError, ValueError) as exc:
@@ -1480,6 +1482,7 @@ def main(argv: list[str] | None = None) -> int:
                     project_root=project,
                     profile=resolved_profile(root),
                     config_root=root,
+                    publication_observer=observe_spec_publication,
                 )
                 print(f"SPEC approved: {approval_path}")
                 return 0
@@ -1532,9 +1535,11 @@ def main(argv: list[str] | None = None) -> int:
                             profile=resolved_profile(root),
                             since=context["since"],
                             evidence_root=root,
+                            publication_observer=observe_spec_publication,
                             review_rejected=review_rejected,
                             checkpoint=phase_spec_checkpoint(
                                 run_dir, args.phase, artifact, config_root=root,
+                                project_root=project,
                             ),
                         ),
                         ensure_ascii=False,
@@ -3657,6 +3662,7 @@ def _run_skills_command(
                     architecture_root=project_root,
                     source_root=project_root,
                     resolution=resolution,
+                    conditional_architecture_markers=conditional_markers,
                 )
             )
             if conditional_markers and required_markers:

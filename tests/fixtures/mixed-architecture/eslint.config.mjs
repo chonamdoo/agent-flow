@@ -14,6 +14,11 @@ const zones = mainLayers.slice(1).map((layer, index) => ({
 }));
 
 const mainRoot = path.join(root, "apps/main/src");
+zones.push({
+  target: path.join(mainRoot, "i18n"),
+  from: mainLayers.filter((layer) => layer !== "shared").map((layer) => path.join(mainRoot, layer)),
+  message: "Locale code must not depend on application or business layers.",
+});
 const mainFiles = sourceFiles(mainRoot);
 const sliceSegments = new Set(["ui", "api", "model", "lib", "config"]);
 

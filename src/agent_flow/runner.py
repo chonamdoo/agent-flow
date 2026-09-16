@@ -39,9 +39,7 @@ from typing import Any, Literal, NamedTuple, Sequence
 from agent_flow.multi_review import eligible_reviewer_names
 from agent_flow.adapters.auto import detect_adapter
 from agent_flow.adapters.generic import STUB_SENTINEL
-from agent_flow.adapters.hosted import review_document_scope
 from agent_flow.artifact import (
-    ACTIVE_LOCK,
     META_FILE,
     RUN_LIFECYCLE_LOCK,
     create_run,
@@ -74,6 +72,7 @@ from agent_flow.core.command_evidence import (
 )
 from agent_flow.core.context_contract import run_relative_path
 from agent_flow.core.run_storage import RUNS_DIRNAME
+from agent_flow.core.review_input import review_document_scope
 from agent_flow.core.review_scope import review_scope_block_reason
 from agent_flow.core.observation import (
     PHASE_ENTERED as OBS_PHASE_ENTERED,
@@ -96,6 +95,8 @@ from agent_flow.core.design_value_check import (
     missing_design_value_implementations,
     missing_spec_item_evidence,
 )
+from agent_flow.core.run_storage import ACTIVE_LOCK
+from agent_flow.spec_publication import observe_spec_publication
 from agent_flow.core.hook_integrity import assert_managed_hooks_registered
 from agent_flow.core.leader_tripwire import leader_sweep_include_ignored
 from agent_flow.core.worktrees import (
@@ -1118,6 +1119,7 @@ class Runner:
             task_text=str(meta.get("task", "")), profile=self.profile,
             since=_meta_timestamp(meta.get("started_at")), evidence_root=self.config_root,
             checkpoint=checkpoint,
+            publication_observer=observe_spec_publication,
         )
 
     def _check_spec_transition(self, from_index: int, to_index: int) -> None:
@@ -2166,7 +2168,7 @@ class Runner:
         assert self.run_dir is not None
         base = self.profile.get("branching", {}).get("base") or self.profile.get("pr", {}).get("target_branch")
         return review_document_scope(
-            self.project_root, self.run_dir, base_branch=base,
+            self.project_root, read_meta(self.run_dir), base_branch=base,
         )
 
     def _effective_markers(self, phase: Phase) -> tuple[str, ...]:
@@ -2355,6 +2357,7 @@ class Runner:
                 profile=self.profile,
                 since=_meta_timestamp(meta.get("started_at")),
                 evidence_root=self.config_root,
+                publication_observer=observe_spec_publication,
                 review_rejected=review_rejected,
                 checkpoint=phase_spec_checkpoint(
                     self.run_dir, phase.id, artifact, config_root=self.config_root,
@@ -2584,8 +2587,11 @@ class Runner:
             for _, history, text in preserved:
                 write_run_subpath_text(self.run_dir, history, text)
             meta = read_meta(self.run_dir)
+            pr_fix_baseline = meta.get("pr_fix_baseline")
             phase_index = next(index for index, item in enumerate(self.phases) if item.id == phase.id)
             self._advance_phase(meta, phase_index, blocked=False)
+            if phase.id in {"pr-comment-fix", "pr-ci-fix"}:
+                meta["pr_fix_baseline"] = pr_fix_baseline
             write_meta(self.run_dir, meta)
             for artifact, _, _ in preserved:
                 artifact.unlink()

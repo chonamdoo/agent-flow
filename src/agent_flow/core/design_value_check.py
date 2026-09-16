@@ -30,7 +30,7 @@ from agent_flow.core.command_evidence import (
 from agent_flow.core.design_ledger import (
     LEDGER_SOURCE_PHASES,
     parse_spec_item_section,
-    missing_spec_publication_evidence,
+    SpecPublicationObserver,
     read_manual_spec_approvals,
     read_ledger,
 )
@@ -62,6 +62,7 @@ def missing_spec_item_evidence(
     evidence_root: Path | None = None,
     review_rejected: bool = False,
     checkpoint: Literal["pre-merge", "post-merge"] | None = None,
+    publication_observer: SpecPublicationObserver | None = None,
 ) -> list[str]:
     if phase_id in LEDGER_SOURCE_PHASES:
         parsed = parse_spec_item_section(text)
@@ -141,13 +142,19 @@ def missing_spec_item_evidence(
         any(item.due == "pre-merge" for item in items)
         or phase_id in {"merge", "merge-approval", "pre-merge"}
     ):
-        unmet.extend(missing_spec_publication_evidence(
-            project_root, run_dir, profile=profile,
-            config_root=evidence_root,
-            post_merge=checkpoint == "post-merge" or (
-                checkpoint is None and phase_id in {"cleanup", "handoff", "terminal"}
-            ),
-        ))
+        if publication_observer is None:
+            unmet.append("pre-merge SPEC: publication observer is unavailable")
+        else:
+            publication = publication_observer(
+                project_root, run_dir, profile=profile,
+                config_root=evidence_root,
+                post_merge=checkpoint == "post-merge" or (
+                    checkpoint is None and phase_id in {"cleanup", "handoff", "terminal"}
+                ),
+            )
+            unmet.extend(publication.missing)
+            if not publication.missing and not publication.head:
+                unmet.append("pre-merge SPEC: cannot prove current publication HEAD")
     for item in items:
         lowered = item.verification.lower()
         if lowered.startswith("test:"):

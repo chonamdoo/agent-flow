@@ -899,7 +899,7 @@ def test_unsafe_feedback_target_returns_error_without_writing(tmp_path, monkeypa
 def test_watch_waits_for_observation_lease_before_returning_green(tmp_path, monkeypatch):
     import json
     import threading
-    from agent_flow.artifact import ACTIVE_LOCK
+    from agent_flow.core.run_storage import ACTIVE_LOCK
     from agent_flow.core.worktree_isolation import exclusive_file_lease
     from agent_flow.pr_watch import watch_pr
 

@@ -165,7 +165,8 @@ phases:
       Decompose design.md into ordered slices. Each slice must be
       implementable within ~50% of the context window. Each slice declares:
       - goal (one sentence, domain-meaningful per ubiquitous language)
-      - layer scope (domain / usecase / data / presentation, or combination)
+      - boundary scope in the selected architecture contract's own terms
+      - bounded contexts and domain concerns, recorded separately from structural scope
       - aggregates touched
       - test cases that will drive the upcoming TDD red phase (translate
         acceptance criteria into specific test names)
@@ -440,9 +441,7 @@ phases:
       code through a token, declare it as
       `design-values-implemented: <key>=<token>` and that token must be in the
       diff.
-      End with `## Overall` followed by exactly one verdict line: `verdict: approve` or
-      `verdict: request-changes`.
-      Also include:
+      Include the Completion Gate before the final Overall section:
 
           ## Completion Gate
           skills_checked: true
@@ -461,6 +460,9 @@ phases:
           solid-boundary-check: pass|fail
           architecture-contract-review: applied
           solid-architecture-check: applied
+
+      End with `## Overall` followed by exactly one verdict line:
+      `verdict: approve` or `verdict: request-changes`.
 
   - id: gates
     description: Runner runs the profile gates itself after final-review approve. Routes fail→fix-loop, pass→commit.

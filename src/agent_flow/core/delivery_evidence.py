@@ -46,7 +46,7 @@ def missing_delivery_evidence(
     return []
 
 
-def _delivery_fields(
+def parse_delivery_fields(
     text: str, names: tuple[str, ...]
 ) -> tuple[dict[str, str], list[str]]:
     body = unfenced_markdown_text(text)
@@ -72,7 +72,7 @@ def _delivery_fields(
 
 
 def _missing_commit_evidence(project_root: Path, text: str) -> list[str]:
-    fields, errors = _delivery_fields(text, ("commit-oid", "commit-subject"))
+    fields, errors = parse_delivery_fields(text, ("commit-oid", "commit-subject"))
     if errors:
         return errors
 
@@ -144,7 +144,7 @@ def _missing_push_pr_evidence(
     target_branch: str,
     post_merge: bool = False,
 ) -> list[str]:
-    fields, errors = _delivery_fields(
+    fields, errors = parse_delivery_fields(
         text,
         ("remote", "branch", "remote-oid", "pr-url", "pr-base"),
     )

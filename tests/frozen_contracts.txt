@@ -152,5 +152,16 @@
 223 tests/test_custom_skill_install.py::test_corrupt_legacy_metadata_does_not_become_a_fresh_pending_install
 223 tests/test_run_cursor_and_transitions.py::test_phase_approval_is_bound_to_artifact_and_attempt
 
+# pr #225 — publication evidence fails closed and core consumers remain usable
+# without concrete publication infrastructure.
+225 tests/test_design_value_check.py::test_premerge_evidence_requires_an_explicit_publication_observer
+225 tests/test_design_value_check.py::test_premerge_manual_approval_rejects_head_changed_during_observation
+225 tests/test_design_value_check.py::test_core_publication_consumers_work_without_concrete_infrastructure
+225 tests/test_design_value_check.py::test_worktree_status_works_without_publication_infrastructure
+225 tests/test_design_value_check.py::test_premerge_ci_and_merge_completion_checkpoints[headless]
+225 tests/test_architecture_followup_integration.py::test_pr_watch_cold_start_reports_unavailable_gh
+225 tests/test_design_value_check.py::test_premerge_observation_requires_ci_from_every_active_profile
+225 tests/test_design_value_check.py::test_publication_checkpoint_uses_selected_merge_markers
+
 # Recorded but deliberately not pinned here.
 uncovered 164 the closed shared-hook-runtime attempt failed on an active-run marker race and on host-specific interpreter paths; neither reproduces deterministically in-process, so claiming coverage would be false comfort. The standing defense is the policy ban on another runtime/installer centralization.

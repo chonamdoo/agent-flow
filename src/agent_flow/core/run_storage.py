@@ -7,6 +7,7 @@ from agent_flow.core.worktree_isolation import git_repo_state, git_safe
 
 RUNS_DIRNAME = ".agent-flow/runs"
 ACTIVE_MARKER = "active"
+ACTIVE_LOCK = "active.lock"
 
 
 def active_run_paths(project_root: Path) -> tuple[Path, ...]:
