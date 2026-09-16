@@ -14,23 +14,23 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 import yaml
 
 from agent_flow.adapters.base import Adapter
-from agent_flow.artifact import bind_review_evidence, ensure_review_binding, read_meta
+from agent_flow.artifact import bind_review_evidence, ensure_review_binding, read_meta, write_meta
 from agent_flow.cli_detect import cli_by_name
 from agent_flow.core.local_skills import (
     ARCHITECTURE_CONTRACT_REQUIREMENT,
     architecture_contract_required,
 )
+from agent_flow.core.skill_scope import record_reviewer_documents, reviewer_document_ids
 from agent_flow.core.review_evidence import (
     ReviewerOutcome,
     complete_provider_names,
@@ -38,15 +38,10 @@ from agent_flow.core.review_evidence import (
     review_results_path,
     serialize_review_results,
 )
-from agent_flow.core.review_scope import (
-    publication_review_base,
-    validate_publication_review_base,
-)
-from agent_flow.core.skill_resolver import selector_matches
+from agent_flow.core import review_input
+from agent_flow.core.skill_resolver import SkillResolution, selector_matches
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
-    git_proves_ancestor,
-    git_safe,
     validate_run_artifact_target,
     write_run_artifact_text,
 )
@@ -59,6 +54,7 @@ from agent_flow.multi_review import (
     distribute,
     eligible_reviewer_names,
     review_job_id,
+    reviewer_provider_error,
     reviewer_result_error,
     run_distribution,
 )
@@ -66,15 +62,6 @@ from agent_flow.subprocess_pool import SubprocessResult
 
 if TYPE_CHECKING:
     from agent_flow.runner import Phase
-
-_REVIEW_INPUT_TIMEOUT_S = 120
-_REVIEW_INPUT_MAX_BYTES = 8 * 1024 * 1024
-_OID_PATTERN = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
-# base ref는 git argv에 그대로 들어간다. 옵션처럼 보이는 값이나 revision 문법이
-# 섞인 값은 거부한다.
-_BASE_REF_CHARS = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/+@"
-)
 
 # 계약 angle과 작성자 게이트는 같은 resolver 판정을 사용해야 리뷰 없는 통과가 없다.
 _BASE_REVIEW_ANGLES: tuple[dict[str, object], ...] = (
@@ -199,7 +186,10 @@ class HostedAdapter(Adapter):
         self.name = host_name
         self._hint = _HOST_HINTS[host_name]
 
-    def execute(self, phase: Phase, run_dir: Path, project_root: Path) -> bool:
+    def execute(
+        self, phase: Phase, run_dir: Path, project_root: Path, *,
+        resolution: SkillResolution | None = None,
+    ) -> bool:
         host_hint = self._hint
         host_hint += (
             "\n\n### Host-session isolation boundary\n"
@@ -231,6 +221,7 @@ class HostedAdapter(Adapter):
             )
         prompt = self.render_envelope(
             phase, run_dir, project_root, host_hint=host_hint,
+            resolution=resolution,
         )
         print(prompt)
         return False  # host AI writes the artifact
@@ -248,7 +239,7 @@ def _run_multi_review_distribution(
         phase.id,
         base_branch=_profile_base_branch(adapter),
     )
-    jobs = _reviewer_jobs(
+    jobs, documents = _reviewer_jobs(
         phase,
         run_dir,
         project_root,
@@ -269,6 +260,24 @@ def _run_multi_review_distribution(
         config_root=adapter.config_root_or(project_root),
     )
     _write_review_results(distribution, execution.outcomes)
+    delivered_jobs = {
+        result.job_id
+        for result in execution.results
+        if reviewer_provider_error(result) is None
+    }
+    delivered_documents = {
+        provider: identities
+        for provider, identities in documents.items()
+        if identities and any(
+            review_job_id(provider, job) in delivered_jobs
+            for job in distribution.by_cli.get(provider, ())
+        )
+    }
+    if delivered_documents:
+        meta = read_meta(run_dir)
+        for provider, identities in delivered_documents.items():
+            record_reviewer_documents(meta, phase.id, provider, identities)
+        write_meta(run_dir, meta)
     return distribution, execution
 
 
@@ -321,6 +330,7 @@ def _write_review_results(
 class ReviewInputSnapshot:
     path: Path
     digest: str
+    document_scope: tuple[str, ...] | None = None
 
 
 def _write_review_input_snapshot(
@@ -330,359 +340,16 @@ def _write_review_input_snapshot(
     *,
     base_branch: str | None = None,
 ) -> ReviewInputSnapshot:
-    """리뷰 증거의 기준점은 기본적으로 merge-base, publication 범위에서는 고정 OID다.
-
-    `HEAD` 기준으로 찍으면 작업이 이미 커밋된 브랜치에서는 모든 섹션이 비는데,
-    같은 프롬프트가 리뷰어에게 샌드박스 안에서 `git diff`를 돌리지 말라고 말한다.
-    그래서 리뷰어는 근거 없이 판정하게 된다 — 라운드 하나가 실제로 그렇게 무너졌다.
-    """
-    try:
-        publication_base = publication_review_base(read_meta(run_dir))
-        if publication_base is not None:
-            validate_publication_review_base(project_root, publication_base)
-    except ValueError as exc:
-        raise WorktreeIsolationError(
-            f"could not precompute reviewer input: invalid publication review scope: {exc}"
-        ) from exc
-    # 관측 하나당 상한을 전체 예산보다 낮게 잡는다. unborn HEAD 경로는 관측을
-    # 셋까지 만들고, 합계가 예산을 넘으면 스냅샷 자체를 못 쓴다. 상한에 걸린
-    # 섹션은 라운드를 죽이지 않고 머리말에 잘렸다고 적는다.
-    observation_max_bytes = max(1, _REVIEW_INPUT_MAX_BYTES // 4)
-    if publication_base is None:
-        baseline = _resolve_review_baseline(
-            project_root,
-            base_branch,
-            max_output_bytes=observation_max_bytes,
-        )
-    else:
-        baseline = _ReviewBaseline(
-            rev=publication_base,
-            detail=(
-                f"pinned publication base {publication_base} — every change "
-                "through the current working tree is below, committed and "
-                "uncommitted alike"
-            ),
-        )
-    status = git_safe(
-        "status",
-        "--short",
-        "--untracked-files=all",
-        cwd=project_root,
-        optional_locks=False,
-        timeout_s=_REVIEW_INPUT_TIMEOUT_S,
-        max_output_bytes=observation_max_bytes,
+    observation = review_input.capture_review_input(
+        project_root, read_meta(run_dir), phase_id, base_branch=base_branch,
     )
-    diff = git_safe(
-        "diff",
-        "--no-ext-diff",
-        "--no-color",
-        baseline.rev,
-        "--",
-        cwd=project_root,
-        optional_locks=False,
-        timeout_s=_REVIEW_INPUT_TIMEOUT_S,
-        max_output_bytes=observation_max_bytes,
-    )
-    notes: list[str] = []
-    if baseline.note:
-        notes.append(baseline.note)
-    diff_observations = []
-    if publication_base is None and _is_unborn_head_failure(diff):
-        notes.append(
-            "HEAD carries no commit yet, so the staged and working-tree diffs "
-            "below stand in for a baseline diff"
-        )
-        diff_observations.extend((
-            (
-                "git diff --cached",
-                git_safe(
-                    "diff",
-                    "--cached",
-                    "--no-ext-diff",
-                    "--no-color",
-                    "--",
-                    cwd=project_root,
-                    optional_locks=False,
-                    timeout_s=_REVIEW_INPUT_TIMEOUT_S,
-                    max_output_bytes=observation_max_bytes,
-                ),
-            ),
-            (
-                "git diff",
-                git_safe(
-                    "diff",
-                    "--no-ext-diff",
-                    "--no-color",
-                    "--",
-                    cwd=project_root,
-                    optional_locks=False,
-                    timeout_s=_REVIEW_INPUT_TIMEOUT_S,
-                    max_output_bytes=observation_max_bytes,
-                ),
-            ),
-        ))
-    else:
-        diff_observations.append((f"git diff {baseline.rev}", diff))
-    observations = [("git status --short", status), *diff_observations]
-    failed = [
-        f"{label}: {result.stderr.strip() or result.error or result.returncode}"
-        for label, result in observations
-        if not result.ok and not _hit_output_limit(result)
-    ]
-    if failed:
-        raise WorktreeIsolationError(
-            "could not precompute reviewer input: " + "; ".join(failed)
-        )
-    truncated = [
-        label for label, result in observations if _hit_output_limit(result)
-    ]
-    if truncated:
-        notes.append(
-            f"truncated at {observation_max_bytes} bytes, so the sections are "
-            f"incomplete: {', '.join(truncated)}"
-        )
-    has_diff = any(result.stdout.strip() for _, result in diff_observations)
-    status_lines = [line for line in status.stdout.splitlines() if line.strip()]
-    # 추적 중인 변경은 반드시 diff로도 나타난다. 그런데 diff가 비었다면 스냅샷을
-    # 못 만든 것이다. 추적되지 않는 파일(`??`)은 status 목록 자체가 증거다.
-    tracked = [line for line in status_lines if not line.startswith("??")]
-    if tracked and not has_diff:
-        raise WorktreeIsolationError(
-            "could not precompute reviewer input: git status reports "
-            f"{len(tracked)} tracked change(s) but the diff against "
-            f"{baseline.rev} is empty"
-        )
-    # 성공했지만 빈 출력은 두 가지다. 변경이 정말 없는 review-only 작업은 정당하고,
-    # 기준점을 못 잡아 아무것도 못 담은 것은 리뷰를 통과시키면 안 된다.
-    if not status_lines and not has_diff:
-        if baseline.base_unresolved:
-            raise WorktreeIsolationError(
-                "could not precompute reviewer input: no diff is available "
-                f"against declared base `{base_branch}` ({baseline.detail}); "
-                "reviewers would receive no evidence"
-            )
-        notes.append(
-            "no change relative to this baseline: the snapshot is a verified "
-            "empty diff, not a missing one"
-        )
-    header = [
-        "# Reviewer input snapshot",
-        "",
-        f"- phase: {phase_id}",
-        f"- diff baseline: {baseline.detail}",
-    ]
-    if publication_base is not None:
-        header.extend((
-            "- review scope: publication-only; not whole-PR or merge approval",
-            "- scope contract: judge defects introduced or worsened by this "
-            "delta, including security defects, without path or category exclusions; "
-            "surrounding code may be read for context",
-            "- prior findings: unchanged pre-baseline findings remain separately "
-            "recorded risks, not fixed findings or approval of the existing PR",
-        ))
-    header.extend(f"- note: {note}" for note in notes)
-    sections = [
-        f"## {label}\n\n{result.stdout.rstrip() or '(empty)'}"
-        for label, result in observations
-    ]
-    content = "\n".join(header) + "\n\n" + "\n\n".join(sections) + "\n"
-    encoded = content.encode("utf-8")
-    if len(encoded) > _REVIEW_INPUT_MAX_BYTES:
-        raise WorktreeIsolationError(
-            "could not precompute reviewer input: "
-            f"snapshot exceeds {_REVIEW_INPUT_MAX_BYTES} bytes"
-        )
     target = run_dir.resolve() / f"{phase_id}-review-input.patch"
-    write_run_artifact_text(run_dir, target, content)
+    write_run_artifact_text(run_dir, target, observation.content)
     return ReviewInputSnapshot(
         path=target,
-        digest=hashlib.sha256(encoded).hexdigest(),
+        digest=hashlib.sha256(observation.content.encode("utf-8")).hexdigest(),
+        document_scope=observation.document_scope,
     )
-
-
-@dataclass(frozen=True)
-class _ReviewBaseline:
-    rev: str
-    detail: str
-    # 선언된 base가 있는데 그걸 기준으로 삼지 못한 상태. 이때의 빈 diff는
-    # "변경 없음"의 증거가 될 수 없다.
-    base_unresolved: bool = False
-    # 기준점을 그 후보에서 잡은 근거. 선언된 base를 쓰지 못한 경우에만 채운다.
-    note: str = ""
-
-
-def _resolve_review_baseline(
-    project_root: Path,
-    base_branch: str | None,
-    *,
-    max_output_bytes: int,
-) -> _ReviewBaseline:
-    fallback = "`HEAD` — changes already committed on this branch are NOT below"
-    if not base_branch:
-        return _ReviewBaseline(
-            rev="HEAD",
-            detail=(
-                f"{fallback} (the active profile declares no `branching.base`)"
-            ),
-        )
-    if not _is_usable_base_ref(base_branch):
-        return _ReviewBaseline(
-            rev="HEAD",
-            detail=(
-                f"{fallback} (declared base `{base_branch}` is not a usable git "
-                "ref name)"
-            ),
-            base_unresolved=True,
-        )
-    diagnostic = "no common ancestor"
-    resolved: list[_BaseCandidate] = []
-    for candidate in _base_candidate_refs(
-        project_root, base_branch, max_output_bytes=max_output_bytes
-    ):
-        result = git_safe(
-            "merge-base",
-            "HEAD",
-            candidate,
-            cwd=project_root,
-            optional_locks=False,
-            timeout_s=_REVIEW_INPUT_TIMEOUT_S,
-            max_output_bytes=max_output_bytes,
-        )
-        oid = result.stdout.strip() if result.ok else ""
-        if _OID_PATTERN.fullmatch(oid):
-            resolved.append(_BaseCandidate(ref=candidate, oid=oid))
-            continue
-        if not result.ok:
-            stderr = result.stderr.strip()
-            diagnostic = (
-                stderr.splitlines()[-1]
-                if stderr
-                else result.error or f"git exited {result.returncode}"
-            )
-    if not resolved:
-        return _ReviewBaseline(
-            rev="HEAD",
-            detail=(
-                f"{fallback} (declared base `{base_branch}` could not be used: "
-                f"{diagnostic})"
-            ),
-            base_unresolved=True,
-        )
-    choice = _newest_review_baseline(project_root, resolved)
-    return _ReviewBaseline(
-        rev=choice.oid,
-        detail=(
-            f"`git merge-base HEAD {choice.candidate}` = {choice.oid} — every "
-            "change from the base through the current working tree is below, "
-            "committed and uncommitted alike"
-        ),
-        note=choice.note,
-    )
-
-
-def _base_candidate_refs(
-    project_root: Path,
-    base_branch: str,
-    *,
-    max_output_bytes: int,
-) -> tuple[str, ...]:
-    """선언된 base와, 그 base가 실제로 추적하는 remote ref.
-
-    `origin/`을 정본으로 두면 fork나 다중 remote 체크아웃에서 틀린 기준점을 고른다 —
-    선언된 `main`이 `upstream/main`을 추적하는데 `origin/main`을 기준으로 잡으면,
-    origin에만 있는 커밋이 선언된 base 대비 변경인데도 diff에서 조용히 빠진다.
-    추적 설정이 없으면 `origin/<base>`로 내려간다. 그 경우가 단일 remote 체크아웃이다.
-    """
-    result = git_safe(
-        "rev-parse",
-        "--symbolic-full-name",
-        f"{base_branch}@{{upstream}}",
-        cwd=project_root,
-        optional_locks=False,
-        timeout_s=_REVIEW_INPUT_TIMEOUT_S,
-        max_output_bytes=max_output_bytes,
-    )
-    tracked = result.stdout.strip() if result.ok else ""
-    prefix = "refs/remotes/"
-    remote_ref = tracked[len(prefix):] if tracked.startswith(prefix) else ""
-    # git이 준 값도 argv에 그대로 들어간다. 선언된 base와 같은 검사를 통과해야 한다.
-    if not remote_ref or not _is_usable_base_ref(remote_ref):
-        remote_ref = f"origin/{base_branch}"
-    if remote_ref == base_branch:
-        return (base_branch,)
-    return (base_branch, remote_ref)
-
-
-class _BaseCandidate(NamedTuple):
-    """base ref 하나와 그 merge-base. 두 칸이 모두 `str`이라 위치로 두면 조용히 섞인다."""
-
-    ref: str
-    oid: str
-
-
-class _BaselineChoice(NamedTuple):
-    """어느 후보에서 기준점을 잡았는가. 세 칸이 모두 `str`이라 위치로 두면 조용히 섞인다."""
-
-    candidate: str
-    oid: str
-    note: str
-
-
-def _newest_review_baseline(
-    project_root: Path,
-    resolved: Sequence[_BaseCandidate],
-) -> _BaselineChoice:
-    """후보 중 가장 descendant인 merge-base와 그 선택의 근거. `resolved`는 비어 있지 않다.
-
-    먼저 resolve된 후보를 쓰면 뒤처진 로컬 base ref가 항상 이긴다. 로컬 base는
-    아무도 전진시키지 않는다(킷의 유일한 fetch는 cleanup 전용이고 remote-tracking
-    ref만 갱신한다). 그러면 스냅샷에 이미 upstream에 머지된 커밋이 들어가고,
-    리뷰어는 그것을 이 브랜치의 변경으로 읽어 코드로는 지울 수 없는
-    request-changes를 낸다.
-
-    순서를 정하지 못한 두 기준점 중에서는 뒤에 선언된 후보(remote-tracking)를
-    쓴다. 둘 다 HEAD의 조상이지만 서로를 포함하지 않는 상태에서 하나를 골라야
-    하고, 이미 통합된 쪽을 기준으로 삼는 것이 리뷰 범위에 대한 사실에 가깝다.
-    그때 다른 후보에서만 닿는 커밋은 diff에 남는다 — rev 하나로는 두 base를
-    동시에 뺄 수 없으므로, 그 사실을 note에 적는다.
-
-    note는 비교마다 **누적한다**. 후보가 셋 이상일 때 뒤 비교가 앞의 인정을 덮으면
-    머리말은 깨끗한 기준점을 주장하면서 diff에 남은 커밋을 숨긴다 — 이 변경이
-    지우려는 실패가 그 자리에서 그대로 돌아온다.
-    """
-    best = resolved[0]
-    notes: list[str] = []
-    for candidate in resolved[1:]:
-        if candidate.oid == best.oid:
-            continue
-        if git_proves_ancestor(
-            root=project_root,
-            ancestor=best.oid,
-            descendant=candidate.oid,
-            timeout_s=_REVIEW_INPUT_TIMEOUT_S,
-        ):
-            notes.append(
-                f"declared base `{best.ref}` is behind `{candidate.ref}`, so its "
-                "merge-base still carries commits that are already merged upstream; "
-                f"the baseline above is the `{candidate.ref}` merge-base and those "
-                "commits are not in the diff below"
-            )
-        elif git_proves_ancestor(
-            root=project_root,
-            ancestor=candidate.oid,
-            descendant=best.oid,
-            timeout_s=_REVIEW_INPUT_TIMEOUT_S,
-        ):
-            continue
-        else:
-            notes.append(
-                f"`{best.ref}` and `{candidate.ref}` merge-bases could not be "
-                "ordered, so the baseline above is the remote-tracking one "
-                f"(`{candidate.ref}`); commits reachable only from `{best.ref}` are "
-                "still in the diff below"
-            )
-        best = candidate
-    return _BaselineChoice(candidate=best.ref, oid=best.oid, note="; ".join(notes))
 
 
 def _profile_base_branch(adapter: Adapter) -> str | None:
@@ -698,33 +365,6 @@ def _profile_base_branch(adapter: Adapter) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
-
-
-def _is_usable_base_ref(value: str) -> bool:
-    return (
-        bool(value)
-        and not value.startswith("-")
-        and ".." not in value
-        and set(value) <= _BASE_REF_CHARS
-    )
-
-
-def _hit_output_limit(result) -> bool:
-    """상한에 걸려 잘린 것과 실패한 것은 다르다. 잘려도 부분 증거는 남는다."""
-    return (
-        result.output_truncated
-        and not result.timed_out
-        and result.error is None
-    )
-
-
-def _is_unborn_head_failure(result) -> bool:
-    diagnostic = f"{result.stderr}\n{result.error or ''}".lower()
-    return (
-        result.returncode == 128
-        and "head" in diagnostic
-        and ("ambiguous" in diagnostic or "bad revision" in diagnostic)
-    )
 
 
 def _applicable_angles(
@@ -819,7 +459,7 @@ def _reviewer_jobs(
     *,
     review_input: ReviewInputSnapshot | None = None,
     providers: Sequence[str] | None = None,
-) -> list[ReviewerJob]:
+) -> tuple[list[ReviewerJob], dict[str, tuple[str, ...]]]:
     """Build provider-specific reviewer jobs from a single captured input."""
     providers = REVIEW_CLI_NAMES if providers is None else tuple(providers)
     adapter._provider_authority = tuple(providers)
@@ -836,17 +476,21 @@ def _reviewer_jobs(
         providers=providers,
     )
     jobs: list[ReviewerJob] = []
-    base_prompt_by_provider = {
-        provider: adapter.render_envelope(
-            phase,
-            run_dir,
-            project_root,
-            prompt_variant=f"reviewer-base-{provider}",
-            skill_host=provider,
-            role="reviewer",
+    meta = read_meta(run_dir)
+    base_prompt_by_provider: dict[str, str] = {}
+    rendered_documents: dict[str, tuple[str, ...]] = {}
+    for provider in providers:
+        resolution = adapter.phase_resolution(
+            phase, project_root, skill_host=provider,
+            document_scope=review_input.document_scope if review_input is not None else None,
+            required_document_ids=reviewer_document_ids(meta, phase.id, provider),
         )
-        for provider in providers
-    }
+        base_prompt_by_provider[provider] = adapter.render_envelope(
+            phase, run_dir, project_root,
+            prompt_variant=f"reviewer-base-{provider}",
+            skill_host=provider, role="reviewer", resolution=resolution,
+        )
+        rendered_documents[provider] = resolution.required_document_ids
     fallback_prompt = (
         ""
         if providers
@@ -869,7 +513,7 @@ def _reviewer_jobs(
         "so committed changes since that baseline are included — and states "
         "in `- note:` lines whether the baseline skipped a "
         "stale declared base, whether the snapshot was truncated, and whether it "
-        "is a verified empty diff. The body holds `git status --short` and that "
+        "is a verified empty diff. The body holds `git status --porcelain=v1` and that "
         "diff. Inspect "
         "untracked files listed there directly. Do not run `git diff` inside "
         "the reviewer sandbox. When the header declares publication-only scope, "
@@ -920,7 +564,7 @@ def _reviewer_jobs(
                 for provider, prompt in base_prompt_by_provider.items()
             },
         ))
-    return jobs
+    return jobs, rendered_documents
 
 
 def _review_angle_output(run_dir: Path, phase_id: str, angle_id: str) -> Path:

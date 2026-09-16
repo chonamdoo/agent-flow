@@ -16,6 +16,11 @@ if SRC not in sys.path:
 
 from agent_flow.artifact import ActiveRunExists, create_run, mark_inactive, read_meta, write_meta
 from agent_flow.core.commands import SafeCommandResult
+from agent_flow.core.design_ledger import (
+    confirm_current_spec_changes,
+    manual_spec_approval_statement,
+    record_manual_spec_approval,
+)
 from agent_flow.core import worktrees as W
 from agent_flow.core import worktree_isolation as W_ISO
 from agent_flow.runner import ResumeMode, Runner
@@ -57,6 +62,16 @@ def _managed_run(root: Path, name: str = "cleanup") -> tuple[W.WorktreeStatus, P
         run_id="run-cleanup",
         checkout_identity=f"worktree:{status.name}",
         checkout_registration_identity=status.registration_identity,
+    )
+    design = (
+        "## Spec Items\n\n"
+        "SPEC-1: Complete the cleanup test workflow.\n"
+        "verify: manual\n"
+    )
+    (run_dir / "design.md").write_text(design, encoding="utf-8")
+    confirm_current_spec_changes(run_dir)
+    record_manual_spec_approval(
+        run_dir, "SPEC-1", manual_spec_approval_statement(run_dir, "SPEC-1")
     )
     return status, run_dir
 

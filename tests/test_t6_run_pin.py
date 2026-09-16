@@ -526,3 +526,529 @@ def test_changed_configured_legacy_custom_blocks_when_neither_digest_matches(
         path.relative_to(run): path.read_bytes()
         for path in run.rglob("*") if path.is_file()
     } == before
+
+
+def _skills_inspection_run(tmp_path, monkeypatch):
+    kit = tmp_path / "kit"
+    source = kit / "workflows" / "custom.yaml"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "id: custom\nphases:\n"
+        "  - id: explore\n"
+        "  - id: green\n"
+        "    skills:\n      required: [pinned-guide]\n"
+        "    required_markers: ['decision: reviewed']\n",
+        encoding="utf-8",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    for name in ("pinned-guide", "fresh-guide"):
+        document = project / "skills" / name / "SKILL.md"
+        document.parent.mkdir(parents=True)
+        document.write_text(
+            f"---\nname: {name}\ndescription: Inspection guide.\n---\n# {name}\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AGENT_FLOW_PROFILE", "generic")
+    monkeypatch.setattr("agent_flow.cli._find_kit_root", lambda: kit)
+    definition = load_phase_workflow_definition(kit, "custom")
+    run = create_run(project, "custom", "Bound task", workflow_definition=definition)
+    meta = read_meta(run)
+    meta.update(
+        current_phase="explore", phase_index=0,
+        phase_approval={"approved": True, "nonce": "original-approval"},
+    )
+    write_meta(run, meta)
+    artifact = project / "inspection.md"
+    artifact.write_text(
+        "## Completion Gate\n"
+        "decision: reviewed\n"
+        "skill-availability: pass\n"
+        "skill-use-evidence: verified\n"
+        "project-local-skills: checked\n"
+        "project-local-skills-used: pinned-guide\n"
+        "project-local-skill-docs: applied\n",
+        encoding="utf-8",
+    )
+    return project, kit, source, run, artifact
+
+
+@pytest.mark.parametrize("explicit_workflow", [False, True])
+@pytest.mark.parametrize("remove_source", [False, True])
+def test_cli_skills_inspection_keeps_active_pin_across_all_surfaces(
+    tmp_path, monkeypatch, capsys, explicit_workflow, remove_source,
+):
+    from agent_flow.cli import main
+
+    project, kit, source, run, artifact = _skills_inspection_run(tmp_path, monkeypatch)
+    if remove_source:
+        source.unlink()
+    else:
+        source.write_text(
+            source.read_text(encoding="utf-8").replace("pinned-guide", "fresh-guide"),
+            encoding="utf-8",
+        )
+    before = {path.name: path.read_bytes() for path in run.iterdir() if path.is_file()}
+    options = ["--workflow", "custom"] if explicit_workflow else []
+    for command in ("resolve", "prompt", "markers"):
+        args = ["skills", command, "--root", str(project), "--phase", "green", *options]
+        if command == "markers":
+            args.extend(["--artifact", str(artifact)])
+        assert main(args) == 0
+        output = capsys.readouterr().out
+        if command == "markers":
+            assert json.loads(output) == []
+        else:
+            assert "pinned-guide" in output
+            assert "fresh-guide" not in output
+    assert {path.name: path.read_bytes() for path in run.iterdir() if path.is_file()} == before
+
+
+@pytest.mark.parametrize("command", ["resolve", "prompt", "markers"])
+@pytest.mark.parametrize("broken_pin", ["digest", "payload", "legacy-missing", "legacy-drift"])
+def test_cli_skills_inspection_rejects_invalid_pin_without_mutation(
+    tmp_path, monkeypatch, capsys, command, broken_pin,
+):
+    from agent_flow.cli import main
+
+    project, kit, source, run, artifact = _skills_inspection_run(tmp_path, monkeypatch)
+    meta = read_meta(run)
+    if broken_pin == "digest":
+        meta["workflow_definition_digest"] = "0" * 64
+    elif broken_pin == "payload":
+        meta["workflow_definition"] = None
+    else:
+        del meta["workflow_definition"]
+        del meta["workflow_definition_digest"]
+        if broken_pin == "legacy-missing":
+            del meta["workflow_digest"]
+        else:
+            source.write_text(
+                source.read_text(encoding="utf-8").replace("pinned-guide", "fresh-guide"),
+                encoding="utf-8",
+            )
+    write_meta(run, meta)
+    before = {path.name: path.read_bytes() for path in run.iterdir() if path.is_file()}
+    args = ["skills", command, "--root", str(project), "--phase", "green"]
+    if command == "markers":
+        args.extend(["--artifact", str(artifact)])
+    assert main(args) == 2
+    captured = capsys.readouterr()
+    assert "workflow custom" in captured.err
+    assert "Traceback" not in captured.err
+    assert {path.name: path.read_bytes() for path in run.iterdir() if path.is_file()} == before
+
+
+def test_cli_skills_fresh_uses_current_kit_and_rejects_ambiguous_workflow(
+    tmp_path, monkeypatch, capsys,
+):
+    from agent_flow.cli import main
+
+    project, kit, source, run, artifact = _skills_inspection_run(tmp_path, monkeypatch)
+    source.write_text(
+        source.read_text(encoding="utf-8").replace("pinned-guide", "fresh-guide"),
+        encoding="utf-8",
+    )
+    (kit / "workflows" / "default.yaml").write_text(
+        "id: default\nphases:\n  - id: green\n"
+        "    skills:\n      required: [default-guide]\n",
+        encoding="utf-8",
+    )
+    base = ["skills", "resolve", "--root", str(project), "--phase", "green"]
+    assert main([*base, "--workflow", "default"]) == 2
+    assert "--fresh" in capsys.readouterr().err
+    assert main([*base, "--fresh", "--workflow", "custom"]) == 0
+    assert "required fresh-guide:" in capsys.readouterr().out
+    assert main([*base, "--fresh"]) == 0
+    assert "required default-guide:" in capsys.readouterr().out
+    assert main(["skills", "resolve", "--root", str(project), "--phase", "missing"]) == 2
+    assert "phase 'missing'" in capsys.readouterr().err
+    (run / "active").unlink()
+    assert main(base) == 0
+    assert "required default-guide:" in capsys.readouterr().out
+
+
+def test_cli_skills_inspection_recovers_exact_legacy_pin_without_upgrading_it(
+    tmp_path, monkeypatch, capsys,
+):
+    from agent_flow.cli import main
+
+    project, kit, source, run, artifact = _skills_inspection_run(tmp_path, monkeypatch)
+    meta = read_meta(run)
+    del meta["workflow_definition"]
+    del meta["workflow_definition_digest"]
+    write_meta(run, meta)
+    before = (run / "meta.json").read_bytes()
+    for command in ("resolve", "prompt", "markers"):
+        args = ["skills", command, "--root", str(project), "--phase", "green"]
+        if command == "markers":
+            args.extend(["--artifact", str(artifact)])
+        assert main(args) == 0
+        output = capsys.readouterr().out
+        if command == "markers":
+            assert json.loads(output) == []
+        else:
+            assert "pinned-guide" in output
+    assert (run / "meta.json").read_bytes() == before
+
+
+def test_cli_skills_context_keeps_bound_concerns_but_fresh_does_not(
+    tmp_path, monkeypatch, capsys,
+):
+    from agent_flow.cli import main
+
+    project, kit, source, run, artifact = _skills_inspection_run(tmp_path, monkeypatch)
+    profile = project / ".agent-flow" / "profiles" / "inspection.yaml"
+    profile.parent.mkdir(parents=True)
+    profile.write_text(
+        "id: inspection\nskills:\n  required_review:\n"
+        "    - group: security\n"
+        "      concerns: [security]\n"
+        "      skills: [concern-guide]\n",
+        encoding="utf-8",
+    )
+    task_guide = project / "skills" / "task-guide" / "SKILL.md"
+    task_guide.parent.mkdir(parents=True)
+    task_guide.write_text(
+        "---\nname: task-guide\ndescription: Task-scoped guide.\n"
+        "workflowPhases: [green]\ntaskTerms: [bound task]\n---\nTask instructions.\n",
+        encoding="utf-8",
+    )
+    meta = read_meta(run)
+    meta["concerns"] = ["security"]
+    write_meta(run, meta)
+    artifact.write_text(
+        artifact.read_text(encoding="utf-8")
+        + "missing-required-profile-skills: none\n",
+        encoding="utf-8",
+    )
+    options = ["--root", str(project), "--phase", "green", "--profile", "inspection"]
+    for command in ("resolve", "prompt", "markers"):
+        args = ["skills", command, *options]
+        if command == "markers":
+            args.extend(["--artifact", str(artifact)])
+        assert main(args) == 0
+        output = capsys.readouterr().out
+        if command == "markers":
+            assert any("concern-guide" in marker for marker in json.loads(output))
+        else:
+            assert "concern-guide" in output
+            assert "task-guide" in output
+        assert main([*args, "--fresh", "--workflow", "custom"]) == 0
+        fresh_output = capsys.readouterr().out
+        assert "concern-guide" not in fresh_output
+        assert "task-guide" not in fresh_output
+    assert main(["skills", "resolve", *options, "--task", "unrelated"]) == 0
+    overridden = capsys.readouterr().out
+    assert "concern-guide" in overridden
+    assert "task-guide" not in overridden
+    assert main([
+        "skills", "resolve", *options, "--fresh", "--workflow", "custom",
+        "--task", "Bound task",
+    ]) == 0
+    explicit = capsys.readouterr().out
+    assert "task-guide" in explicit
+    assert "concern-guide" not in explicit
+
+
+def test_cli_skills_inspection_uses_current_checkout_not_newest_sibling_run(
+    tmp_path, monkeypatch, capsys,
+):
+    from agent_flow.cli import main
+    from agent_flow.adapters.generic import GenericAdapter
+    from agent_flow.core.worktrees import create_worktree, plan_worktree, worktree_runtime_root
+    from tests.test_cli import _init_git_repo
+
+    project, kit, source, leader_run, artifact = _skills_inspection_run(tmp_path, monkeypatch)
+    _init_git_repo(project)
+    (leader_run / "active").unlink()
+    own = create_worktree(root=project, plan=plan_worktree(root=project, name="own"))
+    foreign = create_worktree(root=project, plan=plan_worktree(root=project, name="foreign"))
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "  - id: green\n", "  - id: green\n    artifact: green.md\n",
+        ),
+        encoding="utf-8",
+    )
+    own_definition = load_phase_workflow_definition(kit, "custom")
+    own_state = worktree_runtime_root(root=project, name=own.name)
+    own_run = create_run(
+        own_state, "custom", "Own task", run_id="20000101-000000",
+        workflow_definition=own_definition,
+    )
+    source.write_text(
+        source.read_text(encoding="utf-8").replace("pinned-guide", "fresh-guide"),
+        encoding="utf-8",
+    )
+    foreign_definition = load_phase_workflow_definition(kit, "custom")
+    foreign_run = create_run(
+        worktree_runtime_root(root=project, name=foreign.name), "custom", "Foreign task",
+        run_id="20990101-000000", concerns=["security"], workflow_definition=foreign_definition,
+    )
+    for run in (own_run, foreign_run):
+        meta = read_meta(run)
+        meta.update(
+            current_phase="green" if run == own_run else "explore",
+            phase_index=1 if run == own_run else 0,
+        )
+        write_meta(run, meta)
+    scoped = own.path / "skills" / "checkout-guide" / "SKILL.md"
+    scoped.parent.mkdir(parents=True)
+    scoped.write_text(
+        "---\nname: checkout-guide\ndescription: Checkout-scoped guide.\n"
+        "workflowPhases: [green]\npathGlobs: [checkout-only.txt]\n---\nCheckout instructions.\n",
+        encoding="utf-8",
+    )
+    edited = own.path / "skills" / "pinned-guide" / "SKILL.md"
+    edited.write_text(
+        "---\nname: pinned-guide\ndescription: Edited checkout guide.\n"
+        "requires: [checkout-dependency, installed-guide]\n---\n"
+        "Use the checkout-specific policy, not the leader policy.\n",
+        encoding="utf-8",
+    )
+    dependency = own.path / "skills" / "checkout-dependency" / "SKILL.md"
+    dependency.parent.mkdir(parents=True)
+    dependency.write_text(
+        "---\nname: checkout-dependency\ndescription: Checkout dependency.\n---\n"
+        "Apply the checkout dependency policy.\n",
+        encoding="utf-8",
+    )
+    installed = project / ".agent-flow" / "skills" / "installed-guide" / "SKILL.md"
+    private = project / ".agent-flow" / "local-skills" / "private-guide" / "SKILL.md"
+    for document in (installed, private):
+        document.parent.mkdir(parents=True)
+        document.write_text(
+            f"---\nname: {document.parent.name}\ndescription: Leader-owned guidance.\n"
+            "workflowPhases: [green]\n---\nKeep the leader-installed policy.\n",
+            encoding="utf-8",
+        )
+    expected = {
+        "pinned-guide", "checkout-guide", "checkout-dependency", "installed-guide", "private-guide",
+    }
+    incomplete = own.path / "inspection.md"
+    complete = own.path / "inspection-complete.md"
+    complete.write_text(
+        incomplete.read_text(encoding="utf-8").replace(
+            "project-local-skills-used: pinned-guide",
+            "project-local-skills-used: " + ", ".join(sorted(expected)),
+        ),
+        encoding="utf-8",
+    )
+    (own_run / "green.md").write_text(incomplete.read_text(encoding="utf-8"), encoding="utf-8")
+    (own.path / "checkout-only.txt").write_text("changed\n", encoding="utf-8")
+    monkeypatch.chdir(own.path)
+    before = {
+        path: path.read_bytes()
+        for run in (leader_run, own_run, foreign_run)
+        for path in run.rglob("*") if path.is_file()
+    }
+    for root in (own.path, project):
+        options = ["--root", str(root), "--phase", "green"]
+        assert main(["skills", "resolve", *options]) == 0
+        output = capsys.readouterr().out
+        for name in expected:
+            assert f"required {name}:" in output
+        assert "required pinned-guide: skills/pinned-guide/SKILL.md" in output
+        assert f"required installed-guide: {installed}" in output
+        assert f"required private-guide: {private}" in output
+        assert "fresh-guide" not in output
+        assert main(["skills", "prompt", *options]) == 0
+        prompt = capsys.readouterr().out
+        assert "Edited checkout guide." in prompt
+        assert str(edited) in prompt
+        assert str(installed) in prompt
+        assert str(private) in prompt
+        assert str(project / "skills" / "pinned-guide" / "SKILL.md") not in prompt
+        assert main(["skills", "markers", *options, "--artifact", str(incomplete)]) == 0
+        missing = json.loads(capsys.readouterr().out)
+        used = next(marker for marker in missing if marker.startswith("project-local-skills-used:"))
+        assert set(used.split(": ", 1)[1].split(", ")) == expected
+        assert main(["skills", "markers", *options, "--artifact", str(complete)]) == 0
+        assert json.loads(capsys.readouterr().out) == []
+    runner = Runner(own.path, state_root=own_state, config_root=project, run_dir=own_run)
+    phase = next(phase for phase in runner.phases if phase.id == "green")
+    resolution = runner._required_skill_resolution(phase, read_meta(own_run))
+    assert {skill.name for skill in resolution.available_required} == expected
+    adapter = GenericAdapter()
+    adapter._config_root = project
+    adapter._changed_files = ("checkout-only.txt",)
+    envelope = adapter.render_envelope(phase, own_run, own.path)
+    assert "Edited checkout guide." in envelope
+    assert str(edited) in envelope
+    assert str(installed) in envelope
+    assert str(private) in envelope
+    find_active_run(own_state).print_status(config_root=project, project_root=own.path)
+    status = json.loads(next(
+        line.removeprefix("status_json: ")
+        for line in capsys.readouterr().out.splitlines() if line.startswith("status_json: ")
+    ))
+    assert status["reason"] == "missing_completion_markers"
+    assert used in status["missing_completion_markers"]
+    assert {
+        path: path.read_bytes()
+        for run in (leader_run, own_run, foreign_run)
+        for path in run.rglob("*") if path.is_file()
+    } == before
+    edited.unlink()
+    assert main(["skills", "resolve", "--root", str(own.path), "--phase", "green"]) == 0
+    deleted = capsys.readouterr().out
+    assert "required pinned-guide: MISSING" in deleted
+    assert "checkout-dependency" not in deleted
+    assert (project / "skills" / "pinned-guide" / "SKILL.md").is_file()
+    assert {
+        path: path.read_bytes()
+        for run in (leader_run, own_run, foreign_run)
+        for path in run.rglob("*") if path.is_file()
+    } == before
+    (own_run / "active").unlink()
+    source.write_text(
+        source.read_text(encoding="utf-8").replace("fresh-guide", "unbound-guide"),
+        encoding="utf-8",
+    )
+    assert main([
+        "skills", "resolve", "--root", str(own.path), "--phase", "green",
+        "--workflow", "custom",
+    ]) == 0
+    output = capsys.readouterr().out
+    assert "required unbound-guide:" in output
+    assert "fresh-guide" not in output
+
+
+def test_cli_skills_markers_since_override_and_fresh_do_not_inherit_run_time(
+    tmp_path, monkeypatch, capsys,
+):
+    from agent_flow.cli import main
+    from agent_flow.core.local_skills import record_skill_read
+
+    project, kit, source, run, artifact = _skills_inspection_run(tmp_path, monkeypatch)
+    meta = read_meta(run)
+    meta["phase_entered_at"] = "2999-01-01T00:00:00+00:00"
+    write_meta(run, meta)
+    record_skill_read(project, project / "skills" / "pinned-guide" / "SKILL.md")
+    artifact.write_text(
+        artifact.read_text(encoding="utf-8").replace("skill-use-evidence: verified\n", ""),
+        encoding="utf-8",
+    )
+    args = [
+        "skills", "markers", "--root", str(project), "--phase", "green",
+        "--artifact", str(artifact),
+    ]
+    assert main(args) == 0
+    bound = json.loads(capsys.readouterr().out)
+    assert any("nothing was recorded" in marker for marker in bound)
+    for overrides in (["--since", "0"], ["--fresh", "--workflow", "custom"]):
+        assert main([*args, *overrides]) == 0
+        unbounded = json.loads(capsys.readouterr().out)
+        assert "skill-use-evidence: verified|unavailable" in unbounded
+        assert not any("nothing was recorded" in marker for marker in unbounded)
+
+
+@pytest.mark.parametrize("mode", [None, "pending", "clean", "malformed"])
+def test_cli_status_architecture_guidance_does_not_change_structured_status(
+    tmp_path, monkeypatch, capsys, mode,
+):
+    from agent_flow.cli import main
+
+    project, kit, source, run, artifact = _skills_inspection_run(tmp_path, monkeypatch)
+    monkeypatch.setattr("agent_flow.artifact.find_kit_root", lambda: kit)
+    if mode is not None:
+        selection = project / ".agent-flow.project.yaml"
+        selection.write_text(
+            "schema_version: 1\narchitecture:\n  mode: " + mode + "\n",
+            encoding="utf-8",
+        )
+    before = (run / "meta.json").read_bytes()
+    find_active_run(project).print_status(
+        config_root=project, project_root=project,
+        next_command=f"agent-flow continue --root {project}",
+    )
+    expected = next(
+        line for line in capsys.readouterr().out.splitlines()
+        if line.startswith("status_json: ")
+    )
+    assert main(["status", "--root", str(project)]) == 0
+    output = capsys.readouterr().out
+    actual = next(line for line in output.splitlines() if line.startswith("status_json: "))
+    assert actual == expected
+    assert (run / "meta.json").read_bytes() == before
+
+
+def test_cli_status_without_run_reports_selection_absence_without_creating_state(
+    tmp_path, capsys,
+):
+    from agent_flow.cli import main
+
+    assert main(["status", "--root", str(tmp_path)]) == 0
+    output = capsys.readouterr().out
+    assert "status_json:" not in output
+    assert not (tmp_path / ".agent-flow").exists()
+
+
+@pytest.mark.parametrize("mode", ["clean", "pending"])
+def test_cli_skills_conditional_markers_use_validated_run_selection(
+    tmp_path, monkeypatch, capsys, mode,
+):
+    from agent_flow.cli import main
+    from agent_flow.core.architecture_policy import architecture_snapshot
+    from agent_flow.core.workflow_pin import workflow_pin_metadata
+    from tests.test_cli import _init_git_repo
+
+    project, kit, source, run, artifact = _skills_inspection_run(tmp_path, monkeypatch)
+    source.write_text(
+        source.read_text(encoding="utf-8")
+        + "    required_markers_by_architecture:\n"
+        + "      clean: ['clean-check: pass']\n"
+        + "      pending: ['scope-check: existing']\n",
+        encoding="utf-8",
+    )
+    selection = project / ".agent-flow.project.yaml"
+    selection.write_text(
+        f"schema_version: 1\narchitecture:\n  mode: {mode}\n", encoding="utf-8",
+    )
+    _init_git_repo(project)
+    definition = load_phase_workflow_definition(kit, "custom")
+    meta = read_meta(run)
+    meta.update(
+        workflow_pin_metadata(definition, workflow="custom"),
+        architecture_digest=architecture_snapshot(project).digest,
+    )
+    write_meta(run, meta)
+    source.write_text("id: custom\nphases:\n  - id: replaced\n", encoding="utf-8")
+    args = [
+        "skills", "markers", "--root", str(project), "--phase", "green",
+        "--artifact", str(artifact),
+    ]
+    expected = "clean-check: pass" if mode == "clean" else "scope-check: existing"
+    assert main(["skills", "prompt", "--root", str(project), "--phase", "green"]) == 0
+    prompt = capsys.readouterr().out
+    assert expected in prompt
+    assert ("scope-check: existing" if mode == "clean" else "clean-check: pass") not in prompt
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out) == [expected]
+    artifact.write_text(artifact.read_text(encoding="utf-8") + expected + "\n", encoding="utf-8")
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out) == []
+    artifact.write_text(
+        artifact.read_text(encoding="utf-8").replace("decision: reviewed", "decision: pending"),
+        encoding="utf-8",
+    )
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out) == ["decision: reviewed"]
+    selection.write_text(
+        "schema_version: 1\narchitecture:\n  mode: "
+        + ("pending" if mode == "clean" else "clean") + "\n",
+        encoding="utf-8",
+    )
+    before = (run / "meta.json").read_bytes()
+    for command in ("resolve", "prompt", "markers"):
+        check = ["skills", command, "--root", str(project), "--phase", "green"]
+        if command == "markers":
+            check.extend(["--artifact", str(artifact)])
+        assert main(check) == 2
+        assert "architecture_policy_drift" in capsys.readouterr().err
+    assert (run / "meta.json").read_bytes() == before
+    assert main([
+        "skills", "resolve", "--root", str(project), "--phase", "replaced",
+        "--workflow", "custom", "--fresh",
+    ]) == 0

@@ -73,6 +73,32 @@ Two limits on this command. It runs **once per project**; a new session is not a
 again. And it runs **in the leader checkout only** — running it inside a linked worktree is
 blocked, because the installed assets belong to the repository, not to one run.
 
+## Choose the architecture
+
+Choose before the first run. `clean` uses the bundled Clean Architecture norms; `local`
+uses your tracked `skills/architecture/SKILL.md`; `pending` allows existing-pattern local
+work but blocks changes that require a structural decision. With no selection file,
+the compatibility default is `clean`, not `pending`.
+
+Choose one command:
+
+```bash
+agent-flow architecture select --mode clean
+agent-flow architecture select --mode local --skill skills/architecture/SKILL.md
+agent-flow architecture select --mode pending
+```
+
+For `local`, create the contract at that exact path before selecting it. Track the generated
+`.agent-flow.project.yaml`, the contract, and all `requires_docs` references in Git before
+starting a run. Do not put project-owned norms in the gitignored installed `.agent-flow/`.
+Inspect the selection with `agent-flow architecture export --format json`.
+
+See [Architecture selection](USAGE.md#architecture-selection) for reference syntax,
+conditional document delivery, installation behavior, and drift rules. Selection is pinned
+for a run; `pending` is not a bypass, and changing the file cannot silently change an
+active run's obligations. The human-readable `status` guidance explains pending or absent
+selection without changing `next_command`.
+
 ## Your first run
 
 Use `bugfix`. It has 5 phases — `reproduce`, `implement-fix`, `review`, `qa`, `handoff` — which
@@ -92,7 +118,7 @@ agent-flow run "fix the login timeout on slow networks" --workflow bugfix --work
 The first line of output is the workspace:
 
 ```text
-worktree: fix-login-timeout /Users/you/.agent-flow/worktrees/<repo-id>/fix-login-timeout
+worktree: fix-login-timeout <worktree-path>
 ```
 
 Omit `--worktree` and the name is derived from the task text instead. The default location is
@@ -234,6 +260,12 @@ After upgrading the kit, run `agent-flow .` again in each project. The assets co
 project are a copy, and upgrading the kit does not touch them. These are two separate warnings
 with two separate fixes: the kit is behind, fixed by upgrading; the project's copy no longer
 matches the kit, fixed by installing again.
+
+Before replacing assets used by an existing run, follow
+[Workflow definition migration](USAGE.md#workflow-definition-migration). Existing pins
+keep their old workflow and marker contract; new definitions do not migrate old approvals.
+For inspection, [skills commands](USAGE.md#bound-run-or-fresh-inspection) use the selected
+checkout's active pin unless `--fresh` explicitly requests the current kit.
 
 ## What this is not
 

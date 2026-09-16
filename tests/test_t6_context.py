@@ -176,7 +176,7 @@ def test_each_author_and_provider_angle_delivers_its_own_complete_body(tmp_path)
     phase = Phase(id="review", description="Review", skills=PhaseSkills(required=("contract", "ordinary")))
     run_dir = tmp_path / "run"
     author = adapter.render_envelope(phase, run_dir, tmp_path)
-    jobs = _reviewer_jobs(phase, run_dir, tmp_path, adapter, providers=("claude", "codex"))
+    jobs, _ = _reviewer_jobs(phase, run_dir, tmp_path, adapter, providers=("claude", "codex"))
     assert author.count(body) == 1
     assert "REFERENCE_ONLY_AUTHOR_REVIEWER_NORM" not in author
     assert required_read_paths(author) == [str(ordinary)]
@@ -541,7 +541,7 @@ def test_reviewer_launch_authority_accepts_yaml_values_and_preserves_date_type(t
     adapter = HostedAdapter("codex")
     phase = Phase(id="review", description="Review", skills=PhaseSkills(required=("contract",)))
     run_dir = tmp_path / "run"
-    jobs = _reviewer_jobs(phase, run_dir, tmp_path, adapter, providers=("claude", "codex"))
+    jobs, _ = _reviewer_jobs(phase, run_dir, tmp_path, adapter, providers=("claude", "codex"))
     before = adapter.phase_resolution(phase, tmp_path, skill_host="codex")
     date_authority = adapter._provider_launch_authority
     assert jobs

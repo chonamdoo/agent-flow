@@ -22,6 +22,7 @@ phases:
       - "shared_understanding: reached"
       - "context_docs_checked: true"
       - "context_docs_updated: true|not_needed"
+    required_markers_by_architecture: {}
     prompt: |
       Run `.agent-flow/skills/grill-with-docs/SKILL.md` exactly as written.
       Resolve its `/grilling` and `/domain-modeling` references from
@@ -60,6 +61,7 @@ phases:
       - "## Design Values"
       - "design-values:"
       - "design-values-confirmed: yes|n/a"
+    required_markers_by_architecture: {}
     prompt: |
       Apply `.agent-flow/skills/to-prd/SKILL.md`. Write the PRD
       from domain-grill.md and product-brief.md. Include goal, scope,
@@ -71,9 +73,13 @@ phases:
 
           SPEC-<n>: <requirement>
           verify: test:<name> | symbol:<symbol>=<value> | manual
+          due: review | pre-merge
 
       Every item must have exactly one verifier. Record `spec-items: none` only
       when the run task contains no user instruction.
+      `due` is optional and defaults to `review`. Use `pre-merge` only for
+      requirements whose evidence depends on publication. A due-only change
+      requires the same user confirmation as a requirement or verifier change.
 
       Do not ask for separate approval of the initial SPEC list. If the list is
       changed later, the workflow status reports only added, modified, and
@@ -115,9 +121,11 @@ phases:
     description: Break PRD into independently shippable slices.
     prompt: |
       Create a small-slice implementation plan. Each slice must be testable,
-      independently reviewable, and have explicit verification. If architecture
-      mode is `ddd`, every slice must declare layer scope using domain,
-      application, infrastructure, and presentation. Output: artifacts/slice-plan.md.
+      independently reviewable, and have explicit verification. Record each
+      slice's boundary scope in the selected architecture contract's own terms.
+      DDD is a separate modeling axis: record the bounded contexts and domain
+      concerns for each slice when DDD is selected.
+      Output: artifacts/slice-plan.md.
 
   - id: plan-review
     skills:
@@ -138,22 +146,8 @@ phases:
       required: [ddd-architecture, code-generation-discipline, clean-architecture-core]
     description: DDD first, then selected architecture contract design.
     required_markers:
-      - "## Clean Architecture Boundary Map"
-      - "clean-architecture: applied"
-      - "## Dependency Rule"
-      - "## Use Case Boundaries"
-      - "usecase-interface: required|optional|n/a"
-      - "usecase-composition: none|domain-service|application-service|orchestrator|justified"
-      - "## Repository Boundaries"
-      - "## Cache Boundary"
-      - "cache-required: yes|no"
-      - "memory-cache: required|optional|n/a"
-      - "disk-cache: required|optional|n/a"
-      - "cache-invalidation-policy:"
-      - "## Mapping Boundary"
-      - "remote-dto-domain-mapper: required|optional|n/a"
-      - "entity-domain-mapper: required|optional|n/a"
-      - "domain-ui-mapper: required|optional|n/a"
+      - "## Architecture Boundary Map"
+      - "architecture-contract: applied"
       - "## Composition Root"
       - "## Testability Boundary"
       - "solid-srp-change-reason:"
@@ -161,7 +155,27 @@ phases:
       - "solid-lsp-contracts:"
       - "solid-isp-consumer-ports:"
       - "solid-dip-dependency-direction:"
+    required_markers_by_architecture:
+      clean:
+        - "## Dependency Rule"
+        - "## Use Case Boundaries"
+        - "usecase-interface: required|optional|n/a"
+        - "usecase-composition: none|domain-service|application-service|orchestrator|justified"
+        - "## Repository Boundaries"
+        - "## Cache Boundary"
+        - "cache-required: yes|no"
+        - "memory-cache: required|optional|n/a"
+        - "disk-cache: required|optional|n/a"
+        - "cache-invalidation-policy:"
+        - "## Mapping Boundary"
+        - "remote-dto-domain-mapper: required|optional|n/a"
+        - "entity-domain-mapper: required|optional|n/a"
+        - "domain-ui-mapper: required|optional|n/a"
     prompt: |
+      Follow the effective Completion gate below for this run’s selected architecture.
+      Clean mode additionally requires every listed Clean boundary heading and marker,
+      including all applicability exceptions; local mode assesses its own complete
+      contract instead. Pending mode does not authorize structural decisions.
       Apply `.agent-flow/skills/ddd-architecture/SKILL.md` first to model the domain:
       Bounded Context, Ubiquitous Language, Entities, Value Objects,
       Aggregates, Domain Events, Domain Invariants, and Domain Flow.
@@ -171,35 +185,19 @@ phases:
       testability, and SOLID decisions. In Clean mode, use its layer,
       UseCase port/impl, and Repository port/adapter rules; local mode uses
       the selected contract's own boundaries instead.
-      Retain these legacy subsection names as coverage categories, recording
-      the selected-contract decision or permitted non-applicability for each:
-      - `## Clean Architecture Boundary Map`
-      - `## Dependency Rule`
-      - `## Use Case Boundaries`
-      - `## Repository Boundaries`
-      - `## Cache Boundary`
-      - `## Mapping Boundary`
+      Use these common selected-contract subsections:
+      - `## Architecture Boundary Map`
       - `## Composition Root`
       - `## Testability Boundary`
       If DDD is not appropriate, explicitly label the work as
       `service-layer refactor` and still complete the architecture
       boundary assessment when code boundaries are touched.
-      The fixed `clean-architecture: applied` marker records selected-contract
-      assessment here; identify the actual contract without claiming unselected
-      Clean skills were used.
+      Identify the actual contract and provide boundary evidence from its complete
+      normative root and required references; an applied marker alone is not assessment.
       End with:
 
           ## Completion Gate
-          clean-architecture: applied
-          usecase-interface: required|optional|n/a
-          usecase-composition: none|domain-service|application-service|orchestrator|justified
-          cache-required: yes|no
-          memory-cache: required|optional|n/a
-          disk-cache: required|optional|n/a
-          cache-invalidation-policy: <policy or n/a>
-          remote-dto-domain-mapper: required|optional|n/a
-          entity-domain-mapper: required|optional|n/a
-          domain-ui-mapper: required|optional|n/a
+          architecture-contract: applied
           solid-srp-change-reason: <summary>
           solid-ocp-extension-points: <summary>
           solid-lsp-contracts: <summary>
@@ -239,11 +237,17 @@ phases:
       - "missing-required-profile-skills:"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
-      - "presentation-skill: android|flutter|react|react-native|ios|n/a"
       - "regression-test:"
       - "red-observed:"
       - "test-run-evidence: verified|unavailable"
+    required_markers_by_architecture:
+      clean:
+        - "presentation-skill: android|flutter|react|react-native|ios|n/a"
     prompt: |
+      Follow the effective Completion gate below for this run’s selected architecture.
+      Clean mode additionally requires every listed Clean boundary heading and marker,
+      including all applicability exceptions; local mode assesses its own complete
+      contract instead. Pending mode does not authorize structural decisions.
       Apply code-generation-discipline, `.agent-flow/skills/tdd/SKILL.md`, and
       `.agent-flow/skills/codebase-design/SKILL.md` before writing tests. Write
       failing tests first.
@@ -256,11 +260,8 @@ phases:
       `.agent-flow/skills/index.json`, changed files, and task scope. Read only
       the touched profile skill union before writing tests. Unrelated
       platform skill absence must not block. Save the failure summary and
-      command output. If a required local skill is missing for this host, record
-      `skill-availability: degraded`, put its bare name in
-      `missing-required-profile-skills:`, keep the declared
-      `missing local <group>: <skill>` sentence and source URL in prose/Calibration,
-      then complete the artifact with the skills available.
+      command output. For missing required skills, follow the Missing Required
+      Skills section of `.agent-flow/skills/code-generation-discipline/SKILL.md`.
       End with:
 
           ## Completion Gate
@@ -272,7 +273,6 @@ phases:
           missing-required-profile-skills: none|<list>
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          presentation-skill: <android|flutter|react|react-native|ios|n/a>
           regression-test: <test id that reproduces the required behavior>
           red-observed: <exit code of the failing run>
           test-run-evidence: verified|unavailable
@@ -294,16 +294,22 @@ phases:
       - "changed-file-skill-resolution: applied"
       - "required-profile-skills: checked"
       - "missing-required-profile-skills:"
-      - "clean-architecture: applied|n/a"
+      - "architecture-contract: applied|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
-      - "presentation-skill: android|flutter|react|react-native|ios|n/a"
-      - "presentation-state-based-development: applied|n/a"
-      - "presentation-state-review: pass|fail|n/a"
-      - "ui-state-modeling: explicit|n/a"
-      - "presentation-mapping-boundary: domain-to-uimodel|n/a"
-      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
+    required_markers_by_architecture:
+      clean:
+        - "presentation-skill: android|flutter|react|react-native|ios|n/a"
+        - "presentation-state-based-development: applied|n/a"
+        - "presentation-state-review: pass|fail|n/a"
+        - "ui-state-modeling: explicit|n/a"
+        - "presentation-mapping-boundary: domain-to-uimodel|n/a"
+        - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
     prompt: |
+      Follow the effective Completion gate below for this run’s selected architecture.
+      Clean mode additionally requires every listed Clean boundary heading and marker,
+      including all applicability exceptions; local mode assesses its own complete
+      contract instead. Pending mode does not authorize structural decisions.
       Apply code-generation-discipline. Implement the minimum code to pass red
       tests. Apply `.agent-flow/skills/tdd/SKILL.md` and the architecture contract
       skills this prompt lists as required. Apply code-generation-discipline's
@@ -317,15 +323,9 @@ phases:
           changed-file-skill-resolution: applied
           required-profile-skills: checked
           missing-required-profile-skills: none|<list>
-          clean-architecture: applied|n/a
+          architecture-contract: applied|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          presentation-skill: <android|flutter|react|react-native|ios|n/a>
-          presentation-state-based-development: <applied|n/a>
-          presentation-state-review: <pass|fail|n/a>
-          ui-state-modeling: <explicit|n/a>
-          presentation-mapping-boundary: <domain-to-uimodel|n/a>
-          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a>
 
       Output: artifacts/green.log.
 
@@ -340,18 +340,24 @@ phases:
       - "changed-file-skill-resolution: applied"
       - "required-profile-skills: checked"
       - "missing-required-profile-skills:"
-      - "clean-architecture: applied|n/a"
+      - "architecture-contract: applied|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
-      - "presentation-skill: android|flutter|react|react-native|ios|n/a"
-      - "presentation-state-based-development: applied|n/a"
-      - "presentation-state-review: pass|fail|n/a"
-      - "ui-state-modeling: explicit|n/a"
-      - "presentation-mapping-boundary: domain-to-uimodel|n/a"
-      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
+    required_markers_by_architecture:
+      clean:
+        - "presentation-skill: android|flutter|react|react-native|ios|n/a"
+        - "presentation-state-based-development: applied|n/a"
+        - "presentation-state-review: pass|fail|n/a"
+        - "ui-state-modeling: explicit|n/a"
+        - "presentation-mapping-boundary: domain-to-uimodel|n/a"
+        - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
     routes:
       default: comment-authoring
     prompt: |
+      Follow the effective Completion gate below for this run’s selected architecture.
+      Clean mode additionally requires every listed Clean boundary heading and marker,
+      including all applicability exceptions; local mode assesses its own complete
+      contract instead. Pending mode does not authorize structural decisions.
       Apply code-generation-discipline. Refactor only after green. Keep
       behavior stable, apply `.agent-flow/skills/tdd/SKILL.md` and the architecture
       contract skills this prompt lists as required, read every required profile skill
@@ -367,15 +373,9 @@ phases:
           changed-file-skill-resolution: applied
           required-profile-skills: checked
           missing-required-profile-skills: none|<list>
-          clean-architecture: applied|n/a
+          architecture-contract: applied|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          presentation-skill: <android|flutter|react|react-native|ios|n/a>
-          presentation-state-based-development: <applied|n/a>
-          presentation-state-review: <pass|fail|n/a>
-          ui-state-modeling: <explicit|n/a>
-          presentation-mapping-boundary: <domain-to-uimodel|n/a>
-          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a>
 
       Output: artifacts/refactor.md.
 
@@ -390,6 +390,7 @@ phases:
       - "refactor-scope: none"
       - "performance-optimization: none"
       - "module-split: none"
+    required_markers_by_architecture: {}
     routes:
       default: multi-review
     prompt: |
@@ -433,24 +434,30 @@ phases:
       - "architecture-contract-check: pass|fail|n/a"
       - "codex-claude-parity-check: pass|fail"
       - "hook-parity-check: pass|fail"
-      - "clean-architecture-review: applied"
+      - "architecture-contract-review: applied"
       - "must-avoid-check: pass|fail|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
-      - "presentation-skill: android|flutter|react|react-native|ios|n/a"
-      - "presentation-state-review: pass|fail|n/a"
-      - "ui-state-modeling: explicit|n/a"
-      - "presentation-mapping-boundary: domain-to-uimodel|n/a"
-      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
-      - "usecase-interface-check: applied"
-      - "usecase-composition-check: applied"
-      - "cache-boundary-check: applied"
-      - "mapping-boundary-check: applied"
-      - "solid-clean-architecture-check: applied"
+      - "solid-architecture-check: applied"
+    required_markers_by_architecture:
+      clean:
+        - "presentation-skill: android|flutter|react|react-native|ios|n/a"
+        - "presentation-state-review: pass|fail|n/a"
+        - "ui-state-modeling: explicit|n/a"
+        - "presentation-mapping-boundary: domain-to-uimodel|n/a"
+        - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
+        - "usecase-interface-check: applied"
+        - "usecase-composition-check: applied"
+        - "cache-boundary-check: applied"
+        - "mapping-boundary-check: applied"
     routes:
       approve: architecture-review
       request-changes: fix-loop
     prompt: |
+      Follow the effective Completion gate below for this run’s selected architecture.
+      Clean mode additionally requires every listed Clean boundary heading and marker,
+      including all applicability exceptions; local mode assesses its own complete
+      contract instead. Pending mode does not authorize structural decisions.
       agent-flow already ran this phase's reviewers as confined subprocesses on
       the installed Claude/Codex pool. Do not launch reviewer CLIs yourself:
       read the per-angle artifacts the runner lists and aggregate them. At least
@@ -459,33 +466,35 @@ phases:
       For architecture/SOLID findings, reviewers apply the full selected
       architecture contract injected in their own prompts. Any applicable
       must-avoid violation or failed required criterion makes the overall
-      verdict `request-changes`. Legacy Clean-named review markers certify
-      selected-contract assessment, not adoption of unselected layers.
+      verdict `request-changes`. Applied markers alone are not assessment.
       Any request-changes from any reviewer makes the overall verdict
       request-changes. Reviewers are installed Claude and Codex CLIs only.
       Never use OMP or controller-session work as a reviewer fallback. Each
       reviewer section must include `reviewer-source: sub-agent`. Record
-      per-reviewer verdicts and end with `## Overall` followed by exactly one
-      verdict line: `verdict: approve` or `verdict: request-changes`.
+      per-reviewer verdicts.
       Apply agent-flow-concise-output: one finding per line, concise
       prose, no emoji, and parser verdict markers unchanged.
       Apply code-generation-discipline's Before Starting skill resolution and
       Missing Required Skills procedure for this host.
       The markers below are not the whole completion contract. The runner also
       verifies this run's `design-spec.md` ledger at this phase, and
-      `verdict: approve` does not override it — an unmet item blocks phase
-      completion. Every SPEC item needs evidence in the form its `verify:`
-      declares:
+      `verdict: approve` does not override it — an unmet review-due item blocks
+      phase completion and publication. Explicit pre-merge items remain pending,
+      not satisfied. Every due item needs the evidence its `verify:` declares:
         - `test:<name>` — an observed test command that ran that name and exited 0
         - `symbol:<symbol>=<value>` — the value added in a changed file that
           contains the symbol
         - `manual` — explicit user confirmation in chat, followed by the agent
           recording it with `agent-flow spec approve`
+      Before merge or merge approval, the runner rechecks every item, including
+      review-due items. For pre-merge manual items, first meet the recorded
+      prerequisites on the current published HEAD, then obtain user confirmation
+      and record it. A HEAD change requires fresh approval.
       Recorded design values must appear in the diff. When a value reaches the
       code through a token, declare it as
       `design-values-implemented: <key>=<token>` and that token must be in the
       diff.
-      Also include:
+      Include the Completion Gate before the final Overall section:
 
           ## Completion Gate
           skills_checked: true
@@ -497,22 +506,15 @@ phases:
           architecture-contract-check: pass|fail|n/a
           codex-claude-parity-check: pass|fail
           hook-parity-check: pass|fail
-          clean-architecture-review: applied
+          architecture-contract-review: applied
           must-avoid-check: pass|fail|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          presentation-skill: <android|flutter|react|react-native|ios|n/a>
-          presentation-state-review: <pass|fail|n/a>
-          ui-state-modeling: <explicit|n/a>
-          presentation-mapping-boundary: <domain-to-uimodel|n/a>
-          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a>
-          usecase-interface-check: applied
-          usecase-composition-check: applied
-          cache-boundary-check: applied
-          mapping-boundary-check: applied
-          solid-clean-architecture-check: applied
+          solid-architecture-check: applied
 
       Output: artifacts/multi-review.md.
+      End with `## Overall` followed by exactly one verdict line:
+      `verdict: approve` or `verdict: request-changes`.
 
   - id: architecture-review
     architecture_decision: required
@@ -530,29 +532,35 @@ phases:
       - "architecture-contract-check: pass|fail|n/a"
       - "codex-claude-parity-check: pass|fail"
       - "hook-parity-check: pass|fail"
-      - "clean-architecture: applied|n/a"
+      - "architecture-contract: applied|n/a"
       - "must-avoid-check: pass|fail|n/a"
-      - "shared-presentation-contract-placement: pass|fail|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
-      - "dependency-rule: pass|fail"
-      - "usecase-boundary: pass|fail|n/a"
-      - "usecase-calls-usecase: pass|fail|n/a"
-      - "repository-boundary: pass|fail"
-      - "cache-boundary: pass|fail|n/a"
-      - "memory-disk-cache-separated: pass|fail|n/a"
-      - "mapping-boundary: pass|fail|n/a"
-      - "dto-entity-domain-ui-separated: pass|fail"
       - "solid-boundary-check: pass|fail"
-      - "presentation-skill: android|flutter|react|react-native|ios|n/a"
-      - "presentation-state-review: pass|fail|n/a"
-      - "ui-state-modeling: explicit|n/a"
-      - "presentation-mapping-boundary: domain-to-uimodel|n/a"
-      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
+    required_markers_by_architecture:
+      clean:
+        - "shared-presentation-contract-placement: pass|fail|n/a"
+        - "dependency-rule: pass|fail"
+        - "usecase-boundary: pass|fail|n/a"
+        - "usecase-calls-usecase: pass|fail|n/a"
+        - "repository-boundary: pass|fail"
+        - "cache-boundary: pass|fail|n/a"
+        - "memory-disk-cache-separated: pass|fail|n/a"
+        - "mapping-boundary: pass|fail|n/a"
+        - "dto-entity-domain-ui-separated: pass|fail"
+        - "presentation-skill: android|flutter|react|react-native|ios|n/a"
+        - "presentation-state-review: pass|fail|n/a"
+        - "ui-state-modeling: explicit|n/a"
+        - "presentation-mapping-boundary: domain-to-uimodel|n/a"
+        - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
     routes:
       approve: gates
       request-changes: refactor
     prompt: |
+      Follow the effective Completion gate below for this run’s selected architecture.
+      Clean mode additionally requires every listed Clean boundary heading and marker,
+      including all applicability exceptions; local mode assesses its own complete
+      contract instead. Pending mode does not authorize structural decisions.
       agent-flow already ran this phase's reviewers as confined subprocesses on
       the installed Claude/Codex pool before QA. Do not launch reviewer CLIs
       yourself: aggregate the per-angle artifacts the runner lists. Two
@@ -569,14 +577,12 @@ phases:
       violation or failed required criterion makes the verdict `request-changes`
       for that reviewer. Any request-changes
       from either reviewer makes the overall verdict request-changes.
-      Output architecture-review.md with each reviewer section and end with
-      `## Overall` followed by exactly one verdict line:
-      `verdict: approve` or `verdict: request-changes`.
+      Output architecture-review.md with each reviewer section.
       Apply agent-flow-concise-output for findings and keep verdict markers
       unchanged.
       Apply code-generation-discipline's Before Starting skill resolution and
       Missing Required Skills procedure before judging code.
-      End with:
+      Include the Completion Gate before the final Overall section:
 
           ## Completion Gate
           skills_checked: true
@@ -588,25 +594,14 @@ phases:
           architecture-contract-check: pass|fail|n/a
           codex-claude-parity-check: pass|fail
           hook-parity-check: pass|fail
-          clean-architecture: applied|n/a
+          architecture-contract: applied|n/a
           must-avoid-check: pass|fail|n/a
-          shared-presentation-contract-placement: pass|fail|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          dependency-rule: pass|fail
-          usecase-boundary: pass|fail|n/a
-          usecase-calls-usecase: pass|fail|n/a
-          repository-boundary: pass|fail
-          cache-boundary: pass|fail|n/a
-          memory-disk-cache-separated: pass|fail|n/a
-          mapping-boundary: pass|fail|n/a
-          dto-entity-domain-ui-separated: pass|fail
           solid-boundary-check: pass|fail
-          presentation-skill: <android|flutter|react|react-native|ios|n/a>
-          presentation-state-review: <pass|fail|n/a>
-          ui-state-modeling: <explicit|n/a>
-          presentation-mapping-boundary: <domain-to-uimodel|n/a>
-          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a>
+
+      End with `## Overall` followed by exactly one verdict line:
+      `verdict: approve` or `verdict: request-changes`.
 
   - id: gates
     description: Runner runs the profile gates itself after reviewer approve. Routes fail→fix-loop, pass→commit.
@@ -643,18 +638,24 @@ phases:
       - "changed-file-skill-resolution: applied"
       - "required-profile-skills: checked"
       - "missing-required-profile-skills:"
-      - "clean-architecture: applied|n/a"
+      - "architecture-contract: applied|n/a"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
-      - "presentation-skill: android|flutter|react|react-native|ios|n/a"
-      - "presentation-state-based-development: applied|n/a"
-      - "presentation-state-review: pass|fail|n/a"
-      - "ui-state-modeling: explicit|n/a"
-      - "presentation-mapping-boundary: domain-to-uimodel|n/a"
-      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
+    required_markers_by_architecture:
+      clean:
+        - "presentation-skill: android|flutter|react|react-native|ios|n/a"
+        - "presentation-state-based-development: applied|n/a"
+        - "presentation-state-review: pass|fail|n/a"
+        - "ui-state-modeling: explicit|n/a"
+        - "presentation-mapping-boundary: domain-to-uimodel|n/a"
+        - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a"
     routes:
       default: comment-authoring
     prompt: |
+      Follow the effective Completion gate below for this run’s selected architecture.
+      Clean mode additionally requires every listed Clean boundary heading and marker,
+      including all applicability exceptions; local mode assesses its own complete
+      contract instead. Pending mode does not authorize structural decisions.
       Apply code-generation-discipline while fixing review/gate failures. Read
       required profile skills before writing or judging code, or record that no
       fixes were required. Apply the required architecture contract skills to any
@@ -669,15 +670,9 @@ phases:
           changed-file-skill-resolution: applied
           required-profile-skills: checked
           missing-required-profile-skills: none|<list>
-          clean-architecture: applied|n/a
+          architecture-contract: applied|n/a
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
-          presentation-skill: <android|flutter|react|react-native|ios|n/a>
-          presentation-state-based-development: <applied|n/a>
-          presentation-state-review: <pass|fail|n/a>
-          ui-state-modeling: <explicit|n/a>
-          presentation-mapping-boundary: <domain-to-uimodel|n/a>
-          di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|riverpod|get-it|direct|existing|n/a>
 
       Output: artifacts/fix-loop.md.
 
@@ -687,6 +682,7 @@ phases:
     required_markers:
       - "commit-oid:"
       - "commit-subject:"
+    required_markers_by_architecture: {}
     description: Commit verified changes.
     prompt: |
       Commit the verified slice. Use agent-flow-concise-output commit rules:
@@ -704,6 +700,7 @@ phases:
       - "remote-oid:"
       - "pr-url:"
       - "pr-base:"
+    required_markers_by_architecture: {}
     description: Push branch and create or reuse its PR.
     prompt: |
       Before drafting or refreshing the PR body, apply agent-flow-concise-output
@@ -783,6 +780,8 @@ phases:
       approve: merge
       default: block
     prompt: |
+      Entry requires evidence for all confirmed SPEC items, including pre-merge
+      items. SPEC approval and merge approval remain separate authorizations.
       Ask the user for explicit merge approval. Do not merge yet. Output
       merge-approval.md with exactly `verdict: approve` only after approval.
 
@@ -791,6 +790,7 @@ phases:
       optional: [resolving-merge-conflicts]
     description: Merge after explicit user approval.
     prompt: |
+      Entry rechecks every confirmed SPEC item against the current publication.
       Merge only after explicit user approval. If the merge or rebase hits
       conflicts, apply `.agent-flow/skills/resolving-merge-conflicts/SKILL.md` before
       completing. Record merge strategy, target branch, and merge commit.

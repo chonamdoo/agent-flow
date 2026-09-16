@@ -29,6 +29,7 @@ import yaml
 
 from agent_flow.core.design_ledger import LEDGER_SOURCE_PHASES, ledger_prompt_block
 from agent_flow.core.local_skills import declared_concern_ids, local_skill_prompt_block, phase_skill_resolution
+from agent_flow.core.phase_workflow import effective_phase_markers
 from agent_flow.core.skill_resolver import ResolutionContext, SkillResolution
 
 if TYPE_CHECKING:
@@ -89,7 +90,10 @@ class Adapter(ABC):
 
 
     @abstractmethod
-    def execute(self, phase: "Phase", run_dir: Path, project_root: Path) -> bool:
+    def execute(
+        self, phase: "Phase", run_dir: Path, project_root: Path, *,
+        resolution: SkillResolution | None = None,
+    ) -> bool:
         """Run one phase; return True iff the artifact was written."""
 
     @staticmethod
@@ -98,6 +102,8 @@ class Adapter(ABC):
 
     def phase_resolution(
         self, phase: "Phase", project_root: Path, *, skill_host: str | None = None,
+        document_scope: tuple[str, ...] | None = None,
+        required_document_ids: tuple[str, ...] = (),
     ) -> SkillResolution:
         """Resolve the immutable skill context used to render one phase."""
         return phase_skill_resolution(
@@ -106,6 +112,9 @@ class Adapter(ABC):
             profile=self._profile_snapshot, changed_files=self._changed_files,
             task_text=self._task_text, concerns=self._concerns, host=skill_host,
             architecture_root=project_root, context=self._resolution_context,
+            source_root=project_root,
+            document_scope=document_scope,
+            required_document_ids=required_document_ids,
             provider_authority=json.dumps((
                 self.name, self._provider_authority, self._provider_launch_authority,
             )),
@@ -115,7 +124,8 @@ class Adapter(ABC):
                         project_root: Path, host_hint: str = "",
                         *, prompt_variant: str = "",
                         skill_host: str | None = None,
-                        role: str = "author") -> str:
+                        role: str = "author",
+                        resolution: SkillResolution | None = None) -> str:
         """Render the prompt envelope shared by all AI adapters."""
         if role not in {"author", "reviewer"}:
             raise ValueError(f"unknown envelope role: {role}")
@@ -131,9 +141,16 @@ class Adapter(ABC):
         )
         profile_block = self._render_profile_block(phase)
         architecture_block = self._render_architecture_block(phase)
-        completion_gate_block = self._render_completion_gate_block(phase, role=role)
         config_root = self.config_root_or(project_root)
-        resolution = self.phase_resolution(phase, project_root, skill_host=skill_host)
+        if resolution is None:
+            resolution = self.phase_resolution(phase, project_root, skill_host=skill_host)
+        mode = (
+            resolution.architecture_snapshot.selection.mode
+            if resolution.architecture_snapshot is not None else "pending"
+        )
+        completion_gate_block = self._render_completion_gate_block(
+            phase, role=role, architecture_mode=mode
+        )
         local_skill_block = local_skill_prompt_block(
             config_root,
             phase.id,
@@ -144,8 +161,10 @@ class Adapter(ABC):
             concerns=self._concerns,
             host=skill_host,
             architecture_root=project_root,
+            source_root=project_root,
             resolution=resolution,
             role=role,
+            conditional_architecture_markers=phase.required_markers_by_architecture is not None,
         )
         # 이전 phase의 수치는 대화 컨텍스트가 아니라 여기로만 건너온다.
         # 렌더러가 넣으므로 agent가 빼거나 잊을 수 없다.
@@ -226,9 +245,11 @@ class Adapter(ABC):
             )
         return ""
 
-    def _render_completion_gate_block(self, phase: "Phase", *, role: str = "author") -> str:
+    def _render_completion_gate_block(
+        self, phase: "Phase", *, role: str = "author", architecture_mode: str = "pending"
+    ) -> str:
         """Render the completion contract that applies to the selected role."""
-        markers = getattr(phase, "required_markers", ())
+        markers = effective_phase_markers(phase, architecture_mode)
         if not markers:
             return ""
         lines = [

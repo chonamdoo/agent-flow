@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
-from agent_flow.artifact import ACTIVE_LOCK
+from agent_flow.core.run_storage import ACTIVE_LOCK
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError, exclusive_file_lease, validate_run_artifact_target,
     write_run_artifact_text,

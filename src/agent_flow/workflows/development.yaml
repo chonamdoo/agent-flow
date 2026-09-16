@@ -25,6 +25,7 @@ phases:
     multi_review: true
     required_markers:
       - "must-avoid-check: pass|fail|n/a"
+    required_markers_by_architecture: {}
     routes:
       approve: qa
       request-changes: fix-loop

@@ -12,7 +12,7 @@ Run as an independent reviewer after implementation is complete.
 
 - Correctness: Does the implementation provide the requested behavior?
 - Readability: Are the existing flow and names understandable and maintainable?
-- Architecture: Does the change follow the active profile's architecture contract and Clean Architecture boundaries?
+- Architecture: Does the change follow the selected architecture contract, with Clean Architecture checks only in Clean mode?
 - Security: Does the change introduce authorization, secret-handling, input, or external-call risks?
 - Performance: Does the change introduce avoidable loops, rendering, I/O, or build-cost regressions?
 - Could existing behavior break?
@@ -28,8 +28,8 @@ Run as an independent reviewer after implementation is complete.
 - For Flutter/Dart changes, were only the Flutter profile's required skill groups checked (`flutter-development-guide`, `dart-development-guide`, and `flutter-clean-architecture` when architecture boundary paths change)? Review rebuild scope, constraints and overflow, `BuildContext` use after `await`, disposal of controllers owned by `State`, `UiState` modeling, and Riverpod provider boundaries.
 - For Android/Kotlin/Compose/KMP changes, were `android-code-review` and the skills listed by the phase prompt applied? Required entries include paths resolved for this reviewer host; read those exact paths and do not reconstruct paths or search another host's installation. Use optional entries only when the change touches their scope. Review Compose state and effects, recomposition and stability, modifier/layout/slot APIs, focus, animation, Compose UI tests, Kotlin Flow and coroutine ownership, KMP boundaries, and value classes.
 - When a required profile/local skill is unavailable for this host, record `missing local <skill-group>: <skill>` plus its source URL as a non-blocking coverage gap with `skill-availability: degraded`. Absence itself never changes the verdict and must not become a finding or `request-changes`. Project-local skills include only local Markdown skills applicable to code generation or review; exclude Figma/design, hook, branch, PR, merge, and cleanup skills.
-- For design or implementation changes, was `skills/clean-architecture-core/SKILL.md` applied?
-- Did any Clean Architecture must-fix condition produce `request-changes`?
+- For design or implementation changes, was the selected contract applied under `skills/code-generation-discipline/SKILL.md`, including `skills/clean-architecture-core/SKILL.md` in Clean mode?
+- Did any applicable architecture must-fix condition produce `request-changes`?
 - Do the agent-flow phase artifact and completion markers satisfy their contract?
 - If the run has `design-spec.md`, does every `## Spec Items` entry have evidence matching its `verify:` form? `test:<test name>` requires that name in an observed passing test command; `symbol:<symbol>=<value>` requires the value in a changed file containing the symbol; `manual` requires a recorded `agent-flow spec approve` action.
 - Does token-mediated implementation record `design-values-implemented: <key>=<token>`, with that token present in the actual diff?
@@ -40,6 +40,8 @@ Run as an independent reviewer after implementation is complete.
 Treat language/framework guide violations as blocking only when they create a real bug, runtime risk, accessibility regression, hook-rule violation, hydration or server/client boundary problem, performance regression, security risk, test failure, or project-rule violation. Leave general advice and style differences as suggestions.
 
 ## Output Format
+
+The template is a marker vocabulary, not an unconditional checklist. Emit the active phase's common markers and selected mode requirements with concrete accepted values. The verified workflow pin determines the required names and enums.
 
 ```markdown
 # Code Review
@@ -66,7 +68,7 @@ missing-required-profile-skills: none|<list>
 architecture-contract-check: pass|fail|n/a
 codex-claude-parity-check: pass|fail
 hook-parity-check: pass|fail
-clean-architecture: applied
+architecture-contract: applied|n/a
 must-avoid-check: pass|fail
 shared-presentation-contract-placement: pass|fail|n/a
 project-local-skills: checked|n/a
@@ -81,7 +83,7 @@ memory-disk-cache-separated: pass|fail|n/a
 mapping-boundary: pass|fail|n/a
 dto-entity-domain-ui-separated: pass|fail
 solid-boundary-check: pass|fail
-clean-architecture-review: applied
+architecture-contract-review: applied
 presentation-skill: android|flutter|react|react-native|ios|n/a
 presentation-state-based-development: applied|n/a
 presentation-state-review: pass|fail|n/a
@@ -92,6 +94,14 @@ usecase-interface-check: applied
 usecase-composition-check: applied
 cache-boundary-check: applied
 mapping-boundary-check: applied
+solid-architecture-check: applied
+```
+
+For a legacy pinned phase that requests the following keys, retain them instead of their neutral replacements. Do not add legacy keys to a fresh phase that does not request them.
+
+```text
+clean-architecture: applied
+clean-architecture-review: applied
 solid-clean-architecture-check: applied
 ```
 

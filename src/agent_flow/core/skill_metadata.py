@@ -173,10 +173,38 @@ def _validate_normative_metadata(metadata: dict[str, Any], *, source: str) -> No
             raise SkillMetadataError(f"{source}: requires_docs must be a list")
         seen: set[str] = set()
         for entry in declared:
-            reference = _validate_reference(entry, source=source)
+            if isinstance(entry, dict):
+                if "path" not in entry or set(entry) - {"path", "pathGlobs"}:
+                    raise SkillMetadataError(
+                        f"{source}: requires_docs object must contain path and optional pathGlobs"
+                    )
+                reference = _validate_reference(entry["path"], source=source)
+                if "pathGlobs" in entry:
+                    _validate_document_globs(entry["pathGlobs"], source=source)
+            else:
+                reference = _validate_reference(entry, source=source)
             if reference in seen:
                 raise SkillMetadataError(f"{source}: duplicate requires_docs entry: {reference}")
             seen.add(reference)
+
+
+def _validate_document_globs(patterns: object, *, source: str) -> None:
+    if not isinstance(patterns, list) or not patterns:
+        raise SkillMetadataError(f"{source}: requires_docs pathGlobs must be a nonempty string list")
+    for pattern in patterns:
+        if (
+            not isinstance(pattern, str)
+            or not pattern
+            or pattern != pattern.strip()
+            or pattern.startswith(("!", "/"))
+            or re.match(r"^[A-Za-z]:", pattern)
+            or any(part in {"", ".", ".."} for part in pattern.split("/"))
+            or any(character in pattern for character in "\\{}")
+            or any(ord(character) < 32 or ord(character) == 127 for character in pattern)
+        ):
+            raise SkillMetadataError(
+                f"{source}: requires_docs pathGlobs must use canonical checkout-relative globs: {pattern!r}"
+            )
 
 
 def _validate_reference(entry: object, *, source: str) -> str:

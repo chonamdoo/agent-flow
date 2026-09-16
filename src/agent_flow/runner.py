@@ -34,19 +34,19 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, NamedTuple, Sequence
+from typing import Any, Literal, NamedTuple, Sequence
 
 from agent_flow.multi_review import eligible_reviewer_names
 from agent_flow.adapters.auto import detect_adapter
 from agent_flow.adapters.generic import STUB_SENTINEL
 from agent_flow.artifact import (
-    ACTIVE_LOCK,
     META_FILE,
     RUN_LIFECYCLE_LOCK,
     create_run,
     mark_inactive,
     read_meta,
     phase_review_rejected,
+    phase_spec_checkpoint,
     pending_phase_approval,
     run_concerns,
     run_concerns_value,
@@ -72,6 +72,7 @@ from agent_flow.core.command_evidence import (
 )
 from agent_flow.core.context_contract import run_relative_path
 from agent_flow.core.run_storage import RUNS_DIRNAME
+from agent_flow.core.review_input import review_document_scope
 from agent_flow.core.review_scope import review_scope_block_reason
 from agent_flow.core.observation import (
     PHASE_ENTERED as OBS_PHASE_ENTERED,
@@ -83,14 +84,19 @@ from agent_flow.core.observation import (
 )
 from agent_flow.core.design_ledger import (
     LEDGER_SOURCE_PHASES,
+    LEDGER_FILE,
     capture_design_ledger,
     missing_design_value_markers,
     parse_declared_concerns,
 )
 from agent_flow.core.design_value_check import (
+    SPEC_PRE_MERGE_PHASES,
+    SPEC_PUBLICATION_PHASES,
     missing_design_value_implementations,
     missing_spec_item_evidence,
 )
+from agent_flow.core.run_storage import ACTIVE_LOCK
+from agent_flow.spec_publication import observe_spec_publication
 from agent_flow.core.hook_integrity import assert_managed_hooks_registered
 from agent_flow.core.leader_tripwire import leader_sweep_include_ignored
 from agent_flow.core.worktrees import (
@@ -158,6 +164,7 @@ from agent_flow.core.phase_workflow import (
     RunCursor,
     find_kit_root,
     load_phase_workflow_definition,
+    effective_phase_markers,
 )
 from agent_flow.core.workflow_pin import (
     WorkflowDefinitionPinError,
@@ -177,11 +184,12 @@ from agent_flow.core.local_skills import (
     phase_skill_resolution,
     skill_markers_enforced,
 )
-from agent_flow.core.skill_scope import merge_scope
-from agent_flow.core.profile_routing import routed_profile_skills
+from agent_flow.core.skill_scope import merge_scope, scope_document_ids
+from agent_flow.core.profile_routing import IMPLEMENTATION_PHASES, REVIEW_PHASES, routed_profile_skills
 from agent_flow.core.skill_resolver import (
     PhaseSkills,
     ResolutionContext,
+    SkillResolution,
     _profile_skill_phases,
     active_host,
     active_host_roots,
@@ -241,6 +249,7 @@ class Phase:
     artifact: str = ""
     skills: PhaseSkills | None = None
     architecture_decision: str = "existing"
+    required_markers_by_architecture: dict[str, tuple[str, ...]] | None = None
 
 
 class RouteDecision(NamedTuple):
@@ -604,6 +613,19 @@ class Runner:
                     status="blocked", phase=phase, reason=scope_reason,
                 )
                 return
+            entry_missing = self._missing_entry_spec_evidence(
+                phase.id,
+                checkpoint=phase_spec_checkpoint(
+                    self.run_dir, phase.id, self._existing_artifact_path(phase),
+                    config_root=self.config_root, required_markers=self._effective_markers(phase),
+                ) if phase.id == "merge" else None,
+            )
+            if entry_missing:
+                self._print_structured_status(
+                    status="blocked", phase=phase, reason="missing_completion_markers",
+                    missing_completion_markers=entry_missing,
+                )
+                return
             leader_before = self._verify_host_phase_leader_baseline(
                 meta=meta,
                 phase=phase,
@@ -782,8 +804,10 @@ class Runner:
             # 그대로 보여 주므로 자람이 아니다. 여기서 안 잡으면 첫 게이트가 목록
             # 전체를 자람으로 보고 모든 phase가 한 번씩 헛되게 막힌다.
             self._grown_skill_names(phase)
+            resolution = self._required_skill_resolution(phase, read_meta(self.run_dir))
             completed = adapter.execute(
                 phase, run_dir=self.run_dir, project_root=self.project_root,
+                resolution=resolution,
             )
             if leader_before is not None:
                 self._assert_leader_unchanged(leader_root, leader_before)
@@ -884,6 +908,13 @@ class Runner:
                 )
                 return
 
+        terminal_missing = self._missing_entry_spec_evidence("terminal")
+        if terminal_missing:
+            self._print_structured_status(
+                status="blocked", phase=None, reason="missing_completion_markers",
+                missing_completion_markers=terminal_missing,
+            )
+            return
         report_path = write_run_report(self.run_dir)
         cleanup_journal = read_meta(self.run_dir).get("cleanup_journal")
         disposition = getattr(self.workflow, "completion_disposition", "integrated-cleanup")
@@ -1064,6 +1095,55 @@ class Runner:
             leader_root=leader_root,
             snapshot=snapshot,
         )
+
+    def _missing_entry_spec_evidence(
+        self, phase_id: str, *, checkpoint: Literal["pre-merge", "post-merge"] | None = None,
+    ) -> list[str]:
+        assert self.run_dir is not None
+        if phase_id not in SPEC_PUBLICATION_PHASES | SPEC_PRE_MERGE_PHASES:
+            return []
+        if not (self.run_dir / LEDGER_FILE).exists() and not any(
+            phase.id in LEDGER_SOURCE_PHASES for phase in self.phases
+        ):
+            return []
+        for source in self.phases:
+            if source.id in LEDGER_SOURCE_PHASES:
+                artifact = self._existing_artifact_path(source)
+                if artifact.is_file() and self._is_stub_authored(artifact.read_text(encoding="utf-8")):
+                    return []
+        if not (self.run_dir / LEDGER_FILE).is_file():
+            return ["spec-ledger: design-spec.md is missing"]
+        meta = read_meta(self.run_dir)
+        return missing_spec_item_evidence(
+            self.project_root, self.run_dir, phase_id, "",
+            task_text=str(meta.get("task", "")), profile=self.profile,
+            since=_meta_timestamp(meta.get("started_at")), evidence_root=self.config_root,
+            checkpoint=checkpoint,
+            publication_observer=observe_spec_publication,
+        )
+
+    def _check_spec_transition(self, from_index: int, to_index: int) -> None:
+        if to_index <= from_index:
+            return
+        crossed = self.phases[from_index + 1:to_index + 1]
+        if any(phase.id in {"merge", "merge-approval"} for phase in crossed):
+            checkpoint = "pre-merge"
+        elif to_index >= len(self.phases):
+            checkpoint = "terminal"
+        elif self.phases[to_index].id in SPEC_PRE_MERGE_PHASES:
+            checkpoint = self.phases[to_index].id
+        elif any(phase.id in SPEC_PUBLICATION_PHASES for phase in crossed):
+            checkpoint = "push-pr"
+        else:
+            checkpoint = ""
+        if checkpoint:
+            missing = self._missing_entry_spec_evidence(checkpoint)
+            if missing:
+                raise WorktreeIsolationError("; ".join(missing))
+        for phase in crossed:
+            reason = review_scope_block_reason(read_meta(self.run_dir), phase.id)
+            if reason:
+                raise WorktreeIsolationError(reason)
 
     def _next_index(self, current_index: int, phase: Phase) -> RouteDecision:
         """route가 가리키는 다음 자리와 그렇게 판정한 key.
@@ -1282,6 +1362,8 @@ class Runner:
                     f"current phase is {current_phase or 'complete'}"
                 )
             phase = self.phases[transition.from_index]
+            if not transition.blocked:
+                self._check_spec_transition(transition.from_index, transition.to_index)
             if phase.id == "pr-watch" and transition.ci_repair_state is not None:
                 observation = json.loads(
                     resolve_run_subpath(self.run_dir, Path("pr-feedback.json")).read_text(encoding="utf-8")
@@ -1518,6 +1600,8 @@ class Runner:
                 or str(meta.get("phase_entered_at", "")) != transition.source_attempt
             ):
                 return
+            if not transition.blocked:
+                self._check_spec_transition(transition.from_index, target_index)
             print(
                 f"  [resume] completing interrupted transition "
                 f"{transition.from_phase} -> {transition.to_phase or 'complete'}"
@@ -2075,9 +2159,26 @@ class Runner:
             context = self._resolution_context = ResolutionContext()
         return context
 
-    def _required_skill_names(self, phase: Phase, meta: dict[str, Any]) -> tuple[str, ...]:
-        """게이트가 요구하게 될 required skill 이름. 강제 지점과 같은 입력을 쓴다."""
-        resolution = phase_skill_resolution(
+    def _phase_document_scope(self, phase: Phase) -> tuple[str, ...] | None:
+        snapshot = self._phase_resolution_context().snapshot(self.project_root)
+        if snapshot.selection.mode is not ArchitectureMode.LOCAL:
+            return None
+        if phase.id not in IMPLEMENTATION_PHASES and phase.id not in REVIEW_PHASES and not phase.multi_review:
+            return None
+        assert self.run_dir is not None
+        base = self.profile.get("branching", {}).get("base") or self.profile.get("pr", {}).get("target_branch")
+        return review_document_scope(
+            self.project_root, read_meta(self.run_dir), base_branch=base,
+        )
+
+    def _effective_markers(self, phase: Phase) -> tuple[str, ...]:
+        if phase.required_markers_by_architecture is None:
+            return phase.required_markers
+        mode = self._phase_resolution_context().snapshot(self.project_root).selection.mode
+        return effective_phase_markers(phase, mode)
+
+    def _required_skill_resolution(self, phase: Phase, meta: dict[str, Any]) -> SkillResolution:
+        return phase_skill_resolution(
             self.config_root,
             phase.id,
             phase_skills=phase.skills,
@@ -2086,9 +2187,11 @@ class Runner:
             task_text=str(meta.get("task", "")),
             concerns=run_concerns(meta),
             architecture_root=self.project_root,
+            source_root=self.project_root,
             context=self._phase_resolution_context(),
+            document_scope=self._phase_document_scope(phase),
+            required_document_ids=scope_document_ids(meta, phase.id),
         )
-        return tuple(skill.name for skill in resolution.required)
 
     def _grown_skill_names(self, phase: Phase) -> tuple[str, ...]:
         """프롬프트가 보여 준 뒤로 새로 required가 된 이름. 기록도 여기서 갱신한다.
@@ -2108,14 +2211,30 @@ class Runner:
         ):
             return ()
         meta = read_meta(self.run_dir)
-        added = merge_scope(meta, phase.id, self._required_skill_names(phase, meta))
+        resolution = self._required_skill_resolution(phase, meta)
+        names = tuple(skill.name for skill in resolution.required)
+        documents = resolution.required_document_ids
+        added = merge_scope(meta, phase.id, names, document_ids=documents)
+        if any(item.startswith("document:") for item in added) and artifact.exists():
+            reason = self._invalidate_architecture_evidence_for_reentry(phase)
+            if reason is not None:
+                print(
+                    f"\n═══ phase '{phase.id}' is blocked: {reason}. "
+                    f"{self._architecture_remediation(reason)} ═══"
+                )
+                self._print_structured_status(
+                    status="blocked", phase=phase, reason=reason,
+                )
+                raise WorktreeIsolationError(reason)
+            meta = read_meta(self.run_dir)
+            merge_scope(meta, phase.id, names, document_ids=documents)
         write_meta(self.run_dir, meta)
         return added
 
     def _expected_feedback_command(self, phase: Phase) -> str | None:
         if not any(
             marker.strip() == "feedback-green-exit:"
-            for marker in phase.required_markers
+            for marker in self._effective_markers(phase)
         ):
             return None
         expected: str | None = None
@@ -2124,7 +2243,7 @@ class Runner:
                 break
             if not any(
                 marker.strip() == "feedback-red-exit:"
-                for marker in candidate.required_markers
+                for marker in self._effective_markers(candidate)
             ):
                 continue
             artifact = self._existing_artifact_path(candidate)
@@ -2164,7 +2283,8 @@ class Runner:
         # 하나로 사람이 쓴 artifact까지 통째로 통과해서, 마커 검사 전면 킬스위치였다.
         if self._is_stub_authored(text):
             return []
-        missing = list(_missing_markers(text, phase.required_markers))
+        required_markers = self._effective_markers(phase)
+        missing = list(_missing_markers(text, required_markers))
         missing.extend(
             missing_delivery_evidence(
                 self.project_root,
@@ -2182,7 +2302,7 @@ class Runner:
                 phase.id,
                 text,
                 profile=self.profile,
-                required_markers=phase.required_markers,
+                required_markers=required_markers,
                 since=_meta_timestamp(meta.get("phase_entered_at")),
                 # 관측 로그는 저장소 전체가 공유한다. cwd를 좁히지 않으면 형제
                 # worktree에서 돈 테스트가 이 run의 증거로 잡힌다.
@@ -2195,7 +2315,7 @@ class Runner:
             missing_feedback_evidence_markers(
                 self.config_root,
                 text,
-                required_markers=phase.required_markers,
+                required_markers=required_markers,
                 expected_command=self._expected_feedback_command(phase),
                 recoverable_statuses=self._feedback_recoverable_statuses(phase),
                 since=_meta_timestamp(meta.get("phase_entered_at")),
@@ -2214,7 +2334,9 @@ class Runner:
                 concerns=run_concerns(meta),
                 since=_meta_timestamp(meta.get("phase_entered_at")),
                 architecture_root=self.project_root,
+                source_root=self.project_root,
                 context=self._phase_resolution_context(),
+                conditional_architecture_markers=phase.required_markers_by_architecture is not None,
             )
         )
         review_rejected = phase_review_rejected(
@@ -2235,7 +2357,12 @@ class Runner:
                 profile=self.profile,
                 since=_meta_timestamp(meta.get("started_at")),
                 evidence_root=self.config_root,
+                publication_observer=observe_spec_publication,
                 review_rejected=review_rejected,
+                checkpoint=phase_spec_checkpoint(
+                    self.run_dir, phase.id, artifact, config_root=self.config_root,
+                    required_markers=required_markers,
+                ),
             )
         )
         missing.extend(
@@ -2345,7 +2472,10 @@ class Runner:
                 scope = changed_files(self.project_root)
                 host = getattr(self, "_adapter_name", None)
                 roots = active_host_roots(
-                    skill_roots(self.config_root, profile=self.profile, host=host),
+                    skill_roots(
+                        self.config_root, profile=self.profile, host=host,
+                        source_root=self.project_root,
+                    ),
                     active_host() if host is None else host,
                 )
                 catalog = discover_skill_catalog(self.config_root, roots)
@@ -2393,6 +2523,7 @@ class Runner:
                     profile=self.profile, changed_files=scope,
                     task_text=str(meta.get("task", "")), concerns=run_concerns(meta),
                     host=host, architecture_root=self.project_root,
+                    source_root=self.project_root,
                     context=self._phase_resolution_context(),
                     provider_authority=json.dumps((self._adapter_name, tuple(hosts))),
                 )
@@ -2456,8 +2587,11 @@ class Runner:
             for _, history, text in preserved:
                 write_run_subpath_text(self.run_dir, history, text)
             meta = read_meta(self.run_dir)
+            pr_fix_baseline = meta.get("pr_fix_baseline")
             phase_index = next(index for index, item in enumerate(self.phases) if item.id == phase.id)
             self._advance_phase(meta, phase_index, blocked=False)
+            if phase.id in {"pr-comment-fix", "pr-ci-fix"}:
+                meta["pr_fix_baseline"] = pr_fix_baseline
             write_meta(self.run_dir, meta)
             for artifact, _, _ in preserved:
                 artifact.unlink()
@@ -2530,6 +2664,7 @@ class Runner:
         reason: str,
         required_artifact: Path | None = None,
         report: Path | None = None,
+        missing_completion_markers: list[str] | None = None,
     ) -> None:
         assert self.run_dir is not None
         meta = read_meta(self.run_dir)
@@ -2547,6 +2682,7 @@ class Runner:
             required_artifact=required_artifact,
             report=report,
             next_command=next_command,
+            missing_completion_markers=missing_completion_markers,
         )
         # 사람이 읽는 blocker는 stdout으로만 나가고 사라진다. 같은 판정을
         # trace에도 남겨야 실패한 run을 나중에 재현하거나 eval로 옮길 수 있다.
@@ -2634,6 +2770,7 @@ def _phases_from_definition(definition: PhaseWorkflowDefinition) -> list[Phase]:
             artifact=phase.artifact,
             skills=phase.skills,
             architecture_decision=phase.architecture_decision,
+            required_markers_by_architecture=phase.required_markers_by_architecture,
         )
         for phase in definition.phases
     ]

@@ -8,6 +8,7 @@ phases:
       - "feedback-command:"
       - "feedback-red-exit:"
       - "feedback-run-evidence: verified|unavailable"
+    required_markers_by_architecture: {}
     routes:
       green: reproduce-minimise
       blocked: block
@@ -87,6 +88,7 @@ phases:
       - "feedback-command:"
       - "feedback-green-exit:"
       - "feedback-run-evidence: verified|unavailable"
+    required_markers_by_architecture: {}
     prompt: |
       Fix only the confirmed cause. When a correct test seam exists, turn the
       minimal reproduction into a regression test, run it before the fix and
@@ -120,6 +122,7 @@ phases:
       - "throwaway-artifacts: removed|retained-as-regression|n/a"
       - "comment-authoring: applied"
       - "comment-checker: checked|unavailable|n/a"
+    required_markers_by_architecture: {}
     prompt: |
       Remove every `[DEBUG-<id>]` log and temporary probe. Delete throwaway
       harnesses other than the enforced feedback harness. Keep the exact
@@ -144,6 +147,7 @@ phases:
     multi_review: true
     required_markers:
       - "must-avoid-check: pass|fail|n/a"
+    required_markers_by_architecture: {}
     routes:
       approve: qa
       request-changes: hypotheses
@@ -168,6 +172,7 @@ phases:
       - "feedback-green-exit:"
       - "feedback-run-evidence: verified|unavailable"
       - "regression-test-status: pass|feedback-only|failed|blocked"
+    required_markers_by_architecture: {}
     routes:
       green: handoff
       request-changes: hypotheses

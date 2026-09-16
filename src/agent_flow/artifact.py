@@ -26,17 +26,23 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
+from agent_flow.core import run_storage
 from agent_flow.core.architecture_policy import (
     architecture_norm_block_reason,
     architecture_snapshot,
     architecture_snapshot_block_reason,
 )
 from agent_flow.core.atomic_io import atomic_write_text, fsync_directory, read_bounded_regular_file
-from agent_flow.core.design_value_check import missing_spec_item_evidence
+from agent_flow.core.design_ledger import SpecPublicationObserver
+from agent_flow.core.design_value_check import (
+    SPEC_PRE_MERGE_PHASES,
+    SPEC_PUBLICATION_PHASES,
+    missing_spec_item_evidence,
+)
 from agent_flow.core.installation import assert_install_complete, installation_lock_path
 from agent_flow.core.local_skills import (
     changed_files,
@@ -47,6 +53,7 @@ from agent_flow.core.markers import missing_markers, normalize_required_markers
 from agent_flow.core.phase_workflow import (
     PhaseWorkflowDefinition,
     WorkflowDriftError,
+    effective_phase_markers,
     find_kit_root,
     load_phase_workflow_definition,
 )
@@ -82,7 +89,6 @@ from agent_flow.core.worktree_isolation import (
 
 
 META_FILE = "meta.json"
-ACTIVE_LOCK = "active.lock"
 RUN_LIFECYCLE_LOCK = "lifecycle.lock"
 
 
@@ -99,6 +105,9 @@ class PhaseArtifactContract:
     required_markers: tuple[str, ...]
     skills: PhaseSkills | None
     multi_review: bool
+    required_markers_by_architecture: dict[str, tuple[str, ...]] | None = None
+    review_repair_backward: bool = False
+    spec_ledger_required: bool = False
 
 
 class ActiveRunExists(RuntimeError):
@@ -119,6 +128,7 @@ class ActiveRun:
         next_command: str = "agent-flow continue",
         config_root: Path | None = None,
         project_root: Path | None = None,
+        publication_observer: SpecPublicationObserver | None = None,
     ) -> None:
         """Print the current run status and next available action."""
         artifacts = sorted(str(p.relative_to(self.path)) for p in self.path.rglob("*") if p.is_file())
@@ -189,12 +199,31 @@ class ActiveRun:
         except (OSError, ValueError) as exc:
             architecture_reason = "architecture_policy_unreadable"
             detail = str(exc)
+        entry_missing: list[str] = []
+        checkpoint = "terminal" if current_phase == "-" else current_phase
+        if architecture_reason is None and checkpoint in SPEC_PRE_MERGE_PHASES | SPEC_PUBLICATION_PHASES:
+            entry_missing = missing_spec_item_evidence(
+                project, self.path, checkpoint, "", task_text=str(meta.get("task", "")),
+                profile=resolved_profile(config), since=_parse_timestamp(meta.get("started_at")),
+                evidence_root=config,
+                publication_observer=publication_observer,
+                checkpoint=phase_spec_checkpoint(
+                    self.path, current_phase, required_artifact, config_root=config,
+                    required_markers=effective_phase_markers(contract, snapshot.selection.mode),
+                ),
+            )
+            if contract.spec_ledger_required and not (self.path / "design-spec.md").is_file():
+                entry_missing = ["spec-ledger: design-spec.md is missing"]
         if architecture_reason is not None:
             structured_status = "blocked"
             reason = architecture_reason
         elif scope_reason := review_scope_block_reason(meta, current_phase):
             structured_status = "blocked"
             reason = scope_reason
+        elif entry_missing:
+            structured_status = "blocked"
+            reason = "missing_completion_markers"
+            missing_markers = entry_missing
         elif required_artifact is not None and not artifact_exists:
             structured_status = "awaiting_host"
             reason = "missing_phase_artifact"
@@ -239,6 +268,7 @@ class ActiveRun:
                         current_phase,
                         config_root=config_root,
                         project_root=project_root,
+                        publication_observer=publication_observer,
                     )
                 except (OSError, ValueError) as exc:
                     reason = "architecture_policy_unreadable"
@@ -354,7 +384,7 @@ def create_run(
     try:
         with (
             shared_file_lease(installation_lock_path(checkout_root or project_root)),
-            exclusive_file_lease(runs_dir / ACTIVE_LOCK),
+            exclusive_file_lease(runs_dir / run_storage.ACTIVE_LOCK),
         ):
             existing = find_active_run(project_root)
             if existing is not None:
@@ -522,7 +552,7 @@ def approve_phase_artifact(
     run_dir: Path, *, token: str, config_root: Path | None = None
 ) -> dict[str, str]:
     """Acknowledge these artifact bytes, not the caller's identity."""
-    with exclusive_file_lease(run_dir.parent / ACTIVE_LOCK):
+    with exclusive_file_lease(run_dir.parent / run_storage.ACTIVE_LOCK):
         meta = read_meta(run_dir)
         load_run_workflow_definition(
             find_kit_root(), meta.get("workflow", "unknown"), meta, config_root=config_root,
@@ -539,7 +569,7 @@ def select_publication_review_scope(
     run_dir: Path, project_root: Path, *, base_oid: str,
 ) -> str:
     with exclusive_file_lease(run_dir / RUN_LIFECYCLE_LOCK):
-        with exclusive_file_lease(run_dir.parent / ACTIVE_LOCK):
+        with exclusive_file_lease(run_dir.parent / run_storage.ACTIVE_LOCK):
             meta = read_meta(run_dir)
             if not (run_dir / ACTIVE_MARKER).is_file() or not meta.get("run_id"):
                 raise ValueError("publication review scope requires an active run")
@@ -581,7 +611,7 @@ def _archive_review_scope_evidence(run_dir: Path) -> None:
 
 def ensure_review_binding(run_path: Path) -> ReviewBinding:
     """Return the run identity for review evidence, backfilling old runs once."""
-    with exclusive_file_lease(run_path.parent / ACTIVE_LOCK):
+    with exclusive_file_lease(run_path.parent / run_storage.ACTIVE_LOCK):
         meta = read_meta(run_path)
         run_id = meta.get("run_id")
         phase_entered_at = meta.get("phase_entered_at")
@@ -612,7 +642,7 @@ def bind_review_evidence(
     record: ReviewEvidenceRecord,
 ) -> None:
     """Publish the result binding only while the run attempt is still current."""
-    with exclusive_file_lease(run_path.parent / ACTIVE_LOCK):
+    with exclusive_file_lease(run_path.parent / run_storage.ACTIVE_LOCK):
         meta = read_meta(run_path)
         if (
             meta.get("run_id") != run_id
@@ -651,7 +681,7 @@ def phase_review_rejected(
 ) -> bool:
     """Return whether bound review evidence rejects the selected phase."""
     contract = _phase_contract(run_path, workflow, phase_id, config_root=config_root)
-    if not contract.multi_review:
+    if not contract.multi_review or not contract.review_repair_backward:
         return False
     meta = run_meta if run_meta is not None else read_meta(run_path)
     return (
@@ -672,6 +702,7 @@ def _missing_completion_markers(
     *,
     config_root: Path | None = None,
     project_root: Path | None = None,
+    publication_observer: SpecPublicationObserver | None = None,
 ) -> list[str]:
     """Return required completion markers absent from an artifact."""
     contract = _phase_contract(
@@ -688,14 +719,23 @@ def _missing_completion_markers(
     if not artifact.exists():
         return []
     text = artifact.read_text(encoding="utf-8")
-    missing = (
-        _missing_markers(text, contract.required_markers)
-        if contract.required_markers
-        else []
-    )
     config = config_root or run_path
     project = project_root or config
     meta = read_meta(run_path)
+    markers = contract.required_markers
+    if contract.required_markers_by_architecture is not None:
+        assert_install_complete(project)
+        if config != project:
+            assert_install_complete(config)
+        snapshot = architecture_snapshot(project)
+        if snapshot.declared:
+            assert_architecture_override_compatible(config, snapshot.selection)
+        if snapshot.declared or "architecture_digest" in meta:
+            reason = architecture_snapshot_block_reason(snapshot, meta.get("architecture_digest"))
+            if reason is not None:
+                raise ValueError(reason)
+        markers = effective_phase_markers(contract, snapshot.selection.mode)
+    missing = _missing_markers(text, markers)
     phase_since = _phase_entered_at(run_path)
     profile = resolved_profile(config)
     # 컨텍스트를 안 넘기면 `status`와 runner가 서로 다른 required 집합을 본다.
@@ -712,6 +752,8 @@ def _missing_completion_markers(
             concerns=run_concerns(meta),
             since=phase_since,
             architecture_root=project,
+            source_root=project,
+            conditional_architecture_markers=contract.required_markers_by_architecture is not None,
         )
     )
     missing.extend(
@@ -724,6 +766,10 @@ def _missing_completion_markers(
             profile=profile,
             since=_parse_timestamp(meta.get("started_at")),
             evidence_root=config,
+            publication_observer=publication_observer,
+            checkpoint=phase_spec_checkpoint(
+                run_path, phase_id, artifact, config_root=config, required_markers=markers,
+            ),
             review_rejected=phase_review_rejected(
                 run_path,
                 workflow,
@@ -756,13 +802,25 @@ def _parse_timestamp(value: object) -> float | None:
         return None
 
 
-def _required_markers(
-    run_path: Path, workflow: str, phase_id: str, *, config_root: Path | None = None
-) -> tuple[str, ...]:
-    """Load required markers from the run's verified workflow definition."""
-    return _phase_contract(
-        run_path, workflow, phase_id, config_root=config_root,
-    ).required_markers
+
+
+def _review_repair_backward(definition: PhaseWorkflowDefinition, phase_id: str) -> bool:
+    for index, phase in enumerate(definition.phases):
+        if phase.id == phase_id:
+            target = (phase.routes or {}).get("request-changes")
+            protected = SPEC_PUBLICATION_PHASES | SPEC_PRE_MERGE_PHASES
+            if target in protected:
+                return False
+            for target_index, item in enumerate(definition.phases):
+                if item.id != target:
+                    continue
+                if target_index < index:
+                    return True
+                repair_return = (item.routes or {}).get("default")
+                return repair_return not in protected and any(
+                    earlier.id == repair_return for earlier in definition.phases[:index]
+                )
+    return False
 
 
 def _phase_contract(
@@ -778,12 +836,16 @@ def _phase_contract(
         if phase is None:
             return PhaseArtifactContract(
                 artifact=None, required_markers=(), skills=None, multi_review=False,
+                spec_ledger_required=any(item.id in {"design", "prd"} for item in definition.phases),
             )
         return PhaseArtifactContract(
             artifact=Path(phase.artifact),
             required_markers=phase.required_markers,
             skills=phase.skills,
             multi_review=phase.multi_review,
+            required_markers_by_architecture=phase.required_markers_by_architecture,
+            review_repair_backward=_review_repair_backward(definition, phase_id),
+            spec_ledger_required=any(item.id in {"design", "prd"} for item in definition.phases),
         )
     project_root = run_path.parents[2] if len(run_path.parents) >= 3 else None
     candidates: list[Path] = []
@@ -811,6 +873,9 @@ def _phase_contract(
                         required_markers=phase.required_markers,
                         skills=phase.skills,
                         multi_review=phase.multi_review,
+                        required_markers_by_architecture=phase.required_markers_by_architecture,
+                        review_repair_backward=_review_repair_backward(definition, phase_id),
+                        spec_ledger_required=any(item.id in {"design", "prd"} for item in definition.phases),
                     )
         try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -822,6 +887,10 @@ def _phase_contract(
         for phase in phases:
             if not isinstance(phase, dict) or str(phase.get("id")) != phase_id:
                 continue
+            if "required_markers_by_architecture" in phase:
+                raise ValueError(
+                    f"workflow {path}: required_markers_by_architecture requires a valid phase definition"
+                )
             return PhaseArtifactContract(
                 artifact=Path(f"{phase_id}.md"),
                 required_markers=normalize_required_markers(
@@ -852,6 +921,30 @@ def _existing_phase_artifact(run_path: Path, phase_id: str, artifact_rel: Path |
 
 def _missing_markers(text: str, markers: tuple[str, ...]) -> list[str]:
     return missing_markers(text, markers)
+
+
+def phase_spec_checkpoint(
+    run_path: Path,
+    phase_id: str,
+    artifact: Path | None,
+    *,
+    config_root: Path | None = None,
+    project_root: Path | None = None,
+    required_markers: tuple[str, ...] | None = None,
+) -> Literal["post-merge"] | None:
+    if phase_id != "merge" or artifact is None or not artifact.is_file():
+        return None
+    if _artifact_block_reason(artifact) or _stale_artifact_block_reason(run_path, artifact):
+        return None
+    if required_markers is None:
+        meta = read_meta(run_path)
+        contract = _phase_contract(
+            run_path, str(meta.get("workflow", "")), phase_id, config_root=config_root,
+        )
+        snapshot = architecture_snapshot(project_root or config_root or run_path)
+        required_markers = effective_phase_markers(contract, snapshot.selection.mode)
+    text = artifact.read_text(encoding="utf-8")
+    return None if not text.strip() or _missing_markers(text, required_markers) else "post-merge"
 
 
 def _stale_artifact_block_reason(run_path: Path, artifact: Path) -> str | None:

@@ -3833,7 +3833,7 @@ def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
     assert [job.angle_id for job in jobs] == [
         "generalist",
         "types",
@@ -3895,12 +3895,12 @@ def test_state_integrity_angle_uses_high_signal_selectors_only(tmp_path: Path):
 
     adapter._changed_files = ("src/ui/Copy.tsx",)
     adapter._task_text = "change button wording"
-    unrelated = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    unrelated, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
     assert [job.angle_id for job in unrelated] == ["generalist", "types"]
 
     adapter._changed_files = ("migrations/20260828_add_orders.sql",)
     adapter._task_text = ""
-    persistent_path = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    persistent_path, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
     assert [job.angle_id for job in persistent_path] == [
         "generalist",
         "types",
@@ -3909,7 +3909,7 @@ def test_state_integrity_angle_uses_high_signal_selectors_only(tmp_path: Path):
 
     adapter._changed_files = ("src/ui/Copy.tsx",)
     adapter._task_text = "prevent duplicate payment charge"
-    persistent_task = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    persistent_task, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
     assert [job.angle_id for job in persistent_task] == [
         "generalist",
         "types",
@@ -3965,13 +3965,11 @@ def test_multi_review_precomputes_diff_outside_reviewer_sandbox(tmp_path: Path):
         multi_review=True,
         skills=PhaseSkills(required=("clean-architecture-core",)),
     )
-    jobs = _reviewer_jobs(
-        phase,
-        run_dir,
-        project,
-        adapter,
-        review_input=snapshot,
-    )
+    jobs, _ = _reviewer_jobs(phase,
+    run_dir,
+    project,
+    adapter,
+    review_input=snapshot,)
     for job in jobs:
         prompt = job.prompt_for("claude")
         assert str(snapshot.path) in prompt
@@ -3985,6 +3983,7 @@ def test_review_input_snapshot_uses_extended_git_timeout(
 ):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.adapters import hosted
+    from agent_flow.core import review_input
     from agent_flow.core.commands import SafeCommandResult
 
     timeouts = []
@@ -3998,13 +3997,13 @@ def test_review_input_snapshot_uses_extended_git_timeout(
             stderr="",
         )
 
-    monkeypatch.setattr(hosted, "git_safe", fake_git_safe)
+    monkeypatch.setattr(review_input, "git_safe", fake_git_safe)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
     hosted._write_review_input_snapshot(tmp_path, run_dir, "final-review")
 
-    assert timeouts == [hosted._REVIEW_INPUT_TIMEOUT_S] * 2
+    assert timeouts == [review_input._REVIEW_INPUT_TIMEOUT_S] * 2
 
 
 
@@ -4090,9 +4089,10 @@ def test_review_input_snapshot_rejects_total_overflow(
     monkeypatch,
 ):
     from agent_flow.adapters import hosted
+    from agent_flow.core import review_input
     from agent_flow.core.commands import SafeCommandResult
 
-    monkeypatch.setattr(hosted, "_REVIEW_INPUT_MAX_BYTES", 64)
+    monkeypatch.setattr(review_input, "_REVIEW_INPUT_MAX_BYTES", 64)
 
     def fake_git_safe(*args, **kwargs):
         return SafeCommandResult(
@@ -4102,7 +4102,7 @@ def test_review_input_snapshot_rejects_total_overflow(
             stderr="",
         )
 
-    monkeypatch.setattr(hosted, "git_safe", fake_git_safe)
+    monkeypatch.setattr(review_input, "git_safe", fake_git_safe)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
@@ -4145,7 +4145,7 @@ def test_multi_review_jobs_dedupe_profile_baseline(tmp_path: Path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
     assert [job.angle_id for job in jobs] == [
         "generalist",
         "types",
@@ -4172,7 +4172,7 @@ def test_multi_review_profile_override_keeps_baseline_angle_gate(tmp_path: Path)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
 
     assert [job.angle_id for job in jobs] == ["generalist", "types"]
 
@@ -4233,7 +4233,7 @@ def test_multi_review_profile_cannot_gate_unconditional_baseline_angles(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
 
     assert [job.angle_id for job in jobs] == ["generalist", "types"]
 
@@ -4298,7 +4298,7 @@ def test_multi_review_profile_can_override_baseline_prompt(tmp_path: Path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, project, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, project, adapter)
     assert [job.angle_id for job in jobs] == [
         "generalist",
         "types",
@@ -4437,7 +4437,7 @@ def test_multi_review_packaged_prompt_survives_project_templates_dir(tmp_path: P
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, project, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, project, adapter)
     assert [job.angle_id for job in jobs] == [
         "generalist",
         "types",
@@ -4817,19 +4817,19 @@ def test_push_pr_evidence_uses_profile_target_branch(
         text=True,
     ).stdout.strip()
     pr_url = "https://example.test/pull/1"
+    pr_data = {
+        "url": pr_url,
+        "baseRefName": "release",
+        "headRefName": "feat/release-target",
+        "headRefOid": head,
+        "state": "OPEN",
+    }
 
     def fake_gh(command, **_kwargs):
         return SafeCommandResult(
             args=tuple(command),
             returncode=0,
-            stdout=json.dumps(
-                {
-                    "url": pr_url,
-                    "baseRefName": "release",
-                    "headRefName": "feat/release-target",
-                    "headRefOid": head,
-                }
-            ),
+            stdout=json.dumps(pr_data),
             stderr="",
         )
 
@@ -4856,6 +4856,27 @@ def test_push_pr_evidence_uses_profile_target_branch(
     )
     assert "delivery evidence: pr-base must match profile target main" in mismatch
 
+    subprocess.run(
+        ["git", "push", "origin", "--delete", "feat/release-target"],
+        cwd=project, check=True, capture_output=True, text=True,
+    )
+    pr_data["state"] = "MERGED"
+    assert missing_delivery_evidence(
+        project, "push-pr", artifact, profile={"pr": {"target_branch": "release"}},
+    )
+    assert missing_delivery_evidence(
+        project, "push-pr", artifact, profile={"pr": {"target_branch": "release"}},
+        post_merge=True,
+    ) == []
+    for field, value in (("state", "OPEN"), ("headRefOid", "0" * 40), ("baseRefName", "main")):
+        original = pr_data[field]
+        pr_data[field] = value
+        assert missing_delivery_evidence(
+            project, "push-pr", artifact, profile={"pr": {"target_branch": "release"}},
+            post_merge=True,
+        )
+        pr_data[field] = original
+
 
 def test_a_review_angle_is_dropped_when_its_skill_is_not_required(tmp_path: Path):
     """반증: angle을 무조건 등록하면 resolver 쪽 축소가 review phase에서 전부 사라진다.
@@ -4874,7 +4895,7 @@ def test_a_review_angle_is_dropped_when_its_skill_is_not_required(tmp_path: Path
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
 
     assert [job.angle_id for job in jobs] == ["generalist", "types"]
 
@@ -4909,7 +4930,7 @@ def test_the_angle_gate_and_the_writer_gate_agree_on_a_routed_but_missing_skill(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    jobs = _reviewer_jobs(phase, run_dir, project, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, project, adapter)
     writer_missing = missing_local_skill_markers(
         "## Completion Gate\nclean-architecture: n/a\n",
         project,
@@ -5045,6 +5066,8 @@ def test_pr_fix_refreshes_review_for_code_changes_not_discussion(tmp_path, mutat
     if mutation == "committed":
         for args in (("add", "."), ("commit", "-m", "fix")):
             subprocess.run(("git", *args), cwd=project, check=True, capture_output=True)
+    assert runner._invalidate_architecture_evidence_for_reentry(phases[4]) is None
+    artifact.write_text("fixed against refreshed norms\n", encoding="utf-8")
     for name in ("multi-review", "architecture-review", "gates"):
         (run_dir / f"{name}.md").write_text("old approval\n", encoding="utf-8")
     transition = runner._plan_transition(4, phases[4])
@@ -5226,6 +5249,7 @@ def test_legacy_pin_publication_rejects_invalid_metadata_without_writes(
 
 def test_legacy_pin_publication_reports_active_lock_contention(legacy_pin_runner):
     from agent_flow import artifact
+    from agent_flow.core.run_storage import ACTIVE_LOCK
     from agent_flow.core.workflow_pin import load_run_workflow_definition
     from agent_flow.core.worktree_isolation import (
         WorktreeIsolationError, exclusive_file_lease,
@@ -5234,7 +5258,7 @@ def test_legacy_pin_publication_reports_active_lock_contention(legacy_pin_runner
 
     runner, _pending, pin = legacy_pin_runner
     before = (runner.run_dir / "meta.json").read_bytes()
-    with exclusive_file_lease(runner.run_dir.parent / artifact.ACTIVE_LOCK):
+    with exclusive_file_lease(runner.run_dir.parent / ACTIVE_LOCK):
         with pytest.raises(WorktreeIsolationError):
             runner.run(ResumeMode.RESUME)
         assert (runner.run_dir / "meta.json").read_bytes() == before

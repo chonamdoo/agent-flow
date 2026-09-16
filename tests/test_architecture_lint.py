@@ -261,16 +261,51 @@ def test_inactive_profile_is_reported_separately_from_passed(tmp_path, capsys):
     assert "android: architecture lint n/a (activation_roots absent)" in out
     assert "architecture lint passed" not in out
 
-    adopted = tmp_path / "adopted"
-    _adopted_core_domain_module(adopted)
-    assert inactive_lint_profile_ids(adopted, ["android"], []) == []
-    assert main(["--root", str(adopted), "--profile", "android", "--files"]) == 0
-    assert "android: architecture lint passed" in capsys.readouterr().out
 
     assert main(["--root", str(tmp_path), "--profile", "generic", "--files"]) == 0
     out = capsys.readouterr().out
     assert "generic: architecture lint n/a (architecture contract absent)" in out
     assert "architecture lint passed" not in out
+
+
+def test_lint_distinguishes_empty_unmatched_and_evaluated_sources(tmp_path, capsys):
+    from agent_flow.core.architecture_lint import main
+
+    profiles = tmp_path / ".agent-flow/profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "coverage.yaml").write_text(
+        yaml.safe_dump({
+            "id": "coverage",
+            "architecture": {
+                "roles": [{"id": "domain", "paths": ["apps/a/domain"], "forbidden": ["ApiClient"]}]
+            },
+        }),
+        encoding="utf-8",
+    )
+    args = ["--root", str(tmp_path), "--profile", "coverage", "--files"]
+    assert main(args) == 0
+    empty = capsys.readouterr().out
+    assert "passed" not in empty
+    assert "source candidates=0" in empty
+
+    assert main([*args, "apps/b/domain/model.py"]) == 0
+    unmatched = capsys.readouterr().out
+    assert "passed" not in unmatched
+    assert "source candidates=1, role-matched=0" in unmatched
+
+    source = tmp_path / "apps/a/domain/model.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("class Model: pass\n", encoding="utf-8")
+    assert main([*args, "apps/a/domain/model.py"]) == 0
+    evaluated = capsys.readouterr().out
+    assert "passed" in evaluated
+    assert "role-matched=1, findings=0" in evaluated
+
+    source.write_text("class ApiClient: pass\n", encoding="utf-8")
+    assert main([*args, "apps/a/domain/model.py"]) == 1
+    violation = capsys.readouterr().err
+    assert "failed" in violation
+    assert "role-matched=1, findings=1" in violation
 
 
 def test_changed_file_discovery_fails_closed_when_git_fails(tmp_path, monkeypatch):

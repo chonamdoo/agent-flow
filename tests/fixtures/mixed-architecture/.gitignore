@@ -1,0 +1,6 @@
+node_modules/
+!.agent-flow/
+.agent-flow/*
+!.agent-flow/profiles/
+.agent-flow/profiles/*
+!.agent-flow/profiles/generic.local.yaml

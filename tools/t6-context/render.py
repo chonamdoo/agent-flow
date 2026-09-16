@@ -135,6 +135,9 @@ def render(source: Path, project: Path, case: dict, provider: str, output: Path)
         routes = "unavailable: baseline has no all-route delivery metadata"
     author = adapter.render_envelope(phase, run_dir, project, skill_host=provider)
     jobs = _reviewer_jobs(phase, run_dir, project, adapter, providers=(provider,))
+    # Archived baselines predate the delivery-metadata return value.
+    if isinstance(jobs, tuple):
+        jobs, _ = jobs
     prompts = {"author": author, **{f"reviewer-{job.angle_id}": job.prompt_by_provider[provider] for job in jobs}}
     envelopes = []
     for name, prompt in prompts.items():

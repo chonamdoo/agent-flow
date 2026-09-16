@@ -45,6 +45,21 @@ def completion_gate_marker_values(text: str) -> dict[str, str]:
     return values
 
 
+def missing_architecture_assessment_markers(
+    text: str, *, contract_required: bool, conditional: bool = False
+) -> list[str]:
+    if not contract_required:
+        return []
+    values = completion_gate_marker_values(text)
+    key = "architecture-contract" if conditional else "clean-architecture"
+    missing: list[str] = []
+    if (conditional or key in values) and values.get(key) != "applied":
+        missing.append(f"{key}: applied")
+    if "must-avoid-check" in values and values["must-avoid-check"] not in {"pass", "fail"}:
+        missing.append("must-avoid-check: pass|fail")
+    return missing
+
+
 def completion_gate_marker_values_exact(text: str) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in _completion_gate_lines(text, lowercase=False):

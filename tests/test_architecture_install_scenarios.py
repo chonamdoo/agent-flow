@@ -104,6 +104,7 @@ def _gate_text(resolution: SkillResolution, *, omit: str | None = None) -> str:
         f"project-local-skills-used: {used}\n"
         "project-local-skill-docs: applied\n"
         f"missing-required-profile-skills: {', '.join(skill.name for skill in resolution.missing) or 'none'}\n"
+        f"architecture-contract: {'applied' if architecture_contract_required(resolution) else 'n/a'}\n"
         "must-avoid-check: pass\n"
     )
 
@@ -173,7 +174,7 @@ def test_clean_install_delivers_and_enforces_platform_contract(
         for name in obligations:
             assert str(required[name].path) in prompt
         _assert_application_gate(runner, phase, resolution, obligations)
-    jobs = _reviewer_jobs(_phase(runner, "review"), runner.run_dir, project, adapter, providers=(host,))
+    jobs, _ = _reviewer_jobs(_phase(runner, "review"), runner.run_dir, project, adapter, providers=(host,))
     assert {"clean-architecture", "architecture-design"} <= {job.angle_id for job in jobs}
     review_resolution = _resolve(runner, _phase(runner, "review"), host)
     for job in jobs:
@@ -213,7 +214,7 @@ def test_local_install_delivers_anonymous_route_contract_to_author_and_reviewers
         for content in snapshot.contract.contents:
             assert content in prompt
         _assert_application_gate(runner, phase, resolution, obligations)
-    jobs = _reviewer_jobs(_phase(runner, "review"), runner.run_dir, project, adapter, providers=("claude", "codex"))
+    jobs, _ = _reviewer_jobs(_phase(runner, "review"), runner.run_dir, project, adapter, providers=("claude", "codex"))
     assert {"clean-architecture", "architecture-design"} <= {job.angle_id for job in jobs}
     for provider in ("claude", "codex"):
         resolution = _resolve(runner, _phase(runner, "review"), provider)
@@ -253,7 +254,7 @@ def test_pending_install_keeps_discipline_but_refuses_structural_decisions(
     assert resolution.architecture_snapshot.digest in author
     for skill in resolution.available_required:
         assert str(skill.path) in author
-    jobs = _reviewer_jobs(_phase(runner, "review"), runner.run_dir, project, adapter, providers=(host,))
+    jobs, _ = _reviewer_jobs(_phase(runner, "review"), runner.run_dir, project, adapter, providers=(host,))
     assert not {"clean-architecture", "architecture-design"} & {job.angle_id for job in jobs}
     assert {"generalist", "types"} <= {job.angle_id for job in jobs}
     review = _phase(runner, "review")

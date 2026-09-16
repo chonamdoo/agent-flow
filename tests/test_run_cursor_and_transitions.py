@@ -1328,7 +1328,7 @@ def test_existing_pause_artifact_still_requires_explicit_approval(tmp_path, monk
 
     tmp_path = create_run(tmp_path, "default", "Bind design approval to the exact artifact")
     phase = Phase(id="design", description="", pause_after=True)
-    runner = _runner(tmp_path, [phase])
+    runner = _runner(tmp_path, [phase, Phase(id="implement", description="")])
     runner.profile = {}
     runner.next_command = "agent-flow continue"
     monkeypatch.setattr(runner, "_print_structured_status", lambda **kwargs: None)

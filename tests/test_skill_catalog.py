@@ -118,6 +118,53 @@ def test_metadata_batch_uses_supplied_text_and_isolates_invalid_documents(tmp_pa
     assert "requires_docs" in documents[1]["error"]
 
 
+@pytest.mark.parametrize("entry", [
+    {"path": "references/a.md", "pathGlobs": []},
+    {"path": "references/a.md", "pathGlobs": "apps/a/**"},
+    {"path": "references/a.md", "pathGlob": ["apps/a/**"]},
+    {"pathGlobs": ["apps/a/**"]},
+    *({"path": "references/a.md", "pathGlobs": [pattern]} for pattern in (
+        "", "/apps/**", "apps\\a\\**", "apps/../**", "./apps/**",
+        "apps//**", "!apps/**", "apps/{a,b}/**", "apps/\x7f/**",
+    )),
+])
+def test_scoped_reference_rejects_malformed_metadata_at_direct_and_batch_seams(entry):
+    from agent_flow.core.skill_metadata import (
+        SkillMetadataError, parse_metadata_batch, parse_skill_metadata,
+    )
+
+    text = "---\n" + yaml.safe_dump({"requires_docs": [entry]}) + "---\n"
+    with pytest.raises(SkillMetadataError):
+        parse_skill_metadata(text, source="scoped.md")
+    result = parse_metadata_batch({
+        "schema_version": 1, "documents": [{"source": "scoped.md", "text": text}],
+    })["documents"][0]
+    assert result["metadata"] is None
+    assert result["error"]
+
+
+def test_scoped_reference_projection_preserves_mixed_shapes_and_duplicate_rejection():
+    from agent_flow.core.skill_metadata import (
+        SkillMetadataError, parse_metadata_batch, parse_skill_metadata,
+    )
+
+    entries = [
+        "references/common.md",
+        {"path": "references/a.md", "pathGlobs": ["apps/a/**", "shared/**"]},
+        {"path": "references/unconditional.md"},
+    ]
+    text = "---\n" + yaml.safe_dump({"requires_docs": entries}) + "---\n"
+    assert parse_skill_metadata(text, source="scoped.md")["requires_docs"] == entries
+    assert parse_metadata_batch({
+        "schema_version": 1, "documents": [{"source": "scoped.md", "text": text}],
+    })["documents"][0]["metadata"]["requires_docs"] == entries
+    duplicate = "---\n" + yaml.safe_dump({
+        "requires_docs": ["references/a.md", entries[1]],
+    }) + "---\n"
+    with pytest.raises(SkillMetadataError, match="duplicate"):
+        parse_skill_metadata(duplicate, source="scoped.md")
+
+
 
 
 def test_bundled_skill_relative_markdown_links_resolve():
