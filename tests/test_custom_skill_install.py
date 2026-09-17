@@ -3606,6 +3606,7 @@ _NEW_HOST_SKILLS = {
     "llm-tool-development",
     "react-hook-form-zod",
     "react-tanstack-form",
+    "react-tanstack-query",
     "react-web-seo",
     "react-storybook",
     "react-scroll-restoration",
@@ -3652,18 +3653,25 @@ def test_installer_entrypoints_consume_framework_fixtures(tmp_path: Path, binary
             "react-runtime-i18n",
             "ga4-ecommerce-events",
             "datadog-rum-sourcemaps",
+            "react-tanstack-query",
         })
     if case["profile"] == "nextjs":
         expected_host_skills.add("nextjs-auth-session")
     if case["profile"] in {"android", "ios", "react-native", "node", "typescript", "nextjs"}:
         expected_host_skills.add("webview-json-rpc-bridge")
     assert names & _NEW_HOST_SKILLS == expected_host_skills
+    if case.get("react_web"):
+        guide = tmp_path / ".agent-flow/skills/react-development-guide/SKILL.md"
+        links = re.findall(r"\[[^\]]*\]\(([^)]+)\)", guide.read_text(encoding="utf-8"))
+        zustand_link = next(link for link in links if link.endswith("/zustand-state.md"))
+        source = KIT_ROOT / "skills/react-tanstack-query/references/zustand-state.md"
+        assert (guide.parent / zustand_link).read_bytes() == source.read_bytes()
     for host in (".claude", ".Codex", ".omp"):
         for name in _NEW_HOST_SKILLS:
             directory = tmp_path / host / "skills" / name
             if name in expected_host_skills:
                 assert (directory / "SKILL.md").is_file(), (case["id"], host, name)
-                if name == "react-tanstack-form":
+                if name in {"react-tanstack-form", "react-tanstack-query"}:
                     source = KIT_ROOT / "skills" / name
                     for reference in (source / "references").rglob("*"):
                         if reference.is_file():

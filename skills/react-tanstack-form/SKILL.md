@@ -38,6 +38,8 @@ Read the branch being implemented or reviewed:
 | Next.js/Start server actions, native FormData, SSR state transfer | [SSR and server boundaries](references/ssr.md) |
 | Choosing an upstream example, checking source versions, copying licensed material | [Examples and provenance](references/examples-and-provenance.md) |
 
+For changes to TanStack Query keys, client/cache lifetime, mutations, or post-save synchronization, also read `react-tanstack-query`; the form references remain authoritative for draft/reset behavior. For Next.js submission paths, rewrites, upstream environments, or HTTP mock routing, read `nextjs-api-routing`. Neither branch requires changing the existing form library or introducing a BFF.
+
 ## Completion Evidence
 
 Exercise the changed form path using the project's authorized runtime and declared checks. Observe displayed values, validation feedback, pending lifetime, outgoing payload, save result, and focus—not just internal state or compilation. Choose relevant boundaries from the reference in use; do not create a demo scaffold merely to satisfy this skill. Performance claims need measured interaction/render/validation cost, not an arbitrary render-count target. Report executed evidence separately from source reasoning and unrun scenarios. A visual fixture with injected errors proves presentation, not the submission pipeline.
