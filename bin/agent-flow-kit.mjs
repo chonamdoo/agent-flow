@@ -17,6 +17,8 @@ import {
   activeInstallProfileIds,
   ensureInstallLease,
   prepareArchitectureInstall,
+  migrateRootContext,
+  rootContextPolicy,
   AGENT_FLOW_COMMAND,
   assertInstallRootIsFinal,
   assertKnownInstallArgs,
@@ -80,11 +82,11 @@ import {
   resolveInstallRoot,
   resolveGitCommonWorktreeRoot,
   ROOT_CONTEXT_FILES,
+  ROOT_CONTEXT_NOTICE_PREFIX,
   rootBootstrapBlock,
   retiredHookScripts,
   samePath,
   shellQuote,
-  reportRootBootstrapBlocks,
   SKILL_INDEX_END,
   SKILL_INDEX_START,
   skillIndexBlock,
@@ -97,7 +99,6 @@ import {
   upsertGitignore,
   upsertDocsIndexBlock,
   upsertSkillIndexBlock,
-  upsertRootBootstrapBlock,
   validateSkillDependencies,
   writeKitAssetRecord,
   writePruneBackup,
@@ -172,6 +173,8 @@ function installProject(requestedRoot) {
   const architectureMode = architectureInstall.plan.mode;
   let installSelection = resolveInstallSelection({ args: installArgs, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: root, architectureMode, architecturePlan: architectureInstall.plan });
   const existingPayload = readExistingKit(agentFlowDir);
+  const rootContext = installArgs.includes("--migrate-root-context")
+    ? migrateRootContext(root) : rootContextPolicy(root);
   // 명시 플래그 > 이전 설정 > 기본(켜짐)
   hooksDisabled = hooksFlagOff || (!hooksFlagOn && existingPayload?.hooks === false);
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, root);
@@ -197,6 +200,7 @@ function installProject(requestedRoot) {
     selected_skills: installSelection.skillNames ? [...installSelection.skillNames].sort() : "all",
     root: ".",
     hooks: !hooksDisabled,
+    root_context: rootContext,
     // installed_at은 최초 설치 시각이다. 매 install이 덮으면 "언제부터 쓰던
     // 프로젝트인가"에 답할 기록이 사라진다. 마지막 install은 updated_at이 센다.
     installed_at: typeof existingPayload?.installed_at === "string" ? existingPayload.installed_at : installTimestamp,
@@ -367,18 +371,11 @@ function installProject(requestedRoot) {
   ]);
   upsertGitExclude(root, ROOT_CONTEXT_FILES);
   removeLegacyProjectSkillCopies(root, "graphify");
-  // 순서는 `ROOT_CONTEXT_FILES`와 같아야 보고가 어긋나지 않는다. receipt는 각 쓰기가
-  // 스스로 남기므로 여기서 따로 모으지 않는다.
-  const bootstrapTemplateText = readBootstrapTemplate().text;
-  const bootstrapStatuses = ROOT_CONTEXT_FILES.map((label) => upsertRootBootstrapBlock(
-    root,
-    label,
-    rootBootstrapBlock(label, bootstrapTemplateText),
-    { force: forceManaged },
-  ));
-  reportRootBootstrapBlocks(bootstrapStatuses);
-  upsertSkillIndexBlock(root);
-  upsertDocsIndexBlock(root);
+  if (rootContext === "legacy") {
+    console.log(`${ROOT_CONTEXT_NOTICE_PREFIX}use --migrate-root-context for explicit conversion`);
+    upsertSkillIndexBlock(root);
+    upsertDocsIndexBlock(root);
+  }
   pruneRetiredHookScripts(root, hooksDisabled);
   pruneRetiredManagedScripts(root);
   makeHooksExecutable(root);

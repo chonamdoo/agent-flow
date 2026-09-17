@@ -4,9 +4,8 @@
 // Run from any project root:
 //   npx <agent-flow-package> install
 //
-// The installer creates .agent-flow/ (runs, memory, kit metadata) and
-// upserts an agent-flow block into CLAUDE.md / AGENTS.md so
-// every host CLI sees the same workflow contract.
+// The installer prepares the project runtime and host integration. Fresh installs
+// leave root context documents untouched; legacy root exposure is retained.
 
 import fs from "node:fs";
 import crypto from "node:crypto";
@@ -23,6 +22,7 @@ import {
   activeInstallProfileIds,
   ensureInstallLease,
   prepareArchitectureInstall,
+  rootContextPolicy,
   INSTALL_SAFETY_EXIT,
   AGENT_FLOW_COMMAND,
   ASSET_BACKUP_NOTICE_PREFIX,
@@ -31,7 +31,6 @@ import {
   assertKnownInstallArgs,
   atomicWriteFileSync,
   backupIfDifferent,
-  BOOTSTRAP_TEMPLATE_FILE,
   claudeHooksSettings,
   codexConfigPath,
   codexHooksSettings,
@@ -67,8 +66,7 @@ import {
   pruneRetiredHooks,
   pruneRetiredHookScripts,
   pruneRetiredManagedScripts,
-  BOOTSTRAP_ADOPTED_NOTICE_PREFIX,
-  BOOTSTRAP_KEPT_NOTICE_PREFIX,
+  ROOT_CONTEXT_NOTICE_PREFIX,
   isSymlinkPath,
   pruneUninstalledProfiles,
   pathHasSymlink,
@@ -85,10 +83,8 @@ import {
   resolveManagedWorktreeRoot,
   resolveLinkedWorktreeLeader,
   ROOT_CONTEXT_FILES,
-  rootBootstrapBlock,
   resolveInstallRoot,
   retiredHookScripts,
-  reportRootBootstrapBlocks,
   samePath,
   shellQuote,
   SKILL_INDEX_END,
@@ -105,7 +101,6 @@ import {
   upsertGitignore,
   upsertDocsIndexBlock,
   upsertSkillIndexBlock,
-  upsertRootBootstrapBlock,
   validateSkillDependencies,
   writeKitAssetRecord,
   withoutInstallRootOption,
@@ -201,27 +196,6 @@ function ensureDir(p) {
 // 시점에는 아직 목록이 확정되지 않아, 거기서 채우면 한 install 안에서 곧바로
 // 낡는다. 그래서 블록에는 자리만 두고 여기서 그 자리만 바꾼다.
 
-// 정본은 `bootstrap/AGENTS.md.template` 한 벌이고, `agent-flow-kit.mjs`도 같은 파일을 읽는다.
-// label이 고르는 것은 어느 루트 파일에 쓰는지와, `rootBootstrapBlock`이 CLAUDE.md에는 계약
-// 본문 대신 `@AGENTS.md` 포인터를 낸다는 것뿐이다. 못 읽으면 던진다 — 조용히 건너뛰면
-// "블록을 안 쓴 것"이 정상 결과가 되고, 이전 install이 남긴 낡은 블록이 그대로 방치된다.
-//
-// 쓰기와 소유권 판정은 `upsertRootBootstrapBlock` 한 벌이다. 두 진입점이 각자 판정하면
-// 어느 CLI로 깔았는지에 따라 사용자 편집이 보존되기도 하고 지워지기도 한다.
-function bootstrapMarkdown(label) {
-  const tmplPath = path.join(KIT_ROOT, "bootstrap", BOOTSTRAP_TEMPLATE_FILE);
-  let template;
-  try {
-    template = fs.readFileSync(tmplPath, "utf8");
-  } catch (error) {
-    throw new Error(`bootstrap template unreadable: ${tmplPath} (${error?.message || error})`);
-  }
-  // `rootBootstrapBlock`은 try 밖이다. 마커가 없다는 진단이 "읽을 수 없다"로 바뀌면
-  // 고칠 곳을 찾는 사람이 파일 권한을 보러 간다.
-  return upsertRootBootstrapBlock(PROJECT, label, rootBootstrapBlock(label, template), {
-    force: FORCE_MANAGED,
-  });
-}
 
 function bootstrapLocalSkillName(skillPath, fallback) {
   try {
@@ -893,8 +867,7 @@ function runKitInstall(architectureInstall) {
       || line.startsWith(SKILL_UPGRADE_NOTICE_PREFIX)
       || line.startsWith(ASSET_UPGRADE_NOTICE_PREFIX)
       || line.startsWith(ASSET_BACKUP_NOTICE_PREFIX)
-      || line.startsWith(BOOTSTRAP_KEPT_NOTICE_PREFIX)
-      || line.startsWith(BOOTSTRAP_ADOPTED_NOTICE_PREFIX)
+      || line.startsWith(ROOT_CONTEXT_NOTICE_PREFIX)
       // 링크 너머로 쓴 host 설정. 자식이 쓰고 여기서 걸러 내면 프로젝트 밖 파일을
       // 갈아 끼운 사실이 어디에도 안 남는다.
       || line.startsWith(SYMLINK_FOLLOW_NOTICE_PREFIX)
@@ -927,7 +900,7 @@ function install() {
   }
   // linked worktree(Orca의 `~/orca/workspaces/<repo>/<slug>` 등)도 managed 경로와
   // 똑같이 fail-closed다. 조용히 leader를 PROJECT로 잡으면 이 아래 전부가 leader를
-  // 때린다: `bootstrapMarkdown`이 leader의 CLAUDE.md/AGENTS.md를 백업 없이 덮고,
+  // 때린다: 자식 installer가 legacy root 문서와
   // tracked `.gitignore`를 고치고, `.claude/settings.json`과
   // `.agent-flow/profiles/*`(미선택 profile 삭제)를 갈아치우며, `--force-managed`면
   // `removeDirIfSame`가 tracked `<leader>/scripts/`를 내용 확인 없이 recursive 삭제한다.
@@ -954,6 +927,10 @@ function install() {
   captureLegacySkillCopyReceipts(PROJECT, previousSkillIndex);
   try {
   const delegatedKitInstalled = runKitInstall(architectureInstall);
+  if (!delegatedKitInstalled) {
+    throw new Error("agent-flow install incomplete: delegated kit installation failed; previous policy restored");
+  }
+  const rootContext = rootContextPolicy(PROJECT);
   ensureDir(path.join(AF_DIR, "runs"));
   ensureDir(path.join(AF_DIR, "memory"));
   ensureDir(path.join(AF_DIR, "local-skills"));
@@ -963,13 +940,6 @@ function install() {
   let installSelection = resolveInstallSelection({ args: INSTALL_ARGS, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: PROJECT, architectureMode, architecturePlan: architectureInstall.plan });
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, PROJECT);
 
-  // 자식 kit install이 이미 두 루트 파일을 썼고 receipt까지 남겼다. 여기서 한 번 더
-  // 쓰면 방금 관측한 내용이 곧 "우리가 쓴 것"으로 기록돼, 사용자가 손댔는지 가르는
-  // 오라클이 사라진다 — 실제로 그 두 번째 쓰기가 `--force-managed` 없이도 편집을
-  // 덮었다. 자식이 실패했을 때만(= kit 자산이 안 깔린 degraded 설치) 직접 쓴다.
-  if (!delegatedKitInstalled) {
-    reportRootBootstrapBlocks(ROOT_CONTEXT_FILES.map((label) => bootstrapMarkdown(label)));
-  }
   const gitignorePath = path.join(PROJECT, ".gitignore");
   upsertGitignore(gitignorePath, [
     ".agent-flow/",
@@ -1146,8 +1116,10 @@ function install() {
     console.warn(`warning: ${KIT_ASSETS_RELATIVE} is unreadable; kit asset sync skipped (delete it to re-bootstrap)`);
   }
   const skillIndex = installProjectSkills(FORCE_MANAGED, installSelection);
-  upsertSkillIndexBlock(PROJECT);
-  upsertDocsIndexBlock(PROJECT);
+  if (rootContext === "legacy") {
+    upsertSkillIndexBlock(PROJECT);
+    upsertDocsIndexBlock(PROJECT);
+  }
 
   const agentFlowSkill = path.join(AF_DIR, "skills", "agent-flow");
   const claudeSkillStatus = linkOrCopyDir(
@@ -1177,9 +1149,6 @@ function install() {
         "when possible, or copies it when symlinks are unavailable.\n");
     }
   }
-  if (!delegatedKitInstalled) {
-    throw new Error("agent-flow install incomplete: delegated kit installation failed; previous policy restored");
-  }
 
   // 이 파일이 kit.mjs가 쓴 kit.json을 덮는다. 먼저 읽지 않으면 최초 설치
   // 시각이 재설치마다 지금으로 리셋된다.
@@ -1196,6 +1165,7 @@ function install() {
     // 이 파일이 kit.mjs가 쓴 kit.json을 덮는다. 여기 안 남기면 hook 비활성이
     // 재설치마다 풀린다.
     hooks: !hooksDisabled,
+    root_context: rootContext,
     project_root: PROJECT,
     // installed_at은 최초 설치 시각이다. 매 install이 덮으면 "언제부터 쓰던
     // 프로젝트인가"에 답할 기록이 사라진다. 마지막 install은 updated_at이 센다.

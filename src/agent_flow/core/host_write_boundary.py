@@ -123,6 +123,7 @@ class HostCheckoutBinding:
     session_key: str
     checkout: ActiveCheckout
     leader_snapshot: LeaderSnapshot
+    guidance_eligible: bool = False
 
 
 @dataclass(frozen=True)
@@ -277,6 +278,24 @@ def record_host_checkout_binding(payload: object, project_root: Path) -> Path | 
         raise HostWriteBoundaryError(
             "status output did not identify one verified active managed worktree"
         )
+    result_payload = {
+        key: value for key, value in payload.items()
+        if key not in {"tool_input", "input", "parameters"}
+    } if isinstance(payload, dict) else {}
+    guidance_eligible = (
+        isinstance(payload, dict)
+        and payload.get("session_id", payload.get("sessionId")) == session_id
+        and str(
+            payload.get("tool_name", payload.get("toolName", payload.get("tool", "")))
+        ).lower() in _COMMAND_TOOLS
+        and _first_string(_tool_input(payload), tuple(_COMMAND_KEYS)) == command
+        and _first_number(
+            result_payload, ("exit_code", "exitCode", "returncode", "return_code")
+        ) == 0
+        and _lifecycle_operation(
+            command, root=root, cwd=_session_cwd(payload, command)
+        ) in {"run", "start", "continue"}
+    )
     existing = _load_binding(root, session_id, active)
     if existing is not None:
         if (
@@ -293,8 +312,11 @@ def record_host_checkout_binding(payload: object, project_root: Path) -> Path | 
             worker_root=existing.checkout.checkout,
             include_ignored=False,
         )
-        return _binding_path(root, session_id)
-    leader_snapshot = capture_leader_snapshot(root, include_ignored=False)
+        if existing.guidance_eligible or not guidance_eligible:
+            return _binding_path(root, session_id)
+        leader_snapshot = existing.leader_snapshot
+    else:
+        leader_snapshot = capture_leader_snapshot(root, include_ignored=False)
     binding_path = _binding_path(root, session_id)
     _write_json_atomic(
         binding_path,
@@ -307,6 +329,7 @@ def record_host_checkout_binding(payload: object, project_root: Path) -> Path | 
             "run_id": context.run_id,
             "recorded_at": time.time(),
             "leader_snapshot": leader_snapshot_payload(leader_snapshot),
+            "guidance_eligible": guidance_eligible,
         },
     )
     return binding_path
@@ -996,6 +1019,7 @@ def _load_binding_file(
                 session_key=session_key,
                 checkout=context,
                 leader_snapshot=leader_snapshot,
+                guidance_eligible=payload.get("guidance_eligible") is True,
             )
     return None
 
@@ -2144,6 +2168,59 @@ def _logical_path(value: str, base: Path) -> Path | None:
             path = base / path
         return Path(os.path.normpath(path))
     except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def host_session_guidance(payload: object, project_root: Path) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    session_id = payload.get("session_id", payload.get("sessionId"))
+    cwd = payload.get("cwd")
+    if (
+        not isinstance(session_id, str)
+        or not session_id.strip()
+        or not isinstance(cwd, str)
+        or not Path(cwd).is_absolute()
+    ):
+        return None
+    try:
+        root = _validated_project_root(project_root)
+        session_key = _session_key(session_id)
+        directory = root
+        for component in (".git", "agent-flow", _BINDING_DIR):
+            directory = _require_directory(
+                directory / component, label="trusted host binding directory"
+            )
+        path = directory / f"{session_key}.json"
+        if not path.is_file():
+            return None
+        binding = _load_binding_file(path, session_key, root, _active_checkouts(root))
+        if binding is None or not binding.guidance_eligible:
+            return None
+        context = binding.checkout
+        if not _is_within(real_path(Path(cwd)), context.checkout):
+            return None
+        run_dir = context.runtime_root / ".agent-flow" / "runs" / context.run_id
+        _require_regular_file(run_dir / "active", label="active run marker")
+        meta = _read_trusted_json(run_dir / "meta.json")
+        workflow = meta.get("workflow")
+        phase = meta.get("current_phase") or "-"
+        if (
+            meta.get("run_id") != context.run_id
+            or not isinstance(workflow, str)
+            or not workflow
+            or not isinstance(phase, str)
+        ):
+            return None
+        status_command = shlex.join(
+            ["agent-flow", "status", "--root", str(root), "--worktree", context.name]
+        )
+        return (
+            f"[agent-flow] run: {workflow}/{context.run_id}\n"
+            f"current_phase: {phase}\n"
+            f"status_command: {status_command}"
+        )
+    except (HostWriteBoundaryError, WorktreeIsolationError, OSError, ValueError):
         return None
 
 

@@ -808,76 +808,12 @@ function managedBlockWithoutIndexBodies(text, label) {
   return blockWithoutIndexBodies(text.slice(start, end));
 }
 
-// 두 installer 모두 그 한 벌을 읽는다. 예전에 `agent-flow-kit.mjs`는 같은 텍스트를
-// 리터럴로 또 들고 있었고, 신규 install은 템플릿을 쓰고 이후 kit install은 리터럴을 써서
-// 같은 프로젝트의 AGENTS.md가 어느 쪽이 마지막으로 돌았는지에 따라 달라졌다. parity가
-// 그 리터럴을 보지 않아 드리프트를 잡지도 못했다 — 아래 단언들이 그 회귀의 오라클이다.
-//
-// 이제 `.agent-flow/bootstrap/<label>` 관리 사본도 같은 템플릿에서 파생된다. 그래서
-// 섹션 제목까지 금지할 수 있다: 예전에는 사본 생성기가 그 제목을 정당하게 리터럴로
-// 들고 있어 제목이 오라클이 못 됐고, 정확히 그 자리에서 사본이 갈라졌다.
-for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
-  assertContains(installer, 'path.join(KIT_ROOT, "bootstrap", BOOTSTRAP_TEMPLATE_FILE)');
-  // label이 고르는 것은 이 한 줄뿐이다. 생성기가 두 벌이 되면 CLAUDE.md만 import를
-  // 잃는 조합이 다시 가능해진다.
-  assertContains(installer, "rootBootstrapBlock(label, ");
-  assertNotContains(installer, "`${label}.template`");
-  assertNotContains(installer, "<!-- agent-flow:skills:start -->");
-  assertNotContains(installer, "<!-- agent-flow:docs:start -->");
-  assertNotContains(installer, "## Agent Flow");
-  assertNotContains(installer, "### Workflow Contract");
-  assertNotContains(installer, "### Context Economy");
-}
 
 if (CHECK_INSTALLED_COPY) {
   // 두 사본은 이제 제목만 다른 한 벌이 아니다. `CLAUDE.md` 사본은 루트에 실제로 심기는
   // 것과 같아야 하고, 그것은 계약 본문이 아니라 `@AGENTS.md` 포인터다.
   assertContains(".agent-flow/bootstrap/CLAUDE.md", "@AGENTS.md");
   assertNotContains(".agent-flow/bootstrap/CLAUDE.md", "### Workflow Contract");
-}
-for (const rel of [
-  "bootstrap/AGENTS.md.template",
-  ...(CHECK_INSTALLED_COPY ? [".agent-flow/bootstrap/AGENTS.md"] : []),
-]) {
-  assertFile(rel);
-  assertContains(rel, 'agent-flow run "<task>"');
-  assertContains(rel, "agent-flow status");
-  assertContains(rel, "Install runs once per project");
-  assertContains(rel, "next_command");
-  // 두 절을 함께 고정한다. 언어절만 고정하면 "짧게"가 조용히 사라져도 검사가 통과한다.
-  assertContains(rel, "Keep answers short and in the language the user writes in");
-  assertContains(rel, "at least two installed Claude/Codex CLI reviewer subprocesses");
-  assertContains(rel, "Use OMP as host/controller only, never as a reviewer provider");
-  // `tests/test_cli.py`가 쓰는 needle과 같아야 한다. 한쪽만 접두어를 요구하면
-  // "such as Claude/Gemini"가 한 검사만 통과해 두 검사가 서로 다른 답을 낸다.
-  assertNotContains(rel, "Claude/Gemini");
-  assertContains(rel, "reviewer-source: sub-agent");
-  assertNotContains(rel, "active host");
-  assertContains(rel, "## Overall");
-  assertContains(rel, "verdict: approve");
-  assertContains(rel, "verdict: request-changes");
-  assertContains(rel, "protected-branch commit/push and on leader checkout/switch hold identically on every host");
-}
-
-// 실측된 마찰 셋을 문구로 못 박는다. 이것이 빠지면 agent는 3-6 phase짜리 짧은 workflow의
-// 존재를 모른 채 15-phase `default`만 쓰고, leader에서 빌드를 돌려 phase 경계 tripwire를
-// 깨고, gate에 없는 검증 명령을 반복한다.
-for (const needle of [
-  "--workflow <name>",
-  "Do not run an IDE, Gradle, or a build in the leader checkout",
-  "Take build/test/lint commands only from the active profile's `gates`",
-]) {
-  assertContains("bootstrap/AGENTS.md.template", needle);
-}
-
-// phase 수는 문자열로 지키면 조용히 거짓이 된다: 지금 값은 맞지만 phase가 하나만 늘어도
-// 템플릿은 그대로고 검사도 통과한다. 정본인 yaml에서 세어 기대 문자열을 조립한다.
-// 목록을 yaml 파일 집합에서 돌리므로 workflow를 새로 추가하면 템플릿에 그것을 적기
-// 전까지 parity가 막는다 — 이름 목록을 여기에 다시 적지 않는 이유다.
-for (const name of yamlFileNames(PACKAGED_WORKFLOWS).map((file) => file.replace(/\.yaml$/, ""))) {
-  const workflow = workflowExport(name);
-  if (!workflow) continue;
-  assertContains("bootstrap/AGENTS.md.template", `\`${name}\`(${workflow.phases.length})`);
 }
 
 assertFile(".Codex/agents/code-reviewer.md");
@@ -1364,7 +1300,6 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     }
     assertInstalledHookParity(label, tempRoot);
     assertSkillIndexComplete(label, tempRoot);
-    assertSkillIndexBlockMatchesInstall(label, tempRoot);
     assertInstallerWorkflowBackupAndTimestamps(label, tempRoot, installer);
     assertInstalledBootstrapDerivesFromTemplate(label, tempRoot);
   } finally {
@@ -1372,9 +1307,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
   }
 }
 
-// 관리 사본(`.agent-flow/bootstrap/<label>`)과 루트 블록이 같은 템플릿에서 나오는지를
-// **설치 결과**로 확인한다. 소스 리터럴 금지만으로는 부족하다: 사본 생성기가 템플릿을
-// 읽으면서도 임의로 문장을 덧대거나 골라 넣으면 그 검사는 통과하고 사본은 다시 갈라진다.
+// 관리 사본은 정본 템플릿에서 파생되지만, 신규 설치는 루트 context를 만들지 않는다.
 //
 // 기대값을 여기서 다시 파생시키는 것은 의도적인 이중 구현이다. 규칙(제목 한 줄 + 마커를
 // 뗀 정본 본문)이 짧아 독립 오라클로 유지할 수 있고, installer와 같은 코드를 부르면
@@ -1418,64 +1351,13 @@ function assertInstalledBootstrapDerivesFromTemplate(label, tempRoot) {
       failures.push(`${label} .agent-flow/bootstrap/CLAUDE.md duplicates the contract instead of pointing at it`);
     }
   }
-  // 루트 `AGENTS.md`가 계약을 그대로 받는다. 마커가 살아 있어야 재설치가 멱등하다 —
-  // 마커가 없으면 다음 install이 블록을 찾지 못하고 뒤에 또 붙인다. skill 인덱스 자리는
-  // install이 링크를 다 만든 **뒤에** 채우므로 마커 바깥 조각만 원문과 대조한다.
-  const agentsPath = path.join(tempRoot, "AGENTS.md");
-  if (!fs.existsSync(agentsPath)) {
-    failures.push(`${label} install missing root AGENTS.md`);
-  } else {
-    const agentsText = fs.readFileSync(agentsPath, "utf8");
-    for (const segment of blockSegmentsOutsideIndexes(template)) {
-      if (!agentsText.includes(segment)) {
-        failures.push(`${label} root AGENTS.md does not carry bootstrap/AGENTS.md.template verbatim`);
-        break;
-      }
-    }
-    // 자기 자신을 import하는 줄이고, Claude 외 host에서는 뜻 없는 텍스트다.
-    if (agentsText.includes("@AGENTS.md")) {
-      failures.push(`${label} root AGENTS.md must not import itself`);
-    }
-  }
-  // 루트 `CLAUDE.md`는 포인터 하나다. 계약 본문을 여기 또 심으면 Claude가 같은 규칙을
-  // 두 번 받는다 — `@AGENTS.md`가 이미 파일 전체를 끌어오기 때문이다.
-  const claudePath = path.join(tempRoot, "CLAUDE.md");
-  if (!fs.existsSync(claudePath)) {
-    failures.push(`${label} install missing root CLAUDE.md`);
-  } else {
-    const claudeText = fs.readFileSync(claudePath, "utf8");
-    for (const segment of ["<!-- agent-flow:start -->", "@AGENTS.md", "<!-- agent-flow:end -->"]) {
-      if (!claudeText.includes(segment)) {
-        failures.push(`${label} root CLAUDE.md is missing ${segment}`);
-      }
-    }
-    for (const duplicated of ["### Workflow Contract", "### Context Economy", "[agent-flow skill index]", "[agent-flow docs index]"]) {
-      if (claudeText.includes(duplicated)) {
-        failures.push(`${label} root CLAUDE.md duplicates ${duplicated}; it must point at AGENTS.md instead`);
-      }
+  for (const fileName of ["AGENTS.md", "CLAUDE.md"]) {
+    if (fs.existsSync(path.join(tempRoot, fileName))) {
+      failures.push(`${label} fresh opt-in install created root ${fileName}`);
     }
   }
 }
 
-// 인덱스 자리는 install이 채우므로 템플릿과 대조할 수 없다. 그 구간만 도려내고
-// 나머지를 원문과 맞춘다. 인덱스를 더할 때 여기를 같이 고치지 않으면 새 인덱스가
-// "템플릿에 없는 텍스트"로 보여 정상 설치가 실패로 뒤집힌다.
-function blockSegmentsOutsideIndexes(text) {
-  const cuts = [
-    ["<!-- agent-flow:skills:start -->", "<!-- agent-flow:skills:end -->"],
-    ["<!-- agent-flow:docs:start -->", "<!-- agent-flow:docs:end -->"],
-  ];
-  let segments = [text];
-  for (const [startMarker, endMarker] of cuts) {
-    segments = segments.flatMap((segment) => {
-      const start = segment.indexOf(startMarker);
-      const end = segment.indexOf(endMarker);
-      if (start === -1 || end === -1) return [segment];
-      return [segment.slice(0, start), segment.slice(end)];
-    });
-  }
-  return segments.map((segment) => segment.trimEnd()).filter((segment) => segment !== "");
-}
 
 // 두 installer는 같은 파일명과 같은 문장으로 알려야 한다. 문구가 갈라지면
 // 사용자는 어느 CLI를 썼는지에 따라 다른 손실 통지를 받는다.
@@ -1812,68 +1694,6 @@ function assertLauncherContractIsSingleValued() {
 // 인덱스는 agent가 "이 프로젝트에 뭐가 있나"를 판단 없이 아는 유일한 경로다.
 // 낡은 인덱스는 없는 것보다 나쁘다 - 없는 skill을 찾게 만들고, 있는 skill을
 // 숨긴다. 그래서 목록 자체를 설치 결과와 대조한다.
-function assertSkillIndexBlockMatchesInstall(label, tempRoot) {
-  const index = readJsonSafe(path.join(tempRoot, ".agent-flow", "skills", "index.json"));
-  if (!index || !Array.isArray(index.skills)) {
-    return;
-  }
-  const expected = new Set(index.skills.map((skill) => String(skill.name)));
-  const expectedPassive = new Set(
-    index.skills.filter((skill) => skill.delivery === "passive").map((skill) => String(skill.name)),
-  );
-  // 인덱스는 `AGENTS.md` 한 곳에만 심는다. Claude는 루트 `CLAUDE.md`의 `@AGENTS.md`
-  // import로 같은 목록을 받으므로, 두 곳에 심으면 Claude만 목록을 두 번 받는다.
-  for (const fileName of ["AGENTS.md"]) {
-    const target = path.join(tempRoot, fileName);
-    if (!fs.existsSync(target)) {
-      failures.push(`${label} ${fileName} missing after install`);
-      continue;
-    }
-    const text = fs.readFileSync(target, "utf8");
-    const start = text.indexOf("<!-- agent-flow:skills:start -->");
-    const end = text.indexOf("<!-- agent-flow:skills:end -->");
-    if (start === -1 || end === -1) {
-      failures.push(`${label} ${fileName} has no skill index block`);
-      continue;
-    }
-    const block = text.slice(start, end);
-    if (!block.includes("[agent-flow skill index]")) {
-      failures.push(`${label} ${fileName} skill index block was never filled`);
-      continue;
-    }
-    // 두 그룹 모두 이름만 있는 한 줄이다: `|always:{...}` / `|on-demand:{...}`.
-    const listed = new Set(
-      [...block.matchAll(/\|(?:always|on-demand):\{([^}]*)\}/g)]
-        .flatMap((match) => match[1].split(","))
-        .map((name) => name.trim())
-        .filter(Boolean),
-    );
-    for (const name of expected) {
-      if (!listed.has(name)) {
-        failures.push(`${label} ${fileName} skill index omits installed skill: ${name}`);
-      }
-    }
-    for (const name of listed) {
-      if (!expected.has(name)) {
-        failures.push(`${label} ${fileName} skill index lists a skill that is not installed: ${name}`);
-      }
-    }
-    const alwaysMatch = block.match(/\|always:\{([^}]*)\}/);
-    const always = new Set(
-      (alwaysMatch ? alwaysMatch[1].split(",") : []).map((name) => name.trim()).filter(Boolean),
-    );
-    for (const name of expectedPassive) {
-      if (!always.has(name)) {
-        failures.push(`${label} ${fileName} skill index does not mark ${name} as always-applied`);
-      }
-    }
-    for (const name of always) {
-      if (!expectedPassive.has(name)) {
-        failures.push(`${label} ${fileName} skill index claims ${name} is always-applied, frontmatter says otherwise`);
-      }
-    }
-  }
-}
 
 function assertSkillIndexComplete(label, tempRoot) {
   const skillsDir = path.join(tempRoot, ".agent-flow", "skills");

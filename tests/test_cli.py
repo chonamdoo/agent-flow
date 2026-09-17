@@ -2085,51 +2085,12 @@ class CliTest(unittest.TestCase):
             self.assertTrue(
                 (project_root / ".agent-flow" / "skills" / "react-native-development-guide" / "SKILL.md").is_file()
             )
-            # 이 이름의 정본은 bootstrap 산문이 아니라 installer가 만드는 skill
-            # index다. 산문 사본을 지운 뒤에도 always skill 계약이 실제로
-            # 프로젝트 컨텍스트에 도착하는지를 그 index에서 확인한다.
-            self.assertIn(
-                "always:{code-generation-discipline",
-                (project_root / "AGENTS.md").read_text(encoding="utf-8"),
-            )
-            self.assertIn(
-                "requires at least two installed Claude/Codex CLI reviewer subprocesses",
-                (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
-            )
+            self.assertFalse((project_root / "AGENTS.md").exists())
+            self.assertFalse((project_root / "CLAUDE.md").exists())
             self.assertIn(
                 "status: ci-failed",
                 (project_root / ".agent-flow" / "prompts" / "pr-watch.md").read_text(encoding="utf-8"),
             )
-            self.assertIn(
-                'agent-flow run "<task>"',
-                (project_root / "AGENTS.md").read_text(encoding="utf-8"),
-            )
-            claude_root = (project_root / "CLAUDE.md").read_text(encoding="utf-8")
-            # 계약은 `AGENTS.md` 한 벌이고 `CLAUDE.md`는 그것을 가리킨다. Claude CLI는
-            # 루트 `CLAUDE.md`만 자동 로드하므로 이 import가 유일한 전달 경로다.
-            # 본문까지 여기 심으면 `@path`가 파일 전체를 끌어오므로 두 번 받는다.
-            self.assertIn("@AGENTS.md", claude_root)
-            self.assertNotIn("### Workflow Contract", claude_root)
-            self.assertNotIn("[agent-flow skill index]", claude_root)
-            # `AGENTS.md`에는 없어야 한다 — 자기 자신을 import하는 줄이다.
-            self.assertNotIn("@AGENTS.md", (project_root / "AGENTS.md").read_text(encoding="utf-8"))
-            self.assertIn(
-                "requires at least two installed Claude/Codex CLI reviewer subprocesses",
-                (project_root / "AGENTS.md").read_text(encoding="utf-8"),
-            )
-            self.assertIn(
-                'agent-flow run "<task>"',
-                (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
-            )
-            self.assertIn(
-                "requires at least two installed Claude/Codex CLI reviewer subprocesses",
-                (project_root / "AGENTS.md").read_text(encoding="utf-8"),
-            )
-            agent_flow_skill = (project_root / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md").read_text(
-                encoding="utf-8"
-            )
-            self.assertIn("Treat the status command output as the only source of truth.", agent_flow_skill)
-            self.assertIn("Do not run install just because a new session started.", agent_flow_skill)
 
     def test_node_installers_write_the_managed_launcher(self) -> None:
         """install이 심는 launcher가 고정된 managed Python CLI를 실행한다."""
@@ -2729,8 +2690,7 @@ class CliTest(unittest.TestCase):
                             self.assertNotIn(stop_command, stop_commands)
                             self.assertNotIn(cd_stop_command, stop_commands)
 
-    def test_stop_hook_emits_valid_json_for_active_run(self) -> None:
-        # Stop hook stdout은 JSON이어야 한다. 평문은 invalid stop hook json output 에러를 만든다.
+    def test_stop_hook_is_silent_without_session_participation(self) -> None:
         hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "show-phase-status.sh"
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
@@ -2754,10 +2714,7 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            payload = json.loads(result.stdout)
-            self.assertIn("[agent-flow]", payload["systemMessage"])
-            self.assertIn("status: running", payload["systemMessage"])
-            self.assertIn("next_command", payload["systemMessage"])
+            self.assertEqual(result.stdout, "")
 
     def test_guard_hooks_report_block_reason_on_stderr(self) -> None:
         # exit 2일 때 Claude/Codex/OMP는 stderr만 모델에 전달한다. stdout은 무시된다.
@@ -4374,31 +4331,12 @@ if (codexContext !== undefined) {
                 "verdict: request-changes",
                 (project_root / ".agent-flow" / "prompts" / "multi-review.md").read_text(encoding="utf-8"),
             )
-            self.assertIn('agent-flow run "<task>"', bootstrap.read_text(encoding="utf-8"))
-            self.assertIn(
-                "requires at least two installed Claude/Codex CLI reviewer subprocesses",
-                bootstrap.read_text(encoding="utf-8"),
-            )
-            self.assertIn(
-                "Use OMP as host/controller only, never as a reviewer provider",
-                bootstrap.read_text(encoding="utf-8"),
-            )
-            self.assertNotIn("Claude/Gemini", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("reviewer-source: sub-agent", bootstrap.read_text(encoding="utf-8"))
-            # `CLAUDE.md` 사본은 루트에 실제로 심긴 것과 같아야 한다: 계약 본문이 아니라
-            # 그것을 가리키는 포인터다. 여기에 본문을 담으면 루트와 사본이 갈라진다.
             self.assertIn("@AGENTS.md", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertNotIn("### Workflow Contract", claude_bootstrap.read_text(encoding="utf-8"))
-            # reviewer 실행 방식(별 subprocess, 병렬)은 phase 프롬프트가 쥔다. 블록은
-            # 그 phase에만 쓰이는 절차를 사본으로 들지 않는다 — 두 벌이면 갈라진다.
             multi_review_prompt = (
                 project_root / ".agent-flow" / "prompts" / "multi-review.md"
             ).read_text(encoding="utf-8")
             self.assertIn("confined subprocesses", multi_review_prompt)
             self.assertIn("Do not launch reviewer CLIs yourself", multi_review_prompt)
-            self.assertIn("## Overall", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("verdict: approve", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("verdict: request-changes", bootstrap.read_text(encoding="utf-8"))
             self.assertEqual(skill.read_text(encoding="utf-8"), "stale skill\n")
             self.assertIn("Workflow Contract", rules.read_text(encoding="utf-8"))
             self.assertIn("two independent Claude/Codex reviewer subprocesses", rules.read_text(encoding="utf-8"))

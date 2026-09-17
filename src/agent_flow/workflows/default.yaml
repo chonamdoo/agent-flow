@@ -176,9 +176,10 @@ phases:
       The chain pauses here for user review of design.md + slice-plan.md.
 
   - id: worktree
-    description: Create an isolated git worktree per profile.branching strategy.
+    description: Verify and record the checkout already bound by CLI entry.
     prompt: |
-      Create the working branch per profile.branching:
+      The CLI already attached or created and prepared this run's worktree.
+      Verify its reported path, branch, base, and setup against profile.branching:
         - release-first: branch from active release/* and target release for PR
         - trunk: branch from main and target main
         - gitflow: branch per gitflow rules
@@ -186,13 +187,12 @@ phases:
         - `<prefix><slug>` where prefix and slug_style come from the profile.
         - slug is derived from the configured slug_source and converted to slug_style.
         - truncate to max_slug_length without breaking words.
-      Create the worktree with `agent-flow worktree create --name feat-<slug>`
-      before implementation — not with `git worktree add`, which skips the
-      creation lock, base selection, and the adoption record. The default
-      location is `~/.agent-flow/worktrees/<repo-id>/feat-<slug>/` and the
-      default branch naming is `feat/<slug>`. Do not continue from the leader
-      checkout.
-      Output: worktree.md (branch name, base, worktree path).
+      Record the existing binding; do not create a second worktree or switch
+      the leader branch. Do not run `git worktree add`, install, or regenerate
+      skill links here. If the binding or setup is missing or inconsistent,
+      stop and report the runtime blocker instead of inventing a checkout.
+      Continue only in the bound worker checkout.
+      Output: worktree.md (branch name, base, worktree path, setup verification).
 
   - id: implement
     skills:

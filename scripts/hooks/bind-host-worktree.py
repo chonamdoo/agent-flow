@@ -29,6 +29,23 @@ def main() -> int:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise RuntimeError("invalid host worktree binding payload")
+        response = payload.get("tool_response")
+        # Claude Bash는 exit code 대신 성공한 PostToolUse event로 완료를 보증한다.
+        if (
+            payload.get("hook_event_name") == "PostToolUse"
+            and payload.get("tool_name") == "Bash"
+            and isinstance(response, dict)
+            and isinstance(response.get("stdout"), str)
+            and isinstance(response.get("stderr"), str)
+            and response.get("interrupted") is False
+            and response.get("isImage") is False
+            and not any(
+                key in source
+                for source in (payload, response)
+                for key in ("exit_code", "exitCode", "returncode", "return_code")
+            )
+        ):
+            payload["exit_code"] = 0
         project_root, recorder = load_recorder(Path(__file__).resolve().parent)
         recorder(payload, project_root)
     except Exception as exc:

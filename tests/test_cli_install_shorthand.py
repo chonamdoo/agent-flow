@@ -38,7 +38,9 @@ def test_a_bare_directory_installs_the_project(tmp_path: Path) -> None:
     kit = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
     assert kit["profile"]
     # 설치의 정본은 JS installer다. 그 산출물이 함께 와야 지름길이 반쪽이 아니다.
-    assert (project / "AGENTS.md").is_file()
+    assert not (project / "AGENTS.md").exists()
+    assert not (project / "CLAUDE.md").exists()
+    assert kit["root_context"] == "opt-in"
     assert (project / ".agent-flow" / "skills").is_dir()
 
 

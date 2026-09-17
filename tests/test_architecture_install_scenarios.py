@@ -34,8 +34,7 @@ from tests.test_architecture_selection import (
 from tests.test_custom_skill_install import _install_with
 
 
-@pytest.fixture(autouse=True)
-def isolated_install_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_install_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -49,14 +48,20 @@ def isolated_install_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert shutil.which("node") is not None, "Node is required for real installer scenarios"
 
 
+@pytest.fixture(autouse=True)
+def isolated_install_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_install_environment(tmp_path, monkeypatch)
+
+
 def _installed_runner(
     project: Path, binary: str, profile: str, mode: str,
-    host: str, monkeypatch: pytest.MonkeyPatch,
+    host: str, monkeypatch: pytest.MonkeyPatch, *,
+    contract_path: str = "skills/architecture/SKILL.md",
 ) -> Runner:
     monkeypatch.setenv("AGENT_FLOW_HOST", host)
     flags = ["--profile", profile, "--architecture-mode", mode]
     if mode == "local":
-        flags.extend(("--architecture-skill", "skills/architecture/SKILL.md"))
+        flags.extend(("--architecture-skill", contract_path))
     result = _install_with(binary, project, *flags, env=dict(os.environ))
     assert result.returncode == 0, result.stdout + result.stderr
     _track(project, ".agent-flow.project.yaml")
@@ -137,7 +142,7 @@ def _assert_application_gate(
     ("binary", "profile", "host", "source", "platform_skill"),
     [
         ("agent-flow-kit.mjs", "python", "codex", "src/domain/catalog/model.py", "python-api-clean-architecture"),
-        ("agent-flow-install.mjs", "nextjs", "claude", "src/core/domain/catalog/model.ts", "react-clean-architecture"),
+        ("agent-flow-install.mjs", "nextjs", "claude", "src/features/catalog/presentation/CatalogUiState.ts", "react-clean-architecture"),
     ],
     ids=["kit-python-codex", "install-nextjs-claude"],
 )
@@ -147,10 +152,14 @@ def test_clean_install_delivers_and_enforces_platform_contract(
 ) -> None:
     project = _git_project(tmp_path)
     _write(project, source, "class Catalog: pass\n" if profile == "python" else "export type Catalog = { name: string };\n")
+    if profile == "nextjs":
+        _write(project, "package.json", json.dumps({"dependencies": {"next": "16.0.0", "react": "19.0.0"}}))
     runner = _installed_runner(project, binary, profile, "clean", host, monkeypatch)
     assert main(["architecture", "export", "--root", str(project)]) == 0
     assert json.loads(capsys.readouterr().out)["mode"] == "clean"
     obligations = {"clean-architecture-core", platform_skill, "code-generation-discipline", "write-for-work"}
+    if profile == "nextjs":
+        obligations.add("react-clean-presentation-architecture")
     adapter = _adapter(runner, host)
     for phase_id in ("implement", "review"):
         phase = _phase(runner, phase_id)
@@ -160,7 +169,10 @@ def test_clean_install_delivers_and_enforces_platform_contract(
         assert not resolution.missing
         roots = active_host_roots(skill_roots(project, profile=runner.profile, host=host), host)
         catalog = discover_skill_catalog(project, roots)
-        closure = set(expand_dependencies([platform_skill, "code-generation-discipline"], catalog, architecture_mode=ArchitectureMode.CLEAN))
+        roots_to_expand = [platform_skill, "code-generation-discipline"]
+        if profile == "nextjs":
+            roots_to_expand.append("react-clean-presentation-architecture")
+        closure = set(expand_dependencies(roots_to_expand, catalog, architecture_mode=ArchitectureMode.CLEAN))
         assert obligations <= closure <= required.keys()
         for name in closure:
             skill = required[name]
@@ -311,3 +323,129 @@ def test_missing_local_reference_refuses_install_then_restored_contract_is_consu
     )
     assert before[reference].decode("utf-8") in prompt
     _assert_application_gate(runner, phase, resolution, {"architecture", "code-generation-discipline"})
+
+
+LOCAL_POLICIES = {
+    "outsourced-fsd": (
+        "skills/architecture/SKILL.md",
+        {
+            "references/slice-imports.md": (
+                "# Slice imports\n\n"
+                "Features may import entities and shared modules, never another feature's internals.\n"
+                "Cross-slice consumers must use the target slice's public index.\n"
+            ),
+            "references/query-ownership.md": (
+                "# Query ownership\n\n"
+                "Entity model modules own query keys and server-state synchronization.\n"
+                "Feature UI owns transient interaction state; shared UI never fetches entity data.\n"
+            ),
+        },
+        "apps/storefront/src/features/catalog/ui/Catalog.tsx",
+    ),
+    "vendor-contract": (
+        "skills/architecture/SKILL.md",
+        {
+            "references/controller-boundaries.md": (
+                "# Controller boundaries\n\n"
+                "Page controllers coordinate gateway calls and expose view data to templates.\n"
+                "Templates never call gateways; gateway response objects stop at controllers.\n"
+            ),
+            "references/dependency-composition.md": (
+                "# Dependency composition\n\n"
+                "The frontend bootstrap supplies gateway implementations to page controllers.\n"
+                "Controllers may share pure presentation transforms, but never invoke another controller.\n"
+            ),
+        },
+        "clients/browser/src/pages/catalog/templates/Catalog.tsx",
+    ),
+}
+
+
+def _local_policy_project(tmp_path: Path, case: str) -> tuple[Path, dict[str, str]]:
+    contract_path, references, source = LOCAL_POLICIES[case]
+    project = _git_project(tmp_path, case)
+    root = Path(contract_path).parent
+    documents = {
+        contract_path: (
+            f"---\nname: {case}-policy\ndescription: Apply the selected frontend ownership contract.\n"
+            "requires_docs:\n"
+            + "".join(f"  - {relative}\n" for relative in references)
+            + "---\n\n# Frontend ownership\n\n"
+            "Apply these ownership and dependency rules without adding unselected Clean layers.\n"
+        ),
+        **{(root / relative).as_posix(): body for relative, body in references.items()},
+    }
+    for relative, body in documents.items():
+        _write(project, relative, body)
+    _write(project, source, "export const catalogTitle = 'Catalog';\n")
+    _write(project, "package.json", json.dumps({"dependencies": {"next": "16.0.0", "react": "19.0.0"}}))
+    _track(project, *documents)
+    return project, documents
+
+
+@pytest.mark.parametrize("case", LOCAL_POLICIES)
+def test_local_install_delivers_distinct_frontend_policy_to_author_and_reviewers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
+    project, documents = _local_policy_project(tmp_path, case)
+    contract_path = LOCAL_POLICIES[case][0]
+    runner = _installed_runner(
+        project, "agent-flow-kit.mjs", "nextjs", "local", "omp", monkeypatch,
+        contract_path=contract_path,
+    )
+    snapshot = architecture_snapshot(project)
+    assert snapshot.contract is not None
+    assert snapshot.contract.untracked == ()
+    assert {document.path for document in snapshot.contract.documents} == set(documents)
+    adapter = _adapter(runner, "omp")
+    author = _phase(runner, "implement")
+    resolution = _resolve(runner, author, "omp")
+    assert resolution.architecture_snapshot.digest == snapshot.digest
+    assert not any(
+        "clean-architecture" in skill.name or "clean-presentation-architecture" in skill.name
+        for skill in resolution.required
+    )
+    prompts = [adapter.render_envelope(author, runner.run_dir, project, resolution=resolution)]
+    review = _phase(runner, "review")
+    jobs, _ = _reviewer_jobs(review, runner.run_dir, project, adapter, providers=("claude", "codex"))
+    assert {provider for job in jobs for provider in job.prompt_by_provider} == {"claude", "codex"}
+    for provider in ("claude", "codex"):
+        review_resolution = _resolve(runner, review, provider)
+        assert review_resolution.architecture_snapshot.digest == snapshot.digest
+        assert not any(
+            "clean-architecture" in skill.name or "clean-presentation-architecture" in skill.name
+            for skill in review_resolution.required
+        )
+        prompts.extend(job.prompt_by_provider[provider] for job in jobs)
+    unrelated = next(policy[1] for name, policy in LOCAL_POLICIES.items() if name != case)
+    unrelated_name = next(f"{name}-policy" for name in LOCAL_POLICIES if name != case)
+    for prompt in prompts:
+        assert f"name: {unrelated_name}" not in prompt
+        for relative, body in documents.items():
+            assert relative in prompt
+            assert body in prompt
+        for body in unrelated.values():
+            assert body not in prompt
+
+
+@pytest.mark.parametrize("case", LOCAL_POLICIES)
+def test_distinct_local_contract_missing_mandatory_reference_refuses_install(
+    tmp_path: Path, case: str,
+) -> None:
+    project, documents = _local_policy_project(tmp_path, case)
+    contract_path = LOCAL_POLICIES[case][0]
+    reference = next(relative for relative in documents if relative != contract_path)
+    (project / reference).unlink()
+    result = _install_with(
+        "agent-flow-install.mjs", project, "--profile", "nextjs",
+        "--architecture-mode", "local", "--architecture-skill", contract_path,
+        env=dict(os.environ),
+    )
+    assert result.returncode != 0
+    assert Path(reference).name in result.stdout + result.stderr
+    assert not (project / ".agent-flow/kit.json").exists()
+    assert not (project / ".agent-flow.project.yaml").exists()
+    assert not (project / reference).exists()
+    for relative, body in documents.items():
+        if relative != reference:
+            assert (project / relative).read_text(encoding="utf-8") == body
