@@ -18,6 +18,8 @@
   {"id":"mixed-jvm","files":{"settings.gradle.kts":"include(\":api\", \":mobile\")","api/build.gradle.kts":"plugins { id(\"org.springframework.boot\") }","mobile/build.gradle.kts":"plugins { id(\"com.android.application\") }"},"error":"ambiguous"},
   {"id":"react-vite","files":{"package.json":"{\"dependencies\":{\"react\":\"19.0.0\"},\"devDependencies\":{\"vite\":\"6.0.0\"}}","tsconfig.json":"{}"},"profile":"typescript","react_web":true},
   {"id":"react-javascript","files":{"package.json":"{\"dependencies\":{\"react\":\"19.0.0\"}}"},"profile":"node","react_web":true},
+  {"id":"react-zustand-only","files":{"package.json":"{\"dependencies\":{\"react\":\"19.0.0\",\"zustand\":\"5.0.8\"}}"},"profile":"node","react_web":true},
+  {"id":"react-query-zustand","files":{"package.json":"{\"dependencies\":{\"react\":\"19.0.0\",\"zustand\":\"5.0.8\",\"@tanstack/react-query\":\"5.89.0\"}}"},"profile":"node","react_web":true},
   {"id":"next","files":{"package.json":"{\"dependencies\":{\"next\":\"15.0.0\",\"react\":\"19.0.0\"}}"},"profile":"nextjs","react_web":true},
   {"id":"native-host-priority","files":{"package.json":"{\"dependencies\":{\"react\":\"19.0.0\",\"react-native\":\"0.80.0\"}}","tsconfig.json":"{}","build.gradle.kts":"plugins { id(\"com.android.application\") }"},"profile":"react-native"},
   {"id":"expo","files":{"package.json":"{\"dependencies\":{\"react\":\"19.0.0\",\"expo\":\"53.0.0\"}}"},"profile":"react-native"},

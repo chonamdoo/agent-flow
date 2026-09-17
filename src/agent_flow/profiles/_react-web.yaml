@@ -8,6 +8,7 @@ skills:
     - react-app-shell-error-handling
     - react-hook-form-zod
     - react-tanstack-form
+    - react-tanstack-query
     - react-web-seo
     - react-storybook
     - react-scroll-restoration
