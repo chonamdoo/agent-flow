@@ -32,6 +32,8 @@ Read only the branch being changed or reviewed:
 - Subscription location, live previews, input latency, validation timing, or resolver cost: [Subscriptions and cost](references/subscriptions.md).
 - Async defaults, record changes, refetch/reset, conditional unmount/unregister, field arrays, or response-driven draft updates: [Lifecycle and identity](references/lifecycle.md).
 - Resolver transforms, coercion, conditional schema/payload, or controlled input integration: [Schema and adapters](references/schema-and-adapters.md).
+- Changes to TanStack Query keys, client/cache lifetime, mutations, or post-save synchronization: read `react-tanstack-query`; this skill retains ownership of RHF draft/reset behavior.
+- Changes to Next.js submission paths, rewrites, upstream environments, or HTTP mock routing: read `nextjs-api-routing`; a form-only change does not require a new BFF.
 
 ## Completion Evidence
 
