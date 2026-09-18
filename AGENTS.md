@@ -1,6 +1,7 @@
 # Project Instructions
 
 - Do not add refactors or documentation that was not requested.
+- Before every Agent Flow development task, read `maintainer/verification-policy.md` and select verification by change impact. This is repository-only guidance; keep it and this pointer out of installed templates and skills.
 
 ## Architecture
 
