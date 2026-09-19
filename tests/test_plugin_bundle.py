@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -230,6 +231,211 @@ def test_pack_allows_symlinked_output_parent_outside_assets(tmp_path: Path) -> N
     assert (destination / "plugin/kit/bin/agent-flow-kit.mjs").read_bytes() == (
         KIT_ROOT / "bin/agent-flow-kit.mjs"
     ).read_bytes()
+
+
+@pytest.mark.parametrize("swapped", ["skills/racy/reference.txt", "skills/racy"])
+def test_pack_rejects_payload_swapped_to_symlink_after_validation(tmp_path: Path, swapped: str) -> None:
+    source = _source_copy(tmp_path / "source")
+    (source / "skills/racy").mkdir()
+    (source / "skills/racy/reference.txt").write_text("canonical bytes\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "reference.txt").write_text("external bytes\n")
+    probe = tmp_path / "swap.cjs"
+    probe.write_text(
+        "const fs = require('node:fs');\n"
+        "const lstat = fs.lstatSync;\n"
+        "let swapped = false;\n"
+        "fs.lstatSync = (file, ...args) => {\n"
+        "  const result = lstat(file, ...args);\n"
+        "  if (!swapped && String(file) === process.env.SWAP_TARGET) {\n"
+        "    swapped = true;\n"
+        "    fs.rmSync(file, { recursive: true });\n"
+        "    fs.symlinkSync(process.env.SWAP_OUTSIDE, file);\n"
+        "  }\n"
+        "  return result;\n"
+        "};\n"
+        "require('node:module').syncBuiltinESMExports();\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "plugin"
+    result = subprocess.run(
+        ["node", str(source / "bin/agent-flow-plugin.mjs"), "pack", "--output", str(output)],
+        cwd=tmp_path, text=True, capture_output=True, check=False, timeout=60,
+        env={
+            "PATH": os.environ["PATH"], "NODE_OPTIONS": f"--require={probe}",
+            "SWAP_TARGET": str((source / swapped).resolve()),
+            "SWAP_OUTSIDE": str(outside / "reference.txt" if swapped.endswith(".txt") else outside),
+        },
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert not output.exists()
+    assert not any("external bytes" in file.read_text() for file in tmp_path.rglob("*/kit/skills/racy/*"))
+
+
+def test_pack_claims_output_before_a_competitor_can_create_it(tmp_path: Path) -> None:
+    output = tmp_path / "plugin"
+    probe = tmp_path / "compete.cjs"
+    probe.write_text(
+        "const fs = require('node:fs');\n"
+        "const open = fs.openSync;\n"
+        "fs.openSync = (target, ...args) => {\n"
+        "  if (String(target) === process.env.CLAIMED_OUTPUT + '/plugin.json') {\n"
+        "    try { fs.mkdirSync(process.env.CLAIMED_OUTPUT); fs.writeFileSync(process.env.EVIDENCE, 'created'); }\n"
+        "    catch (error) { fs.writeFileSync(process.env.EVIDENCE, error.code); }\n"
+        "  }\n"
+        "  return open(target, ...args);\n"
+        "};\n"
+        "require('node:module').syncBuiltinESMExports();\n",
+        encoding="utf-8",
+    )
+    evidence = tmp_path / "competitor"
+    result = subprocess.run(
+        ["node", str(KIT_ROOT / "bin/agent-flow-plugin.mjs"), "pack", "--output", str(output)],
+        cwd=tmp_path, text=True, capture_output=True, check=False, timeout=60,
+        env={
+            "PATH": os.environ["PATH"], "NODE_OPTIONS": f"--require={probe}",
+            "CLAIMED_OUTPUT": str(output.parent.resolve() / output.name), "EVIDENCE": str(evidence),
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert evidence.read_text() == "EEXIST"
+    assert (output / "kit/bin/agent-flow-kit.mjs").read_bytes() == (KIT_ROOT / "bin/agent-flow-kit.mjs").read_bytes()
+
+
+def test_interrupted_pack_is_moved_aside_and_foreign_output_is_kept(tmp_path: Path) -> None:
+    output = tmp_path / "plugin"
+    probe = tmp_path / "interrupt.cjs"
+    probe.write_text(
+        "const fs = require('node:fs');\n"
+        "const open = fs.openSync;\n"
+        "fs.openSync = (target, ...args) => {\n"
+        "  const result = open(target, ...args);\n"
+        "  if (String(target) === process.env.KILL_AFTER) process.kill(process.pid, 'SIGKILL');\n"
+        "  return result;\n"
+        "};\n"
+        "require('node:module').syncBuiltinESMExports();\n",
+        encoding="utf-8",
+    )
+    interrupted = subprocess.run(
+        ["node", str(KIT_ROOT / "bin/agent-flow-plugin.mjs"), "pack", "--output", str(output)],
+        cwd=tmp_path, text=True, capture_output=True, check=False, timeout=60,
+        env={
+            "PATH": os.environ["PATH"], "NODE_OPTIONS": f"--require={probe}",
+            "KILL_AFTER": str(output.parent.resolve() / output.name / "kit/package.json"),
+        },
+    )
+    assert interrupted.returncode != 0
+    assert (output / ".agent-flow-plugin-incomplete").is_file()
+    assert not (output / "plugin.json").exists()
+    (output / "user-note.txt").write_text("added after the crash\n")
+    stale = _snapshot(output)
+    _bundle(output)
+    assert not (output / ".agent-flow-plugin-incomplete").exists()
+    assert _snapshot(output) == _snapshot(_bundle(tmp_path / "reference"))
+    preserved = [candidate for candidate in tmp_path.glob("plugin.interrupted-*") if candidate.is_dir()]
+    assert len(preserved) == 1 and _snapshot(preserved[0]) == stale
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    before = _snapshot(foreign)
+    assert _pack(foreign).returncode != 0
+    assert foreign.is_dir() and _snapshot(foreign) == before
+
+
+@pytest.mark.parametrize("swapped", ["", "kit"])
+def test_pack_aborts_without_touching_a_replacement_of_the_claimed_output(tmp_path: Path, swapped: str) -> None:
+    output = tmp_path / "plugin"
+    replacement = tmp_path / "victim"
+    replacement.mkdir()
+    (replacement / "user.txt").write_text("victim data\n")
+    probe = tmp_path / "replace.cjs"
+    probe.write_text(
+        "const fs = require('node:fs');\n"
+        "const realpath = fs.realpathSync;\n"
+        "let replaced = false;\n"
+        "fs.realpathSync = (target, ...args) => {\n"
+        "  if (!replaced && String(target).startsWith(process.env.CLAIMED_OUTPUT + '/kit/skills')) {\n"
+        "    replaced = true;\n"
+        "    fs.renameSync(process.env.SWAPPED, process.env.MOVED);\n"
+        "    fs.symlinkSync(process.env.REPLACEMENT, process.env.SWAPPED);\n"
+        "  }\n"
+        "  return realpath(target, ...args);\n"
+        "};\n"
+        "require('node:module').syncBuiltinESMExports();\n",
+        encoding="utf-8",
+    )
+    before = _snapshot(replacement)
+    result = subprocess.run(
+        ["node", str(KIT_ROOT / "bin/agent-flow-plugin.mjs"), "pack", "--output", str(output)],
+        cwd=tmp_path, text=True, capture_output=True, check=False, timeout=60,
+        env={
+            "PATH": os.environ["PATH"], "NODE_OPTIONS": f"--require={probe}",
+            "CLAIMED_OUTPUT": str(output.parent.resolve() / output.name),
+            "SWAPPED": str(output.parent.resolve() / output.name / swapped).rstrip("/"),
+            "MOVED": str(tmp_path.resolve() / "moved"), "REPLACEMENT": str(replacement.resolve()),
+        },
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert _snapshot(replacement) == before
+    assert (output / swapped).is_symlink()
+
+
+def test_failed_pack_removes_only_its_own_entries(tmp_path: Path) -> None:
+    output = tmp_path / "plugin"
+    probe = tmp_path / "foreign.cjs"
+    probe.write_text(
+        "const fs = require('node:fs');\n"
+        "const open = fs.openSync;\n"
+        "fs.openSync = (target, ...args) => {\n"
+        "  if (String(target) === process.env.CLAIMED_OUTPUT + '/plugin.json') {\n"
+        "    fs.writeFileSync(process.env.CLAIMED_OUTPUT + '/kit/user-added.txt', 'not ours');\n"
+        "    throw new Error('injected packing failure');\n"
+        "  }\n"
+        "  return open(target, ...args);\n"
+        "};\n"
+        "require('node:module').syncBuiltinESMExports();\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["node", str(KIT_ROOT / "bin/agent-flow-plugin.mjs"), "pack", "--output", str(output)],
+        cwd=tmp_path, text=True, capture_output=True, check=False, timeout=60,
+        env={
+            "PATH": os.environ["PATH"], "NODE_OPTIONS": f"--require={probe}",
+            "CLAIMED_OUTPUT": str(output.parent.resolve() / output.name),
+        },
+    )
+    assert result.returncode != 0
+    assert (output / "kit/user-added.txt").read_text() == "not ours"
+    assert [file.relative_to(output).as_posix() for file in output.rglob("*") if file.is_file()] == ["kit/user-added.txt"]
+    assert not (output / ".agent-flow-plugin-incomplete").exists()
+
+
+def test_pack_rejects_foreign_entries_inserted_before_finalization(tmp_path: Path) -> None:
+    output = tmp_path / "plugin"
+    probe = tmp_path / "insert.cjs"
+    probe.write_text(
+        "const fs = require('node:fs');\n"
+        "const open = fs.openSync;\n"
+        "fs.openSync = (target, ...args) => {\n"
+        "  if (String(target) === process.env.CLAIMED_OUTPUT + '/plugin.json') {\n"
+        "    fs.writeFileSync(process.env.CLAIMED_OUTPUT + '/kit/injected.txt', 'foreign bytes');\n"
+        "  }\n"
+        "  return open(target, ...args);\n"
+        "};\n"
+        "require('node:module').syncBuiltinESMExports();\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["node", str(KIT_ROOT / "bin/agent-flow-plugin.mjs"), "pack", "--output", str(output)],
+        cwd=tmp_path, text=True, capture_output=True, check=False, timeout=60,
+        env={
+            "PATH": os.environ["PATH"], "NODE_OPTIONS": f"--require={probe}",
+            "CLAIMED_OUTPUT": str(output.parent.resolve() / output.name),
+        },
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert (output / "kit/injected.txt").read_text() == "foreign bytes"
+    assert not (output / "plugin.json").exists()
 
 
 def test_project_runtime_survives_bundle_removal(tmp_path: Path) -> None:

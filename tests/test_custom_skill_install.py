@@ -1665,7 +1665,6 @@ def test_root_migration_preserves_concurrent_edits_on_failure_and_retry(
     exclude.symlink_to(destination)
     target = project / "AGENTS.md" if boundary == "root" else destination
     before = target.read_bytes()
-    protection = (target.stat().st_mode & 0o777, target.stat().st_uid, target.stat().st_gid)
     receipt = project / ".agent-flow/bootstrap/blocks.json"
     receipt_before = receipt.read_bytes()
     injected = tmp_path / "writer-observed"
@@ -1681,13 +1680,14 @@ def test_root_migration_preserves_concurrent_edits_on_failure_and_retry(
   let injected = false;
   const edit = (fd = null) => {
     const script = fd === null
-      ? "require('node:fs').writeFileSync(process.env.PROBE_TARGET, Buffer.concat([Buffer.from(process.env.PROBE_BEFORE, 'hex'), Buffer.from(String.fromCharCode(10) + '# concurrent-user-edit' + String.fromCharCode(10))]));"
+      ? "require('node:fs').writeFileSync(process.env.PROBE_TARGET, Buffer.concat([Buffer.from(process.env.PROBE_BEFORE, 'hex'), Buffer.from(String.fromCharCode(10) + '# concurrent-user-edit' + String.fromCharCode(10))]), {mode: 0o600});"
       : "const fs=require('node:fs'); fs.writeSync(3, String.fromCharCode(10) + '# concurrent-user-edit' + String.fromCharCode(10)); fs.fsyncSync(3);";
     const writer = child.spawnSync(process.execPath, ['-e', script], {
       env: process.env, encoding: 'utf8', stdio: fd === null ? 'pipe' : ['ignore', 'pipe', 'pipe', fd],
     });
     if (writer.status !== 0) throw new Error(writer.stderr);
-    fs.writeFileSync(process.env.PROBE_EVIDENCE, 'injected');
+    const stat = fd === null ? fs.statSync(process.env.PROBE_TARGET) : fs.fstatSync(fd);
+    fs.writeFileSync(process.env.PROBE_EVIDENCE, JSON.stringify({mode: stat.mode & 0o777, uid: stat.uid, gid: stat.gid}));
     injected = true;
   };
   fs.openSync = (...args) => {
@@ -1741,7 +1741,7 @@ def test_root_migration_preserves_concurrent_edits_on_failure_and_retry(
         "PROBE_BEFORE": before.hex(),
         "PROBE_CRASH": "1" if interrupt_recovery else "0",
     })
-    assert injected.read_text() == "injected"
+    writer_protection = json.loads(injected.read_text())
     assert failed.returncode != 0
     preserved = [
         *(project / ".agent-flow/backups").glob("preserved-write-*/original"),
@@ -1760,7 +1760,9 @@ def test_root_migration_preserves_concurrent_edits_on_failure_and_retry(
     retry = _install_with(binary, project, *install_args)
     assert retry.returncode == 0, retry.stderr
     assert b"# concurrent-user-edit\n" in target.read_bytes()
-    assert (target.stat().st_mode & 0o777, target.stat().st_uid, target.stat().st_gid) == protection
+    assert (target.stat().st_mode & 0o777, target.stat().st_uid, target.stat().st_gid) == (
+        writer_protection["mode"], writer_protection["uid"], writer_protection["gid"],
+    )
     assert exclude.is_symlink()
     assert not (project / ".agent-flow/install-recovery").exists()
     expected_managed = boundary == "legacy-exclude"
@@ -1879,7 +1881,7 @@ def test_root_migration_requires_durable_removed_block_backups(
         "const open = fs.openSync, flush = fs.fsyncSync, rename = fs.renameSync;\n"
         "const opened = new Map(), synced = new Set(), durable = new Set();\n"
         "const backups = JSON.parse(process.env.MIGRATION_BACKUPS);\n"
-        "let failed = false;\n"
+        "let failed = false, observed = false;\n"
         "fs.openSync = (target, ...args) => {\n"
         "  const fd = open(target, ...args); opened.set(fd, String(target)); return fd;\n"
         "};\n"
@@ -1899,7 +1901,9 @@ def test_root_migration_requires_durable_removed_block_backups(
         "  return result;\n"
         "};\n"
         "fs.renameSync = (source, target) => {\n"
-        "  if (String(target) === path.join(process.env.PROJECT, 'AGENTS.md')) {\n"
+        "  const root = path.join(process.env.PROJECT, 'AGENTS.md');\n"
+        "  if (!failed && !observed && (String(source) === root || String(target) === root)) {\n"
+        "    observed = true;\n"
         "    fs.writeFileSync(process.env.EVIDENCE, JSON.stringify({durable: backups.every(p => durable.has(p))}));\n"
         "  }\n"
         "  return rename(source, target);\n"
@@ -2132,14 +2136,14 @@ def test_corrupt_install_metadata_cannot_enable_root_writes(tmp_path: Path, bina
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-@pytest.mark.parametrize(("failure_target", "after_rename"), [
+@pytest.mark.parametrize(("failure_target", "after_publication"), [
     ("CLAUDE.md", False),
     (".agent-flow/kit-assets.json", False),
     (".git/info/exclude", False),
     (".git/info/exclude", True),
 ])
 def test_failed_migration_rolls_back_both_roots_and_receipts(
-    tmp_path: Path, binary: str, failure_target: str, after_rename: bool,
+    tmp_path: Path, binary: str, failure_target: str, after_publication: bool,
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -2160,16 +2164,18 @@ def test_failed_migration_rolls_back_both_roots_and_receipts(
     probe.write_text(
         "if (process.argv[1]?.endsWith(process.env.FAIL_MIGRATION_BINARY)) {\n"
         "  const fs = require('node:fs');\n"
-        "  const rename = fs.renameSync;\n"
         "  let failed = false;\n"
-        "  fs.renameSync = (source, target) => {\n"
-        "    if (!failed && target === process.env.FAIL_MIGRATION_TARGET) {\n"
-        "      failed = true;\n"
-        "      if (process.env.FAIL_AFTER_RENAME === '1') rename(source, target);\n"
-        "      throw new Error('injected migration publication failure');\n"
-        "    }\n"
-        "    return rename(source, target);\n"
-        "  };\n"
+        "  for (const operation of ['renameSync', 'linkSync']) {\n"
+        "    const original = fs[operation];\n"
+        "    fs[operation] = (source, target) => {\n"
+        "      if (!failed && target === process.env.FAIL_MIGRATION_TARGET) {\n"
+        "        failed = true;\n"
+        "        if (process.env.FAIL_AFTER_PUBLICATION === '1') original(source, target);\n"
+        "        throw new Error('injected migration publication failure');\n"
+        "      }\n"
+        "      return original(source, target);\n"
+        "    };\n"
+        "  }\n"
         "  require('node:module').syncBuiltinESMExports();\n"
         "}\n",
         encoding="utf-8",
@@ -2181,7 +2187,7 @@ def test_failed_migration_rolls_back_both_roots_and_receipts(
             "NODE_OPTIONS": f"--require={probe}",
             "FAIL_MIGRATION_TARGET": str(project / failure_target),
             "FAIL_MIGRATION_BINARY": binary if failure_target == ".git/info/exclude" else "agent-flow-kit.mjs",
-            "FAIL_AFTER_RENAME": "1" if after_rename else "0",
+            "FAIL_AFTER_PUBLICATION": "1" if after_publication else "0",
         },
     )
     assert result.returncode != 0
