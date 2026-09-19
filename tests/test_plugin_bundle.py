@@ -438,6 +438,89 @@ def test_pack_rejects_foreign_entries_inserted_before_finalization(tmp_path: Pat
     assert not (output / "plugin.json").exists()
 
 
+def test_pack_syncs_payload_before_removing_the_incomplete_marker(tmp_path: Path) -> None:
+    output = tmp_path / "plugin"
+    evidence = tmp_path / "durability.json"
+    probe = tmp_path / "durability.cjs"
+    probe.write_text(
+        "const fs = require('node:fs');\n"
+        "const open = fs.openSync, flush = fs.fsyncSync, unlink = fs.unlinkSync;\n"
+        "const opened = new Map(), synced = new Set(), created = new Set();\n"
+        "const path = require('node:path');\n"
+        "let markerDurable = null;\n"
+        "fs.openSync = (target, ...args) => {\n"
+        "  if (markerDurable === null && String(target) === process.env.OUTPUT + '/kit/package.json') {\n"
+        "    markerDurable = synced.has(process.env.OUTPUT + '/.agent-flow-plugin-incomplete') && synced.has(process.env.OUTPUT) && synced.has(path.dirname(process.env.OUTPUT));\n"
+        "  }\n"
+        "  const fd = open(target, ...args);\n"
+        "  opened.set(fd, String(target));\n"
+        "  if (String(target).startsWith(process.env.OUTPUT + '/') && (args[0] & fs.constants.O_CREAT)) created.add(String(target));\n"
+        "  return fd;\n"
+        "};\n"
+        "fs.fsyncSync = (fd) => {\n"
+        "  if (process.env.FAIL_SYNC && opened.get(fd) === process.env.FAIL_SYNC) throw Object.assign(new Error('injected ' + process.env.FAIL_SYNC_CODE), {code: process.env.FAIL_SYNC_CODE});\n"
+        "  synced.add(opened.get(fd)); return flush(fd);\n"
+        "};\n"
+        "fs.unlinkSync = (target) => {\n"
+        "  if (String(target) === process.env.OUTPUT + '/.agent-flow-plugin-incomplete') {\n"
+        "    const missing = [...created].filter((file) => file !== String(target) && !synced.has(file));\n"
+        "    const ancestors = []; for (let current = path.dirname(process.env.OUTPUT); ; current = path.dirname(current)) { ancestors.push(current); if (current === process.env.ANCESTOR) break; }\n"
+        "    fs.writeFileSync(process.env.EVIDENCE, JSON.stringify({created: created.size, missing, directory: synced.has(process.env.OUTPUT), parent: synced.has(path.dirname(process.env.OUTPUT)), ancestorsDurable: ancestors.every((directory) => synced.has(directory)), markerDurable}));\n"
+        "  }\n"
+        "  return unlink(target);\n"
+        "};\n"
+        "require('node:module').syncBuiltinESMExports();\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["node", str(KIT_ROOT / "bin/agent-flow-plugin.mjs"), "pack", "--output", str(output)],
+        cwd=tmp_path, text=True, capture_output=True, check=False, timeout=60,
+        env={
+            "PATH": os.environ["PATH"], "NODE_OPTIONS": f"--require={probe}",
+            "OUTPUT": str(output.parent.resolve() / output.name), "EVIDENCE": str(evidence),
+            "ANCESTOR": str(tmp_path.resolve()),
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    observed = json.loads(evidence.read_text())
+    assert observed["created"] > 100
+    assert observed["missing"] == []
+    assert observed["directory"] is True
+    assert observed["parent"] is True
+    assert observed["markerDurable"] is True
+    assert observed["ancestorsDurable"] is True
+    nested = tmp_path / "missing-a/missing-b/missing-c/plugin"
+    nested_evidence = tmp_path / "nested-durability.json"
+    result = subprocess.run(
+        ["node", str(KIT_ROOT / "bin/agent-flow-plugin.mjs"), "pack", "--output", str(nested)],
+        cwd=tmp_path, text=True, capture_output=True, check=False, timeout=60,
+        env={
+            "PATH": os.environ["PATH"], "NODE_OPTIONS": f"--require={probe}",
+            "OUTPUT": str(nested.parent.resolve() / nested.name),
+            "EVIDENCE": str(nested_evidence), "ANCESTOR": str(tmp_path.resolve()),
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(nested_evidence.read_text())["ancestorsDurable"] is True
+    for error_code in ("EIO", "EACCES", "EBADF"):
+        failed = tmp_path / f"failed-{error_code.lower()}"
+        result = subprocess.run(
+            ["node", str(KIT_ROOT / "bin/agent-flow-plugin.mjs"), "pack", "--output", str(failed)],
+            cwd=tmp_path, text=True, capture_output=True, check=False, timeout=60,
+            env={
+                "PATH": os.environ["PATH"], "NODE_OPTIONS": f"--require={probe}",
+                "OUTPUT": str(failed.parent.resolve() / failed.name),
+                "EVIDENCE": str(tmp_path / f"unused-{error_code}.json"),
+                "FAIL_SYNC": str(failed.parent.resolve() / failed.name),
+                "FAIL_SYNC_CODE": error_code,
+                "ANCESTOR": str(tmp_path.resolve()),
+            },
+        )
+        assert result.returncode != 0
+        assert f"injected {error_code}" in result.stderr
+        assert not failed.exists()
+
+
 def test_project_runtime_survives_bundle_removal(tmp_path: Path) -> None:
     bundle = _bundle(tmp_path / "plugin cache")
     project = tmp_path / "project"
