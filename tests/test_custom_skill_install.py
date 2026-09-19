@@ -1641,10 +1641,14 @@ def test_root_migration_preserves_arbitrary_user_bytes(tmp_path: Path, binary: s
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-@pytest.mark.parametrize("boundary", ["root", "exclude"])
-@pytest.mark.parametrize("interrupt_recovery", [False, True])
+@pytest.mark.parametrize("boundary", ["root", "exclude", "legacy-exclude"])
+@pytest.mark.parametrize(("edit_point", "interrupt_recovery"), [
+    ("staging", False), ("staging", True),
+    ("displace", False), ("displace", True),
+    ("publish", False), ("published-fd", True),
+])
 def test_root_migration_preserves_concurrent_edits_on_failure_and_retry(
-    tmp_path: Path, binary: str, boundary: str, interrupt_recovery: bool,
+    tmp_path: Path, binary: str, boundary: str, edit_point: str, interrupt_recovery: bool,
 ) -> None:
     project = (tmp_path / "project").resolve()
     project.mkdir()
@@ -1655,7 +1659,8 @@ def test_root_migration_preserves_concurrent_edits_on_failure_and_retry(
     exclude = project / ".git/info/exclude"
     exclude.unlink()
     destination = (tmp_path / "user-exclude").resolve()
-    destination.write_bytes(b"/AGENTS.md\r\n/CLAUDE.md\r\n/private/\r\n# user-byte: \xff")
+    managed = b"" if boundary == "legacy-exclude" else b"/AGENTS.md\r\n/CLAUDE.md\r\n"
+    destination.write_bytes(managed + b"/private/\r\n# user-byte: \xff")
     destination.chmod(0o640)
     exclude.symlink_to(destination)
     target = project / "AGENTS.md" if boundary == "root" else destination
@@ -1670,8 +1675,21 @@ def test_root_migration_preserves_concurrent_edits_on_failure_and_retry(
   const fs = require('node:fs');
   const child = require('node:child_process');
   const open = fs.openSync, close = fs.closeSync, flush = fs.fsyncSync;
+  const rename = fs.renameSync, link = fs.linkSync;
+  let held = null;
   const descriptors = new Map();
   let injected = false;
+  const edit = (fd = null) => {
+    const script = fd === null
+      ? "require('node:fs').writeFileSync(process.env.PROBE_TARGET, Buffer.concat([Buffer.from(process.env.PROBE_BEFORE, 'hex'), Buffer.from(String.fromCharCode(10) + '# concurrent-user-edit' + String.fromCharCode(10))]));"
+      : "const fs=require('node:fs'); fs.writeSync(3, String.fromCharCode(10) + '# concurrent-user-edit' + String.fromCharCode(10)); fs.fsyncSync(3);";
+    const writer = child.spawnSync(process.execPath, ['-e', script], {
+      env: process.env, encoding: 'utf8', stdio: fd === null ? 'pipe' : ['ignore', 'pipe', 'pipe', fd],
+    });
+    if (writer.status !== 0) throw new Error(writer.stderr);
+    fs.writeFileSync(process.env.PROBE_EVIDENCE, 'injected');
+    injected = true;
+  };
   fs.openSync = (...args) => {
     const fd = open(...args);
     descriptors.set(fd, String(args[0]));
@@ -1684,13 +1702,26 @@ def test_root_migration_preserves_concurrent_edits_on_failure_and_retry(
     if (process.env.PROBE_CRASH === '1' && file?.includes('/install-recovery/conflicts/')) {
       process.kill(process.pid, 'SIGKILL');
     }
-    if (!injected && file?.startsWith(process.env.PROBE_TARGET + '.') && file.endsWith('.tmp')) {
-      injected = true;
-      const writer = child.spawnSync(process.execPath, ['-e',
-        "require('node:fs').appendFileSync(process.env.PROBE_TARGET, String.fromCharCode(10) + '# concurrent-user-edit' + String.fromCharCode(10));"],
-        {env: process.env, encoding: 'utf8'});
-      if (writer.status !== 0) throw new Error(writer.stderr);
-      fs.writeFileSync(process.env.PROBE_EVIDENCE, 'injected');
+    if (!injected && process.env.PROBE_POINT === 'staging'
+        && file?.startsWith(process.env.PROBE_TARGET + '.') && file.endsWith('.tmp')) edit();
+    return result;
+  };
+  fs.renameSync = (source, target) => {
+    if (!injected && String(source) === process.env.PROBE_TARGET && String(target).endsWith('/original')) {
+      if (process.env.PROBE_POINT === 'displace') edit();
+      if (process.env.PROBE_POINT === 'published-fd') held = fs.openSync(process.env.PROBE_TARGET, 'a');
+    }
+    return rename(source, target);
+  };
+  fs.linkSync = (source, target) => {
+    const publishing = !injected && String(source).startsWith(process.env.PROBE_TARGET + '.')
+      && String(source).endsWith('.tmp') && String(target) === process.env.PROBE_TARGET;
+    if (publishing && process.env.PROBE_POINT === 'publish') edit();
+    const result = link(source, target);
+    if (publishing && process.env.PROBE_POINT === 'published-fd') {
+      edit(held);
+      fs.closeSync(held);
+      process.kill(process.pid, 'SIGKILL');
     }
     return result;
   };
@@ -1699,33 +1730,45 @@ def test_root_migration_preserves_concurrent_edits_on_failure_and_retry(
 """,
         encoding="utf-8",
     )
-    failed = _install_with(binary, project, "--migrate-root-context", env={
+    install_args = () if boundary == "legacy-exclude" else ("--migrate-root-context",)
+    failed = _install_with(binary, project, *install_args, env={
         **os.environ,
         "NODE_OPTIONS": f"--require={probe}",
-        "PROBE_BINARY": "agent-flow-kit.mjs" if boundary == "root" else binary,
+        "PROBE_BINARY": "agent-flow-kit.mjs" if boundary != "exclude" else binary,
         "PROBE_TARGET": str(target),
         "PROBE_EVIDENCE": str(injected),
+        "PROBE_POINT": edit_point,
+        "PROBE_BEFORE": before.hex(),
         "PROBE_CRASH": "1" if interrupt_recovery else "0",
     })
     assert injected.read_text() == "injected"
     assert failed.returncode != 0
-    assert target.read_bytes() == before + b"\n# concurrent-user-edit\n"
+    preserved = [
+        *(project / ".agent-flow/backups").glob("preserved-write-*/original"),
+        *destination.parent.glob("preserved-write-*/original"),
+    ]
+    if target.exists():
+        preserved.append(target)
+        if edit_point != "published-fd":
+            assert target.read_bytes() == before + b"\n# concurrent-user-edit\n"
+    assert any(saved.read_bytes() == before + b"\n# concurrent-user-edit\n" for saved in preserved)
     if not (project / ".agent-flow/install-recovery").exists():
         assert receipt.read_bytes() == receipt_before
         for label, original in originals.items():
             if project / label != target:
                 assert (project / label).read_bytes() == original
-    retry = _install_with(binary, project, "--migrate-root-context")
+    retry = _install_with(binary, project, *install_args)
     assert retry.returncode == 0, retry.stderr
     assert b"# concurrent-user-edit\n" in target.read_bytes()
     assert (target.stat().st_mode & 0o777, target.stat().st_uid, target.stat().st_gid) == protection
     assert exclude.is_symlink()
     assert not (project / ".agent-flow/install-recovery").exists()
-    assert b"/AGENTS.md\r\n" not in exclude.read_bytes()
-    assert b"/CLAUDE.md\r\n" not in exclude.read_bytes()
+    expected_managed = boundary == "legacy-exclude"
+    assert (b"/AGENTS.md" in exclude.read_bytes().splitlines()) == expected_managed
+    assert (b"/CLAUDE.md" in exclude.read_bytes().splitlines()) == expected_managed
     assert b"/private/\r\n# user-byte: \xff" in exclude.read_bytes()
     for label in originals:
-        assert b"<!-- agent-flow:start -->" not in (project / label).read_bytes()
+        assert (b"<!-- agent-flow:start -->" in (project / label).read_bytes()) == expected_managed
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -1756,15 +1799,17 @@ def test_interrupted_root_migration_recovers_root_visibility(
     probe.write_text(
         "if (process.argv[1]?.endsWith(process.env.MIGRATION_BINARY)) {\n"
         "  const fs = require('node:fs');\n"
-        "  const rename = fs.renameSync;\n"
-        "  fs.renameSync = (source, target) => {\n"
-        "    const result = rename(source, target);\n"
-        "    if (String(target) === process.env.INTERRUPT_TARGET) {\n"
-        "      fs.writeFileSync(process.env.INTERRUPTED_AT, 'interrupted');\n"
-        "      process.kill(process.pid, 'SIGKILL');\n"
-        "    }\n"
-        "    return result;\n"
-        "  };\n"
+        "  for (const operation of ['renameSync', 'linkSync']) {\n"
+        "    const original = fs[operation];\n"
+        "    fs[operation] = (source, target) => {\n"
+        "      const result = original(source, target);\n"
+        "      if (String(target) === process.env.INTERRUPT_TARGET) {\n"
+        "        fs.writeFileSync(process.env.INTERRUPTED_AT, 'interrupted');\n"
+        "        process.kill(process.pid, 'SIGKILL');\n"
+        "      }\n"
+        "      return result;\n"
+        "    };\n"
+        "  }\n"
         "  require('node:module').syncBuiltinESMExports();\n"
         "}\n",
         encoding="utf-8",
