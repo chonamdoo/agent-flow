@@ -48,6 +48,7 @@ skills:
   install:
     - python-api-clean-architecture
     - python-development-guide
+    - backend-api-contract
     - llm-tool-development
   required_review:
     # baseline과 architecture를 가른다. 한 group에 두면 문구·색상만 바꾸는 변경에도
@@ -59,6 +60,11 @@ skills:
       when: Python files change
       missing: "missing local profile: <skill>"
       path_globs: ["**/*.py", "**/*.pyi"]
+    - group: backend-api
+      skills: [backend-api-contract]
+      task_terms: ["backend API", "server API", "API server", "FastAPI server", "FastAPI endpoint", "FastAPI route", "Django API", "Django view", "Flask API", "Flask route", "Starlette endpoint", "Litestar route"]
+      concerns: [backend-api]
+      missing: "missing local backend API: <skill>"
     # app-shell과 native host role은 여기서 뺀다. `app/**`는 App Router 프로젝트의
     # 소스 대부분이고 Android의 `app` 모듈도 그렇다 — 넣으면 문구만 바꾸는 변경이 다시
     # 계층 문서를 요구해 축소가 사라진다. 그 자리의 배선 검토는 `--concern`으로 지목한다.

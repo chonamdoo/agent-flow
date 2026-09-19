@@ -753,6 +753,57 @@ def test_kotlin_backend_routes_its_adapter_without_android(profile_id: str, adap
     assert names == {"kotlin-backend-development-guide", adapter}
 
 
+@pytest.mark.parametrize("phase", ["implement", "review"])
+def test_python_api_contract_routes_server_intent(phase: str) -> None:
+    names = _names(_route(
+        "python", phase_id=phase, changed_files=["app/routes.py"],
+        task_text="Implement a FastAPI endpoint",
+    ))
+    assert "backend-api-contract" in names
+
+
+@pytest.mark.parametrize(
+    "task,path",
+    [
+        ("Fix CLI argument parsing", "cli.py"),
+        ("Retry an HTTP client call with httpx", "client.py"),
+    ],
+)
+def test_python_api_contract_does_not_infer_a_server_from_python_or_http(task: str, path: str) -> None:
+    names = _names(_route(
+        "python", phase_id="implement", changed_files=[path], task_text=task,
+    ))
+    assert "backend-api-contract" not in names
+
+
+def test_python_api_contract_routes_an_explicit_concern_without_server_named_files() -> None:
+    names = _names(_route(
+        "python", phase_id="review", changed_files=["policy.py"],
+        task_text="Preserve checkout authorization", concerns=["backend-api"],
+    ))
+    assert "backend-api-contract" in names
+
+
+@pytest.mark.parametrize("profile_id", ["spring", "ktor"])
+@pytest.mark.parametrize(
+    "task,concerns,expected",
+    [
+        ("Update Java service dependencies", [], False),
+        ("Prepare Java-to-Kotlin server migration", [], True),
+        ("Prepare mixed JVM server compilation", [], True),
+        ("Configure incremental language migration", ["kotlin-backend"], True),
+    ],
+)
+def test_kotlin_backend_build_only_selection_requires_server_intent(
+    profile_id: str, task: str, concerns: list[str], expected: bool,
+) -> None:
+    names = _names(_route(
+        profile_id, phase_id="implement", changed_files=["build.gradle.kts"],
+        task_text=task, concerns=concerns,
+    ))
+    assert ("kotlin-backend-development-guide" in names) is expected
+
+
 @pytest.mark.parametrize("dependencies", [{}, {"react-native": "0.80", "react": "19"}, {"expo": "53", "react": "19"}])
 @pytest.mark.parametrize("skill", ["react-hook-form-zod", "react-tanstack-form"])
 def test_react_web_concern_cannot_activate_without_web_dependencies(tmp_path: Path, dependencies: dict, skill: str) -> None:

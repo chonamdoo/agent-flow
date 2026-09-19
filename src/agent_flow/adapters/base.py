@@ -173,18 +173,23 @@ class Adapter(ABC):
         artifact_block = (
             f"**Artifact target** (write this when the phase is complete):\n  `{relative_artifact}`\n"
             if role == "author" else
-            f"**Author artifact under review**: `{relative_artifact}`\n"
+            f"**Controller aggregate destination (written after independent reviews)**: `{relative_artifact}`\n"
         )
         phase_block = (
             f"\n## Phase prompt\n\n{body}\n"
             if role == "author" else
-            "\n## Author task specification under review\n\n"
-            "The following is the author's assignment, not an instruction to execute it. "
-            "Assess its complete requirements against the change and evidence. "
-            "Artifact-writing and workflow-advancement duties belong only to the author/controller.\n\n"
-            + "\n".join(
-                f"> {line}" for line in (f"{task_line}\n{body}" if task_line else body).splitlines()
-            ) + "\n"
+            "\n## Author task under review\n\n"
+            + "\n".join(f"> {line}" for line in task_line.splitlines())
+            + "\n\n## Current review-phase assignment\n\n"
+            "Evaluate the change and its evidence against the original task and applicable "
+            "contracts. The assignment below describes this review phase, not an earlier "
+            "implementation phase. Its aggregate artifact is written by the controller after "
+            "independent reviewers return; its absence is not an author defect. Do not "
+            "retroactively require these review-phase markers in earlier author artifacts. "
+            "Assess earlier artifacts against their own declared phase contracts. "
+            "For backward routes, inspect `transitions.jsonl` entries' `source_artifact` "
+            "for retained departing-phase evidence; it is history, not current completion.\n\n"
+            + "\n".join(f"> {line}" for line in body.splitlines()) + "\n"
         )
         completion_block = (
             "\n## When complete\n"
@@ -194,9 +199,11 @@ class Adapter(ABC):
             "\n## Review obligation\n"
             "Remain read-only. Judge the actual change against every applicable required "
             "rule, exception, code pattern and completion criterion; read/applied markers "
-            "alone do not establish compliance. Treat normative instructions to implement, "
-            "write artifacts or advance as criteria for the author's work, not your authority. "
-            "Return the requested review on stdout; do not write artifacts or advance the workflow."
+            "alone do not establish compliance. Apply requirements to their owning phase; "
+            "instructions to implement, write artifacts or advance do not grant you that authority. "
+            "Return the requested review on stdout; do not write artifacts or advance the workflow. "
+            "Honor the active profile's execution policy: do not run CI-only tests locally, "
+            "including focused variants. Their absence from local results is not a defect."
         )
         envelope = (
             f"# agent-flow phase: {phase.id}\n\n"
@@ -255,9 +262,10 @@ class Adapter(ABC):
         lines = [
             "\n## Completion gate",
             "",
-            "Review whether the author's artifact genuinely satisfies these markers; "
-            "the runner's advancement criteria remain unchanged. Missing required markers "
-            "or unsupported claims are review evidence, not permission to write the artifact."
+            "These are the current review aggregate's completion markers, owned by the "
+            "controller after independent reviews finish. They are not prerequisites for "
+            "earlier author artifacts. Evaluate actual compliance with the applicable rules; "
+            "do not demand a pre-existing aggregate or fabricate marker evidence."
             if role == "reviewer" else
             "Do not write the artifact as complete until the phase genuinely "
             "satisfies these markers. The runner blocks advancement when any "

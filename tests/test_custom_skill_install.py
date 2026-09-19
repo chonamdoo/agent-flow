@@ -1473,6 +1473,16 @@ def test_fresh_and_repeated_install_preserve_root_context(
     originals = _owned_legacy_root_context(project) if existing_roots else {}
     if existing_roots:
         (project / ".agent-flow" / "kit.json").unlink()
+        (project / ".agent-flow" / "bootstrap" / "blocks.json").unlink()
+    notice_prefix = subprocess.check_output(
+        (
+            _node(), "--input-type=module", "-e",
+            "import { ROOT_CONTEXT_NOTICE_PREFIX } from "
+            + json.dumps((KIT_ROOT / "lib" / "installer-shared.mjs").as_uri())
+            + "; process.stdout.write(ROOT_CONTEXT_NOTICE_PREFIX);",
+        ),
+        text=True, timeout=30,
+    )
     for label in ("AGENTS.md", "CLAUDE.md"):
         (tmp_path / label).write_text("Parent rules must not change.\n", encoding="utf-8")
     for flags in ((), ("--force-managed",)):
@@ -1486,7 +1496,79 @@ def test_fresh_and_repeated_install_preserve_root_context(
                 assert not target.exists()
             assert (tmp_path / label).read_text(encoding="utf-8") == "Parent rules must not change.\n"
         metadata = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
-        assert metadata["root_context"] == "opt-in"
+        assert metadata["root_context"] == ("preserve" if existing_roots else "opt-in")
+        notices = [line for line in result.stdout.splitlines() if line.startswith(notice_prefix)]
+        assert bool(notices) is existing_roots
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("policy", [None, "preserve"])
+def test_opt_in_install_keeps_new_project_root_docs_visible_to_git(
+    tmp_path: Path, binary: str, policy: str | None,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(
+        ("git", "init", "-q"), cwd=project, check=True, capture_output=True, timeout=30,
+    )
+    if policy is not None:
+        metadata = project / ".agent-flow" / "kit.json"
+        metadata.parent.mkdir()
+        metadata.write_text(json.dumps({"root_context": policy}), encoding="utf-8")
+    exclude = project / ".git" / "info" / "exclude"
+    user_exclusions = b"# Local project files\r\n/local-cache/\r\n"
+    exclude.write_bytes(user_exclusions)
+
+    installed = _install_with(binary, project)
+    assert installed.returncode == 0, installed.stderr
+    roots = {"AGENTS.md": b"# Project agent rules\n", "CLAUDE.md": b"@AGENTS.md\n"}
+    for label, content in roots.items():
+        assert not (project / label).exists()
+        (project / label).write_bytes(content)
+    repeated = _install_with(binary, project, "--force-managed")
+    assert repeated.returncode == 0, repeated.stderr
+    assert {label: (project / label).read_bytes() for label in roots} == roots
+    assert exclude.read_bytes() == user_exclusions
+    ignored = subprocess.run(
+        ("git", "check-ignore", *roots), cwd=project, text=True,
+        capture_output=True, check=False, timeout=30,
+    )
+    assert ignored.returncode == 1, ignored.stdout + ignored.stderr
+    subprocess.run(
+        ("git", "add", "--", *roots), cwd=project, capture_output=True, check=True, timeout=30,
+    )
+    staged = subprocess.run(
+        ("git", "diff", "--cached", "--name-only"), cwd=project, text=True,
+        capture_output=True, check=True, timeout=30,
+    )
+    assert set(staged.stdout.splitlines()) == set(roots)
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_legacy_install_does_not_hide_an_unowned_root(
+    tmp_path: Path, binary: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    _owned_legacy_root_context(project)
+    user_rules = b"# Project-owned rules\n"
+    (project / "AGENTS.md").write_bytes(user_rules)
+    subprocess.run(
+        ("git", "init", "-q"), cwd=project, check=True, capture_output=True, timeout=30,
+    )
+
+    installed = _install_with(binary, project)
+    assert installed.returncode == 0, installed.stderr
+    assert (project / "AGENTS.md").read_bytes() == user_rules
+    ignored = subprocess.run(
+        ("git", "check-ignore", "AGENTS.md", "CLAUDE.md"), cwd=project, text=True,
+        capture_output=True, check=False, timeout=30,
+    )
+    assert ignored.stdout.splitlines() == ["CLAUDE.md"], ignored.stderr
+    subprocess.run(
+        ("git", "add", "--", "AGENTS.md"), cwd=project,
+        capture_output=True, check=True, timeout=30,
+    )
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -1496,6 +1578,14 @@ def test_explicit_root_migration_keeps_rules_imports_and_indexes(
     project = tmp_path / "project"
     project.mkdir()
     originals = _owned_legacy_root_context(project)
+    git_dir = project / ".git"
+    subprocess.run(
+        ("git", "init", "-q"),
+        cwd=project, capture_output=True, check=True, timeout=30,
+    )
+    exclude = git_dir / "info" / "exclude"
+    user_exclusions = b"# Project exclusions\r\n/local-cache/\r\npackages/*/AGENTS.md\r\n# keep final bytes"
+    exclude.write_bytes(b"/AGENTS.md\n/CLAUDE.md\n" + user_exclusions)
     result = _install_with(binary, project, "--migrate-root-context")
     assert result.returncode == 0, result.stderr
     migrated = {label: (project / label).read_bytes() for label in originals}
@@ -1516,6 +1606,375 @@ def test_explicit_root_migration_keeps_rules_imports_and_indexes(
         assert {label: (project / label).read_bytes() for label in originals} == migrated
         metadata = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
         assert metadata["root_context"] == "opt-in"
+        assert exclude.read_bytes() == user_exclusions
+        ignored = subprocess.run(
+            ("git", "check-ignore", *originals), cwd=project, text=True,
+            capture_output=True, check=False, timeout=30,
+        )
+        assert ignored.returncode == 1, ignored.stdout + ignored.stderr
+    subprocess.run(
+        ("git", "add", "--", *originals), cwd=project, capture_output=True, check=True, timeout=30,
+    )
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_root_migration_preserves_arbitrary_user_bytes(tmp_path: Path, binary: str) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    originals = _owned_legacy_root_context(project)
+    prefix = b"user-byte: \xff\x80\x00\r\nmultibyte: \xe2\x98\x83\n"
+    suffix = b"\r\nuser-tail: \xfe\xc0\x00"
+    retained = {}
+    for label, original in originals.items():
+        start = original.index(b"<!-- agent-flow:start -->")
+        end = original.index(b"<!-- agent-flow:end -->") + len(b"<!-- agent-flow:end -->")
+        block = original[start:end]
+        (project / label).write_bytes(prefix + block + suffix)
+        retained[label] = (
+            block[block.index(b"### Context Economy"):block.index(b"<!-- agent-flow:end -->")].rstrip()
+            if label == "AGENTS.md" else b"@AGENTS.md"
+        )
+    result = _install_with(binary, project, "--migrate-root-context")
+    assert result.returncode == 0, result.stderr
+    for label in originals:
+        assert (project / label).read_bytes() == prefix + retained[label] + suffix
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("boundary", ["root", "exclude"])
+@pytest.mark.parametrize("interrupt_recovery", [False, True])
+def test_root_migration_preserves_concurrent_edits_on_failure_and_retry(
+    tmp_path: Path, binary: str, boundary: str, interrupt_recovery: bool,
+) -> None:
+    project = (tmp_path / "project").resolve()
+    project.mkdir()
+    originals = _owned_legacy_root_context(project)
+    subprocess.run(
+        ("git", "init", "-q"), cwd=project, check=True, capture_output=True, timeout=30,
+    )
+    exclude = project / ".git/info/exclude"
+    exclude.unlink()
+    destination = (tmp_path / "user-exclude").resolve()
+    destination.write_bytes(b"/AGENTS.md\r\n/CLAUDE.md\r\n/private/\r\n# user-byte: \xff")
+    destination.chmod(0o640)
+    exclude.symlink_to(destination)
+    target = project / "AGENTS.md" if boundary == "root" else destination
+    before = target.read_bytes()
+    protection = (target.stat().st_mode & 0o777, target.stat().st_uid, target.stat().st_gid)
+    receipt = project / ".agent-flow/bootstrap/blocks.json"
+    receipt_before = receipt.read_bytes()
+    injected = tmp_path / "writer-observed"
+    probe = tmp_path / "concurrent-writer.cjs"
+    probe.write_text(
+        """if (process.argv[1]?.endsWith(process.env.PROBE_BINARY)) {
+  const fs = require('node:fs');
+  const child = require('node:child_process');
+  const open = fs.openSync, close = fs.closeSync, flush = fs.fsyncSync;
+  const descriptors = new Map();
+  let injected = false;
+  fs.openSync = (...args) => {
+    const fd = open(...args);
+    descriptors.set(fd, String(args[0]));
+    return fd;
+  };
+  fs.closeSync = (fd) => { descriptors.delete(fd); return close(fd); };
+  fs.fsyncSync = (fd) => {
+    const result = flush(fd);
+    const file = descriptors.get(fd);
+    if (process.env.PROBE_CRASH === '1' && file?.includes('/install-recovery/conflicts/')) {
+      process.kill(process.pid, 'SIGKILL');
+    }
+    if (!injected && file?.startsWith(process.env.PROBE_TARGET + '.') && file.endsWith('.tmp')) {
+      injected = true;
+      const writer = child.spawnSync(process.execPath, ['-e',
+        "require('node:fs').appendFileSync(process.env.PROBE_TARGET, String.fromCharCode(10) + '# concurrent-user-edit' + String.fromCharCode(10));"],
+        {env: process.env, encoding: 'utf8'});
+      if (writer.status !== 0) throw new Error(writer.stderr);
+      fs.writeFileSync(process.env.PROBE_EVIDENCE, 'injected');
+    }
+    return result;
+  };
+  require('node:module').syncBuiltinESMExports();
+}
+""",
+        encoding="utf-8",
+    )
+    failed = _install_with(binary, project, "--migrate-root-context", env={
+        **os.environ,
+        "NODE_OPTIONS": f"--require={probe}",
+        "PROBE_BINARY": "agent-flow-kit.mjs" if boundary == "root" else binary,
+        "PROBE_TARGET": str(target),
+        "PROBE_EVIDENCE": str(injected),
+        "PROBE_CRASH": "1" if interrupt_recovery else "0",
+    })
+    assert injected.read_text() == "injected"
+    assert failed.returncode != 0
+    assert target.read_bytes() == before + b"\n# concurrent-user-edit\n"
+    if not (project / ".agent-flow/install-recovery").exists():
+        assert receipt.read_bytes() == receipt_before
+        for label, original in originals.items():
+            if project / label != target:
+                assert (project / label).read_bytes() == original
+    retry = _install_with(binary, project, "--migrate-root-context")
+    assert retry.returncode == 0, retry.stderr
+    assert b"# concurrent-user-edit\n" in target.read_bytes()
+    assert (target.stat().st_mode & 0o777, target.stat().st_uid, target.stat().st_gid) == protection
+    assert exclude.is_symlink()
+    assert not (project / ".agent-flow/install-recovery").exists()
+    assert b"/AGENTS.md\r\n" not in exclude.read_bytes()
+    assert b"/CLAUDE.md\r\n" not in exclude.read_bytes()
+    assert b"/private/\r\n# user-byte: \xff" in exclude.read_bytes()
+    for label in originals:
+        assert b"<!-- agent-flow:start -->" not in (project / label).read_bytes()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("boundary", ["exclude", "ready"])
+@pytest.mark.parametrize("git_layout", ["ordinary", "symlink"])
+def test_interrupted_root_migration_recovers_root_visibility(
+    tmp_path: Path, binary: str, boundary: str, git_layout: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    originals = _owned_legacy_root_context(project)
+    subprocess.run(
+        ("git", "init", "-q"), cwd=project, check=True, capture_output=True, timeout=30,
+    )
+    exclude = project / ".git/info/exclude"
+    if git_layout == "symlink":
+        exclude.unlink()
+        outside = tmp_path / "user-exclude"
+        outside.write_bytes(b"")
+        exclude.symlink_to(outside)
+    destination = exclude.resolve()
+    user_exclusions = b"/private/\r\npackages/*/AGENTS.md\r\n# user-byte: \xff"
+    exclude.write_bytes(b"/AGENTS.md\r\n/CLAUDE.md\r\n" + user_exclusions)
+    exclude.chmod(0o640)
+    owner = (exclude.stat().st_uid, exclude.stat().st_gid)
+    interrupted_at = tmp_path / "interrupted"
+    probe = tmp_path / "interrupt-migration.cjs"
+    probe.write_text(
+        "if (process.argv[1]?.endsWith(process.env.MIGRATION_BINARY)) {\n"
+        "  const fs = require('node:fs');\n"
+        "  const rename = fs.renameSync;\n"
+        "  fs.renameSync = (source, target) => {\n"
+        "    const result = rename(source, target);\n"
+        "    if (String(target) === process.env.INTERRUPT_TARGET) {\n"
+        "      fs.writeFileSync(process.env.INTERRUPTED_AT, 'interrupted');\n"
+        "      process.kill(process.pid, 'SIGKILL');\n"
+        "    }\n"
+        "    return result;\n"
+        "  };\n"
+        "  require('node:module').syncBuiltinESMExports();\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    recovery = project / ".agent-flow/install-recovery"
+    result = _install_with(binary, project, "--migrate-root-context", env={
+        **os.environ,
+        "NODE_OPTIONS": f"--require={probe}",
+        "MIGRATION_BINARY": binary,
+        "INTERRUPT_TARGET": str(destination if boundary == "exclude" else recovery / "ready.json"),
+        "INTERRUPTED_AT": str(interrupted_at),
+    })
+    assert result.returncode != 0
+    assert interrupted_at.read_text() == "interrupted"
+    if boundary == "ready":
+        assert json.loads((recovery / "ready.json").read_text())["selectionDocument"] is None
+    for flags in ((), ("--migrate-root-context",)):
+        retry = _install_with(binary, project, *flags)
+        assert retry.returncode == 0, retry.stderr
+    assert exclude.read_bytes() == user_exclusions
+    assert exclude.stat().st_mode & 0o777 == 0o640
+    assert (exclude.stat().st_uid, exclude.stat().st_gid) == owner
+    assert exclude.is_symlink() == (git_layout == "symlink")
+    assert not recovery.exists()
+    for label in originals:
+        assert b"<!-- agent-flow:start -->" not in (project / label).read_bytes()
+    ignored = subprocess.run(
+        ("git", "check-ignore", *originals), cwd=project, text=True,
+        capture_output=True, check=False, timeout=30,
+    )
+    assert ignored.returncode == 1, ignored.stdout + ignored.stderr
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("backup_state", ["new", "reused", "versioned"])
+@pytest.mark.parametrize("failure", [None, "file", "directory"])
+def test_root_migration_requires_durable_removed_block_backups(
+    tmp_path: Path, binary: str, backup_state: str, failure: str | None,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    originals = _owned_legacy_root_context(project)
+    bootstrap = project / ".agent-flow/bootstrap"
+    receipt = bootstrap / "blocks.json"
+    original_receipt = receipt.read_bytes()
+    metadata = project / ".agent-flow/kit.json"
+    original_metadata = metadata.read_bytes()
+    backup_paths = {}
+    blocks = {}
+    for label, original in originals.items():
+        start = original.index(b"<!-- agent-flow:start -->")
+        end = original.index(b"<!-- agent-flow:end -->") + len(b"<!-- agent-flow:end -->")
+        blocks[label] = original[start:end]
+        primary = bootstrap / f"{label}.removed"
+        backup_paths[label] = primary
+        if backup_state == "reused":
+            primary.write_bytes(blocks[label])
+        elif backup_state == "versioned":
+            primary.write_bytes(b"Earlier backup must survive.\n")
+            backup_paths[label] = primary.with_name(primary.name + "." + hashlib.sha256(blocks[label]).hexdigest()[:8])
+    evidence = tmp_path / "durability.json"
+    probe = tmp_path / "backup-durability.cjs"
+    probe.write_text(
+        "if (process.argv[1]?.endsWith('agent-flow-kit.mjs')) {\n"
+        "const fs = require('node:fs');\n"
+        "const path = require('node:path');\n"
+        "const open = fs.openSync, flush = fs.fsyncSync, rename = fs.renameSync;\n"
+        "const opened = new Map(), synced = new Set(), durable = new Set();\n"
+        "const backups = JSON.parse(process.env.MIGRATION_BACKUPS);\n"
+        "let failed = false;\n"
+        "fs.openSync = (target, ...args) => {\n"
+        "  const fd = open(target, ...args); opened.set(fd, String(target)); return fd;\n"
+        "};\n"
+        "fs.fsyncSync = (fd) => {\n"
+        "  const target = opened.get(fd);\n"
+        "  const file = backups.includes(target);\n"
+        "  const directory = target === process.env.BOOTSTRAP && synced.size > 0;\n"
+        "  if (!failed && ((file && process.env.FAIL_BACKUP === 'file') ||\n"
+        "      (directory && process.env.FAIL_BACKUP === 'directory'))) {\n"
+        "    failed = true;\n"
+        "    fs.writeFileSync(process.env.EVIDENCE, JSON.stringify({failure: process.env.FAIL_BACKUP}));\n"
+        "    throw new Error('injected backup durability failure');\n"
+        "  }\n"
+        "  const result = flush(fd);\n"
+        "  if (file) synced.add(target);\n"
+        "  if (directory) for (const backup of synced) durable.add(backup);\n"
+        "  return result;\n"
+        "};\n"
+        "fs.renameSync = (source, target) => {\n"
+        "  if (String(target) === path.join(process.env.PROJECT, 'AGENTS.md')) {\n"
+        "    fs.writeFileSync(process.env.EVIDENCE, JSON.stringify({durable: backups.every(p => durable.has(p))}));\n"
+        "  }\n"
+        "  return rename(source, target);\n"
+        "};\n"
+        "require('node:module').syncBuiltinESMExports();\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    result = _install_with(binary, project, "--migrate-root-context", env={
+        **os.environ,
+        "AGENT_FLOW_INSTALL_FSYNC": "0",
+        "NODE_OPTIONS": f"--require={probe}",
+        "MIGRATION_BACKUPS": json.dumps([str(value) for value in backup_paths.values()]),
+        "BOOTSTRAP": str(bootstrap),
+        "PROJECT": str(project),
+        "EVIDENCE": str(evidence),
+        "FAIL_BACKUP": failure or "",
+    })
+    if failure is not None:
+        assert result.returncode != 0
+        assert json.loads(evidence.read_text()) == {"failure": failure}
+        assert {label: (project / label).read_bytes() for label in originals} == originals
+        assert receipt.read_bytes() == original_receipt
+        assert metadata.read_bytes() == original_metadata
+    else:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(evidence.read_text()) == {"durable": True}
+        for label, backup in backup_paths.items():
+            assert backup.read_bytes() == blocks[label]
+            if backup_state == "versioned":
+                assert (bootstrap / f"{label}.removed").read_bytes() == b"Earlier backup must survive.\n"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("failure_target", ["AGENTS.md", ".agent-flow/bootstrap/blocks.json"])
+def test_root_migration_rolls_back_when_committed_data_cannot_sync(
+    tmp_path: Path, binary: str, failure_target: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    originals = _owned_legacy_root_context(project)
+    receipt = project / ".agent-flow/bootstrap/blocks.json"
+    original_receipt = receipt.read_bytes()
+    metadata = project / ".agent-flow/kit.json"
+    original_metadata = metadata.read_bytes()
+    evidence = tmp_path / "sync-failed"
+    probe = tmp_path / "migration-sync-failure.cjs"
+    probe.write_text(
+        "if (process.argv[1]?.endsWith('agent-flow-kit.mjs')) {\n"
+        "  const fs = require('node:fs');\n"
+        "  const open = fs.openSync, flush = fs.fsyncSync;\n"
+        "  const opened = new Map();\n"
+        "  let failed = false;\n"
+        "  fs.openSync = (target, ...args) => {\n"
+        "    const fd = open(target, ...args); opened.set(fd, String(target)); return fd;\n"
+        "  };\n"
+        "  fs.fsyncSync = (fd) => {\n"
+        "    const target = opened.get(fd);\n"
+        "    if (!failed && target?.startsWith(process.env.MIGRATION_SYNC_TARGET + '.') && target.endsWith('.tmp')) {\n"
+        "      failed = true;\n"
+        "      fs.writeFileSync(process.env.EVIDENCE, 'reached');\n"
+        "      throw new Error('injected migration data sync failure');\n"
+        "    }\n"
+        "    return flush(fd);\n"
+        "  };\n"
+        "  require('node:module').syncBuiltinESMExports();\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    result = _install_with(binary, project, "--migrate-root-context", env={
+        **os.environ,
+        "AGENT_FLOW_INSTALL_FSYNC": "0",
+        "NODE_OPTIONS": f"--require={probe}",
+        "MIGRATION_SYNC_TARGET": str(project / failure_target),
+        "EVIDENCE": str(evidence),
+    })
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert evidence.read_text() == "reached"
+    assert "injected migration data sync failure" in result.stderr
+    assert {label: (project / label).read_bytes() for label in originals} == originals
+    assert receipt.read_bytes() == original_receipt
+    assert metadata.read_bytes() == original_metadata
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("owned_agents", [False, True])
+def test_root_migration_removes_only_migrated_root_exclusions(
+    tmp_path: Path, binary: str, owned_agents: bool,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    _owned_legacy_root_context(project)
+    user_claude = b"# Project-owned Claude rules\n"
+    (project / "CLAUDE.md").write_bytes(user_claude)
+    if not owned_agents:
+        (project / "AGENTS.md").write_text("# Project-owned agent rules\n", encoding="utf-8")
+    subprocess.run(
+        ("git", "init", "-q"), cwd=project, capture_output=True, check=True, timeout=30,
+    )
+    exclude = project / ".git" / "info" / "exclude"
+    retained = b"/CLAUDE.md\r\nCLAUDE.md\r\n/custom/\r\n# Project ignores\r\n"
+    original_exclusions = b"/AGENTS.md\r\n" + retained
+    exclude.write_bytes(original_exclusions)
+    exclude.chmod(0o640)
+    ordinary = _install_with(binary, project)
+    assert ordinary.returncode == 0, ordinary.stderr
+    assert exclude.read_bytes() == original_exclusions
+    migrated = _install_with(binary, project, "--migrate-root-context")
+    assert migrated.returncode == 0, migrated.stderr
+    assert (project / "CLAUDE.md").read_bytes() == user_claude
+    assert exclude.read_bytes() == (retained if owned_agents else original_exclusions)
+    assert exclude.stat().st_mode & 0o777 == 0o640
+    ignored = subprocess.run(
+        ("git", "check-ignore", "AGENTS.md", "CLAUDE.md", "custom/private.txt"),
+        cwd=project, text=True, capture_output=True, check=False, timeout=30,
+    )
+    assert set(ignored.stdout.splitlines()) == (
+        {"CLAUDE.md", "custom/private.txt"} if owned_agents
+        else {"AGENTS.md", "CLAUDE.md", "custom/private.txt"}
+    )
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -1628,23 +2087,40 @@ def test_corrupt_install_metadata_cannot_enable_root_writes(tmp_path: Path, bina
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_failed_migration_rolls_back_both_roots_and_receipts(tmp_path: Path, binary: str) -> None:
+@pytest.mark.parametrize(("failure_target", "after_rename"), [
+    ("CLAUDE.md", False),
+    (".agent-flow/kit-assets.json", False),
+    (".git/info/exclude", False),
+    (".git/info/exclude", True),
+])
+def test_failed_migration_rolls_back_both_roots_and_receipts(
+    tmp_path: Path, binary: str, failure_target: str, after_rename: bool,
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
     originals = _owned_legacy_root_context(project)
+    subprocess.run(
+        ("git", "init", "-q"), cwd=project, check=True, capture_output=True, timeout=30,
+    )
+    exclude = project / ".git" / "info" / "exclude"
+    original_exclusions = b"/AGENTS.md\n/CLAUDE.md\n/private/\n"
+    exclude.write_bytes(original_exclusions)
+    exclude.chmod(0o640)
+    owner = (exclude.stat().st_uid, exclude.stat().st_gid)
     receipt = project / ".agent-flow" / "bootstrap" / "blocks.json"
     original_receipt = receipt.read_bytes()
     metadata = project / ".agent-flow" / "kit.json"
     original_metadata = metadata.read_bytes()
     probe = tmp_path / "fail-migration.cjs"
     probe.write_text(
-        "if (process.argv[1]?.endsWith('agent-flow-kit.mjs')) {\n"
+        "if (process.argv[1]?.endsWith(process.env.FAIL_MIGRATION_BINARY)) {\n"
         "  const fs = require('node:fs');\n"
         "  const rename = fs.renameSync;\n"
         "  let failed = false;\n"
         "  fs.renameSync = (source, target) => {\n"
         "    if (!failed && target === process.env.FAIL_MIGRATION_TARGET) {\n"
         "      failed = true;\n"
+        "      if (process.env.FAIL_AFTER_RENAME === '1') rename(source, target);\n"
         "      throw new Error('injected migration publication failure');\n"
         "    }\n"
         "    return rename(source, target);\n"
@@ -1658,7 +2134,9 @@ def test_failed_migration_rolls_back_both_roots_and_receipts(tmp_path: Path, bin
         env={
             **os.environ,
             "NODE_OPTIONS": f"--require={probe}",
-            "FAIL_MIGRATION_TARGET": str(project / "CLAUDE.md"),
+            "FAIL_MIGRATION_TARGET": str(project / failure_target),
+            "FAIL_MIGRATION_BINARY": binary if failure_target == ".git/info/exclude" else "agent-flow-kit.mjs",
+            "FAIL_AFTER_RENAME": "1" if after_rename else "0",
         },
     )
     assert result.returncode != 0
@@ -1666,6 +2144,9 @@ def test_failed_migration_rolls_back_both_roots_and_receipts(tmp_path: Path, bin
     assert {label: (project / label).read_bytes() for label in originals} == originals
     assert receipt.read_bytes() == original_receipt
     assert metadata.read_bytes() == original_metadata
+    assert exclude.read_bytes() == original_exclusions
+    assert exclude.stat().st_mode & 0o777 == 0o640
+    assert (exclude.stat().st_uid, exclude.stat().st_gid) == owner
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -2594,15 +3075,10 @@ def test_edited_block_preserves_prose_and_indexes(
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_install_leaves_the_git_workspace_clean(tmp_path: Path, binary: str) -> None:
-    """반증: 두 파일이 untracked로 남으면 워크스페이스가 dirty가 되고, 그 즉시
-    `agent-flow worktree create`가 막힌다 — install 직후 첫 명령이 실패한다.
-
-    그렇다고 tracked `.gitignore`에 적으면 툴이 프로젝트 대신 "커밋하지 않는다"를
-    결정하고 그 결정이 커밋된다. 그래서 커밋되지 않는 `.git/info/exclude`에 적는다.
-    """
+def test_legacy_install_leaves_root_context_ignored(tmp_path: Path, binary: str) -> None:
     project = tmp_path / f"clean-tree-{binary}"
     project.mkdir()
+    _owned_legacy_root_context(project)
     subprocess.run(
         ("git", "init", "-q"),
         cwd=project,
@@ -2671,6 +3147,7 @@ def test_install_adds_no_exclude_entry_a_project_already_carries(
         text=True,
         timeout=30,
     )
+    _owned_legacy_root_context(project)
     (project / ".gitignore").write_text("AGENTS.md\nCLAUDE.md\n", encoding="utf-8")
     assert _install_with(binary, project).returncode == 0
 
@@ -3600,6 +4077,8 @@ def test_skill_index_stays_name_only(tmp_path: Path, binary: str) -> None:
 
 _FRAMEWORK_FIXTURES = json.loads((KIT_ROOT / "tests/fixtures/profile-detection.json").read_text(encoding="utf-8"))
 _NEW_HOST_SKILLS = {
+    "security-audit",
+    "backend-api-contract",
     "kotlin-backend-development-guide",
     "spring-boot-development-guide",
     "ktor-development-guide",
@@ -3613,6 +4092,7 @@ _NEW_HOST_SKILLS = {
     "react-runtime-i18n",
     "ga4-ecommerce-events",
     "datadog-rum-sourcemaps",
+    "nextjs-api-routing",
     "nextjs-auth-session",
     "webview-json-rpc-bridge",
 }
@@ -3637,7 +4117,7 @@ def test_installer_entrypoints_consume_framework_fixtures(tmp_path: Path, binary
     index = json.loads((tmp_path / ".agent-flow/skills/index.json").read_text(encoding="utf-8"))
     assert not any("missing required skill" in warning for warning in index["warnings"])
     names = {skill["name"] for skill in index["skills"]}
-    expected_host_skills = set()
+    expected_host_skills = {"security-audit"}
     if case["profile"] == "generic":
         expected_host_skills.update(_NEW_HOST_SKILLS)
     if case["profile"] in {"spring", "ktor"}:
@@ -3646,6 +4126,8 @@ def test_installer_entrypoints_consume_framework_fixtures(tmp_path: Path, binary
         assert "android-code-review" not in names
     if case["profile"] in {"node", "typescript", "nextjs", "python"}:
         expected_host_skills.add("llm-tool-development")
+    if case["profile"] in {"spring", "ktor", "python"}:
+        expected_host_skills.add("backend-api-contract")
     if case.get("react_web"):
         expected_host_skills.update({"react-hook-form-zod", "react-tanstack-form", "react-web-seo", "react-storybook"})
         expected_host_skills.update({
@@ -3656,7 +4138,7 @@ def test_installer_entrypoints_consume_framework_fixtures(tmp_path: Path, binary
             "react-tanstack-query",
         })
     if case["profile"] == "nextjs":
-        expected_host_skills.add("nextjs-auth-session")
+        expected_host_skills.update({"nextjs-auth-session", "nextjs-api-routing"})
     if case["profile"] in {"android", "ios", "react-native", "node", "typescript", "nextjs"}:
         expected_host_skills.add("webview-json-rpc-bridge")
     assert names & _NEW_HOST_SKILLS == expected_host_skills
@@ -3671,9 +4153,10 @@ def test_installer_entrypoints_consume_framework_fixtures(tmp_path: Path, binary
             directory = tmp_path / host / "skills" / name
             if name in expected_host_skills:
                 assert (directory / "SKILL.md").is_file(), (case["id"], host, name)
-                if name in {"react-tanstack-form", "react-tanstack-query"}:
+                if name in {"security-audit", "react-tanstack-form", "react-tanstack-query", "nextjs-api-routing"}:
                     source = KIT_ROOT / "skills" / name
-                    for reference in (source / "references").rglob("*"):
+                    reference_root = source if name == "security-audit" else source / "references"
+                    for reference in reference_root.rglob("*"):
                         if reference.is_file():
                             installed = directory / reference.relative_to(source)
                             assert installed.read_bytes() == reference.read_bytes(), (case["id"], host, reference.name)

@@ -3342,6 +3342,19 @@ def test_backward_route_invalidates_target_artifact(tmp_path: Path):
     runner._commit_transition(transition)
     assert not watch.exists()
     assert not (run_dir / "artifacts" / "pr-comment-fix.md").exists()
+    history = [
+        json.loads(line)
+        for line in (run_dir / "transitions.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert history[-1]["source_artifact"] == {
+        "path": "artifacts/pr-comment-fix.md",
+        "content": "fixed\n",
+    }
+    assert runner._apply_transition(transition)
+    assert [
+        json.loads(line)
+        for line in (run_dir / "transitions.jsonl").read_text(encoding="utf-8").splitlines()
+    ] == history
 
 
 def test_backward_route_invalidates_intermediate_fresh_artifacts(tmp_path: Path):
@@ -5321,3 +5334,68 @@ def test_red_transition_inspection_is_read_only_and_commit_publishes_evidence(tm
         code_baseline=read_meta(run_dir)["test_code_baseline"], cwd_root=project,
     ) == []
     assert published[0].read_bytes() == content
+
+
+@pytest.mark.parametrize("declares_test_evidence", [False, True])
+def test_resume_requires_test_evidence_only_when_workflow_declares_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declares_test_evidence: bool
+) -> None:
+    from agent_flow.adapters.hosted import HostedAdapter
+    from agent_flow.artifact import read_meta
+    from agent_flow.core.command_evidence import COMMANDS_RUN_LOG, TEST_RUN_EVIDENCE_MARKER
+    from agent_flow.core.worktrees import create_worktree
+    from agent_flow.runner import ResumeMode, Runner
+
+    project = tmp_path / "project"
+    project.mkdir()
+    _init_git_project(project)
+    checkout = create_worktree(
+        root=project, plan=plan_worktree(root=project, name="evidence-contract")
+    )
+    state_root = worktree_runtime_root(root=project, name=checkout.name)
+    monkeypatch.setattr("agent_flow.runner.detect_adapter", lambda: HostedAdapter("codex"))
+    workflow = _write_host_phase_workflow(tmp_path, monkeypatch, "implement")
+    with (tmp_path / "kit" / "workflows" / "implement.yaml").open("a") as handle:
+        if declares_test_evidence:
+            handle.write(f"    required_markers: [{json.dumps(TEST_RUN_EVIDENCE_MARKER)}]\n")
+        handle.write("  - id: handoff\n    description: next hosted phase\n")
+    profiles = tmp_path / "kit" / "profiles"
+    profiles.mkdir()
+    (profiles / "generic.yaml").write_text(
+        "id: generic\n"
+        "gates:\n"
+        "  - id: test\n"
+        "    command: [pytest, -q]\n"
+        "    required: true\n"
+        "    execution: ci\n"
+        "    ci_check: pytest\n"
+        "    phase: pre-push\n",
+        encoding="utf-8",
+    )
+    started = Runner(
+        checkout.path, state_root=state_root, config_root=project, workflow=workflow
+    )
+    started.run(ResumeMode.START, task="verify a running application over HTTP")
+    assert started.run_dir is not None
+    (started.run_dir / "implement.md").write_text(
+        "## Completion Gate\n"
+        "test-run-evidence: verified\n",
+        encoding="utf-8",
+    )
+    (project / COMMANDS_RUN_LOG).write_text(
+        json.dumps({
+            "command": "curl http://localhost:8000/health",
+            "exit_code": 0,
+            "cwd": str(checkout.path),
+            "at": time.time(),
+        }) + "\n",
+        encoding="utf-8",
+    )
+    resumed = Runner(
+        checkout.path, state_root=state_root, config_root=project, run_dir=started.run_dir
+    )
+    resumed.run(ResumeMode.RESUME)
+
+    assert read_meta(started.run_dir)["current_phase"] == (
+        "implement" if declares_test_evidence else "handoff"
+    )

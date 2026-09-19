@@ -125,6 +125,47 @@ def test_pack_reads_current_canonical_entry_and_preserves_relative_payload(tmp_p
     assert kit_source_digest(bundle / "kit") == kit_source_digest(source)
 
 
+@pytest.mark.parametrize("installed_skills_link", [False, True], ids=["settings-only", "installed-skills-link"])
+def test_pack_excludes_machine_local_host_state(tmp_path: Path, installed_skills_link: bool) -> None:
+    source = _source_copy(tmp_path / "source")
+    private_registrations = (".claude/settings.json", ".Codex/hooks.json")
+    for relative in private_registrations:
+        (source / relative).write_text(json.dumps({
+            "hooks": {
+                "Stop": [{
+                    "hooks": [{"type": "command", "command": str(tmp_path / "private-hook.sh")}],
+                }],
+            },
+        }))
+    local_rule = ".Codex/rules/concise-output.md"
+    (source / local_rule).write_text("Private project-specific rules.\n")
+    if installed_skills_link:
+        external_skills = tmp_path / "machine-local-skills"
+        external_skills.mkdir()
+        (external_skills / "SKILL.md").write_text("Private machine-local skill.\n")
+        (source / ".claude/skills").symlink_to(external_skills, target_is_directory=True)
+
+    bundle = _bundle(tmp_path / "plugin", source)
+
+    for relative in (*private_registrations, local_rule, ".claude/skills"):
+        excluded = bundle / "kit" / relative
+        assert not excluded.exists()
+        assert not excluded.is_symlink()
+    for relative in (".Codex/agents", ".Codex/context", ".Codex/rules/context", ".claude/agents"):
+        original = source / relative
+        bundled = bundle / "kit" / relative
+        assert bundled.is_dir()
+        assert {
+            file.relative_to(bundled).as_posix(): file.read_bytes()
+            for file in bundled.rglob("*") if file.is_file()
+        } == {
+            file.relative_to(original).as_posix(): file.read_bytes()
+            for file in original.rglob("*") if file.is_file()
+        }
+    rubric = ".Codex/rules/codebase-rubric.md"
+    assert (bundle / "kit" / rubric).read_bytes() == (source / rubric).read_bytes()
+
+
 def test_pack_refuses_existing_output_without_mutating_it(tmp_path: Path) -> None:
     output = tmp_path / "existing"
     output.mkdir()
@@ -146,6 +187,49 @@ def test_pack_rejects_outward_symlinks_without_partial_output(tmp_path: Path) ->
     assert result.returncode != 0
     assert not output.exists()
     assert private.read_text() == "outside payload\n"
+
+
+@pytest.mark.parametrize("ancestor", [".claude", ".Codex/rules"])
+def test_pack_rejects_symlinked_declared_asset_ancestors(tmp_path: Path, ancestor: str) -> None:
+    source = _source_copy(tmp_path / "source")
+    declared_parent = source / ancestor
+    outside = tmp_path / "outside"
+    declared_parent.rename(outside)
+    declared_parent.symlink_to(outside, target_is_directory=True)
+    before = _snapshot(outside)
+    output = tmp_path / "plugin"
+    result = _pack(output, source)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert not output.exists()
+    assert _snapshot(outside) == before
+
+
+def test_pack_rejects_symlinked_output_parent_inside_assets(tmp_path: Path) -> None:
+    source = _source_copy(tmp_path / "source")
+    alias = tmp_path / "output-parent"
+    alias.symlink_to(source / "skills", target_is_directory=True)
+    output = alias / "not-created" / "nested" / "plugin"
+    before = _snapshot(source)
+    result = subprocess.run(
+        ["node", str(source / "bin/agent-flow-plugin.mjs"), "pack", "--output", str(output)],
+        cwd=tmp_path, text=True, capture_output=True, check=False, timeout=60,
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert not (source / "skills/not-created").exists()
+    assert _snapshot(source) == before
+
+
+def test_pack_allows_symlinked_output_parent_outside_assets(tmp_path: Path) -> None:
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    alias = tmp_path / "output-parent"
+    alias.symlink_to(destination, target_is_directory=True)
+    output = alias / "plugin"
+    result = _pack(output)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (destination / "plugin/kit/bin/agent-flow-kit.mjs").read_bytes() == (
+        KIT_ROOT / "bin/agent-flow-kit.mjs"
+    ).read_bytes()
 
 
 def test_project_runtime_survives_bundle_removal(tmp_path: Path) -> None:

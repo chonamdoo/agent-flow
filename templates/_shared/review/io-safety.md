@@ -4,6 +4,24 @@ Check filesystem, network, subprocess, and serialization boundaries for
 crash safety, partial-write hazards, injection, and unintended disclosure.
 Apply common semantics across languages; Python API guidance below applies only to Python.
 
+For security-sensitive trust boundaries, resolve `security-audit` through the
+active skill index (normally `.agent-flow/skills/security-audit/SKILL.md`).
+Read the selected skill in guidance mode and only its applicable domain
+companions, relative to that skill. Report a missing skill instead of guessing
+another installation. Trace the strongest existing control before calling a
+boundary failure a vulnerability; keep hardening advice and unresolved
+runtime/deployment facts distinct from confirmed findings. Put an unresolved
+security claim in Notes as `needs_validation`, without severity; this is not a
+final verdict. Report ordinary correctness defects under this angle as usual.
+
+This angle does not start the skill's full audit workflow or create its reports.
+Target-controlled execution must satisfy both the active profile's gate policy
+and the skill's OS-enforced sandbox requirements; a managed worktree or reviewer
+process alone does not establish those controls. Missing controls leave execution
+unperformed, not waived. The runner still owns phase routing, independent
+Claude/Codex review, and the final verdict format below. Audit records and validator
+success do not replace that verdict or prove independent verification.
+
 ## What to verify
 
 1. **Filesystem**
@@ -34,8 +52,6 @@ Apply common semantics across languages; Python API guidance below applies only 
 ```text
 ## I/O safety review findings
 
-verdict: approve | request-changes
-
 ### Must-fix
 - <severity:high> [path:line] <statement>. Risk: <crash/data-loss/injection>.
 
@@ -44,6 +60,7 @@ verdict: approve | request-changes
 
 ### Notes
 - <severity:low> ...
+- needs_validation: [path:line] <unresolved claim>; existing control: <control>; missing evidence: <runtime/deployment fact>.
 ```
 
 Cite paths as `path/to/file:line`. Keep total under 150 lines.

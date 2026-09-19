@@ -31,6 +31,7 @@ import {
   assertKnownInstallArgs,
   atomicWriteFileSync,
   backupIfDifferent,
+  bootstrapBlockIsOurs,
   claudeHooksSettings,
   codexConfigPath,
   codexHooksSettings,
@@ -962,7 +963,9 @@ function install() {
     "graphify-out/manifest.json",
     "graphify-out/cost.json",
   ]);
-  upsertGitExclude(PROJECT, ROOT_CONTEXT_FILES);
+  if (rootContext === "legacy") {
+    upsertGitExclude(PROJECT, ROOT_CONTEXT_FILES.filter((label) => bootstrapBlockIsOurs(PROJECT, label)));
+  }
   removeLegacyProjectSkillCopies(PROJECT, "graphify");
   writeManagedFile(
     path.join(AF_DIR, "workflows", "full-feature.yaml"),

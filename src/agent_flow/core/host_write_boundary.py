@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from agent_flow.core.workflow_status import status_value
 from agent_flow.core.worktree_isolation import (
     LEADER_SWEEP_TRACKED_ONLY,
     LeaderDriftError,
@@ -242,7 +243,9 @@ def assert_adoption_allowed(*, root: Path) -> None:
         )
 
 
-def record_host_checkout_binding(payload: object, project_root: Path) -> Path | None:
+def record_host_checkout_binding(
+    payload: object, project_root: Path, *, successful_tool_event: bool = False
+) -> Path | None:
     root = _validated_project_root(project_root)
     session_id = _first_string(payload, ("session_id", "sessionId"))
     if not session_id:
@@ -282,6 +285,11 @@ def record_host_checkout_binding(payload: object, project_root: Path) -> Path | 
         key: value for key, value in payload.items()
         if key not in {"tool_input", "input", "parameters"}
     } if isinstance(payload, dict) else {}
+    result_exit_code = _first_number(
+        result_payload, ("exit_code", "exitCode", "returncode", "return_code")
+    )
+    if result_exit_code is None and successful_tool_event is True:
+        result_exit_code = 0
     guidance_eligible = (
         isinstance(payload, dict)
         and payload.get("session_id", payload.get("sessionId")) == session_id
@@ -289,9 +297,7 @@ def record_host_checkout_binding(payload: object, project_root: Path) -> Path | 
             payload.get("tool_name", payload.get("toolName", payload.get("tool", "")))
         ).lower() in _COMMAND_TOOLS
         and _first_string(_tool_input(payload), tuple(_COMMAND_KEYS)) == command
-        and _first_number(
-            result_payload, ("exit_code", "exitCode", "returncode", "return_code")
-        ) == 0
+        and result_exit_code == 0
         and _lifecycle_operation(
             command, root=root, cwd=_session_cwd(payload, command)
         ) in {"run", "start", "continue"}
@@ -2216,9 +2222,9 @@ def host_session_guidance(payload: object, project_root: Path) -> str | None:
             ["agent-flow", "status", "--root", str(root), "--worktree", context.name]
         )
         return (
-            f"[agent-flow] run: {workflow}/{context.run_id}\n"
-            f"current_phase: {phase}\n"
-            f"status_command: {status_command}"
+            f"[agent-flow] run: {status_value(workflow)}/{status_value(context.run_id)}\n"
+            f"current_phase: {status_value(phase)}\n"
+            f"status_command: {status_value(status_command)}"
         )
     except (HostWriteBoundaryError, WorktreeIsolationError, OSError, ValueError):
         return None

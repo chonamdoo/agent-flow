@@ -42,6 +42,7 @@ skills:
     - react-development-guide
     - typescript-development-guide
     - llm-tool-development
+    - nextjs-api-routing
     - nextjs-auth-session
   required_review:
     - group: nextjs-auth-session

@@ -8,29 +8,28 @@ requires: [kotlin-backend-development-guide]
 
 # Ktor Server Development
 
-Apply `kotlin-backend-development-guide` and its core dependency. Its authorization, API, concurrency, migration, durable idempotency, unknown-outcome, and operations contracts remain mandatory for the applicable work. Confirm **server** artifacts, actual Ktor version, engine, serialization plugin, database library/driver, DI approach, and lifecycle configuration. `HttpClient` in an Android/KMP app does not activate this guide.
+Apply `kotlin-backend-development-guide`, its `backend-api-contract` dependency, and the selected architecture contract (Clean core only in Clean mode; full selected local contract and required references in local mode). The common contract owns API, authorization, consistency, recovery, operations, and conditional performance evidence. Confirm **server** artifacts, actual Ktor version, engine, serialization plugin, database library/driver, DI approach, and lifecycle configuration. `HttpClient` in an Android/KMP app does not activate this guide.
 
 ## Composition and entry points
 
 - An Application module is a function that assembles routes/plugins/services, not a required Gradle module or deployment unit. Preserve the project's constructor/parameter injection, attributes, or supported DI plugin; do not install a container to satisfy an example.
-- Application composition owns resources and application-lifetime workers. Routes own input decoding, trusted principal extraction, and response/error mapping; application actions own policy and ports. Keep `ApplicationCall`, ORM rows, provider SDK types, and serialization DTOs out of pure business policy. Expose only the boundaries the actual feature needs.
-- Identify plugin installation scope and pipeline behavior. An authentication provider validates identity; route `authenticate` coverage and application/object/tenant/field policy must still cover every entry point, list/count, bulk item, and worker.
-- Preserve the chosen wire contract across `ContentNegotiation`, request validation, route mapping, and `StatusPages`: malformed body, unsupported media type, missing/null/PATCH semantics, invalid enum, missing resource, conflict, and bounded stable pagination. Validation plugins do not prove domain invariants or authorize objects. Avoid double responses and error bodies that disclose raw exceptions.
+- Place route policy and dependency ownership according to the selected architecture. In Clean mode, Application composition owns resources and application-lifetime workers; routes own input decoding, trusted principal extraction, and response/error mapping; application actions own policy and ports. Keep `ApplicationCall`, ORM rows, provider SDK types, and serialization DTOs out of pure business policy. In local mode, follow the selected contract's ownership and framework-boundary rules instead.
+- Identify plugin installation scope and pipeline behavior. An authentication provider validates identity; verify `authenticate` coverage and enforce the common authorization contract beyond that identity check.
+- Apply the common wire/error/validation contract across `ContentNegotiation`, request validation, route mapping, and `StatusPages`. Avoid double responses; plugin validation does not establish domain invariants or object authorization.
 
 ## Execution, state, and lifecycle
 
 - Request work is structured under the call lifetime. Owned application workers have explicit failure and shutdown handling. Do not detach mandatory side effects into a launch after returning success. Propagate cancellation through generic exception/status mapping; it is not evidence of non-commit.
 - Choose a transaction API from the actual DB library. Ktor routing does not create database transactions. JDBC/JPA is blocking despite a suspending route; bound work and pool usage, and execute the **whole** blocking transaction with coherent connection/thread ownership. Do not scatter transaction calls across dispatchers or share a transaction/session among concurrent child tasks unless the library explicitly supports it.
-- Keep the common atomicity and concurrency contract: preflight checks need DB enforcement; locks, conditional updates, constraints, and versions are alternatives according to the invariant. Remote effects need their own idempotency/reconciliation; a route timeout can leave an unknown outcome.
-- Register resource ownership and shutdown ordering for the chosen engine/version. Withdraw readiness and stop taking new work, drain or durably hand off accepted work, then close database pools/clients and owned execution resources. Bound engine/request/queue/timeout settings and protect secrets/PII.
-- Versioned migrations and rolling/backfill compatibility belong to deployment ownership, not an accidental per-request or per-instance startup race. Actual jobs/consumers need checkpoint/restart, ack/deduplication, and bounded poison-message handling; simple routes do not need a job framework.
+- Register resource ownership and shutdown ordering for the chosen engine/version, following the common readiness/drain contract. Bound engine-specific request/queue/timeout settings.
+- Run migrations through the selected deployment owner, not an accidental per-request or per-instance startup race. Apply the common migration and job/consumer contracts only where those capabilities exist.
 
 ## Conditional Ktor details
 
 - Routing, Authentication, ContentNegotiation, RequestValidation, or StatusPages changes: [Server plugins](references/server-plugins.md).
 - Database library, blocking/reactive execution, engine, application workers, or shutdown changes: [Data and lifecycle](references/data-lifecycle.md).
 
-Read the relevant common Kotlin reference only when its branch is affected. Resolve APIs against the target version; documentation examples are not a scaffold or an upgrade mandate.
+Read the relevant Kotlin reference only when its branch is affected. Resolve APIs against the target version; documentation examples are not a scaffold or an upgrade mandate.
 
 ## Evidence and review
 

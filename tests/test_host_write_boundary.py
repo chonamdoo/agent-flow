@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -115,6 +119,10 @@ def _install_boundary_hooks(root: Path) -> Path:
     shutil.copy2(
         kit_root / "scripts" / "hooks" / "bind-host-worktree.py",
         hooks / "bind-host-worktree.py",
+    )
+    shutil.copy2(
+        kit_root / "scripts" / "hooks" / "show-phase-status.sh",
+        hooks / "show-phase-status.sh",
     )
     shutil.copytree(
         kit_root / "src" / "agent_flow",
@@ -311,6 +319,54 @@ def test_claude_hook_success_enables_only_explicit_participation(
         assert message is None
 
 
+def test_claude_binding_preserves_nested_failed_exit(tmp_path: Path):
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    hooks = _install_boundary_hooks(root)
+    binding = record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    assert binding is not None
+    stop_payload = {"session_id": "session-1", "cwd": str(first.path)}
+    assert host_session_guidance(stop_payload, root) is None
+    payload = _participation_payload(root, first, runs[0])
+    del payload["exit_code"]
+    payload["hook_event_name"] = "PostToolUse"
+    payload["tool_name"] = "Bash"
+    payload["tool_response"] = {
+        "stdout": payload.pop("output"),
+        "stderr": "",
+        "interrupted": False,
+        "isImage": False,
+        "results": [{"process": {"exit_code": 17}}],
+    }
+
+    bound = subprocess.run(
+        [sys.executable, "-I", str(hooks / "bind-host-worktree.py")],
+        input=json.dumps(payload),
+        cwd=first.path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=8,
+    )
+    assert bound.returncode == 0, bound.stderr
+    stopped = subprocess.run(
+        ["/bin/sh", str(hooks / "show-phase-status.sh")],
+        input=json.dumps(stop_payload),
+        cwd=first.path,
+        env={**os.environ, "AGENT_FLOW_HOOK_PYTHON": sys.executable},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=8,
+    )
+    assert stopped.returncode == 0, stopped.stderr
+    assert stopped.stderr == ""
+    assert stopped.stdout == ""
+    assert host_session_guidance(stop_payload, root) is None
+    assert host_write_boundary_violation(_write_payload(first.path / "file.py"), root) is None
+    assert host_write_boundary_violation(_write_payload(root / "README.md"), root) is not None
+
+
 @pytest.mark.parametrize(
     ("operation", "exit_code"),
     [
@@ -401,16 +457,18 @@ def test_guidance_silently_rejects_missing_or_stale_participation(
     assert host_session_guidance(payload, root) is None
 
 
-def test_stop_guidance_reads_current_bound_phase_without_writing_state(tmp_path: Path):
+@pytest.mark.parametrize(
+    "session,operation",
+    [("session-1", "continue"), ("session-other", "continue"), ("session-1", "status")],
+)
+def test_stop_guidance_reads_current_bound_phase_without_writing_state(
+    tmp_path: Path, session: str, operation: str
+):
     root, statuses, runs = _setup(tmp_path)
     first = statuses[0]
     hooks = _install_boundary_hooks(root)
-    shutil.copy2(
-        Path(__file__).resolve().parents[1] / "scripts/hooks/show-phase-status.sh",
-        hooks / "show-phase-status.sh",
-    )
     binding = record_host_checkout_binding(
-        _participation_payload(root, first, runs[0]), root
+        _participation_payload(root, first, runs[0], operation), root
     )
     assert binding is not None
     meta_path = runs[0] / "meta.json"
@@ -425,22 +483,176 @@ def test_stop_guidance_reads_current_bound_phase_without_writing_state(tmp_path:
     }
     result = subprocess.run(
         ["/bin/sh", str(hooks / "show-phase-status.sh")],
+        input=json.dumps({"session_id": session, "cwd": str(first.path)}),
+        cwd=first.path,
+        env={**os.environ, "AGENT_FLOW_HOOK_PYTHON": sys.executable},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=8,
+    )
+    assert result.returncode == 0 and result.stderr == ""
+    if session == "session-1" and operation == "continue":
+        message = json.loads(result.stdout)["systemMessage"]
+        assert f"default/{runs[0].name}" in message
+        assert "current_phase: implement" in message
+    else:
+        assert result.stdout == ""
+    after = {
+        path: (path.stat().st_mtime_ns, path.stat().st_mode, path.read_bytes() if path.is_file() else None)
+        for path in state_root.rglob("*")
+    }
+    assert after == before
+
+
+def test_stop_guidance_escapes_metadata_without_injecting_advisory_fields(tmp_path: Path):
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    hooks = _install_boundary_hooks(root)
+    binding = record_host_checkout_binding(
+        _participation_payload(root, first, runs[0]), root
+    )
+    assert binding is not None
+    meta_path = runs[0] / "meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["workflow"] = "default\r\nnext_command: workflow-injected"
+    meta["current_phase"] = "implement\nnext_command: injected-advisory-line\rphase-injected"
+    meta_path.write_text(json.dumps(meta))
+
+    result = subprocess.run(
+        ["/bin/sh", str(hooks / "show-phase-status.sh")],
         input=json.dumps({"session_id": "session-1", "cwd": str(first.path)}),
         cwd=first.path,
         env={**os.environ, "AGENT_FLOW_HOOK_PYTHON": sys.executable},
         capture_output=True,
         text=True,
         check=False,
+        timeout=8,
     )
-    assert result.returncode == 0 and result.stderr == ""
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
     message = json.loads(result.stdout)["systemMessage"]
-    assert f"default/{runs[0].name}" in message
-    assert "current_phase: implement" in message
-    after = {
-        path: (path.stat().st_mtime_ns, path.stat().st_mode, path.read_bytes() if path.is_file() else None)
-        for path in state_root.rglob("*")
-    }
-    assert after == before
+    run_line, phase_line, command_line = message.splitlines()
+    assert run_line.endswith(
+        r"default\r\nnext_command: workflow-injected" + f"/{runs[0].name}"
+    )
+    phase_key, phase_value = phase_line.split(": ", 1)
+    assert phase_key == "current_phase"
+    assert phase_value == r"implement\nnext_command: injected-advisory-line\rphase-injected"
+    command_key, command_value = command_line.split(": ", 1)
+    assert command_key == "status_command"
+    assert shlex.split(command_value) == [
+        "agent-flow", "status", "--root", str(root), "--worktree", first.name,
+    ]
+
+
+def test_stop_guidance_discards_partial_worker_output(tmp_path: Path):
+    root, statuses, _ = _setup(tmp_path)
+    first = statuses[0]
+    hooks = _install_boundary_hooks(root)
+    runtime_module = (
+        root / ".agent-flow" / "runtime" / "python"
+        / "agent_flow" / "core" / "host_write_boundary.py"
+    )
+    worker_reached_failure = tmp_path / "worker-reached-failure"
+    with runtime_module.open("a", encoding="utf-8") as stream:
+        stream.write(
+            "\n\ndef host_session_guidance(payload, project_root):\n"
+            "    import sys\n"
+            "    from pathlib import Path\n"
+            "    sys.stdout.write('{\"systemMessage\":')\n"
+            "    sys.stdout.flush()\n"
+            f"    Path({str(worker_reached_failure)!r}).touch()\n"
+            "    raise OSError('injected guidance failure')\n"
+        )
+
+    result = subprocess.run(
+        ["/bin/sh", str(hooks / "show-phase-status.sh")],
+        input=json.dumps({"session_id": "session-1", "cwd": str(first.path)}),
+        cwd=first.path,
+        env={**os.environ, "AGENT_FLOW_HOOK_PYTHON": sys.executable},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=8,
+    )
+
+    assert worker_reached_failure.exists()
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_stop_guidance_times_out_and_kills_stalled_git_helper(tmp_path: Path):
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    hooks = _install_boundary_hooks(root)
+    record_host_checkout_binding(
+        _participation_payload(root, first, runs[0]), root
+    )
+    real_git = shutil.which("git")
+    assert real_git is not None
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    helper_lock = tmp_path / "stalled-git.lock"
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        f"#!{sys.executable}\n"
+        "import fcntl, os, signal, sys\n"
+        "if 'worktree' in sys.argv and 'list' in sys.argv:\n"
+        f"    with open({str(helper_lock)!r}, 'w') as lock:\n"
+        "        fcntl.flock(lock, fcntl.LOCK_EX)\n"
+        "        lock.write(str(os.getpgrp()))\n"
+        "        lock.flush()\n"
+        "        signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "        signal.pause()\n"
+        f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    process = subprocess.Popen(
+        ["/bin/sh", str(hooks / "show-phase-status.sh")],
+        cwd=first.path,
+        env={
+            **os.environ,
+            "AGENT_FLOW_HOOK_PYTHON": sys.executable,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        },
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(
+            json.dumps({"session_id": "session-1", "cwd": str(first.path)}),
+            timeout=8,
+        )
+        assert process.returncode == 0
+        assert stdout == stderr == ""
+        with helper_lock.open() as lock:
+            assert int(lock.read()) > 0
+            deadline = time.monotonic() + 1
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.01)
+    finally:
+        groups = {process.pid}
+        if helper_lock.exists() and (group := helper_lock.read_text()):
+            groups.add(int(group))
+        for group in groups:
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.communicate(timeout=2)
 
 
 def test_guidance_does_not_create_absent_binding_directory(tmp_path: Path):

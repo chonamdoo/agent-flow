@@ -1,5 +1,6 @@
 [
   {"id":"generic","files":{},"profile":"generic"},
+  {"id":"python-api","files":{"pyproject.toml":"[project]\nname = 'api'\nversion = '0.0.0'\ndependencies = ['fastapi>=0.115']\n"},"profile":"python"},
   {"id":"android-gradle","files":{"build.gradle":"plugins { id 'com.android.application' }"},"profile":"android"},
   {"id":"spring-kotlin","files":{"build.gradle.kts":"plugins { id(\"org.springframework.boot\") version \"3.5.0\" }"},"profile":"spring"},
   {"id":"spring-maven","files":{"pom.xml":"<project><parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.5.0</version></parent></project>"},"profile":"spring"},

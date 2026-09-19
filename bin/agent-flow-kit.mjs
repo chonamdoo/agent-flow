@@ -24,6 +24,7 @@ import {
   assertKnownInstallArgs,
   atomicWriteFileSync,
   backupIfDifferent,
+  bootstrapBlockIsOurs,
   BOOTSTRAP_TEMPLATE_FILE,
   claudeHooksSettings,
   canonicalPath,
@@ -369,12 +370,16 @@ function installProject(requestedRoot) {
     "graphify-out/manifest.json",
     "graphify-out/cost.json",
   ]);
-  upsertGitExclude(root, ROOT_CONTEXT_FILES);
+  if (rootContext === "legacy") {
+    upsertGitExclude(root, ROOT_CONTEXT_FILES.filter((label) => bootstrapBlockIsOurs(root, label)));
+  }
   removeLegacyProjectSkillCopies(root, "graphify");
   if (rootContext === "legacy") {
     console.log(`${ROOT_CONTEXT_NOTICE_PREFIX}use --migrate-root-context for explicit conversion`);
     upsertSkillIndexBlock(root);
     upsertDocsIndexBlock(root);
+  } else if (rootContext === "preserve") {
+    console.log(`${ROOT_CONTEXT_NOTICE_PREFIX}root ownership is unproven; review conflicting instructions manually. Automatic migration requires an unchanged receipt-owned block.`);
   }
   pruneRetiredHookScripts(root, hooksDisabled);
   pruneRetiredManagedScripts(root);

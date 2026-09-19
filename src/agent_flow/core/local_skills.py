@@ -515,7 +515,8 @@ def _marker_instruction(
     return "\n".join(
         [
             "",
-            "Review the author's `## Completion Gate` for these criteria:"
+            "Current review aggregate markers (controller-owned after review; "
+            "not retroactive requirements for earlier author artifacts):"
             if role == "reviewer" else "The `## Completion Gate` must include:",
             "",
             "```text",

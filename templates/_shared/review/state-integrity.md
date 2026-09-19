@@ -20,14 +20,15 @@ Review persistent-state mutations for concrete concurrency, crash-safety, and re
    - Prefer an atomic update when it cleanly expresses the invariant; a correct existing row lock, optimistic version, advisory lock, `flock`, lease, or `O_EXCL` claim is also valid. Judge its protection and lifecycle rather than requiring a different strategy.
    - Lock identity, ordering, ownership, crash release, and contention behavior are explicit.
 
-5. **Idempotency key**
-   - Claim the key before the irreversible side effect under a unique constraint or equivalent atomic claim.
-   - Scope the key to tenant and operation, bind it to a canonical request fingerprint, reject mismatched reuse, and persist completed outcomes for the supported retry window so a retry returns the prior result.
+5. **Retry/result guarantee and idempotency key**
+   - Establish the promised retry/result semantics across all side effects and returned outcomes. Accept demonstrably repetition-safe operations or equivalent atomic/durable business-state guarantees without a separate request-key/result store; show a concrete duplicate/concurrent execution and crash sequence. An HTTP method name or unchanged primary row alone is insufficient.
+   - When keys are promised, claim the tenant/operation/key before the irreversible effect under a unique constraint or equivalent atomic claim, bind it to a canonical request fingerprint, and reject mismatched reuse.
+   - When prior-result replay is promised, preserve completed outcomes for the supported retry window in a durable record or equivalent durable representation that reproduces that result. Current state alone is insufficient if it cannot recover the promised original outcome.
    - Keep pending/unknown distinct from completed. Recover a crash after external success but before local result recording; a pending flag alone does not prevent duplicate effects.
 
 6. **Unknown write outcome**
    - Timeout, cancellation, connection loss, or a tool error flag is not proof of rollback. Separate the result/error payload from confirmed not-started, not-committed, committed, or unknown effect state.
-   - Reconcile operation status, ledger, or durable provider replay before retrying an unknown write. Retry only at a safe unit with established backend idempotency; provider call IDs and stream event IDs are not business idempotency keys.
+   - Reconcile operation status, ledger, or durable provider replay before retrying an unknown write. Retry only at a safe unit with an established repetition-safe or equivalent atomic/durable guarantee covering all effects and the promised result; provider call IDs and stream event IDs are not business idempotency keys.
 
 ## Blocking calibration
 

@@ -14,9 +14,11 @@ Identify who runs the versioned migration and how concurrent deployment attempts
 
 ## Idempotency and publication
 
-A durable claim needs atomic uniqueness over tenant/operation/key, request fingerprint comparison, and a state/result record. Define retention and pending-owner recovery: a crashed claimant must not permanently block work or cause another worker to duplicate an unknown effect. Completed duplicate requests return the prior outcome; changed payloads under one key conflict.
+Apply `backend-api-contract` to decide the required retry/result guarantee and whether a durable request-key/result record is needed. Demonstrably repetition-safe operations or equivalent atomic/durable business-state guarantees remain valid; assess every side effect and the returned outcome, not only the primary row.
 
-For external effects, record a stable operation identity before attempting the effect when possible, use the provider's idempotency contract, and reconcile a crash after provider success but before local completion. A local `pending` flag alone is not duplicate-effect prevention. Distinguish confirmed not-applied, confirmed applied, and unknown.
+When using a durable claim, enforce atomic uniqueness over tenant/operation/key and recover a crashed pending owner. Follow the common fingerprint, mismatch, replay-window, and unknown-outcome rules.
+
+For external effects, record a stable operation identity before attempting the effect when possible and use the provider's idempotency contract. The recovery sequence must handle provider success followed by a crash before local completion.
 
 If delivery is required, persist intent with the business commit through an outbox, supported durable publication registry, or equivalent mechanism. Relay failures and consumer ack loss need replay/dedup; publishing before commit risks phantom events, publishing after commit without durable intent risks loss. Choose CDC only when its ordering/retention/operational contract fits. Best-effort notifications need not be upgraded to durable messaging.
 

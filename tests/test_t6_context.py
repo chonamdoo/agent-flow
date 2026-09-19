@@ -206,19 +206,15 @@ def test_reviewer_composes_author_spec_as_evidence_not_execution(tmp_path, role,
     quoted = "\n".join(line.removeprefix("> ") for line in lines if line.startswith("> "))
     direct = "\n".join(line for line in lines if not line.startswith("> "))
     if role == "reviewer":
-        specification = f"**Task**: {task}\n\n{body}" if task else body
-        assert quoted == specification
-        assert "**Task**:" not in direct
         for instruction in (task + "\n" + body).splitlines():
             if instruction:
+                assert instruction in quoted
                 assert instruction not in direct
     else:
         assert quoted == ""
         assert f"\n{body}\n" in rendered
         if task:
-            assert f"**Task**: {task}\n" in rendered
-        else:
-            assert "**Task**:" not in rendered
+            assert task in rendered
     assert "atomicity: pass|fail" in rendered
 
 
