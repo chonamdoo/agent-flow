@@ -299,6 +299,61 @@ def test_root_context_files_reach_a_new_checkout(tmp_path: Path, monkeypatch, ca
     )
 
 
+@pytest.mark.parametrize(
+    ("mode", "contract_available"),
+    [(None, False), ("pending", False), ("local", True), ("local", False)],
+)
+def test_untracked_architecture_choice_reaches_the_checkout(
+    tmp_path: Path, monkeypatch, mode: str | None, contract_available: bool
+):
+    from agent_flow import cli as CLI
+    from agent_flow.core.architecture_policy import (
+        PROJECT_ARCHITECTURE_FILE,
+        ArchitectureContractError,
+        architecture_snapshot,
+    )
+
+    leader = tmp_path / "leader"
+    _repo(leader)
+    if contract_available:
+        contract = leader / "skills/architecture/SKILL.md"
+        contract.parent.mkdir(parents=True)
+        contract.write_text(
+            "---\nname: fixture-contract\ndescription: Project-owned architecture.\n"
+            "requires_docs:\n  - references/rules.md\n"
+            "---\nUse the project module contract.\n",
+            encoding="utf-8",
+        )
+        reference = contract.parent / "references/rules.md"
+        reference.parent.mkdir()
+        reference.write_text("Modules expose only their public API.\n", encoding="utf-8")
+        _git("add", "skills", cwd=leader)
+        _git("commit", "-m", "project contract", cwd=leader)
+    if mode is not None:
+        declaration = f"schema_version: 1\narchitecture:\n  mode: {mode}\n"
+        if mode == "local":
+            declaration += "  skill: skills/architecture/SKILL.md\n"
+        (leader / PROJECT_ARCHITECTURE_FILE).write_text(declaration, encoding="utf-8")
+    checkout = _managed_checkout(leader, "architecture-choice")
+    _stub_profile(monkeypatch, tmp_path, {})
+
+    CLI._apply_worktree_setup(root=leader, checkout=checkout)
+
+    if mode == "local" and not contract_available:
+        with pytest.raises(ArchitectureContractError):
+            architecture_snapshot(checkout)
+        return
+    snapshot = architecture_snapshot(checkout)
+    assert snapshot.selection.mode.value == (mode or "clean")
+    assert snapshot.declared is (mode is not None)
+    if mode == "local":
+        assert snapshot.contract is not None
+        assert [document.path for document in snapshot.contract.documents] == [
+            "skills/architecture/SKILL.md",
+            "skills/architecture/references/rules.md",
+        ]
+
+
 def test_missing_profile_declaration_still_warns(tmp_path: Path, monkeypatch, capsys):
     """불변: 컨텍스트 파일을 경고에서 빼느라 `local.properties` 누락을 놓치면 안 된다.
 

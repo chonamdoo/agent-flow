@@ -40,26 +40,13 @@ tools/skill-noop/       ← A/B harness that measures whether a skill line chang
 - Undecidable is not blocked. Let a failed shell parse or an undeclared cwd through (destructive commands are the only exception), and instead let lifecycle commands (`status`/`continue`/`run`/`start`) through **in every state**. When the command that clears a deadlock the boundary created sits behind that boundary, the number of ways out is zero. Do not widen that exemption list — an exempted path skips the literal block, the destructive list, and the tripwire all at once, so `eval --judge-command` becomes a channel for arbitrary argv execution and `worktree remove --name` deletes a sibling checkout (`tests/test_host_write_boundary.py::test_lifecycle_exemption_stays_narrow` guards this).
 - A leader that fast-forwards normally is not drift. The HEAD relaxation is granted only when **all three** hold: the same branch, an ancestor relationship, and the leader's own reflog record (`core/worktree_isolation.py:_head_drift_kind`). That is why there is no command to clear a stale baseline by hand — instead `reset --hard` (not an ancestor), a branch switch, and a ref pushed in from outside all still trip. A record whose snapshot **format** changed is recaptured instead of compared (`LeaderSnapshot.version`) — reporting a format difference as contamination would block every run in flight with no basis.
 
-The agent-flow block below is the canonical source for the Workflow Contract and Context Economy. Do not duplicate them here.
+The explicit Agent Flow lifecycle contract lives in `skills/agent-flow/SKILL.md`. The block below only points to it; project rules above remain applicable independently.
 
 <!-- agent-flow:start -->
 ## Agent Flow
 
-- Start every new session with `agent-flow status`. If a run is active, run that output's `next_command` verbatim; if none is active, start with `agent-flow run "<task>"`. Never guess at `agent-flow continue` or `agent-flow run advance`.
-- Install runs once per project. Do not run it again just because a new session started.
-- `/agent-flow` is a skill trigger, not a shell path. The entry procedure, SPEC review and approval, and run artifact locations are in `.agent-flow/skills/agent-flow/SKILL.md`.
-
-### Workflow Contract
-
-- Pick the workflow by task size: `agent-flow run "<task>" --workflow <name>`. The number in parentheses is the phase count and the source of truth is `.agent-flow/workflows/<name>.yaml`. Omit it and you get `default`; using `default` for a small change makes the phase overhead larger than the work itself.
-  - `review`(3) review with no code change · `bugfix`(5) one reproducible bug · `diagnosing-bugs`(9) one hard or intermittent bug · `development`(6) one concern · `default`(15) through PR and merge · `full-feature`(24) from PRD and DDD
-- The status output is the source of truth for the current phase and the next command. Do not keep a copy of the phase list in this file.
-- `multi-review` requires at least two installed Claude/Codex CLI reviewer subprocesses. Leave `reviewer-source: sub-agent` in each result, and at the end write only `## Overall` plus `verdict: approve` or `verdict: request-changes`. Use OMP as host/controller only, never as a reviewer provider.
-- The active profile's `branching`/`pr` is the source of truth for branching and PR target. Follow the profile even when a skill document dictates a different base, PR target, or branch deletion. Express release-first through the profile's `branching.strategy`/`base`/`integration`/`pr.target_branch`, and leave topic branches to the cleanup phase and the protected-branch hook — do not replace that with the `git branch -D` a skill dictates.
-- Do not run an IDE, Gradle, or a build in the leader checkout. Build output in the leader makes the phase-boundary tripwire report it as drift and the run stops. Open builds, tests, and IDEs only in a bound worktree.
-- Take build/test/lint commands only from the active profile's `gates`. Do not repeat verification commands that no gate declares.
-- Create worktrees only with `agent-flow worktree create --name feat-<slug>`. Do not run `git worktree add` by hand, and do not run install or regenerate skill links inside a worktree.
-- The bans on protected-branch commit/push and on leader checkout/switch hold identically on every host. The hook blocks them automatically.
+- Invoke `/agent-flow` explicitly to start or resume an Agent Flow task. Follow `.agent-flow/skills/agent-flow/SKILL.md` only for that invocation; installation or opening a session does not start a workflow.
+- Existing project rules and installed runtime protection remain applicable outside Agent Flow participation.
 
 ### Context Economy
 
@@ -78,7 +65,7 @@ The agent-flow block below is the canonical source for the Workflow Contract and
 |IMPORTANT: Paths only. Read a document when you need it; do not move its body here.
 |docs:{GETTING-STARTED.md,IDENTITY-AND-FREEZE-POLICY.md,mattpocock-skills-upstream-audit.md,PLAN.md,semantic-clean-architecture-code-review.md,semantic-clean-architecture-skill-audit.md,TEAM-ADOPTION.md,USAGE.md}
 |docs/adr:{0001-separate-core-from-environment-adapters.md,0002-use-stage-artifacts-for-subagent-first-workflows.md,0003-keep-team-orchestration-optional.md,0004-exclude-sandboxed-ai-cli-execution.md,0005-prefer-team-state-archive-before-delete.md,0006-add-domain-and-architecture-gates-to-full-feature.md,0006-use-push-watch-as-pr-automation-entrypoint.md,0007-hosted-remote-sandbox-queue-session-infra.md}
-|docs/issues:{0001-host-provider-discovery.md,0002-worktree-backed-run-start.md,0003-team-runtime-tracer.md,0004-installable-workflow-kit.md,0005-domain-ddd-full-feature-phases.md,0005-push-watch-workflow.md,0006-enforce-ddd-architecture-intent.md,0007-architecture-context-refactor.md,0008-issue222-architecture-followup.md}
+|docs/issues:{0001-host-provider-discovery.md,0002-worktree-backed-run-start.md,0003-team-runtime-tracer.md,0004-installable-workflow-kit.md,0005-domain-ddd-full-feature-phases.md,0005-push-watch-workflow.md,0006-enforce-ddd-architecture-intent.md,0007-architecture-context-refactor.md,0008-issue222-architecture-followup.md,0009-plugin-optin-design.md}
 |docs/ko:{GETTING-STARTED.md,TEAM-ADOPTION.md}
 ```
 <!-- agent-flow:docs:end -->

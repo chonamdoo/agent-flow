@@ -207,15 +207,16 @@ phases:
       Output: artifacts/ddd-design.md.
 
   - id: worktree
-    description: Create an isolated git worktree for parallel task safety.
+    description: Verify and record the checkout already bound by CLI entry.
     prompt: |
-      Run `agent-flow worktree create --name feat-<slug>` to create an isolated
-      worktree without switching the leader branch. Do not run `git worktree add`
-      by hand — that path skips the creation lock, base selection, the adoption
-      record, and profile-declared worktree setup. Do not just create a branch —
-      a physical worktree is required for parallel task isolation. Do not work on
-      main/master/develop. Follow profile.branching.naming when present. Record
-      worktree path, branch name, and base commit.
+      The CLI already attached or created and prepared this run's physical
+      worktree before the first phase. Verify the reported binding and setup;
+      do not create another worktree, switch the leader branch, run install,
+      or regenerate skill links. Check profile.branching and naming against
+      the existing branch and base. Do not work on main/master/develop.
+      If binding or setup is missing or inconsistent, stop and report the
+      runtime blocker instead of bypassing it with `git worktree add`.
+      Record worktree path, branch name, base commit, and setup verification.
       Output: artifacts/worktree.md.
 
   - id: run-start

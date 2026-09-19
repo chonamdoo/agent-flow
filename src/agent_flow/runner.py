@@ -67,6 +67,7 @@ from agent_flow.core.command_evidence import (
     missing_feedback_evidence_markers,
     missing_test_evidence_markers,
     TEST_EVIDENCE_PHASES,
+    TEST_RUN_EVIDENCE_MARKER,
     read_red_reference,
     test_code_baseline,
 )
@@ -1446,6 +1447,16 @@ class Runner:
 
     def _append_transition_journal(self, transition: PhaseTransition) -> None:
         record = transition.journal_record(datetime.now(timezone.utc).isoformat())
+        relative = self._existing_artifact_rel(self.phases[transition.from_index])
+        if relative is not None and relative in transition.invalidated:
+            source = self._attested_run_target(relative)
+            if source is None:
+                raise ValueError(f"transition evidence escapes the run directory: {relative}")
+            # Invalidation must prevent reuse, not erase the departing author's repair evidence.
+            record["source_artifact"] = {
+                "path": relative,
+                "content": source.read_bytes().decode("utf-8"),
+            }
         path = self._transitions_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
@@ -2296,21 +2307,22 @@ class Runner:
         missing.extend(missing_design_value_markers(text, phase.id))
         missing.extend(self._unknown_declared_concerns(text, phase.id))
         meta = read_meta(self.run_dir)
-        missing.extend(
-            missing_test_evidence_markers(
-                self.config_root,
-                phase.id,
-                text,
-                profile=self.profile,
-                required_markers=required_markers,
-                since=_meta_timestamp(meta.get("phase_entered_at")),
-                # 관측 로그는 저장소 전체가 공유한다. cwd를 좁히지 않으면 형제
-                # worktree에서 돈 테스트가 이 run의 증거로 잡힌다.
-                cwd_root=self.project_root,
-                run_dir=self.run_dir,
-                code_baseline=meta.get("test_code_baseline"),
+        if any(marker.strip() == TEST_RUN_EVIDENCE_MARKER for marker in required_markers):
+            missing.extend(
+                missing_test_evidence_markers(
+                    self.config_root,
+                    phase.id,
+                    text,
+                    profile=self.profile,
+                    required_markers=required_markers,
+                    since=_meta_timestamp(meta.get("phase_entered_at")),
+                    # 관측 로그는 저장소 전체가 공유한다. cwd를 좁히지 않으면 형제
+                    # worktree에서 돈 테스트가 이 run의 증거로 잡힌다.
+                    cwd_root=self.project_root,
+                    run_dir=self.run_dir,
+                    code_baseline=meta.get("test_code_baseline"),
+                )
             )
-        )
         missing.extend(
             missing_feedback_evidence_markers(
                 self.config_root,

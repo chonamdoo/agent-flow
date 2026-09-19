@@ -54,8 +54,8 @@ skills:
   required_review:
     - group: kotlin-backend
       skills: [kotlin-backend-development-guide]
-      path_globs: ["**/*.kt", "**/*.kts"]
-      task_terms: ["kotlin server", "kotlin backend", "kotlin 서버", "코틀린 서버", "코틀린 백엔드"]
+      path_globs: ["**/*.kt"]
+      task_terms: ["kotlin server", "kotlin backend", "mixed JVM server", "kotlin 서버", "코틀린 서버", "코틀린 백엔드"]
       concerns: [kotlin-backend]
       missing: "missing local Kotlin backend: <skill>"
     - group: ktor-server

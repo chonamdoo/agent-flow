@@ -8,6 +8,7 @@ compared, so the next sync can use
 - upstream: `https://github.com/mattpocock/skills`
 - pinned commit: `9c9f36ccd3995266cd675468af71639c8dde1ec5` (2026-08-17)
 - `diagnosing-bugs` adoption source: `0ab1b63a410a03d3627979a109c8695de27af954` (2026-08-20)
+- `diagnosing-bugs` verbatim tree: `74ca5fe077456a0b3b2f5310cf9430999fd0b5fd` (`SKILL.md`, `agents/openai.yaml`, `scripts/hitl-loop.template.sh`)
 
 When advancing the pin, record both adopted and intentionally omitted changes in
 the table and notes below. A pin alone cannot distinguish reviewed changes from
@@ -22,6 +23,7 @@ repository uses `skills/<name>/`. The remaining relative paths are unchanged.
 | --- | --- | --- |
 | `codebase-design` | `engineering/codebase-design` | Locally adapted boundaries, evidence preservation, and tool authority; see below |
 | `agent-flow-diagnosing-bugs` + `workflows/diagnosing-bugs.yaml` | `engineering/diagnosing-bugs` | lifecycle wrapper + 9-phase workflow + marker-driven command evidence |
+| `diagnosing-bugs` | `engineering/diagnosing-bugs` | Unmodified upstream tree; installed through the lifecycle wrapper's `requires` |
 | `domain-modeling` | `engineering/domain-modeling` | Merged description and local evidence/edit-authority rules; see below |
 | `tdd` | `engineering/tdd` | Local `requires`, judgment-focused examples, and host-neutral skill access; see below |
 | `grill-with-docs` | `engineering/grill-with-docs` | Local `requires` and host-neutral skill access; see below |
@@ -120,3 +122,21 @@ in `BUNDLED_HOST_SKILL_NAMES`, linked into `.claude/skills`, `.Codex/skills`, an
 Other vendored content skills are exposed through `.agent-flow/skills/`,
 the AGENTS.md index, and phase prompts. Adding an unconsumed `agents/openai.yaml`
 would create a second metadata source that can drift from `SKILL.md`.
+
+`diagnosing-bugs` preserves upstream `agents/openai.yaml` as part of the requested
+verbatim tree import. It does not add a native host entry; the existing
+`agent-flow-diagnosing-bugs` wrapper remains the lifecycle entry.
+
+## Cloudflare security audit
+
+- Upstream: [cloudflare/security-audit-skill](https://github.com/cloudflare/security-audit-skill).
+- Pinned revision: `c1c8a8c1471069fb0e188eeaff69b8e8db6564a8`.
+- Mapping: upstream `skills/security-audit/` → local `skills/security-audit/`.
+- The 21 upstream files are imported verbatim, including domain companions,
+  validators, their tests, and the [MIT license](security-audit/LICENSE).
+- [Local provenance manifest](security-audit/upstream.json) records this pin
+  and each imported file's SHA-256. The manifest is local metadata, not an
+  upstream file or an install-time integrity verifier.
+- Conditional guidance-mode integration belongs to
+  `templates/_shared/review/io-safety.md`; it does not modify the imported
+  audit workflow or replace the runner's review verdict contract.

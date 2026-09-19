@@ -29,8 +29,24 @@ def main() -> int:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise RuntimeError("invalid host worktree binding payload")
+        response = payload.get("tool_response")
+        # Claude는 exit_code를 생략할 수 있어 성공 이벤트를 보조 근거로 쓴다.
+        successful_tool_event = (
+            payload.get("hook_event_name") == "PostToolUse"
+            and payload.get("tool_name") == "Bash"
+            and isinstance(response, dict)
+            and isinstance(response.get("stdout"), str)
+            and isinstance(response.get("stderr"), str)
+            and response.get("interrupted") is False
+            and response.get("isImage") is False
+            and not any(
+                key in source
+                for source in (payload, response)
+                for key in ("exit_code", "exitCode", "returncode", "return_code")
+            )
+        )
         project_root, recorder = load_recorder(Path(__file__).resolve().parent)
-        recorder(payload, project_root)
+        recorder(payload, project_root, successful_tool_event=successful_tool_event)
     except Exception as exc:
         print(f"host worktree binding failed: {exc}", file=sys.stderr)
         return 2

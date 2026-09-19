@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -17,6 +21,7 @@ from agent_flow.artifact import create_run
 from agent_flow.core.host_write_boundary import (
     HostWriteBoundaryError,
     assert_adoption_allowed,
+    host_session_guidance,
     host_write_boundary_violation,
     record_host_checkout_binding,
 )
@@ -115,6 +120,10 @@ def _install_boundary_hooks(root: Path) -> Path:
         kit_root / "scripts" / "hooks" / "bind-host-worktree.py",
         hooks / "bind-host-worktree.py",
     )
+    shutil.copy2(
+        kit_root / "scripts" / "hooks" / "show-phase-status.sh",
+        hooks / "show-phase-status.sh",
+    )
     shutil.copytree(
         kit_root / "src" / "agent_flow",
         runtime / "agent_flow",
@@ -212,6 +221,506 @@ def test_host_binding_allows_only_its_checkout_and_runtime(tmp_path: Path):
     )
     assert leader_violation is not None and "outside the bound worktree" in leader_violation
     assert sibling_violation is not None and "outside the bound worktree" in sibling_violation
+
+
+def _participation_payload(root: Path, status, run_dir: Path, operation="continue"):
+    payload = _status_payload(root, status, run_dir)
+    payload["tool_input"]["command"] = (
+        f"agent-flow {operation} --root {root} --worktree {status.name}"
+    )
+    payload["cwd"] = str(status.path)
+    return payload
+
+
+def test_status_binding_protects_without_granting_guidance(tmp_path: Path):
+    root, statuses, runs = _setup(tmp_path)
+    first, second = statuses
+    binding = record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    assert binding is not None
+    assert host_session_guidance(
+        {"session_id": "session-1", "cwd": str(first.path)}, root
+    ) is None
+    for target in (root / "README.md", second.path / "file.py", runs[1] / "meta.json"):
+        assert host_write_boundary_violation(_write_payload(target), root) is not None
+    assert host_write_boundary_violation(_write_payload(first.path / "file.py"), root) is None
+
+
+@pytest.mark.parametrize("operation", ["run task", "run start", "start task", "continue"])
+def test_successful_explicit_participation_enables_only_bound_session(
+    tmp_path: Path, operation: str
+):
+    root, statuses, runs = _setup(tmp_path)
+    first, second = statuses
+    binding = record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    assert binding is not None
+    snapshot = json.loads(binding.read_text())["leader_snapshot"]
+    record_host_checkout_binding(
+        _participation_payload(root, first, runs[0], operation), root
+    )
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    message = host_session_guidance(
+        {"session_id": "session-1", "cwd": str(first.path)}, root
+    )
+    assert message is not None and f"default/{runs[0].name}" in message
+    assert json.loads(binding.read_text())["leader_snapshot"] == snapshot
+    assert host_session_guidance(
+        {"session_id": "session-other", "cwd": str(first.path)}, root
+    ) is None
+    assert host_session_guidance(
+        {"session_id": "session-1", "cwd": str(second.path)}, root
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("event", "interrupted", "exit_code", "operation", "eligible"),
+    [
+        ("PostToolUse", False, None, "continue", True),
+        ("PostToolUse", False, None, "status", False),
+        ("PostToolUseFailure", False, None, "continue", False),
+        ("PostToolUse", True, None, "continue", False),
+        ("PostToolUse", False, 1, "continue", False),
+        ("PreToolUse", False, None, "continue", False),
+    ],
+)
+def test_claude_hook_success_enables_only_explicit_participation(
+    tmp_path: Path, event: str, interrupted: bool, exit_code: int | None,
+    operation: str, eligible: bool,
+):
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    hooks = _install_boundary_hooks(root)
+    payload = _participation_payload(root, first, runs[0], operation)
+    del payload["exit_code"]
+    payload["hook_event_name"] = event
+    payload["tool_name"] = "Bash"
+    payload["tool_response"] = {
+        "stdout": payload.pop("output"),
+        "stderr": "",
+        "interrupted": interrupted,
+        "isImage": False,
+    }
+    if exit_code is not None:
+        payload["tool_response"]["exit_code"] = exit_code
+    result = subprocess.run(
+        [sys.executable, "-I", str(hooks / "bind-host-worktree.py")],
+        input=json.dumps(payload),
+        cwd=first.path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    message = host_session_guidance(
+        {"session_id": "session-1", "cwd": str(first.path)}, root
+    )
+    if eligible:
+        assert message is not None and f"default/{runs[0].name}" in message
+    else:
+        assert message is None
+
+
+def test_claude_binding_preserves_nested_failed_exit(tmp_path: Path):
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    hooks = _install_boundary_hooks(root)
+    binding = record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    assert binding is not None
+    stop_payload = {"session_id": "session-1", "cwd": str(first.path)}
+    assert host_session_guidance(stop_payload, root) is None
+    payload = _participation_payload(root, first, runs[0])
+    del payload["exit_code"]
+    payload["hook_event_name"] = "PostToolUse"
+    payload["tool_name"] = "Bash"
+    payload["tool_response"] = {
+        "stdout": payload.pop("output"),
+        "stderr": "",
+        "interrupted": False,
+        "isImage": False,
+        "results": [{"process": {"exit_code": 17}}],
+    }
+
+    bound = subprocess.run(
+        [sys.executable, "-I", str(hooks / "bind-host-worktree.py")],
+        input=json.dumps(payload),
+        cwd=first.path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=8,
+    )
+    assert bound.returncode == 0, bound.stderr
+    stopped = subprocess.run(
+        ["/bin/sh", str(hooks / "show-phase-status.sh")],
+        input=json.dumps(stop_payload),
+        cwd=first.path,
+        env={**os.environ, "AGENT_FLOW_HOOK_PYTHON": sys.executable},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=8,
+    )
+    assert stopped.returncode == 0, stopped.stderr
+    assert stopped.stderr == ""
+    assert stopped.stdout == ""
+    assert host_session_guidance(stop_payload, root) is None
+    assert host_write_boundary_violation(_write_payload(first.path / "file.py"), root) is None
+    assert host_write_boundary_violation(_write_payload(root / "README.md"), root) is not None
+
+
+@pytest.mark.parametrize(
+    ("operation", "exit_code"),
+    [
+        ("continue", 1),
+        ("continue", None),
+        ("status", 0),
+        ("run status", 0),
+        ("install", 0),
+        ("enable", 0),
+        ("skills show agent-flow", 0),
+    ],
+)
+def test_nonparticipating_command_never_enables_guidance(
+    tmp_path: Path, operation: str, exit_code: int | None
+):
+    root, statuses, runs = _setup(tmp_path)
+    payload = _participation_payload(root, statuses[0], runs[0], operation)
+    payload["exit_code"] = exit_code
+    record_host_checkout_binding(payload, root)
+    assert host_session_guidance(
+        {"session_id": "session-1", "cwd": str(statuses[0].path)}, root
+    ) is None
+
+
+@pytest.mark.parametrize("untrusted", ["executable", "session", "exit", "skill-read", "command"])
+def test_untrusted_evidence_cannot_grant_participation(
+    tmp_path: Path, untrusted: str
+):
+    root, statuses, runs = _setup(tmp_path)
+    payload = _participation_payload(root, statuses[0], runs[0])
+    if untrusted == "executable":
+        payload["tool_input"]["command"] = payload["tool_input"]["command"].replace(
+            "agent-flow", "/tmp/agent-flow", 1
+        )
+    elif untrusted == "skill-read":
+        payload["tool_name"] = "Skill"
+    elif untrusted == "command":
+        payload["result"] = {"command": payload["tool_input"].pop("command")}
+    else:
+        key = "session_id" if untrusted == "session" else "exit_code"
+        payload["tool_input"][key] = payload.pop(key)
+    record_host_checkout_binding(payload, root)
+    assert host_session_guidance(
+        {"session_id": "session-1", "cwd": str(statuses[0].path)}, root
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["missing-session", "nested-session", "missing-cwd", "leader-cwd", "corrupt",
+     "legacy", "stale", "completed", "symlink", "hardlink"],
+)
+def test_guidance_silently_rejects_missing_or_stale_participation(
+    tmp_path: Path, invalid: str
+):
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    binding = record_host_checkout_binding(
+        _participation_payload(root, first, runs[0]), root
+    )
+    assert binding is not None
+    payload = {"session_id": "session-1", "cwd": str(first.path)}
+    if invalid == "missing-session":
+        del payload["session_id"]
+    elif invalid == "nested-session":
+        payload = {"cwd": str(first.path), "input": {"session_id": "session-1"}}
+    elif invalid == "missing-cwd":
+        del payload["cwd"]
+    elif invalid == "leader-cwd":
+        payload["cwd"] = str(root)
+    elif invalid == "corrupt":
+        binding.write_text("{")
+    elif invalid in {"legacy", "stale"}:
+        data = json.loads(binding.read_text())
+        if invalid == "legacy":
+            del data["guidance_eligible"]
+        else:
+            data["run_id"] = "old-run"
+        binding.write_text(json.dumps(data))
+    elif invalid == "completed":
+        (runs[0] / "active").unlink()
+    elif invalid == "symlink":
+        saved = binding.with_suffix(".saved")
+        binding.rename(saved)
+        binding.symlink_to(saved)
+    elif invalid == "hardlink":
+        os.link(binding, binding.with_suffix(".saved"))
+    assert host_session_guidance(payload, root) is None
+
+
+@pytest.mark.parametrize(
+    "session,operation",
+    [("session-1", "continue"), ("session-other", "continue"), ("session-1", "status")],
+)
+def test_stop_guidance_reads_current_bound_phase_without_writing_state(
+    tmp_path: Path, session: str, operation: str
+):
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    hooks = _install_boundary_hooks(root)
+    binding = record_host_checkout_binding(
+        _participation_payload(root, first, runs[0], operation), root
+    )
+    assert binding is not None
+    meta_path = runs[0] / "meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["current_phase"] = "implement"
+    meta_path.write_text(json.dumps(meta))
+    binding.parent.chmod(0o755)
+    state_root = root / ".git" / "agent-flow"
+    before = {
+        path: (path.stat().st_mtime_ns, path.stat().st_mode, path.read_bytes() if path.is_file() else None)
+        for path in state_root.rglob("*")
+    }
+    result = subprocess.run(
+        ["/bin/sh", str(hooks / "show-phase-status.sh")],
+        input=json.dumps({"session_id": session, "cwd": str(first.path)}),
+        cwd=first.path,
+        env={**os.environ, "AGENT_FLOW_HOOK_PYTHON": sys.executable},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=8,
+    )
+    assert result.returncode == 0 and result.stderr == ""
+    if session == "session-1" and operation == "continue":
+        message = json.loads(result.stdout)["systemMessage"]
+        assert f"default/{runs[0].name}" in message
+        assert "current_phase: implement" in message
+    else:
+        assert result.stdout == ""
+    after = {
+        path: (path.stat().st_mtime_ns, path.stat().st_mode, path.read_bytes() if path.is_file() else None)
+        for path in state_root.rglob("*")
+    }
+    assert after == before
+
+
+def test_stop_guidance_escapes_metadata_without_injecting_advisory_fields(tmp_path: Path):
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    hooks = _install_boundary_hooks(root)
+    binding = record_host_checkout_binding(
+        _participation_payload(root, first, runs[0]), root
+    )
+    assert binding is not None
+    meta_path = runs[0] / "meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["workflow"] = "default\r\nnext_command: workflow-injected"
+    meta["current_phase"] = "implement\nnext_command: injected-advisory-line\rphase-injected"
+    meta_path.write_text(json.dumps(meta))
+
+    result = subprocess.run(
+        ["/bin/sh", str(hooks / "show-phase-status.sh")],
+        input=json.dumps({"session_id": "session-1", "cwd": str(first.path)}),
+        cwd=first.path,
+        env={**os.environ, "AGENT_FLOW_HOOK_PYTHON": sys.executable},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=8,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    message = json.loads(result.stdout)["systemMessage"]
+    run_line, phase_line, command_line = message.splitlines()
+    assert run_line.endswith(
+        r"default\r\nnext_command: workflow-injected" + f"/{runs[0].name}"
+    )
+    phase_key, phase_value = phase_line.split(": ", 1)
+    assert phase_key == "current_phase"
+    assert phase_value == r"implement\nnext_command: injected-advisory-line\rphase-injected"
+    command_key, command_value = command_line.split(": ", 1)
+    assert command_key == "status_command"
+    assert shlex.split(command_value) == [
+        "agent-flow", "status", "--root", str(root), "--worktree", first.name,
+    ]
+
+
+def test_stop_guidance_discards_partial_worker_output(tmp_path: Path):
+    root, statuses, _ = _setup(tmp_path)
+    first = statuses[0]
+    hooks = _install_boundary_hooks(root)
+    runtime_module = (
+        root / ".agent-flow" / "runtime" / "python"
+        / "agent_flow" / "core" / "host_write_boundary.py"
+    )
+    worker_reached_failure = tmp_path / "worker-reached-failure"
+    with runtime_module.open("a", encoding="utf-8") as stream:
+        stream.write(
+            "\n\ndef host_session_guidance(payload, project_root):\n"
+            "    import sys\n"
+            "    from pathlib import Path\n"
+            "    sys.stdout.write('{\"systemMessage\":')\n"
+            "    sys.stdout.flush()\n"
+            f"    Path({str(worker_reached_failure)!r}).touch()\n"
+            "    raise OSError('injected guidance failure')\n"
+        )
+
+    result = subprocess.run(
+        ["/bin/sh", str(hooks / "show-phase-status.sh")],
+        input=json.dumps({"session_id": "session-1", "cwd": str(first.path)}),
+        cwd=first.path,
+        env={**os.environ, "AGENT_FLOW_HOOK_PYTHON": sys.executable},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=8,
+    )
+
+    assert worker_reached_failure.exists()
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_stop_guidance_times_out_and_kills_stalled_git_helper(tmp_path: Path):
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    hooks = _install_boundary_hooks(root)
+    record_host_checkout_binding(
+        _participation_payload(root, first, runs[0]), root
+    )
+    real_git = shutil.which("git")
+    assert real_git is not None
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    helper_lock = tmp_path / "stalled-git.lock"
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        f"#!{sys.executable}\n"
+        "import fcntl, os, signal, sys\n"
+        "if 'worktree' in sys.argv and 'list' in sys.argv:\n"
+        f"    with open({str(helper_lock)!r}, 'w') as lock:\n"
+        "        fcntl.flock(lock, fcntl.LOCK_EX)\n"
+        "        lock.write(str(os.getpgrp()))\n"
+        "        lock.flush()\n"
+        "        signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "        signal.pause()\n"
+        f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    process = subprocess.Popen(
+        ["/bin/sh", str(hooks / "show-phase-status.sh")],
+        cwd=first.path,
+        env={
+            **os.environ,
+            "AGENT_FLOW_HOOK_PYTHON": sys.executable,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        },
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(
+            json.dumps({"session_id": "session-1", "cwd": str(first.path)}),
+            timeout=8,
+        )
+        assert process.returncode == 0
+        assert stdout == stderr == ""
+        with helper_lock.open() as lock:
+            assert int(lock.read()) > 0
+            deadline = time.monotonic() + 1
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.01)
+    finally:
+        groups = {process.pid}
+        if helper_lock.exists() and (group := helper_lock.read_text()):
+            groups.add(int(group))
+        for group in groups:
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.communicate(timeout=2)
+
+
+def test_guidance_does_not_create_absent_binding_directory(tmp_path: Path):
+    root, statuses, _ = _setup(tmp_path)
+    directory = root / ".git" / "agent-flow" / "host-sessions"
+    assert not directory.exists()
+    assert host_session_guidance(
+        {"session_id": "session-1", "cwd": str(statuses[0].path)}, root
+    ) is None
+    assert not directory.exists()
+
+
+def test_omp_shutdown_guidance_and_tool_guards_share_session_context(tmp_path: Path):
+    root, statuses, runs = _setup(tmp_path)
+    first, second = statuses
+    hooks = _install_boundary_hooks(root)
+    kit = Path(__file__).resolve().parents[1]
+    shutil.copy2(
+        kit / "scripts/hooks/show-phase-status.sh", hooks / "show-phase-status.sh"
+    )
+    (root / ".agent-flow" / "kit.json").write_text("{}")
+    launcher = root / ".agent-flow" / "bin" / "agent-flow-hook"
+    launcher.parent.mkdir()
+    launcher.write_text('#!/bin/sh\nexec /bin/sh "$@"\n')
+    launcher.chmod(0o755)
+    extension = root / ".omp" / "extensions" / "agent-flow-hooks.mjs"
+    extension.parent.mkdir(parents=True)
+    source = subprocess.run(
+        [
+            "node", "--input-type=module", "-e",
+            "import { ompHooksExtensionSource } from "
+            + json.dumps(str(kit / "lib/omp-hooks-extension.mjs"))
+            + "; process.stdout.write(ompHooksExtensionSource());",
+        ],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    extension.write_text(source)
+    record_host_checkout_binding(
+        _participation_payload(root, first, runs[0]), root
+    )
+    driver = (
+        f"import extension from {json.dumps(str(extension))};\n"
+        "const handlers = {}; const messages = [];\n"
+        "extension({on(name, handler) { handlers[name] = handler; }});\n"
+        f"const ctx = {{cwd: {json.dumps(str(first.path))}, hasUI: true,\n"
+        "sessionManager: {getSessionId() { return 'session-1'; }},\n"
+        "ui: {notify(message) { messages.push(message); }}};\n"
+        "async function run() {\n"
+        "await handlers.session_shutdown({}, ctx);\n"
+        "await handlers.session_shutdown({}, {...ctx, sessionId: 'uninvoked'});\n"
+        f"await handlers.session_shutdown({{}}, {{...ctx, cwd: {json.dumps(str(second.path))}}});\n"
+        "const blocked = await handlers.tool_call({toolName: 'write', input: {path: "
+        + json.dumps(str(second.path / "file.py"))
+        + "}}, {...ctx, sessionId: 'uninvoked'});\n"
+        "process.stdout.write(JSON.stringify({messages, blocked}));\n"
+        "}\n"
+        "run().catch(error => { console.error(error); process.exitCode = 1; });"
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", driver],
+        cwd=first.path,
+        env={**os.environ, "AGENT_FLOW_HOOK_PYTHON": sys.executable},
+        capture_output=True, text=True, check=True,
+    )
+    observed = json.loads(result.stdout)
+    assert len(observed["messages"]) == 1
+    assert f"default/{runs[0].name}" in observed["messages"][0]
+    assert observed["blocked"]["block"] is True
 
 
 def test_destructive_detection_sees_wrappers_and_splits_conditional_forms():

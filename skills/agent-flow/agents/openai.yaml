@@ -1,0 +1,5 @@
+interface:
+  display_name: "Agent Flow"
+  short_description: "Explicit project workflow start and resume"
+policy:
+  allow_implicit_invocation: false

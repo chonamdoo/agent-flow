@@ -2,12 +2,15 @@
 name: agent-flow-diagnosing-bugs
 description: Start the dedicated Agent Flow workflow for a hard bug or performance regression.
 disable-model-invocation: true
+requires:
+  - diagnosing-bugs
 ---
 
 # Agent Flow Diagnosing Bugs
 
 Use this user-invoked skill as the lifecycle entry for a hard bug or performance regression.
 The workflow owns diagnosis; this wrapper only starts or resumes it.
+Apply [the upstream diagnosis procedure](../diagnosing-bugs/SKILL.md) within the runner's current phase; the runner remains the lifecycle authority.
 
 ## Invocation
 

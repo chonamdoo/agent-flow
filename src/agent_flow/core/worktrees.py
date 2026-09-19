@@ -25,6 +25,7 @@ from agent_flow.artifact import (
     read_meta,
     write_meta,
 )
+from agent_flow.core.architecture_policy import PROJECT_ARCHITECTURE_FILE
 from agent_flow.core.hook_integrity import (
     JSON_REGISTRATION_FILES,
     OMP_REGISTRATION_FILE,
@@ -3858,11 +3859,9 @@ def run_declared_worktree_actions(
     return tuple(ran)
 
 
-# 두 파일은 프로젝트가 커밋할 수도, gitignore할 수도 있다(예전 install이 넣어 둔 항목이
-# 그대로 남아 있는 프로젝트도 많다). 추적하지 않는 쪽이면 `git worktree add`가 가져올
-# 것도, worktree 안 install(= no-op)이 만들 것도 없어서 그 checkout에서 연 host 세션은
-# agent-flow 계약을 한 글자도 받지 못한다. leader에서 복사해 그 공백을 닫는다.
-ROOT_CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md")
+# 미추적 컨텍스트는 git worktree add가 전달하지 않는다. 아키텍처 선언도 빠지면
+# local/pending이 legacy Clean으로 바뀌므로 profile 해석 전에 함께 복사한다.
+ROOT_CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md", PROJECT_ARCHITECTURE_FILE)
 
 
 def declared_worktree_copies(profile: Mapping[str, Any]) -> list[str]:
