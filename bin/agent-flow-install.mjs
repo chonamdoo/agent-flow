@@ -77,7 +77,6 @@ import {
   readKitAssetRecord,
   removeCodexBroadTrustState,
   removeGitignoreEntries,
-  removeLegacyProjectSkillCopies,
   removeOmpHooksExtension,
   reportSkippedUserEdit,
   requestedInstallRootOption,
@@ -957,16 +956,10 @@ function install() {
     "CLAUDE/",
     "agent-flow/",
   ]);
-  removeGitignoreEntries(gitignorePath, [
-    "graphify/",
-    "scripts/check-context-docs.*",
-    "graphify-out/manifest.json",
-    "graphify-out/cost.json",
-  ]);
+  removeGitignoreEntries(gitignorePath, ["scripts/check-context-docs.*"]);
   if (rootContext === "legacy") {
     upsertGitExclude(PROJECT, ROOT_CONTEXT_FILES.filter((label) => bootstrapBlockIsOurs(PROJECT, label)));
   }
-  removeLegacyProjectSkillCopies(PROJECT, "graphify");
   writeManagedFile(
     path.join(AF_DIR, "workflows", "full-feature.yaml"),
     fs.readFileSync(path.join(PACKAGED_ASSETS, "workflows", "full-feature.yaml"), "utf8"),

@@ -1866,7 +1866,6 @@ class CliTest(unittest.TestCase):
             kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertEqual(kit["profile"], "generic")
             self.assertEqual(kit["install_scope"], "project")
-            self.assertNotIn("graphify", kit)
             self.assertTrue((project_root / ".agent-flow" / "runs").is_dir())
             self.assertTrue((project_root / ".agent-flow" / "workflows" / "full-feature.yaml").is_file())
             self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").is_file())
@@ -1955,7 +1954,6 @@ class CliTest(unittest.TestCase):
             self.assertFalse((project_root / ".agent-flow" / "skills" / "android-mvi-feature").exists())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "android-module-creator").exists())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "android-debugging").exists())
-            self.assertFalse((project_root / ".agent-flow" / "skills" / "graphify").exists())
             self.assertTrue(
                 (
                     project_root
@@ -2785,58 +2783,6 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_node_installers_remove_legacy_graphify_artifacts(self) -> None:
-        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
-        managed_skill_roots = (
-            ".agent-flow/skills",
-            ".claude/skills",
-            ".codex/skills",
-            ".Codex/skills",
-            ".omp/skills",
-            ".gemini/skills",
-            ".gemini/antigravity/skills",
-        )
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            node = _node_executable()
-            for installer_name in installers:
-                with self.subTest(installer=installer_name):
-                    project_root = root / installer_name
-                    project_root.mkdir()
-                    (project_root / ".gitignore").write_text(
-                        "node_modules/\n"
-                        "graphify/\n"
-                        "graphify-out/manifest.json\n"
-                        "graphify-out/cost.json\n",
-                        encoding="utf-8",
-                    )
-                    for skill_root in managed_skill_roots:
-                        skill_dir = project_root / skill_root / "graphify"
-                        skill_dir.mkdir(parents=True, exist_ok=True)
-                        (skill_dir / "SKILL.md").write_text("---\nname: graphify\n---\n", encoding="utf-8")
-
-                    result = subprocess.run(
-                        (
-                            node,
-                            str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
-                            "install",
-                        ),
-                        cwd=project_root,
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                    )
-
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
-                    self.assertNotIn("graphify", kit)
-                    gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
-                    self.assertNotIn("graphify/", gitignore)
-                    self.assertNotIn("graphify-out/manifest.json", gitignore)
-                    self.assertNotIn("graphify-out/cost.json", gitignore)
-                    for skill_root in managed_skill_roots:
-                        self.assertFalse((project_root / skill_root / "graphify").exists(), skill_root)
 
     def test_node_installers_remove_legacy_antigravity_skill_links(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")

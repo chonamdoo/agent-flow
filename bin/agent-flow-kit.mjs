@@ -74,7 +74,6 @@ import {
   readKitAssetRecord,
   removeCodexBroadTrustState,
   removeGitignoreEntries,
-  removeLegacyProjectSkillCopies,
   removeOmpHooksExtension,
   requestedInstallRootOption,
   resolveManagedWorktreeRoot,
@@ -364,16 +363,10 @@ function installProject(requestedRoot) {
     "CLAUDE/",
     "agent-flow/",
   ]);
-  removeGitignoreEntries(gitignorePath, [
-    "graphify/",
-    "scripts/check-context-docs.*",
-    "graphify-out/manifest.json",
-    "graphify-out/cost.json",
-  ]);
+  removeGitignoreEntries(gitignorePath, ["scripts/check-context-docs.*"]);
   if (rootContext === "legacy") {
     upsertGitExclude(root, ROOT_CONTEXT_FILES.filter((label) => bootstrapBlockIsOurs(root, label)));
   }
-  removeLegacyProjectSkillCopies(root, "graphify");
   if (rootContext === "legacy") {
     console.log(`${ROOT_CONTEXT_NOTICE_PREFIX}use --migrate-root-context for explicit conversion`);
     upsertSkillIndexBlock(root);
