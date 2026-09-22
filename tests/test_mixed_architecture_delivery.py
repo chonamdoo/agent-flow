@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -99,11 +100,15 @@ def test_installed_mixed_contract_delivery(
         relative: (FIXTURE / relative).read_text(encoding="utf-8")
         for relative in CONTRACT_DOCUMENTS
     }
+    if clean_installed:
+        shutil.rmtree(project / "skills" / "architecture")
+        (project / ".agent-flow" / "project.yaml").unlink()
     subprocess.run(
         ["git", "init", "-q", "-b", "main"], cwd=project, check=True,
         capture_output=True, text=True,
     )
-    _track(project, ".agent-flow/project.yaml", "skills")
+    if not clean_installed:
+        _track(project, "skills")
     monkeypatch.setenv("AGENT_FLOW_HOST", "omp")
     flags = ["--profile", "generic", "--architecture-mode", "clean" if clean_installed else "local"]
     if not clean_installed:
@@ -111,6 +116,11 @@ def test_installed_mixed_contract_delivery(
     installation = _install_with(binary, project, *flags, env=dict(os.environ))
     assert installation.returncode == 0, installation.stdout + installation.stderr
     if clean_installed:
+        for relative, body in originals.items():
+            path = project / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+        _track(project, "skills")
         selected = subprocess.run(
             [
                 _node(), str(KIT_ROOT / "bin/agent-flow-kit.mjs"), "architecture", "select",
@@ -120,7 +130,6 @@ def test_installed_mixed_contract_delivery(
             check=False, timeout=30,
         )
         assert selected.returncode == 0, selected.stdout + selected.stderr
-    _track(project, ".agent-flow/project.yaml")
     snapshot = architecture_snapshot(project)
     assert snapshot.selection.mode is ArchitectureMode.LOCAL
     assert snapshot.selection.contract_path == CONTRACT_ROOT
