@@ -3,7 +3,7 @@
   "subject": "react-development-guide: three lines that restate the closed Blocking-only list were removed. Re-adding them must change nothing.",
   "baseline": "skills/react-development-guide/SKILL.md",
   "variant": {
-    "insertAfter": 45,
+    "insertAfter": 49,
     "expectAnchor": "Blocking only: hook rule violation",
     "text": [
       "- Do not block on generic best-practice advice.",

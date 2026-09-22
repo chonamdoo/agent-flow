@@ -33,6 +33,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      - name: Validate skill-noop cases without model calls
+        run: |
+          node --test tools/skill-noop/run.test.mjs
+          node tools/skill-noop/run.mjs --all --validate
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

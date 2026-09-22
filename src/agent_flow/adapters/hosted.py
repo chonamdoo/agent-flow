@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
@@ -59,6 +61,7 @@ from agent_flow.multi_review import (
     run_distribution,
 )
 from agent_flow.subprocess_pool import SubprocessResult
+from agent_flow.review_metrics import write_review_metrics
 
 if TYPE_CHECKING:
     from agent_flow.runner import Phase
@@ -233,6 +236,7 @@ def _run_multi_review_distribution(
     project_root: Path,
     adapter: Adapter,
 ) -> tuple[Distribution, ReviewExecution]:
+    started = time.monotonic()
     review_input = _write_review_input_snapshot(
         project_root,
         run_dir,
@@ -259,7 +263,20 @@ def _run_multi_review_distribution(
         project_root,
         config_root=adapter.config_root_or(project_root),
     )
+    wall_s = time.monotonic() - started
     _write_review_results(distribution, execution.outcomes)
+    try:
+        write_review_metrics(
+            run_dir,
+            distribution,
+            execution,
+            wall_s=wall_s,
+            snapshot=adapter._resolution_context.snapshots.get(project_root.resolve()),
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Review metrics unavailable (%s)", type(exc).__name__,
+        )
     delivered_jobs = {
         result.job_id
         for result in execution.results
