@@ -76,21 +76,33 @@ blocked, because the installed assets belong to the repository, not to one run.
 ## Choose the architecture
 
 Choose before the first run. `clean` uses the bundled Clean Architecture norms; `local`
-uses your tracked `skills/architecture/SKILL.md`; `pending` allows existing-pattern local
-work but blocks changes that require a structural decision. With no selection file,
-the compatibility default is `clean`, not `pending`.
+uses your own contract — the tracked team copy at `skills/architecture/SKILL.md`, or a
+private copy at `.agent-flow/local-skills/architecture/SKILL.md` that applies only on this
+machine; `pending` allows existing-pattern local work but blocks changes that require a
+structural decision. With no selection file, the compatibility default is `clean`, not
+`pending`.
 
 Choose one command:
 
 ```bash
 agent-flow architecture select --mode clean
 agent-flow architecture select --mode local --skill skills/architecture/SKILL.md
+agent-flow architecture select --mode local --skill .agent-flow/local-skills/architecture/SKILL.md
 agent-flow architecture select --mode pending
 ```
 
-For `local`, create the contract at that exact path before selecting it. Track the generated
-`.agent-flow.project.yaml`, the contract, and all `requires_docs` references in Git before
-starting a run. Do not put project-owned norms in the gitignored installed `.agent-flow/`.
+For `local`, create the contract at one of those two exact paths before selecting it. The
+selection itself is written to `.agent-flow/project.yaml` (gitignored, per checkout). For
+the team path, track the contract and all `requires_docs` references in Git before
+starting a run. The private path is the gitignored drop-box: nothing there is tracked,
+linked worktrees read the leader's copy, and other skills you drop beside it still load
+on their own in code phases.
+
+A fresh interactive install asks the same question first. Answer that a team or private
+contract exists or will be added and no Clean skills are installed (the selection becomes
+`pending` until you run `architecture select`); if the contract file already exists at one of
+the two paths, install adopts it as `local` without asking, and `--architecture-mode clean`
+is refused beside it.
 Inspect the selection with `agent-flow architecture export --format json`.
 
 See [Architecture selection](USAGE.md#architecture-selection) for reference syntax,

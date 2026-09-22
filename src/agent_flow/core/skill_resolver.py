@@ -19,6 +19,7 @@ from agent_flow.core.architecture_policy import (
     ArchitectureSnapshot,
     ContractDocument,
     architecture_snapshot,
+    contract_documents_root,
     contract_names_in,
     contract_skill_name,
     is_clean_architecture_skill,
@@ -66,9 +67,10 @@ _HOST_ORDER = ("claude", "codex", "omp")
 _GLOB_CHARS = "*?["
 
 
-# `.agent-flow/local-skills/`는 사용자가 직접 넣는 private drop-box다. frontmatter 선언이 없어도
-# 코드 생성/리뷰 phase에는 붙는다 — 거기에 둔 것 자체가 "이 프로젝트에 적용하라"는 선언이다.
-# 반면 bundled/host skill은 반드시 스스로 선언해야 활성화된다.
+# `.agent-flow/local-skills/`(개인, gitignore)와 `skills/`(팀, tracked)는 저장소 소유 폴더다.
+# frontmatter 선언이 없어도 코드 생성/리뷰 phase에는 붙는다 — 거기에 둔 것 자체가 "이
+# 프로젝트에 적용하라"는 선언이다. 반면 bundled/host/vendor skill은 반드시 스스로 선언해야 활성화된다.
+
 CODE_PHASES = (
     "implement",
     "implement-fix",
@@ -425,7 +427,7 @@ def assert_architecture_selection_skills(
     selection = snapshot.selection
     if selection.mode is ArchitectureMode.PENDING:
         return
-    contract_root = architecture_root or project_root
+    contract_root = contract_documents_root(architecture_root or project_root, selection)
     roots = active_host_roots(
         skill_roots(project_root, profile=profile, source_root=source_root), active_host(),
     )
@@ -509,10 +511,12 @@ def resolve_phase_skills(
     assert_install_complete(project_root)
     snapshot = context.snapshot(contract_root)
     selection = snapshot.selection
+    # 개인 계약은 worktree에 없고 leader에 있다. 문서 절대 경로는 이 root로만 만든다.
+    documents_root = contract_documents_root(contract_root, selection)
     if snapshot.declared:
         assert_architecture_override_compatible(project_root, selection)
     contract_name = contract_skill_name(selection)
-    contract_path = contract_root / selection.contract_path if selection.contract_path else None
+    contract_path = documents_root / selection.contract_path if selection.contract_path else None
 
     def applicable(name: str) -> bool:
         """Return whether a catalog entry applies to the active phase."""
@@ -567,7 +571,7 @@ def resolve_phase_skills(
         cached = previous[1]
         norm_names = {document.path for document in cached.architecture_norms}
         current_norms = _architecture_norms(
-            contract_root, snapshot,
+            documents_root, snapshot,
             (skill for skill in cached.required
              if skill.name != contract_name and skill.path is not None
              and str(skill.path.absolute()) in norm_names),
@@ -761,7 +765,7 @@ def resolve_phase_skills(
         skill for skill in required
         if skill.name != contract_name and skill.name in norm_names
     )
-    norms = _architecture_norms(contract_root, snapshot, norm_skills, contents=contents)
+    norms = _architecture_norms(documents_root, snapshot, norm_skills, contents=contents)
     normative_documents: list[NormativeDocument] = []
     for skill in required:
         if not skill.exists or skill.path is None:
@@ -789,8 +793,8 @@ def resolve_phase_skills(
             {document.path for document in snapshot.contract.documents}
             | ({snapshot.source_document.path} if snapshot.source_document is not None else set())
             | {
-                Path(document.path).relative_to(contract_root).as_posix()
-                for document in norms if Path(document.path).is_relative_to(contract_root)
+                Path(document.path).relative_to(documents_root).as_posix()
+                for document in norms if Path(document.path).is_relative_to(documents_root)
             }
         ))
         retained_ids = set(required_document_ids)
@@ -1398,13 +1402,19 @@ def entry_can_activate(entry: SkillCatalogEntry) -> bool:
         # 선언했는데 전부 빈 값이면 "무조건 활성화"가 아니라 "아무것도 안 걸림"이다.
         # 그렇지 않으면 `taskTerms: ""` 하나로 모든 phase에 조용히 얹힌다.
         return False
-    if entry.source == "project-local":
-        # drop-box는 사용자가 넣은 것 자체가 근거다. 선언을 요구하지 않는다.
+    if entry.source in PLACEMENT_SOURCES:
+        # 저장소 소유 폴더(`skills/`, `.agent-flow/local-skills/`)는 파일을 둔 것 자체가
+        # "이 프로젝트에 적용하라"는 선언이다. 둘의 차이는 git 추적 여부뿐이다.
         return True
     # upstream SKILL.md는 `workflowPhases`를 선언하지 않는다. 카탈로그에는 담되
     # 자동 활성화는 하지 않는다 — 이 가드가 없으면 host에 깔린 skill 전량이
     # 선택자 없는 엔트리로 required가 된다.
     return bool(entry.phase_declared and entry.workflow_phases)
+
+
+# 배치만으로 켜지는 소스. vendor(`.claude/skills`, `.agents/skills`)와 bundled/host는 제외 —
+# 그쪽은 남이 넣은 파일이라 스스로 `workflowPhases`를 선언해야 한다.
+PLACEMENT_SOURCES = frozenset({"project-local", "project"})
 
 
 # 이름과 어휘를 저장소가 소유하는 소스. 이쪽 `taskTerms`는 머신 구성에 따라 달라지지
@@ -1430,11 +1440,9 @@ def entry_activation(
     if not entry_can_activate(entry):
         return None
     if not entry.selector_declared and not entry.task_terms and not entry.path_globs:
-        # drop-box는 거기 둔 것 자체가 선언이다. 그 밖의 소스는
-        # `entry_can_activate`가 이미 `workflowPhases` 선언을 요구했다.
         return (
             ACTIVATED_BY_PLACEMENT
-            if entry.source == "project-local"
+            if entry.source in PLACEMENT_SOURCES
             else ACTIVATED_BY_DECLARATION
         )
     if selector_matches(

@@ -243,6 +243,7 @@ def test_recursive_selection_yaml_is_a_declaration_error():
 def test_invalid_selection_file_never_becomes_legacy_clean(repository, kind):
     """Verify that invalid selection file never becomes legacy clean."""
     path = repository / policy.PROJECT_ARCHITECTURE_FILE
+    path.parent.mkdir(exist_ok=True)
     if kind == "directory":
         path.mkdir()
     else:
@@ -312,8 +313,8 @@ def test_contract_cannot_come_from_a_nested_repository(repository):
         policy.architecture_snapshot(repository)
 
 
-def test_export_reports_untracked_selection_and_exact_document_bytes(repository, capsys):
-    """Verify that export reports untracked selection and exact document bytes."""
+def test_export_reports_untracked_documents_but_not_the_selection(repository, capsys):
+    """선언 파일은 `.agent-flow/` 안이라 추적 대상이 아니다. 계약 문서만 untracked로 보고한다."""
     selection = _declare(repository)
     contract = _contract(repository, "requires_docs: [references/rules.md]")
     reference = _write(repository, "skills/architecture/references/rules.md", "# 실제 규칙\r\n".encode())
@@ -321,7 +322,7 @@ def test_export_reports_untracked_selection_and_exact_document_bytes(repository,
 
     assert _cli("architecture", "export", "--root", str(repository)) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["untracked"] == [policy.PROJECT_ARCHITECTURE_FILE, "skills/architecture/references/rules.md"]
+    assert payload["untracked"] == ["skills/architecture/references/rules.md"]
     assert payload["source_document"] == {
         "path": policy.PROJECT_ARCHITECTURE_FILE,
         "sha256": hashlib.sha256(selection.read_bytes()).hexdigest(),
@@ -532,7 +533,7 @@ def test_install_starting_during_cli_snapshot_blocks_the_result(repository, monk
     def interrupt_install(path, flags, *args, **kwargs):
         """Simulate installation beginning during contract resolution."""
         descriptor = original_open(path, flags, *args, **kwargs)
-        if kwargs.get("dir_fd") is not None and path == policy.PROJECT_ARCHITECTURE_FILE:
+        if kwargs.get("dir_fd") is not None and path == policy.PROJECT_ARCHITECTURE_FILE.rsplit("/", 1)[-1]:
             _write(repository, ".agent-flow/install-recovery/manifest.json", b"[]")
         return descriptor
 

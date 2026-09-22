@@ -21,7 +21,8 @@ def _selection(root: Path, mode: str) -> None:
     """Write an architecture selection fixture."""
     root.mkdir(parents=True, exist_ok=True)
     skill = "  skill: skills/architecture/SKILL.md\n" if mode == "local" else ""
-    (root / ".agent-flow.project.yaml").write_text(
+    (root / ".agent-flow").mkdir(exist_ok=True)
+    (root / ".agent-flow/project.yaml").write_text(
         f"schema_version: 1\narchitecture:\n  mode: {mode}\n{skill}", encoding="utf-8"
     )
     if mode == "local":
@@ -183,6 +184,8 @@ def test_shared_tool_safety_keeps_mode_scoped_clean_dependency(tmp_path):
     )
     local = resolve_phase_skills(**arguments)
     assert {skill.name for skill in local.required} == {"llm-tool-development", "architecture"}
+    # Clean으로 돌아가려면 프로젝트 계약이 없어야 한다. 옆에 두면 거부된다.
+    shutil.rmtree(tmp_path / "skills" / "architecture")
     _selection(tmp_path, "clean")
     clean = resolve_phase_skills(**arguments)
     assert {skill.name for skill in clean.required} == {
@@ -303,7 +306,7 @@ def _scoped_contract(root):
     (("apps/a/old.py", "apps/b/new.py"), {"a", "b"}),
     (("shared/model.py",), {"a", "b"}),
     (("ROOT.SHARED",), {"a"}),
-    ((".agent-flow.project.yaml",), {"a", "b"}),
+    ((".agent-flow/project.yaml",), {"a", "b"}),
     (("skills/architecture/SKILL.md",), {"a", "b"}),
     (("skills/architecture/references/a.md",), {"a", "b"}),
 ])
@@ -488,11 +491,15 @@ def test_malformed_required_metadata_blocks_resolution(tmp_path, required_via):
 
 
 def test_unrelated_malformed_metadata_does_not_activate_or_block_resolution(tmp_path):
-    """Verify that unrelated malformed metadata does not activate or block resolution."""
+    """Verify that unrelated malformed metadata does not activate or block resolution.
+
+    `skills/`와 drop-box는 배치만으로 켜지므로 거기의 깨진 YAML은 "무관"이 아니다.
+    vendor 루트(`.claude/skills`)는 선언이 있어야 켜지므로 그쪽이 무관한 자리다.
+    """
     _selection(tmp_path, "pending")
     _skill(tmp_path, "custom-review", "requires: [required-rule]\n")
     _skill(tmp_path, "required-rule", "")
-    malformed = tmp_path / "skills/optional-rule/SKILL.md"
+    malformed = tmp_path / ".claude/skills/optional-rule/SKILL.md"
     malformed.parent.mkdir(parents=True)
     malformed.write_text(
         "---\nworkflowPhases: [implement]\nrequires_by_architecture:\n"
@@ -507,6 +514,41 @@ def test_unrelated_malformed_metadata_does_not_activate_or_block_resolution(tmp_
     assert {skill.name for skill in resolution.required} == {"custom-review", "required-rule"}
     assert not resolution.optional
     assert not resolution.missing
+
+
+@pytest.mark.parametrize("location", ["skills", ".agent-flow/local-skills"])
+def test_undeclared_repo_owned_skill_activates_by_placement(tmp_path, location):
+    """`skills/`(팀)와 drop-box(개인)는 파일을 둔 것 자체가 선언이다.
+
+    반증: `skills/`에만 `workflowPhases`를 요구하면 같은 파일을 폴더 사이로 옮길 때
+    코드 작성·리뷰에서 조용히 빠진다.
+    """
+    _selection(tmp_path, "pending")
+    path = tmp_path / location / "dev-conventions" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("---\nname: dev-conventions\n---\n\nUse `type`, never `interface`.\n", encoding="utf-8")
+
+    for phase in ("implement", "review"):
+        resolution = resolve_phase_skills(project_root=tmp_path, phase_id=phase, host="codex")
+        assert "dev-conventions" in {skill.name for skill in resolution.required}, phase
+    design = resolve_phase_skills(project_root=tmp_path, phase_id="design", host="codex")
+    assert "dev-conventions" not in {skill.name for skill in design.required}
+
+
+@pytest.mark.parametrize("location", ["skills", ".agent-flow/local-skills"])
+def test_project_architecture_blocks_clean_and_loads_under_pending(tmp_path, location):
+    """`architecture/`가 있으면 clean은 거부된다(규범이 둘). pending에서는 일반 스킬로 붙는다."""
+    path = tmp_path / location / "architecture" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("---\nname: architecture\n---\n\nDomain never imports adapters.\n", encoding="utf-8")
+    _skill(tmp_path, "clean-architecture-core", "")
+
+    _selection(tmp_path, "clean")
+    with pytest.raises(ArchitectureContractError, match="project architecture contract exists"):
+        resolve_phase_skills(project_root=tmp_path, phase_id="implement", host="codex")
+    _selection(tmp_path, "pending")
+    pending = resolve_phase_skills(project_root=tmp_path, phase_id="implement", host="codex")
+    assert "architecture" in {skill.name for skill in pending.required}
 
 
 def test_required_skill_without_frontmatter_remains_satisfied(tmp_path):
@@ -534,8 +576,10 @@ def test_common_and_selected_dependencies_remain_required(tmp_path, mode):
         "requires_by_architecture:\n  clean: [clean-rule]\n"
         "  local: [local-rule]\n  pending: [pending-rule]\n",
     )
+    # 규칙 스킬은 의존성 전개로만 들어와야 한다. 배치 활성화가 섞이면 이 테스트의
+    # 대상(모드별 requires 전개)이 가려지므로 이 phase에 걸리지 않는 선언을 둔다.
     for name in ("common-rule", "legacy-rule", "clean-rule", "local-rule", "pending-rule"):
-        _skill(tmp_path, name, "")
+        _skill(tmp_path, name, "workflowPhases: [design]\n")
     resolution = resolve_phase_skills(
         project_root=tmp_path, phase_id="implement",
         phase_skills=PhaseSkills(required=("custom-review",)), host="codex",

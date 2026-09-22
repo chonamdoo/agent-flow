@@ -24,7 +24,7 @@ from agent_flow.core.worktrees import plan_worktree, worktree_runtime_root
 from agent_flow.runner import Runner
 
 
-POLICY = ".agent-flow.project.yaml"
+POLICY = ".agent-flow/project.yaml"
 CONTRACT = "skills/architecture/SKILL.md"
 REFERENCE = "skills/architecture/references/patterns.md"
 
@@ -215,15 +215,17 @@ def test_pending_local_selection_requires_documents_and_active_host_transitive_n
     assert str(isolated_environment / ".agents/skills/transport-policy/SKILL.md") in pins
 
 
+# clean ↔ 계약 공존 전이는 없다: 계약 파일이 있으면 clean 선택이 거부된다
+# (`test_clean_never_runs_beside_a_project_contract`). 여기서는 계약이 있는 상태의 drift만 본다.
 @pytest.mark.parametrize(
-    "change", ["pending-clean", "pending-local", "clean-local", "local-clean", "contract-body", "reference-body"],
+    "change", ["pending-local", "contract-body", "reference-body"],
 )
 def test_active_install_contract_transition_blocks_old_completion_until_restored(
     tmp_path, isolated_environment, change,
 ):
     root = _installed_project(tmp_path, "clean")
     _local_contract(root, references=("references/patterns.md",))
-    initial = change.split("-")[0] if change in {"pending-clean", "pending-local", "clean-local", "local-clean"} else "local"
+    initial = "pending" if change == "pending-local" else "local"
     assert _select(root, initial).returncode == 0
     _commit_install(root)
     plan, run_dir, _ = _start(root, "inspect workspace boundaries")

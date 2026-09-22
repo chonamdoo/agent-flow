@@ -68,14 +68,16 @@ Install always happens in the leader checkout. Running it inside a linked worktr
 
 ## Architecture selection
 
-Choose the project's architecture before starting a run. The tracked root file
-`.agent-flow.project.yaml` is the selection authority; `.agent-flow/` remains
-gitignored installed assets. `run --architecture` is prompt context, not this selection.
+Choose the project's architecture before starting a run. The selection authority is
+`.agent-flow/project.yaml`. It lives inside the gitignored `.agent-flow/`, so the mode is
+this checkout's decision; new linked worktrees receive a copy at creation. What the team
+shares is the contract document itself, under `skills/`. `run --architecture` is prompt
+context, not this selection.
 
 | Mode | Contract |
 |---|---|
 | `clean` | Bundled Clean Architecture core and applicable platform norms |
-| `local` | The project contract at exactly `skills/architecture/SKILL.md` and its declared references |
+| `local` | The project contract at exactly `skills/architecture/SKILL.md` (team, tracked) or `.agent-flow/local-skills/architecture/SKILL.md` (private, this machine only) and its declared references |
 | `pending` | No selected contract yet; existing-pattern local work is allowed, but work requiring a structural decision blocks until selection |
 
 A project without the selection file keeps the compatibility default, `clean`; absence
@@ -87,11 +89,16 @@ Choose one of these commands, rather than running all three:
 ```bash
 agent-flow architecture select --mode clean
 agent-flow architecture select --mode local --skill skills/architecture/SKILL.md
+agent-flow architecture select --mode local --skill .agent-flow/local-skills/architecture/SKILL.md
 agent-flow architecture select --mode pending
 ```
 
 `--skill` is required for `local` and rejected for the other modes. It is not an arbitrary
-path: create the local contract at the fixed path before selecting it. Selection checks
+path: create the local contract at one of the two fixed paths before selecting it. The
+team path `skills/architecture/SKILL.md` is tracked and reaches every clone, worktree, and
+reviewer. The private path `.agent-flow/local-skills/architecture/SKILL.md` sits in the
+gitignored drop-box, so it applies only on this machine; linked worktrees read the
+leader's copy, and the tracking requirement below does not apply to it. Selection checks
 the contract, references, and required skills before writing the file. Inspect the result:
 
 ```bash
@@ -107,15 +114,17 @@ architecture:
   skill: skills/architecture/SKILL.md
 ```
 
-Track `.agent-flow.project.yaml`, the contract root, and **every** declared reference in
-Git before starting the run. `select` can warn about untracked documents; that is not a
-waiver of the run's tracking requirement. For a local contract:
+For a team contract, track the contract root and **every** declared reference in Git
+before starting the run. `select` can warn about untracked documents; that is not a
+waiver of the run's tracking requirement.
 
 ```bash
-git add .agent-flow.project.yaml skills/architecture/SKILL.md skills/architecture/references
+git add skills/architecture/SKILL.md skills/architecture/references
 ```
 
-Omit the references directory from that command if the contract declares none.
+Omit the references directory from that command if the contract declares none. A private
+contract is never tracked; its content is still pinned by digest, so editing it during a
+run triggers the same drift block.
 The installer honors the selection: `local` and `pending` exclude bundled Clean-specific
 skills, while `clean` retains them. Project-owned norms are not installed copies to edit
 under `.agent-flow/`. Install or refresh assets only in the leader with no active runs.
@@ -125,7 +134,7 @@ block rather than changing its approved contract.
 
 ### Conditional local references
 
-Declare normative references in the frontmatter of `skills/architecture/SKILL.md`.
+Declare normative references in the frontmatter of the contract root (`SKILL.md`).
 Links in its body alone do not make a document required.
 
 ```yaml
@@ -145,7 +154,7 @@ requires_docs:
 ---
 ```
 
-Paths resolve beneath `skills/architecture/`. Strings are always required; an object with
+Paths resolve beneath the contract's `architecture/` directory. Strings are always required; an object with
 only `path` is also unconditional. Objects accept only `path` and optional `pathGlobs`.
 Duplicate reference paths, including duplicates across string/object forms, are rejected.
 Reference paths must be canonical `references/*.md` paths; nested reference directories

@@ -64,7 +64,8 @@ def _installed_runner(
         flags.extend(("--architecture-skill", contract_path))
     result = _install_with(binary, project, *flags, env=dict(os.environ))
     assert result.returncode == 0, result.stdout + result.stderr
-    _track(project, ".agent-flow.project.yaml")
+    if (project / "skills").exists():
+        _track(project, "skills")
     run_dir = create_run(project, "development", "Update catalog behavior", run_id="installed-contract")
     runner = Runner(project, workflow="development", run_dir=run_dir)
     assert runner.profile_id == profile
@@ -295,7 +296,7 @@ def test_missing_local_reference_refuses_install_then_restored_contract_is_consu
 ) -> None:
     project = _agency_project(tmp_path, separate_hooks=True)
     _local_contract(project, references=("references/ownership.md",))
-    declaration = project / ".agent-flow.project.yaml"
+    declaration = project / ".agent-flow/project.yaml"
     contract = project / "skills/architecture/SKILL.md"
     reference = project / "skills/architecture/references/ownership.md"
     before = {path: path.read_bytes() for path in (declaration, contract, reference)}
@@ -444,7 +445,7 @@ def test_distinct_local_contract_missing_mandatory_reference_refuses_install(
     assert result.returncode != 0
     assert Path(reference).name in result.stdout + result.stderr
     assert not (project / ".agent-flow/kit.json").exists()
-    assert not (project / ".agent-flow.project.yaml").exists()
+    assert not (project / ".agent-flow/project.yaml").exists()
     assert not (project / reference).exists()
     for relative, body in documents.items():
         if relative != reference:

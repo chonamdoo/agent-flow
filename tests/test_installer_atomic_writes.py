@@ -613,7 +613,7 @@ syncBuiltinESMExports();
     )
     assert result.returncode == 2, result.stderr
     assert "refusing to install" in result.stderr
-    assert not (tmp_path / ".agent-flow.project.yaml").exists()
+    assert not (tmp_path / ".agent-flow/project.yaml").exists()
     assert not (tmp_path / ".agent-flow/install-recovery/manifest.json").exists()
 
 
@@ -734,7 +734,7 @@ fs.renameSync = (source, target, ...args) => {
     )
     assert resumed.returncode == 0, resumed.stderr
     assert_install_complete(project)
-    assert "mode: pending" in (project / ".agent-flow.project.yaml").read_text(encoding="utf-8")
+    assert "mode: pending" in (project / ".agent-flow/project.yaml").read_text(encoding="utf-8")
 
 
 def _interrupt_architecture_transaction(project: Path) -> None:
@@ -1199,7 +1199,7 @@ def test_real_completed_legacy_journal_cleanup(
     target = project / ".agent-flow/templates/private.txt"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"original private asset\n")
-    declaration = project / ".agent-flow.project.yaml"
+    declaration = project / ".agent-flow/project.yaml"
     command = [_node(), str(KIT_ROOT / "bin" / binary), "install", "--profile", "python"]
     if state == "no-selection-write":
         declaration.write_text("schema_version: 1\narchitecture:\n  mode: pending\n", encoding="utf-8")
@@ -1590,7 +1590,7 @@ try {
     )
     assert expected in result.stderr
     assert not (tmp_path / ".agent-flow/install-recovery/manifest.json").exists()
-    assert not (tmp_path / ".agent-flow.project.yaml").exists()
+    assert not (tmp_path / ".agent-flow/project.yaml").exists()
 
 
 # 복사 **전** `statSync`만 거짓 소유자를 준다. 기록이 그 값을 담고 있으면 백업 내용을
@@ -1720,7 +1720,7 @@ assert.throws(() => fs.fstatSync(consumed), {code: 'EBADF'});
 assert.equal(tx.plan.mode, 'pending');
 tx.commit();
 tx.rollback();
-assert.equal(fs.existsSync(process.env.PROJECT + '/.agent-flow.project.yaml'), false);
+assert.equal(fs.existsSync(process.env.PROJECT + '/.agent-flow/project.yaml'), false);
 assert.equal(fs.existsSync(process.env.PROJECT + '/.agent-flow/install-recovery/manifest.json'), true);
 if (!process.env.GRANDCHILD) {
   const delegated = tx.delegatedOptions();
@@ -1753,7 +1753,7 @@ tx.commit();
 fs.closeSync(lease);
 """)
     assert result.returncode == 0, result.stderr
-    assert "mode: pending" in (tmp_path / ".agent-flow.project.yaml").read_text(encoding="utf-8")
+    assert "mode: pending" in (tmp_path / ".agent-flow/project.yaml").read_text(encoding="utf-8")
     assert not (tmp_path / ".agent-flow/install-recovery").exists()
 
 

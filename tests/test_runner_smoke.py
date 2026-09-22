@@ -3909,7 +3909,12 @@ def test_state_integrity_angle_uses_high_signal_selectors_only(tmp_path: Path):
     adapter._changed_files = ("src/ui/Copy.tsx",)
     adapter._task_text = "change button wording"
     unrelated, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
-    assert [job.angle_id for job in unrelated] == ["generalist", "types"]
+    assert [job.angle_id for job in unrelated] == [
+        "generalist",
+        "types",
+        "architecture-design",
+        "clean-architecture",
+    ]
 
     adapter._changed_files = ("migrations/20260828_add_orders.sql",)
     adapter._task_text = ""
@@ -3917,7 +3922,9 @@ def test_state_integrity_angle_uses_high_signal_selectors_only(tmp_path: Path):
     assert [job.angle_id for job in persistent_path] == [
         "generalist",
         "types",
+        "architecture-design",
         "state-integrity",
+        "clean-architecture",
     ]
 
     adapter._changed_files = ("src/ui/Copy.tsx",)
@@ -3926,7 +3933,9 @@ def test_state_integrity_angle_uses_high_signal_selectors_only(tmp_path: Path):
     assert [job.angle_id for job in persistent_task] == [
         "generalist",
         "types",
+        "architecture-design",
         "state-integrity",
+        "clean-architecture",
     ]
 
 
@@ -4187,7 +4196,12 @@ def test_multi_review_profile_override_keeps_baseline_angle_gate(tmp_path: Path)
 
     jobs, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
 
-    assert [job.angle_id for job in jobs] == ["generalist", "types"]
+    assert [job.angle_id for job in jobs] == [
+        "generalist",
+        "types",
+        "architecture-design",
+        "clean-architecture",
+    ]
 
 
 def test_multi_review_profile_override_does_not_inherit_baseline_selectors():
@@ -4248,7 +4262,12 @@ def test_multi_review_profile_cannot_gate_unconditional_baseline_angles(
 
     jobs, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
 
-    assert [job.angle_id for job in jobs] == ["generalist", "types"]
+    assert [job.angle_id for job in jobs] == [
+        "generalist",
+        "types",
+        "architecture-design",
+        "clean-architecture",
+    ]
 
 @pytest.mark.parametrize("requires", [None, False, 0, "", [], ["clean-architecture-core"]])
 def test_multi_review_rejects_invalid_angle_requirement(
@@ -4891,19 +4910,20 @@ def test_push_pr_evidence_uses_profile_target_branch(
         pr_data[field] = original
 
 
-def test_a_review_angle_is_dropped_when_its_skill_is_not_required(tmp_path: Path):
-    """반증: angle을 무조건 등록하면 resolver 쪽 축소가 review phase에서 전부 사라진다.
-
-    `base_prompt`는 angle마다 그대로 복제되므로(`_reviewer_jobs`) required 목록 하나가
-    angle 수 × provider 수만큼 늘어난다. 그리고 이 angle의 template은
-    `clean-architecture-core/SKILL.md`를 읽으라고 직접 지시한다.
-    """
+def test_a_review_angle_is_dropped_when_its_skill_is_not_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """An architecture angle is absent when the shared contract gate is false."""
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.core.skill_resolver import SkillResolution
     from agent_flow.runner import Phase
 
     adapter = HostedAdapter("codex")
     adapter._profile_snapshot = {"review_angles": []}
+    monkeypatch.setattr(
+        adapter, "phase_resolution", lambda *_args, **_kwargs: SkillResolution(),
+    )
     phase = Phase(id="final-review", description="", multi_review=True)
     run_dir = tmp_path / "run"
     run_dir.mkdir()

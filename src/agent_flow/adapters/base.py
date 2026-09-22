@@ -139,7 +139,6 @@ class Adapter(ABC):
         host_block = (
             f"\n\n## Host-specific guidance\n{host_hint}\n" if host_hint else ""
         )
-        profile_block = self._render_profile_block(phase)
         architecture_block = self._render_architecture_block(phase)
         config_root = self.config_root_or(project_root)
         if resolution is None:
@@ -148,6 +147,7 @@ class Adapter(ABC):
             resolution.architecture_snapshot.selection.mode
             if resolution.architecture_snapshot is not None else "pending"
         )
+        profile_block = self._render_profile_block(phase, architecture_mode=mode)
         completion_gate_block = self._render_completion_gate_block(
             phase, role=role, architecture_mode=mode
         )
@@ -279,7 +279,7 @@ class Adapter(ABC):
         lines.append("")
         return "\n".join(lines)
 
-    def _render_profile_block(self, phase: "Phase") -> str:
+    def _render_profile_block(self, phase: "Phase", *, architecture_mode: object) -> str:
         """Inline the active profile YAML so the host AI sees real data.
 
         The runner injects `_profile_snapshot` and `_profile_id` before
@@ -294,6 +294,14 @@ class Adapter(ABC):
             for key, value in self._profile_snapshot.items()
             if key not in _RESOLVER_OWNED_PROFILE_KEYS
         }
+        # profile의 `architecture.contract`는 Clean 계열 기본값이다. 프로젝트 계약을 고른
+        # run에 그대로 실으면 "규범은 이것"이라는 문장이 둘이 된다.
+        architecture = trimmed.get("architecture")
+        if (
+            isinstance(architecture, dict) and "contract" in architecture
+            and getattr(architecture_mode, "value", architecture_mode) != "clean"
+        ):
+            trimmed["architecture"] = {k: v for k, v in architecture.items() if k != "contract"}
         if not trimmed:
             return ""
         try:

@@ -46,7 +46,8 @@ def local_contract(root, body, references=()):
     """Install a local architecture contract with optional required references."""
     declared = f"requires_docs: [{', '.join(references)}]\n" if references else ""
     path = skill(root, "architecture", f"---\nname: contract\n{declared}---\n{body}")
-    (root / ".agent-flow.project.yaml").write_text(
+    (root / ".agent-flow").mkdir(exist_ok=True)
+    (root / ".agent-flow/project.yaml").write_text(
         "schema_version: 1\narchitecture:\n  mode: local\n  skill: skills/architecture/SKILL.md\n",
         encoding="utf-8",
     )
@@ -267,8 +268,10 @@ def test_clean_reference_manifest_invalidates_unchanged_selection(tmp_path):
 
 def test_profile_scope_provider_authority_and_roots_invalidate_reuse(tmp_path):
     """Bind cached resolutions to profile scope, provider authority, and roots."""
-    skill(tmp_path, "one", "First norm\n")
-    skill(tmp_path, "two", "Second norm\n")
+    # 배치 활성화가 섞이면 profile 표 라우팅이라는 이 테스트의 대상이 가려진다.
+    # 절대 안 맞는 선택자를 둬서 표 라우팅으로만 required가 되게 한다.
+    skill(tmp_path, "one", "---\npathGlobs: ['never/**']\n---\nFirst norm\n")
+    skill(tmp_path, "two", "---\npathGlobs: ['never/**']\n---\nSecond norm\n")
     context = ResolutionContext()
     profile = {"skills": {"required_review": [
         {"group": "api", "skills": ["one"], "path_globs": ["**/*.py"]}
@@ -431,7 +434,8 @@ def test_unselected_unsafe_clean_catalog_does_not_block_other_work(tmp_path, mod
         with path.open("wb") as stream:
             stream.truncate(skill_resolver.MAX_ARCHITECTURE_DOCUMENT_BYTES + 1)
     contract_line = "  skill: skills/architecture/SKILL.md\n" if mode == "local" else ""
-    (tmp_path / ".agent-flow.project.yaml").write_text(
+    (tmp_path / ".agent-flow").mkdir(exist_ok=True)
+    (tmp_path / ".agent-flow/project.yaml").write_text(
         f"schema_version: 1\narchitecture:\n  mode: {mode}\n{contract_line}", encoding="utf-8",
     )
     if mode == "local":

@@ -23,7 +23,7 @@ from typing import Any
 import yaml
 
 from agent_flow.core.atomic_io import atomic_write_text, read_bounded_regular_file
-from agent_flow.core.worktree_isolation import git_repo_state, git_safe
+from agent_flow.core.worktree_isolation import git_repo_state, git_safe, leader_root_for
 from agent_flow.core.skill_metadata import (
     ARCHITECTURE_MODES,
     SkillMetadataError,
@@ -32,15 +32,23 @@ from agent_flow.core.skill_metadata import (
     split_frontmatter,
 )
 
-# 정본 파일 이름. `.agent-flow/`가 아니라 저장소 루트의 추적 파일이라 clone·worktree·
-# 동료 머신이 같은 선택을 본다.
-PROJECT_ARCHITECTURE_FILE = ".agent-flow.project.yaml"
+# 정본 파일. `.agent-flow/` 안에 있으므로 gitignore되고 이 checkout의 결정이다 — 계약
+# 문서(`skills/architecture/`)는 팀이 추적해 공유하지만, 어떤 모드를 켰는지는 머신마다
+# 고른다. linked worktree는 생성 시 leader의 사본을 받는다(`ROOT_CONTEXT_FILES`).
+PROJECT_ARCHITECTURE_FILE = ".agent-flow/project.yaml"
+LEGACY_PROJECT_ARCHITECTURE_FILE = ".agent-flow.project.yaml"
 SCHEMA_VERSION = 1
 MAX_ARCHITECTURE_DOCUMENT_BYTES = 8 * 1024 * 1024
 
 _DOCUMENT_KEYS = ("schema_version", "architecture")
 _ARCHITECTURE_KEYS = ("mode", "skill")
-_CONTRACT_PATH = "skills/architecture/SKILL.md"
+# local 계약이 앉을 수 있는 자리는 둘뿐이다. `skills/`는 추적되는 팀 계약이라 clone·
+# worktree·동료가 같은 규범을 본다. `.agent-flow/local-skills/`는 gitignore된 개인
+# drop-box라 이 머신에서만 유효하다 — 그래서 추적 요구를 걸지 않고, linked worktree는
+# leader의 사본을 읽는다.
+TEAM_CONTRACT_PATH = "skills/architecture/SKILL.md"
+PRIVATE_CONTRACT_PATH = ".agent-flow/local-skills/architecture/SKILL.md"
+CONTRACT_PATHS = (TEAM_CONTRACT_PATH, PRIVATE_CONTRACT_PATH)
 
 
 class ArchitectureMode(str, Enum):
@@ -69,7 +77,7 @@ class ArchitectureSelection:
             if self.contract_path is None:
                 raise ValueError(
                     "architecture mode local requires a contract skill path "
-                    f"({_CONTRACT_PATH})"
+                    f"({' or '.join(CONTRACT_PATHS)})"
                 )
             _parse_contract_path(self.contract_path, source="architecture selection")
         elif self.contract_path is not None:
@@ -136,9 +144,10 @@ def _parse_contract_path(value: object, *, source: str) -> str | None:
     """Validate and normalize a project-relative contract path."""
     if value is None:
         return None
-    if not isinstance(value, str) or value != _CONTRACT_PATH:
+    if not isinstance(value, str) or value not in CONTRACT_PATHS:
         raise ValueError(
-            f"{source}: architecture contract path must be {_CONTRACT_PATH}: {value!r}"
+            f"{source}: architecture contract path must be one of "
+            f"{', '.join(CONTRACT_PATHS)}: {value!r}"
         )
     return value
 
@@ -253,14 +262,21 @@ def load_architecture_selection(root: Path) -> ArchitectureSelection | None:
 def _load_selection_document(
     repository_fd: int,
 ) -> tuple[ArchitectureSelection | None, ContractDocument | None]:
-    """Load and validate the project's architecture selection document."""
-    with _open_document(repository_fd, PROJECT_ARCHITECTURE_FILE, allow_missing=True) as descriptor:
-        if descriptor is None:
-            return None, None
-        payload = _read_document_bytes(descriptor, PROJECT_ARCHITECTURE_FILE)
-    document, payload = _validate_contract_document(PROJECT_ARCHITECTURE_FILE, payload, kind="selection")
-    selection = parse_architecture_document(payload.decode("utf-8"), source=PROJECT_ARCHITECTURE_FILE)
-    return selection, document
+    """Load and validate the project's architecture selection document.
+
+    0.3.x는 선언을 저장소 루트 `.agent-flow.project.yaml`에 두었다. 새 자리가 비어 있으면
+    그 파일을 읽는다 — 무시하면 `pending`이던 프로젝트가 조용히 legacy `clean`이 된다.
+    설치기가 새 자리로 복사하고, 그 뒤로는 새 자리가 이긴다.
+    """
+    for relative in (PROJECT_ARCHITECTURE_FILE, LEGACY_PROJECT_ARCHITECTURE_FILE):
+        with _open_document(repository_fd, relative, allow_missing=True) as descriptor:
+            if descriptor is None:
+                continue
+            payload = _read_document_bytes(descriptor, relative)
+        document, payload = _validate_contract_document(relative, payload, kind="selection")
+        selection = parse_architecture_document(payload.decode("utf-8"), source=relative)
+        return selection, document
+    return None, None
 
 
 def resolve_architecture_contract(
@@ -275,6 +291,23 @@ def resolve_architecture_contract(
         return _resolve_architecture_contract(root, selection, repository_fd)
 
 
+def is_private_contract(selection: ArchitectureSelection) -> bool:
+    """계약이 gitignore된 개인 drop-box에 있는가."""
+    return selection.contract_path == PRIVATE_CONTRACT_PATH
+
+
+def contract_documents_root(root: Path, selection: ArchitectureSelection) -> Path:
+    """계약 문서 경로(`ContractDocument.path`)의 기준 디렉터리.
+
+    팀 계약은 checkout마다 추적 사본이 있으니 `root` 그대로다. 개인 계약은 `.agent-flow/`
+    아래라 linked worktree에는 없다 — 설치기가 leader에만 심는 다른 `.agent-flow/` 자산과
+    같은 이유로 leader 것을 읽는다.
+    """
+    if not is_private_contract(selection):
+        return root
+    return leader_root_for(root) or root
+
+
 def _resolve_architecture_contract(
     root: Path, selection: ArchitectureSelection, repository_fd: int
 ) -> ArchitectureContract | None:
@@ -282,7 +315,19 @@ def _resolve_architecture_contract(
     if selection.mode is not ArchitectureMode.LOCAL:
         return None
     assert selection.contract_path is not None  # 생성자 불변식
+    documents_root = contract_documents_root(root, selection)
+    if documents_root != root:
+        with _repository_directory(documents_root) as leader_fd:
+            return _read_contract(documents_root, selection, leader_fd)
+    return _read_contract(root, selection, repository_fd)
+
+
+def _read_contract(
+    root: Path, selection: ArchitectureSelection, repository_fd: int
+) -> ArchitectureContract:
+    """Pin the contract root and its declared references beneath one directory."""
     contract_root = selection.contract_path
+    assert contract_root is not None
     root_document, root_bytes = _read_contract_document(repository_fd, contract_root, kind="contract")
     documents = [root_document]
     contents = [root_bytes.decode("utf-8")]
@@ -293,9 +338,13 @@ def _resolve_architecture_contract(
         )
         documents.append(document)
         contents.append(content.decode("utf-8"))
+    # 개인 계약은 gitignore된 자리에 있는 것이 정의다. 추적을 요구하면 선택 자체가 불가능하다.
+    untracked = () if is_private_contract(selection) else _untracked_paths(
+        root, [document.path for document in documents]
+    )
     return ArchitectureContract(
         documents=tuple(documents),
-        untracked=_untracked_paths(root, [document.path for document in documents]),
+        untracked=untracked,
         contents=tuple(contents),
     )
 
@@ -374,6 +423,43 @@ def prepare_architecture_selection(
         return _snapshot_from_selection(root, selection, source_document, repository_fd)
 
 
+def find_project_contract(root: Path) -> str | None:
+    """저장소에 있는 프로젝트 계약 후보의 경로. 팀 자리를 먼저 본다.
+
+    개인 자리는 linked worktree에 없으므로, 이 checkout에 아무것도 없을 때만 leader를 본다.
+    """
+    for relative in CONTRACT_PATHS:
+        if _document_present(root, relative):
+            return relative
+    leader = leader_root_for(root)
+    if leader is not None and _document_present(leader, PRIVATE_CONTRACT_PATH):
+        return PRIVATE_CONTRACT_PATH
+    return None
+
+
+def _document_present(root: Path, relative: str) -> bool:
+    """정확히 그 자리에 무언가 있는가.
+
+    부모가 symlink·파일·없음이면 "없음"이다 — `skills/`가 symlink인 저장소를 계약 보유로
+    읽으면 clean도 local도 못 고르는 상태가 된다. 잎은 symlink·디렉터리라도 "있음"이다;
+    읽을 수 없는 것이 그 자리에 있는데 Clean을 켜면 어느 규범이 유효한지 아무도 답할 수 없다.
+    """
+    current = root
+    segments = relative.split("/")
+    for segment in segments[:-1]:
+        current = current / segment
+        try:
+            if stat.S_ISLNK(os.lstat(current).st_mode) or not current.is_dir():
+                return False
+        except OSError:
+            return False
+    try:
+        os.lstat(current / segments[-1])
+    except OSError:
+        return False
+    return True
+
+
 def _snapshot_from_selection(
     root: Path,
     selection: ArchitectureSelection,
@@ -381,15 +467,25 @@ def _snapshot_from_selection(
     repository_fd: int,
 ) -> ArchitectureSnapshot:
     """Build a pinned architecture snapshot from a validated selection."""
+    if selection.mode is ArchitectureMode.CLEAN:
+        # 프로젝트 계약이 있는데 Clean을 켜면 규범이 둘이 된다. 선언이 없는 legacy 기본값도
+        # 예외가 아니다 — 파일을 둔 것이 곧 "이 규범을 쓰라"는 뜻이다.
+        existing = find_project_contract(root)
+        if existing is not None:
+            raise ArchitectureContractError(
+                f"project architecture contract exists at {existing}; clean architecture "
+                f"cannot be selected or installed beside it. Run "
+                f"`agent-flow architecture select --mode local --skill {existing}`"
+            )
     contract = _resolve_architecture_contract(root, selection, repository_fd)
-    untracked = _untracked_paths(root, [PROJECT_ARCHITECTURE_FILE]) if source_document else ()
+    # 선언 파일은 gitignore된 자리에 있다. 추적 요구는 계약 문서에만 건다.
     return ArchitectureSnapshot(
         selection=selection,
         declared=source_document is not None,
         contract=contract,
         digest=_snapshot_digest(selection, source_document is not None, contract, source_document),
         source_document=source_document,
-        untracked=untracked + (contract.untracked if contract else ()),
+        untracked=contract.untracked if contract else (),
     )
 
 
@@ -426,6 +522,7 @@ def write_architecture_selection(root: Path, selection: ArchitectureSelection) -
     """
     _validate_document_path(root, PROJECT_ARCHITECTURE_FILE, allow_missing=True)
     path = root / PROJECT_ARCHITECTURE_FILE
+    path.parent.mkdir(exist_ok=True)
     try:
         atomic_write_text(path, architecture_selection_document(selection))
     except OSError as exc:
@@ -467,7 +564,7 @@ def contract_skill_name(selection: ArchitectureSelection) -> str | None:
     """local 계약 문서의 skill 이름. 다른 모드에는 프로젝트 계약이 없다."""
     if selection.mode is not ArchitectureMode.LOCAL or selection.contract_path is None:
         return None
-    return selection.contract_path.split("/")[1]
+    return selection.contract_path.split("/")[-2]
 
 
 def contract_names_in(required_names: Sequence[str], selection: ArchitectureSelection) -> tuple[str, ...]:
@@ -563,9 +660,16 @@ def _open_document(
         with ExitStack() as opened:
             parent_fd = repository_fd
             for segment in segments[:-1]:
-                parent_fd = os.open(
-                    segment, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd
-                )
+                try:
+                    parent_fd = os.open(
+                        segment, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd
+                    )
+                except FileNotFoundError:
+                    # `.agent-flow/`가 아직 없는 미설치 checkout. 선언 없음과 같다.
+                    if not allow_missing:
+                        raise
+                    yield None
+                    return
                 opened.callback(os.close, parent_fd)
                 if not stat.S_ISDIR(os.fstat(parent_fd).st_mode):
                     raise ArchitectureContractError(f"architecture document parent is not a directory: {relative}")

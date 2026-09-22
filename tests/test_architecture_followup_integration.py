@@ -59,7 +59,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root.mkdir()
     _git(root, "init", "-b", "main")
     _write(root, ".gitignore", ".agent-flow/\n")
-    _write(root, ".agent-flow.project.yaml", "schema_version: 1\narchitecture:\n  mode: local\n  skill: skills/architecture/SKILL.md\n")
+    _write(root, ".agent-flow/project.yaml", "schema_version: 1\narchitecture:\n  mode: local\n  skill: skills/architecture/SKILL.md\n")
     _write(
         root, "skills/architecture/SKILL.md",
         "---\nname: architecture\nrequires_docs:\n"
@@ -531,9 +531,10 @@ def test_runner_conditional_markers_require_clean_sections_only_in_clean_mode(pr
     required = ()
     skills = "architecture"
     if mode == "clean":
-        _write(project, ".agent-flow.project.yaml", "schema_version: 1\narchitecture:\n  mode: clean\n")
-        _write(project, "skills/clean-architecture-core/SKILL.md", "---\nname: clean-architecture-core\n---\nKeep domain behavior independent.\n")
-        _git(project, "add", ".agent-flow.project.yaml", "skills")
+        _git(project, "rm", "-rq", "skills/architecture")  # clean은 프로젝트 계약 옆에 설 수 없다
+        _write(project, ".agent-flow/project.yaml", "schema_version: 1\narchitecture:\n  mode: clean\n")
+        _write(project, "skills/clean-architecture-core/SKILL.md", "---\nname: clean-architecture-core\npathGlobs: ['never/**']\n---\nKeep domain behavior independent.\n")
+        _git(project, "add", "skills")
         _git(project, "commit", "-m", "Select Clean contract")
         required = ("clean-architecture-core",)
         skills = "clean-architecture-core"
@@ -563,16 +564,18 @@ def test_empty_conditional_phase_requires_selected_assessment(project, mode, con
     skills = "architecture"
     required = ()
     if mode != "local":
-        _write(project, ".agent-flow.project.yaml", f"schema_version: 1\narchitecture:\n  mode: {mode}\n")
+        # 계약이 없는 상태를 나타낸다. 남겨 두면 clean은 거부되고 pending은 배치로 붙는다.
+        _git(project, "rm", "-rq", "skills/architecture")
+        _write(project, ".agent-flow/project.yaml", f"schema_version: 1\narchitecture:\n  mode: {mode}\n")
         if mode == "clean":
-            _write(project, "skills/clean-architecture-core/SKILL.md", "---\nname: clean-architecture-core\n---\nKeep domain behavior independent.\n")
+            _write(project, "skills/clean-architecture-core/SKILL.md", "---\nname: clean-architecture-core\npathGlobs: ['never/**']\n---\nKeep domain behavior independent.\n")
             required = ("clean-architecture-core",)
             skills = "clean-architecture-core"
         if not contract_required:
-            _write(project, "skills/alpha/SKILL.md", "---\nname: alpha\n---\nPreserve current behavior.\n")
+            _write(project, "skills/alpha/SKILL.md", "---\nname: alpha\npathGlobs: ['never/**']\n---\nPreserve current behavior.\n")
             required = ("alpha",)
             skills = "alpha"
-        _git(project, "add", ".agent-flow.project.yaml", "skills")
+        _git(project, "add", "skills")
         _git(project, "commit", "-m", "Select assessment contract")
     phase = Phase(
         id="implement", description="Apply selected contract", skills=PhaseSkills(required=required),
@@ -620,10 +623,11 @@ def test_conditional_review_cannot_omit_declared_must_avoid_assessment(project):
 
 @pytest.mark.parametrize("required", [False, True], ids=["not-required", "required"])
 def test_old_phase_without_conditional_field_keeps_legacy_na_guard(project, required):
-    _write(project, ".agent-flow.project.yaml", "schema_version: 1\narchitecture:\n  mode: clean\n")
-    _write(project, "skills/alpha/SKILL.md", "---\nname: alpha\n---\nPreserve current behavior.\n")
-    _write(project, "skills/clean-architecture-core/SKILL.md", "---\nname: clean-architecture-core\n---\nKeep domain behavior independent.\n")
-    _git(project, "add", ".agent-flow.project.yaml", "skills")
+    _git(project, "rm", "-rq", "skills/architecture")  # clean은 프로젝트 계약 옆에 설 수 없다
+    _write(project, ".agent-flow/project.yaml", "schema_version: 1\narchitecture:\n  mode: clean\n")
+    _write(project, "skills/alpha/SKILL.md", "---\nname: alpha\npathGlobs: ['never/**']\n---\nPreserve current behavior.\n")
+    _write(project, "skills/clean-architecture-core/SKILL.md", "---\nname: clean-architecture-core\npathGlobs: ['never/**']\n---\nKeep domain behavior independent.\n")
+    _git(project, "add", "skills")
     _git(project, "commit", "-m", "Track legacy completion contract")
     skills = ("alpha", "clean-architecture-core") if required else ("alpha",)
     phase = Phase(
