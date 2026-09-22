@@ -3134,7 +3134,7 @@ verify: manual
             )
             self.assertEqual(install.returncode, 0, install.stderr)
             subprocess.run(
-                ("git", "add", ".gitignore", ".agent-flow.project.yaml"),
+                ("git", "add", ".gitignore"),
                 cwd=project_root,
                 check=True,
             )
@@ -12761,14 +12761,18 @@ def _node_epoch_seconds(value: str) -> float:
 
 
 def _write_resolver_skills(temp_dir: str) -> Path:
-    """resolver 테스트용 최소 프로젝트. alpha/beta는 선언 없음, catalog는 자기선언 skill이다."""
+    """resolver 테스트용 최소 프로젝트. alpha/beta는 선언·의존성으로만 들어오고, catalog는 자기선언 skill이다.
+
+    `skills/`는 배치만으로 코드 phase에 켜지므로, alpha/beta에는 절대 안 맞는 선택자를 둬서
+    phase 선언과 dependency 경로만 검증되게 한다.
+    """
     root = Path(temp_dir)
     (root / ".agent-flow").mkdir(parents=True, exist_ok=True)
     for name in ("alpha-guide", "beta-guide"):
         skill_dir = root / "skills" / name
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(
-            f"---\nname: {name}\ndescription: Example guide.\n---\n\n# {name}\n",
+            f"---\nname: {name}\ndescription: Example guide.\npathGlobs: ['never/**']\n---\n\n# {name}\n",
             encoding="utf-8",
         )
     catalog = root / "skills" / "catalog-guide"

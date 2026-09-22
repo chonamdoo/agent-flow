@@ -87,7 +87,7 @@
 - 목표: `docs/USAGE.md`, `docs/GETTING-STARTED.md`에서 선택·설치·실행 절차를 정확히 찾을 수 있게 한다.
 - 착수 판별: 선택 명령·3모드·local 참조 설명은 두 문서에 없었다. T6의 기존 workflow pin migration은 재사용하고 중복하지 않는다.
 - 근거: `cli.py:432-448`의 `architecture select --mode/--skill`; `architecture_policy.py:35-79,313-333,377-415`의 선택 파일, 기본 Clean, tracking, digest, 설치 제외 규범.
-- Acceptance: `clean/local/pending`, `.agent-flow.project.yaml`과 계약/참조 tracking, 고정 local root, R1 참조 문법·scope·전체 pin/drift, 선택별 설치 규범을 설명한다. GETTING-STARTED는 최소 절차와 USAGE 링크만 둔다.
+- Acceptance: `clean/local/pending`, `.agent-flow/project.yaml`과 계약/참조 tracking, 고정 local root, R1 참조 문법·scope·전체 pin/drift, 선택별 설치 규범을 설명한다. GETTING-STARTED는 최소 절차와 USAGE 링크만 둔다.
 - 상태: 문서 반영·명령/schema 대조 완료. [USAGE의 선택 안내](../USAGE.md#architecture-selection), [skills pin/fresh 조회](../USAGE.md#bound-run-or-fresh-inspection), [review_angles override](../USAGE.md#durable-review-angles), [GETTING-STARTED](../GETTING-STARTED.md#choose-the-architecture)에 반영했다. [T6 migration](../USAGE.md#workflow-definition-migration)은 기존 절차를 링크한다.
 
 ## B — 변경하지 않을 계약

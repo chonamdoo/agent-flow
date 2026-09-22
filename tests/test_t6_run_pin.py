@@ -542,11 +542,13 @@ def _skills_inspection_run(tmp_path, monkeypatch):
     )
     project = tmp_path / "project"
     project.mkdir()
+    # `skills/`는 배치만으로 코드 phase에 켜진다. 이 fixture의 대상은 workflow pin이므로
+    # 절대 안 맞는 선택자로 배치 활성화를 끄고 선언으로만 required가 되게 한다.
     for name in ("pinned-guide", "fresh-guide"):
         document = project / "skills" / name / "SKILL.md"
         document.parent.mkdir(parents=True)
         document.write_text(
-            f"---\nname: {name}\ndescription: Inspection guide.\n---\n# {name}\n",
+            f"---\nname: {name}\ndescription: Inspection guide.\npathGlobs: ['never/**']\n---\n# {name}\n",
             encoding="utf-8",
         )
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -810,7 +812,7 @@ def test_cli_skills_inspection_uses_current_checkout_not_newest_sibling_run(
     dependency = own.path / "skills" / "checkout-dependency" / "SKILL.md"
     dependency.parent.mkdir(parents=True)
     dependency.write_text(
-        "---\nname: checkout-dependency\ndescription: Checkout dependency.\n---\n"
+        "---\nname: checkout-dependency\ndescription: Checkout dependency.\npathGlobs: ['never/**']\n---\n"
         "Apply the checkout dependency policy.\n",
         encoding="utf-8",
     )
@@ -953,7 +955,7 @@ def test_cli_status_architecture_guidance_does_not_change_structured_status(
     project, kit, source, run, artifact = _skills_inspection_run(tmp_path, monkeypatch)
     monkeypatch.setattr("agent_flow.artifact.find_kit_root", lambda: kit)
     if mode is not None:
-        selection = project / ".agent-flow.project.yaml"
+        selection = project / ".agent-flow/project.yaml"
         selection.write_text(
             "schema_version: 1\narchitecture:\n  mode: " + mode + "\n",
             encoding="utf-8",
@@ -1002,7 +1004,7 @@ def test_cli_skills_conditional_markers_use_validated_run_selection(
         + "      pending: ['scope-check: existing']\n",
         encoding="utf-8",
     )
-    selection = project / ".agent-flow.project.yaml"
+    selection = project / ".agent-flow/project.yaml"
     selection.write_text(
         f"schema_version: 1\narchitecture:\n  mode: {mode}\n", encoding="utf-8",
     )

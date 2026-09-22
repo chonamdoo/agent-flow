@@ -142,6 +142,167 @@ def test_contract_path_escaping_the_repository_is_rejected(contract_path):
         _parse(mode="local", skill=contract_path)
 
 
+def test_private_contract_path_is_accepted_and_names_the_architecture_skill():
+    """개인 drop-box 계약도 skill 이름은 디렉터리(`architecture`)에서 온다.
+
+    반증: `split('/')[1]`이면 `local-skills`가 계약 이름이 되어 catalog 제외와
+    required 판정이 엉뚱한 이름을 본다.
+    """
+    from agent_flow.core.architecture_policy import contract_skill_name
+
+    selection = _parse(mode="local", skill=".agent-flow/local-skills/architecture/SKILL.md")
+
+    assert contract_skill_name(selection) == "architecture"
+    assert contract_skill_name(_parse(mode="local", skill="skills/architecture/SKILL.md")) == "architecture"
+
+
+@pytest.mark.parametrize(
+    "contract_path",
+    [".agent-flow/local-skills/SKILL.md", ".agent-flow/local-skills/other/SKILL.md", ".agent-flow/skills/architecture/SKILL.md"],
+)
+def test_only_the_architecture_drop_box_slot_is_a_private_contract(contract_path):
+    """drop-box 안이라도 `architecture/` 한 자리만 계약이다. 아무 스킬이나 계약이 되면 안 된다."""
+    with pytest.raises(ValueError, match="contract"):
+        _parse(mode="local", skill=contract_path)
+
+
+def _private_contract(root: Path, *, references: tuple[str, ...] = ()) -> None:
+    """Provision a gitignored private architecture contract fixture."""
+    declared = "".join(f"  - {name}\n" for name in references)
+    requires = f"requires_docs:\n{declared}" if references else ""
+    _write(root, ".gitignore", ".agent-flow/\n")
+    _write(
+        root,
+        ".agent-flow/local-skills/architecture/SKILL.md",
+        f"---\nname: architecture\ndescription: 이 머신에서만 쓰는 구조 규범\n{requires}---\n\n"
+        "# Private architecture\n\nKeep transport in shared/api/.\n",
+    )
+    for name in references:
+        _write(root, f".agent-flow/local-skills/architecture/{name}", "# Private reference\n\nNo barrels.\n")
+    _write(
+        root, PROJECT_ARCHITECTURE_FILE,
+        "schema_version: 1\narchitecture:\n  mode: local\n  skill: .agent-flow/local-skills/architecture/SKILL.md\n",
+    )
+
+
+def test_private_contract_is_pinned_without_a_tracking_requirement(tmp_path):
+    """gitignore된 자리에 있는 것이 개인 계약의 정의다. 추적을 요구하면 선택이 불가능하다.
+
+    선언 파일도 함께 면제한다 — 추적을 요구하면 machine-local 경로를 동료에게 commit
+    하라는 뜻이 된다. 내용은 그래도 digest로 고정돼 drift는 잡힌다.
+    """
+    root = _git_project(tmp_path)
+    _private_contract(root, references=("references/a.md",))
+
+    snapshot = architecture_snapshot(root)
+
+    assert snapshot.untracked == ()
+    assert snapshot.contract is not None
+    assert [document.path for document in snapshot.contract.documents] == [
+        ".agent-flow/local-skills/architecture/SKILL.md",
+        ".agent-flow/local-skills/architecture/references/a.md",
+    ]
+    before = snapshot.digest
+    _write(root, ".agent-flow/local-skills/architecture/references/a.md", "# changed\n\nBarrels allowed.\n")
+    assert architecture_snapshot(root).digest != before
+
+
+def test_private_contract_in_a_linked_worktree_reads_the_leader_copy(tmp_path):
+    """`.agent-flow/`는 leader에만 있다. worktree가 자기 자리만 보면 개인 계약은 매 run 실패다."""
+    from agent_flow.core.architecture_policy import contract_documents_root
+
+    leader = _git_project(tmp_path, "leader")
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=leader, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=leader, check=True)
+    _private_contract(leader)
+    _track(leader, ".gitignore")
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=leader, check=True)
+    checkout = tmp_path / "worktree"
+    subprocess.run(["git", "worktree", "add", "-q", str(checkout), "HEAD"], cwd=leader, check=True)
+    # worktree 생성이 leader의 선언 파일만 복사한다(ROOT_CONTEXT_FILES). local-skills는 오지 않는다.
+    _write(checkout, PROJECT_ARCHITECTURE_FILE, (leader / PROJECT_ARCHITECTURE_FILE).read_text(encoding="utf-8"))
+    assert not (checkout / ".agent-flow/local-skills").exists()
+
+    snapshot = architecture_snapshot(checkout)
+
+    assert contract_documents_root(checkout, snapshot.selection) == leader
+    assert snapshot.contract is not None
+    assert snapshot.contract.root.path == ".agent-flow/local-skills/architecture/SKILL.md"
+    assert snapshot.digest == architecture_snapshot(leader).digest
+    assert contract_documents_root(leader, snapshot.selection) == leader
+
+
+@pytest.mark.parametrize("skill", ["skills/architecture/SKILL.md", ".agent-flow/local-skills/architecture/SKILL.md"])
+@pytest.mark.parametrize("declared", [True, False], ids=["declared-clean", "legacy-default"])
+def test_clean_never_runs_beside_a_project_contract(tmp_path, skill, declared):
+    """계약 파일이 있는데 Clean이 켜지면 규범이 둘이다. 선언이 없는 legacy 기본값도 막는다."""
+    from agent_flow.core.architecture_policy import prepare_architecture_selection
+
+    root = _git_project(tmp_path)
+    _write(root, skill, "---\nname: architecture\n---\n\nDomain never imports adapters.\n")
+    if declared:
+        _declare(root, "schema_version: 1\narchitecture:\n  mode: clean\n")
+
+    with pytest.raises(ArchitectureContractError, match=f"exists at {skill}"):
+        architecture_snapshot(root)
+    with pytest.raises(ArchitectureContractError, match="cannot be selected"):
+        prepare_architecture_selection(root, ArchitectureSelection(mode=ArchitectureMode.CLEAN))
+    # 같은 저장소에서 계약을 고르면 통과한다.
+    _declare(root, f"schema_version: 1\narchitecture:\n  mode: local\n  skill: {skill}\n")
+    assert architecture_snapshot(root).contract is not None
+
+
+def test_legacy_root_selection_is_read_until_migrated(tmp_path):
+    """0.3.x가 루트에 둔 `.agent-flow.project.yaml`을 무시하면 pending이 조용히 clean이 된다."""
+    from agent_flow.core.architecture_policy import LEGACY_PROJECT_ARCHITECTURE_FILE
+
+    root = _git_project(tmp_path)
+    _write(root, LEGACY_PROJECT_ARCHITECTURE_FILE, "schema_version: 1\narchitecture:\n  mode: pending\n")
+
+    snapshot = architecture_snapshot(root)
+    assert snapshot.selection.mode is ArchitectureMode.PENDING
+    assert snapshot.declared is True
+    assert snapshot.source_document is not None
+    assert snapshot.source_document.path == LEGACY_PROJECT_ARCHITECTURE_FILE
+
+    # 새 자리가 생기면 그쪽이 이긴다.
+    _write(root, PROJECT_ARCHITECTURE_FILE, "schema_version: 1\narchitecture:\n  mode: clean\n")
+    assert architecture_snapshot(root).selection.mode is ArchitectureMode.CLEAN
+
+
+@pytest.mark.parametrize("parent_kind", ["symlink", "file", "missing"])
+def test_unusable_skills_parent_is_not_a_project_contract(tmp_path, parent_kind):
+    """`skills/`가 symlink·파일이면 계약 보유로 읽지 않는다. 그러면 clean도 local도 못 골라 출구가 없다."""
+    from agent_flow.core.architecture_policy import find_project_contract
+
+    root = _git_project(tmp_path)
+    if parent_kind == "symlink":
+        _write(tmp_path, "elsewhere/architecture/SKILL.md", "---\nname: architecture\n---\n\nOutside.\n")
+        (root / "skills").symlink_to(tmp_path / "elsewhere")
+    elif parent_kind == "file":
+        _write(root, "skills", "not a directory\n")
+
+    assert find_project_contract(root) is None
+    assert architecture_snapshot(root).selection.mode is ArchitectureMode.CLEAN
+
+
+@pytest.mark.parametrize("leaf_kind", ["directory", "symlink"])
+def test_unreadable_contract_leaf_still_blocks_clean(tmp_path, leaf_kind):
+    """잎 자리에 무언가 있으면 존재다 — 읽을 수 없는 계약 옆에서 Clean이 돌면 규범이 둘이다."""
+    from agent_flow.core.architecture_policy import find_project_contract
+
+    root = _git_project(tmp_path)
+    leaf = root / "skills/architecture/SKILL.md"
+    leaf.parent.mkdir(parents=True)
+    if leaf_kind == "directory":
+        leaf.mkdir()
+    else:
+        leaf.symlink_to(tmp_path / "nowhere.md")
+
+    assert find_project_contract(root) == "skills/architecture/SKILL.md"
+    with pytest.raises(ArchitectureContractError, match="exists at"):
+        architecture_snapshot(root)
+
 
 
 def _git_project(tmp_path: Path, name: str = "project") -> Path:
@@ -168,7 +329,6 @@ def _write(root: Path, relative: str, text: str) -> Path:
 def _declare(root: Path, body: str) -> None:
     """Write an architecture selection fixture."""
     _write(root, PROJECT_ARCHITECTURE_FILE, body)
-    _track(root, PROJECT_ARCHITECTURE_FILE)
 
 
 def _clean_contract(root: Path) -> None:
@@ -1385,11 +1545,15 @@ def test_grown_norms_require_new_attempt_without_repining_old_bytes(tmp_path, mo
         root, "skills/clean-architecture-core/SKILL.md",
         "---\nname: clean-architecture-core\n---\n\nDomain invariants own behavior.\n",
     )
+    # 선택자가 있어야 "변경 범위가 자라서" required가 된다. 선택자 없는 `skills/` 문서는
+    # 배치만으로 처음부터 켜져 이 테스트의 대상(범위 성장)이 사라진다.
     _write(
         root, "skills/python-api-clean-architecture/SKILL.md",
-        "---\nname: python-api-clean-architecture\nrequires: [clean-architecture-core]\n---\n\n"
+        "---\nname: python-api-clean-architecture\nrequires: [clean-architecture-core]\n"
+        "workflowPhases: [implement]\npathGlobs: ['src/**/*.py']\n---\n\n"
         "Python handlers invoke application use cases.\n",
     )
+    _track(root, "skills")
     subprocess.run(
         ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
          "commit", "-qm", "Declare initial policy"], cwd=root, check=True,

@@ -226,7 +226,7 @@ def test_pending_install_rejects_clean_selection_until_norms_are_provisioned(tmp
     env = {**os.environ, "HOME": str(tmp_path / "home"), "AGENT_FLOW_HOST": "codex"}
     installed = _install(project, "--profile", "python", "--architecture-mode", "pending", env=env)
     assert installed.returncode == 0, installed.stderr
-    declaration = project / ".agent-flow.project.yaml"
+    declaration = project / ".agent-flow/project.yaml"
     original = declaration.read_bytes()
     cli = (_node(), str(KIT_ROOT / "bin/agent-flow-kit.mjs"), "architecture")
 
@@ -282,7 +282,8 @@ def test_clean_selection_requires_active_host_norm_dependency_closure(
     project.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("AGENT_FLOW_HOST", "codex")
-    declaration = project / ".agent-flow.project.yaml"
+    declaration = project / ".agent-flow/project.yaml"
+    declaration.parent.mkdir(exist_ok=True)
     declaration.write_text("schema_version: 1\narchitecture:\n  mode: pending\n", encoding="utf-8")
     original = declaration.read_bytes()
     core = project / "skills/clean-architecture-core/SKILL.md"
@@ -320,7 +321,8 @@ def test_local_selection_checks_dependencies_without_requiring_clean_skills(
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("AGENT_FLOW_HOST", "codex")
-    declaration = tmp_path / ".agent-flow.project.yaml"
+    declaration = tmp_path / ".agent-flow/project.yaml"
+    declaration.parent.mkdir(exist_ok=True)
     declaration.write_text("schema_version: 1\narchitecture:\n  mode: pending\n", encoding="utf-8")
     original = declaration.read_bytes()
     contract = tmp_path / "skills/architecture/SKILL.md"
@@ -720,7 +722,7 @@ def test_framed_required_metadata_fails_closed_before_install(
     else:
         assert "conflicts with" in result.stderr
     assert not (project / ".agent-flow/kit.json").exists()
-    assert not (project / ".agent-flow.project.yaml").exists()
+    assert not (project / ".agent-flow/project.yaml").exists()
     assert not (project / ".Codex/skills/consumer-skill").exists()
     assert skill.read_bytes() == before
 
@@ -4581,7 +4583,7 @@ def test_install_safety_works_without_isolated_pyyaml(
     else:
         assert result.returncode != 0, result.stderr
         assert not (project / ".agent-flow/kit.json").exists()
-        assert not (project / ".agent-flow.project.yaml").exists()
+        assert not (project / ".agent-flow/project.yaml").exists()
 
 
 def _installed_skill_names(project: Path) -> set[str]:
@@ -4595,15 +4597,16 @@ def _installed_skill_names(project: Path) -> set[str]:
 
 def _declare_architecture(project: Path, body: str) -> None:
     """Write the fixture's architecture declaration."""
-    (project / ".agent-flow.project.yaml").write_text(body, encoding="utf-8")
+    (project / ".agent-flow").mkdir(exist_ok=True)
+    (project / ".agent-flow/project.yaml").write_text(body, encoding="utf-8")
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-@pytest.mark.parametrize("mode", ["clean", "local"])
 def test_git_install_reports_a_scoped_architecture_tracking_remedy(
-    tmp_path: Path, binary: str, mode: str,
+    tmp_path: Path, binary: str,
 ) -> None:
-    """Verify that Git install reports a scoped architecture tracking remedy."""
+    """local 계약 문서만 추적 대상이다. 선언 파일은 `.agent-flow/` 안이라 remedy에 나오지 않는다."""
+    mode = "local"
     project = tmp_path / "team's project"
     project.mkdir()
     caller = tmp_path / "caller"
@@ -4619,7 +4622,7 @@ def test_git_install_reports_a_scoped_architecture_tracking_remedy(
         subprocess.run(command, cwd=project, check=True, capture_output=True, timeout=30)
     unrelated = project / "unrelated-user-notes.txt"
     unrelated.write_text("Do not stage this draft.\n", encoding="utf-8")
-    required = {".agent-flow.project.yaml"}
+    required: set[str] = set()
     flags = ["--profile", "python", "--architecture-mode", mode]
     if mode == "local":
         contract = project / "skills/architecture/SKILL.md"
@@ -4673,7 +4676,7 @@ def test_non_git_install_does_not_require_architecture_staging(
         line.strip().startswith("git ") and " add -- " in line
         for line in output.splitlines()
     )
-    assert yaml.safe_load((tmp_path / ".agent-flow.project.yaml").read_text())["architecture"]["mode"] == "clean"
+    assert yaml.safe_load((tmp_path / ".agent-flow/project.yaml").read_text())["architecture"]["mode"] == "clean"
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -4714,7 +4717,7 @@ def test_clean_and_legacy_installs_keep_the_clean_pack(tmp_path: Path, binary: s
         else:
             initial = _install_with(binary, project, "--profile", "python", "--architecture-mode", "clean")
             assert initial.returncode == 0, initial.stderr
-            (project / ".agent-flow.project.yaml").unlink()
+            (project / ".agent-flow/project.yaml").unlink()
         assert _install_with(binary, project, "--profile", "python").returncode == 0
 
         installed = _installed_skill_names(project)
@@ -4749,7 +4752,6 @@ def test_reinstall_excludes_project_local_clean_overrides(
     tmp_path: Path, binary: str, source_root: str, mode: str,
 ) -> None:
     """Verify that reinstall excludes project local clean overrides."""
-    _skill(tmp_path / "skills/architecture", "Features own their state.")
     override = tmp_path / source_root / "react-clean-architecture"
     _skill(override, "Project-owned Clean rules without an architecture_modes declaration.")
     original = (override / "SKILL.md").read_bytes()
@@ -4757,6 +4759,8 @@ def test_reinstall_excludes_project_local_clean_overrides(
     assert initial.returncode == 0, initial.stderr
     assert "react-clean-architecture" in _installed_skill_names(tmp_path)
     assert (tmp_path / ".claude/skills/react-clean-architecture/SKILL.md").is_file()
+    # 계약은 clean 설치 뒤에 둔다 — 옆에 있으면 clean 설치 자체가 거부된다.
+    _skill(tmp_path / "skills/architecture", "Features own their state.")
 
     flags = ("--architecture-mode", mode)
     if mode == "local":
@@ -4814,7 +4818,7 @@ def test_install_flag_records_the_selection(tmp_path: Path, binary: str) -> None
         binary, project, "--profile", "python", "--architecture-mode", "pending"
     ).returncode == 0
 
-    assert (project / ".agent-flow.project.yaml").read_text(encoding="utf-8") == (
+    assert (project / ".agent-flow/project.yaml").read_text(encoding="utf-8") == (
         "schema_version: 1\narchitecture:\n  mode: pending\n"
     )
     assert "clean-architecture-core" not in _installed_skill_names(project)
@@ -4846,7 +4850,7 @@ def test_fresh_headless_install_persists_pending(
     result = _install_with(binary, tmp_path, *profile_args)
 
     assert result.returncode == 0, result.stderr
-    declaration = yaml.safe_load((tmp_path / ".agent-flow.project.yaml").read_text())
+    declaration = yaml.safe_load((tmp_path / ".agent-flow/project.yaml").read_text())
     assert declaration["architecture"] == {"mode": "pending"}
     assert "pending" in result.stdout
     names = _installed_skill_names(tmp_path)
@@ -4871,10 +4875,10 @@ def test_local_reinstall_keeps_custom_skills_and_other_selected_stacks(
         "--architecture-skill", "skills/architecture/SKILL.md",
     )
     assert switched.returncode == 0, switched.stderr
-    declaration = (tmp_path / ".agent-flow.project.yaml").read_bytes()
+    declaration = (tmp_path / ".agent-flow/project.yaml").read_bytes()
     again = _install_with(binary, tmp_path)
     assert again.returncode == 0, again.stderr
-    assert (tmp_path / ".agent-flow.project.yaml").read_bytes() == declaration
+    assert (tmp_path / ".agent-flow/project.yaml").read_bytes() == declaration
     assert (tmp_path / "skills/architecture/SKILL.md").read_bytes() == contract
     assert (tmp_path / "skills/team-rule/SKILL.md").read_bytes() == custom
     names = _installed_skill_names(tmp_path)
@@ -4902,7 +4906,7 @@ def test_invalid_architecture_request_preserves_installed_policy(
     """Verify that invalid architecture request preserves installed policy."""
     initial = _install_with(binary, tmp_path, "--profile", "python", "--architecture-mode", "clean")
     assert initial.returncode == 0, initial.stderr
-    paths = [".agent-flow.project.yaml", ".agent-flow/kit.json", ".agent-flow/skills/index.json"]
+    paths = [".agent-flow/project.yaml", ".agent-flow/kit.json", ".agent-flow/skills/index.json"]
     before = {relative: (tmp_path / relative).read_bytes() for relative in paths}
 
     result = _install_with(binary, tmp_path, *flags)
@@ -4921,7 +4925,7 @@ def test_failed_install_restores_policy_and_retry_publishes_local(
     initial = _install_with(binary, project, "--profile", "android", "--architecture-mode", "clean")
     assert initial.returncode == 0, initial.stderr
     _skill(project / "skills/architecture", "Feature owners retain state; adapters isolate external effects.")
-    paths = [".agent-flow.project.yaml", ".agent-flow/kit.json", ".agent-flow/skills/index.json"]
+    paths = [".agent-flow/project.yaml", ".agent-flow/kit.json", ".agent-flow/skills/index.json"]
     before = {relative: (project / relative).read_bytes() for relative in paths}
     hooks_before = _hook_state(project)
     preload = tmp_path / "fail-publish.cjs"
@@ -4946,7 +4950,7 @@ def test_failed_install_restores_policy_and_retry_publishes_local(
     assert not (project / ".agent-flow/install-recovery").exists()
     retry = _install_with(binary, project, *flags)
     assert retry.returncode == 0, retry.stderr
-    assert yaml.safe_load((project / ".agent-flow.project.yaml").read_text())["architecture"]["mode"] == "local"
+    assert yaml.safe_load((project / ".agent-flow/project.yaml").read_text())["architecture"]["mode"] == "local"
     assert "android-clean-architecture" not in _installed_skill_names(project)
 
 
@@ -4964,43 +4968,80 @@ def test_corrupt_legacy_metadata_does_not_become_a_fresh_pending_install(
     assert result.returncode == 0, result.stderr
     repaired = _kit_json(tmp_path)
     assert repaired["installed_at"] <= repaired["updated_at"]
-    assert not (tmp_path / ".agent-flow.project.yaml").exists()
+    assert not (tmp_path / ".agent-flow/project.yaml").exists()
 
 
-@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-@pytest.mark.parametrize(("choice", "mode"), [("1", "clean"), ("2", "local"), ("3", "pending")])
-def test_interactive_install_offers_three_architecture_choices(
-    tmp_path: Path, binary: str, choice: str, mode: str,
-) -> None:
-    """Verify that interactive install offers three architecture choices."""
-    if os.name != "posix":
-        pytest.skip("interactive terminal regression requires a POSIX PTY")
+def _interactive_install(tmp_path: Path, binary: str, answer: str | None) -> subprocess.CompletedProcess:
+    """Run install on a PTY, answering the architecture prompt with ``answer`` if given."""
     import pty
 
-    if mode == "local":
-        _skill(tmp_path / "skills/architecture", "Features own state and isolate external effects.")
     master, slave = pty.openpty()
     try:
-        os.write(master, f"{choice}\n".encode())
-        result = subprocess.run(
+        if answer is not None:
+            os.write(master, f"{answer}\n".encode())
+        return subprocess.run(
             (_node(), str(KIT_ROOT / "bin" / binary), "install", "--profile", "python"),
-            cwd=tmp_path,
-            stdin=slave,
-            stdout=slave,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-            timeout=30,
+            cwd=tmp_path, stdin=slave, stdout=slave, stderr=subprocess.PIPE,
+            text=True, check=False, timeout=30,
         )
     finally:
         os.close(master)
         os.close(slave)
 
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize(("choice", "mode", "clean_installed"), [
+    ("1", "pending", False),
+    ("2", "pending", False),
+    ("3", "clean", True),
+])
+def test_interactive_install_asks_about_a_project_contract_before_installing_clean(
+    tmp_path: Path, binary: str, choice: str, mode: str, clean_installed: bool,
+) -> None:
+    """계약을 "넣겠다"고 답하면 Clean 스킬은 설치되지 않는다. 파일을 넣은 뒤 select로 local이 된다."""
+    if os.name != "posix":
+        pytest.skip("interactive terminal regression requires a POSIX PTY")
+
+    result = _interactive_install(tmp_path, binary, choice)
+
     assert result.returncode == 0, result.stderr
-    declared = yaml.safe_load((tmp_path / ".agent-flow.project.yaml").read_text())
-    assert declared["architecture"]["mode"] == mode
-    if mode == "local":
-        assert declared["architecture"]["skill"] == "skills/architecture/SKILL.md"
+    declared = yaml.safe_load((tmp_path / ".agent-flow/project.yaml").read_text())
+    assert declared["architecture"] == {"mode": mode}
+    assert (tmp_path / ".agent-flow/skills/clean-architecture-core/SKILL.md").exists() is clean_installed
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("skill", ["skills/architecture/SKILL.md", ".agent-flow/local-skills/architecture/SKILL.md"])
+def test_install_adopts_an_existing_project_contract_without_asking(
+    tmp_path: Path, binary: str, skill: str,
+) -> None:
+    """계약 파일이 이미 있으면 묻지 않고 local로 고르고 Clean은 깔지 않는다."""
+    if os.name != "posix":
+        pytest.skip("interactive terminal regression requires a POSIX PTY")
+    _skill((tmp_path / skill).parent, "Domain never imports adapters.")
+
+    result = _interactive_install(tmp_path, binary, None)
+
+    assert result.returncode == 0, result.stderr
+    declared = yaml.safe_load((tmp_path / ".agent-flow/project.yaml").read_text())
+    assert declared["architecture"] == {"mode": "local", "skill": skill}
+    assert not (tmp_path / ".agent-flow/skills/clean-architecture-core").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("skill", ["skills/architecture/SKILL.md", ".agent-flow/local-skills/architecture/SKILL.md"])
+def test_explicit_clean_install_is_refused_beside_a_project_contract(
+    tmp_path: Path, binary: str, skill: str,
+) -> None:
+    """`--architecture-mode clean`이라도 계약이 있으면 거부한다. 규범이 둘이면 안 된다."""
+    _skill((tmp_path / skill).parent, "Domain never imports adapters.")
+
+    result = _install_with(binary, tmp_path, "--profile", "python", "--architecture-mode", "clean")
+
+    assert result.returncode != 0
+    assert "project architecture contract exists" in result.stderr
+    assert not (tmp_path / ".agent-flow/project.yaml").exists()
+    assert not (tmp_path / ".agent-flow/skills/clean-architecture-core").exists()
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -5026,7 +5067,24 @@ def test_local_install_rejects_a_custom_clean_dependency_without_erasing_it(
     assert result.returncode != 0
     assert "team-rule -> clean-architecture-core" in result.stderr
     assert manifest.read_bytes() == original
-    assert not (tmp_path / ".agent-flow.project.yaml").exists()
+    assert not (tmp_path / ".agent-flow/project.yaml").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_migrates_the_legacy_root_selection_file(tmp_path: Path, binary: str) -> None:
+    """0.3.x의 루트 `.agent-flow.project.yaml`은 새 자리로 옮겨 적힌다. 무시하면 pending이 clean이 된다."""
+    (tmp_path / ".agent-flow.project.yaml").write_text(
+        "schema_version: 1\narchitecture:\n  mode: pending\n", encoding="utf-8",
+    )
+
+    result = _install_with(binary, tmp_path, "--profile", "python")
+
+    assert result.returncode == 0, result.stderr
+    assert "moved selection .agent-flow.project.yaml" in result.stdout + result.stderr
+    declared = yaml.safe_load((tmp_path / ".agent-flow/project.yaml").read_text())
+    assert declared["architecture"] == {"mode": "pending"}
+    assert (tmp_path / ".agent-flow.project.yaml").exists()  # 사용자가 추적하던 파일은 건드리지 않는다
+    assert not (tmp_path / ".agent-flow/skills/clean-architecture-core").exists()
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])

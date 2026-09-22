@@ -333,6 +333,7 @@ def test_untracked_architecture_choice_reaches_the_checkout(
         declaration = f"schema_version: 1\narchitecture:\n  mode: {mode}\n"
         if mode == "local":
             declaration += "  skill: skills/architecture/SKILL.md\n"
+        (leader / PROJECT_ARCHITECTURE_FILE).parent.mkdir(exist_ok=True)
         (leader / PROJECT_ARCHITECTURE_FILE).write_text(declaration, encoding="utf-8")
     checkout = _managed_checkout(leader, "architecture-choice")
     _stub_profile(monkeypatch, tmp_path, {})

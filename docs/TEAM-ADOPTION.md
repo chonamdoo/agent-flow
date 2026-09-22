@@ -114,13 +114,23 @@ reported as user-edited rather than overwritten.
 `_DEFAULT_PROJECT_TEMPLATES` in `src/agent_flow/core/skill_resolver.py` lists the
 repository-side skill roots, in order:
 
-- `.agent-flow/local-skills/<skill>/SKILL.md` — a private drop-box. A document placed here
-  attaches to code-generation and review phases with no frontmatter declaration, because
-  putting it there is the declaration.
-- `skills/<skill>/SKILL.md` — skills the repository owns and may name.
+- `.agent-flow/local-skills/<skill>/SKILL.md` — a private drop-box, gitignored, per working
+  copy.
+- `skills/<skill>/SKILL.md` — the shared drop-box the repository owns and commits.
 - `.agent-flow/skills/<skill>/SKILL.md` — the bundled set.
 - `.claude/skills/<skill>/SKILL.md` and `.agents/skills/<skill>/SKILL.md` — vendor installs,
   kept separate from `skills/` because those names belong to someone else.
+
+The two repository-owned roots behave the same: a document placed there attaches to
+code-generation and review phases with no frontmatter declaration, because putting it there
+is the declaration. Moving a skill between them changes nothing but who sees it. Add
+`workflowPhases` or `pathGlobs` only to narrow where it loads. One name is special:
+`architecture/` is the local architecture contract candidate — it is the contract when
+selected with `--mode local` and loads as an ordinary skill under `pending`. While it exists
+in either root, `clean` cannot be selected, installed, or used as the legacy default: the
+installer adopts the file as the local contract, and an explicit `--architecture-mode clean`
+is refused so two norms never compete. Bundled and vendor skills must declare
+`workflowPhases` themselves.
 
 A profile's `skills.required_review` turns repository-owned names into a blocking requirement. A
 group declares `skills`, a human-readable `when`, its activation selectors (`task_terms`,

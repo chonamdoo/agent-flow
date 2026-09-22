@@ -103,7 +103,7 @@ def test_installed_mixed_contract_delivery(
         ["git", "init", "-q", "-b", "main"], cwd=project, check=True,
         capture_output=True, text=True,
     )
-    _track(project, ".agent-flow.project.yaml", "skills")
+    _track(project, ".agent-flow/project.yaml", "skills")
     monkeypatch.setenv("AGENT_FLOW_HOST", "omp")
     flags = ["--profile", "generic", "--architecture-mode", "clean" if clean_installed else "local"]
     if not clean_installed:
@@ -120,7 +120,7 @@ def test_installed_mixed_contract_delivery(
             check=False, timeout=30,
         )
         assert selected.returncode == 0, selected.stdout + selected.stderr
-    _track(project, ".agent-flow.project.yaml")
+    _track(project, ".agent-flow/project.yaml")
     snapshot = architecture_snapshot(project)
     assert snapshot.selection.mode is ArchitectureMode.LOCAL
     assert snapshot.selection.contract_path == CONTRACT_ROOT
