@@ -373,7 +373,7 @@ const ids = argv.includes('--all')
       .filter((d) => existsSync(path.join(CASES, d, 'case.json')))
       .sort()
   : [argOf('--case', null)].filter(Boolean);
-if (!ids.length) fail('usage: run.mjs --case <id> | --all [--reps N] [--providers claude,codex] [--concurrency N]');
+if (!ids.length) fail('usage: run.mjs --case <id> | --all [--validate] [--reps N] [--providers claude,codex] [--concurrency N]');
 
 const reps = posInt(argOf('--reps', '12'), '--reps');
 const limit = posInt(argOf('--concurrency', '8'), '--concurrency');
@@ -387,6 +387,11 @@ for (const p of providers) if (!INVOKE[p]) fail(`unknown provider "${p}" (known:
 // Load every case before spending a single CLI call, so a malformed spec fails immediately
 // instead of after the first case has already run.
 const cases = ids.map(loadCase);
+
+if (argv.includes('--validate')) {
+  for (const kase of cases) console.log(`${kase.id}: valid`);
+  process.exit(0);
+}
 
 for (const kase of cases) {
   const jobs = [];
