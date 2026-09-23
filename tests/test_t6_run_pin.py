@@ -7,7 +7,7 @@ import shlex
 import pytest
 
 from agent_flow.artifact import create_run, find_active_run, read_meta, write_meta
-from agent_flow.core.phase_workflow import load_phase_workflow_definition
+from agent_flow.core.phase_workflow import CorruptRunCursorError, load_phase_workflow_definition
 from agent_flow.core.workflow_pin import WorkflowDefinitionPinError
 from agent_flow.runner import Runner
 
@@ -50,6 +50,140 @@ def test_status_keeps_pinned_completion_contract_after_source_changes(tmp_path, 
     assert payload["required_artifact"] == str(run / "original.md")
     assert "decision: reviewed" in payload["missing_completion_markers"]
     assert (run / "meta.json").read_bytes() == before
+
+
+
+@pytest.fixture
+def status_cursor_run(tmp_path, monkeypatch):
+    kit = tmp_path / "kit"
+    source = kit / "workflows" / "custom.yaml"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "id: custom\ncompletion_disposition: local-handoff\n"
+        "phases:\n  - id: design\n  - id: review\n",
+        encoding="utf-8",
+    )
+    definition = load_phase_workflow_definition(kit, "custom")
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr("agent_flow.artifact.find_kit_root", lambda: kit)
+    run = create_run(project, "custom", "Inspect delivery", workflow_definition=definition)
+    return project, source, run, definition
+
+
+@pytest.mark.parametrize("installed_phases", [["replacement"], ["design", "review", "replacement"]])
+def test_status_distinguishes_preentry_from_pinned_terminal(
+    status_cursor_run, capsys, installed_phases,
+):
+    project, source, run, definition = status_cursor_run
+    source.write_text(
+        "id: custom\ncompletion_disposition: local-handoff\nphases:\n"
+        + "".join(f"  - id: {phase}\n" for phase in installed_phases),
+        encoding="utf-8",
+    )
+    active = find_active_run(project)
+    before = {path.relative_to(run): path.read_bytes() for path in run.rglob("*") if path.is_file()}
+
+    active.print_status(config_root=project, project_root=project)
+
+    output = capsys.readouterr().out
+    preentry = json.loads(next(
+        line.removeprefix("status_json: ")
+        for line in output.splitlines() if line.startswith("status_json: ")
+    ))
+    assert preentry["current_phase"] == "-"
+    assert preentry["status"] == "running"
+    assert preentry["reason"] == "in_progress"
+    assert "missing_completion_markers" not in preentry
+    assert {path.relative_to(run): path.read_bytes() for path in run.rglob("*") if path.is_file()} == before
+
+    meta = read_meta(run)
+    meta["phase_index"] = len(definition.phases)
+    write_meta(run, meta)
+    before = {path.relative_to(run): path.read_bytes() for path in run.rglob("*") if path.is_file()}
+
+    active.print_status(config_root=project, project_root=project)
+
+    terminal = json.loads(next(
+        line.removeprefix("status_json: ")
+        for line in capsys.readouterr().out.splitlines() if line.startswith("status_json: ")
+    ))
+    assert terminal["current_phase"] == "-"
+    assert terminal["status"] == "blocked"
+    assert terminal["reason"] == "missing_completion_markers"
+    assert any("design-spec.md" in marker for marker in terminal["missing_completion_markers"])
+    assert terminal["next_command"] == preentry["next_command"]
+    assert {path.relative_to(run): path.read_bytes() for path in run.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("cursor", [
+    {"phase_index": -1},
+    {"phase_index": 3},
+    {"phase_index": True},
+    {"phase_index": "0"},
+    {"phase_index": 0, "current_phase": "review"},
+    {"phase_index": 0, "current_phase": ""},
+    {"phase_index": 1, "current_phase": None},
+])
+def test_status_rejects_invalid_cursor_instead_of_reporting_preentry(
+    status_cursor_run, cursor,
+):
+    project, _, run, _ = status_cursor_run
+    meta = read_meta(run)
+    meta.update(cursor)
+    write_meta(run, meta)
+    before = {path.relative_to(run): path.read_bytes() for path in run.rglob("*") if path.is_file()}
+
+    with pytest.raises(CorruptRunCursorError):
+        find_active_run(project).print_status(config_root=project, project_root=project)
+
+    assert {path.relative_to(run): path.read_bytes() for path in run.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("failure", ["invalid-digest", "missing-definition"])
+def test_preentry_status_rejects_unverified_pin(status_cursor_run, capsys, failure):
+    project, _, run, _ = status_cursor_run
+    meta = read_meta(run)
+    if failure == "invalid-digest":
+        meta["workflow_definition_digest"] = "0" * 64
+    else:
+        del meta["workflow_definition"]
+    write_meta(run, meta)
+    before = {path.relative_to(run): path.read_bytes() for path in run.rglob("*") if path.is_file()}
+
+    with pytest.raises(WorkflowDefinitionPinError):
+        find_active_run(project).print_status(config_root=project, project_root=project)
+
+    payload = json.loads(next(
+        line.removeprefix("status_json: ")
+        for line in capsys.readouterr().out.splitlines() if line.startswith("status_json: ")
+    ))
+    assert payload["status"] == "blocked"
+    assert payload["reason"] == "workflow_definition_unavailable"
+    assert payload["next_command"] == ""
+    assert {path.relative_to(run): path.read_bytes() for path in run.rglob("*") if path.is_file()} == before
+
+
+def test_status_uses_one_snapshot_for_pin_contract_and_terminal_cursor(
+    status_cursor_run, monkeypatch, capsys,
+):
+    project, _, run, _ = status_cursor_run
+    active = find_active_run(project)
+    initial = read_meta(run)
+    later = {**initial, "workflow_definition_digest": "0" * 64}
+    snapshots = iter((initial, later))
+    monkeypatch.setattr("agent_flow.artifact.read_meta", lambda _: next(snapshots, later))
+
+    active.print_status(config_root=project, project_root=project)
+
+    payload = json.loads(next(
+        line.removeprefix("status_json: ")
+        for line in capsys.readouterr().out.splitlines() if line.startswith("status_json: ")
+    ))
+    assert payload["status"] == "running"
+    assert "missing_completion_markers" not in payload
+    with pytest.raises(WorkflowDefinitionPinError):
+        active.print_status(config_root=project, project_root=project)
 
 
 def test_run_rejects_definition_for_another_workflow_before_publication(tmp_path):
