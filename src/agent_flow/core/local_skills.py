@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -11,7 +12,11 @@ from agent_flow.core.markers import (
     completion_gate_marker_values,
     missing_architecture_assessment_markers,
 )
-from agent_flow.core.profiles import active_profile_ids, load_profile_payload
+from agent_flow.core.profiles import (
+    active_profile_ids,
+    load_profile_payload,
+    runtime_profile_selection,
+)
 from agent_flow.core.profile_routing import routed_profile_skills
 from agent_flow.core.worktree_isolation import git_repo_state, git_safe
 from agent_flow.core.skill_resolver import (
@@ -86,8 +91,8 @@ def merged_profile_payload(payloads: Sequence[dict]) -> dict:
 
     `update`만 하면 뒤 profile이 앞 profile의 `skills.required_review`와 `skills.external`을
     통째로 덮는다. react-native + android처럼 둘 다 활성인 조합에서 한쪽 routing이
-    조용히 사라지는 경로가 그것이다. 순서는 `active_profile_ids()`가 준 순서를
-    유지하고, domain 이름은 **먼저 온 profile이 이긴다** — detect 우선순위가 곧 소유권이다.
+    조용히 사라지는 경로가 그것이다. 선택된 profile 순서를 유지하고,
+    domain 이름은 **먼저 온 profile이 이긴다**.
     `required_review` group은 그 규칙을 쓸 수 없다: 6개 profile 전부가 `group: profile`을
     쓰므로 group 이름만으로 dedupe하면 두 번째 profile의 표가 통째로 사라진다. 그래서
     소유 profile id와 group 이름의 쌍으로 dedupe한다.
@@ -142,15 +147,26 @@ def merged_profile_payload(payloads: Sequence[dict]) -> dict:
 
 
 def resolved_profile(project_root: Path, requested: str | None = None) -> dict | None:
-    """활성 profile을 합친 payload. 호출자가 profile을 안 넘기면 여기가 유일한 출처다.
+    """요청이 없으면 runtime 선택을 합치고, 명시적 요청과 `auto`는 수동 선택을 따른다.
 
     실패는 조용히 넘기지 않는다. profile을 못 읽으면 skill_sources가 사라져
     required 집합이 조용히 줄고, 그게 status와 runner를 다시 갈라놓는다.
     """
     try:
+        fallback = False
+        if requested is None:
+            profile_ids, source = runtime_profile_selection(project_root)
+            fallback = (
+                source in {"AGENT_FLOW_PROFILE", "default"}
+                or os.environ.get("AGENT_FLOW_FALLBACK_GENERIC") == "1"
+            )
+        else:
+            profile_ids = active_profile_ids(project_root, requested or "auto")
         payloads = [
-            load_profile_payload(profile_id, project_root)
-            for profile_id in active_profile_ids(project_root, requested or "auto")
+            load_profile_payload(
+                profile_id, project_root, fallback_unknown_to_generic=fallback,
+            )
+            for profile_id in profile_ids
         ]
     except Exception as exc:  # yaml 오류까지 포함해야 status가 traceback으로 죽지 않는다
         print(f"agent-flow: profile을 읽지 못해 skill 판정이 축소됐다: {exc}", file=sys.stderr)

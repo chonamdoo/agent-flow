@@ -26,8 +26,7 @@ from agent_flow.core.local_skills import merged_profile_payload
 from agent_flow.core.phase_workflow import package_root
 from agent_flow.core.profiles import (
     resolve_project_profile_payload,
-    kit_declared_profile,
-    kit_declared_profiles,
+    runtime_profile_selection,
     project_profile_path,
 )
 from agent_flow.core.security import ensure_child_path, validate_safe_name
@@ -49,35 +48,22 @@ def resolve_profile(kit_root: Path, project_root: Path) -> tuple[str, dict[str, 
     Env-var override case stays lenient (the user explicitly set it; let
     them shoot their foot).
     """
-    forced = os.environ.get("AGENT_FLOW_PROFILE")
+    profile_ids, source = runtime_profile_selection(project_root)
     explicit_fallback = os.environ.get("AGENT_FLOW_FALLBACK_GENERIC") == "1"
-    if forced:
-        return load_single_profile(
-            kit_root,
-            forced,
-            strict_missing=False,
-            explicit_fallback=explicit_fallback,
-            source="AGENT_FLOW_PROFILE",
-            project_root=project_root,
-        )
-
-    from_kit_profiles = kit_declared_profiles(project_root)
-    if from_kit_profiles:
+    if source == ".agent-flow/kit.json:profiles":
         return load_profile_union(
             kit_root,
-            from_kit_profiles,
+            profile_ids,
             explicit_fallback=explicit_fallback,
             project_root=project_root,
         )
 
-    from_kit = kit_declared_profile(project_root)
-    profile_id = from_kit or "generic"
     return load_single_profile(
         kit_root,
-        profile_id,
-        strict_missing=bool(from_kit),
+        profile_ids[0],
+        strict_missing=source == ".agent-flow/kit.json:profile",
         explicit_fallback=explicit_fallback,
-        source=".agent-flow/kit.json:profile" if from_kit else "default",
+        source=source,
         project_root=project_root,
     )
 

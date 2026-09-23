@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from importlib import resources
@@ -260,6 +261,20 @@ def active_profile_ids(root: Path, requested: str = "auto") -> list[str]:
     if kit_profile:
         return [kit_profile]
     return [detect_profile(root)]
+
+
+def runtime_profile_selection(root: Path) -> tuple[list[str], str]:
+    """Return runtime profile IDs and their source, without installer auto-detection."""
+    forced = os.environ.get("AGENT_FLOW_PROFILE")
+    if forced:
+        return [forced], "AGENT_FLOW_PROFILE"
+    profiles = kit_declared_profiles(root)
+    if profiles:
+        return profiles, ".agent-flow/kit.json:profiles"
+    profile = kit_declared_profile(root)
+    if profile:
+        return [profile], ".agent-flow/kit.json:profile"
+    return ["generic"], "default"
 
 
 def load_profile(profile_id: str, root: Path | None = None) -> ProjectProfile:
