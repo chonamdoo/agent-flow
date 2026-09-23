@@ -25,6 +25,7 @@ from agent_flow.core.local_skills import (
     local_skill_prompt_block,
     merged_profile_payload,
     missing_local_skill_markers,
+    resolved_profile,
 )
 from agent_flow.core.profile_routing import (
     RoutedSkill,
@@ -244,6 +245,162 @@ def test_runner_profile_union_routes_like_the_flat_merge(tmp_path):
 
     assert union_routed == flat_routed
     assert "android-code-review" in union_routed
+
+
+@pytest.fixture
+def runtime_profile_project(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    monkeypatch.delenv("AGENT_FLOW_PROFILE", raising=False)
+    monkeypatch.delenv("AGENT_FLOW_FALLBACK_GENERIC", raising=False)
+    project = tmp_path / "config"
+    profiles = project / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    (project / ".agent-flow" / "kit.json").write_text(
+        '{"profiles": ["generic"]}', encoding="utf-8",
+    )
+    for profile_id in ("generic", "python"):
+        (profiles / f"{profile_id}.yaml").write_text(
+            json.dumps({
+                "id": profile_id,
+                "skills": {"required_review": [{
+                    "group": "profile",
+                    "skills": [f"{profile_id}-review"],
+                    "path_globs": ["**/*.py"],
+                }]},
+            }),
+            encoding="utf-8",
+        )
+    return project
+
+
+def test_status_completion_uses_the_runner_environment_profile(
+    runtime_profile_project, tmp_path, monkeypatch, capsys,
+):
+    from agent_flow import artifact
+    from agent_flow.core.phase_workflow import load_phase_workflow_definition
+    from agent_flow.core.profile_resolution import resolve_profile
+    from agent_flow.core.workflow_pin import workflow_pin_metadata
+
+    config = runtime_profile_project
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    monkeypatch.setenv("AGENT_FLOW_PROFILE", "python")
+
+    def observed_changes(root):
+        assert root == checkout
+        return ("src/example.py",)
+
+    monkeypatch.setattr(artifact, "changed_files", observed_changes)
+    workflows = config / ".agent-flow" / "workflows"
+    workflows.mkdir()
+    (workflows / "profile-check.yaml").write_text(
+        "id: profile-check\nphases:\n"
+        "  - id: review\n    artifact: review.md\n"
+        "    required_markers: ['review: pass']\n",
+        encoding="utf-8",
+    )
+    definition = load_phase_workflow_definition(config / ".agent-flow", "profile-check")
+    run = tmp_path / "run"
+    run.mkdir()
+    artifact.write_meta(run, {
+        "run_id": "profile-check",
+        "workflow": "profile-check",
+        "current_phase": "review",
+        "phase_index": 0,
+        **workflow_pin_metadata(definition, workflow="profile-check"),
+    })
+    gate = (
+        "## Completion Gate\nreview: pass\n"
+        "skill-availability: degraded\nskill-use-evidence: unavailable\n"
+        "project-local-skills: checked\nproject-local-skills-used: n/a\n"
+        "missing-required-profile-skills: generic-review\n"
+    )
+    review = run / "review.md"
+    review.write_text(gate, encoding="utf-8")
+    profile_id, runner_profile = resolve_profile(config / ".agent-flow", config)
+    expected = missing_local_skill_markers(
+        gate, config, "review", profile=runner_profile,
+        changed_files=observed_changes(checkout), architecture_root=checkout,
+        source_root=checkout,
+    )
+    assert profile_id == "python"
+    assert expected == ["missing-required-profile-skills: python-review"]
+    assert artifact._missing_completion_markers(
+        run, "profile-check", "review", config_root=config, project_root=checkout,
+    ) == expected
+
+    artifact.ActiveRun(run, "profile-check", "profile-check", "", "").print_status(
+        config_root=config, project_root=checkout,
+    )
+    status_line = next(
+        line for line in capsys.readouterr().out.splitlines()
+        if line.startswith("status_json: ")
+    )
+    assert json.loads(status_line.removeprefix("status_json: "))[
+        "missing_completion_markers"
+    ] == expected
+
+    review.write_text(gate.replace("generic-review", "python-review"), encoding="utf-8")
+    assert artifact._missing_completion_markers(
+        run, "profile-check", "review", config_root=config, project_root=checkout,
+    ) == []
+
+
+def test_runtime_fallback_does_not_change_explicit_or_auto_selection(
+    runtime_profile_project, monkeypatch,
+):
+    from agent_flow.core.profile_resolution import resolve_profile
+
+    project = runtime_profile_project
+
+    def required(profile):
+        return _names(routed_profile_skills(
+            profile, phase_id="review", changed_files=["src/example.py"],
+        ))
+
+    assert required(resolved_profile(project)) == {"generic-review"}
+    monkeypatch.setenv("AGENT_FLOW_PROFILE", "missing-profile")
+    assert required(resolve_profile(project / ".agent-flow", project)[1]) == {"generic-review"}
+    assert required(resolved_profile(project)) == {"generic-review"}
+    assert required(resolved_profile(project, "python")) == {"python-review"}
+    assert required(resolved_profile(project, "auto")) == {"generic-review"}
+
+    monkeypatch.setenv("AGENT_FLOW_PROFILE", "python")
+    assert required(resolved_profile(project, "generic")) == {"generic-review"}
+    (project / ".agent-flow" / "kit.json").unlink()
+    (project / "pyproject.toml").write_text("[project]\nname = 'sample'\n", encoding="utf-8")
+    monkeypatch.delenv("AGENT_FLOW_PROFILE")
+    assert required(resolve_profile(project / ".agent-flow", project)[1]) == {"generic-review"}
+    assert required(resolved_profile(project)) == {"generic-review"}
+    assert required(resolved_profile(project, "auto")) == {"python-review"}
+
+
+def test_runtime_missing_and_malformed_profiles_keep_distinct_recovery(
+    runtime_profile_project, monkeypatch, capsys,
+):
+    from agent_flow.core.profile_resolution import resolve_profile
+
+    project = runtime_profile_project
+    (project / ".agent-flow" / "kit.json").write_text(
+        '{"profiles": ["missing-profile"]}', encoding="utf-8",
+    )
+    with pytest.raises(FileNotFoundError, match="missing-profile"):
+        resolve_profile(project / ".agent-flow", project)
+    assert resolved_profile(project) is None
+    assert "missing-profile" in capsys.readouterr().err
+
+    monkeypatch.setenv("AGENT_FLOW_FALLBACK_GENERIC", "1")
+    assert _names(routed_profile_skills(
+        resolved_profile(project), phase_id="review", changed_files=["src/example.py"],
+    )) == {"generic-review"}
+    monkeypatch.setenv("AGENT_FLOW_PROFILE", "python")
+    (project / ".agent-flow" / "profiles" / "python.yaml").write_text(
+        "- not-a-profile\n", encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="mapping"):
+        resolve_profile(project / ".agent-flow", project)
+    assert resolved_profile(project) is None
+    assert "mapping" in capsys.readouterr().err
 
 
 def test_first_profile_owns_a_duplicated_group():
