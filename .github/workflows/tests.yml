@@ -58,6 +58,8 @@ jobs:
         env:
           PYTHONPATH: src
           PYTEST_K: ${{ inputs.pytest_k }}
+          AGENT_FLOW_SKIP_CODEX_TRUST: "1"
+          AGENT_FLOW_NO_UPDATE_CHECK: "1"
         run: |
           python3 - <<'PY'
           import json
@@ -67,7 +69,7 @@ jobs:
 
           command = [
               sys.executable, "-m", "pytest", "tests", "--collect-only", "-q",
-              "-p", "no:cacheprovider", "-o", "addopts=",
+              "-p", "no:cacheprovider", "-o", "addopts=", "--color=no", "-n", "0",
           ]
           if os.environ["PYTEST_K"]:
               command.extend(["-k", os.environ["PYTEST_K"]])
