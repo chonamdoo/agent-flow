@@ -51,7 +51,9 @@ from agent_flow.core.local_skills import (
 )
 from agent_flow.core.markers import missing_markers, normalize_required_markers
 from agent_flow.core.phase_workflow import (
+    CursorScope,
     PhaseWorkflowDefinition,
+    RunCursor,
     WorkflowDriftError,
     effective_phase_markers,
     find_kit_root,
@@ -143,11 +145,16 @@ class ActiveRun:
         for a in artifacts:
             print(f"  - {a}")
         try:
+            definition = load_run_workflow_definition(
+                find_kit_root(), self.workflow, meta, config_root=config_root,
+            )
+            cursor = RunCursor.from_meta(meta, CursorScope.of(definition))
             contract = _phase_contract(
                 self.path,
                 self.workflow,
                 current_phase,
                 config_root=config_root,
+                definition=definition,
             )
         except WorkflowDriftError as exc:
             print_structured_status(workflow_status_payload(
@@ -200,7 +207,7 @@ class ActiveRun:
             architecture_reason = "architecture_policy_unreadable"
             detail = str(exc)
         entry_missing: list[str] = []
-        checkpoint = "terminal" if current_phase == "-" else current_phase
+        checkpoint = "terminal" if cursor.phase_index == len(definition.phases) else current_phase
         if architecture_reason is None and checkpoint in SPEC_PRE_MERGE_PHASES | SPEC_PUBLICATION_PHASES:
             entry_missing = missing_spec_item_evidence(
                 project, self.path, checkpoint, "", task_text=str(meta.get("task", "")),
@@ -824,14 +831,17 @@ def _review_repair_backward(definition: PhaseWorkflowDefinition, phase_id: str) 
 
 
 def _phase_contract(
-    run_path: Path, workflow: str, phase_id: str, *, config_root: Path | None = None
+    run_path: Path, workflow: str, phase_id: str, *, config_root: Path | None = None,
+    definition: PhaseWorkflowDefinition | None = None,
 ) -> PhaseArtifactContract:
     """Resolve a phase contract without falling back from an invalid run pin."""
-    meta = read_meta(run_path)
-    if (run_path / ACTIVE_MARKER).is_file() or meta.get("workflow") or "workflow_definition" in meta:
-        definition = load_run_workflow_definition(
-            find_kit_root(), workflow, meta, config_root=config_root,
-        )
+    if definition is None:
+        meta = read_meta(run_path)
+        if (run_path / ACTIVE_MARKER).is_file() or meta.get("workflow") or "workflow_definition" in meta:
+            definition = load_run_workflow_definition(
+                find_kit_root(), workflow, meta, config_root=config_root,
+            )
+    if definition is not None:
         phase = next((item for item in definition.phases if item.id == phase_id), None)
         if phase is None:
             return PhaseArtifactContract(
