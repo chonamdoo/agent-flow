@@ -118,9 +118,13 @@ def fetch_pr(
     required_checks: tuple[str, ...] = (),
     require_ready: bool = False,
     run_dir: Path | None = None,
+    record_feedback: bool = True,
 ) -> PRSnapshot:
     """Query and classify a PR, publishing feedback for ACK when run_dir is set.
 
+    With `record_feedback=False`, feedback already ACKed in `run_dir` is still
+    excluded but nothing is written and the run lease is not taken, so callers
+    that already hold the lease can observe without deadlocking.
     Query or feedback-storage failures return an explicit error snapshot.
     Publishing waits for the run lease; success is never returned before storage.
     """
@@ -148,7 +152,7 @@ def fetch_pr(
             number, data, required_checks=required_checks, repo=repository,
             require_ready=require_ready, handled_ids=handled,
         )
-        if run_dir is not None and snapshot.status != "error":
+        if run_dir is not None and record_feedback and snapshot.status != "error":
             _record_feedback_observation(run_dir, snapshot)
         return snapshot
     except (OSError, ValueError, WorktreeIsolationError) as exc:

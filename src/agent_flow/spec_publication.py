@@ -88,9 +88,12 @@ def observe_spec_publication(
         return SpecPublicationEvidence(missing=(
             f"pre-merge SPEC: cannot verify required CI gates: {exc}",
         ))
+    # ACK한 feedback은 pr-watch와 같이 제외하되, 이 관측은 runner lease 안에서도
+    # 불리므로 run 상태를 기록하지 않는다.
     snapshot = fetch_pr(
         int(match.group(2)), repo=f"{url.netloc}/{match.group(1)}",
         required_checks=required_checks, require_ready=True,
+        run_dir=run_dir, record_feedback=False,
     )
     if snapshot.status == "error":
         return SpecPublicationEvidence(missing=(
