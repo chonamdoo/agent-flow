@@ -47,7 +47,6 @@ import {
   installHookLauncher,
   syncManagedWorktreeHostHooks,
   isRecordedKitAsset,
-  isPruneBackupName,
   isRetiredHookCommand,
   KIT_ASSETS_RELATIVE,
   KIT_ROOT,
@@ -104,7 +103,6 @@ import {
   validateSkillDependencies,
   writeKitAssetRecord,
   withoutInstallRootOption,
-  writePruneBackup,
 } from "../lib/installer-shared.mjs";
 
 // 정의의 정본은 패키지 안이다. `agent-flow-kit.mjs`와 같은 자리를 본다.
@@ -224,7 +222,6 @@ function copyDir(
   pruneExtraneous = false,
   preservedExtraneousRootNames = new Set(),
   allowedRootDirs = null,
-  backupPrunedRoot = null,
 ) {
   // Recursive copy without overwriting user-modified files. If a file exists
   // at dest with different content, leave it (user customization wins) and
@@ -264,7 +261,6 @@ function copyDir(
         pruneExtraneous,
         preservedExtraneousRootNames,
         null,
-        backupPrunedRoot,
       );
       written += r.written;
       skipped += r.skipped;
@@ -292,22 +288,7 @@ function copyDir(
       if (sourceNames.has(entry.name) || (isRoot && preservedExtraneousRootNames.has(entry.name))) {
         continue;
       }
-      const target = path.join(dest, entry.name);
-      if (backupPrunedRoot) {
-        // 백업까지 prune하면 다음 install이 그것을 지운다. 그러면 복구 사본은
-        // 재설치 한 번만 버틴다.
-        if (isPruneBackupName(entry.name)) {
-          continue;
-        }
-        if (entry.isFile()) {
-          const backup = writePruneBackup(target);
-          console.log(
-            `${PRUNE_NOTICE_PREFIX}${path.relative(backupPrunedRoot, target)}` +
-              ` (backup: ${path.relative(backupPrunedRoot, backup)})`,
-          );
-        }
-      }
-      fs.rmSync(target, { recursive: true, force: true });
+      fs.rmSync(path.join(dest, entry.name), { recursive: true, force: true });
     }
   }
   return { written, skipped };
@@ -384,11 +365,6 @@ function writeFileIfMissingOrSame(dest, content, force = false) {
   }
   atomicWriteFileSync(dest, content);
   return true;
-}
-
-function writeManagedFile(pathName, content) {
-  ensureDir(path.dirname(pathName));
-  fs.writeFileSync(pathName, content, "utf8");
 }
 
 
@@ -960,10 +936,6 @@ function install() {
   if (rootContext === "legacy") {
     upsertGitExclude(PROJECT, ROOT_CONTEXT_FILES.filter((label) => bootstrapBlockIsOurs(PROJECT, label)));
   }
-  writeManagedFile(
-    path.join(AF_DIR, "workflows", "full-feature.yaml"),
-    fs.readFileSync(path.join(PACKAGED_ASSETS, "workflows", "full-feature.yaml"), "utf8"),
-  );
 
   // Copy bundled skills into project-local skills dir.
   // Host-AI-specific skill paths (`.claude/skills/`, `.Codex/skills/`, `.omp/skills/`) are
@@ -988,17 +960,6 @@ function install() {
     FORCE_MANAGED,
     new Set(["index.json", "catalog.lock.json"]),
     installSelection.copyRootNames,
-  );
-  const workflowsCopied = copyDir(
-    path.join(PACKAGED_ASSETS, "workflows"),
-    path.join(AF_DIR, "workflows"),
-    new Set(),
-    true,
-    true,
-    true,
-    new Set(),
-    null,
-    PROJECT,
   );
   // kit이 배포하는 profile은 갱신한다. 사용자 편집을 보호한다고 두면 새 kit이
   // 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다.
@@ -1173,7 +1134,6 @@ function install() {
     hook_launcher_digest: hookLauncherDigest(PROJECT),
     project_launcher_python: projectLauncherPythonRecord(),
     skills_copied: skillsCopied,
-    workflows_copied: workflowsCopied,
     profiles_copied: profilesCopied,
     templates_copied: templatesCopied,
     codex_agents_copied: codexAgentsCopied,
@@ -1204,7 +1164,6 @@ function install() {
   // 프로젝트 루트 쪽으로 맞춘다.
   console.log(`  root    : ${PROJECT}`);
   console.log(`  skills  : ${skillsCopied.written} written, ${skillsCopied.skipped} skipped`);
-  console.log(`  workflows: ${workflowsCopied.written} written, ${workflowsCopied.skipped} skipped`);
   console.log(`  profiles : ${profilesCopied.written} written, ${profilesCopied.pruned} pruned`);
   console.log(`  claude  : agent-flow skill ${claudeSkillStatus}`);
   console.log(`  codex   : agent-flow skill ${codexSkillStatus}`);

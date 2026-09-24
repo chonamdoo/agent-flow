@@ -172,23 +172,6 @@ function yamlFileNames(rel) {
     .sort();
 }
 
-function assertSameYamlFileSet(sourceDir, otherDir) {
-  const sourceFiles = yamlFileNames(sourceDir);
-  const otherFiles = yamlFileNames(otherDir);
-  const sourceSet = new Set(sourceFiles);
-  const otherSet = new Set(otherFiles);
-  for (const file of sourceFiles) {
-    if (!otherSet.has(file)) {
-      failures.push(`${otherDir} missing ${file} from ${sourceDir}`);
-    }
-  }
-  for (const file of otherFiles) {
-    if (!sourceSet.has(file)) {
-      failures.push(`${otherDir} has extra ${file} not in ${sourceDir}`);
-    }
-  }
-}
-
 function assertSameRelativeFileSet(sourceDir, otherDir) {
   const sourceFiles = recursiveFiles(sourceDir).map((file) => path.relative(sourceDir, file)).sort();
   const otherFiles = recursiveFiles(otherDir).map((file) => path.relative(otherDir, file)).sort();
@@ -290,10 +273,7 @@ assertLauncherContractIsSingleValued();
   }
 }
 
-const fullFeatureWorkflowCopies = [
-  `${PACKAGED_WORKFLOWS}/full-feature.yaml`,
-  ...(CHECK_INSTALLED_COPY ? [".agent-flow/workflows/full-feature.yaml"] : []),
-];
+const fullFeatureWorkflowCopies = [`${PACKAGED_WORKFLOWS}/full-feature.yaml`];
 
 const exportedWorkflow = workflowExport("full-feature");
 if (exportedWorkflow) {
@@ -491,15 +471,8 @@ for (const rel of fullFeatureWorkflowCopies) {
   assertNotContains(rel, "grill-me");
 }
 
-// 정의는 패키지 안에 한 벌만 있다. 예전에는 루트 사본과 바이트 비교를 했지만
-// 비교할 두 번째 사본이 없어졌다. 설치본이 정본에서 밀리지 않았는지만 본다.
-if (CHECK_INSTALLED_COPY) {
-  assertSameYamlFileSet(PACKAGED_WORKFLOWS, ".agent-flow/workflows");
-  for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, PACKAGED_WORKFLOWS)).sort()) {
-    if (!entry.endsWith(".yaml")) continue;
-    assertSame(`${PACKAGED_WORKFLOWS}/${entry}`, `.agent-flow/workflows/${entry}`);
-  }
-}
+// 정의는 패키지 안에 한 벌만 있다. 설치본도 프로젝트에 사본을 두지 않고
+// runtime 패키지(`.agent-flow/runtime/python/agent_flow/workflows`)를 읽는다.
 assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "installed Claude and Codex CLIs only");
 assertNotContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "Gemini sub-agent");
 assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "reviewer-source: sub-agent");
@@ -1270,9 +1243,6 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     if (fs.existsSync(path.join(tempRoot, ".agent-flow", "templates", "_stale", "old.md"))) {
       failures.push(`${label} force install left stale .agent-flow/templates file`);
     }
-    if (fs.existsSync(path.join(tempRoot, ".agent-flow", "workflows", "stale.yaml"))) {
-      failures.push(`${label} force install left stale .agent-flow/workflows file`);
-    }
     if (fs.existsSync(path.join(tempRoot, ".agent-flow", "skills", "stale-skill", "SKILL.md"))) {
       failures.push(`${label} force install left stale .agent-flow/skills file`);
     }
@@ -1300,7 +1270,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     }
     assertInstalledHookParity(label, tempRoot);
     assertSkillIndexComplete(label, tempRoot);
-    assertInstallerWorkflowBackupAndTimestamps(label, tempRoot, installer);
+    assertInstallerTimestamps(label, tempRoot, installer);
     assertInstalledBootstrapDerivesFromTemplate(label, tempRoot);
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -1359,16 +1329,9 @@ function assertInstalledBootstrapDerivesFromTemplate(label, tempRoot) {
 }
 
 
-// 두 installer는 같은 파일명과 같은 문장으로 알려야 한다. 문구가 갈라지면
-// 사용자는 어느 CLI를 썼는지에 따라 다른 손실 통지를 받는다.
-function assertInstallerWorkflowBackupAndTimestamps(label, tempRoot, installer) {
-  const workflowsDir = path.join(tempRoot, ".agent-flow", "workflows");
+// 두 installer가 kit.json의 installed_at/updated_at에 같은 뜻을 담아야 한다.
+function assertInstallerTimestamps(label, tempRoot, installer) {
   const kitPath = path.join(tempRoot, ".agent-flow", "kit.json");
-  const customRel = path.join(".agent-flow", "workflows", "parity-custom.yaml");
-  const custom = path.join(tempRoot, customRel);
-  const backup = `${custom}.removed`;
-  const customText = "id: parity-custom\nphases: []\n";
-  const expectedNotice = `  - pruned: ${customRel} (backup: ${customRel}.removed)`;
   const before = readJsonSafe(kitPath);
   if (typeof before?.installed_at !== "string" || typeof before?.updated_at !== "string") {
     failures.push(`${label} kit.json is missing the installed_at/updated_at pair`);
@@ -1376,7 +1339,6 @@ function assertInstallerWorkflowBackupAndTimestamps(label, tempRoot, installer) 
   }
   let previous = before;
   for (const args of [["install"], ["install"], ["install", "--force-managed"]]) {
-    fs.writeFileSync(custom, customText, "utf8");
     const result = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin", installer), ...args], {
       cwd: tempRoot,
       encoding: "utf8",
@@ -1388,15 +1350,6 @@ function assertInstallerWorkflowBackupAndTimestamps(label, tempRoot, installer) 
       failures.push(`${label} ${args.join(" ")} failed: ${result.error?.message || result.stderr.trim() || result.status}`);
       return;
     }
-    if (!result.stdout.split("\n").includes(expectedNotice)) {
-      failures.push(`${label} ${args.join(" ")} did not report the pruned workflow as \`${expectedNotice}\``);
-    }
-    if (fs.existsSync(custom)) {
-      failures.push(`${label} ${args.join(" ")} left the extraneous ${customRel}`);
-    }
-    if (!fs.existsSync(backup) || fs.readFileSync(backup, "utf8") !== customText) {
-      failures.push(`${label} ${args.join(" ")} did not back up ${customRel}`);
-    }
     const after = readJsonSafe(kitPath);
     if (after?.installed_at !== before.installed_at) {
       failures.push(`${label} ${args.join(" ")} reset kit.json installed_at`);
@@ -1405,10 +1358,6 @@ function assertInstallerWorkflowBackupAndTimestamps(label, tempRoot, installer) 
       failures.push(`${label} ${args.join(" ")} did not refresh kit.json updated_at`);
     }
     previous = after ?? previous;
-  }
-  const backups = fs.readdirSync(workflowsDir).filter((name) => name.startsWith("parity-custom.yaml.removed"));
-  if (backups.length !== 1) {
-    failures.push(`${label} repeated install multiplied workflow backups: ${backups.join(", ")}`);
   }
   const legacy = "2020-01-01T00:00:00.000Z";
   const legacyPayload = { ...previous, installed_at: legacy };
@@ -1720,9 +1669,6 @@ function seedStaleForceManagedInstall(root) {
   const staleTemplate = path.join(root, ".agent-flow", "templates", "_stale", "old.md");
   fs.mkdirSync(path.dirname(staleTemplate), { recursive: true });
   fs.writeFileSync(staleTemplate, "stale\n", "utf8");
-  const staleWorkflow = path.join(root, ".agent-flow", "workflows", "stale.yaml");
-  fs.mkdirSync(path.dirname(staleWorkflow), { recursive: true });
-  fs.writeFileSync(staleWorkflow, "id: stale\nphases: []\n", "utf8");
   const staleSkill = path.join(root, ".agent-flow", "skills", "stale-skill", "SKILL.md");
   fs.mkdirSync(path.dirname(staleSkill), { recursive: true });
   fs.writeFileSync(staleSkill, "---\nname: stale-skill\n---\n# Stale Skill\n", "utf8");

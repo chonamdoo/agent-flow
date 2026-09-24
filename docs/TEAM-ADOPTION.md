@@ -181,9 +181,11 @@ implemented.
 `required_markers` in `src/agent_flow/workflows/<name>.yaml`, and
 `_missing_required_markers` in `src/agent_flow/runner.py` blocks the advance when the artifact
 does not carry them. There is no per-team ownership of that list and no override file for
-workflows: `PROJECT_OVERRIDE_KEYS` covers profiles only, and the installed
-`.agent-flow/workflows/<name>.yaml` is refreshed by re-running the installer, so a hand edit
-does not survive. A procedure for proposing and accepting a marker change is not implemented.
+workflows: `PROJECT_OVERRIDE_KEYS` covers profiles only. Runs read the definition from the
+installed runtime, `.agent-flow/runtime/python/agent_flow/workflows/<name>.yaml`, which the
+installer overwrites, so a hand edit does not survive. The installer no longer writes
+`.agent-flow/workflows/`; a copy left there by an older install is not used for runs. A
+procedure for proposing and accepting a marker change is not implemented.
 
 **A shared convention pack that is versioned and reviewable rather than copied per repository.**
 Today a convention document is either committed into each repository under `skills/`

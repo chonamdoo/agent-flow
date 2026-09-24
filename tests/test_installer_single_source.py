@@ -553,7 +553,7 @@ def test_agent_flow_install_entry_point_still_installs(tmp_path: Path):
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert (project / ".agent-flow" / "workflows" / "default.yaml").is_file()
+    assert (project / ".agent-flow" / "kit.json").is_file()
 
 
 @pytest.mark.parametrize(

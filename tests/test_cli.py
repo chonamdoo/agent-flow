@@ -1867,7 +1867,6 @@ class CliTest(unittest.TestCase):
             self.assertEqual(kit["profile"], "generic")
             self.assertEqual(kit["install_scope"], "project")
             self.assertTrue((project_root / ".agent-flow" / "runs").is_dir())
-            self.assertTrue((project_root / ".agent-flow" / "workflows" / "full-feature.yaml").is_file())
             self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "CLAUDE.md").is_file())
             runtime = project_root / ".agent-flow" / "runtime" / "python"
@@ -4171,7 +4170,6 @@ if (codexContext !== undefined) {
     def test_node_installers_refresh_managed_workflow_skills(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
         rels = (
-            ".agent-flow/workflows/full-feature.yaml",
             ".agent-flow/skills/full-feature-workflow/SKILL.md",
             ".agent-flow/skills/product-brief/SKILL.md",
             ".agent-flow/skills/plan-reviewer/SKILL.md",
@@ -4185,9 +4183,7 @@ if (codexContext !== undefined) {
             for installer_name in installers:
                 with self.subTest(installer=installer_name):
                     project_root = root / f"{installer_name}-managed"
-                    stale_workflow = project_root / ".agent-flow" / "workflows" / "full-feature.yaml"
-                    stale_workflow.parent.mkdir(parents=True)
-                    stale_workflow.write_text("stale: true\n", encoding="utf-8")
+                    project_root.mkdir()
 
                     result = subprocess.run(
                         (
@@ -4202,8 +4198,7 @@ if (codexContext !== undefined) {
                     )
 
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    # managed workflow와 source-backed workflow skill이 모두 설치되어야 한다.
-                    self.assertIn("id: domain-grill", stale_workflow.read_text(encoding="utf-8"))
+                    # source-backed workflow skill이 모두 설치되어야 한다.
                     for rel in rels:
                         self.assertTrue((project_root / rel).is_file(), rel)
                     installed_roots[installer_name] = project_root
@@ -4225,14 +4220,12 @@ if (codexContext !== undefined) {
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
 
-            workflow = project_root / ".agent-flow" / "workflows" / "full-feature.yaml"
             prompt = project_root / ".agent-flow" / "prompts" / "pr-watch.md"
             bootstrap = project_root / ".agent-flow" / "bootstrap" / "AGENTS.md"
             claude_bootstrap = project_root / ".agent-flow" / "bootstrap" / "CLAUDE.md"
             skill = project_root / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md"
             rules = project_root / ".agent-flow" / "rules" / "workflow-contract.md"
             runtime_lint = project_root / ".agent-flow" / "runtime" / "python" / "agent_flow" / "core" / "architecture_lint.py"
-            workflow.write_text("stale workflow\n", encoding="utf-8")
             prompt.write_text("stale prompt\n", encoding="utf-8")
             bootstrap.write_text("stale bootstrap\n", encoding="utf-8")
             claude_bootstrap.write_text("stale claude bootstrap\n", encoding="utf-8")
@@ -4242,10 +4235,6 @@ if (codexContext !== undefined) {
 
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
 
-            self.assertIn("id: full-feature", workflow.read_text(encoding="utf-8"))
-            self.assertIn("Reviewers are installed Claude and Codex CLIs only", workflow.read_text(encoding="utf-8"))
-            self.assertNotIn("Gemini sub-agent", workflow.read_text(encoding="utf-8"))
-            self.assertIn("multi_review: true", workflow.read_text(encoding="utf-8"))
             self.assertIn("status: ci-failed", prompt.read_text(encoding="utf-8"))
             self.assertIn("def main(", runtime_lint.read_text(encoding="utf-8"))
             self.assertNotIn("stale runtime", runtime_lint.read_text(encoding="utf-8"))
@@ -4780,9 +4769,6 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            source_workflow = (Path(__file__).resolve().parents[1] / "src" / "agent_flow" / "workflows" / "full-feature.yaml").read_text(encoding="utf-8")
-            installed_workflow = (project_root / ".agent-flow" / "workflows" / "full-feature.yaml").read_text(encoding="utf-8")
-            self.assertEqual(installed_workflow, source_workflow)
             prompt = (project_root / ".agent-flow" / "prompts" / "product-brief.md").read_text(encoding="utf-8")
             self.assertIn("Apply YC office-hours style pressure", prompt)
             self.assertNotIn("Validate demand, status quo", prompt)

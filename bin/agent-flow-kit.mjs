@@ -45,7 +45,6 @@ import {
   installProjectLauncher,
   installHookLauncher,
   syncManagedWorktreeHostHooks,
-  isPruneBackupName,
   isRetiredHookCommand,
   KIT_ASSETS_RELATIVE,
   KIT_ROOT,
@@ -61,7 +60,6 @@ import {
   projectLauncherPythonRecord,
   PRUNE_BACKUP_SUFFIX,
   PRUNE_BACKUP_VERSIONED,
-  PRUNE_NOTICE_PREFIX,
   pruneRetiredHooks,
   isSymlinkPath,
   pruneRetiredHookScripts,
@@ -101,7 +99,6 @@ import {
   upsertSkillIndexBlock,
   validateSkillDependencies,
   writeKitAssetRecord,
-  writePruneBackup,
 } from "../lib/installer-shared.mjs";
 
 const command = process.argv[2];
@@ -180,7 +177,7 @@ function installProject(requestedRoot) {
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, root);
   const phases = fullFeaturePhases();
 
-  for (const name of ["runs", "state", "handoffs", "team", "workflows", "skills", "templates", "prompts", "rules", "bootstrap"]) {
+  for (const name of ["runs", "state", "handoffs", "team", "skills", "templates", "prompts", "rules", "bootstrap"]) {
     fs.mkdirSync(path.join(agentFlowDir, name), { recursive: true });
   }
   fs.mkdirSync(path.join(agentFlowDir, "local-skills"), { recursive: true });
@@ -214,18 +211,6 @@ function installProject(requestedRoot) {
     project_launcher_python: projectLauncherPythonRecord(),
   };
 
-  writeManagedFile(path.join(agentFlowDir, "workflows", "full-feature.yaml"), fullFeatureWorkflowYaml());
-  copyBundledDirIfMissingOrSame(
-    path.join(PACKAGED_ASSETS, "workflows"),
-    path.join(agentFlowDir, "workflows"),
-    true,
-    new Set(),
-    true,
-    true,
-    new Set(),
-    null,
-    root,
-  );
   const recordedAssets = readKitAssetRecord(root);
   const writtenAssets = new Map();
   upgradeBundledSkills(
@@ -1163,7 +1148,7 @@ function assertInstalled(root) {
     : [];
   const required = [
     path.join(root, ".agent-flow", "kit.json"),
-    path.join(root, ".agent-flow", "workflows", "full-feature.yaml"),
+    path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow", "workflows", "full-feature.yaml"),
     path.join(root, ".agent-flow", "skills", "index.json"),
     path.join(root, ".agent-flow", "skills", "full-feature-workflow", "SKILL.md"),
     ...phases.map((phase) => path.join(root, ".agent-flow", "prompts", `${phase.id}.md`)),
@@ -1670,7 +1655,6 @@ function copyBundledDirIfMissingOrSame(
   pruneExtraneous = false,
   preservedExtraneousRootNames = new Set(),
   allowedRootDirs = null,
-  backupPrunedRoot = null,
 ) {
   if (!fs.existsSync(src)) {
     return;
@@ -1697,7 +1681,7 @@ function copyBundledDirIfMissingOrSame(
         removeManagedDirIfSame(srcPath, destPath, force);
         continue;
       }
-      copyBundledDirIfMissingOrSame(srcPath, destPath, force, excludedRootDirs, false, pruneExtraneous, preservedExtraneousRootNames, null, backupPrunedRoot);
+      copyBundledDirIfMissingOrSame(srcPath, destPath, force, excludedRootDirs, false, pruneExtraneous, preservedExtraneousRootNames, null);
       continue;
     }
     if (!entry.isFile()) {
@@ -1711,30 +1695,10 @@ function copyBundledDirIfMissingOrSame(
       if (sourceNames.has(entry.name) || (isRoot && preservedExtraneousRootNames.has(entry.name))) {
         continue;
       }
-      const target = path.join(dest, entry.name);
-      if (backupPrunedRoot) {
-        // 백업까지 prune하면 다음 install이 그것을 지운다. 그러면 복구 사본은
-        // 재설치 한 번만 버틴다.
-        if (isPruneBackupName(entry.name)) {
-          continue;
-        }
-        if (entry.isFile()) {
-          const backup = writePruneBackup(target);
-          console.log(
-            `${PRUNE_NOTICE_PREFIX}${path.relative(backupPrunedRoot, target)}` +
-              ` (backup: ${path.relative(backupPrunedRoot, backup)})`,
-          );
-        }
-      }
-      fs.rmSync(target, { recursive: true, force: true });
+      fs.rmSync(path.join(dest, entry.name), { recursive: true, force: true });
     }
   }
 }
-
-
-// prune은 source에 없는 파일을 지운다. 사용자가 직접 만든 workflow가 여기
-// 걸리면 경고도 사본도 없이 사라졌다. 같은 내용이 이미 백업돼 있으면 다시
-// 쓰지 않는다 — 재설치마다 사본이 불어나면 그것대로 잃는 것과 같다.
 
 function removeManagedDirIfSame(src, dest, force = false) {
   if (!fs.existsSync(dest)) {
@@ -2363,10 +2327,6 @@ function managedBootstrapMarkdown(label) {
 function newRunId() {
   const stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
   return `${stamp}-${Math.random().toString(16).slice(2, 10)}`;
-}
-
-function fullFeatureWorkflowYaml() {
-  return fullFeatureWorkflow().text;
 }
 
 

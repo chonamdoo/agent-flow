@@ -3265,77 +3265,36 @@ def test_reinstall_does_not_duplicate_the_skill_index(tmp_path: Path, binary: st
     assert second.count("[agent-flow skill index]") == 1
 
 
-def _workflow_backups(project: Path, stem: str) -> dict[str, str]:
-    workflows = project / ".agent-flow" / "workflows"
-    return {
-        path.name: path.read_text(encoding="utf-8")
-        for path in workflows.iterdir()
-        if path.name.startswith(f"{stem}.removed")
-    }
-
-
 def _kit_json(project: Path) -> dict:
     return json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_pruned_custom_workflow_leaves_a_backup_and_says_where(tmp_path: Path, binary: str) -> None:
-    """반증: prune이 사용자가 만든 workflow를 경고도 사본도 없이 지웠다.
+def test_install_leaves_project_workflows_untouched(tmp_path: Path, binary: str) -> None:
+    """반증: runner는 runtime 사본만 읽는데 install이 `.agent-flow/workflows`를 만들고 prune했다.
 
-    알리지 않으면 사용자는 자기 workflow가 사라진 것을 다음 run이 깨질 때 안다.
-    그때는 되돌릴 원본이 없다. 두 진입점이 같은 문장을 내야 한다 — 한쪽만
-    알리면 어느 CLI를 썼는지에 따라 손실이 조용해진다.
+    아무도 읽지 않는 사본은 만들지 않는다. 이미 있는 파일은 소유를 증명할 기록이 없고
+    옛 run 복구(`workflow_pin`)가 그 바이트를 쓸 수 있으니, 어느 install도 건드리지 않는다.
     """
-    project = tmp_path / f"prune-{binary}"
-    project.mkdir()
-    assert _install_with(binary, project).returncode == 0
+    fresh = tmp_path / f"fresh-{binary}"
+    fresh.mkdir()
+    assert _install_with(binary, fresh).returncode == 0
+    assert not (fresh / ".agent-flow" / "workflows").exists()
 
-    body = "id: my-custom\nphases: []\n"
-    custom = project / ".agent-flow" / "workflows" / "my-custom.yaml"
-    custom.write_text(body, encoding="utf-8")
-    result = _install_with(binary, project)
-    assert result.returncode == 0
-
-    assert not custom.exists()
-    backup = custom.with_name("my-custom.yaml.removed")
-    assert backup.read_text(encoding="utf-8") == body
-    # 백업이 `.yaml`로 끝나면 workflow 로더가 그것을 workflow로 되살려 읽는다.
-    assert not backup.name.endswith(".yaml")
-
-    expected = (
-        "  - pruned: .agent-flow/workflows/my-custom.yaml"
-        " (backup: .agent-flow/workflows/my-custom.yaml.removed)"
-    )
-    assert result.stdout.splitlines().count(expected) == 1, result.stdout
-
-
-@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_repeated_install_never_multiplies_workflow_backups(tmp_path: Path, binary: str) -> None:
-    """불변: 백업은 잃은 버전당 하나다.
-
-    `.removed`가 prune 대상에 남아 있으면 다음 install이 백업을 지운다. 반대로
-    매번 새 이름을 붙이면 재설치 횟수만큼 사본이 쌓인다. 둘 다 손실이다.
-    """
-    project = tmp_path / f"prune-idem-{binary}"
-    project.mkdir()
-    assert _install_with(binary, project).returncode == 0
-    custom = project / ".agent-flow" / "workflows" / "my-custom.yaml"
-
-    first = "id: my-custom\nphases: []\n"
-    for _ in range(3):
-        custom.write_text(first, encoding="utf-8")
-        assert _install_with(binary, project).returncode == 0
-    assert _workflow_backups(project, "my-custom.yaml") == {"my-custom.yaml.removed": first}
-
-    second = "id: my-custom\nphases: [edited]\n"
-    for _ in range(2):
-        custom.write_text(second, encoding="utf-8")
-        assert _install_with(binary, project).returncode == 0
-    digest = hashlib.sha256(second.encode("utf-8")).hexdigest()[:8]
-    assert _workflow_backups(project, "my-custom.yaml") == {
-        "my-custom.yaml.removed": first,
-        f"my-custom.yaml.removed.{digest}": second,
+    project = tmp_path / f"existing-{binary}"
+    workflows = project / ".agent-flow" / "workflows"
+    workflows.mkdir(parents=True)
+    seeded = {
+        "my-custom.yaml": b"id: my-custom\nphases: []\n",
+        "full-feature.yaml": b"id: full-feature\nphases: []\n",
     }
+    for name, body in seeded.items():
+        (workflows / name).write_bytes(body)
+    for flags in ((), ("--force-managed",)):
+        result = _install_with(binary, project, *flags)
+        assert result.returncode == 0, result.stderr
+        assert {path.name: path.read_bytes() for path in workflows.iterdir()} == seeded
+        assert ".agent-flow/workflows" not in result.stdout
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
