@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,8 @@ from agent_flow.core.design_value_check import (
     missing_spec_item_evidence,
 )
 from agent_flow.core.phase_workflow import load_phase_workflow_definition, parse_phase_workflow_definition
+from agent_flow.core.run_storage import ACTIVE_LOCK
+from agent_flow.core.worktree_isolation import exclusive_file_lease
 from agent_flow.core.workflow_pin import workflow_pin_metadata
 from agent_flow.runner import Phase, ResumeMode, Runner
 from agent_flow.spec_publication import observe_spec_publication
@@ -594,6 +597,58 @@ def test_premerge_observation_requires_ci_from_every_active_profile(project, run
         publication_observer=observe_spec_publication,
     )
     assert "SPEC-1" in read_manual_spec_approvals(run_dir, project_root=project)
+
+
+def test_premerge_publication_honors_acknowledged_feedback(project, run_dir, monkeypatch):
+    """반증: `pr-watch --run-dir`는 green인데 pre-merge 관측은 ACK한 댓글을 다시 세서 merge 앞에서 영영 막혔다.
+
+    ACK 목록은 읽기만 한다. 관측은 runner lease 안에서도 불리므로 run 상태를 쓰거나 lease를 잡으면 안 된다.
+    """
+    import agent_flow.pr_watch as pr_watch
+    import agent_flow.spec_publication as publication_module
+
+    head = _git("rev-parse", "HEAD", cwd=project).stdout.strip()
+    (run_dir / "push-pr.md").write_text(
+        f"remote-oid: {head}\npr-url: https://github.com/example/repo/pull/1\n",
+    )
+    gates = run_dir / "artifacts" / "gate-results.json"
+    gates.parent.mkdir(exist_ok=True)
+    gates.write_text(json.dumps({"produced_by": {"gate_phase": "all", "gate_execution": "local"}}))
+    payload = {
+        "url": "https://github.com/example/repo/pull/1", "state": "OPEN",
+        "headRefOid": head, "reviewDecision": "APPROVED",
+        "statusCheckRollup": [{"name": "pytest", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        "comments": [{
+            "id": "IC_1", "author": {"login": "someone"},
+            "body": "You have reached your usage limits for code reviews.", "updatedAt": "1",
+        }],
+    }
+    monkeypatch.setattr(publication_module, "missing_delivery_evidence", lambda *a, **k: [])
+    monkeypatch.setattr(pr_watch, "_fetch_pr_data", lambda *a, **k: payload)
+    monkeypatch.setattr(pr_watch, "_fetch_review_threads", lambda *a, **k: [])
+
+    blocked = observe_spec_publication(project, run_dir)
+    assert blocked.missing == ("pre-merge SPEC: expected green publication (has_comments)",)
+
+    observed = pr_watch.fetch_pr(1, "github.com/example/repo", run_dir=run_dir)
+    pr_watch.acknowledge_pr_feedback(
+        run_dir, repo=observed.repo, number=1, head=head, feedback_ids=observed.feedback_ids,
+    )
+    state = run_dir / "pr-feedback.json"
+    before = state.read_bytes()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with exclusive_file_lease(run_dir.parent / ACTIVE_LOCK):
+            published = pool.submit(observe_spec_publication, project, run_dir).result(timeout=2)
+    assert published.missing == ()
+    assert published.head == head
+    assert state.read_bytes() == before
+
+    payload["comments"].append({
+        "id": "IC_2", "author": {"login": "someone"}, "body": "One more question.", "updatedAt": "2",
+    })
+    requeued = observe_spec_publication(project, run_dir)
+    assert requeued.missing == ("pre-merge SPEC: expected green publication (has_comments)",)
 
 
 @pytest.mark.parametrize("surface", ["status", "spec-markers"])
