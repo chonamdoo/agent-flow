@@ -159,9 +159,11 @@ profile이 `skill_sources`를 선언하고, `src/agent_flow/core/skill_sync.py`�
 `src/agent_flow/workflows/<name>.yaml`의 `required_markers`이고,
 `src/agent_flow/runner.py`의 `_missing_required_markers`가 artifact에 그 값이 없으면 전진을
 막는다. 그 목록에 대한 팀별 소유권이 없고, workflow용 override 파일도 없다.
-`PROJECT_OVERRIDE_KEYS`는 profile만 덮고, 설치된 `.agent-flow/workflows/<name>.yaml`은 installer를
-다시 돌리면 갱신되므로 손으로 고친 것은 남지 않는다. marker 변경을 제안하고 수용하는 절차는
-구현되지 않았다.
+`PROJECT_OVERRIDE_KEYS`는 profile만 덮는다. run은 설치된 runtime의
+`.agent-flow/runtime/python/agent_flow/workflows/<name>.yaml`에서 정의를 읽고, installer가 이
+파일을 덮어쓰므로 손으로 고친 것은 남지 않는다. installer는 더 이상 `.agent-flow/workflows/`를
+만들지 않으며, 예전 설치가 남긴 그 사본은 run에 쓰이지 않는다. marker 변경을 제안하고 수용하는
+절차는 구현되지 않았다.
 
 **저장소마다 복사되지 않고 버전이 붙어 리뷰되는 공유 규약 팩.** 지금 규약 문서는 저장소마다
 `skills/` 아래로 커밋되거나(`.agent-flow/local-skills/`는 gitignore된 `.agent-flow/` 아래에 있어
