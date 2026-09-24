@@ -12,6 +12,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -29,9 +35,12 @@ jobs:
 
       - name: Resolve the released version
         id: release
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          git check-ref-format "refs/tags/${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       # main에 없는 커밋의 태그를 릴리스로 만들면, 리뷰를 통과하지 않은 트리가
       # `/releases/latest`가 되어 설치된 모든 CLI에 업그레이드 대상으로 광고된다.
@@ -47,9 +56,10 @@ jobs:
         id: tarball
         env:
           TAG: ${{ steps.release.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
-          curl -fsSL "$url" -o release.tar.gz
+          curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" "$url" -o release.tar.gz
           echo "sha256=$(sha256sum release.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           rm release.tar.gz
 
