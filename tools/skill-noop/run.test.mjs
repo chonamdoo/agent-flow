@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -18,16 +18,17 @@ function setup(t) {
   mkdirSync(emptyPath);
   for (const file of ['run.mjs', 'prompt.md']) copyFileSync(path.join(HERE, file), path.join(harness, file));
   writeFileSync(path.join(root, 'baseline.txt'), 'Review policy\nStable anchor\nReject unsafe changes\n');
+  const run = (args) =>
+    spawnSync(process.execPath, [path.join(harness, 'run.mjs'), ...args], {
+      cwd: root,
+      env: { PATH: emptyPath, HOME: root },
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
   return {
     cases,
-    validate(...selection) {
-      return spawnSync(process.execPath, [path.join(harness, 'run.mjs'), ...selection, '--validate'], {
-        cwd: root,
-        env: { PATH: emptyPath, HOME: root },
-        encoding: 'utf8',
-        timeout: 10_000,
-      });
-    },
+    validate: (...selection) => run([...selection, '--validate']),
+    rescore: (...selection) => run([...selection, '--rescore']),
   };
 }
 
@@ -124,5 +125,48 @@ for (const scenario of [
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stderr, scenario.diagnostic);
     assertNoResults(repo.cases);
+  });
+}
+
+// Every row blocks on the target, so both arms score 12/12 and the decision is NO-OP whatever the
+// warning says. `unmatched` variant rows add a blocking finding no pattern names.
+function writeResults(cases, id, unmatched) {
+  const file = path.join(cases, id, 'results-n12-claude.jsonl');
+  const rows = [];
+  for (const arm of ['baseline', 'variant'])
+    for (let rep = 1; rep <= 12; rep++) {
+      const findings = ['- blocking: unsafe call'];
+      if (arm === 'variant' && rep <= unmatched) findings.push('- blocking: renamed guard is skipped');
+      rows.push({ provider: 'claude', arm, fixture: 'unsafe', rep, code: 0, verdict: 'request-changes', findings, ok: true });
+    }
+  writeFileSync(file, `${rows.map((r) => JSON.stringify(r)).join('\n')}\n`);
+  return file;
+}
+
+// 0/12 vs 5/12 is p≈0.037 and 0/12 vs 4/12 is p≈0.093, so these two sit on either side of the
+// p < 0.05 line the decision uses.
+for (const { unmatched, warns } of [
+  { unmatched: 5, warns: true },
+  { unmatched: 4, warns: false },
+]) {
+  test(`--rescore ${warns ? 'warns' : 'stays quiet'} when one arm leaves ${unmatched}/12 rows with unmatched blocking findings against 0/12`, (t) => {
+    const repo = setup(t);
+    addCase(repo.cases, 'wording');
+    const file = writeResults(repo.cases, 'wording', unmatched);
+    const before = readFileSync(file, 'utf8');
+
+    const result = repo.rescore('--case', 'wording', '--providers', 'claude');
+
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(/WARNING unmatched blocking findings: baseline 0\/12 vs variant \d+\/12/.test(result.stdout), warns, result.stdout);
+    assert.equal(/claude\/variant#1 - blocking: renamed guard is skipped/.test(result.stdout), warns, result.stdout);
+    assert.match(result.stdout, /with-line 12\/12 vs without-line 12\/12 p=1\.0000 => NO-OP/);
+    // Rescoring reads evidence; it must never append to it or leave a new results file behind.
+    assert.equal(readFileSync(file, 'utf8'), before);
+    assert.deepEqual(
+      readdirSync(path.join(repo.cases, 'wording')).filter((name) => name.startsWith('results-')),
+      ['results-n12-claude.jsonl'],
+    );
   });
 }

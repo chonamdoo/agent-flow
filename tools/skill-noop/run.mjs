@@ -292,6 +292,22 @@ function report(kase, results, providers, expectedPerCell) {
         `   topic ${name.padEnd(20)} baseline ${hb}/${nb} vs variant ${hv}/${nv}  p=${fisher(hb, nb - hb, hv, nv - hv).toFixed(4)}  [${perProvider}]`,
       );
     }
+    // A blocking finding that no pattern names is invisible to every count above. When one arm
+    // leaves significantly more rows with such findings, either the patterns miss the words that arm
+    // uses for the measured defect, so the counts measure vocabulary instead of detection (#247), or
+    // a topic the case never named concentrates in that arm. Only a reader can tell which, so this
+    // prints the lines and warns; the decision below is computed exactly as before.
+    const unmatched = (r) => r.findings.filter((l) => isBlocking(l) && ![...kase.patterns.values()].some((re) => re.test(l)));
+    const [ub, uv] = ARMS.map((arm) => bucket(f.name, arm).filter((r) => unmatched(r).length).length);
+    const [nb, nv] = ARMS.map((arm) => bucket(f.name, arm).length);
+    const pu = fisher(ub, nb - ub, uv, nv - uv);
+    if (pu < 0.05) {
+      console.log(
+        `   WARNING unmatched blocking findings: baseline ${ub}/${nb} vs variant ${uv}/${nv} rows  p=${pu.toFixed(4)} — one arm uses wording or a topic no pattern names; read these before trusting the decision:`,
+      );
+      for (const arm of ARMS)
+        for (const r of bucket(f.name, arm)) for (const l of unmatched(r)) console.log(`     ${r.provider}/${arm}#${r.rep} ${l}`);
+    }
   }
 
   console.log('\n-- decision');
@@ -373,7 +389,8 @@ const ids = argv.includes('--all')
       .filter((d) => existsSync(path.join(CASES, d, 'case.json')))
       .sort()
   : [argOf('--case', null)].filter(Boolean);
-if (!ids.length) fail('usage: run.mjs --case <id> | --all [--validate] [--reps N] [--providers claude,codex] [--concurrency N]');
+if (!ids.length)
+  fail('usage: run.mjs --case <id> | --all [--validate | --rescore] [--reps N] [--providers claude,codex] [--concurrency N]');
 
 const reps = posInt(argOf('--reps', '12'), '--reps');
 const limit = posInt(argOf('--concurrency', '8'), '--concurrency');
@@ -393,15 +410,43 @@ if (argv.includes('--validate')) {
   process.exit(0);
 }
 
+// The filename carries the repeat count and the provider set, because a cell is identified by
+// provider as well: a rerun with fewer providers would otherwise overwrite the evidence a decision
+// was justified on while the name still claimed the same power.
+const resultsPath = (kase) => path.join(kase.dir, `results-n${reps}-${[...providers].sort().join('+')}.jsonl`);
+
+// Rescoring re-runs the report over rows already on disk, so a pattern fix can be checked against
+// the evidence a decision was made on without paying for a single CLI call. Like --validate it
+// never writes: appending here would mix a rescore into the evidence it reads.
+if (argv.includes('--rescore')) {
+  for (const kase of cases) {
+    const file = resultsPath(kase);
+    if (!existsSync(file)) fail(`${kase.id}: no ${path.basename(file)} to rescore (pick the run with --reps/--providers)`);
+    const rows = readFileSync(file, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line, i) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return fail(`${kase.id}: ${path.basename(file)}:${i + 1} is not JSON`);
+        }
+      });
+    // The header names the skill as it is now. Rows rendered against another skill text would
+    // otherwise read as evidence about the current one, so name what the rows themselves record.
+    const rendered = [...new Set(rows.map((r) => r.skill ?? 'unrecorded'))].join(', ');
+    report(kase, rows, providers, reps);
+    console.log(`   (rescored ${path.basename(file)}: ${rows.length} row(s) rendered against skill@${rendered})`);
+  }
+  process.exit(0);
+}
+
 for (const kase of cases) {
   const jobs = [];
   for (const provider of providers)
     for (const arm of ARMS)
       for (const f of kase.fixtures) for (let rep = 1; rep <= reps; rep++) jobs.push({ provider, arm, fixture: f.name, rep });
-  // The filename carries the repeat count and the provider set, because a cell is identified by
-  // provider as well: a rerun with fewer providers would otherwise overwrite the evidence a
-  // decision was justified on while the name still claimed the same power.
-  const out = path.join(kase.dir, `results-n${reps}-${[...providers].sort().join('+')}.jsonl`);
+  const out = resultsPath(kase);
   appendFileSync(out, '');
   process.stderr.write(`\n${kase.id}: ${jobs.length} jobs -> ${path.basename(out)}\n`);
   // Rows land on disk as they finish, so a crash keeps the runs already paid for. Appending means
