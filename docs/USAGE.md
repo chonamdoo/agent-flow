@@ -628,9 +628,12 @@ not a reviewer provider. When both are candidates, each must also complete a val
 
 - **Both available** — both can review every angle. A provider with a failed probe
   is excluded from remaining angles; valid rejections already obtained are kept.
-- **Only one available** — that provider starts every angle at once, without a probe,
-  still using at least two independent subprocesses. Two subprocesses do not require
-  two vendor names.
+- **Only one available** — that provider starts every angle in one dispatch, without a
+  probe, up to `AGENT_FLOW_MAX_WORKERS` at a time, still using at least two independent
+  subprocesses. After a provider-level failure (rate limit, timeout, or a failed exit
+  such as an authentication or quota error), angles that have not started yet are
+  skipped: approval needs that provider to complete every angle, so the review is
+  already blocked. Two subprocesses do not require two vendor names.
 - **Neither available** — review is blocked. Controller-session work cannot replace it.
 
 Approval requires a complete valid set from at least one provider and no valid
