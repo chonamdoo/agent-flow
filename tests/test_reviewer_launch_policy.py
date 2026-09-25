@@ -248,7 +248,7 @@ def test_artifact_records_identity_but_not_raw_argv_or_prompt(
     )
     launched: list[tuple[str, ...]] = []
 
-    def fake_run_parallel(jobs):
+    def fake_run_parallel(jobs, **_kwargs):
         launched.extend(job.args for job in jobs)
         return [
             SubprocessResult(
@@ -415,6 +415,79 @@ def test_review_outcome_artifact_records_launch_and_content_digests(
     ).validation == "invalid"
 
 
+@pytest.mark.parametrize(
+    ("installed", "narrowed", "provider"),
+    [
+        # 회사처럼 CLI가 하나만 설치된 환경.
+        (("codex",), "", "codex"),
+        # 둘 다 설치됐지만 허용된 CLI 하나로 고정한 환경.
+        (("claude", "codex"), "claude", "claude"),
+    ],
+)
+def test_single_provider_review_starts_every_angle_at_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    installed: tuple[str, ...],
+    narrowed: str,
+    provider: str,
+) -> None:
+    from agent_flow.adapters.hosted import _write_review_results
+    from agent_flow.core.review_evidence import (
+        load_review_evidence,
+        multi_review_route_key,
+    )
+    from agent_flow.subprocess_pool import SubprocessResult
+
+    monkeypatch.setenv("AGENT_FLOW_REVIEWERS", narrowed)
+    monkeypatch.setattr(
+        multi_review, "detect_available_clis", lambda: [_CLIS[name] for name in installed]
+    )
+    monkeypatch.setattr(multi_review, "cli_by_name", _CLIS.get)
+    monkeypatch.setattr(multi_review, "_cli_version", lambda _binary: None)
+    monkeypatch.setattr(
+        multi_review, "assert_managed_hooks_registered", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(multi_review, "leader_root_for", lambda _root: None)
+    launches: list[list[str]] = []
+
+    def fake_run_parallel(jobs, **_kwargs):
+        launches.append([job.job_id for job in jobs])
+        return [
+            SubprocessResult(
+                job_id=job.job_id,
+                returncode=0,
+                stdout="reviewer-source: sub-agent\nverdict: approve\n",
+            )
+            for job in jobs
+        ]
+
+    monkeypatch.setattr(multi_review, "run_parallel", fake_run_parallel)
+    angles = ("generalist", "types", "io-safety")
+    jobs = [
+        multi_review.ReviewerJob(
+            angle, f"review {angle}", tmp_path / f"review-{angle}.md", tmp_path
+        )
+        for angle in angles
+    ]
+    (tmp_path / "meta.json").write_text(
+        json.dumps({"run_id": "r1", "phase_entered_at": "2026-08-21T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+
+    distribution = multi_review.distribute(jobs, host="omp", phase_id="review")
+    execution = multi_review.run_distribution(distribution, tmp_path)
+    _write_review_results(distribution, execution.outcomes)
+
+    assert launches == [[f"{provider}-{angle}" for angle in angles]]
+    evidence = load_review_evidence(
+        artifact_root=tmp_path,
+        phase_id="review",
+        run_meta=json.loads((tmp_path / "meta.json").read_text(encoding="utf-8")),
+    )
+    assert evidence.validation == "verified"
+    assert multi_review_route_key(evidence) == "approve"
+
+
 def test_provider_keeps_running_after_a_malformed_probe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -429,7 +502,8 @@ def test_provider_keeps_running_after_a_malformed_probe(
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(multi_review, "leader_root_for", lambda _root: None)
-    monkeypatch.setattr(multi_review, "cli_by_name", lambda _name: _CLAUDE)
+    # probe는 provider가 둘일 때만 돈다. 하나일 때는 모든 angle이 한 번에 시작한다.
+    monkeypatch.setattr(multi_review, "cli_by_name", _CLIS.get)
     launches: list[list[str]] = []
 
     def fake_run_parallel(jobs, **_kwargs):
@@ -437,10 +511,11 @@ def test_provider_keeps_running_after_a_malformed_probe(
         if len(launches) == 1:
             return [
                 SubprocessResult(
-                    job_id=jobs[0].job_id,
+                    job_id=job.job_id,
                     returncode=0,
                     stdout="reviewer-source: sub-agent\nmissing verdict\n",
                 )
+                for job in jobs
             ]
         return [
             SubprocessResult(
@@ -452,17 +527,19 @@ def test_provider_keeps_running_after_a_malformed_probe(
         ]
 
     monkeypatch.setattr(multi_review, "run_parallel", fake_run_parallel)
-    jobs = [
-        multi_review.ReviewerJob(
-            angle,
-            f"review {angle}",
-            tmp_path / f"review-{angle}.md",
-            tmp_path,
-        )
-        for angle in ("generalist", "types")
-    ]
     distribution = multi_review.Distribution(
-        by_cli={"claude": jobs},
+        by_cli={
+            provider: [
+                multi_review.ReviewerJob(
+                    angle,
+                    f"review {angle}",
+                    tmp_path / f"review-{angle}-{provider}.md",
+                    tmp_path,
+                )
+                for angle in ("generalist", "types")
+            ]
+            for provider in ("claude", "codex")
+        },
         phase_id="review",
     )
     (tmp_path / "meta.json").write_text(
@@ -479,7 +556,10 @@ def test_provider_keeps_running_after_a_malformed_probe(
     _write_review_results(distribution, execution.outcomes)
 
     assert execution.skipped_providers == ()
-    assert launches == [["claude-generalist"], ["claude-types"]]
+    assert launches == [
+        ["claude-generalist", "codex-generalist"],
+        ["claude-types", "codex-types"],
+    ]
     run_meta = json.loads(
         (tmp_path / "meta.json").read_text(encoding="utf-8")
     )
@@ -526,7 +606,7 @@ def test_late_provider_result_controls_queued_dispatch(
     monkeypatch.setattr(multi_review, "leader_root_for", lambda _root: None)
     launched: list[str] = []
 
-    async def execute(job):
+    async def execute(job, **_kwargs):
         launched.append(job.job_id)
         await asyncio.sleep(0)
         result = subprocess_pool.SubprocessResult(
@@ -788,7 +868,7 @@ def test_declaration_is_read_from_the_config_root_not_the_worker_checkout(
     monkeypatch.setattr(multi_review, "leader_root_for", lambda root: None)
     launched: list[tuple[str, ...]] = []
 
-    def fake_run_parallel(jobs):
+    def fake_run_parallel(jobs, **_kwargs):
         launched.extend(job.args for job in jobs)
         return [
             SubprocessResult(

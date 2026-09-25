@@ -6,12 +6,17 @@ isolation fallback.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
+import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -50,7 +55,12 @@ from agent_flow.core.worktree_isolation import (
     validate_run_artifact_target,
     write_run_artifact_text,
 )
-from agent_flow.subprocess_pool import SubprocessJob, SubprocessResult, run_parallel
+from agent_flow.subprocess_pool import (
+    ProviderProcessLedger,
+    SubprocessJob,
+    SubprocessResult,
+    run_parallel,
+)
 
 _REVIEWER_PROVENANCE_RE = re.compile(
     r"(?m)^reviewer-source:\s*sub-agent[ \t]*$"
@@ -512,79 +522,157 @@ def run_distribution(
     if leader is not None:
         include_ignored = leader_sweep_include_ignored_for(leader)
         leader_before = capture_leader_snapshot(leader, include_ignored=include_ignored)
-    probes = [jobs[0] for jobs in sub_jobs_by_cli.values()]
-    results = run_parallel(probes)
-    available = {
-        result.job_id.split("-", 1)[0]
-        for result in results
-        if reviewer_provider_error(result) is None
-    }
+    ledger = ProviderProcessLedger()
+    observed: list[SubprocessResult] = []
+    prior_artifacts: list[tuple[ReviewerJob, Path | None]] = []
+    committed = False
+    available = set(sub_jobs_by_cli)
 
     def should_start(job: SubprocessJob) -> bool:
         return job.job_id.split("-", 1)[0] in available
 
     def observe_result(result: SubprocessResult) -> None:
+        observed.append(result)
         if reviewer_provider_error(result) is not None:
             available.discard(result.job_id.split("-", 1)[0])
 
-    remaining = [
-        job
-        for cli_name, jobs in sub_jobs_by_cli.items()
-        if cli_name in available
-        for job in jobs[1:]
-    ]
-    if remaining:
-        results.extend(run_parallel(
-            remaining, should_start=should_start, on_result=observe_result,
-        ))
-    skipped_providers = tuple(
-        cli_name for cli_name in sub_jobs_by_cli if cli_name not in available
-    )
-    # Write each artifact at the angle's intended output_path so the host AI
-    # can aggregate them into final-review.md.
-    #
-    # 기록이 tripwire보다 **먼저**다. 순서를 뒤집으면 오탐 1회에 완료된
-    # 리뷰어 N명의 산출물이 통째로 사라진다.
-    artifact_digests: dict[str, str] = {}
-    for result in results:
-        job = job_to_output.get(result.job_id)
-        if job is None:
-            continue
-        rendered = _render_angle_result(
-            result,
-            launch=launch_by_job[result.job_id],
-            prompt=job.prompt,
+    try:
+        if len(sub_jobs_by_cli) == 1:
+            # probe는 고장 난 provider를 다른 provider와 가려내려고 먼저 돌린다.
+            # provider가 하나면 가려낼 대상이 없어 리뷰 시간만 두 배가 된다.
+            results = run_parallel(
+                [job for jobs in sub_jobs_by_cli.values() for job in jobs],
+                should_start=should_start,
+                on_result=observe_result,
+                process_ledger=ledger,
+            )
+        else:
+            results = run_parallel(
+                [jobs[0] for jobs in sub_jobs_by_cli.values()],
+                on_result=observed.append,
+                process_ledger=ledger,
+            )
+            available.intersection_update(
+                result.job_id.split("-", 1)[0]
+                for result in results
+                if reviewer_provider_error(result) is None
+            )
+            remaining = [
+                job
+                for cli_name, jobs in sub_jobs_by_cli.items()
+                if cli_name in available
+                for job in jobs[1:]
+            ]
+            if remaining:
+                results.extend(run_parallel(
+                    remaining,
+                    should_start=should_start,
+                    on_result=observe_result,
+                    process_ledger=ledger,
+                ))
+        # Write each artifact at the angle's intended output_path so the host AI
+        # can aggregate them into final-review.md.
+        #
+        # 기록이 tripwire보다 **먼저**다. 순서를 뒤집으면 오탐 1회에 완료된
+        # 리뷰어 N명의 산출물이 통째로 사라진다.
+        artifact_digests: dict[str, str] = {}
+        for result in results:
+            job = job_to_output.get(result.job_id)
+            if job is None:
+                continue
+            rendered = _render_angle_result(
+                result,
+                launch=launch_by_job[result.job_id],
+                prompt=job.prompt,
+            )
+            prior_artifacts.append((job, _keep_prior_artifact(job)))
+            _write_review_artifact(job, rendered)
+            artifact_digests[result.job_id] = hashlib.sha256(
+                rendered.encode("utf-8")
+            ).hexdigest()
+        skipped_providers = tuple(
+            cli_name for cli_name in sub_jobs_by_cli if cli_name not in available
         )
-        _write_review_artifact(job, rendered)
-        artifact_digests[result.job_id] = hashlib.sha256(
-            rendered.encode("utf-8")
-        ).hexdigest()
-    outcomes = tuple(
-        _reviewer_outcome(
-            result,
-            job=job_to_output[result.job_id],
-            launch=launch_by_job[result.job_id],
-            artifact_sha256=artifact_digests[result.job_id],
+        outcomes = tuple(
+            _reviewer_outcome(
+                result,
+                job=job_to_output[result.job_id],
+                launch=launch_by_job[result.job_id],
+                artifact_sha256=artifact_digests[result.job_id],
+            )
+            for result in results
+            if result.job_id in artifact_digests
         )
-        for result in results
-        if result.job_id in artifact_digests
-    )
-    if leader is not None and leader_before is not None:
-        # 범위는 기록에서 되읽는다. 여기서 다시 profile을 해석하면 리뷰가 도는
-        # 동안 선언이 바뀌었을 때 baseline과 관측이 서로 다른 범위가 되고, 그
-        # 불일치는 leader를 아무도 건드리지 않아도 항상 diff로 나온다.
-        assert_leader_unchanged(
-            leader,
-            leader_before,
-            run_id="multi-review",
-            worker_root=project_root,
-            include_ignored=leader_sweep_includes_ignored(leader_before.scope),
+        if leader is not None and leader_before is not None:
+            # 범위는 기록에서 되읽는다. 여기서 다시 profile을 해석하면 리뷰가 도는
+            # 동안 선언이 바뀌었을 때 baseline과 관측이 서로 다른 범위가 되고, 그
+            # 불일치는 leader를 아무도 건드리지 않아도 항상 diff로 나온다.
+            assert_leader_unchanged(
+                leader,
+                leader_before,
+                run_id="multi-review",
+                worker_root=project_root,
+                include_ignored=leader_sweep_includes_ignored(leader_before.scope),
+            )
+        # 리뷰 시도는 여기서 끝난다. 이 뒤의 취소는 반환 직후의 취소와 같게
+        # 다루고 되돌리지 않는다. 백업이 일부 지워진 뒤라 되돌리면 이전 artifact와
+        # 새 artifact가 섞인다. 이전 `<phase>-review-results.json`은 새 artifact의
+        # digest와 맞지 않아 그 근거는 무효로 판정된다.
+        committed = True
+        _discard_prior_artifacts(prior_artifacts)
+    except BaseException as raised:
+        if committed:
+            raise
+        interruption = _cancellation_behind(raised)
+        if interruption is None:
+            _discard_prior_artifacts(prior_artifacts)
+            raise
+        unrestored = _restore_review_artifacts(prior_artifacts)
+        _warn_interrupted_review(
+            preservation=_preserve_interrupted_results(
+                observed, ledger, job_to_output, launch_by_job
+            ),
+            unrestored=unrestored,
+            masking_error=None if interruption is raised else raised,
         )
+        if interruption is raised:
+            raise
+        raise interruption from None
     return ReviewExecution(
         results=tuple(results),
         skipped_providers=skipped_providers,
         outcomes=outcomes,
     )
+
+
+def _cancellation_behind(raised: BaseException) -> BaseException | None:
+    """Return the first cancellation behind `raised`, else `None`.
+
+    Python links an exception raised while another propagates through the
+    implicit `__context__`. A cleanup error or a second interrupt raised that
+    way must not replace the cancellation that started it, so the walk goes
+    back to the earliest one. It stops at an error raised `from` another on
+    purpose, like asyncio's timeout, which stays an error. It also stops at the
+    `CancelledError` directly under a `KeyboardInterrupt`: that is how
+    `asyncio.run` reports the same Ctrl-C, not an earlier cancellation.
+    """
+    first: BaseException | None = None
+    seen: set[int] = set()
+    current: BaseException | None = raised
+    while current is not None and id(current) not in seen:
+        if not isinstance(current, Exception):
+            if (
+                isinstance(current, asyncio.CancelledError)
+                and isinstance(first, KeyboardInterrupt)
+                and first.__context__ is current
+            ):
+                break
+            first = current
+        if current.__cause__ is not None or current.__suppress_context__:
+            break
+        seen.add(id(current))
+        current = current.__context__
+    return first
 
 
 def _reviewer_outcome(
@@ -628,9 +716,167 @@ def _validate_review_artifact(job: ReviewerJob) -> tuple[Path, Path]:
     return validate_run_artifact_target(job.artifact_root, job.output_path)
 
 
+def _keep_prior_artifact(job: ReviewerJob) -> Path | None:
+    """Copy an existing normal artifact aside before this attempt replaces it.
+
+    Putting it back is then a rename, which needs no new disk space. Every
+    copy gets a fresh name, so an original that an earlier cancelled attempt
+    could not put back is never overwritten.
+    """
+    artifact_root, output = _validate_review_artifact(job)
+    if not output.exists():
+        return None
+    fd, raw_backup = tempfile.mkstemp(
+        dir=artifact_root, prefix=f".{output.name}.", suffix=".prior"
+    )
+    backup = Path(raw_backup)
+    try:
+        with os.fdopen(fd, "wb") as copy, output.open("rb") as source:
+            shutil.copyfileobj(source, copy)
+    except BaseException:
+        backup.unlink(missing_ok=True)
+        raise
+    return backup
+
+
+def _discard_prior_artifacts(
+    prior_artifacts: Sequence[tuple[ReviewerJob, Path | None]],
+) -> None:
+    """Delete a finished attempt's copies without raising `OSError`.
+
+    A leftover hidden copy is harmless. Failing a completed review over it, or
+    replacing the error already being raised, is not.
+    """
+    left: list[str] = []
+    for _job, backup in prior_artifacts:
+        if backup is None:
+            continue
+        try:
+            backup.unlink(missing_ok=True)
+        except OSError as exc:
+            left.append(f"{backup.name} ({type(exc).__name__}: {exc})")
+    if left:
+        logging.getLogger(__name__).warning(
+            "review attempt finished; earlier artifact copies not removed: %s",
+            ", ".join(left),
+        )
+
+
 def _write_review_artifact(job: ReviewerJob, content: str) -> None:
     artifact_root, output = _validate_review_artifact(job)
     write_run_artifact_text(artifact_root, output, content)
+
+
+def _restore_review_artifacts(
+    prior_artifacts: Sequence[tuple[ReviewerJob, Path | None]],
+) -> list[str]:
+    """Put back the normal artifacts a cancelled attempt touched, never raising.
+
+    An earlier attempt's `<phase>-review-results.json` binds these files by
+    digest, so a cancelled attempt must leave their bytes and absence as it
+    found them. Each file is tried on its own, even after a second interrupt;
+    the returned entries name the ones left as this attempt wrote them.
+    """
+    unrestored: list[str] = []
+    for job, backup in prior_artifacts:
+        try:
+            _artifact_root, output = _validate_review_artifact(job)
+            if backup is None:
+                output.unlink(missing_ok=True)
+            else:
+                os.replace(backup, output)
+        except BaseException as exc:
+            kept = (
+                "written by this attempt"
+                if backup is None
+                else f"original kept in {backup.name}"
+            )
+            unrestored.append(
+                f"{job.output_path.name} ({kept}; {type(exc).__name__}: {exc})"
+            )
+    return unrestored
+
+
+def _warn_interrupted_review(
+    *,
+    preservation: str | None,
+    unrestored: Sequence[str],
+    masking_error: BaseException | None,
+) -> None:
+    parts = [preservation] if preservation else []
+    if unrestored:
+        parts.append("normal reviewer artifacts not restored: " + ", ".join(unrestored))
+    if masking_error is not None:
+        parts.append(
+            "cleanup did not finish during the cancellation "
+            f"({type(masking_error).__name__}: {masking_error})"
+        )
+    if not parts:
+        return
+    try:
+        logging.getLogger(__name__).warning(
+            "interrupted review: %s", "; ".join(parts)
+        )
+    except BaseException:
+        # 경고를 쓰는 중 두 번째 중단이 와도 호출자가 원래 취소를 다시 던진다.
+        pass
+
+
+_INTERRUPTED_REVIEW_NOTICE = (
+    "> Interrupted review attempt: this reviewer finished before the whole "
+    "review was cancelled. It is not approval evidence."
+)
+
+
+def _preserve_interrupted_results(
+    results: Sequence[SubprocessResult],
+    ledger: ProviderProcessLedger,
+    job_to_output: dict[str, ReviewerJob],
+    launch_by_job: dict[str, ResolvedLaunch],
+) -> str | None:
+    """Keep results that finished before a cancellation and say how it went.
+
+    The files go next to, not over, the normal per-angle artifacts, so an
+    earlier attempt's bound evidence keeps its digests. They are written only
+    after every reviewer process group of this attempt is gone: a reviewer
+    still running could otherwise read another reviewer's findings. Even a
+    second interrupt stops here, so the caller re-raises the original one.
+    """
+    if not results:
+        return None
+    preserved: list[str] = []
+    try:
+        if not ledger.all_exited():
+            return (
+                f"{len(results)} completed reviewer result(s) not preserved; "
+                "reviewer process exit is unconfirmed"
+            )
+        for result in results:
+            job = job_to_output.get(result.job_id)
+            if job is None:
+                continue
+            target = job.output_path.with_name(
+                f"{job.output_path.stem}-interrupted{job.output_path.suffix}"
+            )
+            rendered = _render_angle_result(
+                result, launch=launch_by_job[result.job_id], prompt=job.prompt
+            )
+            write_run_artifact_text(
+                job.artifact_root,
+                target,
+                f"{_INTERRUPTED_REVIEW_NOTICE}\n\n{rendered}",
+            )
+            preserved.append(target.name)
+    except BaseException as exc:
+        return (
+            "completed reviewer results not preserved "
+            f"({type(exc).__name__}: {exc}); preserved before the failure: "
+            f"{', '.join(preserved) or 'none'}"
+        )
+    return (
+        "completed reviewer results preserved, not approval evidence: "
+        f"{', '.join(preserved)}"
+    )
 
 
 def residual_host_jobs(distribution: Distribution) -> list[ReviewerJob]:

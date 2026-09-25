@@ -9,9 +9,12 @@ Design points:
   - asyncio.gather(..., return_exceptions=True) so one failure does not
     abort the others.
   - Per-job timeout + soft kill + drained stderr.
-  - Results are durable: each job writes its artifact independently, so a
-    timed-out angle leaves the other artifacts intact and the host AI can
-    aggregate whatever completed.
+  - One job's timeout or failure becomes that job's result; the other jobs
+    keep running. The pool writes no artifacts: the caller records the
+    returned results. A genuine cancellation propagates without returning
+    any result, so a caller that must keep completed results collects them
+    through `on_result` and checks `ProviderProcessLedger` before exposing
+    them.
 """
 from __future__ import annotations
 
@@ -63,7 +66,61 @@ class SubprocessResult:
         return not self.timed_out and self.error is None and self.returncode == 0
 
 
-async def _run_one(job: SubprocessJob) -> SubprocessResult:
+class ProviderProcessLedger:
+    """Process groups the pool launched for one review attempt.
+
+    A reaped provider CLI does not prove its helpers are gone: they stay in
+    the CLI's process group. A caller must see `all_exited()` before it puts
+    one reviewer's output where a still-running reviewer could read it.
+    A launch that never reported its process group, such as one cancelled
+    while spawning, keeps the attempt unconfirmed.
+    """
+
+    def __init__(self) -> None:
+        self._process_groups: list[int] = []
+        self._unreported_launches = 0
+
+    def launch_started(self) -> None:
+        self._unreported_launches += 1
+
+    def launch_finished(self, process_group: int | None) -> None:
+        """Report a started launch; `None` means no provider process ran."""
+        self._unreported_launches -= 1
+        if process_group is not None:
+            self._process_groups.append(process_group)
+
+    def all_exited(self) -> bool:
+        """Poll up to the reap deadline. Blocking: call outside an event loop."""
+        if self._unreported_launches:
+            return False
+        deadline = time.monotonic() + _PROVIDER_REAP_TIMEOUT_S
+        pending = list(self._process_groups)
+        while True:
+            pending = [pgid for pgid in pending if _process_group_alive(pgid)]
+            if not pending:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(_PROVIDER_POLL_S)
+
+
+def _process_group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # A permission error still means some member exists; any other error
+        # cannot prove the group is gone either.
+        return True
+    return True
+
+
+async def _run_one(
+    job: SubprocessJob,
+    *,
+    process_ledger: ProviderProcessLedger | None = None,
+) -> SubprocessResult:
     started = time.monotonic()
     proc: asyncio.subprocess.Process | None = None
     wait_task: asyncio.Task[int] | None = None
@@ -84,17 +141,27 @@ async def _run_one(job: SubprocessJob) -> SubprocessResult:
                 with stdout_path.open("xb") as stdout_file, stderr_path.open(
                     "xb"
                 ) as stderr_file:
-                    proc = await asyncio.create_subprocess_exec(
-                        *launch.argv,
-                        stdin=asyncio.subprocess.DEVNULL,
-                        cwd=str(launch.cwd),
-                        env=launch.env,
-                        stdout=stdout_file,
-                        stderr=stderr_file,
-                        start_new_session=True,
-                        close_fds=True,
-                        pass_fds=launch.lease.process_lifetime_fds,
-                    )
+                    if process_ledger is not None:
+                        process_ledger.launch_started()
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            *launch.argv,
+                            stdin=asyncio.subprocess.DEVNULL,
+                            cwd=str(launch.cwd),
+                            env=launch.env,
+                            stdout=stdout_file,
+                            stderr=stderr_file,
+                            start_new_session=True,
+                            close_fds=True,
+                            pass_fds=launch.lease.process_lifetime_fds,
+                        )
+                    except Exception:
+                        if process_ledger is not None:
+                            process_ledger.launch_finished(None)
+                        raise
+                    if process_ledger is not None:
+                        # start_new_session=True makes the pid the process group id.
+                        process_ledger.launch_finished(proc.pid)
                     wait_task = asyncio.create_task(proc.wait())
                     outcome = await _wait_for_provider(
                         wait_task,
@@ -238,6 +305,7 @@ async def run_parallel_async(
     jobs: Sequence[SubprocessJob], *, max_concurrency: int | None = None,
     should_start: Callable[[SubprocessJob], bool] | None = None,
     on_result: Callable[[SubprocessResult], None] | None = None,
+    process_ledger: ProviderProcessLedger | None = None,
 ) -> list[SubprocessResult]:
     """Run all jobs concurrently. Returns results in the same order as jobs.
 
@@ -260,7 +328,7 @@ async def run_parallel_async(
             if should_start is not None and not should_start(job):
                 return None
             try:
-                result = await _run_one(job)
+                result = await _run_one(job, process_ledger=process_ledger)
             except Exception as exc:
                 result = SubprocessResult(
                     job_id=job.job_id,
@@ -292,6 +360,7 @@ def run_parallel(
     *,
     should_start: Callable[[SubprocessJob], bool] | None = None,
     on_result: Callable[[SubprocessResult], None] | None = None,
+    process_ledger: ProviderProcessLedger | None = None,
 ) -> list[SubprocessResult]:
     """Sync wrapper around run_parallel_async. Preferred entry point for
     callers that aren't already inside an event loop.
@@ -309,6 +378,7 @@ def run_parallel(
         )
     return asyncio.run(run_parallel_async(
         jobs, should_start=should_start, on_result=on_result,
+        process_ledger=process_ledger,
     ))
 
 
