@@ -929,6 +929,102 @@ def test_premerge_guard_rejects_forward_and_replayed_bypass(project, run_dir, ta
     assert not (run_dir / "merge.md").exists()
 
 
+@pytest.mark.parametrize("case", ["merged", "forged-open", "green-branch-deleted"])
+@pytest.mark.parametrize("replay", [False, True])
+def test_pr_watch_merged_route_proves_the_live_merge_after_the_head_branch_is_deleted(
+    project, run_dir, tmp_path, monkeypatch, case, replay,
+):
+    """반증: GitHub이 merge와 함께 head 브랜치를 지우면 `merged` route가 pre-merge 증명(원격 브랜치 OID와
+    green PR)에 막혀, 이미 merge된 run이 abort 말고는 나갈 길이 없었다 (#250).
+
+    `status: merged`는 agent가 쓴 주장이다. GitHub이 MERGED를 보고하지 않으면 여전히 막혀야 하고,
+    merge phase로 가는 `green` route의 pre-merge 증명은 그대로여야 한다.
+    """
+    import agent_flow.pr_watch as pr_watch
+    from agent_flow.core.commands import SafeCommandResult
+    from agent_flow.core.worktree_isolation import WorktreeIsolationError
+
+    branch = "feat/merged-route"
+    _git("switch", "-c", branch, cwd=project)
+    (project / "feature.txt").write_text("feature\n", encoding="utf-8")
+    _git("add", "feature.txt", cwd=project)
+    _git("commit", "-m", "feat: merged route", cwd=project)
+    remote = tmp_path / "remote.git"
+    _git("init", "--bare", str(remote), cwd=tmp_path)
+    _git("remote", "add", "origin", str(remote), cwd=project)
+    _git("push", "origin", "HEAD", cwd=project)
+    head = _git("rev-parse", "HEAD", cwd=project).stdout.strip()
+    url = "https://github.com/example/repo/pull/1"
+    (run_dir / "push-pr.md").write_text(
+        f"remote: origin\nbranch: {branch}\nremote-oid: {head}\npr-url: {url}\npr-base: main\n",
+    )
+    gates = run_dir / "artifacts" / "gate-results.json"
+    gates.parent.mkdir(exist_ok=True)
+    gates.write_text(json.dumps({"produced_by": {"gate_phase": "all", "gate_execution": "local"}}))
+    pr = {
+        "url": url, "state": "OPEN", "baseRefName": "main", "headRefName": branch, "headRefOid": head,
+        "reviewDecision": "APPROVED",
+        "statusCheckRollup": [{"name": "pytest", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+    }
+    monkeypatch.setattr(
+        "agent_flow.core.delivery_evidence.run_safe_command",
+        lambda command, **_: SafeCommandResult(
+            args=tuple(command), returncode=0, stdout=json.dumps(pr), stderr="",
+        ),
+    )
+    monkeypatch.setattr(pr_watch, "_fetch_pr_data", lambda *a, **k: pr)
+    monkeypatch.setattr(pr_watch, "_fetch_review_threads", lambda *a, **k: [])
+    _capture_spec_ledger(run_dir, "manual", due="pre-merge")
+    definition = parse_phase_workflow_definition(
+        json.dumps({"name": "default", "phases": [
+            {"id": "push-pr"},
+            {"id": "pr-watch", "routes": {"merged": "cleanup", "green": "merge"}},
+            {"id": "merge"},
+            {"id": "cleanup"},
+        ]}).encode(),
+        source=project / "merged-route.yaml", name="default",
+    )
+    write_meta(run_dir, {
+        "run_id": "merged-route", "workflow": "default", "task": "",
+        **workflow_pin_metadata(definition, workflow="default"),
+        "phase_index": 1, "current_phase": "pr-watch",
+        "phase_entered_at": "2026-08-21T00:00:00+00:00",
+    })
+    runner = Runner(project, run_dir=run_dir)
+    record_manual_spec_approval(
+        run_dir, "SPEC-1", manual_spec_approval_statement(run_dir, "SPEC-1", project_root=project),
+        project_root=project, profile=runner.profile, publication_observer=observe_spec_publication,
+    )
+
+    if case != "forged-open":
+        _git("push", "origin", "--delete", branch, cwd=project)
+    if case == "merged":
+        pr["state"] = "MERGED"
+    (run_dir / "pr-watch.md").write_text(f"status: {'green' if case == 'green-branch-deleted' else 'merged'}\n")
+    transition = runner._plan_transition(1, runner.phases[1])
+    if replay:
+        runner._append_transition_journal(transition)
+
+    def advance():
+        if replay:
+            runner._resume_pending_transition()
+        else:
+            runner._commit_transition(transition)
+
+    if case == "merged":
+        advance()
+        assert read_meta(run_dir)["current_phase"] == "cleanup"
+        return
+    expected = {
+        "forged-open": "completed merge requires a live MERGED pull request",
+        "green-branch-deleted": "cannot prove the pushed remote branch OID",
+    }[case]
+    with pytest.raises(WorktreeIsolationError, match=expected):
+        advance()
+    assert read_meta(run_dir)["phase_index"] == 1
+    assert not (run_dir / "cleanup.md").exists()
+
+
 @pytest.mark.parametrize("phase_id", ["final-review", "merge"])
 @pytest.mark.parametrize("missing_ledger", [False, True])
 def test_all_completion_paths_share_spec_evidence_check(

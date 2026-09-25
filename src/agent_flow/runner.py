@@ -1123,12 +1123,25 @@ class Runner:
             publication_observer=observe_spec_publication,
         )
 
-    def _check_spec_transition(self, from_index: int, to_index: int) -> None:
+    def _check_spec_transition(self, from_index: int, to_index: int, route_key: str) -> None:
         if to_index <= from_index:
             return
         crossed = self.phases[from_index + 1:to_index + 1]
+        merge_state: Literal["post-merge"] | None = None
         if any(phase.id in {"merge", "merge-approval"} for phase in crossed):
             checkpoint = "pre-merge"
+            # A declared `merged` route skips the merge phase because the PR was merged outside
+            # the run. Pre-merge proof cannot hold there: it expects a green PR and reads the
+            # head branch from the remote, which GitHub deletes on merge in many repos. Prove
+            # the merge the way the merge phase's own completion does — a live MERGED PR whose
+            # head is this HEAD — while the phase id keeps the publication check mandatory, so
+            # a `status: merged` artifact alone still proves nothing.
+            if (
+                route_key == "merged"
+                and "merged" in self.phases[from_index].routes
+                and (to_index >= len(self.phases) or self.phases[to_index].id not in {"merge", "merge-approval"})
+            ):
+                merge_state = "post-merge"
         elif to_index >= len(self.phases):
             checkpoint = "terminal"
         elif self.phases[to_index].id in SPEC_PRE_MERGE_PHASES:
@@ -1138,7 +1151,7 @@ class Runner:
         else:
             checkpoint = ""
         if checkpoint:
-            missing = self._missing_entry_spec_evidence(checkpoint)
+            missing = self._missing_entry_spec_evidence(checkpoint, checkpoint=merge_state)
             if missing:
                 raise WorktreeIsolationError("; ".join(missing))
         for phase in crossed:
@@ -1364,7 +1377,7 @@ class Runner:
                 )
             phase = self.phases[transition.from_index]
             if not transition.blocked:
-                self._check_spec_transition(transition.from_index, transition.to_index)
+                self._check_spec_transition(transition.from_index, transition.to_index, transition.route_key)
             if phase.id == "pr-watch" and transition.ci_repair_state is not None:
                 observation = json.loads(
                     resolve_run_subpath(self.run_dir, Path("pr-feedback.json")).read_text(encoding="utf-8")
@@ -1612,7 +1625,7 @@ class Runner:
             ):
                 return
             if not transition.blocked:
-                self._check_spec_transition(transition.from_index, target_index)
+                self._check_spec_transition(transition.from_index, target_index, transition.route_key)
             print(
                 f"  [resume] completing interrupted transition "
                 f"{transition.from_phase} -> {transition.to_phase or 'complete'}"
