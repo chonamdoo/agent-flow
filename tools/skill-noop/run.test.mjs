@@ -181,7 +181,7 @@ for (const { unmatched, warns } of [
   });
 }
 
-test('--rescore reports each appended run on its own and refuses runs whose prompt the case no longer renders', (t) => {
+test('--rescore reports each appended run on its own and refuses runs measured under other inputs', (t) => {
   const repo = setup(t);
   addCase(repo.cases, 'reruns');
   const selection = ['--case', 'reruns', '--providers', 'claude', '--reps', '2'];
@@ -210,4 +210,12 @@ test('--rescore reports each appended run on its own and refuses runs whose prom
   assert.equal(moved.status, 0, moved.stderr);
   assert.equal(moved.stdout.match(/REFUSED: 2 row\(s\) were rendered from a prompt the current case no longer produces/g)?.length, 2, moved.stdout);
   assert.doesNotMatch(moved.stdout, /=> /);
+
+  // Same prompts, but the fixture now expects approval: every row would be re-read as off-expected.
+  writeFileSync(spec, JSON.stringify({ ...original, fixtures: [{ ...original.fixtures[0], expect: 'approve' }] }));
+  const rescored = repo.rescore(...selection);
+
+  assert.equal(rescored.status, 0, rescored.stderr);
+  assert.equal(rescored.stdout.match(/REFUSED: 4 row\(s\) were scored under another kind, lineIn or expected verdict/g)?.length, 2, rescored.stdout);
+  assert.doesNotMatch(rescored.stdout, /rendered from a prompt|=> /);
 });

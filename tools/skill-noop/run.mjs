@@ -41,6 +41,9 @@ const fail = (msg) => {
 const isPosInt = (v) => Number.isInteger(v) && v > 0;
 const isBlocking = (line) => BLOCKING_RE.test(line);
 const digest = (text) => createHash('sha256').update(text).digest('hex').slice(0, 12);
+// What the report reads besides the patterns: the decision kind, the arm carrying the line and each
+// fixture's expected verdict. Target and forbidden only pick patterns, so they stay rescoreable.
+const scoringDigest = (kase) => digest(JSON.stringify([kase.kind, kase.lineIn, kase.fixtures.map((f) => [f.name, f.expect])]));
 
 function variantText(kase) {
   const lines = kase.baselineText.split('\n');
@@ -443,6 +446,7 @@ if (argv.includes('--rescore')) {
       if (!runs.has(id)) runs.set(id, []);
       runs.get(id).push(r);
     }
+    const scoring = scoringDigest(kase);
     for (const [runId, runRows] of runs) {
       // A row rendered from another prompt measured another edit: after a variant flips between
       // insertion and deletion the same arm name means the opposite, and the report would print a
@@ -453,16 +457,25 @@ if (argv.includes('--rescore')) {
           r.promptHash != null &&
           !(ARMS.includes(r.arm) && kase.fixtureText.has(r.fixture) && r.promptHash === digest(buildPrompt(kase, r.arm, r.fixture))),
       );
-      if (moved.length) {
-        console.log(
-          `\n=== ${kase.id} run ${runId} ===\n   REFUSED: ${moved.length} row(s) were rendered from a prompt the current case no longer produces (skill, variant or fixture changed); measure again instead of rescoring.`,
-        );
+      // The same prompts under another kind, lineIn or expected verdict are read by other rules:
+      // flipping an `expect` inverts every off-expected count without a single new run.
+      const rescored = runRows.filter((r) => r.scoringHash != null && r.scoringHash !== scoring);
+      if (moved.length || rescored.length) {
+        console.log(`\n=== ${kase.id} run ${runId} ===`);
+        if (moved.length)
+          console.log(
+            `   REFUSED: ${moved.length} row(s) were rendered from a prompt the current case no longer produces (skill, variant or fixture changed); measure again instead of rescoring.`,
+          );
+        if (rescored.length)
+          console.log(
+            `   REFUSED: ${rescored.length} row(s) were scored under another kind, lineIn or expected verdict; measure again instead of rescoring.`,
+          );
         continue;
       }
       report(kase, runRows, providers, reps);
-      const unchecked = runRows.filter((r) => r.promptHash == null).length;
+      const unchecked = runRows.filter((r) => r.promptHash == null || r.scoringHash == null).length;
       console.log(
-        `   (rescored ${path.basename(file)} run ${runId}: ${runRows.length} row(s); ${unchecked ? `${unchecked} predate prompt digests, so their arm meaning is assumed, not checked` : 'every prompt matches the current case'})`,
+        `   (rescored ${path.basename(file)} run ${runId}: ${runRows.length} row(s); ${unchecked ? `${unchecked} predate provenance digests, so their arm meaning and scoring are assumed, not checked` : 'every prompt and scoring rule matches the current case'})`,
       );
     }
   }
@@ -486,7 +499,7 @@ for (const kase of cases) {
     jobs,
     limit,
     (job) => runOne(kase, job),
-    (row) => appendFileSync(out, `${JSON.stringify({ runId, skill: kase.baselineHash, ...row })}\n`),
+    (row) => appendFileSync(out, `${JSON.stringify({ runId, skill: kase.baselineHash, scoringHash: scoringDigest(kase), ...row })}\n`),
   );
   report(kase, results, providers, reps);
 }
