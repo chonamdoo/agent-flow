@@ -1,11 +1,13 @@
 {
   "kind": "addition",
-  "subject": "applied line F6: the shell must render from data a plain request can obtain. Removing it must lose blocking findings.",
+  "subject": "candidate line F6: the shell must render from data a plain request can obtain. Removed after #247: once cold-shell accepted the wording reviewers use without the line, both arms caught the empty shell 24/24. Re-adding it must surface a miss the guide otherwise loses.",
   "baseline": "skills/react-development-guide/SKILL.md",
-  "lineIn": "baseline",
   "variant": {
-    "deleteLines": [26, 26],
-    "expectRemoved": ["Render the shell from data a plain request can obtain"]
+    "insertAfter": 25,
+    "expectAnchor": "Server HTML and the first client hydration render must use the same snapshot",
+    "text": [
+      "- Render the shell from data a plain request can obtain. A first-visit or crawler request that misses build-warmed state must still receive the shell."
+    ]
   },
   "fixtures": [{ "name": "target", "file": "fixture.diff", "expect": "request-changes" }],
   "patterns": {
