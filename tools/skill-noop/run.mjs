@@ -40,6 +40,10 @@ const fail = (msg) => {
 };
 const isPosInt = (v) => Number.isInteger(v) && v > 0;
 const isBlocking = (line) => BLOCKING_RE.test(line);
+const digest = (text) => createHash('sha256').update(text).digest('hex').slice(0, 12);
+// What the report reads besides the patterns: the decision kind, the arm carrying the line and each
+// fixture's expected verdict. Target and forbidden only pick patterns, so they stay rescoreable.
+const scoringDigest = (kase) => digest(JSON.stringify([kase.kind, kase.lineIn, kase.fixtures.map((f) => [f.name, f.expect])]));
 
 function variantText(kase) {
   const lines = kase.baselineText.split('\n');
@@ -82,7 +86,7 @@ function loadCase(id) {
   // batch is in flight change the baseline text under later jobs, so the two arms would differ
   // by more than the single edit the case declares.
   const baselineText = readFileSync(baselinePath, 'utf8');
-  const baselineHash = createHash('sha256').update(baselineText).digest('hex').slice(0, 12);
+  const baselineHash = digest(baselineText);
 
   if (!spec.fixtures?.length) fail(`${id}: no fixtures`);
   const fixtureText = new Map();
@@ -151,7 +155,9 @@ function runOne(kase, job) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      const row = { ...job, seconds: Math.round((Date.now() - t0) / 1000), ...extra };
+      // The digest of the exact prompt binds the row to the arm and fixture it measured. A rescore
+      // after the case changes can then tell a pattern-only edit from rows whose meaning moved.
+      const row = { ...job, promptHash: digest(prompt), seconds: Math.round((Date.now() - t0) / 1000), ...extra };
       row.ok = row.code === 0 && row.verdict != null;
       // stderr carries no signal on a good run — codex echoes the entire prompt there, which was
       // 43% of the committed evidence. On a failed run it is the only clue, so keep it there,
@@ -292,6 +298,22 @@ function report(kase, results, providers, expectedPerCell) {
         `   topic ${name.padEnd(20)} baseline ${hb}/${nb} vs variant ${hv}/${nv}  p=${fisher(hb, nb - hb, hv, nv - hv).toFixed(4)}  [${perProvider}]`,
       );
     }
+    // A blocking finding that no pattern names is invisible to every count above. When one arm
+    // leaves significantly more rows with such findings, either the patterns miss the words that arm
+    // uses for the measured defect, so the counts measure vocabulary instead of detection (#247), or
+    // a topic the case never named concentrates in that arm. Only a reader can tell which, so this
+    // prints the lines and warns; the decision below is computed exactly as before.
+    const unmatched = (r) => r.findings.filter((l) => isBlocking(l) && ![...kase.patterns.values()].some((re) => re.test(l)));
+    const [ub, uv] = ARMS.map((arm) => bucket(f.name, arm).filter((r) => unmatched(r).length).length);
+    const [nb, nv] = ARMS.map((arm) => bucket(f.name, arm).length);
+    const pu = fisher(ub, nb - ub, uv, nv - uv);
+    if (pu < 0.05) {
+      console.log(
+        `   WARNING unmatched blocking findings: baseline ${ub}/${nb} vs variant ${uv}/${nv} rows  p=${pu.toFixed(4)} — one arm uses wording or a topic no pattern names; read these before trusting the decision:`,
+      );
+      for (const arm of ARMS)
+        for (const r of bucket(f.name, arm)) for (const l of unmatched(r)) console.log(`     ${r.provider}/${arm}#${r.rep} ${l}`);
+    }
   }
 
   console.log('\n-- decision');
@@ -373,7 +395,8 @@ const ids = argv.includes('--all')
       .filter((d) => existsSync(path.join(CASES, d, 'case.json')))
       .sort()
   : [argOf('--case', null)].filter(Boolean);
-if (!ids.length) fail('usage: run.mjs --case <id> | --all [--validate] [--reps N] [--providers claude,codex] [--concurrency N]');
+if (!ids.length)
+  fail('usage: run.mjs --case <id> | --all [--validate | --rescore] [--reps N] [--providers claude,codex] [--concurrency N]');
 
 const reps = posInt(argOf('--reps', '12'), '--reps');
 const limit = posInt(argOf('--concurrency', '8'), '--concurrency');
@@ -393,15 +416,78 @@ if (argv.includes('--validate')) {
   process.exit(0);
 }
 
+// The filename carries the repeat count and the provider set, because a cell is identified by
+// provider as well: a rerun with fewer providers would otherwise overwrite the evidence a decision
+// was justified on while the name still claimed the same power.
+const resultsPath = (kase) => path.join(kase.dir, `results-n${reps}-${[...providers].sort().join('+')}.jsonl`);
+
+// Rescoring re-runs the report over rows already on disk, so a pattern fix can be checked against
+// the evidence a decision was made on without paying for a single CLI call. Like --validate it
+// never writes: appending here would mix a rescore into the evidence it reads.
+if (argv.includes('--rescore')) {
+  for (const kase of cases) {
+    const file = resultsPath(kase);
+    if (!existsSync(file)) fail(`${kase.id}: no ${path.basename(file)} to rescore (pick the run with --reps/--providers)`);
+    const rows = readFileSync(file, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line, i) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return fail(`${kase.id}: ${path.basename(file)}:${i + 1} is not JSON`);
+        }
+      });
+    // Measuring appends, so one file can hold several runs. Pooling them would fill every cell past
+    // --reps and refuse them all, so each run is reported on its own.
+    const runs = new Map();
+    for (const r of rows) {
+      const id = r.runId ?? 'unrecorded';
+      if (!runs.has(id)) runs.set(id, []);
+      runs.get(id).push(r);
+    }
+    const scoring = scoringDigest(kase);
+    for (const [runId, runRows] of runs) {
+      // A row rendered from another prompt measured another edit: after a variant flips between
+      // insertion and deletion the same arm name means the opposite, and the report would print a
+      // confident decision about lines the rows never compared. Patterns are not in the prompt, so
+      // a pattern fix still rescores.
+      const moved = runRows.filter(
+        (r) =>
+          r.promptHash != null &&
+          !(ARMS.includes(r.arm) && kase.fixtureText.has(r.fixture) && r.promptHash === digest(buildPrompt(kase, r.arm, r.fixture))),
+      );
+      // The same prompts under another kind, lineIn or expected verdict are read by other rules:
+      // flipping an `expect` inverts every off-expected count without a single new run.
+      const rescored = runRows.filter((r) => r.scoringHash != null && r.scoringHash !== scoring);
+      if (moved.length || rescored.length) {
+        console.log(`\n=== ${kase.id} run ${runId} ===`);
+        if (moved.length)
+          console.log(
+            `   REFUSED: ${moved.length} row(s) were rendered from a prompt the current case no longer produces (skill, variant or fixture changed); measure again instead of rescoring.`,
+          );
+        if (rescored.length)
+          console.log(
+            `   REFUSED: ${rescored.length} row(s) were scored under another kind, lineIn or expected verdict; measure again instead of rescoring.`,
+          );
+        continue;
+      }
+      report(kase, runRows, providers, reps);
+      const unchecked = runRows.filter((r) => r.promptHash == null || r.scoringHash == null).length;
+      console.log(
+        `   (rescored ${path.basename(file)} run ${runId}: ${runRows.length} row(s); ${unchecked ? `${unchecked} predate provenance digests, so their arm meaning and scoring are assumed, not checked` : 'every prompt and scoring rule matches the current case'})`,
+      );
+    }
+  }
+  process.exit(0);
+}
+
 for (const kase of cases) {
   const jobs = [];
   for (const provider of providers)
     for (const arm of ARMS)
       for (const f of kase.fixtures) for (let rep = 1; rep <= reps; rep++) jobs.push({ provider, arm, fixture: f.name, rep });
-  // The filename carries the repeat count and the provider set, because a cell is identified by
-  // provider as well: a rerun with fewer providers would otherwise overwrite the evidence a
-  // decision was justified on while the name still claimed the same power.
-  const out = path.join(kase.dir, `results-n${reps}-${[...providers].sort().join('+')}.jsonl`);
+  const out = resultsPath(kase);
   appendFileSync(out, '');
   process.stderr.write(`\n${kase.id}: ${jobs.length} jobs -> ${path.basename(out)}\n`);
   // Rows land on disk as they finish, so a crash keeps the runs already paid for. Appending means
@@ -413,7 +499,7 @@ for (const kase of cases) {
     jobs,
     limit,
     (job) => runOne(kase, job),
-    (row) => appendFileSync(out, `${JSON.stringify({ runId, skill: kase.baselineHash, ...row })}\n`),
+    (row) => appendFileSync(out, `${JSON.stringify({ runId, skill: kase.baselineHash, scoringHash: scoringDigest(kase), ...row })}\n`),
   );
   report(kase, results, providers, reps);
 }

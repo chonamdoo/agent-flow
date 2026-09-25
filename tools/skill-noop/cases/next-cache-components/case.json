@@ -3,7 +3,7 @@
   "subject": "candidate line F5: runtime APIs are not readable inside a `use cache` function",
   "baseline": "skills/react-development-guide/SKILL.md",
   "variant": {
-    "insertAfter": 28,
+    "insertAfter": 27,
     "expectAnchor": "Avoid rerender work only when there is a real changed path",
     "text": [
       "- In a `use cache` function, take request data as arguments. Runtime APIs such as `cookies()`, `headers()`, and `searchParams` are not readable inside it."
