@@ -53,11 +53,11 @@ A team can express:
 
 A team cannot express, in a repository, the whole of that list. A repository lays its own values
 on top through `.agent-flow/profiles/<profile-id>.local.yaml`, and
-`PROJECT_OVERRIDE_KEYS` in `src/agent_flow/core/profiles.py` accepts exactly five keys:
-`architecture`, `branching`, `execution`, `gates`, `pr`. Any other key is rejected with an
-error rather than ignored, so a declaration that would not take effect is never swallowed
-silently. `review_angles`, `commit_convention`, `vocabulary` and `skills` are therefore not
-settable per repository: changing them means shipping a changed profile. Editing the installed
+`PROJECT_OVERRIDE_KEYS` in `src/agent_flow/core/profiles.py` accepts exactly seven keys:
+`architecture`, `branching`, `commit_convention`, `execution`, `gates`, `pr`, `review_angles`.
+Any other key is rejected with an error rather than ignored, so a declaration that would not
+take effect is never swallowed silently. `vocabulary` and `skills` are therefore not settable
+per repository: changing them means shipping a changed profile. Editing the installed
 `.agent-flow/profiles/<id>.yaml` directly does not survive, because install overwrites the
 shipped profile so new fields reach existing installs.
 
@@ -196,9 +196,12 @@ repository is not implemented.
 
 **How a team agrees a review criterion.** A criterion is a `review_angles` entry pointing at a
 prompt path relative to the kit root, such as `templates/_shared/review/architecture-design.md`.
-`review_angles` is not one of the five keys a `.local.yaml` override accepts, so a team cannot
-add or retire an angle without shipping a changed profile, and there is no record of who agreed
-to it. An agreement procedure is not implemented.
+A `.local.yaml` override can replace the profile's `review_angles` list, and a prompt that is not
+one of the kit's baseline prompts is read from the project before the kit (`_review_angle_prompt`
+in `src/agent_flow/adapters/hosted.py`), so a working copy can add or retire an angle without
+shipping a changed profile. The mandatory `generalist` and `types` angles still run, the
+override file is per working copy like any other, and there is no record of who agreed to a
+change. An agreement procedure is not implemented.
 
 **Per-member skill differences.** `agent-flow skills doctor` and `agent-flow skills scan` report
 what resolves on the machine they run on. Nothing compares two machines. The candidate set is,
@@ -238,9 +241,10 @@ before any run uses it.
 People decide: who may move the pin, and what happens to a run already in flight when it moves.
 
 Drop it when: the team concludes each working copy should keep its own values. The `.local.yaml`
-override already carries `architecture`, `branching`, `execution`, `gates` and `pr`, but it is
-gitignored, so dropping this stage leaves every member restating those values by hand — or
-force-adding the file — rather than resolving one shared declaration.
+override already carries `architecture`, `branching`, `commit_convention`, `execution`, `gates`,
+`pr` and `review_angles`, but it is gitignored, so dropping this stage leaves every member
+restating those values by hand — or force-adding the file — rather than resolving one shared
+declaration.
 
 ### Stage B — team convention packs as versioned skill sources with a review owner
 

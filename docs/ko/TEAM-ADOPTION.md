@@ -51,10 +51,10 @@
 
 팀이 저장소 안에서 위 목록 전부를 선언할 수는 없다. 저장소는
 `.agent-flow/profiles/<profile-id>.local.yaml`로 자기 값을 얹고,
-`src/agent_flow/core/profiles.py`의 `PROJECT_OVERRIDE_KEYS`는 정확히 다섯 키만 받는다:
-`architecture`, `branching`, `execution`, `gates`, `pr`. 그 밖의 키는 조용히 무시되지 않고
-에러로 거부된다 — 반영되지 않는 선언을 삼키지 않기 위해서다. 그래서 `review_angles`,
-`commit_convention`, `vocabulary`, `skills`는 저장소별로 설정할 수 없고, 바꾸려면 바뀐 profile을
+`src/agent_flow/core/profiles.py`의 `PROJECT_OVERRIDE_KEYS`는 정확히 일곱 키만 받는다:
+`architecture`, `branching`, `commit_convention`, `execution`, `gates`, `pr`, `review_angles`.
+그 밖의 키는 조용히 무시되지 않고 에러로 거부된다 — 반영되지 않는 선언을 삼키지 않기
+위해서다. 그래서 `vocabulary`, `skills`는 저장소별로 설정할 수 없고, 바꾸려면 바뀐 profile을
 배포해야 한다. 설치된 `.agent-flow/profiles/<id>.yaml`를 직접 고치는 것은 남지 않는다. install이
 새 필드를 기존 설치본에 닿게 하려고 배포 profile을 덮어쓰기 때문이다.
 
@@ -171,9 +171,12 @@ profile이 `skill_sources`를 선언하고, `src/agent_flow/core/skill_sync.py`�
 저장소 양쪽에서 독립적으로 팀이 소유·버전·리뷰·핀하는 팩은 구현되지 않았다.
 
 **팀이 리뷰 기준에 합의하는 방법.** 기준은 kit root 기준 prompt 경로를 가리키는 `review_angles`
-항목이다(예: `templates/_shared/review/architecture-design.md`). `review_angles`는 `.local.yaml`
-override가 받는 다섯 키에 없으므로, 팀은 profile을 고쳐 배포하지 않고 angle을 추가하거나 뺄 수 없고,
-누가 그것에 합의했는지에 대한 기록도 없다. 합의 절차는 구현되지 않았다.
+항목이다(예: `templates/_shared/review/architecture-design.md`). `.local.yaml` override는
+profile의 `review_angles` 목록을 통째로 바꿀 수 있고, kit baseline prompt가 아닌 prompt는 kit보다
+프로젝트에서 먼저 읽힌다(`src/agent_flow/adapters/hosted.py`의 `_review_angle_prompt`). 그래서 작업
+사본은 profile을 고쳐 배포하지 않고도 angle을 추가하거나 뺄 수 있다. 필수 angle인 `generalist`와
+`types`는 그래도 돌고, override 파일은 다른 키와 마찬가지로 작업 사본별이며, 누가 그 변경에
+합의했는지에 대한 기록도 없다. 합의 절차는 구현되지 않았다.
 
 **구성원별 skill 차이.** `agent-flow skills doctor`와 `agent-flow skills scan`은 실행된 그 머신에서
 무엇이 해석되는지 보고한다. 두 머신을 비교하는 것은 없다. `_schema.yaml`이 적은 대로 후보 집합은 이
@@ -209,9 +212,9 @@ override, 그리고 `src/agent_flow/core/skill_sync.py`의 고정 ref fetch 캐�
 사람이 정할 것: 누가 핀을 옮길 수 있는가, 그리고 옮기는 시점에 이미 돌고 있는 run은 어떻게 되는가.
 
 버릴 조건: 팀이 작업 사본마다 자기 값을 갖는 편이 맞다고 결론 내릴 때. `.local.yaml` override가
-이미 `architecture`, `branching`, `execution`, `gates`, `pr`를 담지만 gitignore되므로, 만들지
-않으면 모든 구성원이 그 값을 손으로 다시 적거나 파일을 force-add하게 되고, 공유 선언 하나로
-해석되지는 않는다.
+이미 `architecture`, `branching`, `commit_convention`, `execution`, `gates`, `pr`, `review_angles`를
+담지만 gitignore되므로, 만들지 않으면 모든 구성원이 그 값을 손으로 다시 적거나 파일을
+force-add하게 되고, 공유 선언 하나로 해석되지는 않는다.
 
 ### 단계 B — 리뷰 담당자가 있는 버전 붙은 skill source로서의 팀 규약 팩
 
