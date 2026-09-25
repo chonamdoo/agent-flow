@@ -160,5 +160,9 @@
 225 tests/test_design_value_check.py::test_premerge_observation_requires_ci_from_every_active_profile
 225 tests/test_design_value_check.py::test_publication_checkpoint_uses_selected_merge_markers
 
+# pr #252 — a pr-watch `merged` route that skips merge proves a live MERGED PR whose head is
+# this HEAD, even after GitHub deletes the head branch; the claim alone never skips merge.
+252 tests/test_design_value_check.py::test_pr_watch_merged_route_proves_the_live_merge_after_the_head_branch_is_deleted
+
 # Recorded but deliberately not pinned here.
 uncovered 164 the closed shared-hook-runtime attempt failed on an active-run marker race and on host-specific interpreter paths; neither reproduces deterministically in-process, so claiming coverage would be false comfort. The standing defense is the policy ban on another runtime/installer centralization.
