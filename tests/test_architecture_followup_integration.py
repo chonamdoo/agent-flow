@@ -387,7 +387,7 @@ def test_reviewer_inspection_does_not_record_delivery_and_provider_history_is_se
     monkeypatch.setattr(multi_review, "_cli_version", lambda _binary: None)
     monkeypatch.setattr(multi_review, "assert_managed_hooks_registered", lambda *args: None)
 
-    def fake_run_parallel(jobs, *, should_start=None, on_result=None):
+    def fake_run_parallel(jobs, *, should_start=None, on_result=None, **_kwargs):
         results = []
         for job in jobs:
             if should_start is not None and not should_start(job):

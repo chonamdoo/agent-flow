@@ -69,7 +69,7 @@ def test_multi_review_sweeps_the_scope_the_profile_declared(
     monkeypatch.setattr(
         multi_review,
         "run_parallel",
-        lambda jobs: [
+        lambda jobs, **_kwargs: [
             SubprocessResult(
                 job_id=job.job_id,
                 returncode=0,
