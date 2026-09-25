@@ -10,8 +10,9 @@
 #
 #   .agent-flow/profiles/<profile-id>.local.yaml
 #
-# `architecture`, `branching`, `commit_convention`, `execution`, `gates`, `pr` are
-# project-overridable. Other keys are rejected rather than silently ignored.
+# `architecture`, `branching`, `commit_convention`, `execution`, `gates`, `pr`,
+# `review_angles` are project-overridable. Other keys are rejected rather than
+# silently ignored.
 # dict는 깊게 병합하고 리스트와 스칼라는 통째로 대체한다. 리스트를 대체로 두는
 # 이유는 `gates`와 `architecture.roles` 때문이다: 저장소가 자기 모듈 구조를
 # 선언하는 것은 배포본 표에 **덧붙이는** 일이 아니라 **대신하는** 일이고, 이어

@@ -620,6 +620,45 @@ when updating installed assets.
 The build, test, and lint commands come only from the active profile's `gates`. Verification
 commands that are not in a gate are not repeated at will.
 
+### Reviewer model and effort
+
+A reviewer subprocess runs with its CLI's default model and effort unless the active profile
+declares `execution.reviewers`. To pin them for a project, declare rules in
+`.agent-flow/profiles/<profile-id>.local.yaml`:
+
+```yaml
+execution:
+  reviewers:
+    - match: {phase: review, angle: architecture-design}
+      candidates:
+        - {provider: claude, model: <claude-model-id>, effort: xhigh}
+        - {provider: codex, model: <codex-model-id>, effort: xhigh}
+    - candidates:   # no match: every review phase and angle
+        - {provider: claude, model: <claude-model-id>}
+        - {provider: codex, effort: medium}
+```
+
+- `match` takes `phase` and/or `angle`; an omitted key matches any value. Review phase ids by
+  workflow: `final-review` (`default`), `multi-review` and `architecture-review`
+  (`full-feature`), `review` (`review`, `bugfix`, `development`, `diagnosing-bugs`).
+- The first matching rule wins. Inside it, the first candidate for the provider already
+  assigned to that reviewer is used; a rule never changes which provider reviews. If that rule
+  has no candidate for the provider, the reviewer runs with CLI defaults — later rules are not
+  consulted. `effort` is `low`, `medium`, `high` or `xhigh`.
+- Claude gets `--model`/`--effort`; Codex gets `--model` and `-c model_reasoning_effort="..."`.
+  Codex reviewers run with `--ignore-user-config` and a private `CODEX_HOME` holding only
+  `auth.json`, so `~/.codex/config.toml` does not choose their model.
+- Each reviewer artifact records `- model:` and `- effort:`. `unspecified` means no flag was
+  passed and the CLI used its own default. It is not a config value: omit the field instead.
+  `model: unspecified` would reach the CLI as a model id, and `effort: unspecified` is rejected.
+- Lists replace rather than merge, so a local `execution.reviewers` replaces every shipped rule.
+  Re-declare shipped pins you want to keep, such as `python.yaml`'s `architecture-design` rule.
+- The declaration is read from the leader checkout, not a worker worktree, each time a review
+  wave starts; no reinstall is needed, and install does not overwrite `.local.yaml`. The file is
+  gitignored, so sharing it takes `git add -f`. If two active profiles both declare `execution`,
+  the review is blocked. There is no per-run CLI flag or environment variable for reviewer model
+  or effort.
+
 ## Reviewer distribution
 
 Every phase marked `multi_review: true` uses the same availability-based dispatch
