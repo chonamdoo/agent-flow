@@ -40,6 +40,7 @@ const fail = (msg) => {
 };
 const isPosInt = (v) => Number.isInteger(v) && v > 0;
 const isBlocking = (line) => BLOCKING_RE.test(line);
+const digest = (text) => createHash('sha256').update(text).digest('hex').slice(0, 12);
 
 function variantText(kase) {
   const lines = kase.baselineText.split('\n');
@@ -82,7 +83,7 @@ function loadCase(id) {
   // batch is in flight change the baseline text under later jobs, so the two arms would differ
   // by more than the single edit the case declares.
   const baselineText = readFileSync(baselinePath, 'utf8');
-  const baselineHash = createHash('sha256').update(baselineText).digest('hex').slice(0, 12);
+  const baselineHash = digest(baselineText);
 
   if (!spec.fixtures?.length) fail(`${id}: no fixtures`);
   const fixtureText = new Map();
@@ -151,7 +152,9 @@ function runOne(kase, job) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      const row = { ...job, seconds: Math.round((Date.now() - t0) / 1000), ...extra };
+      // The digest of the exact prompt binds the row to the arm and fixture it measured. A rescore
+      // after the case changes can then tell a pattern-only edit from rows whose meaning moved.
+      const row = { ...job, promptHash: digest(prompt), seconds: Math.round((Date.now() - t0) / 1000), ...extra };
       row.ok = row.code === 0 && row.verdict != null;
       // stderr carries no signal on a good run — codex echoes the entire prompt there, which was
       // 43% of the committed evidence. On a failed run it is the only clue, so keep it there,
@@ -432,11 +435,36 @@ if (argv.includes('--rescore')) {
           return fail(`${kase.id}: ${path.basename(file)}:${i + 1} is not JSON`);
         }
       });
-    // The header names the skill as it is now. Rows rendered against another skill text would
-    // otherwise read as evidence about the current one, so name what the rows themselves record.
-    const rendered = [...new Set(rows.map((r) => r.skill ?? 'unrecorded'))].join(', ');
-    report(kase, rows, providers, reps);
-    console.log(`   (rescored ${path.basename(file)}: ${rows.length} row(s) rendered against skill@${rendered})`);
+    // Measuring appends, so one file can hold several runs. Pooling them would fill every cell past
+    // --reps and refuse them all, so each run is reported on its own.
+    const runs = new Map();
+    for (const r of rows) {
+      const id = r.runId ?? 'unrecorded';
+      if (!runs.has(id)) runs.set(id, []);
+      runs.get(id).push(r);
+    }
+    for (const [runId, runRows] of runs) {
+      // A row rendered from another prompt measured another edit: after a variant flips between
+      // insertion and deletion the same arm name means the opposite, and the report would print a
+      // confident decision about lines the rows never compared. Patterns are not in the prompt, so
+      // a pattern fix still rescores.
+      const moved = runRows.filter(
+        (r) =>
+          r.promptHash != null &&
+          !(ARMS.includes(r.arm) && kase.fixtureText.has(r.fixture) && r.promptHash === digest(buildPrompt(kase, r.arm, r.fixture))),
+      );
+      if (moved.length) {
+        console.log(
+          `\n=== ${kase.id} run ${runId} ===\n   REFUSED: ${moved.length} row(s) were rendered from a prompt the current case no longer produces (skill, variant or fixture changed); measure again instead of rescoring.`,
+        );
+        continue;
+      }
+      report(kase, runRows, providers, reps);
+      const unchecked = runRows.filter((r) => r.promptHash == null).length;
+      console.log(
+        `   (rescored ${path.basename(file)} run ${runId}: ${runRows.length} row(s); ${unchecked ? `${unchecked} predate prompt digests, so their arm meaning is assumed, not checked` : 'every prompt matches the current case'})`,
+      );
+    }
   }
   process.exit(0);
 }

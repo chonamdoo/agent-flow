@@ -14,14 +14,23 @@ function setup(t) {
   const harness = path.join(root, 'tools', 'skill-noop');
   const cases = path.join(harness, 'cases');
   const emptyPath = path.join(root, 'empty-bin');
+  const reviewerPath = path.join(root, 'reviewer-bin');
   mkdirSync(cases, { recursive: true });
   mkdirSync(emptyPath);
+  mkdirSync(reviewerPath);
+  // A stand-in reviewer CLI: reads the prompt and blocks on the target topic, so a real measurement
+  // writes the same rows a provider would without a model call.
+  writeFileSync(
+    path.join(reviewerPath, 'claude'),
+    "#!/bin/sh\n/bin/cat >/dev/null\nprintf 'verdict: request-changes\\n- blocking: unsafe call\\n'\n",
+    { mode: 0o755 },
+  );
   for (const file of ['run.mjs', 'prompt.md']) copyFileSync(path.join(HERE, file), path.join(harness, file));
   writeFileSync(path.join(root, 'baseline.txt'), 'Review policy\nStable anchor\nReject unsafe changes\n');
-  const run = (args) =>
+  const run = (args, bin = emptyPath) =>
     spawnSync(process.execPath, [path.join(harness, 'run.mjs'), ...args], {
       cwd: root,
-      env: { PATH: emptyPath, HOME: root },
+      env: { PATH: bin, HOME: root },
       encoding: 'utf8',
       timeout: 10_000,
     });
@@ -29,6 +38,7 @@ function setup(t) {
     cases,
     validate: (...selection) => run([...selection, '--validate']),
     rescore: (...selection) => run([...selection, '--rescore']),
+    measure: (...selection) => run(selection, reviewerPath),
   };
 }
 
@@ -170,3 +180,34 @@ for (const { unmatched, warns } of [
     );
   });
 }
+
+test('--rescore reports each appended run on its own and refuses runs whose prompt the case no longer renders', (t) => {
+  const repo = setup(t);
+  addCase(repo.cases, 'reruns');
+  const selection = ['--case', 'reruns', '--providers', 'claude', '--reps', '2'];
+  for (let i = 0; i < 2; i++) {
+    const measured = repo.measure(...selection);
+    assert.ifError(measured.error);
+    assert.equal(measured.status, 0, measured.stderr);
+  }
+
+  const both = repo.rescore(...selection);
+
+  assert.equal(both.status, 0, both.stderr);
+  assert.equal(both.stdout.match(/=> NO-OP/g)?.length, 2, both.stdout);
+  assert.doesNotMatch(both.stdout, /REFUSED/);
+
+  // Only the patterns changed: the rows still measured this edit, so they rescore.
+  const spec = path.join(repo.cases, 'reruns', 'case.json');
+  const original = JSON.parse(readFileSync(spec, 'utf8'));
+  writeFileSync(spec, JSON.stringify({ ...original, patterns: { unsafe: 'unsafe|risky' } }));
+  assert.equal(repo.rescore(...selection).stdout.match(/=> NO-OP/g)?.length, 2);
+
+  // The variant now inserts another line, so every recorded variant row measured a different edit.
+  writeFileSync(spec, JSON.stringify({ ...original, variant: { ...original.variant, text: ['Check risky changes'] } }));
+  const moved = repo.rescore(...selection);
+
+  assert.equal(moved.status, 0, moved.stderr);
+  assert.equal(moved.stdout.match(/REFUSED: 2 row\(s\) were rendered from a prompt the current case no longer produces/g)?.length, 2, moved.stdout);
+  assert.doesNotMatch(moved.stdout, /=> /);
+});
