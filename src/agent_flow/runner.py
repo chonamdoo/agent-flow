@@ -2443,8 +2443,9 @@ class Runner:
         """Return remediation text for an architecture policy block."""
         if reason == "architecture_decision_pending":
             return (
-                "Select clean or local with `agent-flow architecture select` in the bound "
-                "checkout, then start a new run. Previous approval cannot be reused."
+                "Select clean, stack (when its skill is installed and the project qualifies), "
+                "or local with `agent-flow architecture select` in the bound checkout, then "
+                "start a new run. Previous approval cannot be reused."
             )
         if reason in {"skill_scope_grew", "architecture_norms_unpinned"}:
             return (

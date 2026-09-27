@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -5097,6 +5098,74 @@ def test_installer_and_runtime_agree_on_kotlin_backend_evidence(tmp_path: Path, 
 
     assert json.loads(result.stdout) is expected
     assert is_kotlin_backend_project(tmp_path) is expected
+
+
+@pytest.mark.parametrize("operation", ["subtree", "build-file"])
+@pytest.mark.parametrize("code,number", [
+    ("EACCES", errno.EACCES),
+    ("EPERM", errno.EPERM),
+    ("EIO", errno.EIO),
+])
+def test_kotlin_backend_eligibility_denied_reads_fail_closed_without_masking_other_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, code: str, number: int
+) -> None:
+    from agent_flow.core.profiles import is_kotlin_backend_project
+
+    (tmp_path / "settings.gradle.kts").write_text('include(":service")\n', encoding="utf-8")
+    service = tmp_path / "service"
+    service.mkdir()
+    (service / "build.gradle.kts").write_text('plugins { kotlin("jvm") }\n', encoding="utf-8")
+    target = (service if operation == "subtree" else service / "build.gradle.kts").resolve()
+    assert is_kotlin_backend_project(tmp_path) is True
+
+    method = "readdirSync" if operation == "subtree" else "readFileSync"
+    script = (
+        'import fs from "node:fs";\n'
+        f"import {{ isKotlinBackendProject }} from {json.dumps((KIT_ROOT / 'lib/profile-detection.mjs').as_uri())};\n"
+        f"const root = {json.dumps(str(tmp_path))};\n"
+        f"const target = {json.dumps(str(target))};\n"
+        f"const original = fs.{method};\n"
+        "console.log(JSON.stringify(isKotlinBackendProject(root)));\n"
+        f"fs.{method} = (...args) => {{\n"
+        f"  if (args[0] === target) throw Object.assign(new Error('denied'), {{ code: {json.dumps(code)} }});\n"
+        "  return original(...args);\n"
+        "};\n"
+        "try { console.log(JSON.stringify(isKotlinBackendProject(root))); }\n"
+        "catch (error) { console.log(JSON.stringify({ code: error.code })); }\n"
+    )
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", script), text=True, capture_output=True, check=True, timeout=30,
+    )
+    before, after = map(json.loads, result.stdout.splitlines())
+    assert before is True
+    assert after == ({"code": "EIO"} if code == "EIO" else False)
+
+    with monkeypatch.context() as patch:
+        if operation == "subtree":
+            original = os.scandir
+
+            def denied(directory: Path) -> object:
+                if directory == target:
+                    raise OSError(number, "denied", str(target))
+                return original(directory)
+
+            patch.setattr(os, "scandir", denied)
+        else:
+            original_read = Path.read_text
+
+            def denied_read(file: Path, *args: object, **kwargs: object) -> str:
+                if file == target:
+                    raise OSError(number, "denied", str(target))
+                return original_read(file, *args, **kwargs)
+
+            patch.setattr(Path, "read_text", denied_read)
+        if code == "EIO":
+            with pytest.raises(OSError) as raised:
+                is_kotlin_backend_project(tmp_path)
+            assert raised.value.errno == errno.EIO
+        else:
+            assert is_kotlin_backend_project(tmp_path) is False
+
 
 def test_kotlin_backend_eligibility_rejects_symlinked_module_ancestor(tmp_path: Path) -> None:
     from agent_flow.core.profiles import is_kotlin_backend_project

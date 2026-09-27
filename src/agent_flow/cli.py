@@ -3642,6 +3642,8 @@ def _run_skills_command(
         )
         conditional_markers = phase.required_markers_by_architecture is not None
         snapshot = resolution.architecture_snapshot
+        if snapshot is not None:
+            assert_stack_architecture_eligible(project_root, snapshot.selection, payloads)
         mode = snapshot.selection.mode.value if snapshot is not None else ArchitectureMode.CLEAN.value
         if conditional_markers and active is not None:
             if snapshot is None:
@@ -3720,8 +3722,9 @@ def _print_architecture_selection_guidance(root: Path) -> None:
         return
     print("Architecture: pending; no selected contract.")
     print(
-        "Select Clean or a project-local contract before making structural decisions; "
-        "nonstructural changes may continue using existing patterns."
+        "Select Clean, eligible Stack (install its skill first), or a project-local contract "
+        "before making structural decisions; nonstructural changes may continue using "
+        "existing patterns."
     )
 
 

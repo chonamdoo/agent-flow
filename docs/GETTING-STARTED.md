@@ -112,7 +112,8 @@ contract exists or will be added and no Clean skills are installed (the selectio
 architecture" to get the stack skill for React Web, Kotlin Spring/Ktor, and React Native, and
 Clean otherwise. If the contract file already exists at one of the two paths, install adopts
 it as `local` without asking, and `--architecture-mode clean` is refused beside it.
-`--mode stack` fails when no active profile provides a stack skill.
+`--mode stack` fails unless every active profile provides a stack skill; Spring and Ktor
+projects also need Kotlin evidence in every code and framework module.
 Inspect the selection with `agent-flow architecture export --format json`.
 
 See [Architecture selection](USAGE.md#architecture-selection) for reference syntax,

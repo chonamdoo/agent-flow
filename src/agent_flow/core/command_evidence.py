@@ -363,7 +363,7 @@ def _has_only_required_ci_test_gates(profile: dict | None) -> bool:
     ]
     return bool(test_gates) and all(
         gate.get("execution") == "ci"
-        and gate.get("required") is True
+        and gate.get("required") is not False
         and isinstance(gate.get("ci_check"), str)
         and bool(gate["ci_check"].strip())
         for gate in test_gates

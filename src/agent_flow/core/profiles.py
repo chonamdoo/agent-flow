@@ -286,42 +286,45 @@ def is_kotlin_backend_project(root: Path) -> bool:
     Kotlin 근거가 있어야 한다. `apply false`/`.apply(false)` 선언은 적용이 아니고, `.kts` 빌드
     스크립트는 Java 서비스도 쓴다.
     """
-    root = root.resolve()
-    kotlin = False
-    pending = [root]
-    while pending:
-        directory = pending.pop()
-        if not _modules_stay_in_checkout(directory, root):
-            return False
-        gradle = re.sub(
-            r"^[^\n]*(?:\n[ \t]*\.[^\n]*)*\bapply\s*(?:\(\s*false\s*\)|false\b)[^\n]*$", "",
-            "\n".join(
-                _without_gradle_comments(_read_build_file(directory / name))
-                for name in ("build.gradle", "build.gradle.kts")
-            ),
-            flags=re.MULTILINE,
-        )
-        pom = re.sub(r"<!--[\s\S]*?-->", "", _read_build_file(directory / "pom.xml"))
-        main = directory / "src" / "main"
-        kotlin_module = bool(
-            (main / "kotlin").exists()
-            or _KOTLIN_GRADLE_PLUGIN_RE.search(gradle)
-            or re.search(r"<artifactId>\s*kotlin-maven-plugin\s*</artifactId>", pom)
-        )
-        jvm_code = any((main / name).exists() for name in ("java", "groovy", "scala"))
-        framework = _has_spring_boot_evidence(gradle, pom) or _has_ktor_server_evidence(gradle, pom)
-        aggregator = re.search(r"<packaging>\s*pom\s*</packaging>", pom) is not None
-        if not kotlin_module and (jvm_code or (framework and not aggregator)):
-            return False
-        kotlin = kotlin or kotlin_module
-        with os.scandir(directory) as entries:
-            pending.extend(
-                Path(entry.path) for entry in entries
-                if entry.is_dir(follow_symlinks=False)
-                and not entry.name.startswith(".")
-                and entry.name not in _MODULE_WALK_PRUNED
+    try:
+        root = root.resolve()
+        kotlin = False
+        pending = [root]
+        while pending:
+            directory = pending.pop()
+            if not _modules_stay_in_checkout(directory, root):
+                return False
+            gradle = re.sub(
+                r"^[^\n]*(?:\n[ \t]*\.[^\n]*)*\bapply\s*(?:\(\s*false\s*\)|false\b)[^\n]*$", "",
+                "\n".join(
+                    _without_gradle_comments(_read_build_file(directory / name))
+                    for name in ("build.gradle", "build.gradle.kts")
+                ),
+                flags=re.MULTILINE,
             )
-    return kotlin
+            pom = re.sub(r"<!--[\s\S]*?-->", "", _read_build_file(directory / "pom.xml"))
+            main = directory / "src" / "main"
+            kotlin_module = bool(
+                (main / "kotlin").exists()
+                or _KOTLIN_GRADLE_PLUGIN_RE.search(gradle)
+                or re.search(r"<artifactId>\s*kotlin-maven-plugin\s*</artifactId>", pom)
+            )
+            jvm_code = any((main / name).exists() for name in ("java", "groovy", "scala"))
+            framework = _has_spring_boot_evidence(gradle, pom) or _has_ktor_server_evidence(gradle, pom)
+            aggregator = re.search(r"<packaging>\s*pom\s*</packaging>", pom) is not None
+            if not kotlin_module and (jvm_code or (framework and not aggregator)):
+                return False
+            kotlin = kotlin or kotlin_module
+            with os.scandir(directory) as entries:
+                pending.extend(
+                    Path(entry.path) for entry in entries
+                    if entry.is_dir(follow_symlinks=False)
+                    and not entry.name.startswith(".")
+                    and entry.name not in _MODULE_WALK_PRUNED
+                )
+        return kotlin
+    except PermissionError:
+        return False
 
 
 def assert_stack_architecture_eligible(

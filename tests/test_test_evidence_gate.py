@@ -260,6 +260,25 @@ def test_behavior_preserving_ci_only_test_is_deferred_without_command_evidence(t
     ) == ["test-run-evidence: verified (the related test must end green)"]
 
 
+def test_ci_deferral_respects_omitted_required_default_but_not_optional_gate(tmp_path):
+    root = _project(tmp_path)
+    _observe(root, "git status", 0)
+    text = (
+        GATE
+        + "change-kind: behavior-preserving\n"
+        + "behavior-preserving-reason: only the adapter boundary moves\n"
+        + "test-run-evidence: unavailable\n"
+    )
+    gate = {"id": "test", "command": ["pytest"], "execution": "ci", "ci_check": "pytest"}
+
+    assert missing_test_evidence_markers(
+        root, "implement", text, profile={"gates": [gate]},
+    ) == []
+    assert missing_test_evidence_markers(
+        root, "implement", text, profile={"gates": [{**gate, "required": False}]},
+    ) == ["test-run-evidence: verified (the related test must end green)"]
+
+
 def test_behavior_preserving_ci_deferral_requires_concrete_regression_and_required_check(tmp_path):
     root = _project(tmp_path)
     text = (

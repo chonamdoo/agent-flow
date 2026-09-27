@@ -667,6 +667,66 @@ def test_select_stack_needs_a_profile_with_a_stack_contract(tmp_path, capsys):
     assert not (root / PROJECT_ARCHITECTURE_FILE).exists()
 
 
+@pytest.mark.parametrize("command", ["resolve", "prompt", "markers"])
+@pytest.mark.parametrize("profiles", ["react-native,node", "node,react-native"])
+def test_skills_cli_rejects_a_stack_profile_without_its_own_contract(
+    tmp_path, capsys, monkeypatch, command, profiles,
+):
+    root = _git_project(tmp_path)
+    _declare(root, "schema_version: 1\narchitecture:\n  mode: stack\n")
+    _write(
+        root, ".agent-flow/skills/react-native-feature-architecture/SKILL.md",
+        "---\nname: react-native-feature-architecture\n"
+        "workflowPhases: [implement]\narchitecture_modes: [stack, local]\n"
+        "---\n\n# Feature architecture\n",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    options = ["--root", str(root), "--profile", profiles, "--phase", "implement", "--fresh"]
+    if command == "markers":
+        options.extend(["--artifact", str(root / "missing-artifact.md")])
+
+    assert _cli("skills", command, *options) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "every active profile" in captured.err
+    assert "stack architecture skill" in captured.err
+
+
+@pytest.mark.parametrize("mode", ["clean", "local", "pending"])
+@pytest.mark.parametrize("command", ["resolve", "prompt", "markers"])
+def test_skills_cli_keeps_non_stack_selections_available(
+    tmp_path, capsys, monkeypatch, mode, command,
+):
+    root = _git_project(tmp_path)
+    if mode == "local":
+        _local_contract(root)
+    else:
+        _declare(root, f"schema_version: 1\narchitecture:\n  mode: {mode}\n")
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    options = [
+        "--root", str(root), "--profile", "react-native,node",
+        "--phase", "implement", "--fresh",
+    ]
+    if command == "markers":
+        options.extend(["--artifact", str(root / "missing-artifact.md")])
+
+    assert _cli("skills", command, *options) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    if command == "markers":
+        missing = json.loads(captured.out)
+        assert "skills_checked: true" in missing
+        assert ("presentation-skill: android|flutter|react|react-native|ios|n/a" in missing) == (
+            mode == "clean"
+        )
+    elif command == "prompt":
+        assert f"Mode: `{mode}`." in captured.out
+    else:
+        assert "skill-availability:" in captured.out
+        if mode == "local":
+            assert "required architecture:" in captured.out
+
+
 def test_select_stack_refuses_a_java_spring_project(tmp_path, capsys):
     """hexagonal 계약은 Java 서비스를 대상에서 뺀다. 명시 선택도 기본값과 같은 자격을 요구한다."""
     root = _git_project(tmp_path)
