@@ -698,7 +698,9 @@ def test_skills_cli_keeps_non_stack_selections_available(
     tmp_path, capsys, monkeypatch, mode, command,
 ):
     root = _git_project(tmp_path)
-    if mode == "local":
+    if mode == "clean":
+        _clean_contract(root)
+    elif mode == "local":
         _local_contract(root)
     else:
         _declare(root, f"schema_version: 1\narchitecture:\n  mode: {mode}\n")
