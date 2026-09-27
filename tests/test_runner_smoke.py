@@ -3827,6 +3827,23 @@ def test_cli_detection_runs():
         assert c.name in {"claude", "codex", "omp"}
 
 
+def _clean_review_project(tmp_path: Path) -> Path:
+    project = tmp_path / "project"
+    policy = project / ".agent-flow" / "project.yaml"
+    policy.parent.mkdir(parents=True)
+    policy.write_text(
+        "schema_version: 1\narchitecture:\n  mode: clean\n", encoding="utf-8"
+    )
+    contract = project / "skills" / "clean-architecture-core" / "SKILL.md"
+    contract.parent.mkdir(parents=True)
+    contract.write_text(
+        "---\nname: clean-architecture-core\n---\n\n"
+        "Keep domain policy independent of I/O.\n",
+        encoding="utf-8",
+    )
+    return project
+
+
 def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
@@ -3898,17 +3915,24 @@ def test_state_integrity_angle_covers_required_risks():
 def test_state_integrity_angle_uses_high_signal_selectors_only(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.core.skill_resolver import PhaseSkills
     from agent_flow.runner import Phase
 
     adapter = HostedAdapter("codex")
     adapter._profile_snapshot = {"review_angles": []}
-    phase = Phase(id="final-review", description="", multi_review=True)
+    phase = Phase(
+        id="final-review",
+        description="",
+        multi_review=True,
+        skills=PhaseSkills(required=("clean-architecture-core",)),
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
+    project = _clean_review_project(tmp_path)
 
     adapter._changed_files = ("src/ui/Copy.tsx",)
     adapter._task_text = "change button wording"
-    unrelated, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    unrelated, _ = _reviewer_jobs(phase, run_dir, project, adapter)
     assert [job.angle_id for job in unrelated] == [
         "generalist",
         "types",
@@ -3918,7 +3942,7 @@ def test_state_integrity_angle_uses_high_signal_selectors_only(tmp_path: Path):
 
     adapter._changed_files = ("migrations/20260828_add_orders.sql",)
     adapter._task_text = ""
-    persistent_path, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    persistent_path, _ = _reviewer_jobs(phase, run_dir, project, adapter)
     assert [job.angle_id for job in persistent_path] == [
         "generalist",
         "types",
@@ -3929,7 +3953,7 @@ def test_state_integrity_angle_uses_high_signal_selectors_only(tmp_path: Path):
 
     adapter._changed_files = ("src/ui/Copy.tsx",)
     adapter._task_text = "prevent duplicate payment charge"
-    persistent_task, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    persistent_task, _ = _reviewer_jobs(phase, run_dir, project, adapter)
     assert [job.angle_id for job in persistent_task] == [
         "generalist",
         "types",
@@ -4179,6 +4203,7 @@ def test_multi_review_jobs_dedupe_profile_baseline(tmp_path: Path):
 def test_multi_review_profile_override_keeps_baseline_angle_gate(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.core.skill_resolver import PhaseSkills
     from agent_flow.runner import Phase
 
     adapter = HostedAdapter("codex")
@@ -4190,11 +4215,17 @@ def test_multi_review_profile_override_keeps_baseline_angle_gate(tmp_path: Path)
             },
         ]
     }
-    phase = Phase(id="final-review", description="", multi_review=True)
+    phase = Phase(
+        id="final-review",
+        description="",
+        multi_review=True,
+        skills=PhaseSkills(required=("clean-architecture-core",)),
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
+    project = _clean_review_project(tmp_path)
 
-    jobs, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, project, adapter)
 
     assert [job.angle_id for job in jobs] == [
         "generalist",
@@ -4238,6 +4269,7 @@ def test_multi_review_profile_cannot_gate_unconditional_baseline_angles(
     tmp_path: Path,
 ):
     from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.core.skill_resolver import PhaseSkills
     from agent_flow.runner import Phase
 
     adapter = HostedAdapter("codex")
@@ -4256,11 +4288,17 @@ def test_multi_review_profile_cannot_gate_unconditional_baseline_angles(
             )
         ]
     }
-    phase = Phase(id="final-review", description="", multi_review=True)
+    phase = Phase(
+        id="final-review",
+        description="",
+        multi_review=True,
+        skills=PhaseSkills(required=("clean-architecture-core",)),
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
+    project = _clean_review_project(tmp_path)
 
-    jobs, _ = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+    jobs, _ = _reviewer_jobs(phase, run_dir, project, adapter)
 
     assert [job.angle_id for job in jobs] == [
         "generalist",
