@@ -28,9 +28,12 @@ Use this as a secondary checklist after user request, repo instructions, existin
 
 ## Conditional Capabilities
 
+- When the project's architecture mode is stack, or its local contract adopts FSD, and placement or import boundaries change, read `react-fsd-architecture`; neither a `features/` folder nor React Web alone selects that contract. Clean-selected projects follow their Clean contract.
 - RHF form draft, subscriptions, validation, initialization, field adapters, or submit changes: read `react-hook-form-zod`; generic TSX or an unrelated `watch`, `reset`, or `Controller` is not enough.
 - TanStack Form draft, subscriptions, validation, initialization, field composition, arrays, wizards, submit, or SSR integration changes: read `react-tanstack-form` and check installed versions; generic TSX, TanStack Query alone, or RHF-only work is not enough.
 - React Web TanStack Query keys, query functions, cache/client lifetime, mutations, persistence, or SSR hydration: read `react-tanstack-query`; Query-only work does not select a form skill or require a new form library.
+- React Web Zod parsing, transforms, inferred input/output types, or schema placement: read `react-zod-validation`. An RHF or TanStack Form change also reads its actual form skill; do not add or migrate a form library to satisfy this pointer.
+- React Web Tailwind CSS v4 class, theme token, responsive variant, or shared UI styling changes: read `react-tailwind-v4` only when the project uses Tailwind v4; do not impose it on CSS modules, other styling systems, or React Native.
 - Next.js browser/server API paths, rewrites, upstream environments, BFF forwarding, or mock-to-backend routing: read `nextjs-api-routing`; rendering-only Next.js work does not require network redesign.
 - Zustand store lifetime, SSR hydration, persisted state, account/tenant changes, or draft checkpoints: read [Zustand state](../react-tanstack-query/references/zustand-state.md) directly, including when Query is absent; a browser-wide UI store alone is not a defect.
 - Public React Web URL indexing, metadata, canonical, JSON-LD, bot responses, or SEO-related cache changes: read `react-web-seo`; internal authenticated UI does not need SEO work by default.

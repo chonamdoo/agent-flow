@@ -12,7 +12,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { BUNDLED_HOST_SKILL_NAMES, mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
+import { BUNDLED_HOST_SKILL_NAMES, assertStackArchitectureSelection, mergeInstallSelectionWithPrevious, resolveInstallSelection, stackArchitectureDefault } from "../lib/skill-selection.mjs";
 import { installProfile } from "../lib/profile-detection.mjs";
 import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
 import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
@@ -898,7 +898,15 @@ function install() {
   if (!ensureInstallLease(PROJECT)) return;
   // 자식 kit install이 index를 다시 쓴다. 그 뒤에 읽으면 "사용자가 손댔는가"를
   // 가르는 hash가 방금 관측한 현재 내용으로 갱신돼 있어 오라클이 사라진다.
-  const architectureInstall = prepareArchitectureInstall(PROJECT, INSTALL_ARGS);
+  const architectureInstall = prepareArchitectureInstall(PROJECT, INSTALL_ARGS, {
+    stackDefault: () => {
+      const index = readJsonIfExists(path.join(AF_DIR, "skills", "index.json"));
+      return stackArchitectureDefault({
+        args: INSTALL_ARGS, detectedProfile: installProfile(PROJECT, INSTALL_ARGS, index),
+        previousIndex: index, kitRoot: KIT_ROOT, projectRoot: PROJECT,
+      });
+    },
+  });
   const previousSkillIndex = readJsonIfExists(path.join(AF_DIR, "skills", "index.json"));
   captureLegacySkillCopyReceipts(PROJECT, previousSkillIndex);
   try {
@@ -915,6 +923,7 @@ function install() {
   const architectureMode = architectureInstall.plan.mode;
   let installSelection = resolveInstallSelection({ args: INSTALL_ARGS, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: PROJECT, architectureMode, architecturePlan: architectureInstall.plan });
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, PROJECT);
+  assertStackArchitectureSelection(installSelection, KIT_ROOT, PROJECT);
 
   const gitignorePath = path.join(PROJECT, ".gitignore");
   upsertGitignore(gitignorePath, [

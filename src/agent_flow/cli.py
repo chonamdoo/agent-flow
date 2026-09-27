@@ -66,6 +66,7 @@ from agent_flow.core.phase_workflow import (
 )
 from agent_flow.core.profiles import (
     assert_architecture_override_compatible,
+    assert_stack_architecture_eligible,
     DEFAULT_GATE_PHASE,
     GATE_PHASE_ALL,
     GATE_PHASES,
@@ -1379,6 +1380,7 @@ def main(argv: list[str] | None = None) -> int:
                         load_profile_payload(profile_id, profile_root)
                         for profile_id in active_profile_ids(profile_root)
                     ]
+                    assert_stack_architecture_eligible(command_root, snapshot.selection, profiles)
                     assert_architecture_selection_skills(
                         profile_root, snapshot, profile=merged_profile_payload(profiles),
                         architecture_root=command_root,

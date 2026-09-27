@@ -65,6 +65,7 @@ skills:
   install:
     - kotlin-backend-development-guide
     - spring-boot-development-guide
+    - kotlin-backend-hexagonal-architecture
     - llm-tool-development
   required_review:
     - group: kotlin-backend

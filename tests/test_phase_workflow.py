@@ -200,6 +200,19 @@ def test_explicit_empty_conditional_field_is_preserved_in_export() -> None:
     assert definition.to_json_dict()["phases"][0]["required_markers_by_architecture"] == {}
 
 
+def test_stack_mode_markers_are_accepted_and_applied() -> None:
+    from agent_flow.core.phase_workflow import effective_phase_markers, parse_phase_workflow_definition
+
+    definition = parse_phase_workflow_definition(
+        b"id: custom\nphases:\n  - id: review\n    required_markers_by_architecture:\n"
+        b"      stack: ['stack-contract: pass|fail']\n",
+        source=Path("custom.yaml"), name="custom",
+    )
+
+    assert effective_phase_markers(definition.phases[0], "stack") == ("stack-contract: pass|fail",)
+    assert effective_phase_markers(definition.phases[0], "clean") == ()
+
+
 @pytest.mark.parametrize("workflow,phase_id", [
     ("default", "design"), ("full-feature", "ddd-design"),
 ])

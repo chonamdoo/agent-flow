@@ -1,14 +1,13 @@
 ---
 name: react-native-clean-architecture
-description: React Native and Expo Clean Architecture adapter for the platform-neutral clean-architecture-core contract. Use for shared package layout, RN platform adapters, Context Provider composition root, optional TSyringe, native bridge boundaries, repository/source/mapper boundaries, and RN architecture review.
+description: React Native and Expo Clean Architecture adapter for the platform-neutral clean-architecture-core contract. Use for shared package layout, RN platform adapters, Context Provider composition root, optional TSyringe, native interop boundaries, repository/source/mapper boundaries, and RN architecture review.
 requires:
   - clean-architecture-core
 ---
 
 # React Native Clean Architecture
 
-Load `clean-architecture-core` first. This skill adds React Native package and
-platform-adapter details only.
+Load `clean-architecture-core` first **when this project's architecture selection is Clean**. This skill is a chosen application-layer contract, not a requirement of React Native's New Architecture (Fabric/JSI/TurboModules). It adds React Native package and platform-adapter details only; do not apply it to `local` or `pending` architecture selections.
 
 ## Package Boundaries
 
@@ -22,12 +21,8 @@ notifier/queue contracts and managed source-root coverage.
 
 ## DI Shape
 
-- Assemble dependencies at the adopted app or framework composition owner.
-  When using Context, provide typed consumer ports through that boundary; no
-  particular factory function name or root filename is required.
-- Put native modules, permissions, linking, storage, and device implementations at
-  platform adapter edges. Pass narrow application/domain capability ports to use
-  cases and presentation; those ports need not be called repositories.
+- Assemble dependencies at the adopted app or framework composition owner. Prefer props for local dependencies; use Context for consumers that need a shared app-level capability. When using Context, provide typed consumer ports through that boundary; no particular factory function name or root filename is required.
+- Put native modules, permissions, linking, storage, and device implementations at platform adapter edges **when domain/application policy consumes them**. Pass narrow application/domain capability ports to that policy and its state holder; those ports need not be called repositories. Framework router hooks and rendering details remain in the framework-owned presentation boundary.
 - Optional TSyringe usage stays at app shell or adapter edge.
 - Composition may construct raw clients/native adapters. Context values consumed
   by presentation expose typed ports, not those implementations.
@@ -47,7 +42,6 @@ remote-data-source-boundary: pass|fail
 native-module-edge-only: pass|fail|n/a
 ```
 
-## Evidence Basis
+## Evidence and Project Contract
 
-React Native React Fundamentals, React Native state docs, React Native Linking
-docs, React createContext/useContext docs, TSyringe README.
+[RN testing](https://reactnative.dev/docs/testing-overview#writing-testable-code) recommends separating views from business logic for testability; [React Context](https://react.dev/learn/passing-data-deeply-with-context) describes a value-sharing mechanism and recommends considering props first. [RN Turbo Native Modules](https://reactnative.dev/docs/turbo-native-modules-introduction) describes typed native interfaces, not mandatory app ports. `clean-architecture-core` owns this project's dependency/mapping contract; repository/source/mapper and Context-based port injection are **Clean design choices**, not RN/Expo requirements. If adopting TSyringe, check its [README](https://github.com/microsoft/tsyringe/blob/master/README.md) for Babel metadata and `reflect-metadata` setup.

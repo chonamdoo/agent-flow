@@ -12,6 +12,7 @@ import yaml
 
 from agent_flow.core.markers import normalize_required_markers
 from agent_flow.core.security import ensure_child_path, validate_safe_name
+from agent_flow.core.skill_metadata import ARCHITECTURE_MODES
 from agent_flow.core.skill_resolver import PhaseSkills
 
 
@@ -89,7 +90,7 @@ def effective_phase_markers(phase: _PhaseMarkerContract, mode: str) -> tuple[str
     conditional = phase.required_markers_by_architecture
     if conditional is None:
         return phase.required_markers
-    if mode not in {"clean", "local", "pending"}:
+    if mode not in ARCHITECTURE_MODES:
         raise ValueError(f"unknown architecture mode: {mode!r}")
     return phase.required_markers + conditional.get(mode, ())
 
@@ -482,7 +483,7 @@ def _architecture_markers(
         raise ValueError(f"{prefix} must be a mapping")
     result: dict[str, tuple[str, ...]] = {}
     for mode, markers in value.items():
-        if not isinstance(mode, str) or mode not in {"clean", "local", "pending"}:
+        if not isinstance(mode, str) or mode not in ARCHITECTURE_MODES:
             raise ValueError(f"{prefix} has unknown architecture mode {mode!r}")
         if not isinstance(markers, list) or any(
             not isinstance(marker, str) or not marker.strip() for marker in markers

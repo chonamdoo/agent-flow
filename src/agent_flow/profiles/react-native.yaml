@@ -44,6 +44,7 @@ skills:
     - react-native-clean-architecture
     - react-native-clean-presentation-architecture
     - react-native-development-guide
+    - react-native-feature-architecture
     - react-native-operational-adoption
     - typescript-development-guide
   required_review:

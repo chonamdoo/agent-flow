@@ -12,10 +12,12 @@ Use this as a secondary checklist after user request, repo instructions, existin
 - Include React Native app code, Expo/RN TSX, navigation, permissions, native bridge boundaries, platform-specific UI, FlatList/ScrollView, keyboard, safe area, accessibility, lifecycle, offline, and smoke flows.
 - Exclude Kotlin/Android native implementation details, iOS native implementation details, and TypeScript language generalities.
 - If native Android/Kotlin/Compose/KMP code changes, first apply the Android profile's required review skills and the Android skills the phase prompt lists for the change.
+- When the RN project's architecture mode is stack, or its local contract adopts route-and-feature ownership, read `react-native-feature-architecture` for screen/feature, state, cache, and lifecycle boundary changes. Clean-selected RN projects instead follow their Clean contract.
 
 ## Write
 
 - Keep navigation params stable and compatible with existing route types/patterns.
+- In every architecture mode, give each kind of state one owner. A simple screen keeps its local state without an extra hook or state union; do not copy an adopted server-state cache into screen state. The adopted router owns route availability, including authentication-driven changes, so do not navigate imperatively from a state hook for them. Keep the adopted router; `react-native-operational-adoption` distinguishes router and host conventions.
 - Isolate `Platform.OS` differences near the platform boundary. Do not scatter platform branches through unrelated UI.
 - Preserve permission request, denied, limited, and granted flows when touching camera, media, location, notifications, Bluetooth, or contacts.
 - Account for app lifecycle when background/foreground affects subscriptions, timers, sensors, sockets, or refresh.
@@ -24,7 +26,7 @@ Use this as a secondary checklist after user request, repo instructions, existin
 - Preserve image loading/error placeholders when changing remote images.
 - Keep touch targets reachable and add useful `accessibilityLabel`/state for interactive controls.
 - Handle keyboard and safe area behavior when editing forms, bottom sheets, modals, or full-screen layouts.
-- Keep native module/bridge calls behind the existing boundary. Do not drift into native implementation details.
+- Keep native module calls behind the project's existing boundary. In hosted runtimes, verify the host actually supports the native library; a JS wrapper cannot add missing host code. Do not drift into native implementation details.
 
 ## Test
 

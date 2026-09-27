@@ -9,7 +9,7 @@ requires_by_architecture:
 
 # LLM Tool Development
 
-Apply the selected architecture contract (`clean-architecture-core` in Clean mode) and the implementation language's active guide. Local mode uses its full normative root and required references; execution authority, security, and effect-state safeguards below apply in every mode. This capability is language-neutral: it neither selects Python nor introduces an agent framework. Resolve provider API/SDK and MCP revision/capabilities from the integration being changed. Reuse existing application actions and their authorization, idempotency, egress, and audit policies rather than duplicating business logic for the LLM.
+Apply the selected architecture contract (`clean-architecture-core` in Clean mode) and the implementation language's active guide. Local mode uses its full normative root and required references, and stack mode uses the required bundled stack architecture skill; execution authority, security, and effect-state safeguards below apply in every mode. This capability is language-neutral: it neither selects Python nor introduces an agent framework. Resolve provider API/SDK and MCP revision/capabilities from the integration being changed. Reuse existing application actions and their authorization, idempotency, egress, and audit policies rather than duplicating business logic for the LLM.
 
 ## Execution authority
 

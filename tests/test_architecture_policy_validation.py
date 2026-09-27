@@ -504,7 +504,7 @@ def test_opened_contract_must_still_be_a_regular_file(repository, monkeypatch, r
         policy.architecture_snapshot(repository)
 
 
-@pytest.mark.parametrize("mode", ["legacy", "clean", "local", "pending"])
+@pytest.mark.parametrize("mode", ["legacy", "clean", "local", "pending", "stack"])
 def test_interrupted_install_blocks_cli_until_recovery(repository, mode, capsys):
     """Verify that interrupted install blocks CLI until recovery."""
     if mode != "legacy":

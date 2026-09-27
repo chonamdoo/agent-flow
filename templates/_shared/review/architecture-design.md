@@ -26,9 +26,11 @@ framework-specific evidence.
 
 2. Selected architecture alignment
    - In local mode, verify every applicable local rule and recorded exception
-     against the implementation. Use the contract's own structural vocabulary;
-     feature colocation and framework-aware boundaries are not defects by
-     themselves. A missing rule or missing evidence is not a successful check.
+     against the implementation. In stack mode, do the same with the bundled
+     stack skill's rules and valid alternatives. Use the contract's own
+     structural vocabulary; feature colocation and framework-aware boundaries
+     are not defects by themselves. A missing rule or missing evidence is not a
+     successful check.
    - In Clean mode, apply the full required `clean-architecture-core` semantic
      boundaries and exceptions against the design. In particular, compare the
      design's use-case, repository, cache, mapping, and composition decisions;

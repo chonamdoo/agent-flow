@@ -7,7 +7,8 @@ description: SOLID architecture review checklist for code review, final review, 
 
 Use this skill for SOLID-specific review. Apply the selected architecture
 contract for structural boundaries and dependency direction. In Clean mode,
-load `clean-architecture-core`; local mode uses its full root and required references.
+load `clean-architecture-core`; local mode uses its full root and required references,
+and stack mode uses the required bundled stack architecture skill.
 
 ## Review Priority
 

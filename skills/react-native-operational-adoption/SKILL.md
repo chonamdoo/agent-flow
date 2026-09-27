@@ -11,7 +11,7 @@ pathGlobs: ["**/metro.config.*", "**/react-native.config.*", "**/*.podspec", "**
 ## Use With
 
 - Always pair with `react-native-development-guide` for React Native or Expo implementation.
-- Apply the selected architecture contract when changing presentation boundaries (`react-native-clean-presentation-architecture` in Clean mode).
+- Apply the project's selected architecture contract when changing presentation boundaries (`react-native-clean-presentation-architecture` only when Clean is selected); the RN runtime does not select Clean.
 - Pair with `react-development-guide` only when the RN task also changes shared React Web code.
 - Android/Kotlin skills when adding native Android integration.
 - Use `react-runtime-i18n` only when the task changes an actual React Web locale runtime. RN retains native locale, formatter, storage, and lifecycle adapters; shared message meaning does not require DOM or SSR behavior on native.
@@ -39,16 +39,22 @@ Confirm current project facts before proposing changes:
 - Current navigation, data fetching, storage, logging, crash reporting, and release pipeline.
 - Whether the app needs OTA at all. OTA adds security and rollback duties.
 
+## Two Different Architectures
+
+- RN New Architecture is the Fabric renderer, JSI/native interop, Turbo Native Modules, and related runtime changes. RN 0.76 made it the default; RN 0.82+ is New Architecture-only, and Expo SDK 55+ cannot opt out. Legacy opt-out guidance is for older releases, not a fallback for current apps. Check the installed version and native library compatibility; an app-layer adapter cannot make an incompatible native binary work. See [RN 0.82](https://reactnative.dev/blog/2025/10/08/react-native-0.82) and [Expo compatibility](https://docs.expo.dev/guides/new-architecture/).
+- Clean layers, repositories, service classes, screen containers, Context injection, and Zustand/Redux Toolkit are **app design choices**, not consequences of Fabric or JSI. React recommends separating views from business logic for testability, but does not require those specific layers or libraries. Keep the chosen project contract; do not impose Clean on a project selecting `local` or `pending`. See [RN testing](https://reactnative.dev/docs/testing-overview#writing-testable-code) and [React state ownership](https://react.dev/learn/sharing-state-between-components).
+- Hermes is the JS engine, not an app-layer architecture. RN 0.84 makes Hermes V1 the default for standalone RN builds; a hosted mini-app's actual engine and native API surface depend on its host. See [RN 0.84](https://reactnative.dev/blog/2026/02/11/react-native-0.84).
+
 ## Adoption Order
 
 1. Baseline runtime.
    - Prefer supported official React/RN releases compatible with the adopted project or Expo release channel over forks; this is not an instruction to upgrade RN for unrelated work.
-   - For RN, keep Hermes enabled unless a measured blocker exists.
-   - If native modules are involved, prefer New Architecture-compatible libraries and Codegen/TurboModule boundaries.
+   - For standalone RN, keep the adopted Hermes setting unless a measured blocker exists. In hosted runtimes, verify the host's engine and supported capabilities instead of assuming the app owns them.
+   - If native modules are involved, check their installed-version and host compatibility first. Build a custom native capability only when existing supported APIs do not cover it: RN's typed Turbo Native Module specs/Codegen or, where supported, Expo Modules API are options. Codegen is not an app-wide requirement; an app-layer adapter does not fix binary incompatibility. See [RN Codegen](https://reactnative.dev/docs/the-new-architecture/what-is-codegen) and [Expo Modules](https://docs.expo.dev/modules/overview/).
 
 2. App shell and routing.
-   - Preserve the adopted router and verify its installed version's public API. Plain React Navigation may own its container; Expo and other framework-managed routers own theirs.
-   - Keep module and mini-app routing behind public route contracts. Use framework-owned auth/recovery mechanisms where applicable instead of adding another navigation container or reaching through router internals.
+   - Preserve the adopted router and verify its installed version's public API. Plain React Navigation may own its container; Expo Router and Granite/other framework-managed routers own theirs. Expo Router's `src/app` routes and `_layout.tsx` are not Granite's `pages/` and `src/_app.tsx`.
+   - Keep module and mini-app routing behind public route contracts. Use framework-owned auth/recovery mechanisms where applicable instead of adding another navigation container or reaching through router internals. For Apps-in-Toss/Granite, confirm third-party native libraries against the host's support and smoke test in its sandbox; Expo Modules or TurboModules cannot be assumed installable in that host. See [Apps-in-Toss RN guidance](https://developers-apps-in-toss.toss.im/ai-vibe-coding/tutorials/react-native).
    - For React Web, mirror the same route ownership with framework routing or package boundaries, not RN-specific APIs.
 
 3. Module and micro-frontend boundary.
@@ -60,7 +66,7 @@ Confirm current project facts before proposing changes:
    - If OTA is required, require signed metadata, staged activation, and rollback.
    - Model states explicitly: downloaded temp, pending activation, active, previous rollback copy.
    - Never ship unsigned JS bundles or unverifiable remote code.
-   - Keep version lanes for legacy/new RN only during migrations. Add removal criteria.
+   - Keep version lanes for legacy/new RN only during migrations from older releases that support both; RN 0.82+ cannot switch back to Legacy. Add removal criteria.
 
 5. Runtime library choices.
    - Keep the adopted libraries unless a concrete capability gap warrants a change; compare platform/toolchain compatibility and measured behavior before adding a candidate below.
@@ -68,7 +74,7 @@ Confirm current project facts before proposing changes:
    - Gestures/animation: consider `react-native-reanimated`, `react-native-gesture-handler`, or `react-native-screens` when the required interaction and supported runtime justify them.
    - Lists: consider `@shopify/flash-list` for large mobile lists after measuring current `FlatList` issues and checking migration compatibility.
    - Storage: consider `react-native-mmkv` for a measured local key-value performance need; preserve the existing storage contract and do not store secrets without platform security review.
-   - Data: keep the adopted server-state path. Relay/GraphQL is a candidate for schema-driven requirements and SWR for compatible REST/lightweight fetching; select by caching, offline, and runtime needs rather than imposing either.
+   - Data: keep the adopted server-state path. TanStack Query, SWR, RTK Query, Apollo, and Relay are conditional choices according to caching, offline, schema, and host compatibility; do not require any of them.
    - State transforms: use `immer` only where immutable updates are complex enough to justify it.
    - i18n: preserve the adopted catalog and formatter contract. FormatJS/react-intl is a candidate when already adopted or needed for shared React/RN compatibility, not a required catalog format.
    - Money: choose a representation that satisfies required currency precision, rounding, and exactness, such as integer minor units or decimal arithmetic. This does not prohibit binary floating point for unrelated mathematics.
@@ -85,7 +91,7 @@ Confirm current project facts before proposing changes:
 - Are React Web and RN responsibilities separated where platform behavior differs?
 - Is OTA either out of scope or covered by signature verification, staged activation, rollback, and monitoring?
 - Is legacy/new RN coexistence temporary, observable, and tied to removal criteria?
-- Are native modules New Architecture-compatible or isolated behind adapters?
+- Are native modules compatible with the installed RN version **and** supported by the host (or verified through the available interop layer)? Merely wrapping them in JS adapters does not establish runtime compatibility.
 - Are navigation and module boundaries clear enough for independent feature ownership?
 - Are performance libraries added because of measured bottlenecks, not trend matching?
 - Are release, crash, and rollback signals included in verification?

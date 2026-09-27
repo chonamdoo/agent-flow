@@ -23,10 +23,12 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from agent_flow.core import skill_catalog
+from agent_flow.core.local_skills import merged_profile_payload
 from agent_flow.core.phase_workflow import declared_phase_skills
 from agent_flow.core.profiles import load_profile_payload
 from agent_flow.core.skill_resolver import (
     CODE_PHASES,
+    PhaseSkills,
     SkillRoot,
     discover_skill_catalog,
     resolve_phase_skills,
@@ -263,6 +265,80 @@ def test_project_local_skill_without_declarations_still_activates(tmp_path):
     )
 
     assert "house-rules" in {skill.name for skill in resolution.required}
+
+def test_kit_source_skills_follow_profile_and_phase_not_placement(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    project.mkdir()
+    profile = merged_profile_payload([
+        load_profile_payload("python"), load_profile_payload("node"),
+    ])
+    scope = ["src/agent_flow/core/skill_resolver.py", "bin/agent-flow-kit.mjs"]
+    common = dict(
+        project_root=project,
+        source_root=REPO,
+        profile=profile,
+        changed_files=scope,
+        host="claude",
+        task_text="Fix Python and JavaScript phase skill resolution",
+    )
+
+    implement = resolve_phase_skills(
+        **common,
+        phase_id="implement",
+        phase_skills=PhaseSkills(required=("code-generation-discipline",)),
+    )
+    review = resolve_phase_skills(
+        **common,
+        phase_id="review",
+        phase_skills=PhaseSkills(required=("code-review",)),
+    )
+
+    for resolution, explicit in (
+        (implement, "code-generation-discipline"),
+        (review, "code-review"),
+    ):
+        required = {skill.name for skill in resolution.available_required}
+        assert {explicit, "python-development-guide"} <= required
+        assert not {
+            "android-code-review",
+            "flutter-clean-presentation-architecture",
+            "ios-clean-presentation-architecture",
+            "dart-add-unit-test",
+            "camera1-to-camerax",
+        } & required
+
+
+def test_kit_source_keeps_missing_required_profile_skills(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    project.mkdir()
+    profile = {
+        "skills": {"required_review": [{
+            "group": "profile",
+            "skills": ["missing-python-review"],
+            "path_globs": ["**/*.py"],
+        }]},
+    }
+
+    resolution = resolve_phase_skills(
+        project_root=project,
+        source_root=REPO,
+        profile=profile,
+        phase_id="review",
+        changed_files=["src/agent_flow/core/skill_resolver.py"],
+        host="claude",
+    )
+
+    assert "missing-python-review" in {skill.name for skill in resolution.missing}
+
+
+def test_other_projects_keep_placement_required_for_unscoped_skills(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    _upstream_skill(project / "skills", "house-rules", "Project rules.")
+
+    assert "house-rules" in _required_for(project, ["src/example.py"])
 
 
 def test_catalog_reflects_a_skill_edited_in_the_same_process(tmp_path):

@@ -104,6 +104,7 @@ def merged_profile_payload(payloads: Sequence[dict]) -> dict:
     domains: list[dict] = []
     seen_domains: set[str] = set()
     external: dict = {}
+    installs: list[str] = []
     for payload in payloads:
         merged.update(payload)
         declared = payload.get("skill_sources")
@@ -112,6 +113,8 @@ def merged_profile_payload(payloads: Sequence[dict]) -> dict:
         skills = payload.get("skills")
         if not isinstance(skills, dict):
             continue
+        if isinstance(skills.get("install"), list):
+            installs.extend(name for name in skills["install"] if isinstance(name, str))
         if isinstance(skills.get("required_review"), list):
             for group in skills["required_review"]:
                 if not isinstance(group, dict):
@@ -136,8 +139,12 @@ def merged_profile_payload(payloads: Sequence[dict]) -> dict:
                 domains.append(domain)
     if sources:
         merged["skill_sources"] = sources
-    if groups or domains:
+    if groups or domains or installs:
         skills = dict(merged.get("skills") or {})
+        if installs:
+            # stack 계약은 profile마다 다르다. 마지막 profile 목록만 남기면 앞 profile의
+            # 계약이 required에서 조용히 빠진다.
+            skills["install"] = list(dict.fromkeys(installs))
         if groups:
             skills["required_review"] = groups
         if domains:

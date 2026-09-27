@@ -19,7 +19,8 @@ phases_invoked: [design, final-review]
 This skill covers domain modeling only. It answers "what is the domain?"
 For structural boundaries, dependency direction, persistence, composition,
 testability, and SOLID validation, apply the selected architecture contract
-after this skill. Read its full root and required references in local mode.
+after this skill. Read its full root and required references in local mode,
+and the required bundled stack architecture skill in stack mode.
 Use `clean-architecture-core` and its layer/port/adapter rules only in Clean mode.
 Pending is a wait for a structural standard, not permission to omit validation.
 

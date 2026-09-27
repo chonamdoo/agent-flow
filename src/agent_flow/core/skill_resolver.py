@@ -14,6 +14,7 @@ import yaml
 
 from agent_flow.core.architecture_policy import (
     MAX_ARCHITECTURE_DOCUMENT_BYTES,
+    STACK_ARCHITECTURE_SKILLS,
     ArchitectureContractError,
     ArchitectureMode,
     ArchitectureSnapshot,
@@ -23,6 +24,7 @@ from agent_flow.core.architecture_policy import (
     contract_names_in,
     contract_skill_name,
     is_clean_architecture_skill,
+    stack_architecture_skills,
 )
 from agent_flow.core.atomic_io import read_bounded_regular_file
 from agent_flow.core.installation import assert_install_complete
@@ -357,9 +359,13 @@ def skill_roots(
     """탐색 순서대로 정렬된 root 목록. project → active host → 나머지 host → shared → profile 선언."""
     resolved_host = active_host(env) if host is None else host
     repository_root = source_root or project_root
+    kit_source = (
+        (repository_root / "pyproject.toml").is_file()
+        and (repository_root / "bin" / "agent-flow-kit.mjs").is_file()
+    )
     roots = [
         SkillRoot(
-            source=source,
+            source="bundled" if source == "project" and kit_source else source,
             template=str((repository_root if source == "project" else project_root) / template),
         )
         for source, template in _DEFAULT_PROJECT_TEMPLATES
@@ -413,6 +419,19 @@ def resolve_skill(name: str, roots: Sequence[SkillRoot]) -> ResolvedSkill:
     )
 
 
+def _required_stack_skills(profile: dict | None) -> tuple[str, ...]:
+    """stack 선택이 요구하는 번들 계약. 선택 뒤 profile이 바뀌어 계약이 사라지면
+    구조 규범 없이 phase가 돌므로, 선택 시점과 같은 조건으로 막는다."""
+    names = stack_architecture_skills(profile)
+    if not names:
+        raise ArchitectureContractError(
+            "architecture mode 'stack' needs an active profile that installs a bundled "
+            f"stack architecture skill ({', '.join(sorted(STACK_ARCHITECTURE_SKILLS))}); "
+            "select clean, local, or pending instead"
+        )
+    return names
+
+
 def assert_architecture_selection_skills(
     project_root: Path,
     snapshot: ArchitectureSnapshot,
@@ -447,6 +466,8 @@ def assert_architecture_selection_skills(
             ),
         )
         names = [contract_name]
+    elif selection.mode is ArchitectureMode.STACK:
+        names = list(_required_stack_skills(profile))
     else:
         names = ["clean-architecture-core", *sorted(
             name for name in routable_group_skills(profile) if is_clean_architecture_skill(name)
@@ -689,6 +710,16 @@ def resolve_phase_skills(
         required_names.append(contract_name)
     if contract_name is not None:
         routes.append(SkillRoute(contract_name, "architecture-selection", selection.mode.value))
+    if selection.mode is ArchitectureMode.STACK:
+        # 번들 스택 계약은 local 계약과 같은 자리를 차지하지만, 파일이 선언한 phase에서만
+        # 요구한다. 설치가 빠졌으면 이름을 남겨 missing required로 드러낸다.
+        for name in _required_stack_skills(profile):
+            entry = catalog_by_name.get(name)
+            if entry is not None and phase_id not in entry.workflow_phases:
+                continue
+            if name not in required_names:
+                required_names.append(name)
+            routes.append(SkillRoute(name, "architecture-selection", selection.mode.value))
     required_names = expand_dependencies(required_names, catalog, architecture_mode=selection.mode)
     for name in _stable_unique(required_names):
         entry = catalog_by_name.get(name)
@@ -1403,17 +1434,16 @@ def entry_can_activate(entry: SkillCatalogEntry) -> bool:
         # 그렇지 않으면 `taskTerms: ""` 하나로 모든 phase에 조용히 얹힌다.
         return False
     if entry.source in PLACEMENT_SOURCES:
-        # 저장소 소유 폴더(`skills/`, `.agent-flow/local-skills/`)는 파일을 둔 것 자체가
-        # "이 프로젝트에 적용하라"는 선언이다. 둘의 차이는 git 추적 여부뿐이다.
+        # 일반 프로젝트의 `skills/`와 `.agent-flow/local-skills/`는
+        # 파일을 둔 것 자체가 "이 프로젝트에 적용하라"는 선언이다.
         return True
-    # upstream SKILL.md는 `workflowPhases`를 선언하지 않는다. 카탈로그에는 담되
-    # 자동 활성화는 하지 않는다 — 이 가드가 없으면 host에 깔린 skill 전량이
-    # 선택자 없는 엔트리로 required가 된다.
+    # 설치된 skill과 이 키트의 bundled skill은 카탈로그에 담되, 명시된
+    # `workflowPhases`가 없는 한 자동 활성화하지 않는다.
     return bool(entry.phase_declared and entry.workflow_phases)
 
 
-# 배치만으로 켜지는 소스. vendor(`.claude/skills`, `.agents/skills`)와 bundled/host는 제외 —
-# 그쪽은 남이 넣은 파일이라 스스로 `workflowPhases`를 선언해야 한다.
+# 배치만으로 켜지는 소스. vendor와 bundled/host는 제외한다 —
+# 그쪽은 phase 선언 또는 선택자/프로필 경로로만 활성화한다.
 PLACEMENT_SOURCES = frozenset({"project-local", "project"})
 
 
