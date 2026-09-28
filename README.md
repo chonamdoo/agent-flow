@@ -66,9 +66,11 @@ cache-invalidation-policy: <policy or n/a>
 solid-dip-dependency-direction: <summary>
 ```
 
-The design phase alone demands more than 20 markers. Layer boundaries, dependency direction,
-UseCase ports, Repository adapters, cache policy, mapping boundaries, the composition root, and
-every SOLID item have to be answered explicitly, or the phase does not pass.
+The design phase demands 12 markers under every architecture: the boundary map, the
+composition root, the testability boundary, every SOLID item, and the SPEC and Design Values
+ledgers. The selected architecture adds its own — Clean mode adds 14 more for the dependency
+rule, UseCase ports, Repository boundaries, cache policy, and mapping boundaries, as in the
+example above. Each has to be answered explicitly, or the phase does not pass.
 
 Marker values are cross-checked against the body as well. Writing only a count in `spec-items:`
 is rejected; it has to match the actual list of item IDs. Write `design-values: none` while the
@@ -184,7 +186,7 @@ product-brief        verify it is worth building
 prd                  requirements doc + SPEC ledger + Design Values   [pause]
 slice-plan           split into independently shippable units
 plan-review          plan review        → approve: next / request-changes: slice-plan
-ddd-design           DDD domain modeling → Clean Architecture boundaries
+ddd-design           DDD domain modeling → selected architecture boundaries
 worktree             create the isolated workspace
 run-start            record the run configuration
 red                  write and run a failing test (the hook observes the run)
@@ -230,6 +232,26 @@ Spring and Ktor server projects use framework-specific profiles; Gradle alone is
 not an Android signal. React Web capabilities select form, SEO, and Storybook
 skills without treating every React project as Next.js. Ambiguous projects need
 an explicit profile; project-local overrides are applied after capability selection.
+
+### Architecture
+
+Design and review phases judge against one selected architecture contract, recorded in
+`.agent-flow/project.yaml`.
+
+| Mode | Contract |
+|---|---|
+| `clean` | the bundled Clean Architecture norms |
+| `stack` | the bundled skill for the active stack: `react-fsd-architecture` (React Web), `kotlin-backend-hexagonal-architecture` (Kotlin Spring/Ktor), `react-native-feature-architecture` (React Native) |
+| `local` | your own contract at `skills/architecture/SKILL.md` (team) or `.agent-flow/local-skills/architecture/SKILL.md` (private) |
+| `pending` | none yet; existing-pattern work is allowed, structural decisions block |
+
+A fresh install defaults to `stack` when every selected profile is React Web, Kotlin
+Spring/Ktor, or React Native; a Spring or Ktor project counts only when its JVM code is Kotlin
+throughout. Otherwise a non-interactive install defaults to `pending`, and answering "None" at
+the interactive prompt selects `clean`. An existing contract file is adopted as `local`, and
+reinstalling a legacy install on a stack-capable project switches it to `stack`. Keep Clean
+with `--architecture-mode clean`. Details are in
+[Architecture selection](docs/USAGE.md#architecture-selection).
 
 ---
 
