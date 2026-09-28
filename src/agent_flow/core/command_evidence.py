@@ -355,6 +355,21 @@ def _observation_reaches_checkout(
     return bool(read_command_evidence(project_root, cwd_root=cwd_root).runs)
 
 
+def _has_only_required_ci_test_gates(profile: dict | None) -> bool:
+    test_gates = [
+        gate
+        for gate in (profile or {}).get("gates") or []
+        if isinstance(gate, dict) and "test" in str(gate.get("id", "")).lower()
+    ]
+    return bool(test_gates) and all(
+        gate.get("execution") == "ci"
+        and gate.get("required") is not False
+        and isinstance(gate.get("ci_check"), str)
+        and bool(gate["ci_check"].strip())
+        for gate in test_gates
+    )
+
+
 def missing_test_evidence_markers(
     project_root: Path,
     phase_id: str,
@@ -400,6 +415,18 @@ def missing_test_evidence_markers(
         selector = values.get("regression-test", "").strip()
         evidence = read_command_evidence(project_root, since=since, cwd_root=cwd_root)
         relevant = _selected_test_runs(evidence, profile, selector)
+        if phase_id == "implement" and _has_only_required_ci_test_gates(profile):
+            if not is_concrete_test_selector(selector):
+                return ["regression-test: <concrete test id for the unchanged contract>"]
+            if not relevant:
+                if values.get("test-run-evidence") != "unavailable":
+                    return ["test-run-evidence: unavailable (CI-only test deferred to PR check)"]
+                return []
+            if max(relevant, key=lambda run: run.at).exit_code != 0:
+                return ["test-run-evidence: verified (the related test must end green)"]
+            if values.get("test-run-evidence") != "verified":
+                return ["test-run-evidence: verified (the related test was observed locally)"]
+            return []
         if not relevant or max(relevant, key=lambda run: run.at).exit_code != 0:
             return ["test-run-evidence: verified (the related test must end green)"]
         return []

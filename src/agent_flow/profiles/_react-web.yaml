@@ -3,12 +3,15 @@ excludes_dependencies: [react-native, expo]
 skills:
   install:
     - react-development-guide
+    - react-fsd-architecture
+    - react-tailwind-v4
     - react-clean-architecture
     - react-clean-presentation-architecture
     - react-app-shell-error-handling
     - react-hook-form-zod
     - react-tanstack-form
     - react-tanstack-query
+    - react-zod-validation
     - react-web-seo
     - react-storybook
     - react-scroll-restoration

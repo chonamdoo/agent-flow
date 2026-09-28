@@ -153,6 +153,7 @@ from agent_flow.core.profiles import (
     GATE_PHASE_ALL,
     active_profile_ids,
     assert_architecture_override_compatible,
+    assert_stack_architecture_eligible,
 )
 from agent_flow.core.review_evidence import (
     review_route_needs_regeneration,
@@ -2442,8 +2443,9 @@ class Runner:
         """Return remediation text for an architecture policy block."""
         if reason == "architecture_decision_pending":
             return (
-                "Select clean or local with `agent-flow architecture select` in the bound "
-                "checkout, then start a new run. Previous approval cannot be reused."
+                "Select clean, stack (when its skill is installed and the project qualifies), "
+                "or local with `agent-flow architecture select` in the bound checkout, then "
+                "start a new run. Previous approval cannot be reused."
             )
         if reason in {"skill_scope_grew", "architecture_norms_unpinned"}:
             return (
@@ -2651,6 +2653,11 @@ class Runner:
             snapshot = self._phase_resolution_context().snapshot(self.project_root)
             if snapshot.declared:
                 assert_architecture_override_compatible(self.config_root, snapshot.selection)
+                # 선택 뒤 의존성이나 모듈이 바뀌면 자격을 잃는다. 병합 전 profile마다 본다.
+                assert_stack_architecture_eligible(
+                    self.project_root, snapshot.selection,
+                    self.profile.get("profiles") or [self.profile],
+                )
         except (OSError, ValueError) as exc:
             print(f"agent-flow: {exc}", file=sys.stderr)
             return "architecture_policy_unreadable"

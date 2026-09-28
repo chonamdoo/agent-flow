@@ -9,7 +9,7 @@ import yaml
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 
-ARCHITECTURE_MODES = ("clean", "local", "pending")
+ARCHITECTURE_MODES = ("clean", "local", "pending", "stack")
 GOVERNANCE_KEYS = frozenset({"version", "owner", "lifecycle", "approval", "provenance"})
 _NORMATIVE_KEYS = frozenset({
     "requires", "dependencies", "requires_by_architecture", "architecture_modes", "requires_docs",

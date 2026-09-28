@@ -50,6 +50,7 @@ skills:
   install:
     - kotlin-backend-development-guide
     - ktor-development-guide
+    - kotlin-backend-hexagonal-architecture
     - llm-tool-development
   required_review:
     - group: kotlin-backend

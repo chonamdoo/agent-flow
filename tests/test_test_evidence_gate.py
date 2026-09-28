@@ -27,6 +27,12 @@ from agent_flow.core.command_evidence import (
 )
 
 PYTHON_PROFILE = {"gates": [{"id": "test", "command": ["pytest", "-q"]}]}
+CI_PYTHON_PROFILE = {
+    "gates": [
+        {"id": "test", "command": ["pytest", "-q"], "required": True,
+         "execution": "ci", "ci_check": "pytest"}
+    ]
+}
 ANDROID_PROFILE = {"gates": [{"id": "test", "command": ["./gradlew", "test"]}]}
 
 GATE = "## Completion Gate\n\nregression-test: tests/test_x.py::test_bug\nred-observed: 1\n"
@@ -230,6 +236,84 @@ def test_behavior_preserving_requires_reason_and_related_green(tmp_path):
     assert missing_test_evidence_markers(root, "implement", text, profile=PYTHON_PROFILE) == [
         "test-run-evidence: verified (the related test must end green)"
     ]
+
+
+def test_behavior_preserving_ci_only_test_is_deferred_without_command_evidence(tmp_path):
+    root = _project(tmp_path)
+    text = (
+        GATE
+        + "change-kind: behavior-preserving\n"
+        + "behavior-preserving-reason: only the adapter boundary moves\n"
+    )
+
+    assert missing_test_evidence_markers(
+        root, "implement", text + "test-run-evidence: unavailable\n",
+        profile=CI_PYTHON_PROFILE,
+    ) == []
+    assert missing_test_evidence_markers(
+        root, "implement", text + "test-run-evidence: verified\n",
+        profile=CI_PYTHON_PROFILE,
+    ) == ["test-run-evidence: unavailable (CI-only test deferred to PR check)"]
+    assert missing_test_evidence_markers(
+        root, "implement", text + "test-run-evidence: unavailable\n",
+        profile=PYTHON_PROFILE,
+    ) == ["test-run-evidence: verified (the related test must end green)"]
+
+
+def test_ci_deferral_respects_omitted_required_default_but_not_optional_gate(tmp_path):
+    root = _project(tmp_path)
+    _observe(root, "git status", 0)
+    text = (
+        GATE
+        + "change-kind: behavior-preserving\n"
+        + "behavior-preserving-reason: only the adapter boundary moves\n"
+        + "test-run-evidence: unavailable\n"
+    )
+    gate = {"id": "test", "command": ["pytest"], "execution": "ci", "ci_check": "pytest"}
+
+    assert missing_test_evidence_markers(
+        root, "implement", text, profile={"gates": [gate]},
+    ) == []
+    assert missing_test_evidence_markers(
+        root, "implement", text, profile={"gates": [{**gate, "required": False}]},
+    ) == ["test-run-evidence: verified (the related test must end green)"]
+
+
+def test_behavior_preserving_ci_deferral_requires_concrete_regression_and_required_check(tmp_path):
+    root = _project(tmp_path)
+    text = (
+        "change-kind: behavior-preserving\n"
+        "behavior-preserving-reason: only the adapter boundary moves\n"
+        "test-run-evidence: unavailable\n"
+    )
+    assert missing_test_evidence_markers(
+        root, "implement", "## Completion Gate\n" + text, profile=CI_PYTHON_PROFILE,
+    ) == ["regression-test: <concrete test id for the unchanged contract>"]
+    for gates in (
+        [{"id": "test", "command": ["pytest"], "required": True, "execution": "ci"}],
+        [*CI_PYTHON_PROFILE["gates"], *PYTHON_PROFILE["gates"]],
+    ):
+        assert missing_test_evidence_markers(
+            root, "implement", GATE + text,
+            profile={"gates": gates},
+        ) == ["test-run-evidence: verified (the related test must end green)"]
+
+
+def test_behavior_preserving_ci_deferral_does_not_apply_to_other_phases_or_failed_run(tmp_path):
+    root = _project(tmp_path)
+    text = (
+        GATE
+        + "change-kind: behavior-preserving\n"
+        + "behavior-preserving-reason: only the adapter boundary moves\n"
+        + "test-run-evidence: unavailable\n"
+    )
+    assert missing_test_evidence_markers(
+        root, "implement-fix", text, profile=CI_PYTHON_PROFILE,
+    ) == ["test-run-evidence: verified (the related test must end green)"]
+    _observe(root, "pytest tests/test_x.py::test_bug", 1)
+    assert missing_test_evidence_markers(
+        root, "implement", text, profile=CI_PYTHON_PROFILE,
+    ) == ["test-run-evidence: verified (the related test must end green)"]
 
 
 def test_undeclared_and_feature_changes_still_require_red(tmp_path):

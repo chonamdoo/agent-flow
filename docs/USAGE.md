@@ -78,16 +78,52 @@ context, not this selection.
 |---|---|
 | `clean` | Bundled Clean Architecture core and applicable platform norms |
 | `local` | The project contract at exactly `skills/architecture/SKILL.md` (team, tracked) or `.agent-flow/local-skills/architecture/SKILL.md` (private, this machine only) and its declared references |
+| `stack` | The kit-bundled architecture skill for the active stack: `react-fsd-architecture` (React Web — `nextjs`, and `node`/`typescript` projects with React dependencies), `kotlin-backend-hexagonal-architecture` (`spring`, `ktor`), or `react-native-feature-architecture` (`react-native`) |
 | `pending` | No selected contract yet; existing-pattern local work is allowed, but work requiring a structural decision blocks until selection |
 
 A project without the selection file keeps the compatibility default, `clean`; absence
-does not mean `pending`. Human-readable `status` explains an absent selection or `pending`.
-That guidance does not change JSON, exit codes, `next_command`, or the run's pinned selection.
+does not mean `pending`. Install writes the file, so the defaults below apply at install time:
 
-Choose one of these commands, rather than running all three:
+- A fresh install where every selected profile has a stack skill defaults to `stack`, both
+  non-interactively and when the interactive prompt is answered "None — use the bundled
+  architecture". A `spring` or `ktor` project counts only when its JVM code is Kotlin throughout,
+  because the hexagonal skill is Kotlin-only. The check walks the checkout rather than the build's
+  module list, skipping hidden directories, `node_modules`, `build`, `out`, `target`, and `dist`.
+  Every directory with `src/main/java` (or Groovy or Scala) and every non-parent build that
+  applies Spring Boot or Ktor needs `src/main/kotlin`, a Kotlin compile plugin, or
+  `kotlin-maven-plugin` there, and at least one directory must show that evidence. A Java module
+  or sample anywhere in the checkout, a Kotlin DSL build script, a `kotlin-stdlib` dependency, or
+  an `apply false`/`.apply(false)` declaration does not count as Kotlin. A declared module the
+  walk cannot reach also disqualifies the project: `includeFlat`, a `projectDir` remap, a Maven
+  `<module>` outside the checkout, an included directory that is missing or under a skipped
+  directory, or an `include` argument that is not a literal project path. A run re-checks this at
+  every phase and blocks once the project stops qualifying, as it does when a profile loses its
+  stack skill. Other profiles keep the previous defaults: `pending` non-interactively, and Clean
+  for "None".
+- Reinstalling a legacy install that has no `.agent-flow/project.yaml` switches those stacks to
+  `mode: stack` and prints the switch; other stacks keep the legacy Clean default. A legacy
+  `architecture:` profile override in `.agent-flow/profiles/*.local.yaml` also keeps Clean,
+  because non-Clean modes reject that override.
+- Explicit `clean` (`--architecture-mode clean`) still installs Clean for any stack.
+- Explicit `stack` (`--architecture-mode stack`) fails unless every active profile provides a
+  stack skill, and fails for `spring` or `ktor` without the Kotlin evidence the default requires.
+- `architecture select` records a mode only when its skills are already installed. Moving
+  between `clean` and `stack` therefore needs a reinstall with `--architecture-mode <mode>`;
+  `select` alone fails with `missing required architecture skill`.
+- Stack skills resolve like every other kit skill: a same-named `skills/<name>/SKILL.md` or
+  `.agent-flow/local-skills/<name>/SKILL.md` takes precedence over the installed copy, as it
+  does for `clean-architecture-core` under `clean`. Only `local` pins its contract path. A
+  same-named skill whose `architecture_modes` excludes `stack` leaves that profile without a
+  contract, so install neither defaults to nor accepts `stack`.
+
+Human-readable `status` explains an absent selection or `pending`. That guidance does not
+change JSON, exit codes, `next_command`, or the run's pinned selection.
+
+Choose one of these commands, rather than running all of them:
 
 ```bash
 agent-flow architecture select --mode clean
+agent-flow architecture select --mode stack
 agent-flow architecture select --mode local --skill skills/architecture/SKILL.md
 agent-flow architecture select --mode local --skill .agent-flow/local-skills/architecture/SKILL.md
 agent-flow architecture select --mode pending
@@ -125,8 +161,11 @@ git add skills/architecture/SKILL.md skills/architecture/references
 Omit the references directory from that command if the contract declares none. A private
 contract is never tracked; its content is still pinned by digest, so editing it during a
 run triggers the same drift block.
-The installer honors the selection: `local` and `pending` exclude bundled Clean-specific
-skills, while `clean` retains them. Project-owned norms are not installed copies to edit
+The installer honors the selection: `local`, `stack`, and `pending` exclude bundled
+Clean-specific skills, while `clean` retains them. In `stack` mode the profile's stack skill
+is the contract: required in its declared phases, pinned as the architecture norm, and assessed
+by the architecture-contract review angle. In `local` mode the stack skill also installs, as
+an adjunct that never overrides the project contract. Project-owned norms are not installed copies to edit
 under `.agent-flow/`. Install or refresh assets only in the leader with no active runs.
 For an existing run, follow [Workflow definition migration](#workflow-definition-migration);
 changing selection, contract bytes, or a declared reference triggers the existing drift
@@ -197,7 +236,7 @@ on drift. The common root is always delivered; do not claim an omitted reference
 ### Architecture lint in a monorepo
 
 Architecture role lint remains a Clean-mode check. A non-Clean `architecture` profile
-override is rejected by both direct lint and the CLI; `local`/`pending` without that
+override is rejected by both direct lint and the CLI; `local`/`stack`/`pending` without that
 override remain `n/a`. Local contract review does not activate the built-in Clean role rules.
 
 For Clean projects, use concrete app prefixes in
@@ -229,13 +268,14 @@ structural compliance.
 Fresh workflow definitions use neutral common requirements, including
 `## Architecture Boundary Map` and the phase's `architecture-contract` markers.
 `required_markers_by_architecture` adds the selected mode's requirements to
-`required_markers`. Its only mode keys are `clean`, `local`, and `pending`, each containing
-a marker list. Prompt generation, marker checking, and completion use the same effective
+`required_markers`. Its only mode keys are `clean`, `local`, `pending`, and `stack`, each containing
+a marker list; a mode without a key adds no conditional markers. Prompt generation, marker checking, and completion use the same effective
 requirements from the validated selection.
 
 Clean-only dependency, UseCase, repository, mapping, cache, and platform obligations retain
 their enums and exceptions. Local review must assess the selected root and required
-references; a single `applied` line is not proof of that review. `pending` still blocks
+references, and stack review the required stack skill; a single `applied` line is not proof
+of that review. `pending` still blocks
 structural decisions. This is not a marker DSL in `requires_docs` or blanket permission
 to answer `n/a`.
 

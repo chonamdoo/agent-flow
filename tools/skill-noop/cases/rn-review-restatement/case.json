@@ -3,7 +3,7 @@
   "subject": "react-native-development-guide: three lines that restate the closed Blocking-only list were removed. Re-adding them must change nothing.",
   "baseline": "skills/react-native-development-guide/SKILL.md",
   "variant": {
-    "insertAfter": 38,
+    "insertAfter": 40,
     "expectAnchor": "Blocking only: crash risk",
     "text": [
       "- Do not block on generic best-practice advice.",

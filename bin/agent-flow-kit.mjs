@@ -8,7 +8,7 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { BUNDLED_HOST_SKILL_NAMES, mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
+import { BUNDLED_HOST_SKILL_NAMES, assertStackArchitectureSelection, mergeInstallSelectionWithPrevious, resolveInstallSelection, stackArchitectureDefault } from "../lib/skill-selection.mjs";
 import { installProfile } from "../lib/profile-detection.mjs";
 import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
 import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
@@ -162,7 +162,15 @@ function installProject(requestedRoot) {
   const root = resolveInstallRoot(requestedRoot);
   if (!ensureInstallLease(root)) return;
   const agentFlowDir = path.join(root, ".agent-flow");
-  const architectureInstall = prepareArchitectureInstall(root, installArgs);
+  const architectureInstall = prepareArchitectureInstall(root, installArgs, {
+    stackDefault: () => {
+      const index = readJsonIfExists(path.join(agentFlowDir, "skills", "index.json"));
+      return stackArchitectureDefault({
+        args: installArgs, detectedProfile: installProfile(root, installArgs, index),
+        previousIndex: index, kitRoot: KIT_ROOT, projectRoot: root,
+      });
+    },
+  });
   const previousSkillIndex = readJsonIfExists(path.join(agentFlowDir, "skills", "index.json"));
   captureLegacySkillCopyReceipts(root, previousSkillIndex);
   const profile = installProfile(root, installArgs, previousSkillIndex);
@@ -175,6 +183,7 @@ function installProject(requestedRoot) {
   // 명시 플래그 > 이전 설정 > 기본(켜짐)
   hooksDisabled = hooksFlagOff || (!hooksFlagOn && existingPayload?.hooks === false);
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, root);
+  assertStackArchitectureSelection(installSelection, KIT_ROOT, root);
   const phases = fullFeaturePhases();
 
   for (const name of ["runs", "state", "handoffs", "team", "skills", "templates", "prompts", "rules", "bootstrap"]) {

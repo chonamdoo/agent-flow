@@ -247,6 +247,8 @@ def test_clean_never_runs_beside_a_project_contract(tmp_path, skill, declared):
         architecture_snapshot(root)
     with pytest.raises(ArchitectureContractError, match="cannot be selected"):
         prepare_architecture_selection(root, ArchitectureSelection(mode=ArchitectureMode.CLEAN))
+    with pytest.raises(ArchitectureContractError, match="cannot be selected"):
+        prepare_architecture_selection(root, ArchitectureSelection(mode=ArchitectureMode.STACK))
     # 같은 저장소에서 계약을 고르면 통과한다.
     _declare(root, f"schema_version: 1\narchitecture:\n  mode: local\n  skill: {skill}\n")
     assert architecture_snapshot(root).contract is not None
@@ -656,6 +658,87 @@ def test_select_replaces_a_previous_choice_without_merging(tmp_path, capsys):
     assert plan["contract"] is None
 
 
+def test_select_stack_needs_a_profile_with_a_stack_contract(tmp_path, capsys):
+    """스택 계약이 없는 profile에서 stack을 기록하면 구조 계약 없는 선택이 된다."""
+    root = _git_project(tmp_path)
+
+    assert _cli("architecture", "select", "--root", str(root), "--mode", "stack") != 0
+    assert "stack architecture skill" in capsys.readouterr().err
+    assert not (root / PROJECT_ARCHITECTURE_FILE).exists()
+
+
+@pytest.mark.parametrize("command", ["resolve", "prompt", "markers"])
+@pytest.mark.parametrize("profiles", ["react-native,node", "node,react-native"])
+def test_skills_cli_rejects_a_stack_profile_without_its_own_contract(
+    tmp_path, capsys, monkeypatch, command, profiles,
+):
+    root = _git_project(tmp_path)
+    _declare(root, "schema_version: 1\narchitecture:\n  mode: stack\n")
+    _write(
+        root, ".agent-flow/skills/react-native-feature-architecture/SKILL.md",
+        "---\nname: react-native-feature-architecture\n"
+        "workflowPhases: [implement]\narchitecture_modes: [stack, local]\n"
+        "---\n\n# Feature architecture\n",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    options = ["--root", str(root), "--profile", profiles, "--phase", "implement", "--fresh"]
+    if command == "markers":
+        options.extend(["--artifact", str(root / "missing-artifact.md")])
+
+    assert _cli("skills", command, *options) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "every active profile" in captured.err
+    assert "stack architecture skill" in captured.err
+
+
+@pytest.mark.parametrize("mode", ["clean", "local", "pending"])
+@pytest.mark.parametrize("command", ["resolve", "prompt", "markers"])
+def test_skills_cli_keeps_non_stack_selections_available(
+    tmp_path, capsys, monkeypatch, mode, command,
+):
+    root = _git_project(tmp_path)
+    if mode == "clean":
+        _clean_contract(root)
+    elif mode == "local":
+        _local_contract(root)
+    else:
+        _declare(root, f"schema_version: 1\narchitecture:\n  mode: {mode}\n")
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    options = [
+        "--root", str(root), "--profile", "react-native,node",
+        "--phase", "implement", "--fresh",
+    ]
+    if command == "markers":
+        options.extend(["--artifact", str(root / "missing-artifact.md")])
+
+    assert _cli("skills", command, *options) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    if command == "markers":
+        missing = json.loads(captured.out)
+        assert "skills_checked: true" in missing
+        assert ("presentation-skill: android|flutter|react|react-native|ios|n/a" in missing) == (
+            mode == "clean"
+        )
+    elif command == "prompt":
+        assert f"Mode: `{mode}`." in captured.out
+    else:
+        assert "skill-availability:" in captured.out
+        if mode == "local":
+            assert "required architecture:" in captured.out
+
+
+def test_select_stack_refuses_a_java_spring_project(tmp_path, capsys):
+    """hexagonal 계약은 Java 서비스를 대상에서 뺀다. 명시 선택도 기본값과 같은 자격을 요구한다."""
+    root = _git_project(tmp_path)
+    _write(root, "build.gradle.kts", 'plugins { java\n id("org.springframework.boot") version "3.5.0" }\n')
+
+    assert _cli("architecture", "select", "--root", str(root), "--mode", "stack") != 0
+    assert "Kotlin in every code module" in capsys.readouterr().err
+    assert not (root / PROJECT_ARCHITECTURE_FILE).exists()
+
+
 def test_export_reports_schema_version_incompatibility_instead_of_defaulting(tmp_path, capsys):
     """구 kit이 새 선언을 Clean으로 읽으면 그것이 조용한 정책 변경이다."""
     root = _git_project(tmp_path)
@@ -719,6 +802,72 @@ def test_three_modes_resolve_distinct_required_contracts(tmp_path, monkeypatch):
     assert "architecture" in local
     # 공통 개발 규율은 세 모드에서 모두 남는다. 선택은 구조 규범만 바꾼다.
     assert {"code-generation-discipline", "tdd"} <= clean & pending & local
+
+
+def test_stack_mode_requires_and_pins_the_profile_stack_contract(tmp_path, monkeypatch):
+    """stack에서는 profile의 번들 스택 skill이 선언한 phase의 계약·규범이 되고 Clean은 빠진다."""
+    from agent_flow.core.skill_resolver import PhaseSkills, resolve_phase_skills
+
+    root = _git_project(tmp_path)
+    _declare(root, "schema_version: 1\narchitecture:\n  mode: stack\n")
+    _write(
+        root, ".agent-flow/skills/react-fsd-architecture/SKILL.md",
+        "---\nname: react-fsd-architecture\ndescription: FSD\n"
+        "workflowPhases: [implement, review]\ntaskTerms: [FSD]\n"
+        "architecture_modes: [stack, local]\n---\n\n# FSD\n",
+    )
+    monkeypatch.setenv("HOME", str(root / "empty-home"))
+
+    def resolve(phase_id):
+        return resolve_phase_skills(
+            project_root=root, phase_id=phase_id,
+            profile={"skills": {"install": ["react-fsd-architecture"]}},
+            phase_skills=PhaseSkills(required=IMPLEMENT_DECLARED, replaceable_architecture=True),
+        )
+
+    implement = resolve("implement")
+
+    assert "react-fsd-architecture" in _required_names(implement)
+    assert "clean-architecture-core" not in _required_names(implement)
+    assert implement.architecture_contract == ("react-fsd-architecture",)
+    assert any(
+        document.path.endswith(".agent-flow/skills/react-fsd-architecture/SKILL.md")
+        for document in implement.architecture_norms
+    )
+    assert "react-fsd-architecture" not in _required_names(resolve("explore"))
+
+
+def test_stack_mode_blocks_when_the_profile_loses_its_contract(tmp_path, monkeypatch):
+    """선택 뒤 의존성이 바뀌어 profile이 계약을 잃으면, 구조 규범 없는 phase가 아니라 차단이어야 한다."""
+    from agent_flow.core.skill_resolver import PhaseSkills, resolve_phase_skills
+
+    root = _git_project(tmp_path)
+    _declare(root, "schema_version: 1\narchitecture:\n  mode: stack\n")
+    monkeypatch.setenv("HOME", str(root / "empty-home"))
+
+    with pytest.raises(ArchitectureContractError, match="stack architecture skill"):
+        resolve_phase_skills(
+            project_root=root, phase_id="implement",
+            profile={"skills": {"install": ["typescript-development-guide"]}},
+            phase_skills=PhaseSkills(required=IMPLEMENT_DECLARED, replaceable_architecture=True),
+        )
+
+
+@pytest.mark.parametrize("order", [("react-native", "spring"), ("spring", "react-native")])
+def test_multi_profile_stack_keeps_every_profile_contract(order):
+    """합본 profile이 마지막 설치 목록만 남기면 앞 profile의 스택 계약이 required에서 빠진다."""
+    from agent_flow.core.architecture_policy import stack_architecture_skills
+    from agent_flow.core.local_skills import merged_profile_payload
+
+    installs = {
+        "react-native": ["react-native-development-guide", "react-native-feature-architecture"],
+        "spring": ["spring-boot-development-guide", "kotlin-backend-hexagonal-architecture"],
+    }
+    merged = merged_profile_payload([{"id": name, "skills": {"install": installs[name]}} for name in order])
+
+    assert stack_architecture_skills(merged) == (
+        "kotlin-backend-hexagonal-architecture", "react-native-feature-architecture",
+    )
 
 
 def test_pending_does_not_exempt_the_common_required_skills(tmp_path, monkeypatch):
@@ -975,6 +1124,43 @@ def test_runner_blocks_an_unreadable_declaration_instead_of_assuming_clean(tmp_p
     _declare(root, "schema_version: 1\narchitecture:\n  mode: whatever\n")
 
     assert runner._architecture_policy_block_reason() == "architecture_policy_unreadable"
+
+
+def test_runner_blocks_stack_when_one_profile_loses_its_contract(tmp_path, capsys):
+    """병합 profile로 보면 남은 profile의 계약이 잃은 profile을 가린다. 자격은 profile마다 본다."""
+    root = _git_project(tmp_path)
+    _declare(root, "schema_version: 1\narchitecture:\n  mode: stack\n")
+    runner = _pinned_runner(root)
+    mobile = {"id": "react-native", "skills": {"install": ["react-native-feature-architecture"]}}
+    node = {"id": "node", "skills": {"install": ["typescript-development-guide"]}}
+    runner.profile = {"id": "multi-profile", "profiles": [mobile, node]}
+
+    assert runner._architecture_policy_block_reason() == "architecture_policy_unreadable"
+    assert "every active profile" in capsys.readouterr().err
+
+    node["skills"]["install"].append("react-fsd-architecture")
+    assert runner._architecture_policy_block_reason() is None
+
+
+@pytest.mark.parametrize("profile,plugin", [
+    ("spring", 'id("org.springframework.boot")'),
+    ("ktor", 'id("io.ktor.plugin")'),
+])
+def test_runner_blocks_stack_when_a_java_backend_module_appears(tmp_path, capsys, profile, plugin):
+    """선택 뒤 Java 백엔드 모듈이 생기면 Kotlin 전용 계약이 그 모듈을 규율하지 못한다."""
+    root = _git_project(tmp_path)
+    _write(root, "build.gradle.kts", f'plugins {{\n kotlin("jvm")\n {plugin}\n}}\n')
+    _declare(root, "schema_version: 1\narchitecture:\n  mode: stack\n")
+    runner = _pinned_runner(root)
+    runner.profile = {"id": profile, "skills": {"install": ["kotlin-backend-hexagonal-architecture"]}}
+    assert runner._architecture_policy_block_reason() is None
+
+    _write(root, "settings.gradle.kts", 'include(":billing")\n')
+    _write(root, "billing/build.gradle.kts", f'plugins {{\n java\n {plugin}\n}}\n')
+    _write(root, "billing/src/main/java/Billing.java", "class Billing {}\n")
+
+    assert runner._architecture_policy_block_reason() == "architecture_policy_unreadable"
+    assert "Kotlin in every code module" in capsys.readouterr().err
 
 
 AGENCY_ROOT = "apps/console/src/app/workspace/catalog"

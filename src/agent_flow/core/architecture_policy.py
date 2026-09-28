@@ -54,7 +54,7 @@ CONTRACT_PATHS = (TEAM_CONTRACT_PATH, PRIVATE_CONTRACT_PATH)
 class ArchitectureMode(str, Enum):
     """프로젝트가 선언한 구조 기준. 닫힌 집합이다."""
 
-    CLEAN, LOCAL, PENDING = ARCHITECTURE_MODES
+    CLEAN, LOCAL, PENDING, STACK = ARCHITECTURE_MODES
 
 
 @dataclass(frozen=True)
@@ -467,14 +467,14 @@ def _snapshot_from_selection(
     repository_fd: int,
 ) -> ArchitectureSnapshot:
     """Build a pinned architecture snapshot from a validated selection."""
-    if selection.mode is ArchitectureMode.CLEAN:
-        # 프로젝트 계약이 있는데 Clean을 켜면 규범이 둘이 된다. 선언이 없는 legacy 기본값도
+    if selection.mode in (ArchitectureMode.CLEAN, ArchitectureMode.STACK):
+        # 프로젝트 계약이 있는데 번들 규범을 켜면 규범이 둘이 된다. 선언이 없는 legacy 기본값도
         # 예외가 아니다 — 파일을 둔 것이 곧 "이 규범을 쓰라"는 뜻이다.
         existing = find_project_contract(root)
         if existing is not None:
             raise ArchitectureContractError(
-                f"project architecture contract exists at {existing}; clean architecture "
-                f"cannot be selected or installed beside it. Run "
+                f"project architecture contract exists at {existing}; {selection.mode.value} "
+                f"architecture cannot be selected or installed beside it. Run "
                 f"`agent-flow architecture select --mode local --skill {existing}`"
             )
     contract = _resolve_architecture_contract(root, selection, repository_fd)
@@ -560,6 +560,21 @@ def is_clean_architecture_skill(name: str) -> bool:
     return name in CLEAN_ARCHITECTURE_SKILLS
 
 
+# kit이 스택별로 번들한 구조 계약. `stack` 모드에서는 활성 profile이 설치하는 것이
+# 계약이다. `lib/skill-selection.mjs`의 `STACK_ARCHITECTURE_SKILLS`와 같은 목록이다.
+STACK_ARCHITECTURE_SKILLS = frozenset({
+    "kotlin-backend-hexagonal-architecture",
+    "react-fsd-architecture",
+    "react-native-feature-architecture",
+})
+
+
+def stack_architecture_skills(profile: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Return the bundled stack architecture skills the active profile installs."""
+    skills = (profile or {}).get("skills") or {}
+    return tuple(sorted(STACK_ARCHITECTURE_SKILLS.intersection(skills.get("install") or ())))
+
+
 def contract_skill_name(selection: ArchitectureSelection) -> str | None:
     """local 계약 문서의 skill 이름. 다른 모드에는 프로젝트 계약이 없다."""
     if selection.mode is not ArchitectureMode.LOCAL or selection.contract_path is None:
@@ -571,6 +586,8 @@ def contract_names_in(required_names: Sequence[str], selection: ArchitectureSele
     """required 중 이 선택이 구조 계약으로 인정하는 이름."""
     if selection.mode is ArchitectureMode.CLEAN:
         return tuple(name for name in required_names if is_clean_architecture_skill(name))
+    if selection.mode is ArchitectureMode.STACK:
+        return tuple(name for name in required_names if name in STACK_ARCHITECTURE_SKILLS)
     contract = contract_skill_name(selection)
     if contract is None:
         return ()

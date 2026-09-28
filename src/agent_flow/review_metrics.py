@@ -56,7 +56,7 @@ def write_review_metrics(
         })
     mode = snapshot.selection.mode if snapshot is not None else None
     source = None
-    if mode is ArchitectureMode.CLEAN:
+    if mode in (ArchitectureMode.CLEAN, ArchitectureMode.STACK):
         source = "bundled"
     elif mode is ArchitectureMode.LOCAL and snapshot is not None:
         source = "private" if is_private_contract(snapshot.selection) else "team"

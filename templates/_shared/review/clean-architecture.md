@@ -28,6 +28,22 @@ layers or permission to skip the review. A fixed legacy
 where the workflow requires it; document the actual mode and contract rather
 than claiming an unselected Clean skill was read.
 
+## Stack mode
+
+The contract is the bundled stack architecture skill listed as required in this
+reviewer's own prompt. Assess every applicable rule, valid alternative, and
+non-target in that skill against actual changed code and the approved design.
+Cite both the skill's rule and implementation evidence for a violation; missing
+evidence is not a pass. Do not demand Clean layers, UseCase classes, or Clean
+mappings the stack skill does not require, and preserve the same shared
+security, data-integrity, cancellation, and interface-contract checks.
+
+An applicable required-rule violation produces `verdict: request-changes`.
+Record `must-avoid-check: pass|fail` for that skill's failure cases. Retain
+completion markers and category coverage exactly as in local mode: explain the
+stack-skill evidence or a permitted `n/a` for each category, and document the
+actual mode and skill rather than claiming an unselected Clean skill was read.
+
 ## Clean mode
 
 Apply every applicable requirement, alternative, and exception in the required

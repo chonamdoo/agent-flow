@@ -7,7 +7,7 @@ taskTerms: [backend API, server API]
 
 # Backend API Contract
 
-Apply these observable behavior requirements at the responsibility boundaries of the selected architecture contract. This skill selects no folders, layers, DI container, runtime, database, or messaging infrastructure and does not require Clean Architecture. Preserve the existing `clean`/`local`/`pending` selection: local uses its selected root and required references; a missing selected local contract is an error, not permission to fall back to Clean. Pending permits only work that needs no new structural decision; it cannot decide ownership, dependency direction, persistence boundaries, or wiring.
+Apply these observable behavior requirements at the responsibility boundaries of the selected architecture contract. This skill selects no folders, layers, DI container, runtime, database, or messaging infrastructure and does not require Clean Architecture. Preserve the existing `clean`/`local`/`pending`/`stack` selection: local uses its selected root and required references; stack uses the bundled stack architecture skill the resolver requires; a missing selected local contract is an error, not permission to fall back to Clean. Pending permits only work that needs no new structural decision; it cannot decide ownership, dependency direction, persistence boundaries, or wiring.
 
 Before changing an entry point, identify its actor/tenant, allowed action and state transition, wire result, consistency boundary, and failure/recovery behavior. Resolve actual framework, driver, database, and deployment versions from the project. Apply framework-specific guidance only to the boundary using that framework.
 

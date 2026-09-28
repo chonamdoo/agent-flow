@@ -75,17 +75,25 @@ blocked, because the installed assets belong to the repository, not to one run.
 
 ## Choose the architecture
 
-Choose before the first run. `clean` uses the bundled Clean Architecture norms; `local`
+Choose before the first run. `clean` uses the bundled Clean Architecture norms; `stack` uses
+the kit-bundled architecture skill for the active stack (Feature-Sliced Design for React Web,
+hexagonal for Kotlin Spring/Ktor, route-and-feature for React Native); `local`
 uses your own contract — the tracked team copy at `skills/architecture/SKILL.md`, or a
 private copy at `.agent-flow/local-skills/architecture/SKILL.md` that applies only on this
 machine; `pending` allows existing-pattern local work but blocks changes that require a
 structural decision. With no selection file, the compatibility default is `clean`, not
-`pending`.
+`pending`. Install writes the selection: when every selected profile is React Web, Kotlin
+Spring/Ktor, or React Native, a fresh non-interactive install defaults to `stack` (a Spring or
+Ktor project with any Java module, and other profiles: `pending`), and reinstalling a legacy
+install without `.agent-flow/project.yaml` switches to `stack` and says so. To keep Clean on
+those stacks, install with `--architecture-mode clean`; `architecture select` records only a
+mode whose skills are already installed.
 
 Choose one command:
 
 ```bash
 agent-flow architecture select --mode clean
+agent-flow architecture select --mode stack
 agent-flow architecture select --mode local --skill skills/architecture/SKILL.md
 agent-flow architecture select --mode local --skill .agent-flow/local-skills/architecture/SKILL.md
 agent-flow architecture select --mode pending
@@ -100,9 +108,12 @@ on their own in code phases.
 
 A fresh interactive install asks the same question first. Answer that a team or private
 contract exists or will be added and no Clean skills are installed (the selection becomes
-`pending` until you run `architecture select`); if the contract file already exists at one of
-the two paths, install adopts it as `local` without asking, and `--architecture-mode clean`
-is refused beside it.
+`pending` until you run `architecture select`), or answer "None — use the bundled
+architecture" to get the stack skill for React Web, Kotlin Spring/Ktor, and React Native, and
+Clean otherwise. If the contract file already exists at one of the two paths, install adopts
+it as `local` without asking, and `--architecture-mode clean` is refused beside it.
+`--mode stack` fails unless every active profile provides a stack skill; Spring and Ktor
+projects also need Kotlin evidence in every code and framework module.
 Inspect the selection with `agent-flow architecture export --format json`.
 
 See [Architecture selection](USAGE.md#architecture-selection) for reference syntax,

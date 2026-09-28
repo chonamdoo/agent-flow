@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -4098,6 +4099,8 @@ _NEW_HOST_SKILLS = {
     "react-hook-form-zod",
     "react-tanstack-form",
     "react-tanstack-query",
+    "react-zod-validation",
+    "react-tailwind-v4",
     "react-web-seo",
     "react-storybook",
     "react-scroll-restoration",
@@ -4148,6 +4151,8 @@ def test_installer_entrypoints_consume_framework_fixtures(tmp_path: Path, binary
             "ga4-ecommerce-events",
             "datadog-rum-sourcemaps",
             "react-tanstack-query",
+            "react-zod-validation",
+            "react-tailwind-v4",
         })
     if case["profile"] == "nextjs":
         expected_host_skills.update({"nextjs-auth-session", "nextjs-api-routing"})
@@ -4662,6 +4667,656 @@ def test_local_architecture_install_omits_the_clean_pack(tmp_path: Path, binary:
     # 공통 규율과 도메인 모델링은 선택과 무관하게 남는다. `ddd-architecture`를 Clean
     # 팩으로 묶어 빼면 workflow의 DDD 단계가 설치되지 않은 이름을 계속 요구한다.
     assert {"code-generation-discipline", "tdd", "ddd-architecture"} <= installed
+
+
+_STACK_PROFILES = [
+    ("nextjs", "package.json", '{"dependencies":{"react":"19","next":"16"}}', "react-fsd-architecture"),
+    (
+        "spring", "build.gradle.kts", 'plugins {\n kotlin("jvm")\n id("org.springframework.boot") version "3.5.0"\n}',
+        "kotlin-backend-hexagonal-architecture",
+    ),
+    ("ktor", "build.gradle.kts", 'plugins { kotlin("jvm") }', "kotlin-backend-hexagonal-architecture"),
+    (
+        "react-native", "package.json",
+        '{"dependencies":{"react":"19","react-native":"0.81","expo":"54"}}', "react-native-feature-architecture",
+    ),
+]
+
+
+def _stack_project(tmp_path: Path, name: str, manifest: str, content: str) -> Path:
+    """Create a fixture project for one stack profile."""
+    project = tmp_path / name
+    project.mkdir()
+    (project / manifest).write_text(content, encoding="utf-8")
+    return project
+
+
+def _declared_mode(project: Path) -> str:
+    """Return the architecture mode recorded in the project declaration."""
+    declaration = yaml.safe_load((project / ".agent-flow/project.yaml").read_text(encoding="utf-8"))
+    return declaration["architecture"]["mode"]
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("profile,manifest,content,stack_skill", _STACK_PROFILES)
+def test_stack_profiles_install_their_architecture_by_default(
+    tmp_path: Path, binary: str, profile: str, manifest: str, content: str, stack_skill: str,
+) -> None:
+    """React Web, Kotlin 백엔드, RN은 선언 없이 설치하면 Clean 대신 자기 스택 계약을 받는다."""
+    from agent_flow.core.architecture_policy import CLEAN_ARCHITECTURE_SKILLS
+
+    project = _stack_project(tmp_path, f"{profile}-{binary}", manifest, content)
+
+    result = _install_with(binary, project, "--profile", profile, "--no-hooks")
+
+    assert result.returncode == 0, result.stderr
+    names = _installed_skill_names(project)
+    assert _declared_mode(project) == "stack"
+    assert stack_skill in names
+    assert not names & CLEAN_ARCHITECTURE_SKILLS
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("profile,manifest,content", [
+    ("android", "settings.gradle.kts", 'rootProject.name = "probe"'),
+    (
+        "spring", "pom.xml",
+        "<project><dependencies><dependency><groupId>org.springframework.boot</groupId>"
+        "<artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>",
+    ),
+    ("spring", "build.gradle.kts", 'plugins { java\n id("org.springframework.boot") version "3.5.0" }'),
+    ("ktor", "build.gradle.kts", 'plugins { java\n id("io.ktor.plugin") version "3.2.0" }'),
+])
+def test_profiles_without_a_stack_contract_keep_the_pending_default(
+    tmp_path: Path, binary: str, profile: str, manifest: str, content: str,
+) -> None:
+    """스택 계약이 없는 profile이나 Java Spring까지 stack으로 기록하면 맞지 않는 계약을 받는다."""
+    project = _stack_project(tmp_path, f"{profile}-{binary}", manifest, content)
+
+    result = _install_with(binary, project, "--profile", profile, "--no-hooks")
+
+    assert result.returncode == 0, result.stderr
+    assert _declared_mode(project) == "pending"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_stack_needs_a_profile_contract_not_an_explicit_skill(tmp_path: Path, binary: str) -> None:
+    """런타임은 활성 profile에서 계약을 찾는다. 명시 skill로 통과시키면 계약 없는 stack이 기록된다."""
+    project = _stack_project(tmp_path, f"python-{binary}", "pyproject.toml", "[project]\nname = 'probe'\n")
+
+    result = _install_with(
+        binary, project, "--profile", "python", "--skill", "react-fsd-architecture",
+        "--architecture-mode", "stack", "--no-hooks",
+    )
+
+    assert result.returncode != 0
+    assert "stack architecture skill" in result.stderr
+
+
+def test_installer_and_runtime_agree_on_the_stack_contracts() -> None:
+    """설치기와 resolver가 stack 계약 목록을 다르게 보면 설치된 계약이 required가 되지 않는다."""
+    from agent_flow.core.architecture_policy import STACK_ARCHITECTURE_SKILLS
+
+    script = (
+        f"import {{ STACK_ARCHITECTURE_SKILLS }} from {json.dumps((KIT_ROOT / 'lib/skill-selection.mjs').as_uri())};"
+        "console.log(JSON.stringify([...STACK_ARCHITECTURE_SKILLS]));"
+    )
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", script), text=True, capture_output=True, check=True, timeout=30,
+    )
+
+    assert set(json.loads(result.stdout)) == set(STACK_ARCHITECTURE_SKILLS)
+    for name in STACK_ARCHITECTURE_SKILLS:
+        assert (KIT_ROOT / "skills" / name / "SKILL.md").is_file(), name
+
+
+_SPRING_GRADLE = 'plugins {\n id("org.springframework.boot") version "3.5.0"\n}\n'
+_SPRING_POM = "<project><parent><groupId>org.springframework.boot</groupId></parent>"
+_SPRING_AGGREGATOR = _SPRING_POM + "<packaging>pom</packaging><modules><module>service</module></modules></project>"
+
+
+@pytest.mark.parametrize("files,expected", [
+    ({"build.gradle.kts": 'plugins {\n kotlin("jvm")\n kotlin("plugin.spring")\n id("org.springframework.boot")\n}'}, True),
+    ({"build.gradle": "plugins { id 'org.springframework.boot' version '3.5.0' }\napply plugin: 'kotlin'\n"}, True),
+    ({"pom.xml": _SPRING_POM + "<build><plugins><plugin><artifactId>kotlin-maven-plugin</artifactId></plugin></plugins></build></project>"}, True),
+    ({"build.gradle.kts": _SPRING_GRADLE, "src/main/kotlin/App.kt": "fun main() {}\n"}, True),
+    (
+        {
+            "settings.gradle.kts": 'include(":app")',
+            "build.gradle.kts": 'plugins {\n id("org.springframework.boot") version "3.5.0" apply false\n kotlin("jvm") version "2.2.0" apply false\n}\n',
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        True,
+    ),
+    ({"build.gradle.kts": 'plugins { java\n id("org.springframework.boot") version "3.5.0" }'}, False),
+    (
+        {"build.gradle.kts": _SPRING_GRADLE + 'dependencies {\n implementation(kotlin("stdlib"))\n implementation("org.jetbrains.kotlin:kotlin-reflect")\n}\n'},
+        False,
+    ),
+    ({"pom.xml": _SPRING_POM + "<dependencies><dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-stdlib</artifactId></dependency></dependencies></project>"}, False),
+    (
+        {
+            "settings.gradle.kts": 'include(":service", ":lib")',
+            "service/build.gradle.kts": 'plugins {\n java\n id("org.springframework.boot")\n}\n',
+            "lib/build.gradle.kts": 'plugins {\n kotlin("jvm")\n}\n',
+            "lib/src/main/kotlin/Lib.kt": "object Lib\n",
+        },
+        False,
+    ),
+    ({"build.gradle.kts": '// kotlin("jvm")\n' + _SPRING_GRADLE}, False),
+    ({"build.gradle.kts": 'plugins {\n alias(libs.plugins.kotlin.jvm)\n alias(libs.plugins.spring.boot)\n}\n', "src/main/kotlin/App.kt": "fun main() {}\n"}, True),
+    (
+        {
+            "pom.xml": _SPRING_AGGREGATOR,
+            "service/pom.xml": "<project><dependencies><dependency><groupId>org.springframework.boot</groupId></dependency></dependencies></project>",
+            "service/src/main/kotlin/App.kt": "fun main() {}\n",
+        },
+        True,
+    ),
+    (
+        {
+            "pom.xml": _SPRING_AGGREGATOR,
+            "service/pom.xml": "<project><parent><groupId>com.example</groupId></parent></project>",
+            "service/src/main/java/App.java": "class App {}\n",
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'include(":app", ":util")',
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+            "util/build.gradle.kts": "plugins { java }\n",
+            "util/src/main/java/Util.java": "class Util {}\n",
+        },
+        False,
+    ),
+    ({"build.gradle.kts": 'plugins {\n java\n kotlin("jvm").version("2.2.0").apply(false)\n id("org.springframework.boot")\n}\n'}, False),
+    ({"build.gradle.kts": 'plugins {\n java\n kotlin("jvm")\n  .version("2.2.0")\n  .apply(false)\n id("org.springframework.boot")\n}\n'}, False),
+    (
+        {
+            "settings.gradle.kts": 'include(":app", ":billing")\nproject(":billing").projectDir = file("services/billing")\n',
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+            "services/billing/build.gradle.kts": 'plugins {\n java\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'include(":app", ":missing")\n',
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'include(":app")\ninclude(*extraModules.toTypedArray())\n',
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'val extraModule = ":billing"\ninclude(":app", extraModule)\n',
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+            "billing/build.gradle.kts": 'plugins {\n java\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle.kts": (
+                'pluginManagement { includeBuild("build-logic") }\n'
+                'dependencyResolutionManagement { repositories { mavenCentral { content { includeGroup("com.example") } } } }\n'
+                'include(":app")\n'
+            ),
+            "build-logic/build.gradle.kts": "plugins { `kotlin-dsl` }\n",
+            "build-logic/src/main/kotlin/Conventions.kt": "object Conventions\n",
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        True,
+    ),
+    ({"build.gradle.kts": 'plugins {\n java\n id("io.ktor.plugin") version "3.2.0"\n}\n', "src/main/java/App.java": "class App {}\n"}, False),
+    ({"build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("io.ktor.plugin") version "3.2.0"\n}\n'}, True),
+    (
+        {
+            "settings.gradle.kts": 'include(":app")\nsettings.include(":billing")\n',
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+            "billing/build.gradle.kts": "plugins { java }\n",
+            "billing/src/main/java/Billing.java": "class Billing {}\n",
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'include(":parent:app")\n',
+            "parent/build.gradle.kts": "plugins { java }\n",
+            "parent/src/main/java/Parent.java": "class Parent {}\n",
+            "parent/app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle": "include ':app',\n    extraModule\n",
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+            "billing/src/main/java/Billing.java": "class Billing {}\n",
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'rootProject.name = "projectDir"\ninclude(":app")\n',
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        True,
+    ),
+    (
+        {
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+            "mobile/build.gradle.kts": 'plugins {\n id("com.android.application")\n kotlin("android")\n}\n',
+            "mobile/src/main/java/Main.kt": "class Main\n",
+            "web/node_modules/pkg/src/main/java/Vendored.java": "class Vendored {}\n",
+        },
+        True,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'include(":app")\nincludeFlat("billing")\n',
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'include(":app")\nproject(":app").projectDir = file(".modules/app")\n',
+            ".modules/app/build.gradle.kts": 'plugins {\n java\n id("org.springframework.boot")\n}\n',
+            ".modules/app/src/main/java/App.java": "class App {}\n",
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "pom.xml": _SPRING_POM + "<packaging>pom</packaging><modules><module>../billing</module></modules></project>",
+            "src/main/kotlin/App.kt": "fun main() {}\n",
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'rootProject.name = "include-demo"\ninclude(":app")\n',
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        True,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'include(":app",)\n',
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        True,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'apply(from = "gradle/modules.gradle.kts")\n',
+            "gradle/modules.gradle.kts": 'include(":billing")\nproject(":billing").projectDir = file("../billing")\n',
+            "build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle": "apply from: 'gradle/modules.gradle'\n",
+            "gradle/modules.gradle": "include ':billing'\n",
+            "build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'apply { from("gradle/modules.gradle.kts") }\n',
+            "gradle/modules.gradle.kts": 'include(":billing")\nproject(":billing").projectDir = file("../billing")\n',
+            "build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'apply(to = settings, from = "gradle/modules.gradle.kts")\n',
+            "gradle/modules.gradle.kts": 'include(":billing")\nproject(":billing").projectDir = file("../billing")\n',
+            "build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle": "apply([from: 'gradle/modules.gradle'])\n",
+            "gradle/modules.gradle": "include ':billing'\n",
+            "build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'apply(mapOf("from" to "gradle/modules.gradle.kts"))\n',
+            "gradle/modules.gradle.kts": 'include(":billing")\nproject(":billing").projectDir = file("../billing")\n',
+            "build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle": "apply(['from': 'gradle/modules.gradle'])\n",
+            "gradle/modules.gradle": "include ':billing'\n",
+            "build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle": "apply 'from': 'gradle/modules.gradle'\n",
+            "gradle/modules.gradle": "include ':billing'\n",
+            "build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle": "apply to: settings, from: 'gradle/modules.gradle'\n",
+            "gradle/modules.gradle": "include ':billing'\n",
+            "build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'apply(to = listOf(settings), from = "gradle/modules.gradle.kts")\n',
+            "gradle/modules.gradle.kts": 'include(":billing")\n',
+            "build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle": "def spec = [from: 'gradle/modules.gradle']\napply(spec)\n",
+            "gradle/modules.gradle": "include ':billing'\n",
+            "build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        False,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'plugins { id("org.springframework.boot") version "3.5.0" apply false }\ninclude(":app")\n',
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        True,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'pluginManagement { plugins { id("org.springframework.boot").version("3.5.0").apply(false) } }\ninclude(":app")\n',
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        True,
+    ),
+    (
+        {
+            "settings.gradle.kts": 'rootProject.name = "apply(from = ignored.gradle.kts)"\ninclude(":app")\n',
+            "app/build.gradle.kts": 'plugins {\n kotlin("jvm")\n id("org.springframework.boot")\n}\n',
+        },
+        True,
+    ),
+], ids=[
+    "gradle-kotlin", "groovy-apply", "maven-plugin", "source-tree", "apply-false-root", "java-kts",
+    "java-with-kotlin-dependencies", "maven-kotlin-dependency", "java-service-kotlin-library", "commented",
+    "version-catalog-kotlin", "maven-parent-kotlin-child", "maven-parent-inherited-java-child",
+    "kotlin-service-java-module", "apply-false-call", "apply-false-chain", "project-dir-remap",
+    "missing-include-directory", "dynamic-include-without-code", "mixed-literal-dynamic-include",
+    "include-build-and-group", "java-ktor", "kotlin-ktor", "qualified-include", "nested-parent-module",
+    "groovy-continuation", "project-dir-in-a-string", "android-kotlin-and-node-modules", "include-flat",
+    "project-dir-into-hidden-directory", "maven-module-outside-checkout", "include-in-a-string",
+    "trailing-comma-include", "imported-kotlin-settings", "imported-groovy-settings",
+    "imported-action-settings", "imported-named-settings", "imported-map-settings", "imported-kotlin-map-settings",
+    "imported-quoted-map-settings", "imported-quoted-named-settings", "imported-ordered-groovy-settings",
+    "imported-nested-settings", "imported-indirect-settings", "settings-plugin-apply-false",
+    "settings-plugin-apply-false-call", "settings-string-apply",
+])
+def test_installer_and_runtime_agree_on_kotlin_backend_evidence(tmp_path: Path, files: dict, expected: bool) -> None:
+    """spring·ktor stack 자격을 설치기와 런타임이 다르게 보면 한쪽만 Kotlin 계약을 기록한다."""
+    from agent_flow.core.profiles import is_kotlin_backend_project
+
+    for relative, content in files.items():
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    script = (
+        f"import {{ isKotlinBackendProject }} from {json.dumps((KIT_ROOT / 'lib/profile-detection.mjs').as_uri())};"
+        f"console.log(JSON.stringify(isKotlinBackendProject({json.dumps(str(tmp_path))})));"
+    )
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", script), text=True, capture_output=True, check=True, timeout=30,
+    )
+
+    assert json.loads(result.stdout) is expected
+    assert is_kotlin_backend_project(tmp_path) is expected
+
+
+@pytest.mark.parametrize("operation", ["subtree", "build-file"])
+@pytest.mark.parametrize("code,number", [
+    ("EACCES", errno.EACCES),
+    ("EPERM", errno.EPERM),
+    ("EIO", errno.EIO),
+])
+def test_kotlin_backend_eligibility_denied_reads_fail_closed_without_masking_other_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, code: str, number: int
+) -> None:
+    from agent_flow.core.profiles import is_kotlin_backend_project
+
+    (tmp_path / "settings.gradle.kts").write_text('include(":service")\n', encoding="utf-8")
+    service = tmp_path / "service"
+    service.mkdir()
+    (service / "build.gradle.kts").write_text('plugins { kotlin("jvm") }\n', encoding="utf-8")
+    target = (service if operation == "subtree" else service / "build.gradle.kts").resolve()
+    assert is_kotlin_backend_project(tmp_path) is True
+
+    method = "readdirSync" if operation == "subtree" else "readFileSync"
+    script = (
+        'import fs from "node:fs";\n'
+        f"import {{ isKotlinBackendProject }} from {json.dumps((KIT_ROOT / 'lib/profile-detection.mjs').as_uri())};\n"
+        f"const root = {json.dumps(str(tmp_path))};\n"
+        f"const target = {json.dumps(str(target))};\n"
+        f"const original = fs.{method};\n"
+        "console.log(JSON.stringify(isKotlinBackendProject(root)));\n"
+        f"fs.{method} = (...args) => {{\n"
+        f"  if (args[0] === target) throw Object.assign(new Error('denied'), {{ code: {json.dumps(code)} }});\n"
+        "  return original(...args);\n"
+        "};\n"
+        "try { console.log(JSON.stringify(isKotlinBackendProject(root))); }\n"
+        "catch (error) { console.log(JSON.stringify({ code: error.code })); }\n"
+    )
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", script), text=True, capture_output=True, check=True, timeout=30,
+    )
+    before, after = map(json.loads, result.stdout.splitlines())
+    assert before is True
+    assert after == ({"code": "EIO"} if code == "EIO" else False)
+
+    with monkeypatch.context() as patch:
+        if operation == "subtree":
+            original = os.scandir
+
+            def denied(directory: Path) -> object:
+                if directory == target:
+                    raise OSError(number, "denied", str(target))
+                return original(directory)
+
+            patch.setattr(os, "scandir", denied)
+        else:
+            original_read = Path.read_text
+
+            def denied_read(file: Path, *args: object, **kwargs: object) -> str:
+                if file == target:
+                    raise OSError(number, "denied", str(target))
+                return original_read(file, *args, **kwargs)
+
+            patch.setattr(Path, "read_text", denied_read)
+        if code == "EIO":
+            with pytest.raises(OSError) as raised:
+                is_kotlin_backend_project(tmp_path)
+            assert raised.value.errno == errno.EIO
+        else:
+            assert is_kotlin_backend_project(tmp_path) is False
+
+
+def test_kotlin_backend_eligibility_rejects_symlinked_module_ancestor(tmp_path: Path) -> None:
+    from agent_flow.core.profiles import is_kotlin_backend_project
+
+    (tmp_path / "settings.gradle.kts").write_text('include(":app", ":linked:billing")\n', encoding="utf-8")
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "build.gradle.kts").write_text('plugins { kotlin("jvm") }\n', encoding="utf-8")
+    external = tmp_path.parent / f"{tmp_path.name}-external"
+    billing = external / "billing" / "src" / "main" / "java"
+    billing.mkdir(parents=True)
+    (billing / "Billing.java").write_text("class Billing {}\n", encoding="utf-8")
+    (tmp_path / "linked").symlink_to(external, target_is_directory=True)
+    script = (
+        f"import {{ isKotlinBackendProject }} from {json.dumps((KIT_ROOT / 'lib/profile-detection.mjs').as_uri())};"
+        f"console.log(JSON.stringify(isKotlinBackendProject({json.dumps(str(tmp_path))})));"
+    )
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", script), text=True, capture_output=True, check=True, timeout=30,
+    )
+
+    assert json.loads(result.stdout) is False
+    assert is_kotlin_backend_project(tmp_path) is False
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_skill_only_reinstall_keeps_the_stack_contract(tmp_path: Path, binary: str) -> None:
+    """`--skill`만 더하는 재설치는 이전 profile을 이어받으므로 stack 계약이 유지된다."""
+    project = _stack_project(tmp_path, f"skill-only-{binary}", "package.json", _STACK_PROFILES[0][2])
+    assert _install_with(binary, project, "--profile", "nextjs", "--no-hooks").returncode == 0
+
+    result = _install_with(binary, project, "--skill", "code-review", "--no-hooks")
+
+    assert result.returncode == 0, result.stderr
+    assert _declared_mode(project) == "stack"
+    assert {"react-fsd-architecture", "code-review"} <= _installed_skill_names(project)
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize(
+    "override",
+    ["architecture:\n  roles: []\n", '"architecture": {roles: []}\n', "{architecture: {roles: []}}\n"],
+    ids=["block", "quoted-key", "flow-mapping"],
+)
+def test_legacy_install_with_a_clean_override_keeps_clean(tmp_path: Path, binary: str, override: str) -> None:
+    """Clean role override가 있는 legacy 설치를 stack으로 옮기면 모든 run이 override 충돌로 막힌다."""
+    project = _stack_project(tmp_path, f"override-{binary}", "package.json", _STACK_PROFILES[0][2])
+    initial = _install_with(binary, project, "--profile", "nextjs", "--architecture-mode", "clean", "--no-hooks")
+    assert initial.returncode == 0, initial.stderr
+    (project / ".agent-flow/project.yaml").unlink()
+    (project / ".agent-flow/profiles/nextjs.local.yaml").write_text(override, encoding="utf-8")
+
+    result = _install_with(binary, project, "--no-hooks")
+
+    assert result.returncode == 0, result.stderr
+    assert "switched" not in result.stdout
+    assert not (project / ".agent-flow/project.yaml").exists()
+    assert "clean-architecture-core" in _installed_skill_names(project)
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_explicit_stack_needs_every_profile_contract(tmp_path: Path, binary: str) -> None:
+    """스택 계약 없는 profile이 섞인 stack은 그 부분을 구조 계약 없이 돌게 만든다."""
+    project = _stack_project(tmp_path, f"mixed-{binary}", "package.json", _STACK_PROFILES[0][2])
+
+    result = _install_with(binary, project, "--profile", "nextjs,android", "--architecture-mode", "stack", "--no-hooks")
+
+    assert result.returncode != 0
+    assert "every selected profile" in result.stderr
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("profile,plugin", [
+    ("spring", 'id("org.springframework.boot") version "3.5.0"'),
+    ("ktor", 'id("io.ktor.plugin") version "3.2.0"'),
+])
+def test_explicit_stack_refuses_a_java_backend(tmp_path: Path, binary: str, profile: str, plugin: str) -> None:
+    """hexagonal 계약은 Java 서비스를 대상에서 뺀다. 명시 선택도 기본값과 같은 자격을 요구한다."""
+    project = _stack_project(tmp_path, f"java-{profile}-{binary}", "build.gradle.kts", f"plugins {{ java\n {plugin} }}")
+
+    result = _install_with(binary, project, "--profile", profile, "--architecture-mode", "stack", "--no-hooks")
+
+    assert result.returncode != 0
+    assert "Kotlin in every code module" in result.stderr
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_stack_needs_the_contract_to_survive_a_project_shadow(tmp_path: Path, binary: str) -> None:
+    """stack에 맞지 않는 같은 이름의 프로젝트 skill은 필터가 지운다. 계약 없는 stack이 기록되면 안 된다."""
+    project = _stack_project(tmp_path, f"shadow-{binary}", "package.json", _STACK_PROFILES[0][2])
+    (project / "skills/react-fsd-architecture").mkdir(parents=True)
+    (project / "skills/react-fsd-architecture/SKILL.md").write_text(
+        "---\nname: react-fsd-architecture\ndescription: Team copy for Clean projects.\n"
+        "architecture_modes: [clean]\n---\n\n# Team copy\n",
+        encoding="utf-8",
+    )
+
+    explicit = _install_with(binary, project, "--profile", "nextjs", "--architecture-mode", "stack", "--no-hooks")
+    assert explicit.returncode != 0
+    assert "every selected profile" in explicit.stderr
+    assert not (project / ".agent-flow/project.yaml").exists()
+
+    default = _install_with(binary, project, "--profile", "nextjs", "--no-hooks")
+    assert default.returncode == 0, default.stderr
+    assert _declared_mode(project) == "pending"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_undeclared_legacy_stack_install_switches_on_reinstall(tmp_path: Path, binary: str) -> None:
+    """선언 없이 Clean 기본값을 받던 스택 프로젝트는 재설치 때 스택 계약으로 옮겨지고 그 사실을 알린다."""
+    project = _stack_project(tmp_path, f"legacy-{binary}", "package.json", _STACK_PROFILES[0][2])
+    initial = _install_with(binary, project, "--profile", "nextjs", "--architecture-mode", "clean", "--no-hooks")
+    assert initial.returncode == 0, initial.stderr
+    assert "clean-architecture-core" in _installed_skill_names(project)
+    (project / ".agent-flow/project.yaml").unlink()
+
+    result = _install_with(binary, project, "--no-hooks")
+
+    assert result.returncode == 0, result.stderr
+    assert "switched the undeclared Clean default" in result.stdout
+    assert _declared_mode(project) == "stack"
+    names = _installed_skill_names(project)
+    assert "react-fsd-architecture" in names
+    assert "clean-architecture-core" not in names
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("profile,manifest,content,stack_skill", _STACK_PROFILES)
+def test_selected_local_and_clean_keep_their_own_architecture(
+    tmp_path: Path, binary: str, profile: str, manifest: str, content: str, stack_skill: str,
+) -> None:
+    """명시한 clean과 local/team 계약은 스택 기본값에 덮이지 않는다."""
+    for mode in ("local", "clean"):
+        project = _stack_project(tmp_path, f"{profile}-{mode}-{binary}", manifest, content)
+        if mode == "local":
+            _skill(project / "skills/architecture", "Existing project-specific architecture contract.")
+            _declare_architecture(
+                project,
+                "schema_version: 1\narchitecture:\n  mode: local\n  skill: skills/architecture/SKILL.md\n",
+            )
+        else:
+            _declare_architecture(project, "schema_version: 1\narchitecture:\n  mode: clean\n")
+        result = _install_with(binary, project, "--profile", profile, "--no-hooks")
+        assert result.returncode == 0, result.stderr
+        names = _installed_skill_names(project)
+        assert ("architecture" in names) is (mode == "local")
+        assert (stack_skill in names) is (mode == "local")
+        assert ("clean-architecture-core" in names) is (mode == "clean")
+        if profile == "nextjs":
+            assert {"react-tailwind-v4", "react-zod-validation", "react-hook-form-zod", "react-tanstack-form",
+                    "react-tanstack-query"} <= names
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])

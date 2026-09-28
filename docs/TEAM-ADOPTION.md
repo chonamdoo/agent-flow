@@ -129,7 +129,9 @@ is the declaration. Moving a skill between them changes nothing but who sees it.
 selected with `--mode local` and loads as an ordinary skill under `pending`. While it exists
 in either root, `clean` cannot be selected, installed, or used as the legacy default: the
 installer adopts the file as the local contract, and an explicit `--architecture-mode clean`
-is refused so two norms never compete. Bundled and vendor skills must declare
+is refused so two norms never compete. Under `local`, a stack with a bundled stack skill
+(React Web, Kotlin Spring/Ktor, React Native) still installs it as an adjunct; the project
+contract governs and the stack skill never overrides it. Bundled and vendor skills must declare
 `workflowPhases` themselves.
 
 A profile's `skills.required_review` turns repository-owned names into a blocking requirement. A

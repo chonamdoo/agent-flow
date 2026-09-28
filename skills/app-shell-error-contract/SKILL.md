@@ -41,17 +41,17 @@ Apply this semantic contract before the matching platform AppShell skill. Platfo
 - In Clean mode, the notifier/queue port belongs to
   `shared-presentation-contract`, not Core Domain or an AppShell implementation;
   features consume it and AppShell wires and observes it at composition.
-  Local mode uses its selected contract's ownership and dependency rules.
+  Local and stack modes use their selected contract's ownership and dependency rules.
   Neither mode requires a prescribed folder or extra module.
 - Preserve `code`, `title`, `message`, and `requestId` through error conversion,
   queue storage, and common UI models when supplied. In Clean mode, map transport
   metadata into domain error fields at the data boundary and keep transport DTOs
-  and exceptions out of domain/presentation. Local mode uses its declared
+  and exceptions out of domain/presentation. Local and stack modes use their declared
   representation boundaries while preserving the same metadata and safe UI
   behavior.
 - In Clean mode, data mappers convert network/server failures into domain errors
   while preserving shared metadata; presentation mappers project them into
-  feature-local or common-error UI values. Local mode uses the selected
+  feature-local or common-error UI values. Local and stack modes use the selected
   contract's representation boundaries while preserving the same metadata and
   UI ownership. These are semantic roles, not required wrapper or class names.
 

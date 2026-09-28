@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -10,7 +11,11 @@ from typing import Any, cast, Literal
 
 import yaml
 
-from agent_flow.core.architecture_policy import ArchitectureMode, ArchitectureSelection
+from agent_flow.core.architecture_policy import (
+    ArchitectureMode,
+    ArchitectureSelection,
+    stack_architecture_skills,
+)
 from agent_flow.core.reviewer_launch import (
     ReviewerLaunchError,
     validate_reviewer_launch_declaration,
@@ -196,6 +201,160 @@ def _build_directories(root: Path) -> list[Path]:
     return directories
 
 
+def _has_spring_boot_evidence(gradle: str, pom: str) -> bool:
+    return bool(
+        re.search(r"""\bid\s*(?:\(\s*)?["']org\.springframework\.boot["']""", gradle)
+        or re.search(r"""["']org\.springframework\.boot:spring-boot[^"']*["']""", gradle)
+        or re.search(r"<groupId\b[^>]*>\s*org\.springframework\.boot\s*</groupId>", pom)
+    )
+
+
+def _has_ktor_server_evidence(gradle: str, pom: str) -> bool:
+    return bool(
+        re.search(r"""\bid\s*(?:\(\s*)?["']io\.ktor(?:\.plugin)?["']""", gradle)
+        or re.search(r"""["']io\.ktor:ktor-server-[^"']+["']""", gradle)
+        or re.search(r"<(dependency|plugin)\b[^>]*>(?:(?!</\1>)[\s\S])*<groupId>\s*io\.ktor\s*</groupId>\s*<artifactId>\s*ktor-server-[^<]+</artifactId>", pom)
+    )
+
+
+# Kotlin 컴파일 plugin 적용. `kotlin("stdlib")`나 `org.jetbrains.kotlin:*` 의존성은 Java 서비스도 쓴다.
+_KOTLIN_GRADLE_PLUGIN_RE = re.compile(
+    r"""\bkotlin\s*\(\s*["'](?:jvm|android|multiplatform|kapt|plugin\.[\w.-]+)["']\s*\)"""
+    r"""|["']org\.jetbrains\.kotlin\.(?:jvm|android|multiplatform|kapt|plugin\.[\w.-]+)["']"""
+    r"""|\bapply\s*\(?\s*plugin\s*[:=]\s*["'](?:kotlin(?:-[\w-]+)?|org\.jetbrains\.kotlin\.[\w.-]+)["']"""
+)
+
+# 빌드 산출물·의존성·숨김 디렉터리와 소스 트리 안쪽은 모듈을 찾으러 내려가지 않는다.
+_MODULE_WALK_PRUNED = frozenset({"node_modules", "build", "out", "target", "dist", "src"})
+
+_MODULE_NAME_RE = re.compile(r"^:?[A-Za-z0-9_.-]+(?::[A-Za-z0-9_.-]+)*$")
+
+KOTLIN_BACKEND_PROFILES = frozenset({"spring", "ktor"})
+
+
+def _modules_stay_in_checkout(directory: Path, root: Path) -> bool:
+    """선언된 모듈이 모두 걷는 범위 안의 디렉터리인가.
+
+    걷기가 닿지 않는 모듈(`includeFlat`, `projectDir` 재배치, 심볼릭 링크 경유)과
+    설정의 `apply`가 가져오는 미확인 선언은 거부한다. `plugins { ... apply false }`와
+    `.apply(false)`는 적용이 아니다. 문자열 안의 낱말은 가리고 찾는다.
+    """
+    settings = "\n".join(
+        _without_gradle_comments(_read_build_file(directory / name))
+        for name in ("settings.gradle", "settings.gradle.kts")
+    )
+    code = re.sub(
+        r""""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'""",
+        lambda literal: literal[0][0] + " " * (len(literal[0]) - 2) + literal[0][0],
+        settings,
+    )
+    if re.search(r"\b(?:projectDir|includeFlat)\b|\bapply\b(?!\s*(?:false\b|\(\s*false\s*\)))", code):
+        return False
+    modules: list[str] = []
+    for match in re.finditer(r"\binclude\b\s*(\([^)]*\)|[^\n]*)", code):
+        arguments = re.sub(r"^\(|\)$", "", settings[match.start(1):match.end(1)])
+        parts = [part.strip() for part in arguments.split(",")]
+        if len(parts) > 1 and parts[-1] == "" and match[1].startswith("("):
+            parts.pop()
+        for part in parts:
+            literal = re.fullmatch(r"""(["'])(.*)\1""", part)
+            if literal is None or not _MODULE_NAME_RE.match(literal[2]):
+                return False
+            modules.append(literal[2].removeprefix(":").replace(":", "/"))
+    pom = re.sub(r"<!--[\s\S]*?-->", "", _read_build_file(directory / "pom.xml"))
+    for block in re.findall(r"<modules\b[^>]*>([\s\S]*?)</modules>", pom):
+        modules.extend(re.findall(r"<module\b[^>]*>\s*([^<]+?)\s*</module>", block))
+    for module in modules:
+        target = Path(os.path.normpath(directory / module))
+        if target == root or not target.is_relative_to(root):
+            return False
+        if any(part.startswith(".") or part in _MODULE_WALK_PRUNED for part in target.relative_to(root).parts):
+            return False
+        if not target.is_dir() or target.resolve() != target:
+            return False
+    return True
+
+
+def is_kotlin_backend_project(root: Path) -> bool:
+    """체크아웃의 JVM 코드가 모두 Kotlin인가. `lib/profile-detection.mjs`의
+    `isKotlinBackendProject`와 같은 판정이다.
+
+    spring과 ktor profile은 Java 서비스도 받는다. 코드는 디렉터리를 직접 걸어 찾는다 — 한정
+    호출, 중첩 include, 동적 인자를 정규식으로 다 읽을 수 없어 모듈 목록만 믿으면 읽지 못한
+    Java 모듈이 계약을 통과시킨다. 선언은 걷는 범위 밖을 가리키지 않는지만 본다.
+    `src/main/java`(Groovy·Scala 포함)가 있거나 Spring Boot·Ktor를 적용한 부모 아닌 빌드는
+    Kotlin 근거가 있어야 한다. `apply false`/`.apply(false)` 선언은 적용이 아니고, `.kts` 빌드
+    스크립트는 Java 서비스도 쓴다.
+    """
+    try:
+        root = root.resolve()
+        kotlin = False
+        pending = [root]
+        while pending:
+            directory = pending.pop()
+            if not _modules_stay_in_checkout(directory, root):
+                return False
+            gradle = re.sub(
+                r"^[^\n]*(?:\n[ \t]*\.[^\n]*)*\bapply\s*(?:\(\s*false\s*\)|false\b)[^\n]*$", "",
+                "\n".join(
+                    _without_gradle_comments(_read_build_file(directory / name))
+                    for name in ("build.gradle", "build.gradle.kts")
+                ),
+                flags=re.MULTILINE,
+            )
+            pom = re.sub(r"<!--[\s\S]*?-->", "", _read_build_file(directory / "pom.xml"))
+            main = directory / "src" / "main"
+            kotlin_module = bool(
+                (main / "kotlin").exists()
+                or _KOTLIN_GRADLE_PLUGIN_RE.search(gradle)
+                or re.search(r"<artifactId>\s*kotlin-maven-plugin\s*</artifactId>", pom)
+            )
+            jvm_code = any((main / name).exists() for name in ("java", "groovy", "scala"))
+            framework = _has_spring_boot_evidence(gradle, pom) or _has_ktor_server_evidence(gradle, pom)
+            aggregator = re.search(r"<packaging>\s*pom\s*</packaging>", pom) is not None
+            if not kotlin_module and (jvm_code or (framework and not aggregator)):
+                return False
+            kotlin = kotlin or kotlin_module
+            with os.scandir(directory) as entries:
+                pending.extend(
+                    Path(entry.path) for entry in entries
+                    if entry.is_dir(follow_symlinks=False)
+                    and not entry.name.startswith(".")
+                    and entry.name not in _MODULE_WALK_PRUNED
+                )
+        return kotlin
+    except PermissionError:
+        return False
+
+
+def assert_stack_architecture_eligible(
+    source_root: Path,
+    selection: ArchitectureSelection,
+    profiles: Sequence[Mapping[str, Any]],
+) -> None:
+    """Reject `stack` unless every active profile still qualifies.
+
+    Same condition as `stackEligible` in `lib/skill-selection.mjs`. A merged profile hides which
+    profile supplied a contract, so one profile losing its contract would pass on another's.
+    Kotlin evidence comes from `source_root`, the checkout whose code the contract governs.
+    """
+    if selection.mode is not ArchitectureMode.STACK:
+        return
+    if (
+        not profiles
+        or not all(stack_architecture_skills(profile) for profile in profiles)
+        or (
+            any(profile.get("id") in KOTLIN_BACKEND_PROFILES for profile in profiles)
+            and not is_kotlin_backend_project(source_root)
+        )
+    ):
+        raise ValueError(
+            "architecture mode 'stack' needs every active profile to provide a bundled stack "
+            "architecture skill, and a spring or ktor project needs Kotlin in every code module "
+            "and framework module; select clean, local, or pending instead"
+        )
+
+
 def detect_profile(root: Path) -> str:
     dependencies = package_dependencies(root)
     candidates: set[str] = set()
@@ -219,17 +378,9 @@ def detect_profile(root: Path) -> str:
         jvm = jvm or any(path.exists() for path in gradle_files) or (directory / "pom.xml").exists()
         gradle = "\n".join(_without_gradle_comments(_read_build_file(path)) for path in gradle_files)
         pom = re.sub(r"<!--[\s\S]*?-->", "", _read_build_file(directory / "pom.xml"))
-        if (
-            re.search(r"""\bid\s*(?:\(\s*)?["']org\.springframework\.boot["']""", gradle)
-            or re.search(r"""["']org\.springframework\.boot:spring-boot[^"']*["']""", gradle)
-            or re.search(r"<groupId\b[^>]*>\s*org\.springframework\.boot\s*</groupId>", pom)
-        ):
+        if _has_spring_boot_evidence(gradle, pom):
             candidates.add("spring")
-        if (
-            re.search(r"""\bid\s*(?:\(\s*)?["']io\.ktor(?:\.plugin)?["']""", gradle)
-            or re.search(r"""["']io\.ktor:ktor-server-[^"']+["']""", gradle)
-            or re.search(r"<(dependency|plugin)\b[^>]*>(?:(?!</\1>)[\s\S])*<groupId>\s*io\.ktor\s*</groupId>\s*<artifactId>\s*ktor-server-[^<]+</artifactId>", pom)
-        ):
+        if _has_ktor_server_evidence(gradle, pom):
             candidates.add("ktor")
         if (
             re.search(r"""\bid\s*(?:\(\s*)?["']com\.android\.(?:application|library|test|dynamic-feature)["']""", gradle)
@@ -467,23 +618,32 @@ def _validate_gate_variants(
             raise ValueError(f"invalid profile gate_variants gate: {context}: {exc}") from exc
 
 
+def legacy_architecture_overrides(root: Path) -> tuple[Path, ...]:
+    """Return profile overrides that still carry the legacy Clean `architecture` key."""
+    found: list[Path] = []
+    for path in sorted((root / ".agent-flow" / "profiles").glob("*.local.yaml")):
+        try:
+            override = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise ValueError(f"cannot read profile override {path}: {exc}") from exc
+        if isinstance(override, dict) and "architecture" in override:
+            found.append(path)
+    return tuple(found)
+
+
 def assert_architecture_override_compatible(
     root: Path, selection: ArchitectureSelection,
 ) -> None:
     """Reject an architecture override incompatible with the active profile."""
     if selection.mode is ArchitectureMode.CLEAN:
         return
-    for path in (root / ".agent-flow" / "profiles").glob("*.local.yaml"):
-        try:
-            override = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
-            raise ValueError(f"cannot read profile override {path}: {exc}") from exc
-        if isinstance(override, dict) and "architecture" in override:
-            raise ValueError(
-                f"{path}: legacy architecture override conflicts with "
-                f"architecture mode {selection.mode.value}; migrate the override "
-                "to the selected project contract before proceeding"
-            )
+    overrides = legacy_architecture_overrides(root)
+    if overrides:
+        raise ValueError(
+            f"{overrides[0]}: legacy architecture override conflicts with "
+            f"architecture mode {selection.mode.value}; migrate the override "
+            "to the selected project contract before proceeding"
+        )
 
 
 def apply_project_profile_override(

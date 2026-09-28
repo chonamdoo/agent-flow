@@ -10,11 +10,11 @@ requires_by_architecture:
 
 # Kotlin Backend Development
 
-Apply `backend-api-contract` and the selected architecture contract (`clean-architecture-core` in Clean mode), including its full required references in local mode. Confirm the server source scope and actual framework, Kotlin, coroutine, database, and migration versions from project dependencies and configuration. A `.kt` file or Gradle build alone is not server evidence. Keep existing architecture and build choices; for a new service, consider a feature-oriented modular monolith before introducing independent deployment modules. Kotlin `internal` is a compilation-module boundary, not package privacy.
+Apply `backend-api-contract` and the selected architecture contract (`clean-architecture-core` in Clean mode, `kotlin-backend-hexagonal-architecture` in stack mode), including its full required references in local mode. Confirm the server source scope and actual framework, Kotlin, coroutine, database, and migration versions from project dependencies and configuration. A `.kt` file or Gradle build alone is not server evidence. Keep existing architecture and build choices; for a new service, consider a feature-oriented modular monolith before introducing independent deployment modules. Kotlin `internal` is a compilation-module boundary, not package privacy.
 
 ## Architecture-specific boundaries
 
-These role/boundary rules describe Clean mode. In local mode, use the selected contract's ownership and framework-dependency rules instead. `backend-api-contract` owns the architecture-neutral API, authorization, consistency, recovery, operations, and conditional performance-evidence requirements.
+These role/boundary rules describe Clean mode. In local mode, use the selected contract's ownership and framework-dependency rules instead; in stack mode, `kotlin-backend-hexagonal-architecture` owns them. `backend-api-contract` owns the architecture-neutral API, authorization, consistency, recovery, operations, and conditional performance-evidence requirements.
 
 - `app-shell` composes dependencies and process lifecycle; `inbound-adapter` owns HTTP/worker input and response schemas; `application` owns actions and consumer-focused ports; `core-domain` owns pure policy; `core-data` owns persistence and outbound integrations. These are semantic roles, not required folders.
 - Keep provider SDK DTOs and ORM entities at outbound boundaries; HTTP request/response schemas at inbound boundaries; stable commands/results inside. Map where meaning changes, not to create forwarding types.
