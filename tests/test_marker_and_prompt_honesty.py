@@ -111,6 +111,11 @@ def test_envelope_uses_selected_conditional_marker_contract(
         definition.phases[0], run_dir, project, role=role,
     )
 
+    if role == "reviewer":
+        # completion marker는 controller 소유다. reviewer는 규범 본문으로 판단한다.
+        assert "- `architecture-contract: applied|n/a`" not in envelope
+        assert "- `repository-boundary: pass|fail`" not in envelope
+        return
     assert "- `architecture-contract: applied|n/a`" in envelope
     assert ("- `repository-boundary: pass|fail`" in envelope) is (mode == "clean")
     assert "- `clean-architecture: applied|n/a`" not in envelope

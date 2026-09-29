@@ -23,6 +23,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from pathlib import Path
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -37,6 +38,11 @@ if TYPE_CHECKING:
 
 # resolver가 이미 구체적인 skill 목록으로 바꿔 놓는 키들. 원본 선언을 다시 넣지 않는다.
 _RESOLVER_OWNED_PROFILE_KEYS = frozenset({"skills", "skill_sources"})
+# 독립 reviewer는 커밋 규칙, review 각도 배분, reviewer launch 설정(`execution`, runner 소유)을
+# 소유하지 않는다. `branching`/`pr`/`gates`는 generalist 각도(`templates/_shared/review/
+# architecture.md` 7절)가 검사하므로 남긴다 — gate별 `execution: ci`는 `gates` 안에 있다.
+_REVIEWER_OMITTED_PROFILE_KEYS = frozenset({"commit_convention", "review_angles", "execution"})
+_COMPLETION_GATE_HEADING = "## Completion Gate"
 
 
 class Adapter(ABC):
@@ -147,9 +153,11 @@ class Adapter(ABC):
             resolution.architecture_snapshot.selection.mode
             if resolution.architecture_snapshot is not None else "pending"
         )
-        profile_block = self._render_profile_block(phase, architecture_mode=mode)
-        completion_gate_block = self._render_completion_gate_block(
-            phase, role=role, architecture_mode=mode
+        profile_block = self._render_profile_block(phase, architecture_mode=mode, role=role)
+        # reviewer에게 completion marker는 controller 소유라 싣지 않는다.
+        completion_gate_block = (
+            "" if role == "reviewer" else
+            self._render_completion_gate_block(phase, architecture_mode=mode)
         )
         local_skill_block = local_skill_prompt_block(
             config_root,
@@ -165,6 +173,7 @@ class Adapter(ABC):
             resolution=resolution,
             role=role,
             conditional_architecture_markers=phase.required_markers_by_architecture is not None,
+            delivered_to_reviewers=bool(getattr(phase, "multi_review", False)),
         )
         # 이전 phase의 수치는 대화 컨텍스트가 아니라 여기로만 건너온다.
         # 렌더러가 넣으므로 agent가 빼거나 잊을 수 없다.
@@ -189,7 +198,7 @@ class Adapter(ABC):
             "Assess earlier artifacts against their own declared phase contracts. "
             "For backward routes, inspect `transitions.jsonl` entries' `source_artifact` "
             "for retained departing-phase evidence; it is history, not current completion.\n\n"
-            + "\n".join(f"> {line}" for line in body.splitlines()) + "\n"
+            + "\n".join(f"> {line}" for line in _without_completion_gate(body).splitlines()) + "\n"
         )
         completion_block = (
             "\n## When complete\n"
@@ -253,20 +262,15 @@ class Adapter(ABC):
         return ""
 
     def _render_completion_gate_block(
-        self, phase: "Phase", *, role: str = "author", architecture_mode: str = "pending"
+        self, phase: "Phase", *, architecture_mode: str = "pending"
     ) -> str:
-        """Render the completion contract that applies to the selected role."""
+        """Render the author's completion contract."""
         markers = effective_phase_markers(phase, architecture_mode)
         if not markers:
             return ""
         lines = [
             "\n## Completion gate",
             "",
-            "These are the current review aggregate's completion markers, owned by the "
-            "controller after independent reviews finish. They are not prerequisites for "
-            "earlier author artifacts. Evaluate actual compliance with the applicable rules; "
-            "do not demand a pre-existing aggregate or fabricate marker evidence."
-            if role == "reviewer" else
             "Do not write the artifact as complete until the phase genuinely "
             "satisfies these markers. The runner blocks advancement when any "
             "marker is missing. The artifact must include a `## Completion Gate` "
@@ -279,7 +283,9 @@ class Adapter(ABC):
         lines.append("")
         return "\n".join(lines)
 
-    def _render_profile_block(self, phase: "Phase", *, architecture_mode: object) -> str:
+    def _render_profile_block(
+        self, phase: "Phase", *, architecture_mode: object, role: str = "author"
+    ) -> str:
         """Inline the active profile YAML so the host AI sees real data.
 
         The runner injects `_profile_snapshot` and `_profile_id` before
@@ -289,19 +295,25 @@ class Adapter(ABC):
         """
         if not self._profile_snapshot:
             return ""
+        omitted = _RESOLVER_OWNED_PROFILE_KEYS | (
+            _REVIEWER_OMITTED_PROFILE_KEYS if role == "reviewer" else frozenset()
+        )
         trimmed = {
             key: value
             for key, value in self._profile_snapshot.items()
-            if key not in _RESOLVER_OWNED_PROFILE_KEYS
+            if key not in omitted
         }
-        # profile의 `architecture.contract`는 Clean 계열 기본값이다. 프로젝트 계약을 고른
-        # run에 그대로 실으면 "규범은 이것"이라는 문장이 둘이 된다.
+        # profile의 `architecture.contract`/`roles`는 Clean 계열 기본값이다. 프로젝트 계약을
+        # 고른 run에 그대로 실으면 "규범은 이것"이라는 문장이 둘이 된다. Clean role lint도
+        # CLEAN에서만 적용된다.
         architecture = trimmed.get("architecture")
         if (
-            isinstance(architecture, dict) and "contract" in architecture
+            isinstance(architecture, dict)
             and getattr(architecture_mode, "value", architecture_mode) != "clean"
         ):
-            trimmed["architecture"] = {k: v for k, v in architecture.items() if k != "contract"}
+            trimmed["architecture"] = {
+                k: v for k, v in architecture.items() if k not in {"contract", "roles"}
+            }
         if not trimmed:
             return ""
         try:
@@ -328,3 +340,49 @@ class Adapter(ABC):
         if not ids:
             return ""
         return f"\nDeclared concern ids: {', '.join(ids)}\n"
+
+
+# 가리키는 대상(Completion gate)이 reviewer 프롬프트에 없으므로 그 한 문장만 뺀다. 이어지는
+# Clean·local 계약 적용 문장과 pending 문장은 판정 기준이라 남긴다.
+_GATE_POINTER_RE = re.compile(r"Follow the effective Completion gate below[^.\n]{0,200}\.[ \t]*")
+
+
+def _without_completion_gate(body: str) -> str:
+    """Drop the controller's `## Completion Gate` instructions from a quoted phase prompt.
+
+    The aggregate markers are controller-owned; quoting them makes reviewers fill in a
+    gate they cannot satisfy. Removed: the `## Completion Gate` block or section, a
+    lead-in line that only introduces it, and the one sentence that points at "the
+    Completion gate below". Every other sentence stays, including the Clean/local
+    contract requirement and the pending-mode rule that follow that pointer.
+    """
+    body = _GATE_POINTER_RE.sub("", body, count=1)
+    kept: list[str] = []
+    lines = body.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        indent = len(line) - len(line.lstrip())
+        if line.strip() != _COMPLETION_GATE_HEADING:
+            kept.append(line)
+            index += 1
+            continue
+        while kept and not kept[-1].strip():
+            kept.pop()
+        lead_in = kept[-1].strip() if kept else ""
+        if lead_in.endswith(":") and "completion gate" in lead_in.lower():
+            kept.pop()
+        index += 1
+        if indent:
+            # 들여쓴 템플릿 블록: 같은 깊이 이상으로 들여쓴 줄과 빈 줄이 블록이다.
+            while index < len(lines) and (
+                not lines[index].strip() or len(lines[index]) - len(lines[index].lstrip()) >= indent
+            ):
+                index += 1
+        else:
+            # 최상위 제목: 같은 수준 이상의 다음 제목까지가 그 절이다.
+            while index < len(lines) and not re.match(r"#{1,2}\s", lines[index]):
+                index += 1
+        if kept and index < len(lines):
+            kept.append("")
+    return "\n".join(kept)

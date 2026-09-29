@@ -286,7 +286,7 @@ def test_status_completion_uses_the_runner_environment_profile(
     checkout.mkdir()
     monkeypatch.setenv("AGENT_FLOW_PROFILE", "python")
 
-    def observed_changes(root):
+    def observed_changes(root, profile=None):
         assert root == checkout
         return ("src/example.py",)
 
@@ -1182,3 +1182,53 @@ def test_installed_phase_metadata_yields_to_live_skill_and_explicit_workflow(tmp
     live.write_text("---\nname: scoped-check\nworkflowPhases: [review]\ntaskTerms: [boundary]\n---\n", encoding="utf-8")
     assert {skill.name for skill in resolve_phase_skills(phase_id="review", **kwargs).available_required} == {"scoped-check"}
     assert not resolve_phase_skills(phase_id="design", **kwargs).required
+
+
+def test_committed_branch_changes_keep_path_routed_skills_after_commit(tmp_path):
+    """커밋 후 fix phase에서 status만 보면 경로 라우팅 skill이 사라진다. reviewer는 merge-base부터 본다."""
+    import subprocess
+
+    from agent_flow.core.local_skills import changed_files, phase_skill_resolution
+
+    project = tmp_path / "rn"
+    (project / "src").mkdir(parents=True)
+    (project / "package.json").write_text('{"name": "rn"}\n', encoding="utf-8")
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", *args],
+            cwd=project, check=True, capture_output=True,
+        )
+
+    git("init", "-q", "-b", "main")
+    git("add", ".")
+    git("commit", "-q", "-m", "seed")
+    git("checkout", "-q", "-b", "feature")
+    (project / "src" / "App.tsx").write_text("export const App = () => null;\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-q", "-m", "feat")
+    profile = load_profile_payload("react-native")
+
+    def required(files: tuple[str, ...]) -> set[str]:
+        resolution = phase_skill_resolution(
+            project, "pr-ci-fix", profile=profile, changed_files=files, source_root=project,
+        )
+        return {skill.name for skill in resolution.required}
+
+    assert "react-native-development-guide" in required(changed_files(project, profile))
+    assert "react-native-development-guide" not in required(changed_files(project))
+
+
+@pytest.mark.parametrize(
+    ("pattern", "path", "expected"),
+    [
+        ("**/Presentation/**", "src/features/orders/presentation/X.ts", False),
+        ("**/Presentation/**", "Sources/Presentation/V.swift", True),
+        ("**/*.tsx", "src/ui/Button.TSX", True),
+        ("**/*.tsx", "Button.TSX", True),
+    ],
+)
+def test_glob_directories_match_case_sensitively_but_extensions_do_not(pattern, path, expected):
+    from agent_flow.core.skill_resolver import _glob_matches
+
+    assert _glob_matches(pattern, path) is expected

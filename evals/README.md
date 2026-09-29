@@ -151,3 +151,86 @@ Codex CLI와 인증, Python의 PyYAML이 필요하다. 모델 API를 사용하�
 잘못된 정상 fixture나 누락한 정답을 수정했다면 이전 결과를 보존하고
 사후 채점 수정과 새 모델 실행을 구분한다. 반복하지 않은 단일 시행이나
 baseline 만점만으로 스킬의 개선 효과를 주장하지 않는다.
+
+## phase skill 전달 평가
+
+workflow의 각 phase가 필요한 skill을 정확히 받는지, 쓰지 않는 텍스트에 토큰을
+쓰지 않는지를 잰다. 두 도구 모두 비교할 kit를 인자로 받는다. 비교 기준 kit는
+`git archive <ref> | tar -x -C <dir>`로 만든다.
+
+### `phase_budget.py` — 결정적, 모델 없음
+
+profile × architecture mode × 변경 조건(변경 없음, profile 기본 경로, 계층 경로,
+커밋 후 깨끗한 작업 트리)마다 임시 프로젝트에 kit를 설치하고, 그 kit의 runner로
+full-feature 모든 phase의 envelope와 multi-review 리뷰어 job을 렌더해 바이트,
+필수 skill, 리뷰어 수를 기록한다.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python evals/phase_budget.py --kit <kit> --output budget.json
+```
+
+모델이 목록의 파일을 실제로 다 여는지는 이 측정으로 알 수 없다. 토큰은
+bytes/4 추정이다.
+
+두 결과를 비교하려면 `python evals/phase_budget_compare.py before.json after.json`을 쓴다.
+어느 변경 조건에서든 필수 skill이 빠졌거나, Clean이 아닌 mode의 envelope에 `roles`가
+들어갔거나, 합계 바이트가 늘었거나, 전에 재던 phase를 못 재면 실패한다. PR에서는
+`.github/workflows/phase-budget.yml`이 base와 head를 병렬로 재고 이 비교를 돌린다.
+
+### `phase_eval.py` — 실제 모델, 수동·비차단
+
+`phase-cases/{web,rn,app,backend}` × `clean`/`local`/`team`(설치 기본 mode + 팀
+skill)마다 두 kit를 설치하고 각 kit의 prompt를 그대로 쓴다.
+
+- author: full-feature `green` envelope로 Claude 세션 하나가 구현한다.
+  `oracle.py`가 behavior(red 테스트를 원본으로 되돌린 뒤 실행), plan(slice-plan에만
+  있는 요구를 검사하는 hidden 테스트), norm(mode 규칙, 정적 검사)을 채점한다.
+  필수 SKILL.md 읽음은 성공한 `Read` 도구 결과로만 센다.
+- review: 실제 multi-review 리뷰어 job(모든 관점 × claude/codex)을 결함 diff와
+  정상 diff에 돌린다. run 폴더에는 author와 같은 prd·ddd-design·slice-plan과
+  design-spec을 두고, 리뷰 대상 트리의 테스트 실행 기록(`test-evidence.md`, 전체 출력)을
+  남긴다. 테스트는 프로젝트 복사본에서 돌려 실행 부산물이 리뷰 diff에 섞이지 않게 한다
+  (`review_test_command`가 있으면 그것을 쓴다). 런타임과 같은 판정 계약을 쓰고, 무효
+  리뷰어가 있으면 그 시행은 채점하지 않는다. 결함은 request-changes 판정의
+  Must-fix/blocking 지적 안에서만 찾는다. Should-fix·Notes 같은 비차단 구간의 언급은
+  탐지로 세지 않는다.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python evals/phase_eval.py --kit before=<dir> --kit after=<dir> \
+  --scenario author,review --trials 1 --concurrency 10 --output <new dir>
+```
+
+결과는 `results/phase-<kit 버전>-<YYYYMMDD>/`에 둔다. 원자료는 크기 때문에 gzip으로
+저장한다. `phase_budget.py` 출력은 `budget-<kit>.json.gz`, `phase_eval.py`가 출력 폴더에
+쓰는 `results.jsonl`은 `eval-results.jsonl.gz`로 둔다.
+
+### 해석할 때 주의
+
+- 시행 1회 결과는 방향만 보여 준다. 정확도 개선을 주장하려면 같은 case를
+  반복해 차이가 표본 변동보다 큰지 확인한다.
+- flutter와 python은 설치 기본 mode가 `pending`이라 team case도 pending이다.
+  pending 규칙상 리뷰어가 구조 결정을 이유로 변경을 요청할 수 있어 정상 diff의 정답
+  판정이 정해지지 않는다. 그래서 두 case의 정상 diff는 `expect: null`로 두고 판정을
+  채점하지 않는다. 결함 diff는 그대로 채점한다.
+- author 평가는 한 phase만 새 세션에서 돌린다. 실제 run처럼 대화 맥락이 이어지는
+  경우의 효과는 재지 않는다.
+- host 전역 skill과 설정은 격리하지 않는다.
+
+### 0.3.7 기준 정적 측정 (`results/phase-0.3.7-20260929/`)
+
+37개 profile × mode 조합, 계층 경로 변경 조건, full-feature 한 번 통과 기준이다.
+필수 읽기는 envelope에 read plan이 있는 phase만 센다. 리뷰어는 subprocess마다
+prompt 전체와 그 provider의 필수 읽기를 한 번씩 센다.
+
+| 구간 | 변경 전 | 변경 후 | 차이 |
+|---|---:|---:|---:|
+| author phase envelope + 필수 읽기 | 5,579k | 5,244k | −6.0% |
+| multi-review·architecture-review 조율 세션 | 1,216k | 146k | −88.0% |
+| 리뷰어 subprocess | 13,845k | 12,481k | −9.9% |
+| 합계 | 20,640k | 17,872k | −13.4% |
+
+조합별 차이는 −10.2%에서 −17.6%다. 필수 skill이 빠진 경우는 red/green의
+`code-review` 하나뿐이다(의도한 변경, 네 조건 합계 148개 phase 항목씩). 커밋 후
+조건에서는 경로로 선택되는 가이드가 492개 phase 항목에 새로 붙었다. Clean이 아닌
+mode의 계층 경로 조건에서 `roles`가 들어간 phase envelope는 480/624에서 0/624가 됐다.
+모델 평가 결과와 채점·사례 보정 기록은 같은 폴더의 `summary.md`에 있다.

@@ -49,6 +49,7 @@ from agent_flow.core.local_skills import (
     missing_local_skill_markers,
     resolved_profile,
 )
+from agent_flow.core.skill_scope import reviewer_delivery
 from agent_flow.core.markers import missing_markers, normalize_required_markers
 from agent_flow.core.phase_workflow import (
     CursorScope,
@@ -754,13 +755,16 @@ def _missing_completion_markers(
             phase_id,
             phase_skills=contract.skills,
             profile=profile,
-            changed_files=changed_files(project),
+            changed_files=changed_files(project, profile),
             task_text=str(meta.get("task", "")),
             concerns=run_concerns(meta),
             since=phase_since,
             architecture_root=project,
             source_root=project,
             conditional_architecture_markers=contract.required_markers_by_architecture is not None,
+            reviewer_delivery=(
+                reviewer_delivery(meta, phase_id) if contract.multi_review else None
+            ),
         )
     )
     missing.extend(

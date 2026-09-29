@@ -76,10 +76,13 @@ def _assert_local_selection(
 
 def _assert_contract_delivery(
     prompt: str, originals: dict[str, str], expected: set[str], *, context: str,
+    reviewer: bool = False,
 ) -> None:
     for relative, body in originals.items():
         if relative in expected:
-            assert relative in prompt, f"{context}: missing complete document path {relative}"
+            # reviewer는 inline 본문만 받는다. 문서 경로 provenance는 author 프롬프트에만 있다.
+            if not reviewer:
+                assert relative in prompt, f"{context}: missing complete document path {relative}"
             assert body in prompt, f"{context}: missing original document body {relative}"
         else:
             assert relative not in prompt, f"{context}: wrong-scope document path {relative}"
@@ -191,7 +194,7 @@ def test_installed_mixed_contract_delivery(
                 for job in jobs:
                     _assert_contract_delivery(
                         job.prompt_by_provider[provider], originals, expected,
-                        context=f"{scope}/{provider}/{job.angle_id}",
+                        context=f"{scope}/{provider}/{job.angle_id}", reviewer=True,
                     )
         finally:
             for relative in paths:
@@ -324,7 +327,7 @@ def test_installed_frontend_service_contract_scope_delivery(
         for job in jobs:
             _assert_contract_delivery(
                 job.prompt_by_provider[provider], SERVICE_DOCUMENTS, expected,
-                context=f"{scope}/{provider}/{job.angle_id}",
+                context=f"{scope}/{provider}/{job.angle_id}", reviewer=True,
             )
 
 
@@ -371,5 +374,5 @@ def test_installed_service_author_accumulates_norms_but_reviewers_keep_captured_
         for job in jobs:
             for provider, prompt in job.prompt_by_provider.items():
                 _assert_contract_delivery(
-                    prompt, SERVICE_DOCUMENTS, expected, context=f"captured/{provider}/{job.angle_id}",
+                    prompt, SERVICE_DOCUMENTS, expected, context=f"captured/{provider}/{job.angle_id}", reviewer=True,
                 )

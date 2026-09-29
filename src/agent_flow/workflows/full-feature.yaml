@@ -252,6 +252,8 @@ phases:
       Apply code-generation-discipline, `.agent-flow/skills/tdd/SKILL.md`, and
       `.agent-flow/skills/codebase-design/SKILL.md` before writing tests. Write
       failing tests first.
+      Cover the slices in slice-plan.md in order, honor ddd-design.md decisions,
+      and treat prd.md and the design-spec.md SPEC items as the definition of done.
 
       Then **run them** and let them fail. The run itself is observed by the
       `record-command-run.py` PostToolUse hook, so "I wrote a test" without a
@@ -315,6 +317,9 @@ phases:
       tests. Apply `.agent-flow/skills/tdd/SKILL.md` and the architecture contract
       skills this prompt lists as required. Apply code-generation-discipline's
       Before Starting skill resolution and Missing Required Skills procedure.
+      Then implement the slices in slice-plan.md in order, honor ddd-design.md
+      decisions, and treat prd.md and the design-spec.md SPEC items as the
+      definition of done.
       End with:
 
           ## Completion Gate
@@ -332,7 +337,7 @@ phases:
 
   - id: refactor
     skills:
-      required: [code-generation-discipline, tdd, clean-architecture-core]
+      required: [code-generation-discipline, tdd, code-review, clean-architecture-core]
     description: TDD refactor phase.
     required_markers:
       - "skills_checked: true"
@@ -360,6 +365,8 @@ phases:
       including all applicability exceptions; local mode assesses its own complete
       contract instead. Pending mode does not authorize structural decisions.
       Apply code-generation-discipline. Refactor only after green. Keep
+      the slice-plan.md slices and ddd-design.md decisions intact, and keep prd.md
+      and the design-spec.md SPEC items satisfied as the definition of done. Keep
       behavior stable, apply `.agent-flow/skills/tdd/SKILL.md` and the architecture
       contract skills this prompt lists as required, read every required profile skill
       before changing code, and summarize structural changes. Apply
@@ -657,7 +664,9 @@ phases:
       Clean mode additionally requires every listed Clean boundary heading and marker,
       including all applicability exceptions; local mode assesses its own complete
       contract instead. Pending mode does not authorize structural decisions.
-      Apply code-generation-discipline while fixing review/gate failures. Read
+      Apply code-generation-discipline while fixing review/gate failures. Fixes
+      must keep the slice-plan.md slices and ddd-design.md decisions, with prd.md
+      and the design-spec.md SPEC items as the definition of done. Read
       required profile skills before writing or judging code, or record that no
       fixes were required. Apply the required architecture contract skills to any
       boundary-affecting fix. Apply code-generation-discipline's Before Starting
@@ -757,7 +766,9 @@ phases:
       default: pr-watch
     prompt: |
       Apply `.agent-flow/skills/push-watch/SKILL.md` triage and deferred
-      completion policy, including on reentry after publication.
+      completion policy, including on reentry after publication. Code fixes
+      must keep the slice-plan.md slices and ddd-design.md decisions, with
+      prd.md and the design-spec.md SPEC items as the definition of done.
       Output: artifacts/pr-comment-fix.md with completed/deferred feedback IDs,
       responses, fixes, thread URLs, and publication evidence, or
       `status: blocked` with the required human decision.
@@ -771,7 +782,9 @@ phases:
       default: pr-watch
     prompt: |
       Apply `.agent-flow/skills/push-watch/SKILL.md` triage and CI repair
-      policy. Output: artifacts/pr-ci-fix.md with check identities, commands
+      policy. Code fixes must keep the slice-plan.md slices and ddd-design.md
+      decisions, with prd.md and the design-spec.md SPEC items as the definition
+      of done. Output: artifacts/pr-ci-fix.md with check identities, commands
       actually run, fixes, and log URLs, or `status: blocked` with the
       required human decision.
 

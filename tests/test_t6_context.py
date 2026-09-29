@@ -161,6 +161,9 @@ def test_local_contract_and_equal_reference_paths_deliver_once(tmp_path, role):
     assert len(result.normative_documents) == 4
     assert result.delivered_normative_bytes == len(payload)
     assert result.duplicated_normative_bytes == len(payload) * 2
+    if role == "reviewer":
+        assert "Bytes:" not in prompt and "route: " not in prompt
+        return
     for item in result.normative_documents:
         assert item.document.path in prompt
         assert item.document.sha256 in prompt
@@ -216,7 +219,8 @@ def test_reviewer_composes_author_spec_as_evidence_not_execution(tmp_path, role,
         assert f"\n{body}\n" in rendered
         if task:
             assert task in rendered
-    assert "atomicity: pass|fail" in rendered
+    # completion marker는 controller 소유다. reviewer에게는 판단 근거가 아니다.
+    assert ("atomicity: pass|fail" in rendered) is (role == "author")
 
 
 def test_unknown_envelope_role_is_rejected(tmp_path):
@@ -413,6 +417,9 @@ def test_equal_required_files_have_one_read_and_keep_both_routes(tmp_path, role,
     }
     assert not any(group.inline for group in result.delivery)
     assert result.duplicated_normative_bytes == 0
+    if role == "reviewer":
+        assert "Bytes:" not in prompt and "route: " not in prompt
+        return
     for item in result.normative_documents:
         assert item.document.path in prompt
         assert item.document.sha256 in prompt
@@ -559,3 +566,126 @@ def test_reviewer_launch_authority_accepts_yaml_values_and_preserves_date_type(t
     _reviewer_jobs(phase, run_dir, tmp_path, adapter, providers=("claude", "codex"))
     assert adapter._provider_launch_authority != date_authority
     assert adapter.phase_resolution(phase, tmp_path, skill_host="codex") is not before
+
+
+@pytest.mark.parametrize("mode", ["clean", "stack", "local", "pending"])
+def test_clean_roles_reach_only_clean_mode_envelopes(tmp_path, mode):
+    """Clean role lint applies only in Clean; elsewhere the profile roles are a competing norm."""
+    adapter = HostedAdapter("codex")
+    adapter._profile_id = "sample"
+    adapter._profile_snapshot = {
+        "architecture": {"roles": {"domain": ["ROLE_GLOB_MARKER/**"]}, "contract": "CONTRACT_MARKER"},
+    }
+    block = adapter._render_profile_block(Phase(id="implement", description="Implement"), architecture_mode=mode)
+    assert ("ROLE_GLOB_MARKER" in block) is (mode == "clean")
+    assert ("CONTRACT_MARKER" in block) is (mode == "clean")
+
+
+def test_reviewer_keeps_read_plan_and_profile_checks_without_controller_markers(tmp_path):
+    """Reviewers apply norms plus the profile gates, branching and PR target their angles check;
+    aggregate markers, commit convention, angle assignment and reviewer launch configuration
+    stay with the controller/runner."""
+    ordinary = skill(tmp_path, "ordinary", "ORDINARY_NORM\n")
+    adapter = HostedAdapter("codex")
+    adapter._profile_id = "sample"
+    adapter._profile_snapshot = {
+        "gates": [{"id": "test", "command": "GATE_COMMAND_MARKER", "execution": "ci"}],
+        "branching": {"base": "BRANCH_MARKER"},
+        "pr": {"target_branch": "PR_TARGET_MARKER"},
+        "review_angles": [{"id": "ANGLE_MARKER"}],
+        "execution": {"reviewers": [{"candidates": [{"provider": "claude", "model": "LAUNCH_MODEL_MARKER"}]}]},
+    }
+    phase = Phase(id="review", description="Review", skills=PhaseSkills(required=("ordinary",)),
+                  required_markers=("atomicity: pass|fail",), multi_review=True)
+    reviewer = adapter.render_envelope(phase, tmp_path / "run", tmp_path, role="reviewer")
+    assert "## Required-read plan" in reviewer
+    assert required_read_paths(reviewer) == [str(ordinary)]
+    assert "GATE_COMMAND_MARKER" in reviewer
+    assert "execution: ci" in reviewer
+    assert "BRANCH_MARKER" in reviewer
+    assert "PR_TARGET_MARKER" in reviewer
+    assert "ANGLE_MARKER" not in reviewer
+    assert "LAUNCH_MODEL_MARKER" not in reviewer
+    assert "project-local-skills: checked" not in reviewer
+    assert "atomicity: pass|fail" not in reviewer
+
+    controller = adapter.render_envelope(phase, tmp_path / "run", tmp_path)
+    assert required_read_paths(controller) == []
+    assert "`ordinary`" in controller
+    assert "project-local-skills-used: ordinary" in controller
+    assert "atomicity: pass|fail" in controller
+    assert "ANGLE_MARKER" in controller
+    assert "LAUNCH_MODEL_MARKER" in controller
+    # controller는 읽지 않은 규범의 읽음/적용을 자기신고하지 않는다. 게이트가 전달 기록을 본다.
+    assert "skill-use-evidence" not in controller
+    assert "project-local-skill-docs: applied" not in controller
+
+
+def test_reviewer_assignment_omits_the_controller_completion_gate(tmp_path):
+    """The real multi-review prompt: reviewers keep every criterion but not the aggregate gate template."""
+    from agent_flow.core.phase_workflow import load_phase_workflow_definition
+    from agent_flow.runner import _phases_from_definition
+
+    kit = Path(__file__).resolve().parents[1]
+    phase = next(
+        item for item in _phases_from_definition(load_phase_workflow_definition(kit, "full-feature"))
+        if item.id == "multi-review"
+    )
+    assert "## Completion Gate" in phase.prompt
+    reviewer = HostedAdapter("codex").render_envelope(phase, tmp_path / "run", tmp_path, role="reviewer")
+    assignment = reviewer.split("## Current review-phase assignment", 1)[1]
+    assert "## Completion Gate" not in reviewer
+    assert "codex-claude-parity-check" not in reviewer
+    assert "Include the Completion Gate" not in reviewer
+    assert "Completion gate below" not in assignment
+    assert "Pending mode does not authorize structural decisions." in assignment
+    assert "local mode assesses its own complete" in assignment
+    assert "must-avoid violation or failed required criterion" in assignment
+    assert "Any request-changes from any reviewer makes the overall verdict" in assignment
+    assert "`verdict: approve` or `verdict: request-changes`." in assignment
+
+
+def test_reviewer_assignment_omits_a_top_level_completion_gate_section():
+    """반증: 들여쓴 템플릿만 지우면 custom workflow가 최상위 `## Completion Gate` 절로 적은
+    controller marker가 reviewer에게 그대로 간다. 다음 같은 수준 제목부터는 남는다."""
+    from agent_flow.adapters.base import _without_completion_gate
+
+    body = (
+        "Review the change.\n\n"
+        "## Completion Gate\n"
+        "codex-claude-parity-check: pass\n"
+        "- aggregate-verdict: approve|request-changes\n\n"
+        "## Criteria\n"
+        "Reject any must-avoid violation.\n"
+    )
+    stripped = _without_completion_gate(body)
+    assert "Completion Gate" not in stripped
+    assert "codex-claude-parity-check" not in stripped
+    assert "aggregate-verdict" not in stripped
+    assert "## Criteria\nReject any must-avoid violation." in stripped
+    assert stripped.startswith("Review the change.")
+
+
+@pytest.mark.parametrize(
+    ("body", "kept"),
+    [
+        pytest.param(
+            "Follow the effective Completion gate below for this run. Local mode assesses its own "
+            "contract instead. Pending mode does not authorize structural decisions.",
+            "Local mode assesses its own contract instead. Pending mode does not authorize structural decisions.",
+            id="same-line",
+        ),
+        pytest.param(
+            "Follow the effective Completion gate below for this run. Reject any must-avoid violation.",
+            "Reject any must-avoid violation.",
+            id="no-terminator",
+        ),
+    ],
+)
+def test_reviewer_assignment_keeps_criteria_around_the_gate_pointer(body, kept):
+    """반증: 게이트를 가리키는 문장과 함께 뒤따르는 계약 적용 기준까지 지우면 reviewer가 그 기준을 잃는다."""
+    from agent_flow.adapters.base import _without_completion_gate
+
+    stripped = _without_completion_gate(body)
+    assert kept in stripped
+    assert "Completion gate below" not in stripped

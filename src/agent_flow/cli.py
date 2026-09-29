@@ -83,6 +83,7 @@ from agent_flow.core.local_skills import (
     phase_skill_resolution,
     resolved_profile,
 )
+from agent_flow.core.skill_scope import reviewer_delivery
 from agent_flow.core import skill_catalog
 from agent_flow.core.skill_resolver import ResolutionContext, assert_architecture_selection_skills
 from agent_flow.core.skill_sync import parse_skill_sources, sync_skill_sources
@@ -3625,7 +3626,7 @@ def _run_skills_command(
             )
             return 2
         merged = merged_profile_payload(payloads)
-        context = _skill_context(project_root, args, meta)
+        context = _skill_context(project_root, args, meta, merged)
         resolution_context = ResolutionContext()
 
         resolution = phase_skill_resolution(
@@ -3667,6 +3668,7 @@ def _run_skills_command(
                     source_root=project_root,
                     resolution=resolution,
                     conditional_architecture_markers=conditional_markers,
+                    delivered_to_reviewers=phase.multi_review,
                 )
             )
             if conditional_markers and required_markers:
@@ -3693,6 +3695,9 @@ def _run_skills_command(
                     since=context["since"],
                     context=resolution_context,
                     conditional_architecture_markers=conditional_markers,
+                    reviewer_delivery=(
+                        reviewer_delivery(meta, phase.id) if phase.multi_review else None
+                    ),
                 )
             )
             print(json.dumps(list(dict.fromkeys(missing)), ensure_ascii=False))
@@ -3728,13 +3733,13 @@ def _print_architecture_selection_guidance(root: Path) -> None:
     )
 
 
-def _skill_context(root: Path, args: argparse.Namespace, meta: dict) -> dict:
+def _skill_context(root: Path, args: argparse.Namespace, meta: dict, profile: dict) -> dict:
     task = getattr(args, "task", None)
     since = getattr(args, "since", None)
     return {
         "task_text": str(meta.get("task", "")) if task is None else task,
         "since": _run_meta_timestamp(meta) if since is None else since,
-        "changed_files": changed_files(root),
+        "changed_files": changed_files(root, profile),
         "concerns": run_concerns(meta),
     }
 

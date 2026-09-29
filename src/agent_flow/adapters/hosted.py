@@ -32,7 +32,7 @@ from agent_flow.core.local_skills import (
     ARCHITECTURE_CONTRACT_REQUIREMENT,
     architecture_contract_required,
 )
-from agent_flow.core.skill_scope import record_reviewer_documents, reviewer_document_ids
+from agent_flow.core.skill_scope import record_reviewer_deliverable, record_reviewer_documents, reviewer_document_ids
 from agent_flow.core.review_evidence import (
     ReviewerOutcome,
     complete_provider_names,
@@ -243,7 +243,7 @@ def _run_multi_review_distribution(
         phase.id,
         base_branch=_profile_base_branch(adapter),
     )
-    jobs, documents = _reviewer_jobs(
+    jobs, resolutions = _reviewer_jobs(
         phase,
         run_dir,
         project_root,
@@ -282,18 +282,39 @@ def _run_multi_review_distribution(
         for result in execution.results
         if reviewer_provider_error(result) is None
     }
-    delivered_documents = {
-        provider: identities
-        for provider, identities in documents.items()
-        if identities and any(
+    delivered = {
+        provider: resolution
+        for provider, resolution in resolutions.items()
+        if resolution.required_document_ids and any(
             review_job_id(provider, job) in delivered_jobs
             for job in distribution.by_cli.get(provider, ())
         )
     }
-    if delivered_documents:
+    # 문서 전달(scope 추적)은 provider가 프롬프트를 받았으면 기록한다. skill 적용 증거는 판정이
+    # 유효한 리뷰 산출물이 있을 때만 준다 — 빈 출력·판정 없는 출력은 규범을 적용한 근거가 아니다.
+    valid_jobs = {
+        result.job_id for result in execution.results if reviewer_result_error(result) is None
+    }
+    ran = {
+        provider: resolution
+        for provider, resolution in resolutions.items()
+        if distribution.by_cli.get(provider)
+    }
+    if ran:
         meta = read_meta(run_dir)
-        for provider, identities in delivered_documents.items():
-            record_reviewer_documents(meta, phase.id, provider, identities)
+        for provider, resolution in ran.items():
+            record_reviewer_deliverable(
+                meta, phase.id, provider, [skill.name for skill in resolution.available_required],
+            )
+        for provider, resolution in delivered.items():
+            applied = any(
+                review_job_id(provider, job) in valid_jobs
+                for job in distribution.by_cli.get(provider, ())
+            )
+            record_reviewer_documents(
+                meta, phase.id, provider, resolution.required_document_ids,
+                skill_names=[skill.name for skill in resolution.available_required] if applied else [],
+            )
         write_meta(run_dir, meta)
     return distribution, execution
 
@@ -371,17 +392,7 @@ def _write_review_input_snapshot(
 
 def _profile_base_branch(adapter: Adapter) -> str | None:
     """diff 기준 브랜치. profile의 `branching.base`가 정본이다."""
-    snapshot = getattr(adapter, "_profile_snapshot", None)
-    if not isinstance(snapshot, Mapping):
-        return None
-    for section, key in (("branching", "base"), ("pr", "target_branch")):
-        block = snapshot.get(section)
-        if not isinstance(block, Mapping):
-            continue
-        value = block.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
+    return review_input.profile_base_branch(getattr(adapter, "_profile_snapshot", None))
 
 
 def _applicable_angles(
@@ -476,7 +487,7 @@ def _reviewer_jobs(
     *,
     review_input: ReviewInputSnapshot | None = None,
     providers: Sequence[str] | None = None,
-) -> tuple[list[ReviewerJob], dict[str, tuple[str, ...]]]:
+) -> tuple[list[ReviewerJob], dict[str, SkillResolution]]:
     """Build provider-specific reviewer jobs from a single captured input."""
     providers = REVIEW_CLI_NAMES if providers is None else tuple(providers)
     adapter._provider_authority = tuple(providers)
@@ -495,7 +506,7 @@ def _reviewer_jobs(
     jobs: list[ReviewerJob] = []
     meta = read_meta(run_dir)
     base_prompt_by_provider: dict[str, str] = {}
-    rendered_documents: dict[str, tuple[str, ...]] = {}
+    rendered: dict[str, SkillResolution] = {}
     for provider in providers:
         resolution = adapter.phase_resolution(
             phase, project_root, skill_host=provider,
@@ -507,7 +518,7 @@ def _reviewer_jobs(
             prompt_variant=f"reviewer-base-{provider}",
             skill_host=provider, role="reviewer", resolution=resolution,
         )
-        rendered_documents[provider] = resolution.required_document_ids
+        rendered[provider] = resolution
     fallback_prompt = (
         ""
         if providers
@@ -581,7 +592,7 @@ def _reviewer_jobs(
                 for provider, prompt in base_prompt_by_provider.items()
             },
         ))
-    return jobs, rendered_documents
+    return jobs, rendered
 
 
 def _review_angle_output(run_dir: Path, phase_id: str, angle_id: str) -> Path:

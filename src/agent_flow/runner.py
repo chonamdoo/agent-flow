@@ -73,7 +73,7 @@ from agent_flow.core.command_evidence import (
 )
 from agent_flow.core.context_contract import run_relative_path
 from agent_flow.core.run_storage import RUNS_DIRNAME
-from agent_flow.core.review_input import review_document_scope
+from agent_flow.core.review_input import profile_base_branch, review_document_scope
 from agent_flow.core.review_scope import review_scope_block_reason
 from agent_flow.core.observation import (
     PHASE_ENTERED as OBS_PHASE_ENTERED,
@@ -186,7 +186,7 @@ from agent_flow.core.local_skills import (
     phase_skill_resolution,
     skill_markers_enforced,
 )
-from agent_flow.core.skill_scope import merge_scope, scope_document_ids
+from agent_flow.core.skill_scope import merge_scope, reviewer_delivery, scope_document_ids
 from agent_flow.core.profile_routing import IMPLEMENTATION_PHASES, REVIEW_PHASES, routed_profile_skills
 from agent_flow.core.skill_resolver import (
     PhaseSkills,
@@ -584,7 +584,7 @@ class Runner:
         adapter._architecture = self.architecture
         adapter._config_root = self.config_root
         adapter._task_text = run_meta.get("task", "")
-        adapter._changed_files = changed_files(self.project_root)
+        adapter._changed_files = changed_files(self.project_root, self.profile)
         adapter._concerns = run_concerns(run_meta)
         # 정확히 무엇을 주입했는지는 envelope를 만드는 자리에서만 알 수 있다.
         # 여기서 잡지 않으면 run이 끝난 뒤 프롬프트를 되살릴 방법이 없다.
@@ -716,11 +716,7 @@ class Runner:
                     return
                 grown = self._grown_skill_names(phase)
                 if grown:
-                    print(
-                        f"\n═══ phase '{phase.id}' scope grew: "
-                        f"{', '.join(grown)}. Read them, then update the "
-                        f"artifact and `{self.next_command}`. ═══"
-                    )
+                    print(self._scope_grew_message(phase, grown))
                     self._print_structured_status(
                         status="blocked",
                         phase=phase,
@@ -864,11 +860,7 @@ class Runner:
                 return
             grown = self._grown_skill_names(phase)
             if grown:
-                print(
-                    f"\n═══ phase '{phase.id}' scope grew: "
-                    f"{', '.join(grown)}. Read them, then update the "
-                    f"artifact and `{self.next_command}`. ═══"
-                )
+                print(self._scope_grew_message(phase, grown))
                 self._print_structured_status(
                     status="blocked",
                     phase=phase,
@@ -2191,9 +2183,8 @@ class Runner:
         if phase.id not in IMPLEMENTATION_PHASES and phase.id not in REVIEW_PHASES and not phase.multi_review:
             return None
         assert self.run_dir is not None
-        base = self.profile.get("branching", {}).get("base") or self.profile.get("pr", {}).get("target_branch")
         return review_document_scope(
-            self.project_root, read_meta(self.run_dir), base_branch=base,
+            self.project_root, read_meta(self.run_dir), base_branch=profile_base_branch(self.profile),
         )
 
     def _effective_markers(self, phase: Phase) -> tuple[str, ...]:
@@ -2208,7 +2199,7 @@ class Runner:
             phase.id,
             phase_skills=phase.skills,
             profile=self.profile,
-            changed_files=changed_files(self.project_root),
+            changed_files=changed_files(self.project_root, self.profile),
             task_text=str(meta.get("task", "")),
             concerns=run_concerns(meta),
             architecture_root=self.project_root,
@@ -2216,6 +2207,20 @@ class Runner:
             context=self._phase_resolution_context(),
             document_scope=self._phase_document_scope(phase),
             required_document_ids=scope_document_ids(meta, phase.id),
+        )
+
+    def _scope_grew_message(self, phase: Phase, grown: tuple[str, ...]) -> str:
+        # multi-review controller는 규범을 직접 읽지 않는다. 자란 문서는 reviewer가 받아야 한다.
+        action = (
+            "Rerun the independent reviews so the reviewers receive them, then update "
+            "the aggregate artifact"
+            if phase.multi_review else
+            "Read them, re-check the changes this phase already made against them, "
+            "then update the artifact"
+        )
+        return (
+            f"\n═══ phase '{phase.id}' scope grew: "
+            f"{', '.join(grown)}. {action} and `{self.next_command}`. ═══"
         )
 
     def _grown_skill_names(self, phase: Phase) -> tuple[str, ...]:
@@ -2355,7 +2360,7 @@ class Runner:
                 phase.id,
                 phase_skills=phase.skills,
                 profile=self.profile,
-                changed_files=changed_files(self.project_root),
+                changed_files=changed_files(self.project_root, self.profile),
                 task_text=str(meta.get("task", "")),
                 concerns=run_concerns(meta),
                 since=_meta_timestamp(meta.get("phase_entered_at")),
@@ -2363,6 +2368,9 @@ class Runner:
                 source_root=self.project_root,
                 context=self._phase_resolution_context(),
                 conditional_architecture_markers=phase.required_markers_by_architecture is not None,
+                reviewer_delivery=(
+                    reviewer_delivery(meta, phase.id) if phase.multi_review else None
+                ),
             )
         )
         review_rejected = phase_review_rejected(
@@ -2496,7 +2504,7 @@ class Runner:
             assert self.run_dir is not None
             meta = read_meta(self.run_dir)
             try:
-                scope = changed_files(self.project_root)
+                scope = changed_files(self.project_root, self.profile)
                 host = getattr(self, "_adapter_name", None)
                 roots = active_host_roots(
                     skill_roots(
@@ -2537,7 +2545,7 @@ class Runner:
         if phase.multi_review:
             hosts.extend(eligible_reviewer_names())
         manifests = {}
-        scope = changed_files(self.project_root)
+        scope = changed_files(self.project_root, self.profile)
         try:
             pinned_documents = meta.get("architecture_norm_documents", {})
             pinned_phases = meta.get("architecture_norm_phases", {})

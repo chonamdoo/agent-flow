@@ -28,6 +28,19 @@ Clean/local/pending 사례를 재사용 가능한 작은 회귀 fixture로 유�
 
 파일이 설치됐다는 사실과 모델이 규칙을 올바르게 적용한다는 사실을 구분한다. 스킬이 새로운 판단 기준을 도입하면 정상 사례와 결함 사례를 골라 평가한다. 매번 앱을 새로 만들지 않고 기존 기준 사례를 재사용한다.
 
+### phase skill 전달 회귀 평가
+
+phase가 필요한 skill을 정확히 받는지, 그러면서 쓰지 않는 텍스트에 토큰을 쓰지 않는지를 두 도구로 확인한다. 실행법과 해석 주의점은 `evals/README.md`의 "phase skill 전달 평가"를 따른다.
+
+- `evals/phase_budget.py` — 모델을 쓰지 않는 결정적 측정이다. prompt, skill 본문·frontmatter, workflow YAML, resolver·routing 코드를 바꾸는 PR마다 변경 전 kit과 변경 후 kit으로 돌려 차이를 PR에 기록한다. 다음이 나오면 PR에 원인을 적는다.
+  - 변경 전에 필수였던 skill이 어떤 profile·mode·변경 조건에서 빠졌다.
+  - Clean이 아닌 mode의 envelope에 Clean `roles`가 들어갔다.
+  - phase envelope, 조율 세션, 리뷰어 subprocess의 합계 바이트가 늘었다.
+- `evals/phase_eval.py` — 실제 모델 평가다. 기존 정책대로 수동·비차단이다. 판단 기준이 바뀌는 변경을 할 때와 릴리스 전에 돌린다. 기록 항목은 정확도(author의 behavior/plan/norm, 리뷰의 판정 정확도·결함 탐지·오탐), 필수 skill의 실제 읽음률, 토큰, 무효 시행 수다.
+- 결과는 `evals/results/phase-<kit 버전>-<YYYYMMDD>/`에 남겨 다음 변경이 이전 결과와 비교되게 한다.
+- 평가에서 새로 나온 실패 사례는 `evals/phase-cases/`에 기준 사례로 추가한다.
+- `phase_budget.py`는 CI에서 돈다. `.github/workflows/phase-budget.yml`이 테스트 스위트와 병렬로 PR의 base kit과 head kit을 측정하고 `evals/phase_budget_compare.py`로 위 세 조건을 판정한다(runtime·skill·template·installer 경로가 바뀐 PR만). 의도한 변화면 PR 본문에 이유를 적고 `phase-budget-accepted` 라벨을 붙인다. 보고는 그대로 남고 실패만 면한다.
+
 ## 실행과 기록
 
 - 검증 계획에 변경 유형, 영향 범위, 필요한 검증 층과 선택 이유를 기록한다.

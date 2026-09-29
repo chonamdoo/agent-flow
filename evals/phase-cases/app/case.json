@@ -1,0 +1,90 @@
+{
+  "stack": "app",
+  "profile": "flutter",
+  "task": "Add the orders list screen logic to the app: a repository that loads the customer's orders from the backend, and a screen state holder that exposes loading, loaded, empty and error states, with orders shown newest first and totals formatted as dollars. The failing tests under test/ describe the expected API; keep the logic in pure Dart (no Flutter imports).",
+  "test_command": [
+    "sh",
+    "-c",
+    "set -e; for f in test/*_test.dart; do dart \"$f\"; done"
+  ],
+  "review_test_command": [
+    "flutter",
+    "test"
+  ],
+  "modes": {
+    "clean": {
+      "install": [
+        "--architecture-mode",
+        "clean"
+      ]
+    },
+    "local": {
+      "install": [
+        "--architecture-mode",
+        "local",
+        "--architecture-skill",
+        "skills/architecture/SKILL.md"
+      ]
+    },
+    "team": {
+      "install": []
+    }
+  },
+  "review": {
+    "clean": {
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "mode-rule",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:Order\\.fromDto|fromDto|OrderDto|order_dto(\\.dart)?))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:domain))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:import|depend|referenc|coupl|leak|violat|inward|direction))"
+          },
+          {
+            "id": "bug",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:_toRows|orders_list_holder(\\.dart)?|OrdersListHolder|placedAt|compareTo))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:sort|order))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:ascending|oldest|invert|backwards?|wrong (order|direction)|not newest|instead of newest|missing (the )?reverse|without reverse|no reverse|reverse=True (is )?(missing|dropped|removed)|dropp\\w* (the )?reverse))"
+          }
+        ]
+      },
+      "clean": {
+        "expect": "approve"
+      }
+    },
+    "local": {
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "mode-rule",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:\\b(domain|data|presentation)/|OrdersRepositoryPort|orders_repository_port|abstract (interface )?class|\\bexport\\b))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:flat|sub-?folders?|sub-?director|layer|single library|one library|\\bpart\\b|architecture|contract))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:violat|forbid|not allowed|must|should|breaks|contradict|instead|disallow|prohibit|\\brequires\\b))"
+          },
+          {
+            "id": "bug",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:==\\s*(const\\s*)?\\[\\]|_fetchState|OrdersEmpty|ordersEmptyMessage))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:empty))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:never|always (false|evaluat)|identity|list equality|reference|unreachable|not (reach|emit|shown|match)))"
+          }
+        ]
+      },
+      "clean": {
+        "expect": "approve"
+      }
+    },
+    "team": {
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "mode-rule",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:reportTeamError|telemetry(\\.dart)?|teamErrorLog))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:catch|on Exception|error))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:missing|without|not call|n't call|never|dropp|removed|silent|swallow|must|lack|skip))"
+          },
+          {
+            "id": "bug",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:_formatCents|cents\\s*/\\s*100|totalLabel))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:decimal|two (decimal|digit)|\\$?12\\.5\\b|3\\.05|double|floating|trailing zero|pad|format))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:wrong|drops?|loses?|lost|missing|instead|incorrect|not (pad|two|keep)|\\$?12\\.5\\b|double|floating|without))"
+          }
+        ]
+      },
+      "clean": {
+        "expect": null,
+        "note": "flutter installs pending by default; pending mode lets a reviewer ask for an architecture decision on a new module, so approve is not a fixed answer"
+      }
+    }
+  }
+}
