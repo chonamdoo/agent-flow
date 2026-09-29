@@ -39,7 +39,7 @@ phase가 필요한 skill을 정확히 받는지, 그러면서 쓰지 않는 텍�
 - `evals/phase_eval.py` — 실제 모델 평가다. 기존 정책대로 수동·비차단이다. 판단 기준이 바뀌는 변경을 할 때와 릴리스 전에 돌린다. 기록 항목은 정확도(author의 behavior/plan/norm, 리뷰의 판정 정확도·결함 탐지·오탐), 필수 skill의 실제 읽음률, 토큰, 무효 시행 수다.
 - 결과는 `evals/results/phase-<kit 버전>-<YYYYMMDD>/`에 남겨 다음 변경이 이전 결과와 비교되게 한다.
 - 평가에서 새로 나온 실패 사례는 `evals/phase-cases/`에 기준 사례로 추가한다.
-- `phase_budget.py`는 CI에서 돈다. `.github/workflows/phase-budget.yml`이 테스트 스위트와 병렬로 PR의 base kit과 head kit을 측정하고 `evals/phase_budget_compare.py`로 위 세 조건을 판정한다(runtime·skill·template·installer 경로가 바뀐 PR만). 의도한 변화면 PR 본문에 이유를 적고 `phase-budget-accepted` 라벨을 붙인다. 보고는 그대로 남고 실패만 면한다.
+- `phase_budget.py`는 PR CI에서 돈다. `.github/workflows/tests.yml`의 `phase-budget` job이 테스트 스위트와 병렬로 PR의 base kit과 head kit을 측정하고, `phase-budget-compare` job이 `evals/phase_budget_compare.py`로 위 세 조건을 모든 변경 조건에서 판정한다. 의도한 변화면 PR 본문에 이유를 적고 `phase-budget-accepted` 라벨을 붙인 뒤 비교 job을 다시 돌린다. 보고는 그대로 남고 실패만 면한다.
 
 ## 실행과 기록
 
