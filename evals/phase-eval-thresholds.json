@@ -1,0 +1,33 @@
+{
+  "min_trials": 3,
+  "matrix": {
+    "stacks": ["web", "rn", "app", "backend"],
+    "modes": ["clean", "local", "team"],
+    "variants": {
+      "author": [""],
+      "review": ["defect", "clean"]
+    }
+  },
+  "floors": {
+    "author_required_read_rate": 0.95,
+    "review_correct_rate": 0.95,
+    "defect_detection_rate": 1.0
+  },
+  "ceilings": {
+    "invalid_rate": 0.10
+  },
+  "no_drop": [
+    "author_required_read_rate",
+    "author_pass_rate",
+    "review_correct_rate",
+    "defect_detection_rate",
+    "reviewer_read_rate"
+  ],
+  "no_rise": [
+    "false_request_changes_rate"
+  ],
+  "token_ratio_max": {
+    "uncached_input": 1.05,
+    "output": 1.10
+  }
+}

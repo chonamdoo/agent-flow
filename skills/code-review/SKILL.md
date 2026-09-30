@@ -10,7 +10,7 @@ description: Review the changes since a fixed point (commit, branch, tag, or mer
 1. Pin the requested committed or work-in-progress change set as described below.
 2. Identify the spec source and standards sources.
 3. Spawn the Standards and Spec reviewers in parallel.
-4. Aggregate the two axes without merging or reranking them.
+4. Verify the findings and aggregate the two axes without merging or reranking them.
 
 Two-axis review of the requested change set against a fixed baseline:
 
@@ -76,6 +76,8 @@ If the active workflow phase says reviewer subprocesses already ran, do not laun
 
 Otherwise dispatch Standards and Spec in one parallel batch through the current host's supported sub-agent interface. Keep the two prompts and contexts independent. If the host cannot dispatch parallel sub-agents, run the axes sequentially in separate contexts and preserve the same independent outputs.
 
+Include this execution boundary in both reviewer prompts: "Perform the assigned axis directly against the supplied snapshot. Do not invoke code-review again or delegate to additional agents. Review read-only; return findings rather than applying fixes."
+
 **Standards sub-agent prompt** — include:
 
 - The shared immutable review snapshot, comparison commands, resolved revisions, and commit list.
@@ -90,9 +92,11 @@ Otherwise dispatch Standards and Spec in one parallel batch through the current 
 
 If the spec is missing, skip the Spec reviewer and note `no spec available` in the final report.
 
-### 5. Aggregate
+### 5. Verify and aggregate
 
-Present the two reports under `## Standards` and `## Spec` headings, verbatim or lightly cleaned. Do **not** merge or rerank findings — the two axes are deliberately separate (see _Why two axes_).
+Check each finding's location and cited rule or requirement against the shared snapshot and source. Check claimed impact against relevant context; an agent's report is a lead, not proof. Keep unresolved claims within their original axis, labelled `unverified` with the missing evidence. Preserve existing workflow reviewer artifacts and verdict markers; aggregation does not rewrite their verdicts or satisfy an unresolved workflow gate.
+
+Present the checked reports under `## Standards` and `## Spec` headings, retaining their evidence and uncertainty. Do **not** merge or rerank findings — the two axes are deliberately separate (see _Why two axes_).
 
 End with a one-line summary: total findings per axis, and the worst issue _within each axis_ (if any). Don't pick a single winner across axes — that's the reranking the separation exists to prevent.
 

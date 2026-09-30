@@ -51,6 +51,33 @@ jobs:
           git fetch --no-tags origin main
           git merge-base --is-ancestor "refs/tags/${TAG}" origin/main
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # A tag ships only with a committed, passing phase_eval record measured against the
+      # previous release with this tag's kit, evaluator and cases. The tag tree's own gate script
+      # and thresholds recompute the verdict from the recorded rows instead of trusting a flag.
+      # This stops a release without a matching measurement; it cannot detect fabricated rows.
+      - name: Require a passing phase_eval gate record
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          previous="$(git describe --tags --abbrev=0 --match 'v*' "refs/tags/${TAG}^")"
+          kit="${RUNNER_TEMP}/kit"
+          before="${RUNNER_TEMP}/previous"
+          mkdir -p "$kit" "$before"
+          git archive "refs/tags/${TAG}" | tar -x -C "$kit"
+          git archive "refs/tags/${previous}" | tar -x -C "$before"
+          record="${kit}/evals/release-gates/${TAG}"
+          if [ ! -d "$record" ]; then
+            echo "::error::no phase_eval gate record at evals/release-gates/${TAG}"
+            exit 1
+          fi
+          python "${kit}/evals/phase_eval_compare.py" "$record" \
+            --require-kit "$kit" --require-before-kit "$before" --require-evaluator "$kit" \
+            --summary "$GITHUB_STEP_SUMMARY"
+
       # sha256은 GitHub이 만드는 태그 tarball에서만 나온다. 사람이 옮겨 적지 않는다.
       - name: Hash the tag tarball
         id: tarball

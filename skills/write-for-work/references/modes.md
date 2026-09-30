@@ -27,6 +27,24 @@ Preferred sequence when applicable:
 5. Failure and recovery
 6. Related references
 
+## Visual explanations
+
+Use a visual only when it makes the requested explanation easier to understand. Keep simple changes in prose. Choose the smallest view and place it next to the text it supports:
+
+| Question | View |
+|---|---|
+| What decision or algorithm changed? | Pseudocode or a focused diff |
+| Which calls run, and in what order? | Call tree; Mermaid when interactions matter |
+| Which UI components own state or cross a module boundary? | Component tree |
+| Which files own the changed responsibilities? | Shallow file tree |
+| How do components exchange data or change state? | Mermaid flow or sequence diagram |
+
+Keep only relevant calls, files, states, and boundaries. Derive current behavior from inspected sources; label proposed behavior and unknown relationships. A sketch or generated HTML explains a claim but is not execution evidence.
+
+An explanation request alone does not authorize writing files or opening a browser or application. For authorized HTML output, use the host's supported preview and follow the HTML verification requirements in [SKILL.md](../SKILL.md).
+
+The view-selection approach is informed by [show-me](https://github.com/humanlayer/skills/blob/ca7c8088db69e315a8b2deea43820270457f8f3c/plugins/show-me/skills/show-me/SKILL.md); it is a source, not a runtime dependency.
+
 ## PR descriptions
 
 Help a reviewer understand why the change exists and what evidence supports it.
@@ -34,10 +52,12 @@ Help a reviewer understand why the change exists and what evidence supports it.
 - Start from the supplied issue, diff, notes, and execution results. Lead with the problem and changed behavior, not a file inventory or "안정성을 강화했다".
 - Separate implemented behavior from intended benefits. Say which condition or operation changed; do not claim faster, safer, or regression-free behavior without evidence.
 - Report verification exactly as observed: what ran, what it checked, its result, and what did not run. A test added to the diff is not evidence it passed.
+- When before/after observations exist, connect each to its revision or input, comparable reproduction conditions, and actual output or screenshot. If the earlier state was not observed, say so rather than inventing a failure. Pseudocode and diagrams explain behavior; they are not test logs. A screenshot supports only the visible state it captures.
 - Preserve the repository's template, required headings, issue links, and machine-readable markers. Keep checkbox state unless source evidence and the task authorize a status update; prose editing alone does not.
-- Include compatibility effects, remaining risks, or rollout/rollback requirements only when supported. Do not invent an issue number, reviewer approval, test result, or release plan to fill a section.
+- Include compatibility effects, remaining risks, or rollout/rollback requirements only when supported. Where recovery matters, name the affected consumers or operations, failure conditions, rollback method, and effects that remain after rollback. Code reversibility does not imply data or external effects are reversible. If recovery is unknown, state that uncertainty; a one-way/two-way label is not merge approval. Do not invent an issue number, reviewer approval, test result, or release plan to fill a section.
 - Keep change history here when it explains the patch. Do not apply the documentation rule about current behavior by deleting the reason for the change.
 - Return the requested PR text; publishing or updating a remote PR requires separate authorization.
+- Use the Visual explanations guidance only where it clarifies the change, inside the repository's existing template. Neither a diagram nor a fixed Summary/Evidence/Merge Danger layout is mandatory.
 
 Synthetic example with all facts in the draft:
 
