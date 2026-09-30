@@ -149,13 +149,42 @@ def test_fewer_trials_than_required_fails(gate, tmp_path):
     assert any("trials" in failure for failure in failures)
 
 
-def test_invalid_rows_above_ceiling_fail_and_are_excluded_from_accuracy(gate, tmp_path):
-    after = rows_for("after")
-    after[1].update(valid=False, correct=None, error="provider failed")
-    after[2].update(valid=False, correct=None, error="provider failed")
-    failures = run_gate(gate, tmp_path, rows_for("before"), after)
-    assert any("invalid_rate" in failure for failure in failures)
+@pytest.mark.parametrize("invalid_kit", ["before", "after"])
+def test_invalid_rows_above_ceiling_fail_and_are_excluded_from_accuracy(gate, tmp_path, invalid_kit):
+    before, after = rows_for("before"), rows_for("after")
+    rows = before if invalid_kit == "before" else after
+    rows[1].update(valid=False, correct=None, error="provider failed")
+    rows[2].update(valid=False, correct=None, error="provider failed")
+    failures = run_gate(gate, tmp_path, before, after)
+    assert any(f"invalid_rate on {invalid_kit}" in failure for failure in failures)
     assert not any("review_correct_rate" in failure for failure in failures)
+
+
+@pytest.mark.parametrize("invalid_kit", ["before", "after"])
+@pytest.mark.parametrize("invalid_count, allowed", [(3, True), (4, False)], ids=["at-ceiling", "above-ceiling"])
+def test_invalid_rate_ceiling_controls_export_for_each_kit(gate, tmp_path, invalid_kit, invalid_count, allowed):
+    before, after = rows_for("before", trials=10), rows_for("after", trials=10)
+    rows = before if invalid_kit == "before" else after
+    for row in rows[:invalid_count]:
+        row["error"] = "provider failed"
+        if row["scenario"] == "review":
+            row.update(valid=False, correct=None)
+    run = write_run(tmp_path / "run", before + after)
+    destination = tmp_path / "record"
+    _, failures = gate.compare([run], "before", "after", THRESHOLDS, export=destination)
+    if allowed:
+        assert failures == []
+        assert (destination / "results.jsonl.gz").is_file()
+    else:
+        assert any(f"invalid_rate on {invalid_kit}" in failure for failure in failures)
+        assert not destination.exists()
+
+
+def test_baseline_quality_can_improve_under_after_only_ceilings(gate, tmp_path):
+    before = rows_for("before")
+    before[2].update(overall="request-changes", correct=False, false_request_changes=1)
+    thresholds = {**THRESHOLDS, "ceilings": {**THRESHOLDS["ceilings"], "false_request_changes_rate": 0.0}}
+    assert run_gate(gate, tmp_path, before, rows_for("after"), thresholds) == []
 
 
 def test_runs_measured_under_different_conditions_are_not_compared(gate, tmp_path):

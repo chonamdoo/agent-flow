@@ -12,6 +12,7 @@ Failure conditions come from the thresholds file:
 - a results file is incomplete (fewer rows than `units`, unparseable lines) or has duplicate units;
 - a stack · mode · variant combination is missing on one kit or has fewer than `min_trials` trials;
 - an after-kit metric is below its floor or above its ceiling;
+- either kit's `invalid_rate` is above its ceiling;
 - an after-kit metric dropped (`no_drop`) or rose (`no_rise`) against the before kit;
 - summed uncached input or output tokens of units valid in both kits grew beyond the ratio;
 - a metric or token sum cannot be measured, including a valid unit without usage;
@@ -476,10 +477,12 @@ def compare(directories: list[Path], before: str, after: str, thresholds: dict, 
         elif new[metric] < floor:
             failures.append(f"{metric} {_fmt(new[metric])} is below floor {floor}")
     for metric, ceiling in thresholds["ceilings"].items():
-        if new[metric] is None:
-            failures.append(f"{metric} unmeasured on {after}; ceiling {ceiling}")
-        elif new[metric] > ceiling:
-            failures.append(f"{metric} {_fmt(new[metric])} is above ceiling {ceiling}")
+        for kit in ((before, after) if metric == "invalid_rate" else (after,)):
+            value = metrics[kit][metric]
+            if value is None:
+                failures.append(f"{metric} unmeasured on {kit}; ceiling {ceiling}")
+            elif value > ceiling:
+                failures.append(f"{metric} on {kit} {_fmt(value)} is above ceiling {ceiling}")
     for metric in thresholds["no_drop"]:
         old, value = metrics[before][metric], new[metric]
         if old is None or value is None:

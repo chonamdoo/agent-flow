@@ -240,7 +240,7 @@ python evals/phase_eval_compare.py <new dir> --summary <new dir>/gate.md \
 한다. 폴더 사이에서 같은 kit의 지문이 다르면 실패한다. 두 kit의 조합별 trial ID 집합도 같아야
 한다. 리뷰 행의 `expected`와 결함 ID는 `case_files`의 해시가 일치하는 `case.json`과 대조한다.
 행에서 기대 판정이나 결함을 지워 분모를 줄일 수 없다. case가 명시한 `expect: null`은 그대로
-허용하며, 무효 시행의 제외·상한 정책은 바뀌지 않는다.
+허용한다. 무효 시행은 각 kit의 무효율에 포함하고, 양쪽 모두 유효한 unit만 토큰 비교에 사용한다.
 
 `release.yml`은 태그를 배포하기 전에 태그 트리의 `evals/release-gates/<태그>/`를 태그 트리의
 이 스크립트와 기준으로 다시 판정한다. 기록이 없거나 판정이 실패하면 태그를 거부한다. 다음과
@@ -266,7 +266,8 @@ kit 지문은 디렉터리 안의 모든 파일로 계산하고, 태그 쪽은 g
 기준은 `phase-eval-thresholds.json`에 있다.
 
 - 하한: author 필수 SKILL.md 읽음률 0.95, 리뷰 판정 정확도 0.95, 심은 결함 탐지 1.0.
-- 상한: 무효 시행 비율 0.10.
+- 상한: 이전 kit과 새 kit 각각의 무효 시행 비율이 0.10을 넘으면 실패한다. 새 kit의 무효율이
+  낮아도 상한을 넘은 baseline으로 비교하거나 통과 기록을 export할 수 없다.
 - 이전 kit보다 낮아지면 실패: author 읽음률·세 축 통과율, 리뷰 판정 정확도, 결함 탐지,
   Claude 리뷰어 필수 문서 읽음률. 정상 diff에서 리뷰어가 변경을 요청한 비율은 높아지면 실패다.
 - 토큰: 두 kit에서 모두 유효한 unit끼리 합친다. cache 제외 입력이 1.05배, 출력이
