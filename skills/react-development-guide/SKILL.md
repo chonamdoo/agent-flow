@@ -18,6 +18,7 @@ Use this as a secondary checklist after user request, repo instructions, existin
 - Keep component responsibility narrow and aligned with existing repo patterns.
 - Follow Rules of Hooks: call hooks only at the top level of components or custom hooks, never inside conditions, loops, callbacks, async functions, or after early returns. The installed React version's supported `use` API has separate rules: conditional/loop calls are allowed inside a component or hook, but reading a promise with `use` must not be wrapped in `try/catch`. This exception does not relax ordinary Hook rules.
 - Minimize effects. Use effects for external systems, not for derivable render state.
+- When a changed rendered value comes from mutable state outside React, prefer the existing library's supported React binding. For a custom store or browser snapshot, use an installed-compatible `useSyncExternalStore`/shim or an existing mechanism that demonstrably covers the render-to-subscription gap and concurrent snapshot consistency. Keep unchanged snapshots stable and immutable, release subscriptions with their owner, and supply a matching server snapshot when that path is server-rendered. Preserve React-owned state and non-rendering Effect subscriptions; hook-name absence alone is not a defect.
 - When the installed React and hooks-lint versions support `useEffectEvent`, use it only for genuinely non-reactive events inside Effects, including calls from another local Effect Event. Keep dependencies needed for resynchronization; exclude the Effect Event itself from the dependency array. It is not a general callback for render, click handlers, or passing to another component/hook.
 - Avoid derived state when a value can be computed from props/state during render.
 - Preserve loading, empty, error, and success states when touching async or user-visible flows.
@@ -52,7 +53,7 @@ Use this as a secondary checklist after user request, repo instructions, existin
 
 ## Sources
 
-- React [Rules of Hooks](https://react.dev/reference/rules/rules-of-hooks), [`use`](https://react.dev/reference/react/use), [`useEffectEvent`](https://react.dev/reference/react/useEffectEvent), and [`hydrateRoot`](https://react.dev/reference/react-dom/client/hydrateRoot).
+- React [Rules of Hooks](https://react.dev/reference/rules/rules-of-hooks), [`use`](https://react.dev/reference/react/use), [`useEffectEvent`](https://react.dev/reference/react/useEffectEvent), [`useSyncExternalStore`](https://react.dev/reference/react/useSyncExternalStore), and [`hydrateRoot`](https://react.dev/reference/react-dom/client/hydrateRoot).
 - React [Compiler setup and coverage](https://react.dev/learn/react-compiler/installation), [incompatible libraries](https://react.dev/reference/eslint-plugin-react-hooks/lints/incompatible-library), and [`memo`](https://react.dev/reference/react/memo).
 - Next.js docs: Server and Client Components.
 - Repo configuration and existing component patterns override generic advice.

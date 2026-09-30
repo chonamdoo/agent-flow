@@ -79,6 +79,7 @@ For Korean work writing, read [references/plain-language.md](references/plain-la
 Read [references/modes.md](references/modes.md) and use only the relevant mode:
 
 - Documentation
+- Visual explanations, only when requested or when they clarify the document
 - PR descriptions
 - Code comments and docstrings
 - Business or strategy report

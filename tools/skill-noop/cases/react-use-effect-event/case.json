@@ -4,7 +4,7 @@
   "baseline": "skills/react-development-guide/SKILL.md",
   "lineIn": "baseline",
   "variant": {
-    "deleteLines": [21, 21],
+    "deleteLines": [22, 22],
     "expectRemoved": ["When the installed React and hooks-lint versions support `useEffectEvent`"]
   },
   "fixtures": [{ "name": "target", "file": "fixture.diff", "expect": "request-changes" }],

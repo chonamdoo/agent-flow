@@ -185,7 +185,9 @@ skill)마다 두 kit를 설치하고 각 kit의 prompt를 그대로 쓴다.
 - author: full-feature `green` envelope로 Claude 세션 하나가 구현한다.
   `oracle.py`가 behavior(red 테스트를 원본으로 되돌린 뒤 실행), plan(slice-plan에만
   있는 요구를 검사하는 hidden 테스트), norm(mode 규칙, 정적 검사)을 채점한다.
-  필수 SKILL.md 읽음은 성공한 `Read` 도구 결과로만 센다.
+  필수 SKILL.md 읽음률은 성공한 `Read` 경로만 센다. 전체 본문·reference 읽음이나
+  실제 규칙 준수의 증거로 해석하지 않는다. norm은 case의 fixture 계약 검사이며
+  일반적인 Clean Architecture 인증이 아니다.
 - review: 실제 multi-review 리뷰어 job(모든 관점 × claude/codex)을 결함 diff와
   정상 diff에 돌린다. run 폴더에는 author와 같은 prd·ddd-design·slice-plan과
   design-spec을 두고, 리뷰 대상 트리의 테스트 실행 기록(`test-evidence.md`, 전체 출력)을
@@ -195,14 +197,96 @@ skill)마다 두 kit를 설치하고 각 kit의 prompt를 그대로 쓴다.
   Must-fix/blocking 지적 안에서만 찾는다. Should-fix·Notes 같은 비차단 구간의 언급은
   탐지로 세지 않는다.
 
+Claude 리뷰어는 `plan` 대신 `default` permission mode에서 `Read,Glob,Grep`만
+사용한다. Write/Edit/Bash/Agent는 제공하지 않는다. 이는 평가 CLI의 도구 제한이지
+host 전체의 파일시스템 sandbox가 아니다. author의 쓰기 권한은 바꾸지 않았다.
+성공한 Claude Read 경로와 문서별 SHA·inline 본문 포함 여부를 별도로 남긴다.
+Codex의 shell 읽기는 이 지표로 정규화하지 않으므로 미관측은 `null`이다.
+
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python evals/phase_eval.py --kit before=<dir> --kit after=<dir> \
-  --scenario author,review --trials 1 --concurrency 10 --output <new dir>
+  --scenario author,review --trials 1 --concurrency 10 \
+  --claude-model <model> --codex-model <model> --output <new dir>
 ```
 
 결과는 `results/phase-<kit 버전>-<YYYYMMDD>/`에 둔다. 원자료는 크기 때문에 gzip으로
 저장한다. `phase_budget.py` 출력은 `budget-<kit>.json.gz`, `phase_eval.py`가 출력 폴더에
 쓰는 `results.jsonl`은 `eval-results.jsonl.gz`로 둔다.
+
+실행할 때는 출력 폴더의 `evidence/`에 호출별 prompt·argv·stdout·stderr를 보존한다.
+호출의 SHA, 요청 모델, Claude가 보고한 모델, evaluator·case 파일 해시도 남긴다.
+raw에는 로컬 경로와 입력 내용이 있으므로 공개 전 별도 검토한다.
+토큰은 cache 포함/제외·cache·output으로 나눈다. 누락은 `null`이며, 일부 합계는
+`usage_observed`와 `usage_missing_reviewers`로 구분한다. 형식 실패·provider 오류와
+코드 판정은 분리하고, 그런 실패 호출의 관측 사용량도 남긴다. evidence 저장 자체가
+실패하면 출력을 해석하기 전에 멈춘다. 이때 리뷰어 행의 사용량은 `null`이고, author
+행에는 `usage` 필드가 없다.
+
+### `phase_eval_compare.py` — 릴리스 차단 검사
+
+릴리스 전에 이전 릴리스 kit(`before`)과 새 kit(`after`)를 같은 `phase_eval.py` 실행에서
+조합당 3회 이상 돌리고, 그 출력 폴더를 이 검사에 넘긴다. 통과하면 `--export`가 릴리스
+기록을 `evals/release-gates/v<버전>/`에 쓴다. 이 기록을 릴리스 PR에 커밋한다. 실패하면 exit 1이고
+기록을 쓰지 않는다.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python evals/phase_eval.py --kit before=<이전 릴리스 트리> --kit after=<새 kit> \
+  --scenario author,review --trials 3 --claude-model <model> --codex-model <model> --output <new dir>
+python evals/phase_eval_compare.py <new dir> --summary <new dir>/gate.md \
+  --export evals/release-gates/v<버전>
+```
+
+각 출력 폴더는 실제 행의 모든 kit 지문과 Claude·Codex의 비어 있지 않은 모델 이름을 기록해야
+한다. 폴더 사이에서 같은 kit의 지문이 다르면 실패한다. 두 kit의 조합별 trial ID 집합도 같아야
+한다. 리뷰 행의 `expected`와 결함 ID는 `case_files`의 해시가 일치하는 `case.json`과 대조한다.
+행에서 기대 판정이나 결함을 지워 분모를 줄일 수 없다. case가 명시한 `expect: null`은 그대로
+허용하며, 무효 시행의 제외·상한 정책은 바뀌지 않는다.
+
+`release.yml`은 태그를 배포하기 전에 태그 트리의 `evals/release-gates/<태그>/`를 태그 트리의
+이 스크립트와 기준으로 다시 판정한다. 기록이 없거나 판정이 실패하면 태그를 거부한다. 다음과
+같은 경우에도 거부한다.
+
+- 기록의 `kit_digests`가 태그 트리와 바로 이전 태그 트리의 kit 지문(`kit_source_digest`)과
+  다르다.
+- 기록의 `evaluator_sha256`·`case_files`가 태그 트리의 `evals/phase_eval.py`·`evals/phase-cases`
+  와 다르다.
+
+측정 뒤에 kit·평가기·case를 고치면 다시 측정해야 한다. 버전 파일·`Formula/`는 kit 지문에
+들어가지 않으므로 릴리스 버전을 올려도 기록을 그대로 쓸 수 있다. 모델 호출이 필요한 측정은
+CI에서 돌리지 않는다.
+
+kit 지문은 디렉터리 안의 모든 파일로 계산하고, 태그 쪽은 git이 추적하는 파일만 들어간다.
+그래서 측정할 kit은 `git archive`로 풀거나 추적 파일만 복사한 트리를 쓴다. 작업 트리에 남은
+`.DS_Store` 같은 파일 하나만 있어도 지문이 달라져 태그가 거부된다.
+
+기록에는 판정에 쓰는 필드만 남긴다. 로컬 경로, argv, 리뷰어 출력 원문은 빠진다. 원자료는
+측정한 곳에 따로 보관한다. 이 검사는 측정 없이 태그하는 실수를 막는다. 커밋 권한이 있는
+사람이 행을 꾸며 넣는 것까지 막지는 못한다.
+
+기준은 `phase-eval-thresholds.json`에 있다.
+
+- 하한: author 필수 SKILL.md 읽음률 0.95, 리뷰 판정 정확도 0.95, 심은 결함 탐지 1.0.
+- 상한: 무효 시행 비율 0.10.
+- 이전 kit보다 낮아지면 실패: author 읽음률·세 축 통과율, 리뷰 판정 정확도, 결함 탐지,
+  Claude 리뷰어 필수 문서 읽음률. 정상 diff에서 리뷰어가 변경을 요청한 비율은 높아지면 실패다.
+- 토큰: 두 kit에서 모두 유효한 unit끼리 합친다. cache 제외 입력이 1.05배, 출력이
+  1.10배를 넘으면 실패다. 유효한 unit에 사용량이 없으면 검증할 수 없으므로 실패다.
+- 결과가 완전하지 않으면 실패다.
+  - `results.jsonl` 행 수가 `meta.json`의 `units`보다 적거나, 읽을 수 없는 줄이나 중복 unit이 있다.
+  - 기준 파일의 `matrix`(stack × mode × variant)에 있는 조합이 한 kit에라도 없거나, 조합당
+    시행이 3회보다 적다. 두 kit이 같이 좁게 돌아도 통과하지 못한다.
+  - 지표의 분모가 없거나, 채점 필드가 빠졌거나 형식이 틀린 행이 있다. `NaN`, 음수 토큰,
+    빠진 `correct`·`defects`·읽음 목록이 여기에 해당한다. 이런 행은 0이나 제외로 처리하지 않고 실패로 본다.
+- 측정 조건을 확인할 수 없으면 실패다. 각 폴더의 `evaluator_sha256`·요청 모델·case 파일
+  해시가 없거나, 폴더끼리 값이 다르면 해당한다. 기준 파일에 모르는 지표 이름이 있어도 실패다.
+
+읽음률은 성공한 Read 경로만 센다. prompt에 본문이 들어간 문서와 Codex의 미관측(`null`)은
+분모에서 뺀다. 기준값을 바꿀 때는 PR에 이유와 근거가 된 측정 결과를 적는다.
+
+리뷰어 형식 오류와 provider 오류(예: 모델 용량 부족)도 무효 시행으로 센다. 이전 kit 대비
+하락은 허용 폭 없이 실패로 본다. 실패하면 먼저 원인이 kit 변화인지 측정 잡음인지 원자료로
+확인한다. 잡음이면 같은 조건으로 전체를 다시 측정한다. 실패한 unit만 골라 다시 돌리거나,
+근거 없이 기준값을 낮춰 통과시키지 않는다.
 
 ### 해석할 때 주의
 
@@ -215,6 +299,11 @@ PYTHONDONTWRITEBYTECODE=1 python evals/phase_eval.py --kit before=<dir> --kit af
 - author 평가는 한 phase만 새 세션에서 돌린다. 실제 run처럼 대화 맥락이 이어지는
   경우의 효과는 재지 않는다.
 - host 전역 skill과 설정은 격리하지 않는다.
+- 런타임 Claude 리뷰어는 provider sandbox 안에서 `plan` mode와 기본 도구로 돈다
+  (`src/agent_flow/multi_review.py`). 평가 리뷰어의 도구 조건은 이와 다르고, 이 조건
+  변경 전에 모은 리뷰 결과와도 다르다. 리뷰 정확도를 런타임 동작으로 옮기거나 조건이
+  다른 결과끼리 비교하지 않는다. `meta.json`에 `evaluator_sha256`이 없거나 값이 다르면
+  조건이 다른 결과로 본다.
 
 ### 0.3.7 기준 정적 측정 (`results/phase-0.3.7-20260929/`)
 

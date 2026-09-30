@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import inspect
 import json
 import os
@@ -49,6 +50,17 @@ AUTHOR_TOOLS = (
 )
 AUTHOR_DENIED = "Bash(agent-flow:*) Bash(git:*) Bash(rm:*)"
 PY = sys.executable
+USAGE_KEYS = ("input", "uncached_input", "cached_input", "output")
+REQUESTED_MODELS: dict[str, str | None] = {"claude": None, "codex": None}
+
+
+def _token_count(usage: dict, key: str) -> int | None:
+    value = usage.get(key) if isinstance(usage, dict) else None
+    return value if type(value) is int and value >= 0 else None
+
+
+def _token_sum(values: list[int | None]) -> int | None:
+    return sum(value for value in values if value is not None) if values and all(value is not None for value in values) else None
 
 
 def _run_group(args: list[str], *, timeout: int, cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -89,6 +101,15 @@ def _overlay(src: Path, dst: Path) -> None:
             target = dst / path.relative_to(src)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, target)
+
+
+def _document_manifest(resolution, prompt: str) -> list[dict]:
+    encoded = prompt.encode("utf-8")
+    return [
+        {"path": item.document.path, "sha256": item.document.sha256, "bytes": item.document.bytes,
+         "inline_in_prompt": delivery.inline and delivery.content in encoded}
+        for delivery in resolution.delivery for item in delivery.documents
+    ]
 
 
 def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, project: Path) -> dict:
@@ -157,6 +178,7 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
                 for delivery in resolution.delivery if delivery.inline
                 for item in delivery.documents for route in item.routes
             }),
+            "documents": _document_manifest(resolution, prompt),
         }
     # 실제 run에서 multi-review 앞 phase들은 테스트 실행 기록을 남긴다. 그것이 없으면 design-spec의
     # review 기한 항목을 본 리뷰어가 "실행 근거 없음"으로 변경을 요청한다. phase artifact(green.md)
@@ -178,11 +200,12 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
     review_input = _write_review_input_snapshot(
         project, run_dir, phase.id, base_branch=_profile_base_branch(adapter),
     )
-    jobs, _ = _reviewer_jobs(phase, run_dir, project, adapter, review_input=review_input,
+    jobs, resolutions = _reviewer_jobs(phase, run_dir, project, adapter, review_input=review_input,
                              providers=("claude", "codex"))
     return {
         "jobs": [
-            {"angle": job.angle_id, "provider": provider, "prompt": job.prompt_by_provider[provider]}
+            {"angle": job.angle_id, "provider": provider, "prompt": job.prompt_by_provider[provider],
+             "documents": _document_manifest(resolutions[provider], job.prompt_by_provider[provider])}
             for job in jobs for provider in ("claude", "codex")
         ],
     }
@@ -210,88 +233,134 @@ def _run_cli(args: list[str], prompt: str, cwd: Path, timeout: int) -> subproces
 
 
 
-def _claude(prompt: str, cwd: Path, *, author: bool, timeout: int) -> dict:
-    args = ["claude", "-p", "--safe-mode", "--no-session-persistence"]
+def _call_evidence(args: list[str], prompt: str, cwd: Path, proc: subprocess.CompletedProcess,
+                   evidence: Path | None) -> dict:
+    record = {"argv": args, "cwd": str(cwd), "returncode": proc.returncode,
+              "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+              "stdout_sha256": hashlib.sha256(proc.stdout.encode("utf-8")).hexdigest(),
+              "stderr_sha256": hashlib.sha256(proc.stderr.encode("utf-8")).hexdigest()}
+    if evidence is not None:
+        evidence.mkdir(parents=True, exist_ok=False)
+        (evidence / "command.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+        for name, text in (("prompt.txt", prompt), ("stdout.raw", proc.stdout), ("stderr.raw", proc.stderr)):
+            (evidence / name).write_text(text, encoding="utf-8")
+        record["evidence"] = str(evidence)
+    return record
+
+
+def _claude(prompt: str, cwd: Path, *, author: bool, timeout: int, evidence: Path | None = None) -> dict:
+    args = ["claude", "-p", "--safe-mode", "--no-session-persistence",
+            "--output-format", "stream-json", "--verbose"]
+    if REQUESTED_MODELS["claude"]:
+        args += ["--model", REQUESTED_MODELS["claude"]]
     if author:
-        args += ["--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
+        args += ["--permission-mode", "acceptEdits",
                  "--allowedTools", *AUTHOR_TOOLS.split(" "), "--disallowedTools", *AUTHOR_DENIED.split(" ")]
     else:
-        args += ["--output-format", "json", "--permission-mode", "plan"]
+        args += ["--permission-mode", "default", "--tools", "Read,Glob,Grep",
+                 "--allowedTools", "Read", "Glob", "Grep"]
     started = time.time()
     proc = _run_cli(args, prompt, cwd, timeout)
     out: dict = {"rc": proc.returncode, "seconds": round(time.time() - started, 1), "reads": [], "text": ""}
+    out["execution"] = _call_evidence(args, prompt, cwd, proc, evidence)
     events = []
-    if author:
-        for line in proc.stdout.splitlines():
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        result = next((e for e in reversed(events) if e.get("type") == "result"), {})
-        read_calls: dict[str, str] = {}
-        outcomes: dict[str, bool] = {}
-        for event in events:
-            message = event.get("message") if isinstance(event, dict) else None
-            content = message.get("content") if isinstance(message, dict) else None
-            for block in content if isinstance(content, list) else []:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") == "tool_result" and block.get("tool_use_id"):
-                    outcomes[block["tool_use_id"]] = not block.get("is_error")
-                elif block.get("type") == "tool_use":
-                    tool_input = block.get("input") or {}
-                    out.setdefault("tool_inputs", []).append(json.dumps(tool_input)[:400])
-                    if block.get("name") == "Read" and tool_input.get("file_path"):
-                        read_calls[str(block.get("id"))] = tool_input["file_path"]
-                    elif block.get("name") == "Bash":
-                        out.setdefault("bash", []).append(str(tool_input.get("command", ""))[:200])
-        # 성공한 tool_result가 짝지어진 Read만 읽음이다. 실패·미응답은 따로 보고한다.
-        out["reads"] = [path for use_id, path in read_calls.items() if outcomes.get(use_id)]
-        out["failed_reads"] = [path for use_id, path in read_calls.items() if not outcomes.get(use_id)]
-    else:
-        try:
-            result = json.loads(proc.stdout)
-        except json.JSONDecodeError:
-            result = {}
-    usage = result.get("usage") or {}
-    out["text"] = str(result.get("result") or "")
-    out["usage"] = {
-        "input": usage.get("input_tokens", 0) + usage.get("cache_creation_input_tokens", 0)
-        + usage.get("cache_read_input_tokens", 0),
-        "uncached_input": usage.get("input_tokens", 0) + usage.get("cache_creation_input_tokens", 0),
-        "output": usage.get("output_tokens", 0),
-    }
-    out["cost_usd"] = result.get("total_cost_usd")
-    out["turns"] = result.get("num_turns")
-    if proc.returncode != 0 or not result:
-        out["error"] = (proc.stderr or proc.stdout)[-400:]
-    return out
-
-
-def _codex(prompt: str, cwd: Path, *, timeout: int) -> dict:
-    args = ["codex", "exec", "--ephemeral", "--ignore-user-config", "--sandbox", "read-only",
-            "--cd", str(cwd), "--json", "--skip-git-repo-check", "-"]
-    started = time.time()
-    proc = _run_cli(args, prompt, cwd, timeout)
-    texts, usage = [], {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
     for line in proc.stdout.splitlines():
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if isinstance(event, dict):
+            events.append(event)
+    result = next((e for e in reversed(events) if e.get("type") == "result"), {})
+    read_calls: dict[str, str] = {}
+    outcomes: dict[str, bool] = {}
+    calls: dict[str, str] = {}
+    for event in events:
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_result" and block.get("tool_use_id"):
+                outcomes[block["tool_use_id"]] = not block.get("is_error")
+            elif block.get("type") == "tool_use":
+                calls[str(block.get("id"))] = str(block.get("name"))
+                tool_input = block.get("input") or {}
+                out.setdefault("tool_inputs", []).append(json.dumps(tool_input)[:400])
+                if block.get("name") == "Read" and tool_input.get("file_path"):
+                    read_calls[str(block.get("id"))] = tool_input["file_path"]
+                elif block.get("name") == "Bash":
+                    out.setdefault("bash", []).append(str(tool_input.get("command", ""))[:200])
+    # 성공한 tool_result가 짝지어진 Read만 읽음이다. 실패·미응답은 따로 보고한다.
+    out["reads"] = [path for use_id, path in read_calls.items() if outcomes.get(use_id)]
+    out["failed_reads"] = [path for use_id, path in read_calls.items() if not outcomes.get(use_id)]
+    out["tool_calls"] = [{"id": use_id, "name": name, "succeeded": outcomes.get(use_id)}
+                         for use_id, name in calls.items()]
+    usage = result.get("usage") or {}
+    out["text"] = str(result.get("result") or "")
+    uncached = _token_sum([_token_count(usage, key) for key in ("input_tokens", "cache_creation_input_tokens")])
+    cached = _token_count(usage, "cache_read_input_tokens")
+    out["usage"] = {
+        "input": _token_sum([uncached, cached]),
+        "uncached_input": uncached,
+        "cached_input": cached,
+        "output": _token_count(usage, "output_tokens"),
+    }
+    out["cost_usd"] = result.get("total_cost_usd")
+    model_usage = result.get("modelUsage")
+    out["models_observed"] = sorted(model_usage) if isinstance(model_usage, dict) else None
+    out["turns"] = result.get("num_turns")
+    if proc.returncode != 0 or not result or result.get("is_error"):
+        out["error"] = (proc.stderr or out["text"] or proc.stdout or "missing CLI result")[-400:]
+    if not author and any(outcomes.get(use_id) and name not in {"Read", "Glob", "Grep"}
+                          for use_id, name in calls.items()):
+        out["error"] = "read-only reviewer used a tool outside Read/Glob/Grep"
+    return out
+
+
+def _codex(prompt: str, cwd: Path, *, timeout: int, evidence: Path | None = None) -> dict:
+    args = ["codex", "exec", "--ephemeral", "--ignore-user-config", "--sandbox", "read-only",
+            "--cd", str(cwd), "--json", "--skip-git-repo-check", "-"]
+    if REQUESTED_MODELS["codex"]:
+        args[2:2] = ["--model", REQUESTED_MODELS["codex"]]
+    started = time.time()
+    proc = _run_cli(args, prompt, cwd, timeout)
+    execution = _call_evidence(args, prompt, cwd, proc, evidence)
+    texts, reports, failures = [], [], []
+    for line in proc.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "turn.failed":
+            failures.append(str(event.get("error") or "provider turn failed"))
         item = event.get("item") or {}
-        if event.get("type") == "item.completed" and item.get("type") == "agent_message":
+        if event.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
             texts.append(item.get("text", ""))
         if event.get("type") == "turn.completed":
-            for key in usage:
-                usage[key] += (event.get("usage") or {}).get(key, 0)
+            reports.append(event.get("usage") or {})
+    usage = {
+        key: _token_sum([_token_count(report, key) for report in reports])
+        for key in ("input_tokens", "cached_input_tokens", "output_tokens")
+    }
+    uncached = _token_sum([
+        total - cached if total is not None and cached is not None and cached <= total else None
+        for report in reports
+        for total, cached in [(_token_count(report, "input_tokens"), _token_count(report, "cached_input_tokens"))]
+    ])
     out = {
         "rc": proc.returncode, "seconds": round(time.time() - started, 1), "text": texts[-1] if texts else "",
-        "usage": {"input": usage["input_tokens"], "uncached_input": usage["input_tokens"] - usage["cached_input_tokens"],
+        "execution": execution,
+        "usage": {"input": usage["input_tokens"], "uncached_input": uncached,
+                  "cached_input": usage["cached_input_tokens"],
                   "output": usage["output_tokens"]},
     }
     if proc.returncode != 0 or not texts:
         out["error"] = (proc.stderr or proc.stdout)[-400:]
+    if failures:
+        out["error"] = "\n".join(failures)[-400:]
     return out
 
 
@@ -319,7 +388,8 @@ def _valid_verdict(out: dict, job_id: str) -> str | None:
     if out.get("rc") != 0 or out.get("error"):
         return None
     result = result_type(job_id=job_id, stdout=out.get("text", ""), stderr="", returncode=0)
-    if result_error(result) is not None:
+    out["output_contract_error"] = result_error(result)
+    if out["output_contract_error"] is not None:
         return None
     return output_verdict(result.stdout)
 
@@ -382,7 +452,8 @@ def _prepare_subprocess(kit: Path, case_dir: Path, mode: str, scenario: str, var
     return json.loads(proc.stdout)
 
 
-def run_author(kit_name: str, kit: Path, case_dir: Path, mode: str, trial: int, work: Path, timeout: int) -> dict:
+def run_author(kit_name: str, kit: Path, case_dir: Path, mode: str, trial: int, work: Path, timeout: int,
+               evidence: Path | None = None) -> dict:
     project = work / f"author-{case_dir.name}-{mode}-{kit_name}-{trial}"
     row = {"scenario": "author", "stack": case_dir.name, "mode": mode, "kit": kit_name, "trial": trial}
     try:
@@ -391,7 +462,7 @@ def run_author(kit_name: str, kit: Path, case_dir: Path, mode: str, trial: int, 
         return {**row, "error": str(exc)[-1200:]}
     row["prompt_bytes"] = len(prepared["prompt"].encode())
     row["required"] = [r["name"] for r in prepared["required"]]
-    result = _claude(prepared["prompt"], project, author=True, timeout=timeout)
+    result = _claude(prepared["prompt"], project, author=True, timeout=timeout, evidence=evidence)
     read_real = {os.path.realpath(p) for p in result["reads"]}
     inline = set(prepared.get("inline", []))
     required_paths = {
@@ -401,6 +472,7 @@ def run_author(kit_name: str, kit: Path, case_dir: Path, mode: str, trial: int, 
     row["required_read"] = sorted(n for n, p in required_paths.items() if p in read_real)
     row["required_unread"] = sorted(n for n, p in required_paths.items() if p not in read_real)
     row["required_read_rate"] = round(len(row["required_read"]) / len(required_paths), 3) if required_paths else None
+    row["required_read_rate_scope"] = "Successful SKILL.md Read paths, not full-body or reference coverage"
     row["other_skill_reads"] = sorted(
         p for p in read_real if p.endswith("SKILL.md") and p not in set(required_paths.values())
     )
@@ -409,13 +481,15 @@ def run_author(kit_name: str, kit: Path, case_dir: Path, mode: str, trial: int, 
         name for name in ("slice-plan.md", "ddd-design.md", "prd.md", "design-spec.md") if name in touched
     )
     row["failed_reads"] = sorted(result.get("failed_reads", []))
-    row.update({k: result.get(k) for k in ("usage", "cost_usd", "turns", "seconds", "error")})
+    row.update({k: result.get(k) for k in ("usage", "cost_usd", "turns", "seconds", "error", "execution", "models_observed")})
+    row["documents"] = prepared.get("documents", [])
+    row["norm_scope"] = "case-specific fixture contract; general architecture correctness is unverified"
     row["oracle"] = _oracle(case_dir, "author", "--project", str(project), "--mode", mode)
     return row
 
 
 def run_review(kit_name: str, kit: Path, case_dir: Path, mode: str, variant: str, trial: int,
-               work: Path, timeout: int) -> dict:
+               work: Path, timeout: int, evidence: Path | None = None) -> dict:
     project = work / f"review-{case_dir.name}-{mode}-{variant}-{kit_name}-{trial}"
     row = {"scenario": "review", "stack": case_dir.name, "mode": mode, "variant": variant,
            "kit": kit_name, "trial": trial}
@@ -427,14 +501,22 @@ def run_review(kit_name: str, kit: Path, case_dir: Path, mode: str, variant: str
     with concurrent.futures.ThreadPoolExecutor(len(jobs)) as pool:
         futures = [
             pool.submit(
-                (lambda j: _claude(j["prompt"], project, author=False, timeout=timeout))
+                (lambda j: _claude(j["prompt"], project, author=False, timeout=timeout,
+                                  evidence=evidence / f"{j['angle']}-claude" if evidence else None))
                 if job["provider"] == "claude" else
-                (lambda j: _codex(j["prompt"], project, timeout=timeout)),
+                (lambda j: _codex(j["prompt"], project, timeout=timeout,
+                                 evidence=evidence / f"{j['angle']}-codex" if evidence else None)),
                 job,
             )
             for job in jobs
         ]
-        outputs = [f.result() for f in futures]
+        outputs = []
+        for future in futures:
+            try:
+                outputs.append(future.result())
+            except Exception as exc:
+                outputs.append({"text": "", "seconds": None, "error": str(exc)[-1200:],
+                                "usage": {key: None for key in USAGE_KEYS}})
     angles, full_texts = [], []
     for job, out in zip(jobs, outputs):
         verdict = _valid_verdict(out, f"{job['angle']}-{job['provider']}")
@@ -443,6 +525,16 @@ def run_review(kit_name: str, kit: Path, case_dir: Path, mode: str, variant: str
             "angle": job["angle"], "provider": job["provider"], "prompt_bytes": len(job["prompt"].encode()),
             "verdict": verdict, "usage": out["usage"], "seconds": out["seconds"],
             "rc": out.get("rc"), "error": out.get("error"), "text": out["text"],
+            "output_contract_error": out.get("output_contract_error"),
+            "read_paths_observed": out.get("reads"), "failed_reads": out.get("failed_reads"),
+            "tool_calls": out.get("tool_calls"),
+            "execution": out.get("execution"), "models_observed": out.get("models_observed"),
+            "cost_usd": out.get("cost_usd"),
+            "documents": [
+                {**document, "read_path_observed": None if out.get("reads") is None else
+                 os.path.realpath(document["path"]) in {os.path.realpath(path) for path in out["reads"]}}
+                for document in job.get("documents", [])
+            ],
         })
     case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
     spec = case["review"][mode][variant]
@@ -473,7 +565,13 @@ def run_review(kit_name: str, kit: Path, case_dir: Path, mode: str, variant: str
     row["false_request_changes"] = sum(1 for v in verdicts if v == "request-changes") if spec["expect"] == "approve" else None
     row["invalid_reviewers"] = sum(1 for a in angles if a["verdict"] is None)
     row["usage"] = {
-        key: sum(a["usage"].get(key, 0) for a in angles) for key in ("input", "uncached_input", "output")
+        key: _token_sum([a["usage"].get(key) for a in angles]) for key in USAGE_KEYS
+    }
+    row["usage_observed"] = {
+        key: sum(a["usage"].get(key) or 0 for a in angles) for key in USAGE_KEYS
+    }
+    row["usage_missing_reviewers"] = {
+        key: sum(a["usage"].get(key) is None for a in angles) for key in USAGE_KEYS
     }
     row["prompt_bytes_total"] = sum(a["prompt_bytes"] for a in angles)
     row["subprocesses"] = len(angles)
@@ -493,6 +591,8 @@ def main() -> int:
     parser.add_argument("--trials", type=int, default=1)
     parser.add_argument("--concurrency", type=int, default=8, help="parallel model CLI processes")
     parser.add_argument("--timeout", type=int, default=1500)
+    parser.add_argument("--claude-model")
+    parser.add_argument("--codex-model")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
@@ -503,6 +603,7 @@ def main() -> int:
     if args.output is None or not args.kit:
         parser.error("--output and --kit are required")
     args.output.mkdir(parents=True, exist_ok=False)
+    REQUESTED_MODELS.update(claude=args.claude_model, codex=args.codex_model)
     _slots = threading.Semaphore(args.concurrency)
     kits = {name: Path(path).resolve() for name, path in (k.split("=", 1) for k in args.kit)}
     work = Path(tempfile.mkdtemp(prefix="af-phase-eval-"))
@@ -523,11 +624,13 @@ def main() -> int:
 
     def execute(unit):
         scenario, kit_name, kit, case_dir, mode, variant, trial = unit
+        unit_id = hashlib.sha256(json.dumps([scenario, kit_name, case_dir.name, mode, variant, trial]).encode()).hexdigest()
+        evidence = args.output / "evidence" / unit_id
         try:
             if scenario == "author":
-                row = run_author(kit_name, kit, case_dir, mode, trial, work, args.timeout)
+                row = run_author(kit_name, kit, case_dir, mode, trial, work, args.timeout, evidence=evidence)
             else:
-                row = run_review(kit_name, kit, case_dir, mode, variant, trial, work, args.timeout)
+                row = run_review(kit_name, kit, case_dir, mode, variant, trial, work, args.timeout, evidence=evidence)
         except Exception as exc:  # timeout 등은 결과 행으로 남겨 invalid로 센다.
             row = {"scenario": scenario, "stack": case_dir.name, "mode": mode, "variant": variant,
                    "kit": kit_name, "trial": trial, "error": f"{type(exc).__name__}: {exc}"[-1200:]}
@@ -538,11 +641,22 @@ def main() -> int:
                   f"{kit_name} t{trial}: {row.get('error') and 'ERROR' or 'ok'}", flush=True)
         return row
 
+    # Content fingerprint of each measured kit; the release check matches it to the tag tree.
+    sys.path.insert(0, str(HERE.parent / "src"))
+    from agent_flow.core.kit_digest import kit_source_digest
+
     meta = {
         "kits": {k: str(v) for k, v in kits.items()},
+        "kit_digests": {k: kit_source_digest(v) for k, v in kits.items()},
         "claude": subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip(),
         "codex": subprocess.run(["codex", "--version"], capture_output=True, text=True).stdout.strip(),
         "units": len(units), "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "work": str(work),
+        "requested_models": REQUESTED_MODELS.copy(),
+        "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "case_files": {
+            path.relative_to(CASES).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(CASES.rglob("*")) if path.is_file() and "__pycache__" not in path.parts
+        },
     }
     (args.output / "meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     # 한 unit 안에서도 리뷰어가 병렬이므로, unit 동시성은 CLI 슬롯으로만 제한한다.
