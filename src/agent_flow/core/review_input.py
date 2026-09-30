@@ -37,6 +37,115 @@ class _ReviewInputUnavailable(WorktreeIsolationError):
     """Publication limits only; observation and scope-integrity failures remain fatal."""
 
 
+def profile_base_branch(profile: Mapping[str, object] | None) -> str | None:
+    """diff 기준 브랜치. profile의 `branching.base`가 정본이고 없으면 `pr.target_branch`다."""
+    if not isinstance(profile, Mapping):
+        return None
+    for section, key in (("branching", "base"), ("pr", "target_branch")):
+        block = profile.get(section)
+        if not isinstance(block, Mapping):
+            continue
+        value = block.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def branch_changed_paths(project_root: Path, base_branch: str | None) -> tuple[str, ...] | None:
+    """리뷰와 같은 merge-base에서 HEAD까지 커밋된 변경 경로. 기준점이 없으면 None.
+
+    phase마다 여러 번 불린다(프롬프트 렌더, 게이트, 자람 검사). 결과는 HEAD와 base 후보
+    ref들의 oid만의 함수이므로 그 oid를 키로 프로세스 안에 기억한다 — ref가 움직이면
+    키가 바뀌므로 낡은 값이 나올 수 없다. oid를 한 번에 못 잡으면 캐시하지 않는다.
+    """
+    if not base_branch or not _is_usable_base_ref(base_branch):
+        return None
+    pinned = _pinned_baseline_inputs(project_root, base_branch)
+    if pinned is None:
+        candidates = _base_candidate_refs(
+            project_root, base_branch, max_output_bytes=_REVIEW_INPUT_MAX_BYTES,
+        )
+        return _committed_paths(project_root, "HEAD", tuple((ref, ref) for ref in candidates))
+    key = (str(project_root.resolve()), *pinned)
+    if key in _COMMITTED_PATHS_CACHE:
+        return _COMMITTED_PATHS_CACHE[key]
+    paths = _committed_paths(project_root, *pinned)
+    # 실패(None)는 기억하지 않는다. timeout 같은 일시 실패가 같은 oid 동안 굳는다.
+    if paths is not None:
+        if len(_COMMITTED_PATHS_CACHE) >= _COMMITTED_PATHS_CACHE_LIMIT:
+            _COMMITTED_PATHS_CACHE.clear()
+        _COMMITTED_PATHS_CACHE[key] = paths
+    return paths
+
+
+_COMMITTED_PATHS_CACHE: dict[tuple[str, str, tuple[tuple[str, str], ...]], tuple[str, ...]] = {}
+_COMMITTED_PATHS_CACHE_LIMIT = 64
+
+
+def _pinned_baseline_inputs(
+    project_root: Path, base_branch: str,
+) -> tuple[str, tuple[tuple[str, str], ...]] | None:
+    """HEAD oid와 `_base_candidate_refs`가 고를 후보들의 (ref, oid). git 호출 한 번이다.
+
+    `--revs-only`는 없는 ref를 조용히 빼므로 줄 수가 정확히 맞을 때만 믿는다. 하나라도
+    빠지면(upstream 미설정, `origin/<base>` 없음, unborn HEAD) None — 위치가 어긋난
+    oid로 키를 만들면 다른 상태의 값을 돌려준다.
+    """
+    upstream = f"{base_branch}@{{upstream}}"
+    result = git_safe(
+        "rev-parse", "--revs-only", "HEAD", base_branch, upstream, f"origin/{base_branch}",
+        "--symbolic-full-name", upstream,
+        cwd=project_root,
+        optional_locks=False,
+        timeout_s=_REVIEW_INPUT_TIMEOUT_S,
+    )
+    lines = result.stdout.split() if result.ok else []
+    if len(lines) != 5 or not all(_OID_PATTERN.fullmatch(oid) for oid in lines[:4]):
+        return None
+    head, base_oid, upstream_oid, origin_oid, tracked = lines
+    candidates = [(base_branch, base_oid)]
+    # `_base_candidate_refs`와 같은 선택이다. 두 규칙이 갈리면 캐시 값과 비캐시 값이 달라진다.
+    prefix = "refs/remotes/"
+    remote_ref = tracked[len(prefix):] if tracked.startswith(prefix) else ""
+    if remote_ref and _is_usable_base_ref(remote_ref):
+        if remote_ref != base_branch:
+            candidates.append((remote_ref, upstream_oid))
+    else:
+        candidates.append((f"origin/{base_branch}", origin_oid))
+    return head, tuple(candidates)
+
+
+def _committed_paths(
+    project_root: Path, head: str, candidates: Sequence[tuple[str, str]],
+) -> tuple[str, ...] | None:
+    """후보 rev마다 merge-base를 잡아 가장 새 기준점에서 `head`까지 바뀐 경로."""
+    resolved: list[_BaseCandidate] = []
+    for ref, rev in candidates:
+        result = git_safe(
+            "merge-base", head, rev,
+            cwd=project_root,
+            optional_locks=False,
+            timeout_s=_REVIEW_INPUT_TIMEOUT_S,
+            max_output_bytes=_REVIEW_INPUT_MAX_BYTES,
+        )
+        oid = result.stdout.strip() if result.ok else ""
+        if _OID_PATTERN.fullmatch(oid):
+            resolved.append(_BaseCandidate(ref=ref, oid=oid))
+    if not resolved:
+        return None
+    baseline = _newest_review_baseline(project_root, resolved).oid
+    result = git_safe(
+        "diff", "--name-only", "-z", "--no-renames", baseline, head,
+        cwd=project_root,
+        optional_locks=False,
+        timeout_s=_REVIEW_INPUT_TIMEOUT_S,
+        max_output_bytes=_REVIEW_INPUT_MAX_BYTES,
+    )
+    if not result.ok:
+        return None
+    return tuple(path for path in result.stdout.split("\0") if path)
+
+
 def review_document_scope(
     project_root: Path, run_meta: Mapping[str, object], *, base_branch: str | None = None,
 ) -> tuple[str, ...] | None:

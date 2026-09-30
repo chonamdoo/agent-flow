@@ -1,0 +1,91 @@
+{
+  "stack": "backend",
+  "profile": "python",
+  "task": "Add an orders listing endpoint to this Python service. Expose build_list_orders_handler(rows) that takes the stored order rows (dicts with order_id, customer_id, status, total_cents, placed_at) and returns a handler(query) -> {\"status\": int, \"body\": dict}. The handler requires customer_id, optionally filters by status (pending, paid, shipped, cancelled), returns that customer's orders newest first as {\"id\", \"status\", \"total\", \"placed_at\"} with the total formatted as a decimal string, rejects unknown statuses and a missing customer_id with a 400 error body, and shows an empty-state message when nothing matches. Keep the order storage behind whatever boundary this codebase expects so a real database can replace it later.",
+  "test_command": [
+    "python3",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tests",
+    "-t",
+    "."
+  ],
+  "modes": {
+    "clean": {
+      "install": [
+        "--architecture-mode",
+        "clean"
+      ]
+    },
+    "local": {
+      "install": [
+        "--architecture-mode",
+        "local",
+        "--architecture-skill",
+        "skills/architecture/SKILL.md"
+      ]
+    },
+    "team": {
+      "install": []
+    }
+  },
+  "review": {
+    "clean": {
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "mode-rule",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:ListOrders|list_orders\\.py|use ?case|\\bdomain\\b))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:InMemoryOrderRepository|data\\.orders|data layer|concrete (repository|implementation|adapter)))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:construct|instantiat|imports? (the )?(concrete|data|InMemory)|hard-?wired|creates|news? up|directly))"
+          },
+          {
+            "id": "bug",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:ListOrders|list_orders\\.py|sorted|placed_at))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:sort|order))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:ascending|oldest|invert|backwards?|wrong (order|direction)|not newest|instead of newest|missing (the )?reverse|without reverse|no reverse|reverse=True (is )?(missing|dropped|removed)|dropp\\w* (the )?reverse))"
+          }
+        ]
+      },
+      "clean": {
+        "expect": "approve"
+      }
+    },
+    "local": {
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "mode-rule",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:repository\\.py|CallableOrderRepository|OrderRepository))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:ord_\\w*|prefix|Protocol|\\bport\\b|interface|callable|load_rows|architecture|contract))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:violat|forbid|not allowed|must|should|banned|disallow|instead|reject|breaks|contradict|introduc))"
+          },
+          {
+            "id": "bug",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:_format_total|ord_service(\\.py)?|total))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:two (decimal|digit)|\\.2f|decimal places|trailing zero|12\\.5\\b|\\\"100\\\"|pad))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:drop|missing|los[te]|instead|wrong|not|without|\\\"f\\\"|12\\.5\\b|\\\"100\\\"))"
+          }
+        ]
+      },
+      "clean": {
+        "expect": "approve"
+      }
+    },
+    "team": {
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "mode-rule",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:models\\.py|OrderRowDTO|\\bOrder\\b))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:NamedTuple|named tuple|orders-team-conventions|team convention))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:dataclass|banned|must|should|instead|violat|replace))"
+          },
+          {
+            "id": "bug",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:list_customer_orders|listing\\.py|customer_id))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:filter|scop|other customers?|every customer|all customers|leak|isolation|필터|다른 고객|모든 고객|전체 고객|노출))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:ignor|unused|missing|never|dropp|not (filter|used|appl)|without|leak|all customers|other customers|every customer|쓰지 않|사용하지 않|검사하지 않|무관|노출|다른 고객|모든 고객))"
+          }
+        ]
+      },
+      "clean": {
+        "expect": null,
+        "note": "python installs pending by default; pending mode lets a reviewer ask for an architecture decision on a new module, so approve is not a fixed answer"
+      }
+    }
+  }
+}

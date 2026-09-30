@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
-from agent_flow.artifact import create_run
+from agent_flow.artifact import create_run, read_meta, write_meta
 from agent_flow.cli import main
 from agent_flow.core.architecture_policy import ArchitectureMode, architecture_snapshot
 from agent_flow.core.local_skills import architecture_contract_required, changed_files
@@ -21,6 +21,7 @@ from agent_flow.core.skill_resolver import (
     resolve_phase_skills,
     skill_roots,
 )
+from agent_flow.core.skill_scope import record_reviewer_documents
 from agent_flow.runner import Phase, Runner, _phases_from_definition
 from tests.test_architecture_selection import (
     AGENCY_ROOT,
@@ -99,16 +100,19 @@ def _adapter(runner: Runner, host: str) -> HostedAdapter:
     return adapter
 
 
-def _gate_text(resolution: SkillResolution, *, omit: str | None = None) -> str:
+def _gate_text(resolution: SkillResolution, *, omit: str | None = None, controller: bool = False) -> str:
     used = ", ".join(skill.name for skill in resolution.available_required if skill.name != omit)
+    # multi-review controller는 읽지 않은 규범의 읽음/적용을 자기신고하지 않는다.
+    read_claims = "" if controller else "skill-use-evidence: verified\n"
+    applied_claim = "" if controller else "project-local-skill-docs: applied\n"
     return (
         "## Completion Gate\n"
         f"skill-availability: {'degraded' if resolution.missing else 'pass'}\n"
-        "skill-use-evidence: verified\n"
+        f"{read_claims}"
         "test-run-evidence: unavailable\n"
         "project-local-skills: checked\n"
         f"project-local-skills-used: {used}\n"
-        "project-local-skill-docs: applied\n"
+        f"{applied_claim}"
         f"missing-required-profile-skills: {', '.join(skill.name for skill in resolution.missing) or 'none'}\n"
         f"architecture-contract: {'applied' if architecture_contract_required(resolution) else 'n/a'}\n"
         "must-avoid-check: pass\n"
@@ -120,18 +124,31 @@ def _assert_application_gate(
 ) -> None:
     assert runner.run_dir is not None
     artifact = runner.run_dir / (phase.artifact or f"{phase.id}.md")
-    complete = _gate_text(resolution)
+    complete = _gate_text(resolution, controller=phase.multi_review)
     artifact.write_text(complete, encoding="utf-8")
+    if phase.multi_review:
+        # controller의 증거는 runner가 기록한 reviewer 전달이다. 기록 전에는 막힌다.
+        blocked = runner._missing_required_markers(phase)
+        assert len(blocked) == 1 and "no independent reviewer delivery" in blocked[0], blocked
+        meta = read_meta(runner.run_dir)
+        record_reviewer_documents(
+            meta, phase.id, "codex", resolution.required_document_ids,
+            skill_names=[skill.name for skill in resolution.available_required],
+        )
+        write_meta(runner.run_dir, meta)
     assert runner._missing_required_markers(phase) == []
     for obligation in sorted(obligations):
         assert obligation in {skill.name for skill in resolution.available_required}
-        artifact.write_text(_gate_text(resolution, omit=obligation), encoding="utf-8")
+        artifact.write_text(
+            _gate_text(resolution, omit=obligation, controller=phase.multi_review), encoding="utf-8",
+        )
         missing = runner._missing_required_markers(phase)
         assert len(missing) == 1, missing
         assert missing[0].startswith("project-local-skills-used: "), missing
         assert obligation in missing[0].split(": ", 1)[1].split(", ")
-    artifact.write_text(complete.replace("project-local-skill-docs: applied\n", ""), encoding="utf-8")
-    assert runner._missing_required_markers(phase) == ["project-local-skill-docs: applied"]
+    if not phase.multi_review:
+        artifact.write_text(complete.replace("project-local-skill-docs: applied\n", ""), encoding="utf-8")
+        assert runner._missing_required_markers(phase) == ["project-local-skill-docs: applied"]
     if architecture_contract_required(resolution):
         artifact.write_text(complete.replace("must-avoid-check: pass", "must-avoid-check: n/a"), encoding="utf-8")
         assert "must-avoid-check: pass|fail" in runner._missing_required_markers(phase)
@@ -185,7 +202,9 @@ def test_clean_install_delivers_and_enforces_platform_contract(
         assert required["clean-architecture-core"].path.resolve() in norm_paths
         prompt = adapter.render_envelope(phase, runner.run_dir, project, skill_host=host)
         for name in obligations:
-            assert str(required[name].path) in prompt
+            # multi-review controller는 이름만 받는다. 본문 경로는 아래 reviewer job이 받는다.
+            expected = f"`{name}`" if phase.multi_review else str(required[name].path)
+            assert expected in prompt
         _assert_application_gate(runner, phase, resolution, obligations)
     jobs, _ = _reviewer_jobs(_phase(runner, "review"), runner.run_dir, project, adapter, providers=(host,))
     assert {"clean-architecture", "architecture-design"} <= {job.angle_id for job in jobs}
@@ -224,8 +243,9 @@ def test_local_install_delivers_anonymous_route_contract_to_author_and_reviewers
         assert not any("clean-architecture" in skill.name or "clean-presentation-architecture" in skill.name for skill in resolution.required)
         assert architecture_contract_required(resolution)
         prompt = adapter.render_envelope(phase, runner.run_dir, project, skill_host="omp")
+        # multi-review controller는 본문을 받지 않는다. 아래 reviewer job이 받는다.
         for content in snapshot.contract.contents:
-            assert content in prompt
+            assert (content in prompt) is not phase.multi_review
         _assert_application_gate(runner, phase, resolution, obligations)
     jobs, _ = _reviewer_jobs(_phase(runner, "review"), runner.run_dir, project, adapter, providers=("claude", "codex"))
     assert {"clean-architecture", "architecture-design"} <= {job.angle_id for job in jobs}
@@ -420,10 +440,12 @@ def test_local_install_delivers_distinct_frontend_policy_to_author_and_reviewers
         prompts.extend(job.prompt_by_provider[provider] for job in jobs)
     unrelated = next(policy[1] for name, policy in LOCAL_POLICIES.items() if name != case)
     unrelated_name = next(f"{name}-policy" for name in LOCAL_POLICIES if name != case)
-    for prompt in prompts:
+    for index, prompt in enumerate(prompts):
         assert f"name: {unrelated_name}" not in prompt
         for relative, body in documents.items():
-            assert relative in prompt
+            # 문서 경로 provenance는 author에게만 싣는다. reviewer는 본문만 받는다.
+            if index == 0:
+                assert relative in prompt
             assert body in prompt
         for body in unrelated.values():
             assert body not in prompt

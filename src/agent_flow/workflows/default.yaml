@@ -196,7 +196,7 @@ phases:
 
   - id: implement
     skills:
-      required: [code-generation-discipline, tdd, clean-architecture-core]
+      required: [code-generation-discipline, tdd, code-review, clean-architecture-core]
       optional: [codebase-design]
     description: |
       Behavior changes follow red → green → refactor per slice. Behavior-preserving

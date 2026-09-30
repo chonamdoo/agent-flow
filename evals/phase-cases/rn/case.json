@@ -1,0 +1,85 @@
+{
+  "stack": "rn",
+  "profile": "react-native",
+  "task": "Add the orders list screen logic for the React Native app: fetch the signed-in user's orders from GET /v1/orders (response shape {\"orders\": [{\"order_id\", \"placed_at\", \"total_cents\", \"status\"}]}) through the existing src/shared/http.ts, keep a screen state holder with loading, content, empty and error states, show orders newest first with totals formatted by src/shared/money.ts, and add an OrdersScreen that renders the state and lets the user retry after an error. A load that finishes after the screen unmounts must not update the screen state.",
+  "test_command": [
+    "node",
+    "--test",
+    "tests/*.test.ts"
+  ],
+  "modes": {
+    "clean": {
+      "install": [
+        "--architecture-mode",
+        "clean"
+      ]
+    },
+    "local": {
+      "install": [
+        "--architecture-mode",
+        "local",
+        "--architecture-skill",
+        "skills/architecture/SKILL.md"
+      ]
+    },
+    "team": {
+      "install": []
+    }
+  },
+  "review": {
+    "clean": {
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "mode-rule",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:orderFromDto|OrderDto))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:domain))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:import|depend|referenc|coupl|leak|violat|inward|direction))"
+          },
+          {
+            "id": "bug",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:sortNewestFirst|getTime|placedAt))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:sort|order))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:ascending|oldest|invert|backwards?|wrong (order|direction)|not newest|instead of newest|missing (the )?reverse|without reverse|no reverse|reverse=True (is )?(missing|dropped|removed)|dropp\\w* (the )?reverse))"
+          }
+        ]
+      },
+      "clean": {
+        "expect": "approve"
+      }
+    },
+    "local": {
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "mode-rule",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:orders\\.types(\\.ts)?|OrdersState\\b|OrderRow\\b|OrderShape|OrdersStateShape|\\bOrder\\b))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:Shape|suffix|type names?|naming))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:must|should|missing|lack|without|violat|renam|instead|not end|dropp|breaks|\\brequires\\b))"
+          },
+          {
+            "id": "bug",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:loadState|orders\\.store(\\.ts)?|createOrdersStore|\\bcatch\\b))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:empty))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:swallow|instead of (the |an )?`?error|mask|hid(e|es|ing)|indistinguishable|no error state|`?error`? (state )?(is )?(never|unreachable|lost)|never (reach|produce|enter)\\w*.{0,30}error|as (an? )?empty|treat\\w*.{0,40}empty|turn\\w*.{0,40}into.{0,20}empty|becomes? (an? )?empty|empty`?(로| 상태로)|구분되지 않))"
+          }
+        ]
+      },
+      "clean": {
+        "expect": "approve"
+      }
+    },
+    "team": {
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "mode-rule",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:ordersScreenStore(\\.ts)?|shared/http|getJson))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:\\.remote(\\.ts)?|remote module|rn-io-conventions))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:violat|must|should|move|belongs?|not allowed|outside|missing|no \\S*\\.remote|without|\\brequires\\b))"
+          },
+          {
+            "id": "bug",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:loadState|loadOrders|ordersScreenStore(\\.ts)?|createOrdersScreenStore|\\bload\\(\\)))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:catch|reject|throw|error state|fail))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:unhandled|no (try|catch|error state)|missing|without|stuck|never|remains? (in )?(the )?loading|propagat|escape|uncaught))"
+          }
+        ]
+      },
+      "clean": {
+        "expect": "approve"
+      }
+    }
+  }
+}

@@ -217,3 +217,83 @@ jobs:
           echo "frozen contracts: ${#contracts[@]}"
           PYTHONPATH=src python3 -m pytest "${contracts[@]}" \
             -q -p no:cacheprovider -o addopts="" -n auto
+
+  # 테스트 스위트와 병렬로 도는 별도 job이다. PR의 base kit과 head kit에
+  # `evals/phase_budget.py`를 각각 돌려(모델 호출 없음, 결정적) phase별 필수 skill과
+  # 프롬프트 바이트를 비교한다. 판정 기준은 maintainer/verification-policy.md의
+  # "phase skill 전달 회귀 평가"다.
+  phase-budget:
+    if: github.event_name == 'pull_request'
+    name: phase_budget ${{ matrix.kit }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        kit: [base, head]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      # 측정 스크립트는 head 것을 쓰고, 측정 대상 kit만 base/head 커밋의 트리로 바꾼다.
+      - name: Extract the kit under measurement
+        env:
+          REF: ${{ matrix.kit == 'base' && github.event.pull_request.base.sha || github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/kit"
+          git archive "$REF" | tar -x -C "$RUNNER_TEMP/kit"
+      - name: Measure
+        env:
+          AGENT_FLOW_SKIP_CODEX_TRUST: "1"
+          AGENT_FLOW_NO_UPDATE_CHECK: "1"
+          KIT: ${{ matrix.kit }}
+        run: python evals/phase_budget.py --kit "$RUNNER_TEMP/kit" --jobs 4 --output "budget-${KIT}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: budget-${{ matrix.kit }}
+          path: budget-${{ matrix.kit }}.json
+          retention-days: 14
+
+  # 의도한 변화면 PR 본문에 이유를 적고 `phase-budget-accepted` 라벨을 붙인 뒤 이 job만
+  # 다시 돌린다. 라벨은 이벤트 payload가 아니라 실행 시점의 PR에서 읽으므로 재실행에 반영된다.
+  phase-budget-compare:
+    if: github.event_name == 'pull_request'
+    needs: phase-budget
+    permissions:
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: budget-*
+          merge-multiple: true
+      - name: Compare base and head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          accept=()
+          if gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name' \
+              | grep -qx 'phase-budget-accepted'; then
+            accept=(--accept)
+          fi
+          python evals/phase_budget_compare.py budget-base.json budget-head.json \
+            --summary "$GITHUB_STEP_SUMMARY" "${accept[@]}"

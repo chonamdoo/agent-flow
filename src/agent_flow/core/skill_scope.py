@@ -16,7 +16,7 @@ agent가 파일을 만들면 `changed_files`가 자라고 required 집합도 자
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, NamedTuple, Sequence
 
 SCOPE_KEY = "skill_scope"
 # 형식이 바뀐 기록은 비교하지 않고 새로 잡는다. 형식 차이를 자람으로 보고하면
@@ -69,16 +69,93 @@ def reviewer_document_ids(meta: dict[str, Any], phase_id: str, provider: str) ->
     return tuple(values)
 
 
-def record_reviewer_documents(
-    meta: dict[str, Any], phase_id: str, provider: str, identities: Sequence[str],
-) -> None:
-    previous = reviewer_document_ids(meta, phase_id, provider)
+class ReviewerDelivery(NamedTuple):
+    """multi-review controller의 skill 증거. 둘 다 provider 합집합이다.
+
+    `delivered`: 성공한 reviewer 프롬프트에 runner가 실어 보낸 required skill 이름.
+    `deliverable`: 이 phase에서 돌린 reviewer host가 해석할 수 있었던 required skill 이름.
+    reviewer를 한 번도 돌리지 않았으면 None이다. 여기 없는 이름(controller host에만 있는
+    skill)은 어떤 reviewer에게도 보낼 수 없으므로 재실행을 요구해도 풀리지 않는다.
+    """
+
+    delivered: frozenset[str]
+    deliverable: frozenset[str] | None
+
+
+def _provider_names(record: dict[str, Any], key: str) -> frozenset[str] | None:
+    providers = record.get(key)
+    if providers is None:
+        return None
+    if not isinstance(providers, dict):
+        raise ValueError(f"invalid reviewer skill scope: {key}")
+    names: set[str] = set()
+    for values in providers.values():
+        if not isinstance(values, list) or any(not isinstance(value, str) or not value for value in values):
+            raise ValueError(f"invalid reviewer skill names: {key}")
+        names.update(values)
+    return frozenset(names)
+
+
+def reviewer_delivery(meta: dict[str, Any], phase_id: str) -> ReviewerDelivery:
+    """이 phase에서 runner가 독립 reviewer에게 보낸 skill 기록.
+
+    multi-review controller는 규범을 직접 읽지 않으므로 "적용했다"는 자기신고 대신 이 기록이
+    증거다. 이름으로 비교한다 — 문서 identity는 host별 route를 담아 controller 해석과 맞지 않는다.
+    """
+    record = _record(meta, phase_id)
+    if record is None:
+        return ReviewerDelivery(frozenset(), None)
+    # 두 기록 모두 기록한 그 scope revision에만 유효하다. scope가 자라거나(새 이름) 같은 이름의
+    # 문서 본문이 바뀌면(새 identity) revision이 오른다. 옛 전달 기록으로 통과시키면 새 규범을
+    # 아무 reviewer도 보지 않은 채 적용한 것으로 남고, 옛 해석 목록에 새 이름이 없다는 것을
+    # "어떤 reviewer host도 해석 못 한다"로 읽으면 재전달 요구가 사라진다.
+    revision = scope_revision(meta, phase_id)
+    delivered = (
+        _provider_names(record, "reviewer_skill_names") or frozenset()
+        if record.get("reviewer_skill_revision") == revision else frozenset()
+    )
+    return ReviewerDelivery(
+        delivered,
+        _provider_names(record, "reviewer_deliverable_names")
+        if record.get("reviewer_deliverable_revision") == revision else None,
+    )
+
+
+def _reviewer_record(meta: dict[str, Any], phase_id: str) -> dict[str, Any]:
     if _record(meta, phase_id) is None:
         merge_scope(meta, phase_id, ())
     record = _record(meta, phase_id)
     assert record is not None
+    return record
+
+
+def record_reviewer_deliverable(
+    meta: dict[str, Any], phase_id: str, provider: str, skill_names: Sequence[str],
+) -> None:
+    """reviewer job의 성패와 무관하게, 그 host가 해석한 required 이름을 현재 scope revision에 남긴다."""
+    record = _reviewer_record(meta, phase_id)
+    revision = scope_revision(meta, phase_id)
+    if record.get("reviewer_deliverable_revision") != revision:
+        record["reviewer_deliverable_names"] = {}
+        record["reviewer_deliverable_revision"] = revision
+    deliverable = record["reviewer_deliverable_names"]
+    deliverable[provider] = sorted(set(deliverable.get(provider, ())) | set(skill_names))
+
+
+def record_reviewer_documents(
+    meta: dict[str, Any], phase_id: str, provider: str, identities: Sequence[str],
+    *, skill_names: Sequence[str],
+) -> None:
+    previous = reviewer_document_ids(meta, phase_id, provider)
+    record = _reviewer_record(meta, phase_id)
     providers = record.setdefault("reviewer_document_ids", {})
     providers[provider] = sorted(set(previous) | set(identities))
+    revision = scope_revision(meta, phase_id)
+    if record.get("reviewer_skill_revision") != revision:
+        record["reviewer_skill_names"] = {}
+        record["reviewer_skill_revision"] = revision
+    delivered = record["reviewer_skill_names"]
+    delivered[provider] = sorted(set(delivered.get(provider, ())) | set(skill_names))
 
 
 def scope_revision(meta: dict[str, Any], phase_id: str) -> int:

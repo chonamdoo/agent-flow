@@ -6,7 +6,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from agent_flow.core.markers import (
     completion_gate_marker_values,
@@ -18,6 +18,8 @@ from agent_flow.core.profiles import (
     runtime_profile_selection,
 )
 from agent_flow.core.profile_routing import routed_profile_skills
+from agent_flow.core.review_input import branch_changed_paths, profile_base_branch
+from agent_flow.core.skill_scope import ReviewerDelivery
 from agent_flow.core.worktree_isolation import git_repo_state, git_safe
 from agent_flow.core.skill_resolver import (
     CODE_PHASES,
@@ -36,8 +38,12 @@ USE_EVIDENCE_MARKER = "skill-use-evidence: verified|unavailable"
 SKILLS_READ_LOG = Path(".agent-flow") / "skills-read.jsonl"
 
 
-def changed_files(project_root: Path) -> tuple[str, ...]:
-    """working tree + staged 변경 경로. git이 없거나 실패하면 빈 튜플로 degrade한다.
+def changed_files(project_root: Path, profile: Mapping[str, object] | None = None) -> tuple[str, ...]:
+    """working tree + staged 변경 경로 ∪ profile base의 merge-base..HEAD 커밋 경로.
+
+    git status만 보면 커밋한 뒤(`pr-comment-fix`, `pr-ci-fix`) 경로 라우팅 skill이 사라지는데
+    reviewer는 merge-base부터 diff를 본다. 그래서 리뷰와 같은 기준점을 쓴다. base나
+    merge-base를 못 잡으면 status만 쓴다. git이 없거나 실패하면 빈 튜플로 degrade한다.
 
     rename/copy 레코드는 `XY <new>\\0<old>\\0` 두 필드다. 레코드를 독립적으로 보고
     앞 3글자를 자르면 두 번째 필드(상태 접두사가 없는 원본 경로)에서 실제 문자
@@ -64,7 +70,12 @@ def changed_files(project_root: Path) -> tuple[str, ...]:
                 file=sys.stderr,
             )
         return ()
-    return _porcelain_paths(result.stdout)
+    status_paths = _porcelain_paths(result.stdout)
+    base = profile_base_branch(profile)
+    committed = branch_changed_paths(project_root, base) if base else None
+    if not committed:
+        return status_paths
+    return tuple(dict.fromkeys((*status_paths, *committed)))
 
 
 def _porcelain_paths(stdout: str) -> tuple[str, ...]:
@@ -293,6 +304,7 @@ def local_skill_prompt_block(
     provider_authority: str = "",
     role: str = "author",
     conditional_architecture_markers: bool = False,
+    delivered_to_reviewers: bool = False,
 ) -> str:
     """Render resolved local skill content for a phase prompt."""
     resolution = resolution or phase_skill_resolution(
@@ -313,7 +325,10 @@ def local_skill_prompt_block(
     )
     # 강제 지점과 같은 조건을 쓴다. 둘이 갈라지면 프롬프트가 다시 거짓말한다.
     enforced = skill_markers_enforced(phase_id)
-    block = skill_prompt_block(source_root or project_root, resolution, enforced=enforced, role=role)
+    block = skill_prompt_block(
+        source_root or project_root, resolution, enforced=enforced, role=role,
+        delivered_to_reviewers=delivered_to_reviewers,
+    )
     if not block:
         return ""
     routed_missing = _missing_routed_names(
@@ -331,6 +346,7 @@ def local_skill_prompt_block(
             contract_required=architecture_contract_required(resolution),
             conditional=conditional_architecture_markers,
         ),
+        delivered_to_reviewers=delivered_to_reviewers,
     )
 
 
@@ -350,8 +366,16 @@ def missing_local_skill_markers(
     context: ResolutionContext | None = None,
     provider_authority: str = "",
     conditional_architecture_markers: bool = False,
+    reviewer_delivery: ReviewerDelivery | None = None,
 ) -> list[str]:
-    """Return completion markers for locally unavailable skills."""
+    """Return completion markers for locally unavailable skills.
+
+    `reviewer_delivery` is set only for a multi-review controller: the runner's record of
+    required skill names rendered into independent reviewers' prompts this phase. The
+    controller never reads those norms, so that record — not its own
+    `skill-use-evidence`/`project-local-skill-docs` claim — is the evidence. A skill no
+    reviewer host could resolve is degraded, not blocking: rerunning reviews cannot deliver it.
+    """
     resolution = phase_skill_resolution(
         project_root,
         phase_id,
@@ -389,7 +413,42 @@ def missing_local_skill_markers(
     #     이 교환의 대가: 읽지 않고 `verified`라고 적으면 이제 통지 없이 통과한다.
     #     그것을 잡아내던 자리는 여기 하나뿐이었다. 남은 것은 "뭐라도 신고하게 하는"
     #     강제와, 막는 순간 붙는 진단뿐이다.
-    if values.get("skill-use-evidence") not in {"verified", "unavailable"}:
+    applied = [skill.name for skill in resolution.available_required]
+    undeliverable: list[str] = []
+    if reviewer_delivery is not None:
+        deliverable = reviewer_delivery.deliverable
+        undelivered = [
+            name for name in applied
+            if name not in reviewer_delivery.delivered
+            and (deliverable is None or name in deliverable)
+        ]
+        if undelivered:
+            # marker 모양(`key: value`)을 피한다. controller가 적어서 풀 수 있는 것이 아니다.
+            missing.append(
+                "(no independent reviewer delivery was recorded this phase for required "
+                f"skill documents {', '.join(undelivered)}; rerun the independent reviews "
+                "so the runner delivers them - the controller cannot certify them itself)"
+            )
+        # 어떤 reviewer host도 해석하지 못한 skill은 재실행으로도 전달되지 않는다. 막지 않되
+        # 적용한 것으로 적게 두지도 않는다: 이 phase의 커버리지는 degraded다.
+        undeliverable = [
+            name for name in applied
+            if name not in reviewer_delivery.delivered
+            and deliverable is not None and name not in deliverable
+        ]
+        if undeliverable:
+            applied = [name for name in applied if name not in undeliverable]
+            if values.get("skill-availability") != "degraded":
+                missing.append("skill-availability: degraded")
+                missing.append(
+                    "(no reviewer host could resolve required skill documents "
+                    f"{', '.join(undeliverable)}; no independent reviewer applied them, so "
+                    "leave them out of project-local-skills-used)"
+                )
+        # 적용 범위는 reviewer 쪽 기록이 기준이다. controller host에 없어도 reviewer가 받아
+        # 적용한 skill은 적용 목록에 들어간다.
+        applied += sorted(name for name in reviewer_delivery.delivered if name not in applied)
+    elif values.get("skill-use-evidence") not in {"verified", "unavailable"}:
         missing.append(USE_EVIDENCE_MARKER)
         # 진단은 marker 이름에 붙이지 않는다. 이 리스트는 runner가 "이 marker들을
         # artifact에 적어라"로 그대로 보여 주는 자리이고(`runner.py`가 `', '.join`으로
@@ -409,13 +468,21 @@ def missing_local_skill_markers(
     # L3: 자기신고는 표시용이다. resolver가 required로 판정하고 실제로 있는 것만 요구한다.
     if values.get("project-local-skills") != "checked":
         missing.append("project-local-skills: checked")
-    if resolution.available_required:
-        used = values.get("project-local-skills-used", "").strip()
-        if used in {"", "n/a", "none", "optional"} or not _mentions_required(used, resolution):
-            expected = ", ".join(skill.name for skill in resolution.available_required)
-            missing.append(f"project-local-skills-used: {expected}")
-        if values.get("project-local-skill-docs") != "applied":
+    used = values.get("project-local-skills-used", "").strip()
+    if applied:
+        if used in {"", "n/a", "none", "optional"} or not _mentioned_names(used) >= {
+            name.lower() for name in applied
+        }:
+            missing.append(f"project-local-skills-used: {', '.join(applied)}")
+        if reviewer_delivery is None and values.get("project-local-skill-docs") != "applied":
             missing.append(APPLIED_MARKER)
+    claimed = sorted(name for name in undeliverable if name.lower() in _mentioned_names(used))
+    if claimed:
+        missing.append(f"project-local-skills-used: {', '.join(applied) or 'none'}")
+        missing.append(
+            f"(project-local-skills-used names {', '.join(claimed)}, which no independent "
+            "reviewer received)"
+        )
 
     # L4: profile 표로 붙었는데 host에 없는 skill. 설치를 강요하지는 않지만,
     #     "없다"는 사실이 artifact에 이름으로 남아야 한다. `none`으로 덮으면
@@ -430,6 +497,9 @@ def missing_local_skill_markers(
         concerns=concerns,
         resolution=resolution,
     )
+    if reviewer_delivery is not None:
+        # controller host에 없어도 reviewer가 받았다면 이 phase에서 빠진 skill이 아니다.
+        routed_missing = [name for name in routed_missing if name not in reviewer_delivery.delivered]
     if routed_missing:
         declared = values.get("missing-required-profile-skills", "").strip()
         names = {
@@ -527,28 +597,33 @@ def _marker_instruction(
     routed_missing: Sequence[str] = (),
     role: str = "author",
     architecture_markers: Sequence[str] = (),
+    delivered_to_reviewers: bool = False,
 ) -> str:
-    """Describe evidence markers for the author or reviewer receiving the prompt."""
+    """Describe the author's evidence markers. Reviewers get none: the aggregate is controller-owned.
+
+    A multi-review controller is not asked to certify reading: the gate checks the
+    runner's record of what reached the reviewers instead.
+    """
     expected = ", ".join(skill.name for skill in resolution.available_required) or "n/a"
     availability = "degraded" if resolution.missing else "pass"
-    if not enforced:
+    if not enforced or role == "reviewer":
         return ""
+    read_claims = () if delivered_to_reviewers else ("skill-use-evidence: verified|unavailable",)
+    applied_claim = () if delivered_to_reviewers else (APPLIED_MARKER,)
     # 게이트가 요구하는 마커는 전부 여기 적는다. 하나라도 빠지면 계약대로 쓴
     # artifact가 반드시 한 번 거부되고, 그 순간 이 블록 전체가 신뢰를 잃는다.
     return "\n".join(
         [
             "",
-            "Current review aggregate markers (controller-owned after review; "
-            "not retroactive requirements for earlier author artifacts):"
-            if role == "reviewer" else "The `## Completion Gate` must include:",
+            "The `## Completion Gate` must include:",
             "",
             "```text",
             f"skill-availability: {availability}",
-            "skill-use-evidence: verified|unavailable",
+            *read_claims,
             *architecture_markers,
             "project-local-skills: checked",
             f"project-local-skills-used: {expected}",
-            APPLIED_MARKER,
+            *applied_claim,
             f"missing-required-profile-skills: {', '.join(routed_missing) or 'none'}",
             "```",
             "",
@@ -585,13 +660,12 @@ def _missing_routed_names(
     return [skill.name for skill in resolution.missing if skill.name in routed]
 
 
-def _mentions_required(value: str, resolution: SkillResolution) -> bool:
-    names = {
+def _mentioned_names(value: str) -> set[str]:
+    return {
         token.strip().lower()
         for token in value.replace(";", ",").split(",")
         if token.strip()
     }
-    return all(skill.name.lower() in names for skill in resolution.available_required)
 
 
 def _entry_timestamp(entry: dict) -> float:

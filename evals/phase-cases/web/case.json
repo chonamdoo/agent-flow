@@ -1,0 +1,85 @@
+{
+  "stack": "web",
+  "profile": "nextjs",
+  "task": "Add the orders list for the account area of the Next.js app: load the signed-in user's orders from GET /api/orders (response {\"orders\": [{\"order_id\", \"state\", \"placed_at\", \"total_cents\"}]}) through an injected getJson(path) transport, and expose the view state the orders screen renders — loading, error, empty and loaded — with the orders sorted for display.",
+  "test_command": [
+    "node",
+    "--test",
+    "tests/*.test.ts"
+  ],
+  "modes": {
+    "clean": {
+      "install": [
+        "--architecture-mode",
+        "clean"
+      ]
+    },
+    "local": {
+      "install": [
+        "--architecture-mode",
+        "local",
+        "--architecture-skill",
+        "skills/architecture/SKILL.md"
+      ]
+    },
+    "team": {
+      "install": []
+    }
+  },
+  "review": {
+    "clean": {
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "mode-rule",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:HttpOrderRepository|core/data))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:presentation|ordersViewState|loadOrdersViewState|view state))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:depend|import|concrete|coupl|instead of|violat|direction|inward))"
+          },
+          {
+            "id": "bug",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:<=\\s*1|loadOrdersViewState|ordersViewState(\\.ts)?))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:empty))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:single|one order|1 order|exactly one|off[- ]by[- ]one|<=\\s*1))"
+          }
+        ]
+      },
+      "clean": {
+        "expect": "approve"
+      }
+    },
+    "local": {
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "mode-rule",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:HttpOrdersRepository|ordersRepository(\\.ts)?|orders/data|\\bdata/))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:flat|sub-?folders?|sub-?director|nested|\\bclass\\b|repository|layer|role\\.feature|architecture|contract))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:violat|forbid|not allowed|must|should|breaks|contradict|instead|disallow|prohibit))"
+          },
+          {
+            "id": "bug",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:loadOrdersView\\b|view\\.orders(\\.ts)?|\\bcatch\\b|orders = \\[\\]))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:empty))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:swallow|instead of (the |an )?`?error|mask|hid(e|es|ing)|indistinguishable|no error state|`?error`? (state )?(is )?(never|unreachable|lost)|never (reach|produce|enter)\\w*.{0,30}error|as (an? )?empty|treat\\w*.{0,40}empty|turn\\w*.{0,40}into.{0,20}empty|becomes? (an? )?empty|empty`?(로| 상태로)|구분되지 않))"
+          }
+        ]
+      },
+      "clean": {
+        "expect": "approve"
+      }
+    },
+    "team": {
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "mode-rule",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:fetchOrders(\\.ts)?|/api/orders))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:EP_ORDERS|EP_|endpoints\\.ts|endpoint[- ]registry|web-endpoint-registry))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:literal|hard-?coded|inline|instead|must|should|violat))"
+          },
+          {
+            "id": "bug",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:getDate|sortOrdersForDisplay|placedAt))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:getDate|day[- ]of[- ](the[- ])?month|month|year))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:wrong|instead|ignor|only|incorrect|mis|across|discard))"
+          }
+        ]
+      },
+      "clean": {
+        "expect": "approve"
+      }
+    }
+  }
+}

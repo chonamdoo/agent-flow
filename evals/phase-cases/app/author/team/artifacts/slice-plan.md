@@ -1,0 +1,23 @@
+# Slice Plan: Orders list screen logic
+
+Architecture: not selected for this project (installer default); follow the team skill
+`skills/team-flutter-conventions/SKILL.md`. All files live in `lib/features/orders/`.
+
+## Slice 1 — Order model and repository
+- Scope: `Order` (`id`, `customerName`, `totalCents`, `placedAt` UTC) and a concrete
+  `OrdersRepository(ApiClient)` whose `fetchOrders()` calls `GET /orders` and decodes records
+  (`id`, `customer`, `total_cents`, `placed_at` ISO-8601).
+- Verification: `dart test/orders_repository_test.dart`.
+
+## Slice 2 — Orders list notifier
+- Scope: sealed `OrdersListState` (`OrdersLoading`, `OrdersLoaded(rows)`, `OrdersEmpty(message)`,
+  `OrdersError(message)`), `OrderRow` with `totalLabel` (`$12.50`), and
+  `OrdersListNotifier(OrdersRepository)` exposing `state` and `load()`.
+- Rows are sorted newest `placedAt` first.
+- Empty state: when the repository returns no orders, the state is `OrdersEmpty` whose `message` is
+  exactly `No orders in the last 90 days` (product copy, verbatim — no trailing period).
+- Request failures map to `OrdersError`.
+- Verification: `dart test/orders_list_notifier_test.dart`.
+
+## Out of scope
+- Widgets, routing, pull-to-refresh, pagination; changes to `lib/team/`.

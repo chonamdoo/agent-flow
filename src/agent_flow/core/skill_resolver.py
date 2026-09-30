@@ -5,7 +5,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from fnmatch import fnmatch
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -1024,7 +1024,7 @@ def catalog_stamp(files: Sequence[tuple[str, Path]]) -> str:
 
 def skill_prompt_block(
     project_root: Path, resolution: SkillResolution, *, enforced: bool = True,
-    role: str = "author",
+    role: str = "author", delivered_to_reviewers: bool = False,
 ) -> str:
     """resolver 결과만 프롬프트에 넣는다. profile YAML 전량 dump를 대체한다.
 
@@ -1040,21 +1040,39 @@ def skill_prompt_block(
     "먼저 skill을 호출하라"는 문서 패턴에 앵커링돼 프로젝트 컨텍스트를 놓쳤고,
     "프로젝트를 먼저 훑고 그 다음 호출하라"가 더 나은 결과를 냈다. 게이트는 순서도
     읽음 여부도 보지 않으므로, 강제는 그대로 두고 순서만 사실대로 권한다.
+
+    `delivered_to_reviewers`는 multi-review phase의 controller(author role)다. 규범
+    문서는 독립 reviewer가 받아 적용했으므로 controller에게 다시 읽히지 않는다.
     """
     if role not in {"author", "reviewer"}:
         raise ValueError(f"unknown envelope role: {role}")
     if not resolution.required and not resolution.optional and resolution.architecture_snapshot is None:
         return ""
+    controller = delivered_to_reviewers and role == "author"
     lines = ["\n## Required skills for this phase", ""]
     # 훈련 데이터의 일반 통념과 이 파일이 갈리면 파일이 이긴다. 우리 skill은
     # 일반 개념이 아니라 **이 프로젝트의 규범**이라, 기억으로 대체하면 조용히 틀린다.
-    lines.append(
-        "Prefer what these files say over what you already know. Where a skill and "
-        "your prior knowledge disagree, the skill wins — it is this project's norm, "
-        "not the general one."
-    )
-    lines.append("")
-    if resolution.required:
+    if not controller:
+        lines.append(
+            "Prefer what these files say over what you already know. Where a skill and "
+            "your prior knowledge disagree, the skill wins — it is this project's norm, "
+            "not the general one."
+        )
+        lines.append("")
+    if resolution.required and controller:
+        lines.extend((
+            "The runner delivers these documents to every independent reviewer whose host "
+            "can resolve them, and they apply them. Do not read them yourself; aggregate "
+            "the reviewers' artifacts. Report the reviewers' coverage in the completion "
+            "markers: `project-local-skills-used` lists the names below that reached a "
+            "reviewer. If the gate reports a name no reviewer host could resolve, record "
+            "`skill-availability: degraded` and leave that name out:",
+            "",
+        ))
+        lines.extend(f"- `{skill.name}`" + ("" if skill.exists else " — **MISSING**")
+                     for skill in resolution.required)
+        lines.append("")
+    elif resolution.required:
         lines.append(
             "Skim the actual change, then apply every required document below in your "
             "review. Verify the author's completion evidence without writing it; a read "
@@ -1084,7 +1102,7 @@ def skill_prompt_block(
                 hint = f" — install: {skill.install_hint}" if skill.install_hint else ""
                 lines.append(f"- `{skill.name}` — **MISSING**{hint}")
         lines.append("")
-    if resolution.optional:
+    if resolution.optional and not controller:
         lines.append("Optional — read only if the change touches their scope:")
         lines.append("")
         for skill in resolution.optional:
@@ -1118,6 +1136,8 @@ def skill_prompt_block(
                 "decision; a missing standard is not permission to approve structural work."
             )
         lines.append("")
+    if controller:
+        return "\n".join(lines)
     if any(not document.selected for document in resolution.normative_documents):
         lines.extend((
             "The full contract remains pinned. This required-read plan selects the root, "
@@ -1130,20 +1150,31 @@ def skill_prompt_block(
     if deliveries:
         lines.extend(("## Required-read plan", ""))
         for index, delivery in enumerate(deliveries, 1):
+            # reviewer 프롬프트는 digest로 전달된 문서 버전에 묶인다(계약이 바뀌면 prompt digest도
+            # 바뀐다). route/bytes 같은 나머지 provenance는 reviewer가 쓰지 않아 뺀다.
+            digest = f" (SHA-256: `{delivery.documents[0].document.sha256}`)" if role == "reviewer" else ""
             if delivery.inline:
-                lines.append(f"- Apply inline body {index} below; no file read is required for this body.")
+                lines.append(f"- Apply inline body {index} below{digest}; no file read is required for this body.")
             else:
-                lines.append(f"- Read `{delivery.documents[0].document.path}`.")
-        lines.extend((
-            "",
-            "## Normative provenance and inline bodies",
-            "",
-            "All paths, digests, and routes below are provenance only, not additional "
-            "read instructions. Each plan entry satisfies every selection route for "
-            "that exact body; all selected obligations still apply.",
-            "",
-        ))
+                lines.append(f"- Read `{delivery.documents[0].document.path}`{digest}.")
+        if role == "reviewer":
+            if any(delivery.inline for delivery in deliveries):
+                lines.extend(("", "## Inline bodies", ""))
+        else:
+            lines.extend((
+                "",
+                "## Normative provenance and inline bodies",
+                "",
+                "All paths, digests, and routes below are provenance only, not additional "
+                "read instructions. Each plan entry satisfies every selection route for "
+                "that exact body; all selected obligations still apply.",
+                "",
+            ))
     for index, delivery in enumerate(deliveries, 1):
+        if role == "reviewer":
+            if delivery.inline:
+                lines.extend((f"### Normative body {index}", "", delivery.content.decode("utf-8"), ""))
+            continue
         lines.append(f"### Normative body {index}")
         for item in delivery.documents:
             document = item.document
@@ -1494,17 +1525,28 @@ def entry_activation(
 
 def _glob_matches(pattern: str, candidate: str) -> bool:
     """Return whether a path matches a configured skill glob."""
-    # 대소문자를 접어서 본다. `fnmatch`는 POSIX에서 대소문자를 구분하므로
+    # 확장자만 대소문자를 접는다. `fnmatch`는 POSIX에서 대소문자를 구분하므로
     # `Button.TSX`가 `**/*.tsx`에 안 걸린다. 확장자 표기 하나로 skill 강제가
-    # 사라지는 쪽이 문서 한 장을 더 읽는 쪽보다 나쁘다.
-    folded_pattern = pattern.lower()
-    folded_candidate = candidate.lower()
-    if fnmatch(folded_candidate, folded_pattern):
+    # 사라지는 쪽이 문서 한 장을 더 읽는 쪽보다 나쁘다. 디렉터리는 접지 않는다 —
+    # 접으면 iOS의 `**/Presentation/**`가 웹의 `presentation/`에 걸려 다른 스택의
+    # 규범이 required로 붙는다.
+    folded_pattern = _fold_extension(pattern)
+    folded_candidate = _fold_extension(candidate)
+    if fnmatchcase(folded_candidate, folded_pattern):
         return True
     # `**/x` 는 최상위 경로에도 걸려야 한다. fnmatch는 이를 처리하지 않는다.
     if folded_pattern.startswith("**/"):
-        return fnmatch(folded_candidate, folded_pattern[3:])
+        return fnmatchcase(folded_candidate, folded_pattern[3:])
     return False
+
+
+def _fold_extension(path: str) -> str:
+    """Lowercase only the last segment's extension."""
+    head, _, name = path.rpartition("/")
+    stem, dot, extension = name.rpartition(".")
+    if not dot or not stem:
+        return path
+    return f"{head}/{stem}.{extension.lower()}" if head else f"{stem}.{extension.lower()}"
 
 
 def expand_dependencies(

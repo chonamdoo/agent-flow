@@ -12371,6 +12371,15 @@ def _write_node_review_results(
         ],
     }
     meta["review_evidence"] = evidence
+    # runner는 결과와 함께 각 reviewer 프롬프트에 실은 required skill을 기록한다.
+    # multi-review controller의 skill 증거는 이 기록이다.
+    from agent_flow.core.skill_scope import record_reviewer_documents
+
+    for outcome in outcomes:
+        record_reviewer_documents(
+            meta, phase_id, outcome["provider"], (f"{phase_id}-fixture-document",),
+            skill_names=_node_declared_skills(phase_id),
+        )
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
 
 

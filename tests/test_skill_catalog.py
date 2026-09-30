@@ -1392,7 +1392,7 @@ MIGRATED_DEPENDENCIES = {
     "react-native-clean-architecture": ["clean-architecture-core"],
     "python-api-clean-architecture": ["clean-architecture-core"],
     "grill-with-docs": ["domain-modeling", "grilling"],
-    "tdd": ["codebase-design", "code-review"],
+    "tdd": ["codebase-design"],
     "app-shell-error-contract": ["clean-architecture-core"],
     "android-appshell-error-handling": ["app-shell-error-contract"],
     "ios-app-shell-error-handling": ["app-shell-error-contract"],
@@ -1602,7 +1602,6 @@ def test_common_skill_selection_does_not_duplicate_transitive_dependencies():
     )[1].split("]);", 1)[0]
     transitive_dependencies = {
         "clean-architecture-core",
-        "code-review",
         "codebase-design",
         "domain-modeling",
         "grilling",

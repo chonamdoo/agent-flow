@@ -64,7 +64,7 @@ def _runner(tmp_path: Path, monkeypatch, changed: list[str]) -> Runner:
     run_dir = project / ".agent-flow" / "runs" / "r1"
     run_dir.mkdir(parents=True)
     write_meta(run_dir, {"task": "레이어 경계 정리"})
-    monkeypatch.setattr(runner_module, "changed_files", lambda root: tuple(changed))
+    monkeypatch.setattr(runner_module, "changed_files", lambda root, profile=None: tuple(changed))
 
     runner = Runner.__new__(Runner)
     runner.run_dir = run_dir
@@ -500,3 +500,114 @@ def test_gated_angles_use_only_eligible_reviewer_providers(tmp_path, monkeypatch
 
     assert "clean-architecture" not in {job.angle_id for job in claude_only}
     assert "clean-architecture" in {job.angle_id for job in codex_only}
+
+
+def test_multi_review_controller_skill_evidence_is_the_recorded_reviewer_delivery(tmp_path, monkeypatch):
+    """반증: controller는 규범을 읽지 않는다. 자기신고로 통과시키면 reviewer가 받지 못한
+    규범도 "applied"로 적힌다 — 증거는 runner가 기록한 reviewer 전달이어야 한다."""
+    from agent_flow.core.local_skills import APPLIED_MARKER, USE_EVIDENCE_MARKER, missing_local_skill_markers
+    from agent_flow.core.skill_resolver import PhaseSkills
+    from agent_flow.core.skill_scope import (
+        ReviewerDelivery,
+        record_reviewer_deliverable,
+        record_reviewer_documents,
+        reviewer_delivery,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    project = tmp_path / "proj"
+    skill = project / "skills" / "ordinary" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("ORDINARY_NORM\n", encoding="utf-8")
+    controller_artifact = (
+        "## Completion Gate\nskill-availability: pass\nproject-local-skills: checked\n"
+        "project-local-skills-used: ordinary\nmissing-required-profile-skills: none\n"
+    )
+
+    def gate(meta: dict) -> list[str]:
+        return missing_local_skill_markers(
+            controller_artifact, project, "review",
+            phase_skills=PhaseSkills(required=("ordinary",)),
+            reviewer_delivery=reviewer_delivery(meta, "review"),
+        )
+
+    meta: dict = {}
+    blocked = gate(meta)
+    assert any("ordinary" in item and "reviewer" in item for item in blocked), blocked
+    assert USE_EVIDENCE_MARKER not in blocked
+    assert APPLIED_MARKER not in blocked
+
+    # reviewer host가 해석했지만 그 job이 실패해 전달되지 않았다: 재실행으로 풀리므로 막는다.
+    record_reviewer_deliverable(meta, "review", "claude", ("ordinary",))
+    assert any("ordinary" in item and "reviewer" in item for item in gate(meta))
+
+    record_reviewer_documents(meta, "review", "codex", ("document-id",), skill_names=("ordinary",))
+    assert gate(meta) == []
+    # 다른 phase의 전달 기록은 이 phase의 증거가 아니다.
+    assert reviewer_delivery(meta, "multi-review") == ReviewerDelivery(frozenset(), None)
+    # multi-review가 아닌 phase는 여전히 자기신고를 요구한다.
+    assert USE_EVIDENCE_MARKER in missing_local_skill_markers(
+        controller_artifact, project, "review", phase_skills=PhaseSkills(required=("ordinary",)),
+    )
+
+    # 반증: controller host에만 있는 skill은 어떤 reviewer도 받을 수 없다. 재실행을 요구하면
+    # 두 reviewer가 정상 완료해도 풀리지 않는다. 그렇다고 "적용했다"로 통과시키면 아무도
+    # 적용하지 않은 규범이 기록에 남는다. 커버리지 부족(degraded)으로만 통과한다.
+    host_only: dict = {}
+    record_reviewer_deliverable(host_only, "review", "claude", ())
+    record_reviewer_deliverable(host_only, "review", "codex", ())
+    blocked = gate(host_only)
+    assert "skill-availability: degraded" in blocked
+    assert not any("rerun" in item for item in blocked)
+    degraded_artifact = (
+        "## Completion Gate\nskill-availability: degraded\nproject-local-skills: checked\n"
+        "project-local-skills-used: none\nmissing-required-profile-skills: none\n"
+    )
+    assert missing_local_skill_markers(
+        degraded_artifact, project, "review",
+        phase_skills=PhaseSkills(required=("ordinary",)),
+        reviewer_delivery=reviewer_delivery(host_only, "review"),
+    ) == []
+    # 반증: degraded로 적고도 아무 reviewer도 받지 못한 이름을 적용 목록에 올리면 통과하면 안 된다.
+    claimed = missing_local_skill_markers(
+        degraded_artifact.replace("project-local-skills-used: none", "project-local-skills-used: ordinary"),
+        project, "review",
+        phase_skills=PhaseSkills(required=("ordinary",)),
+        reviewer_delivery=reviewer_delivery(host_only, "review"),
+    )
+    assert any("ordinary" in item and "no independent reviewer received" in item for item in claimed), claimed
+    # 반증: reviewer가 돈 뒤 scope가 자라 새 required 이름이 생겼다. 옛 해석 목록에 없다는 것은
+    # "어떤 reviewer host도 해석 못 한다"의 근거가 아니다 — degraded로 넘기지 말고 재리뷰를 요구한다.
+    merge_scope(host_only, "review", ("ordinary",))
+    grown = missing_local_skill_markers(
+        degraded_artifact, project, "review",
+        phase_skills=PhaseSkills(required=("ordinary",)),
+        reviewer_delivery=reviewer_delivery(host_only, "review"),
+    )
+    assert any("ordinary" in item and "rerun" in item for item in grown), grown
+
+    # 반증: 같은 이름의 규범 본문이 리뷰 뒤에 바뀌었다(새 문서 identity). 옛 전달 기록은 새 본문을
+    # 본 reviewer가 있다는 근거가 아니다.
+    body: dict = {}
+    merge_scope(body, "review", ("ordinary",), document_ids=("doc-v1",))
+    record_reviewer_deliverable(body, "review", "codex", ("ordinary",))
+    record_reviewer_documents(body, "review", "codex", ("doc-v1",), skill_names=("ordinary",))
+    assert gate(body) == []
+    merge_scope(body, "review", ("ordinary",), document_ids=("doc-v2",))
+    assert any("ordinary" in item and "rerun" in item for item in gate(body)), gate(body)
+
+    # 반증(대칭): reviewer host에만 있는 skill은 controller 해석에 없어도 reviewer가 적용했다.
+    # 적용 목록에서 빼면 aggregate가 실제 reviewer 커버리지를 빠뜨린다.
+    reviewer_only: dict = {}
+    merge_scope(reviewer_only, "review", ("ordinary",))
+    record_reviewer_deliverable(reviewer_only, "review", "codex", ("ordinary", "reviewer-only"))
+    record_reviewer_documents(
+        reviewer_only, "review", "codex", ("doc",), skill_names=("ordinary", "reviewer-only"),
+    )
+    assert "project-local-skills-used: ordinary, reviewer-only" in gate(reviewer_only)
+    assert missing_local_skill_markers(
+        controller_artifact.replace("used: ordinary", "used: ordinary, reviewer-only"),
+        project, "review",
+        phase_skills=PhaseSkills(required=("ordinary",)),
+        reviewer_delivery=reviewer_delivery(reviewer_only, "review"),
+    ) == []

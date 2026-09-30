@@ -1,0 +1,6 @@
+[project]
+name = "orders-service"
+version = "0.1.0"
+description = "Orders HTTP service"
+requires-python = ">=3.9"
+dependencies = []
