@@ -658,12 +658,12 @@ def test_codex_only_full_matrix_exports_a_recomputable_private_record(gate, tmp_
 
 
 @pytest.mark.parametrize("observed", [False, None])
-def test_codex_only_false_or_unknown_reads_cannot_pass_the_strict_gate(gate, tmp_path, observed):
+def test_codex_only_lost_or_unknown_read_evidence_blocks_export(gate, tmp_path, observed):
     roles = {"author": "codex", "review": ["codex"]}
     rows = [row for kit in ("before", "after") for row in rows_for(kit, author="codex", reviewers=("codex",))]
     for row in rows:
         for angle in row.get("angles", []):
-            angle["documents"] = [document(observed)]
+            angle["documents"] = [document(True if row["kit"] == "before" else observed)]
     run = write_run(tmp_path / "run", rows, meta={
         **META, "requested_providers": roles, "requested_models": {"claude": None, "codex": "gpt-6-astra"},
     })
