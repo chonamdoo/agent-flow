@@ -692,8 +692,10 @@ def run_review(kit_name: str, kit: Path, case_dir: Path, mode: str, variant: str
     row["valid"] = overall != "incomplete"
     row["correct"] = overall == spec["expect"] if row["valid"] and spec["expect"] else None
     # 잘린 사본이 아니라 전문에서, 유효한 request-changes 출력의 finding 안에서만 찾는다.
+    # 단일 줄 inline-code 표기는 구간·문단 경계를 유지한 채 의미 패턴과 비교한다.
     findings = [
-        (a, _findings(text)) for a, text in zip(angles, full_texts) if a["verdict"] == "request-changes"
+        (a, re.sub(r"(?<!`)(`+)([^`\n]+)\1(?!`)", r"\2", _findings(text)))
+        for a, text in zip(angles, full_texts) if a["verdict"] == "request-changes"
     ]
     row["defects"] = {}
     row["defect_detectors"] = {}

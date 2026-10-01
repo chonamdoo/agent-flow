@@ -469,3 +469,31 @@ def test_codex_recovered_stream_error_preserves_warning_not_invalid_result(evalu
     assert row["valid"] is True
     assert row["angles"][0]["provider_warnings"] == ["Reconnecting after transport failure"]
     assert row["usage"]["uncached_input"] == 10
+
+
+@pytest.mark.parametrize("state", ["empty", "`empty`", "``empty``"])
+@pytest.mark.parametrize("section,detected", [("Must-fix", True), ("Notes", False)])
+def test_error_defect_detection_is_independent_of_inline_code_not_finding_scope(
+    evaluator, monkeypatch, tmp_path, state, section, detected,
+):
+    report = (
+        "## Reviewer\nreviewer-source: sub-agent\n"
+        f"### {section}\n"
+        f"- <severity:high> [src/orders/orders.store.ts:29] Rejected loads become {state}, "
+        "violating SPEC-5 and making the screen's error/retry branch unreachable. "
+        "Return an error state and add a rejected-load retry regression test.\n"
+        "verdict: request-changes"
+    )
+    stdout = "\n".join(json.dumps(event) for event in [
+        {"type": "item.completed", "item": {"type": "agent_message", "text": report}},
+        {"type": "turn.completed", "usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 2}},
+    ])
+    monkeypatch.setattr(evaluator, "_prepare_subprocess", lambda *args: {
+        "jobs": [{"angle": "generalist", "provider": "codex", "prompt": "Review this change."}],
+    })
+    monkeypatch.setattr(evaluator, "_run_cli", lambda args, *rest:
+                        subprocess.CompletedProcess(args, 0, stdout, ""))
+    row = evaluator.run_review(
+        "after", ROOT, ROOT / "evals/phase-cases/rn", "local", "defect", 1, tmp_path, 10,
+    )
+    assert row["defects"]["bug"] is detected
