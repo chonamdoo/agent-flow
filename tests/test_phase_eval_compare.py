@@ -687,3 +687,23 @@ def test_provider_failure_rows_remain_invalid_and_are_preserved_in_export(gate, 
     assert gate.kit_metrics(exported, "before")["invalid_rate"] == 2 / 30
     assert exported[0]["error"] is True
     assert exported[1]["valid"] is False and exported[1]["error"] is True
+
+
+def test_unknown_author_reads_keep_floor_and_failed_behavior_scored(gate, tmp_path):
+    rows = [row for kit in ("before", "after") for row in rows_for(kit, author="codex")]
+    authors = [row for row in rows if row["kit"] == "after" and row["scenario"] == "author"]
+    for row in authors:
+        row.update(required_read=["a"], required_unread=None, required_unobserved=["b"])
+    authors[0]["oracle"]["behavior"] = False
+    run = write_run(tmp_path / "run", rows, meta={
+        **META, "requested_providers": {"author": "codex", "review": ["claude", "codex"]},
+    })
+    destination = tmp_path / "record"
+    _, failures = gate.compare([run], "before", "after", THRESHOLDS, export=destination)
+    metrics = gate.kit_metrics(rows, "after")
+    assert metrics["author_required_read_rate"] == 0.5
+    assert metrics["author_pass_rate"] == 2 / 3
+    assert metrics["invalid_rate"] == 0
+    assert any("author_required_read_rate" in failure for failure in failures)
+    assert any("author_pass_rate" in failure for failure in failures)
+    assert not destination.exists()

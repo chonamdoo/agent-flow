@@ -85,8 +85,19 @@ def malformed_fields(row: dict) -> list[str]:
     # A scored unit without complete usage cannot be checked for token efficiency, so it is malformed.
     problems = [f"usage.{axis}" for axis in TOKEN_AXES if not (isinstance(usage, dict) and _count(usage.get(axis)))]
     if row["scenario"] == "author":
-        return problems + [key for key in ("required_read", "required_unread")
-                           if not (isinstance(row.get(key), list) and all(isinstance(name, str) for name in row[key]))]
+        groups = {key: row.get(key) for key in ("required_read", "required_unread")}
+        groups["required_unobserved"] = row.get("required_unobserved", [])
+        if "required_unread" in row and groups["required_unread"] is None and groups["required_unobserved"]:
+            groups["required_unread"] = []
+        problems.extend(
+            key for key, names in groups.items()
+            if not (isinstance(names, list) and all(isinstance(name, str) for name in names))
+        )
+        if not any(key in problems for key in groups):
+            names = [name for group in groups.values() for name in group]
+            if len(names) != len(set(names)):
+                problems.append("required_read/required_unread/required_unobserved overlap")
+        return problems
     if "expected" not in row:
         problems.append("expected")
     expected = row.get("expected")
@@ -341,7 +352,8 @@ def kit_metrics(rows: list[dict], kit: str) -> dict[str, float | None]:
     reviews = [row for row in own if row["scenario"] == "review" and not _invalid(row)]
 
     read = sum(len(row["required_read"]) for row in authors)
-    unread = sum(len(row["required_unread"]) for row in authors)
+    unread = sum(len(row["required_unread"] or []) for row in authors)
+    unobserved = sum(len(row.get("required_unobserved", [])) for row in authors)
     scored = [row["oracle"] for row in authors]
     judged = [row["correct"] for row in reviews if row.get("expected") is not None]
     seeded = [found for row in reviews if row.get("expected") == "request-changes" for found in row["defects"].values()]
@@ -354,7 +366,7 @@ def kit_metrics(rows: list[dict], kit: str) -> dict[str, float | None]:
         if not document.get("inline_in_prompt") and document.get("read_path_observed") is not None
     ]
     return {
-        "author_required_read_rate": _rate(read, read + unread),
+        "author_required_read_rate": _rate(read, read + unread + unobserved),
         "author_pass_rate": _rate(sum(all(oracle[axis] for axis in AXES) for oracle in scored), len(scored)),
         "review_correct_rate": _rate(sum(judged), len(judged)),
         "defect_detection_rate": _rate(sum(bool(found) for found in seeded), len(seeded)),

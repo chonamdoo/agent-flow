@@ -606,7 +606,8 @@ def run_author(kit_name: str, kit: Path, case_dir: Path, mode: str, trial: int, 
     unobserved = sorted(n for n, p in required_paths.items()
                         if p not in read_real and p not in failed and not complete)
     row["required_unobserved"] = unobserved
-    row["required_unread"] = None if unobserved else sorted(n for n, p in required_paths.items() if p not in read_real)
+    unread = sorted(n for n, p in required_paths.items() if p not in read_real and (p in failed or complete))
+    row["required_unread"] = unread if unread or not unobserved else None
     row["required_read_rate"] = (round(len(row["required_read"]) / len(required_paths), 3)
                                  if required_paths and not unobserved else None)
     row["required_read_rate_scope"] = "Successful SKILL.md read paths, not full-body or reference coverage"
@@ -620,8 +621,6 @@ def run_author(kit_name: str, kit: Path, case_dir: Path, mode: str, trial: int, 
     row["failed_reads"] = sorted(result.get("failed_reads", []))
     row.update({k: result.get(k) for k in ("usage", "cost_usd", "turns", "seconds", "rc", "error",
                                         "execution", "models_observed", "provider_warnings")})
-    if unobserved and not row.get("error"):
-        row["error"] = "required skill read observation unavailable: " + ", ".join(unobserved)
     row["documents"] = prepared.get("documents", [])
     row["norm_scope"] = "case-specific fixture contract; general architecture correctness is unverified"
     row["oracle"] = _oracle(case_dir, "author", "--project", str(project), "--mode", mode)

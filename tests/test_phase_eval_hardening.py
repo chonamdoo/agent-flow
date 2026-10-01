@@ -443,7 +443,7 @@ def test_codex_unattributed_command_reads_remain_unknown(evaluator, monkeypatch,
     assert row["angles"][0]["documents"][0]["read_path_observed"] is None
 
 
-def test_codex_author_missing_read_channel_is_invalid_not_unread(evaluator, monkeypatch, tmp_path):
+def test_codex_author_missing_read_channel_preserves_unknown_and_behavior(evaluator, monkeypatch, tmp_path):
     evaluator.REQUESTED_PROVIDERS.update(author="codex", review=["codex"])
     monkeypatch.setattr(evaluator, "_prepare_subprocess", lambda *args: {
         "prompt": "Implement.", "required": [{"name": "policy", "path": str(tmp_path / "SKILL.md")}],
@@ -456,8 +456,7 @@ def test_codex_author_missing_read_channel_is_invalid_not_unread(evaluator, monk
     assert row["required_unread"] is None
     assert row["required_unobserved"] == ["policy"]
     assert row["required_read_rate"] is None
-    assert row["error"]
-    assert row["oracle"] == {"behavior": True, "plan": True, "norm": True}
+    assert not row["error"]
 
 
 def test_codex_recovered_stream_error_preserves_warning_not_invalid_result(evaluator, monkeypatch, tmp_path):

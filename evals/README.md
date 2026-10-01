@@ -212,7 +212,9 @@ Codex도 성공한 명시적 읽기 경로와 실제 문서 내용이 출력에�
 양쪽 kit에 같은 관측 계약을 덧붙인다. Codex는 skill마다 literal 경로의 단독 `cat` 또는
 `sed` 출력 명령을 사용하도록 요청한다. Python 일괄 읽기·불명확한 복합 명령은
 성공 경로로 추정하지 않는다. 미관측 author 필수 읽기는 읽기 실패로 바꾸지 않고
-`required_unobserved`와 `required_unread: null`로 남기며, 관측 불완전 시행으로 무효율에 포함한다.
+`required_unobserved`와 `required_unread: null`로 남긴다. 미관측 필수 skill도 author 읽음률
+분모에는 포함한다. 실제 읽음 증거가 없는 시행을 무효 처리해 0.95 읽음률 기준이나
+실패한 behavior 판정을 피할 수 없다. 알려진 읽기 실패는 별도 `required_unread`에 남긴다.
 리뷰 보고서는 영어로 요청한다. 기존 case의 영어 의미 패턴이 정상적인 한국어 결함 지적을
 놓치는 일을 방지하기 위한 출력 언어 통제이며, 결함 정답·탐지 패턴·판정 기준은 바꾸지 않는다.
 `review_report_language: "en"`을 비교 조건에 기록한다. 복구된 stream 오류는 warning과 원자료에
