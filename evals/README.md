@@ -182,14 +182,17 @@ bytes/4 추정이다.
 `phase-cases/{web,rn,app,backend}` × `clean`/`local`/`team`(설치 기본 mode + 팀
 skill)마다 두 kit를 설치하고 각 kit의 prompt를 그대로 쓴다.
 
-- author: full-feature `green` envelope로 Claude 세션 하나가 구현한다.
+- author: full-feature `green` envelope로 `--author-provider`가 선택한 Claude 또는
+  Codex 세션 하나가 구현한다(기본값 `claude`).
   `oracle.py`가 behavior(red 테스트를 원본으로 되돌린 뒤 실행), plan(slice-plan에만
   있는 요구를 검사하는 hidden 테스트), norm(mode 규칙, 정적 검사)을 채점한다.
-  필수 SKILL.md 읽음률은 성공한 `Read` 경로만 센다. 전체 본문·reference 읽음이나
+  필수 SKILL.md 읽음률은 관측된 성공한 읽기 경로만 센다. Claude는 `Read`, Codex는
+  성공한 shell 읽기 명령의 경로와 실제 문서 내용 출력을 확인한다. 전체 본문·reference 읽음이나
   실제 규칙 준수의 증거로 해석하지 않는다. norm은 case의 fixture 계약 검사이며
   일반적인 Clean Architecture 인증이 아니다.
-- review: 실제 multi-review 리뷰어 job(모든 관점 × claude/codex)을 결함 diff와
-  정상 diff에 돌린다. run 폴더에는 author와 같은 prd·ddd-design·slice-plan과
+- review: 실제 multi-review 리뷰어 job에서 `--review-providers`가 선택한 provider를
+  모든 관점에 적용해 결함 diff와 정상 diff를 검토한다(기본값 `claude,codex`).
+  run 폴더에는 author와 같은 prd·ddd-design·slice-plan과
   design-spec을 두고, 리뷰 대상 트리의 테스트 실행 기록(`test-evidence.md`, 전체 출력)을
   남긴다. 테스트는 프로젝트 복사본에서 돌려 실행 부산물이 리뷰 diff에 섞이지 않게 한다
   (`review_test_command`가 있으면 그것을 쓴다). 런타임과 같은 판정 계약을 쓰고, 무효
@@ -199,15 +202,47 @@ skill)마다 두 kit를 설치하고 각 kit의 prompt를 그대로 쓴다.
 
 Claude 리뷰어는 `plan` 대신 `default` permission mode에서 `Read,Glob,Grep`만
 사용한다. Write/Edit/Bash/Agent는 제공하지 않는다. 이는 평가 CLI의 도구 제한이지
-host 전체의 파일시스템 sandbox가 아니다. author의 쓰기 권한은 바꾸지 않았다.
+host 전체의 파일시스템 sandbox가 아니다. Codex author는 `workspace-write`,
+리뷰어는 `read-only` sandbox로 native Codex CLI를 호출한다.
 성공한 Claude Read 경로와 문서별 SHA·inline 본문 포함 여부를 별도로 남긴다.
-Codex의 shell 읽기는 이 지표로 정규화하지 않으므로 미관측은 `null`이다.
+Codex도 성공한 명시적 읽기 경로와 실제 문서 내용이 출력에서 관측되면 문서 읽음으로 센다.
+실패한 읽기, 모호한 경로, 모델의 자기신고, grep 명령 문장만으로는 읽었다고 보지 않는다.
+관측할 수 없는 문서 읽음은 `null`로 남긴다. `null`과 inline 본문은 읽음률 분모에서 제외하며,
+미관측을 읽기 실패(`false`)로 바꾸지 않는다.
+양쪽 kit에 같은 관측 계약을 덧붙인다. Codex는 skill마다 literal 경로의 단독 `cat` 또는
+`sed` 출력 명령을 사용하도록 요청한다. Python 일괄 읽기·불명확한 복합 명령은
+성공 경로로 추정하지 않는다. 미관측 author 필수 읽기는 읽기 실패로 바꾸지 않고
+`required_unobserved`와 `required_unread: null`로 남기며, 관측 불완전 시행으로 무효율에 포함한다.
+리뷰 보고서는 영어로 요청한다. 기존 case의 영어 의미 패턴이 정상적인 한국어 결함 지적을
+놓치는 일을 방지하기 위한 출력 언어 통제이며, 결함 정답·탐지 패턴·판정 기준은 바꾸지 않는다.
+`review_report_language: "en"`을 비교 조건에 기록한다. 복구된 stream 오류는 warning과 원자료에
+보존하고, terminal 실패·복구되지 않은 오류·실패 종료는 무효 시행으로 남긴다.
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python evals/phase_eval.py --kit before=<dir> --kit after=<dir> \
   --scenario author,review --trials 1 --concurrency 10 \
   --claude-model <model> --codex-model <model> --output <new dir>
 ```
+
+Astra만으로 전체 릴리스 행렬을 측정하려면 다음과 같이 실행한다. Codex CLI 인증과
+`gpt-6-astra` 접근 권한이 필요하다. 선택하지 않은 Claude CLI는 버전 확인에도 호출하지 않는다.
+author와 리뷰 모두 실제 모델을 실행하며, source review만으로 대체하지 않는다.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python evals/phase_eval.py \
+  --kit before=<이전 릴리스 트리> --kit after=<새 kit> \
+  --scenario author,review --author-provider codex --review-providers codex \
+  --codex-model gpt-6-astra --trials 3 --concurrency 10 --output <new dir>
+python evals/phase_eval_compare.py <new dir> --summary <new dir>/gate.md \
+  --export evals/release-gates/v0.3.9
+```
+
+4개 stack × 3개 mode × author·review-defect·review-clean × 2개 kit × 3회,
+총 216 unit을 유지한다. reviewer provider 선택은 unit 수나 품질·토큰 기준값을 줄이지 않는다.
+빈 reviewer 목록, 미지원 provider, 중복 reviewer는 프로젝트 준비와 CLI 실행 전에 거부한다.
+이 단일 모델 평가는 독립적인 Claude+Codex 리뷰와 동등하지 않으며, 런타임 multi-review의
+독립 provider 요구나 workflow 자동 시작 조건을 바꾸지 않는다.
+
 
 결과는 `results/phase-<kit 버전>-<YYYYMMDD>/`에 둔다. 원자료는 크기 때문에 gzip으로
 저장한다. `phase_budget.py` 출력은 `budget-<kit>.json.gz`, `phase_eval.py`가 출력 폴더에
@@ -236,11 +271,23 @@ python evals/phase_eval_compare.py <new dir> --summary <new dir>/gate.md \
   --export evals/release-gates/v<버전>
 ```
 
-각 출력 폴더는 실제 행의 모든 kit 지문과 Claude·Codex의 비어 있지 않은 모델 이름을 기록해야
-한다. 폴더 사이에서 같은 kit의 지문이 다르면 실패한다. 두 kit의 조합별 trial ID 집합도 같아야
+각 출력 폴더는 실제 행의 모든 kit 지문과 `requested_providers` 역할 설정을 기록해야 한다.
+예를 들어 Astra-only는 `{"author":"codex","review":["codex"]}`이며, `requested_models`는
+`{"claude":null,"codex":"gpt-6-astra"}`다. 활성 provider 모델은 명시한 비어 있지 않은 문자열,
+비활성 provider 모델은 `null`이어야 한다. 비활성 CLI 버전도 `null`로 남긴다.
+폴더 사이의 `evaluator_sha256`, `case_files`, 역할·모델 설정, `review_report_language`는 모두 같아야 하며,
+같은 kit의 지문이 다르면 실패한다. 채점된 author의 `provider`는 선언한 author와 같아야 한다.
+채점된 리뷰에는 선택한 모든 provider의 관점 수가 같아야 하고, `subprocesses`는 `angles` 수와
+같아야 한다. 빈 리뷰나 provider 재표기로 채점을 바꿀 수 없다. 두 kit의 조합별 trial ID 집합도 같아야
 한다. 리뷰 행의 `expected`와 결함 ID는 `case_files`의 해시가 일치하는 `case.json`과 대조한다.
 행에서 기대 판정이나 결함을 지워 분모를 줄일 수 없다. case가 명시한 `expect: null`은 그대로
 허용한다. 무효 시행은 각 kit의 무효율에 포함하고, 양쪽 모두 유효한 unit만 토큰 비교에 사용한다.
+
+평가 방식 변경: Codex 문서 읽음도 관측된 성공 경로로 집계하고 provider 역할과 영어 보고서
+조건을 비교에 추가했다. 이전 기록에 역할·언어 조건이 없으면 조건 미상으로 거부한다.
+과거 기록을 새 형식으로 덧씌우거나 새 평가와 섞지 않는다. 오류·무효 행은 지우지 않고 기존
+무효율 기준으로 판정한다.
+
 
 `release.yml`은 태그를 배포하기 전에 태그 트리의 `evals/release-gates/<태그>/`를 태그 트리의
 이 스크립트와 기준으로 다시 판정한다. 기록이 없거나 판정이 실패하면 태그를 거부한다. 다음과
@@ -259,7 +306,8 @@ kit 지문은 디렉터리 안의 모든 파일로 계산하고, 태그 쪽은 g
 그래서 측정할 kit은 `git archive`로 풀거나 추적 파일만 복사한 트리를 쓴다. 작업 트리에 남은
 `.DS_Store` 같은 파일 하나만 있어도 지문이 달라져 태그가 거부된다.
 
-기록에는 판정에 쓰는 필드만 남긴다. 로컬 경로, argv, 리뷰어 출력 원문은 빠진다. 원자료는
+기록에는 역할·모델을 포함한 모든 비교 조건, author의 `provider`, 리뷰의 provider별 관측과
+판정에 쓰는 필드만 남긴다. 로컬 경로, argv, 리뷰어 출력 원문은 빠진다. 원자료는
 측정한 곳에 따로 보관한다. 이 검사는 측정 없이 태그하는 실수를 막는다. 커밋 권한이 있는
 사람이 행을 꾸며 넣는 것까지 막지는 못한다.
 

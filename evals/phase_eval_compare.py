@@ -4,9 +4,9 @@
         [--before before] [--after after] [--thresholds evals/phase-eval-thresholds.json] [--summary out.md]
 
 Pass one `phase_eval.py` output directory that measured both kits, or one directory per kit.
-Every directory must record `evaluator_sha256`, `requested_models`, `case_files` and `units`,
-and the directories must agree on the first three; results measured under different or
-unknown conditions are not compared.
+Every directory must record `evaluator_sha256`, `requested_providers`, `requested_models`,
+`review_report_language`, `case_files` and `units`, and agree on all measurement conditions; results
+under different or unknown conditions are not compared.
 
 Failure conditions come from the thresholds file:
 - a results file is incomplete (fewer rows than `units`, unparseable lines) or has duplicate units;
@@ -45,7 +45,8 @@ from typing import IO
 
 DEFAULT_THRESHOLDS = Path(__file__).resolve().parent / "phase-eval-thresholds.json"
 DEFAULT_CASES = Path(__file__).resolve().parent / "phase-cases"
-CONDITION_KEYS = ("evaluator_sha256", "requested_models", "case_files")
+CONDITION_KEYS = ("evaluator_sha256", "requested_providers", "requested_models", "review_report_language", "case_files")
+PROVIDERS = ("claude", "codex")
 SCENARIOS = ("author", "review")
 UNIT_FIELDS = ("scenario", "stack", "mode", "kit", "trial")
 AXES = ("behavior", "plan", "norm")
@@ -55,8 +56,8 @@ METRICS = (
     "false_request_changes_rate", "reviewer_read_rate", "invalid_rate",
 )
 ROW_FIELDS = (
-    "scenario", "stack", "mode", "variant", "kit", "trial", "valid", "expected", "correct", "defects",
-    "false_request_changes", "subprocesses", "required_read", "required_unread", "usage",
+    "scenario", "stack", "mode", "variant", "kit", "trial", "provider", "valid", "expected", "correct", "defects",
+    "false_request_changes", "subprocesses", "required_read", "required_unread", "required_unobserved", "usage",
 )
 
 
@@ -166,13 +167,51 @@ def _review_case_failures(rows: list[dict], condition: dict, cases: Path) -> lis
     return failures
 
 
-def _condition_known(key: str, value: object) -> bool:
+def _providers_known(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {"author", "review"}:
+        return False
+    reviewers = value["review"]
+    return (
+        isinstance(value["author"], str) and value["author"] in PROVIDERS
+        and isinstance(reviewers, list) and bool(reviewers)
+        and all(isinstance(provider, str) and provider in PROVIDERS for provider in reviewers)
+        and len(reviewers) == len(set(reviewers))
+    )
+
+
+def _condition_known(key: str, value: object, condition: dict) -> bool:
+    if key == "requested_providers":
+        return _providers_known(value)
+    if key == "review_report_language":
+        return value == "en"
     if key == "requested_models":
-        return isinstance(value, dict) and all(
-            isinstance(value.get(provider), str) and bool(value[provider].strip())
-            for provider in ("claude", "codex")
+        roles = condition.get("requested_providers")
+        if not _providers_known(roles) or not isinstance(value, dict) or set(value) != set(PROVIDERS):
+            return False
+        enabled = {roles["author"], *roles["review"]}
+        return all(
+            isinstance(value[provider], str) and bool(value[provider].strip())
+            if provider in enabled else value[provider] is None
+            for provider in PROVIDERS
         )
     return bool(value)
+
+
+def _provider_fields(row: dict, roles: dict) -> list[str]:
+    if row["scenario"] == "author":
+        return [] if row.get("provider") == roles["author"] else ["provider"]
+    angles = row.get("angles")
+    if not isinstance(angles, list) or not angles or not all(isinstance(angle, dict) for angle in angles):
+        return ["angles.providers"]
+    providers = [angle.get("provider") for angle in angles]
+    reviewers = roles["review"]
+    problems = []
+    if (any(provider not in reviewers for provider in providers)
+            or any(providers.count(provider) != len(angles) / len(reviewers) for provider in reviewers)):
+        problems.append("angles.providers")
+    if not _count(row.get("subprocesses"), 1) or row["subprocesses"] != len(angles):
+        problems.append("subprocesses")
+    return problems
 
 
 def _open_results(directory: Path) -> IO[str]:
@@ -195,7 +234,7 @@ def load(directories: list[Path]) -> tuple[list[dict], list[str], dict, dict[str
             failures.append(f"unreadable meta.json in {directory}")
             continue
         condition = {key: meta.get(key) for key in CONDITION_KEYS}
-        missing = [key for key, value in condition.items() if not _condition_known(key, value)]
+        missing = [key for key, value in condition.items() if not _condition_known(key, value, condition)]
         if missing:
             failures.append(f"measurement condition unknown in {directory}: {', '.join(missing)}")
         conditions.append((directory, condition))
@@ -217,6 +256,14 @@ def load(directories: list[Path]) -> tuple[list[dict], list[str], dict, dict[str
             failures.append(f"unreadable results in {directory}")
         failures.extend(f"{kit} kit digest not recorded in {directory}"
                         for kit in {row["kit"] for row in rows[start:]} if kit not in recorded)
+        roles = condition.get("requested_providers")
+        if _providers_known(roles):
+            failures.extend(
+                f"provider configuration mismatch in {directory} {row['kit']} "
+                f"{'/'.join(map(str, _unit_key(row)))}: {', '.join(problems)}"
+                for row in rows[start:] if not _unscored(row)
+                for problems in [_provider_fields(row, roles)] if problems
+            )
         units = meta.get("units")
         if type(units) is not int or parsed != units:
             failures.append(f"results incomplete in {directory}: {parsed} rows, meta.json units {units}")
@@ -299,10 +346,10 @@ def kit_metrics(rows: list[dict], kit: str) -> dict[str, float | None]:
     judged = [row["correct"] for row in reviews if row.get("expected") is not None]
     seeded = [found for row in reviews if row.get("expected") == "request-changes" for found in row["defects"].values()]
     approve_rows = [row for row in reviews if row.get("expected") == "approve"]
-    # Codex read observations are null and inline bodies need no read; neither counts as unread.
+    # Unobserved reads and inline bodies do not contribute to the read-rate denominator.
     observed = [
         document["read_path_observed"]
-        for row in reviews for angle in row.get("angles") or [] if angle.get("provider") == "claude"
+        for row in reviews for angle in row.get("angles") or []
         for document in angle.get("documents") or []
         if not document.get("inline_in_prompt") and document.get("read_path_observed") is not None
     ]
