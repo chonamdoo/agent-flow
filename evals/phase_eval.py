@@ -3,15 +3,15 @@
 For each stack case (`evals/phase-cases/<stack>/`), skill mode (clean/local/team) and
 kit (before/after) this builds a throwaway project, installs that kit, and renders the
 kit's own prompts with its own runner code:
-- author: the full-feature `green` envelope after the red tests exist. One Claude
-  session writes the code; `oracle.py` scores behavior (visible tests restored
-  from the red phase first), plan (hidden slice-plan requirement) and norm (mode
-  rule, static). Required SKILL.md reads are the session's Read calls whose
-  tool_result succeeded, never self-report. `slice-plan.md`, `ddd-design.md` and
+- author: the full-feature `green` envelope after the red tests exist. The selected
+  Claude or Codex session writes the code; `oracle.py` scores behavior (visible
+  tests restored from the red phase first), plan (hidden slice-plan requirement)
+  and norm (mode rule, static). Required reads use successful tool evidence,
+  never self-report. `slice-plan.md`, `ddd-design.md` and
   `prd.md` are staged; `design-spec.md` is captured from `prd.md` by the kit's own
   ledger code, so the green envelope carries that kit's SPEC ledger block.
-- review: the real `multi-review` reviewer jobs (every angle × claude/codex) on a
-  defect diff and a clean diff. Validity uses the runtime reviewer contract; a
+- review: the real `multi-review` reviewer jobs (every angle × selected providers)
+  on a defect diff and a clean diff. Validity uses the runtime reviewer contract; a
   seeded defect counts only inside must-fix findings of a valid request-changes output.
 
 Token usage comes from each CLI's own usage report. Model API calls: manual only.
@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from collections import Counter
 import hashlib
 import inspect
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -52,6 +54,14 @@ AUTHOR_DENIED = "Bash(agent-flow:*) Bash(git:*) Bash(rm:*)"
 PY = sys.executable
 USAGE_KEYS = ("input", "uncached_input", "cached_input", "output")
 REQUESTED_MODELS: dict[str, str | None] = {"claude": None, "codex": None}
+REQUESTED_PROVIDERS: dict[str, str | list[str]] = {"author": "claude", "review": ["claude", "codex"]}
+READ_EVIDENCE_PROMPT = (
+    "\n\nEvaluation read-evidence contract: when reading a skill document, use the native Read tool "
+    "if available. Otherwise use a standalone cat or sed print command with one literal file path "
+    "per tool call. Do not bulk-read skill documents through Python, loops, pipes, or mixed shell "
+    "commands: those reads cannot be attributed by this evaluator. This changes only evidence "
+    "collection, not the task requirements or implementation."
+)
 
 
 def _token_count(usage: dict, key: str) -> int | None:
@@ -112,9 +122,11 @@ def _document_manifest(resolution, prompt: str) -> list[dict]:
     ]
 
 
-def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, project: Path) -> dict:
+def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, project: Path,
+            *, author_provider: str = "claude", review_providers: tuple[str, ...] = ("claude", "codex")) -> dict:
     sys.path.insert(0, str(kit / "src"))
-    os.environ["AGENT_FLOW_HOST"] = "claude"
+    host = author_provider if scenario == "author" else review_providers[0]
+    os.environ["AGENT_FLOW_HOST"] = host
     case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
     project.mkdir(parents=True)
     _overlay(case_dir / "seed", project)
@@ -154,7 +166,7 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
         # runner의 prd 완료 경로와 같은 함수로 원장을 굳힌다. kit마다 자기 코드로 쓴다.
         capture_design_ledger(run_dir, "prd", prd.read_text(encoding="utf-8"))
     runner = Runner(project, workflow="full-feature", run_dir=run_dir)
-    adapter = HostedAdapter("claude")
+    adapter = HostedAdapter(host)
     adapter._profile_id = runner.profile_id
     adapter._profile_snapshot = runner.profile
     adapter._config_root = runner.config_root
@@ -164,10 +176,10 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
     adapter._task_text = case["task"]
     if scenario == "author":
         phase = next(p for p in runner.phases if p.id == "green")
-        resolution = adapter.phase_resolution(phase, project, skill_host="claude")
-        prompt = adapter.render_envelope(phase, run_dir, project, skill_host="claude", resolution=resolution)
+        resolution = adapter.phase_resolution(phase, project, skill_host=host)
+        prompt = adapter.render_envelope(phase, run_dir, project, skill_host=host, resolution=resolution)
         return {
-            "prompt": prompt,
+            "prompt": prompt + READ_EVIDENCE_PROMPT,
             "required": [
                 {"name": s.name, "path": str(s.path) if s.path else ""}
                 for s in resolution.required
@@ -201,12 +213,14 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
         project, run_dir, phase.id, base_branch=_profile_base_branch(adapter),
     )
     jobs, resolutions = _reviewer_jobs(phase, run_dir, project, adapter, review_input=review_input,
-                             providers=("claude", "codex"))
+                             providers=review_providers)
     return {
         "jobs": [
-            {"angle": job.angle_id, "provider": provider, "prompt": job.prompt_by_provider[provider],
+            {"angle": job.angle_id, "provider": provider,
+             "prompt": job.prompt_by_provider[provider] + READ_EVIDENCE_PROMPT +
+             "\n\nWrite the review report in English. Keep code identifiers and exact workflow markers unchanged.",
              "documents": _document_manifest(resolutions[provider], job.prompt_by_provider[provider])}
-            for job in jobs for provider in ("claude", "codex")
+            for job in jobs for provider in review_providers
         ],
     }
 
@@ -318,15 +332,104 @@ def _claude(prompt: str, cwd: Path, *, author: bool, timeout: int, evidence: Pat
     return out
 
 
-def _codex(prompt: str, cwd: Path, *, timeout: int, evidence: Path | None = None) -> dict:
-    args = ["codex", "exec", "--ephemeral", "--ignore-user-config", "--sandbox", "read-only",
+def _read_command_paths(command: str, cwd: Path) -> list[str]:
+    try:
+        arguments = shlex.split(command)
+        if (len(arguments) == 3 and Path(arguments[0]).name in {"sh", "bash", "zsh"}
+                and arguments[1] in {"-c", "-lc"}):
+            if "/" in arguments[0] and Path(arguments[0]).parent not in (Path("/bin"), Path("/usr/bin")):
+                return []
+            command = arguments[2]
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";|&<>()\n")
+        lexer.commenters = ""
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        arguments = list(lexer)
+    except ValueError:
+        return []
+    if not arguments:
+        return []
+    if arguments[0] == "cd":
+        if (len(arguments) < 4 or arguments[2] != "&&" or arguments[1].startswith("-")
+                or any(character in arguments[1] for character in "$`*?[]~{}")):
+            return []
+        cwd = (cwd / arguments[1]).resolve()
+        arguments = arguments[3:]
+    segments: list[list[str]] = [[]]
+    for token in arguments:
+        if token in (";", "&&", "\n"):
+            if not segments[-1]:
+                return []
+            segments.append([])
+        elif token and all(character in ";|&<>()\n" for character in token):
+            return []
+        else:
+            segments[-1].append(token)
+    if not segments[-1]:
+        segments.pop()
+    paths = []
+    for segment in segments:
+        if "/" in segment[0] and Path(segment[0]).parent not in (Path("/bin"), Path("/usr/bin")):
+            return []
+        reader, operands = Path(segment[0]).name, segment[1:]
+        if reader == "sed":
+            if operands and operands[0] == "-n":
+                operands = operands[1:]
+            if not operands or not re.fullmatch(r"(?:\d+|\$)?(?:,(?:\d+|\$))?p", operands[0]):
+                return []
+            operands = operands[1:]
+        elif reader in {"head", "tail"}:
+            if len(operands) >= 2 and operands[0] in {"-n", "-c"} and re.fullmatch(r"[+-]?\d+", operands[1]):
+                operands = operands[2:]
+            elif operands and re.fullmatch(r"-(?:[nc])?\d+", operands[0]):
+                operands = operands[1:]
+        elif reader != "cat":
+            return []
+        if operands and operands[0] == "--":
+            operands = operands[1:]
+        if (not operands or (reader != "cat" and len(operands) != 1)
+                or any(operand.startswith(("-", "#")) or
+                       any(character in operand for character in "$`*?[]~{}") for operand in operands)):
+            return []
+        paths.extend(str((cwd / operand).resolve()) for operand in operands)
+    return list(dict.fromkeys(paths))
+
+
+def _codex_read_paths(item: dict, cwd: Path) -> tuple[list[str], list[str]]:
+    command = item.get("command")
+    paths = _read_command_paths(command, cwd) if isinstance(command, str) else []
+    if type(item.get("exit_code")) is not int or item["exit_code"] != 0 or item.get("status") not in (None, "completed"):
+        return [], paths if len(paths) == 1 else []
+    output = item.get("aggregated_output")
+    if not isinstance(output, str) or not output:
+        return [], []
+    contents = {}
+    for path in paths:
+        try:
+            contents[path] = {line.strip() for line in Path(path).read_text(encoding="utf-8").splitlines()
+                              if len(line.strip()) >= 20}
+        except (OSError, UnicodeError):
+            continue
+    occurrences = Counter(line for lines in contents.values() for line in lines)
+    output_lines = {line.strip() for line in output.splitlines()}
+    reads = [path for path, lines in contents.items()
+             if any(occurrences[line] == 1 and line in output_lines for line in lines)]
+    return reads, []
+
+
+def _codex(prompt: str, cwd: Path, *, author: bool = False, timeout: int, evidence: Path | None = None) -> dict:
+    args = ["codex", "exec", "--ephemeral", "--ignore-user-config", "--sandbox",
+            "workspace-write" if author else "read-only",
             "--cd", str(cwd), "--json", "--skip-git-repo-check", "-"]
     if REQUESTED_MODELS["codex"]:
         args[2:2] = ["--model", REQUESTED_MODELS["codex"]]
     started = time.time()
     proc = _run_cli(args, prompt, cwd, timeout)
     execution = _call_evidence(args, prompt, cwd, proc, evidence)
-    texts, reports, failures = [], [], []
+    texts, reports, failures, warnings = [], [], [], []
+    reads, failed_reads, tool_calls, tool_inputs = set(), set(), [], []
+    observation_complete = True
+    terminal_complete = False
     for line in proc.stdout.splitlines():
         try:
             event = json.loads(line)
@@ -334,12 +437,27 @@ def _codex(prompt: str, cwd: Path, *, timeout: int, evidence: Path | None = None
             continue
         if not isinstance(event, dict):
             continue
+        if event.get("type") == "error":
+            warnings.append(str(event.get("message") or "provider error"))
+            terminal_complete = False
         if event.get("type") == "turn.failed":
             failures.append(str(event.get("error") or "provider turn failed"))
         item = event.get("item") or {}
+        if event.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "command_execution":
+            observed, failed = _codex_read_paths(item, cwd)
+            reads.update(observed)
+            failed_reads.update(failed)
+            command = item.get("command")
+            paths = _read_command_paths(command, cwd) if isinstance(command, str) else []
+            observation_complete = observation_complete and bool(paths) and set(paths) <= set(observed + failed)
+            tool_calls.append({"id": item.get("id"), "name": "command_execution",
+                               "succeeded": type(item.get("exit_code")) is int and item["exit_code"] == 0
+                               and item.get("status") in (None, "completed")})
+            tool_inputs.append(json.dumps({"command": item.get("command")}))
         if event.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
             texts.append(item.get("text", ""))
         if event.get("type") == "turn.completed":
+            terminal_complete = True
             reports.append(event.get("usage") or {})
     usage = {
         key: _token_sum([_token_count(report, key) for report in reports])
@@ -353,14 +471,20 @@ def _codex(prompt: str, cwd: Path, *, timeout: int, evidence: Path | None = None
     out = {
         "rc": proc.returncode, "seconds": round(time.time() - started, 1), "text": texts[-1] if texts else "",
         "execution": execution,
+        "reads": sorted(reads) if tool_calls else None, "failed_reads": sorted(failed_reads),
+        "tool_calls": tool_calls or None, "tool_inputs": tool_inputs,
+        "read_observation_complete": bool(tool_calls) and observation_complete,
+        "provider_warnings": warnings,
         "usage": {"input": usage["input_tokens"], "uncached_input": uncached,
                   "cached_input": usage["cached_input_tokens"],
                   "output": usage["output_tokens"]},
     }
     if proc.returncode != 0 or not texts:
-        out["error"] = (proc.stderr or proc.stdout)[-400:]
+        out["error"] = (proc.stderr or proc.stdout or "missing CLI result")[-400:]
     if failures:
         out["error"] = "\n".join(failures)[-400:]
+    if warnings and not terminal_complete:
+        out["error"] = "\n".join(warnings)[-400:]
     return out
 
 
@@ -442,7 +566,9 @@ def _oracle(case_dir: Path, *args: str) -> dict:
 
 def _prepare_subprocess(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, project: Path) -> dict:
     proc = _run_group(
-        [PY, __file__, "--prepare", json.dumps([str(kit), str(case_dir), mode, scenario, variant, str(project)])],
+        [PY, __file__, "--prepare", json.dumps([str(kit), str(case_dir), mode, scenario, variant, str(project)]),
+         "--author-provider", REQUESTED_PROVIDERS["author"],
+         "--review-providers", ",".join(REQUESTED_PROVIDERS["review"])],
         # prepare 안의 설치(600초, ETIMEDOUT이면 1회 재시도)와 테스트(600초)는 각자 자기 그룹을
         # 끝낸다. 바깥 한도는 그 합(1800초)보다 크게 둔다.
         timeout=2400,
@@ -455,24 +581,36 @@ def _prepare_subprocess(kit: Path, case_dir: Path, mode: str, scenario: str, var
 def run_author(kit_name: str, kit: Path, case_dir: Path, mode: str, trial: int, work: Path, timeout: int,
                evidence: Path | None = None) -> dict:
     project = work / f"author-{case_dir.name}-{mode}-{kit_name}-{trial}"
-    row = {"scenario": "author", "stack": case_dir.name, "mode": mode, "kit": kit_name, "trial": trial}
+    row = {"scenario": "author", "stack": case_dir.name, "mode": mode, "kit": kit_name, "trial": trial,
+           "provider": REQUESTED_PROVIDERS["author"]}
     try:
         prepared = _prepare_subprocess(kit, case_dir, mode, "author", "", project)
     except Exception as exc:
         return {**row, "error": str(exc)[-1200:]}
     row["prompt_bytes"] = len(prepared["prompt"].encode())
     row["required"] = [r["name"] for r in prepared["required"]]
-    result = _claude(prepared["prompt"], project, author=True, timeout=timeout, evidence=evidence)
-    read_real = {os.path.realpath(p) for p in result["reads"]}
+    invoke = _claude if row["provider"] == "claude" else _codex
+    try:
+        result = invoke(prepared["prompt"], project, author=True, timeout=timeout, evidence=evidence)
+    except Exception as exc:
+        return {**row, "error": f"{type(exc).__name__}: {exc}"[-1200:]}
+    read_real = {os.path.realpath(p) for p in result["reads"] or []}
     inline = set(prepared.get("inline", []))
     required_paths = {
         r["name"]: os.path.realpath(r["path"]) for r in prepared["required"] if r["path"] and r["name"] not in inline
     }
     row["inline_required"] = sorted(inline)
     row["required_read"] = sorted(n for n, p in required_paths.items() if p in read_real)
-    row["required_unread"] = sorted(n for n, p in required_paths.items() if p not in read_real)
-    row["required_read_rate"] = round(len(row["required_read"]) / len(required_paths), 3) if required_paths else None
-    row["required_read_rate_scope"] = "Successful SKILL.md Read paths, not full-body or reference coverage"
+    complete = result.get("read_observation_complete", result["reads"] is not None)
+    failed = {os.path.realpath(p) for p in result.get("failed_reads", [])}
+    unobserved = sorted(n for n, p in required_paths.items()
+                        if p not in read_real and p not in failed and not complete)
+    row["required_unobserved"] = unobserved
+    unread = sorted(n for n, p in required_paths.items() if p not in read_real and (p in failed or complete))
+    row["required_unread"] = unread if unread or not unobserved else None
+    row["required_read_rate"] = (round(len(row["required_read"]) / len(required_paths), 3)
+                                 if required_paths and not unobserved else None)
+    row["required_read_rate_scope"] = "Successful SKILL.md read paths, not full-body or reference coverage"
     row["other_skill_reads"] = sorted(
         p for p in read_real if p.endswith("SKILL.md") and p not in set(required_paths.values())
     )
@@ -481,7 +619,8 @@ def run_author(kit_name: str, kit: Path, case_dir: Path, mode: str, trial: int, 
         name for name in ("slice-plan.md", "ddd-design.md", "prd.md", "design-spec.md") if name in touched
     )
     row["failed_reads"] = sorted(result.get("failed_reads", []))
-    row.update({k: result.get(k) for k in ("usage", "cost_usd", "turns", "seconds", "error", "execution", "models_observed")})
+    row.update({k: result.get(k) for k in ("usage", "cost_usd", "turns", "seconds", "rc", "error",
+                                        "execution", "models_observed", "provider_warnings")})
     row["documents"] = prepared.get("documents", [])
     row["norm_scope"] = "case-specific fixture contract; general architecture correctness is unverified"
     row["oracle"] = _oracle(case_dir, "author", "--project", str(project), "--mode", mode)
@@ -498,18 +637,16 @@ def run_review(kit_name: str, kit: Path, case_dir: Path, mode: str, variant: str
     except Exception as exc:
         return {**row, "error": str(exc)[-1200:]}
     jobs = prepared["jobs"]
+
+    def invoke_review(job):
+        if job["provider"] not in REQUESTED_PROVIDERS["review"]:
+            raise ValueError(f"unselected reviewer provider: {job['provider']}")
+        invoke = _claude if job["provider"] == "claude" else _codex
+        return invoke(job["prompt"], project, author=False, timeout=timeout,
+                      evidence=evidence / f"{job['angle']}-{job['provider']}" if evidence else None)
+
     with concurrent.futures.ThreadPoolExecutor(len(jobs)) as pool:
-        futures = [
-            pool.submit(
-                (lambda j: _claude(j["prompt"], project, author=False, timeout=timeout,
-                                  evidence=evidence / f"{j['angle']}-claude" if evidence else None))
-                if job["provider"] == "claude" else
-                (lambda j: _codex(j["prompt"], project, timeout=timeout,
-                                 evidence=evidence / f"{j['angle']}-codex" if evidence else None)),
-                job,
-            )
-            for job in jobs
-        ]
+        futures = [pool.submit(invoke_review, job) for job in jobs]
         outputs = []
         for future in futures:
             try:
@@ -528,11 +665,16 @@ def run_review(kit_name: str, kit: Path, case_dir: Path, mode: str, variant: str
             "output_contract_error": out.get("output_contract_error"),
             "read_paths_observed": out.get("reads"), "failed_reads": out.get("failed_reads"),
             "tool_calls": out.get("tool_calls"),
+            "provider_warnings": out.get("provider_warnings"),
             "execution": out.get("execution"), "models_observed": out.get("models_observed"),
             "cost_usd": out.get("cost_usd"),
             "documents": [
-                {**document, "read_path_observed": None if out.get("reads") is None else
-                 os.path.realpath(document["path"]) in {os.path.realpath(path) for path in out["reads"]}}
+                {**document, "read_path_observed": (
+                    True if os.path.realpath(document["path"]) in {os.path.realpath(path) for path in out.get("reads") or []}
+                    else False if os.path.realpath(document["path"]) in
+                    {os.path.realpath(path) for path in out.get("failed_reads") or []}
+                    or out.get("read_observation_complete", out.get("reads") is not None) else None
+                )}
                 for document in job.get("documents", [])
             ],
         })
@@ -550,8 +692,10 @@ def run_review(kit_name: str, kit: Path, case_dir: Path, mode: str, variant: str
     row["valid"] = overall != "incomplete"
     row["correct"] = overall == spec["expect"] if row["valid"] and spec["expect"] else None
     # 잘린 사본이 아니라 전문에서, 유효한 request-changes 출력의 finding 안에서만 찾는다.
+    # 단일 줄 inline-code 표기는 구간·문단 경계를 유지한 채 의미 패턴과 비교한다.
     findings = [
-        (a, _findings(text)) for a, text in zip(angles, full_texts) if a["verdict"] == "request-changes"
+        (a, re.sub(r"(?<!`)(`+)([^`\n]+)\1(?!`)", r"\2", _findings(text)))
+        for a, text in zip(angles, full_texts) if a["verdict"] == "request-changes"
     ]
     row["defects"] = {}
     row["defect_detectors"] = {}
@@ -591,19 +735,31 @@ def main() -> int:
     parser.add_argument("--trials", type=int, default=1)
     parser.add_argument("--concurrency", type=int, default=8, help="parallel model CLI processes")
     parser.add_argument("--timeout", type=int, default=1500)
+    parser.add_argument("--author-provider", choices=("claude", "codex"), default="claude")
+    parser.add_argument("--review-providers", default="claude,codex", help="comma-separated claude/codex subset")
     parser.add_argument("--claude-model")
     parser.add_argument("--codex-model")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
+    reviewers = args.review_providers.split(",")
+    if (not reviewers or any(provider not in {"claude", "codex"} for provider in reviewers)
+            or len(reviewers) != len(set(reviewers))):
+        parser.error("--review-providers requires distinct, nonempty claude/codex selections")
+    REQUESTED_PROVIDERS.update(author=args.author_provider, review=reviewers)
     if args.prepare:
         kit, case_dir, mode, scenario, variant, project = json.loads(args.prepare)
-        print(json.dumps(prepare(Path(kit), Path(case_dir), mode, scenario, variant, Path(project))))
+        print(json.dumps(prepare(Path(kit), Path(case_dir), mode, scenario, variant, Path(project),
+                                 author_provider=args.author_provider, review_providers=tuple(reviewers))))
         return 0
     if args.output is None or not args.kit:
         parser.error("--output and --kit are required")
     args.output.mkdir(parents=True, exist_ok=False)
-    REQUESTED_MODELS.update(claude=args.claude_model, codex=args.codex_model)
+    enabled = {args.author_provider, *reviewers}
+    REQUESTED_MODELS.update({
+        provider: getattr(args, f"{provider}_model") if provider in enabled else None
+        for provider in ("claude", "codex")
+    })
     _slots = threading.Semaphore(args.concurrency)
     kits = {name: Path(path).resolve() for name, path in (k.split("=", 1) for k in args.kit)}
     work = Path(tempfile.mkdtemp(prefix="af-phase-eval-"))
@@ -634,6 +790,8 @@ def main() -> int:
         except Exception as exc:  # timeout 등은 결과 행으로 남겨 invalid로 센다.
             row = {"scenario": scenario, "stack": case_dir.name, "mode": mode, "variant": variant,
                    "kit": kit_name, "trial": trial, "error": f"{type(exc).__name__}: {exc}"[-1200:]}
+            if scenario == "author":
+                row["provider"] = REQUESTED_PROVIDERS["author"]
         with lock:
             with results_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -648,10 +806,15 @@ def main() -> int:
     meta = {
         "kits": {k: str(v) for k, v in kits.items()},
         "kit_digests": {k: kit_source_digest(v) for k, v in kits.items()},
-        "claude": subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip(),
-        "codex": subprocess.run(["codex", "--version"], capture_output=True, text=True).stdout.strip(),
+        **{
+            provider: subprocess.run([provider, "--version"], capture_output=True, text=True).stdout.strip()
+            if provider in enabled else None
+            for provider in ("claude", "codex")
+        },
         "units": len(units), "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "work": str(work),
         "requested_models": REQUESTED_MODELS.copy(),
+        "requested_providers": {"author": args.author_provider, "review": reviewers},
+        "review_report_language": "en",
         "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "case_files": {
             path.relative_to(CASES).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()

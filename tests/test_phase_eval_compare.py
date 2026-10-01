@@ -27,7 +27,9 @@ CASE = {"review": {mode: {
 CASE_BODY = json.dumps(CASE)
 META = {
     "evaluator_sha256": "e" * 64,
+    "requested_providers": {"author": "claude", "review": ["claude", "codex"]},
     "requested_models": {"claude": "c", "codex": "x"},
+    "review_report_language": "en",
     "case_files": {f"{stack}/case.json": hashlib.sha256(CASE_BODY.encode()).hexdigest()
                    for stack in ("web", "rn", "app", "backend")},
     "kit_digests": {"before": "b" * 64, "after": "a" * 64},
@@ -56,11 +58,11 @@ def document(observed, inline=False):
     return {"path": "/p/SKILL.md", "sha256": "s", "bytes": 1, "inline_in_prompt": inline, "read_path_observed": observed}
 
 
-def rows_for(kit, trials=3, stack="web", mode="clean"):
+def rows_for(kit, trials=3, stack="web", mode="clean", author="claude", reviewers=("claude", "codex")):
     rows = []
     for trial in range(1, trials + 1):
         rows.append({
-            "scenario": "author", "stack": stack, "mode": mode, "kit": kit, "trial": trial,
+            "scenario": "author", "stack": stack, "mode": mode, "kit": kit, "trial": trial, "provider": author,
             "required_read": ["a", "b"], "required_unread": [], "error": None,
             "oracle": {"behavior": True, "plan": True, "norm": True}, "usage": usage(),
         })
@@ -69,11 +71,14 @@ def rows_for(kit, trials=3, stack="web", mode="clean"):
                 "scenario": "review", "stack": stack, "mode": mode, "variant": variant, "kit": kit, "trial": trial,
                 "valid": True, "expected": expect, "overall": expect, "correct": True,
                 "defects": {"bug": True} if variant == "defect" else {},
-                "false_request_changes": 0 if variant == "clean" else None, "subprocesses": 2,
+                "false_request_changes": 0 if variant == "clean" else None, "subprocesses": len(reviewers),
                 "usage": usage(),
                 "angles": [
-                    {"provider": "claude", "documents": [document(True), document(None, inline=True)]},
-                    {"provider": "codex", "documents": [document(None), document(None)]},
+                    {"provider": provider, "documents": (
+                        [document(True), document(None, inline=True)] if provider == "claude"
+                        else [document(None), document(None)]
+                    )}
+                    for provider in reviewers
                 ],
             })
     return rows
@@ -245,12 +250,16 @@ def test_duplicate_unit_fails(gate, tmp_path):
     assert any("duplicate" in failure for failure in failures)
 
 
-@pytest.mark.parametrize("missing", ["evaluator_sha256", "requested_models", "case_files"])
+@pytest.mark.parametrize("missing", ["evaluator_sha256", "requested_providers", "requested_models", "case_files"])
 def test_single_run_without_measurement_provenance_fails(gate, tmp_path, missing):
     meta = {key: value for key, value in META.items() if key != missing}
     run = write_run(tmp_path / "run", rows_for("before") + rows_for("after"), meta=meta)
-    _, failures = gate.compare([run], "before", "after", THRESHOLDS)
+    original = {name: (run / name).read_bytes() for name in ("meta.json", "results.jsonl")}
+    destination = tmp_path / "record"
+    _, failures = gate.compare([run], "before", "after", THRESHOLDS, export=destination)
     assert any(missing in failure for failure in failures)
+    assert not destination.exists()
+    assert {name: (run / name).read_bytes() for name in original} == original
 
 
 def test_incomplete_oracle_counts_as_invalid_instead_of_leaving_the_denominator(gate, tmp_path):
@@ -496,7 +505,7 @@ def test_relabeling_a_trial_cannot_remove_it_from_paired_token_comparison(gate, 
     {"claude": True, "codex": "x"},
     {"claude": "c", "codex": "  "},
 ])
-def test_both_provider_model_names_are_required_to_compare_a_measurement(gate, tmp_path, models):
+def test_enabled_provider_model_names_are_required_to_compare_a_measurement(gate, tmp_path, models):
     run = write_run(tmp_path / "run", rows_for("before") + rows_for("after"),
                     meta={**META, "requested_models": models})
     _, failures = gate.compare([run], "before", "after", THRESHOLDS, export=tmp_path / "record")
@@ -545,3 +554,156 @@ def test_separate_runs_with_matching_models_cases_and_kit_digests_can_pass(gate,
                       meta={**META, "kit_digests": {"after": "a" * 64}})
     _, failures = gate.compare([before, after], "before", "after", THRESHOLDS)
     assert failures == []
+
+
+@pytest.mark.parametrize("roles", [
+    None,
+    {},
+    {"author": "codex"},
+    {"author": "unknown", "review": ["codex"]},
+    {"author": ["codex"], "review": ["codex"]},
+    {"author": "codex", "review": []},
+    {"author": "codex", "review": "codex"},
+    {"author": "codex", "review": ["unknown"]},
+    {"author": "codex", "review": ["codex", "codex"]},
+    {"author": "codex", "review": [{}]},
+])
+def test_unknown_provider_roles_refuse_comparison_and_export(gate, tmp_path, roles):
+    run = write_run(tmp_path / "run", rows_for("before") + rows_for("after"),
+                    meta={**META, "requested_providers": roles})
+    destination = tmp_path / "record"
+    _, failures = gate.compare([run], "before", "after", THRESHOLDS, export=destination)
+    assert any("measurement condition unknown" in failure and "requested_providers" in failure
+               for failure in failures)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("role", ["author", "review"])
+def test_provider_roles_cannot_change_between_measured_kits(gate, tmp_path, role):
+    before = write_run(tmp_path / "before", rows_for("before"))
+    meta = copy.deepcopy(META)
+    meta["requested_providers"][role] = "codex" if role == "author" else ["codex"]
+    after_rows = rows_for("after", author="codex" if role == "author" else "claude",
+                          reviewers=("codex",) if role == "review" else ("claude", "codex"))
+    after = write_run(tmp_path / "after", after_rows, meta=meta)
+    destination = tmp_path / "record"
+    _, failures = gate.compare([before, after], "before", "after", THRESHOLDS, export=destination)
+    assert any("measurement condition differs" in failure and "requested_providers" in failure
+               for failure in failures)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("index, damage", [
+    (0, lambda row: row.pop("provider")),
+    (0, lambda row: row.update(provider="codex")),
+    (1, lambda row: row["angles"][0].update(provider="unknown")),
+    (1, lambda row: row["angles"][0].update(provider="codex")),
+    (1, lambda row: row.update(angles=[], subprocesses=1)),
+    (1, lambda row: row.update(subprocesses=3)),
+    (1, lambda row: row.pop("subprocesses")),
+    (1, lambda row: row.update(angles=row["angles"] + [copy.deepcopy(row["angles"][0])], subprocesses=3)),
+], ids=["missing-author", "changed-author", "unknown-reviewer", "missing-reviewer",
+        "empty-reviewers", "changed-subprocesses", "missing-subprocesses", "unbalanced-reviewers"])
+def test_scored_provider_mismatch_cannot_export(gate, tmp_path, index, damage):
+    after = rows_for("after")
+    damage(after[index])
+    run = write_run(tmp_path / "run", rows_for("before") + after)
+    destination = tmp_path / "record"
+    _, failures = gate.compare([run], "before", "after", THRESHOLDS, export=destination)
+    assert any("provider configuration mismatch" in failure for failure in failures)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("model", [None, "", "  ", 1, True])
+def test_codex_only_requires_an_explicit_codex_model(gate, tmp_path, model):
+    meta = {**META, "requested_providers": {"author": "codex", "review": ["codex"]},
+            "requested_models": {"claude": None, "codex": model}}
+    rows = [row for kit in ("before", "after") for row in rows_for(kit, author="codex", reviewers=("codex",))]
+    run = write_run(tmp_path / "run", rows, meta=meta)
+    destination = tmp_path / "record"
+    _, failures = gate.compare([run], "before", "after", THRESHOLDS, export=destination)
+    assert any("measurement condition unknown" in failure and "requested_models" in failure for failure in failures)
+    assert not destination.exists()
+
+
+def test_codex_only_full_matrix_exports_a_recomputable_private_record(gate, tmp_path):
+    thresholds = json.loads((ROOT / "evals/phase-eval-thresholds.json").read_text(encoding="utf-8"))
+    matrix = thresholds["matrix"]
+    roles = {"author": "codex", "review": ["codex"]}
+    models = {"claude": None, "codex": "gpt-6-astra"}
+    rows = [
+        row for kit in ("before", "after") for stack in matrix["stacks"] for mode in matrix["modes"]
+        for row in rows_for(kit, stack=stack, mode=mode, author="codex", reviewers=("codex",))
+    ]
+    for row in rows:
+        row["execution"] = {"cwd": "/private/eval", "argv": ["secret-cli"]}
+        for angle in row.get("angles", []):
+            angle["text"] = "private reviewer response"
+            angle["documents"] = [document(True), document(None), document(False, inline=True)]
+    meta = {**META, "requested_providers": roles, "requested_models": models}
+    run = write_run(tmp_path / "run", rows, meta=meta)
+    destination = tmp_path / "record"
+    original, failures = gate.compare([run], "before", "after", thresholds, export=destination)
+    assert failures == []
+    exported_meta = json.loads((destination / "meta.json").read_text(encoding="utf-8"))
+    assert exported_meta["requested_providers"] == roles
+    assert exported_meta["requested_models"] == models
+    body = gzip.decompress((destination / "results.jsonl.gz").read_bytes()).decode()
+    assert all(secret not in body for secret in ("/private/eval", "/p/SKILL.md", "secret-cli", "private reviewer response"))
+    exported = [json.loads(line) for line in body.splitlines()]
+    assert {row["provider"] for row in exported if row["scenario"] == "author"} == {"codex"}
+    recomputed, failures = gate.compare([destination], "before", "after", thresholds)
+    assert failures == []
+    assert recomputed[4:] == original[4:]
+
+
+@pytest.mark.parametrize("observed", [False, None])
+def test_codex_only_lost_or_unknown_read_evidence_blocks_export(gate, tmp_path, observed):
+    roles = {"author": "codex", "review": ["codex"]}
+    rows = [row for kit in ("before", "after") for row in rows_for(kit, author="codex", reviewers=("codex",))]
+    for row in rows:
+        for angle in row.get("angles", []):
+            angle["documents"] = [document(True if row["kit"] == "before" else observed)]
+    run = write_run(tmp_path / "run", rows, meta={
+        **META, "requested_providers": roles, "requested_models": {"claude": None, "codex": "gpt-6-astra"},
+    })
+    destination = tmp_path / "record"
+    _, failures = gate.compare([run], "before", "after", THRESHOLDS, export=destination)
+    assert any("reviewer_read_rate" in failure for failure in failures)
+    assert not destination.exists()
+
+
+def test_provider_failure_rows_remain_invalid_and_are_preserved_in_export(gate, tmp_path):
+    rows = [row for kit in ("before", "after") for row in rows_for(kit, trials=10)]
+    rows[0].update(error="author unavailable")
+    rows[0].pop("provider")
+    rows[1].update(valid=False, error="review unavailable", angles=[], subprocesses=0)
+    run = write_run(tmp_path / "run", rows)
+    destination = tmp_path / "record"
+    _, failures = gate.compare([run], "before", "after", THRESHOLDS, export=destination)
+    assert failures == []
+    exported, failures, _, _ = gate.load([destination])
+    assert failures == []
+    assert gate.kit_metrics(exported, "before")["invalid_rate"] == 2 / 30
+    assert exported[0]["error"] is True
+    assert exported[1]["valid"] is False and exported[1]["error"] is True
+
+
+def test_unknown_author_reads_keep_floor_and_failed_behavior_scored(gate, tmp_path):
+    rows = [row for kit in ("before", "after") for row in rows_for(kit, author="codex")]
+    authors = [row for row in rows if row["kit"] == "after" and row["scenario"] == "author"]
+    for row in authors:
+        row.update(required_read=["a"], required_unread=None, required_unobserved=["b"])
+    authors[0]["oracle"]["behavior"] = False
+    run = write_run(tmp_path / "run", rows, meta={
+        **META, "requested_providers": {"author": "codex", "review": ["claude", "codex"]},
+    })
+    destination = tmp_path / "record"
+    _, failures = gate.compare([run], "before", "after", THRESHOLDS, export=destination)
+    metrics = gate.kit_metrics(rows, "after")
+    assert metrics["author_required_read_rate"] == 0.5
+    assert metrics["author_pass_rate"] == 2 / 3
+    assert metrics["invalid_rate"] == 0
+    assert any("author_required_read_rate" in failure for failure in failures)
+    assert any("author_pass_rate" in failure for failure in failures)
+    assert not destination.exists()
