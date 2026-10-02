@@ -37,7 +37,7 @@ phase가 필요한 skill을 정확히 받는지, 그러면서 쓰지 않는 텍�
   - Clean이 아닌 mode의 envelope에 Clean `roles`가 들어갔다.
   - phase envelope, 조율 세션, 리뷰어 subprocess의 합계 바이트가 늘었다.
 - `evals/phase_eval.py` — 실제 모델 평가다. 수동으로 돌리고 CI를 막지 않는다. 판단 기준이 바뀌는 변경을 할 때와 릴리스 전에 돌린다. 기록 항목은 정확도(author의 behavior/plan/norm, 리뷰의 판정 정확도·결함 탐지·오탐), 필수 skill의 실제 읽음률, 토큰, 무효 시행 수다.
-- 릴리스 전에는 이전 릴리스 kit과 새 kit을 조합당 3회 이상 같은 실행에서 돌리고 `evals/phase_eval_compare.py`로 판정한다. 통과하면 `--export evals/release-gates/v<버전>`으로 남긴 기록을 릴리스 PR에 커밋한다. `release.yml`은 그 기록을 다시 판정하고, 기록의 kit 지문이 태그와 이전 태그의 kit과 같은지 확인한다. 기록이 없거나 판정이 실패하면 태그를 거부한다. 기준값은 `evals/phase-eval-thresholds.json`이고, 바꿀 때는 PR에 이유와 근거가 된 측정 결과를 적는다.
+- 릴리스 전에는 이전 릴리스 kit과 새 kit을 같은 실행에서 author 조합당 3회, review 조합당 2회 이상 돌리고 `evals/phase_eval_compare.py`로 판정한다. 통과하면 `--export evals/release-gates/v<버전>`으로 남긴 기록을 릴리스 PR에 커밋한다. 판정이 실패하면 같은 조건으로 다시 돌리지 않고, 원인이 된 kit이나 평가기를 고친 뒤 새로 측정한다. `release.yml`은 그 기록을 다시 판정하고, 기록의 kit 지문이 태그와 이전 태그의 kit과 같은지 확인한다. 기록이 없거나 판정이 실패하면 태그를 거부한다. 기준값은 `evals/phase-eval-thresholds.json`이고, 바꿀 때는 PR에 이유와 근거가 된 측정 결과를 적는다.
 - 결과는 `evals/results/phase-<kit 버전>-<YYYYMMDD>/`에 남겨 다음 변경이 이전 결과와 비교되게 한다.
 - 평가에서 새로 나온 실패 사례는 `evals/phase-cases/`에 기준 사례로 추가한다.
 - `phase_budget.py`는 PR CI에서 돈다. `.github/workflows/tests.yml`의 `phase-budget` job이 테스트 스위트와 병렬로 PR의 base kit과 head kit을 측정하고, `phase-budget-compare` job이 `evals/phase_budget_compare.py`로 위 세 조건을 모든 변경 조건에서 판정한다. 의도한 변화면 PR 본문에 이유를 적고 `phase-budget-accepted` 라벨을 붙인 뒤 비교 job을 다시 돌린다. 보고는 그대로 남고 실패만 면한다.

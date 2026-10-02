@@ -238,13 +238,13 @@ author와 리뷰 모두 실제 모델을 실행하며, source review만으로 �
 PYTHONDONTWRITEBYTECODE=1 python evals/phase_eval.py \
   --kit before=<이전 릴리스 트리> --kit after=<새 kit> \
   --scenario author,review --author-provider codex --review-providers codex \
-  --codex-model gpt-6-astra --trials 3 --concurrency 10 --output <new dir>
+  --codex-model gpt-6-astra --trials 3 --review-trials 2 --concurrency 10 --output <new dir>
 python evals/phase_eval_compare.py <new dir> --summary <new dir>/gate.md \
-  --export evals/release-gates/v0.3.9
+  --export evals/release-gates/v<버전>
 ```
 
-4개 stack × 3개 mode × author·review-defect·review-clean × 2개 kit × 3회,
-총 216 unit을 유지한다. reviewer provider 선택은 unit 수나 품질·토큰 기준값을 줄이지 않는다.
+4개 stack × 3개 mode × 2개 kit에 author 3회, review-defect·review-clean 각 2회,
+총 168 unit을 유지한다. reviewer provider 선택은 unit 수나 품질·토큰 기준값을 줄이지 않는다.
 빈 reviewer 목록, 미지원 provider, 중복 reviewer는 프로젝트 준비와 CLI 실행 전에 거부한다.
 이 단일 모델 평가는 독립적인 Claude+Codex 리뷰와 동등하지 않으며, 런타임 multi-review의
 독립 provider 요구나 workflow 자동 시작 조건을 바꾸지 않는다.
@@ -266,13 +266,13 @@ raw에는 로컬 경로와 입력 내용이 있으므로 공개 전 별도 검�
 ### `phase_eval_compare.py` — 릴리스 차단 검사
 
 릴리스 전에 이전 릴리스 kit(`before`)과 새 kit(`after`)를 같은 `phase_eval.py` 실행에서
-조합당 3회 이상 돌리고, 그 출력 폴더를 이 검사에 넘긴다. 통과하면 `--export`가 릴리스
+author 조합은 3회, review 조합은 2회 이상 돌리고, 그 출력 폴더를 이 검사에 넘긴다. 통과하면 `--export`가 릴리스
 기록을 `evals/release-gates/v<버전>/`에 쓴다. 이 기록을 릴리스 PR에 커밋한다. 실패하면 exit 1이고
 기록을 쓰지 않는다.
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python evals/phase_eval.py --kit before=<이전 릴리스 트리> --kit after=<새 kit> \
-  --scenario author,review --trials 3 --claude-model <model> --codex-model <model> --output <new dir>
+  --scenario author,review --trials 3 --review-trials 2 --claude-model <model> --codex-model <model> --output <new dir>
 python evals/phase_eval_compare.py <new dir> --summary <new dir>/gate.md \
   --export evals/release-gates/v<버전>
 ```
@@ -329,7 +329,7 @@ kit 지문은 디렉터리 안의 모든 파일로 계산하고, 태그 쪽은 g
 - 결과가 완전하지 않으면 실패다.
   - `results.jsonl` 행 수가 `meta.json`의 `units`보다 적거나, 읽을 수 없는 줄이나 중복 unit이 있다.
   - 기준 파일의 `matrix`(stack × mode × variant)에 있는 조합이 한 kit에라도 없거나, 조합당
-    시행이 3회보다 적다. 두 kit이 같이 좁게 돌아도 통과하지 못한다.
+    시행이 scenario별 `min_trials`(author 3, review 2)보다 적다. 두 kit이 같이 좁게 돌아도 통과하지 못한다.
   - 지표의 분모가 없거나, 채점 필드가 빠졌거나 형식이 틀린 행이 있다. `NaN`, 음수 토큰,
     빠진 `correct`·`defects`·읽음 목록이 여기에 해당한다. 이런 행은 0이나 제외로 처리하지 않고 실패로 본다.
 - 측정 조건을 확인할 수 없으면 실패다. 각 폴더의 `evaluator_sha256`·요청 provider 역할·
@@ -342,9 +342,9 @@ author 필수 읽음률에서는 미관측 skill도 분모에 포함해 읽음 �
 기준값을 바꿀 때는 PR에 이유와 근거가 된 측정 결과를 적는다.
 
 리뷰어 형식 오류와 provider 오류(예: 모델 용량 부족)도 무효 시행으로 센다. 이전 kit 대비
-하락은 허용 폭 없이 실패로 본다. 실패하면 먼저 원인이 kit 변화인지 측정 잡음인지 원자료로
-확인한다. 잡음이면 같은 조건으로 전체를 다시 측정한다. 실패한 unit만 골라 다시 돌리거나,
-근거 없이 기준값을 낮춰 통과시키지 않는다.
+하락은 허용 폭 없이 실패로 본다. 실패하면 원자료로 원인이 kit인지 평가기인지 찾아 고친 뒤,
+바뀐 kit 지문이나 평가기 해시로 전체를 새로 측정한다. 같은 kit·평가기·case 조건으로 다시 돌려
+통과 결과를 고르거나, 실패한 unit만 골라 다시 돌리거나, 근거 없이 기준값을 낮춰 통과시키지 않는다.
 
 ### 해석할 때 주의
 

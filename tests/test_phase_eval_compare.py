@@ -11,7 +11,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 THRESHOLDS = {
-    "min_trials": 3,
+    "min_trials": {"author": 3, "review": 2},
     "floors": {"author_required_read_rate": 0.95, "review_correct_rate": 0.95, "defect_detection_rate": 1.0},
     "ceilings": {"invalid_rate": 0.10},
     "no_drop": ["author_required_read_rate", "author_pass_rate", "review_correct_rate",
@@ -224,6 +224,17 @@ def test_trials_are_required_per_combination_not_per_scenario(gate, tmp_path):
     assert any("backend" in failure and "1 trials" in failure for failure in failures)
 
 
+def test_review_combinations_need_their_own_smaller_trial_count(gate, tmp_path):
+    def measured(kit, review_trials):
+        return [row for row in rows_for(kit) if row["scenario"] == "author" or row["trial"] <= review_trials]
+
+    assert run_gate(gate, tmp_path / "two", measured("before", 2), measured("after", 2)) == []
+    failures = run_gate(gate, tmp_path / "one", measured("before", 1), measured("after", 1))
+    assert any("review/web/clean" in failure and "1 trials, need 2" in failure for failure in failures)
+    assert not any("author/" in failure for failure in failures)
+
+
+
 def test_combination_missing_on_one_kit_fails(gate, tmp_path):
     before = rows_for("before") + rows_for("before", stack="backend")
     failures = run_gate(gate, tmp_path, before, rows_for("after"))
@@ -392,14 +403,17 @@ def evaluation_tree(root: Path, evaluator: str, case: str) -> Path:
     {"token_ratio_max": {"uncached_input": 0, "output": 1.1}},
     {"floors": {"review_correct_rate": 1.5}},
     {"ceilings": {"invalid_rate": "0.1"}},
-    {"min_trials": 0},
-    {"min_trials": 2.5},
+    {"min_trials": 3},
+    {"min_trials": {"author": 3}},
+    {"min_trials": {"author": 0, "review": 2}},
+    {"min_trials": {"author": 3, "review": 2.5}},
     {"floors": {"review_correct_rate": 10**400}},
     {"floors": []},
     {"matrix": []},
     {"no_drop": {"review_correct_rate": 1}},
     {"matrix": {**THRESHOLDS["matrix"], "stacks": "web"}},
-], ids=["nan-limit", "zero-limit", "rate-above-one", "string-rate", "zero-trials", "fractional-trials",
+], ids=["nan-limit", "zero-limit", "rate-above-one", "string-rate", "scalar-trials", "missing-scenario-trials",
+        "zero-trials", "fractional-trials",
         "huge-integer-rate", "floors-not-object", "matrix-not-object", "no-drop-not-list", "stacks-not-list"])
 def test_invalid_threshold_values_are_reported_not_silently_disabling_a_check(gate, tmp_path, patch):
     failures = run_gate(gate, tmp_path, rows_for("before"), rows_for("after"), {**THRESHOLDS, **patch})

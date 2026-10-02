@@ -18,6 +18,8 @@ Token usage comes from each CLI's own usage report. Model API calls: manual only
 
     python evals/phase_eval.py --kit before=/tmp/af-kit-before --kit after=. \
         --scenario author,review --trials 1 --output /tmp/af-eval/run1
+
+`--trials` sets the trial count of every scenario; `--review-trials` overrides it for review.
 """
 from __future__ import annotations
 
@@ -733,6 +735,7 @@ def main() -> int:
     parser.add_argument("--modes", default=",".join(MODES))
     parser.add_argument("--scenario", default="author,review")
     parser.add_argument("--trials", type=int, default=1)
+    parser.add_argument("--review-trials", type=int, help="review trial count; defaults to --trials")
     parser.add_argument("--concurrency", type=int, default=8, help="parallel model CLI processes")
     parser.add_argument("--timeout", type=int, default=1500)
     parser.add_argument("--author-provider", choices=("claude", "codex"), default="claude")
@@ -742,6 +745,10 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
+    trials = {"author": args.trials,
+              "review": args.trials if args.review_trials is None else args.review_trials}
+    if min(trials.values()) < 1:
+        parser.error("--trials and --review-trials must be positive")
     reviewers = args.review_providers.split(",")
     if (not reviewers or any(provider not in {"claude", "codex"} for provider in reviewers)
             or len(reviewers) != len(set(reviewers))):
@@ -765,14 +772,14 @@ def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="af-phase-eval-"))
     scenarios = args.scenario.split(",")
     units = []
-    for trial in range(1, args.trials + 1):
+    for trial in range(1, max(trials.values()) + 1):
         for stack in args.stacks.split(","):
             case_dir = CASES / stack
             for mode in args.modes.split(","):
                 for kit_name, kit in kits.items():
-                    if "author" in scenarios:
+                    if "author" in scenarios and trial <= trials["author"]:
                         units.append(("author", kit_name, kit, case_dir, mode, "", trial))
-                    if "review" in scenarios:
+                    if "review" in scenarios and trial <= trials["review"]:
                         for variant in ("defect", "clean"):
                             units.append(("review", kit_name, kit, case_dir, mode, variant, trial))
     results_path = args.output / "results.jsonl"

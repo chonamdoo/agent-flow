@@ -1,5 +1,8 @@
 {
-  "min_trials": 3,
+  "min_trials": {
+    "author": 3,
+    "review": 2
+  },
   "matrix": {
     "stacks": ["web", "rn", "app", "backend"],
     "modes": ["clean", "local", "team"],
