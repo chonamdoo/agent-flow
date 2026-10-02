@@ -10,7 +10,7 @@ under different or unknown conditions are not compared.
 
 Failure conditions come from the thresholds file:
 - a results file is incomplete (fewer rows than `units`, unparseable lines) or has duplicate units;
-- a stack · mode · variant combination is missing on one kit or has fewer than `min_trials` trials;
+- a stack · mode · variant combination is missing on one kit or has fewer trials than its scenario's `min_trials`;
 - an after-kit metric is below its floor or above its ceiling;
 - either kit's `invalid_rate` is above its ceiling;
 - an after-kit metric dropped (`no_drop`) or rose (`no_rise`) against the before kit;
@@ -420,8 +420,8 @@ def _coverage_failures(rows: list[dict], before: str, after: str, thresholds: di
             label = f"{kit} {'/'.join(part for part in combination if part)}"
             if not seen:
                 failures.append(f"{label}: missing on this kit")
-            elif len(set(seen)) < min_trials:
-                failures.append(f"{label}: {len(set(seen))} trials, need {min_trials}")
+            elif len(set(seen)) < min_trials[combination[0]]:
+                failures.append(f"{label}: {len(set(seen))} trials, need {min_trials[combination[0]]}")
             if len(seen) != len(set(seen)):
                 failures.append(f"{label}: duplicate trial rows")
     for combination in sorted(combinations):
@@ -462,7 +462,8 @@ def _shape_failures(thresholds: object) -> list[str]:
     failures = [f"thresholds missing `{key}`" for key in
                 ("min_trials", "floors", "ceilings", "no_drop", "no_rise", "token_ratio_max", "matrix")
                 if key not in thresholds]
-    failures.extend(f"thresholds `{key}` must be an object" for key in ("floors", "ceilings", "token_ratio_max", "matrix")
+    failures.extend(f"thresholds `{key}` must be an object"
+                    for key in ("min_trials", "floors", "ceilings", "token_ratio_max", "matrix")
                     if key in thresholds and not isinstance(thresholds[key], dict))
     failures.extend(f"thresholds `{key}` must be a list of names" for key in ("no_drop", "no_rise")
                     if key in thresholds and not _names(thresholds[key]))
@@ -487,8 +488,13 @@ def _threshold_failures(thresholds: dict) -> list[str]:
     failures.extend(f"thresholds name unknown metric `{name}`" for name in named if name not in METRICS)
     failures.extend(f"thresholds name unknown token axis `{axis}`"
                     for axis in thresholds["token_ratio_max"] if axis not in TOKEN_AXES)
-    if not _count(thresholds["min_trials"], 1):
-        failures.append("thresholds `min_trials` must be a positive integer")
+    min_trials = thresholds["min_trials"]
+    failures.extend(f"thresholds `min_trials` missing scenario `{scenario}`"
+                    for scenario in SCENARIOS if scenario not in min_trials)
+    failures.extend(f"thresholds `min_trials` names unknown scenario `{scenario}`"
+                    for scenario in min_trials if scenario not in SCENARIOS)
+    failures.extend(f"thresholds `min_trials.{scenario}` must be a positive integer"
+                    for scenario, value in min_trials.items() if scenario in SCENARIOS and not _count(value, 1))
     failures.extend(f"thresholds `{name}` must be a rate between 0 and 1"
                     for section in ("floors", "ceilings") for name, value in thresholds[section].items()
                     if not (_finite_number(value) and 0 <= value <= 1))
