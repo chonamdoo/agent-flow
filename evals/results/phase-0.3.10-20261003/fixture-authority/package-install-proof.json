@@ -1,0 +1,28 @@
+{
+  "package_sha256": "cd907b4e8df1e48139fe2b3d91427cbf2d1a2456e9704f2b61ecc810e3d6f4c0",
+  "source_main": "5d43918600d7c2e6bb0a6ca5c33df37da8d23482",
+  "installations": [
+    {
+      "entrypoint": "agent-flow-kit.mjs",
+      "profile": "android",
+      "architecture_mode": "local",
+      "install_exit_code": 0,
+      "installed_wrapper_version": "agent-flow 0.3.10",
+      "active_and_runtime_changed_templates_exact": true
+    },
+    {
+      "entrypoint": "agent-flow-install.mjs",
+      "profile": "android",
+      "architecture_mode": "local",
+      "install_exit_code": 0,
+      "installed_wrapper_version": "agent-flow 0.3.10",
+      "active_and_runtime_changed_templates_exact": true
+    }
+  ],
+  "python_override": "/var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-review-criteria-2jcmz81d/wheel-python/bin/python",
+  "environment_recovery": [
+    "First smoke used unsupported AGENT_FLOW_PYTHON. Emitted launcher selected existing leader .venv with 0.2.9 metadata. Corrected temp install to supported PYTHON; no product or user interpreter modified.",
+    "Second entrypoint requires the documented install subcommand; corrected invocation after help evidence."
+  ],
+  "published": false
+}

@@ -133,11 +133,15 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
     project.mkdir(parents=True)
     _overlay(case_dir / "seed", project)
     _overlay(case_dir / "modes" / mode / "overlay", project)
+    if scenario == "author":
+        _overlay(case_dir / "author" / mode / "setup", project)
     _git(project, "init", "-q", "-b", "main")
     _git(project, "add", "-A")
     _git(project, "commit", "-qm", "seed")
+    mode_config = case["modes"][mode]
+    install_args = mode_config.get("author_install", mode_config["install"]) if scenario == "author" else mode_config["install"]
     command = ["node", str(kit / "bin" / "agent-flow-kit.mjs"), "install", "--root", str(project),
-               "--profile", case["profile"], *case["modes"][mode]["install"], "--no-hooks"]
+               "--profile", case["profile"], *install_args, "--no-hooks"]
     install = _run_group(command, timeout=600)
     if install.returncode != 0 and "ETIMEDOUT" in install.stderr + install.stdout:
         # 동시 실행 부하로 install 안의 python 하위 호출이 시간 초과된 경우다. kit 결함이 아니므로 한 번만 다시 설치한다.
@@ -158,10 +162,11 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
     else:
         _overlay(case_dir / "review" / mode / variant, project)
     run_dir = create_run(project, "full-feature", case["task"], run_id=f"eval-{scenario}")
-    # full-feature에서 red/green과 multi-review는 모두 prd·ddd-design·slice-plan 뒤에 온다. 두 시나리오에 같은 산출물을 둔다.
     artifacts = case_dir / "author" / mode / "artifacts"
     _overlay(artifacts, run_dir)
-    prd = artifacts / "prd.md"
+    if scenario == "review":
+        _overlay(case_dir / "review" / mode / "artifacts", run_dir)
+    prd = run_dir / "prd.md"
     if prd.is_file():
         from agent_flow.core.design_ledger import capture_design_ledger
 

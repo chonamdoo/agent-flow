@@ -1,0 +1,107 @@
+{
+  "passed": true,
+  "gate_command": "env PYTHONDONTWRITEBYTECODE=1 AGENT_FLOW_NO_UPDATE_CHECK=1 /var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-review-criteria-2jcmz81d/persistent-python/bin/python evals/phase_eval_compare.py /var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-review-criteria-2jcmz81d/phase-release-fixture-authority --require-kit /var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-review-criteria-2jcmz81d/main-5d43918 --require-before-kit /var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-review-criteria-2jcmz81d/before --require-evaluator /Users/namdoo/.agent-flow/worktrees/agent-workflow-e11171fb0dea/feat-phase-author-fixture --summary /var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-review-criteria-2jcmz81d/phase-release-fixture-authority/gate.md --export evals/release-gates/v0.3.10",
+  "gate_cwd": "/Users/namdoo/.agent-flow/worktrees/agent-workflow-e11171fb0dea/feat-phase-author-fixture",
+  "units": 168,
+  "raw_results_sha256": "4bb3238ac78dccd7e3c30c5b682567d7416cfb2115117c8020dd6567db3e7274",
+  "gate_export_preserves_gate_only_projection": true,
+  "original_bytes_archived": true,
+  "before": {
+    "author_required_read_rate": 1.0,
+    "author_pass_rate": 1.0,
+    "review_correct_rate": 0.9772727272727273,
+    "defect_detection_rate": 1.0,
+    "false_request_changes_rate": 0.008333333333333333,
+    "reviewer_read_rate": 1.0,
+    "invalid_rate": 0.0
+  },
+  "after": {
+    "author_required_read_rate": 1.0,
+    "author_pass_rate": 1.0,
+    "review_correct_rate": 1.0,
+    "defect_detection_rate": 1.0,
+    "false_request_changes_rate": 0.0,
+    "reviewer_read_rate": 1.0,
+    "invalid_rate": 0.011904761904761904
+  },
+  "token_ratios": {
+    "author": {
+      "uncached_input": 1.0259547173223817,
+      "output": 1.0754938864651746
+    },
+    "review": {
+      "uncached_input": 0.9876335793373642,
+      "output": 0.9933714383211056
+    }
+  },
+  "invalid_attempts": [
+    {
+      "scenario": "author",
+      "stack": "backend",
+      "mode": "clean",
+      "kit": "after",
+      "trial": 3,
+      "provider": "codex",
+      "error": "prepare failed: Traceback (most recent call last):\n  File \"/Users/namdoo/.agent-flow/worktrees/agent-workflow-e11171fb0dea/feat-phase-author-fixture/evals/phase_eval.py\", line 846, in <module>\n    raise SystemExit(main())\n                     ^^^^^^\n  File \"/Users/namdoo/.agent-flow/worktrees/agent-workflow-e11171fb0dea/feat-phase-author-fixture/evals/phase_eval.py\", line 764, in main\n    print(json.dumps(prepare(Path(kit), Path(case_dir), mode, scenario, variant, Path(project),\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/namdoo/.agent-flow/worktrees/agent-workflow-e11171fb0dea/feat-phase-author-fixture/evals/phase_eval.py\", line 150, in prepare\n    raise RuntimeError(f\"install failed: {install.stderr[-600:] or install.stdout[-600:]}\")\nRuntimeError: install failed: timeout after 600s\n\n"
+    }
+  ],
+  "invalid_attempts_retried": false,
+  "thresholds_modified": false,
+  "backend_team_author": [
+    {
+      "kit": "before",
+      "trial": 1,
+      "oracle": {
+        "behavior": true,
+        "plan": true,
+        "norm": true
+      }
+    },
+    {
+      "kit": "after",
+      "trial": 1,
+      "oracle": {
+        "behavior": true,
+        "plan": true,
+        "norm": true
+      }
+    },
+    {
+      "kit": "before",
+      "trial": 2,
+      "oracle": {
+        "behavior": true,
+        "plan": true,
+        "norm": true
+      }
+    },
+    {
+      "kit": "after",
+      "trial": 2,
+      "oracle": {
+        "behavior": true,
+        "plan": true,
+        "norm": true
+      }
+    },
+    {
+      "kit": "before",
+      "trial": 3,
+      "oracle": {
+        "behavior": true,
+        "plan": true,
+        "norm": true
+      }
+    },
+    {
+      "kit": "after",
+      "trial": 3,
+      "oracle": {
+        "behavior": true,
+        "plan": true,
+        "norm": true
+      }
+    }
+  ],
+  "lifecycle_limit": "Single phase evaluation; not full workflow lifecycle or hooks."
+}
