@@ -123,18 +123,36 @@ an invitation to switch commands silently or manufacture usage.
 Verdicts and evidence
 ---------------------
 
-The existing evals/skill_tasks.py score_review is used unchanged: verdict,
-finding location, defect coverage, false positives and host success stay distinct.
+The shared evals/skill_tasks.py scorer requires independent cause and broken-contract
+judgments as well as correct finding locations. Equivalent wording is valid.
+Verdict, defect coverage, false positives and host success remain separate.
 The inline corpus does not pretend to be an executed document tool-read trace.
 Status distinguishes not-executed, timeout, provider-failure, fixture-mutated,
-malformed-response, oracle-mismatch, matched-oracle, and render-failure.
+malformed-response, adjudication-pending, oracle-mismatch, matched-oracle, and render-failure.
+Correct defect verdicts with unjudged reasons are pending, not oracle mismatches.
+
+After inspecting the saved case.json and actual response, a trusted independent
+reviewer supplies the reviews JSON format documented in evals/README.md, keyed
+by each row's review_sha256. Never accept model self-ratings as judgments.
+
+  python tools/t6-context/run.py --rescore /tmp/t6-live-pair-NEW \
+    --adjudications /tmp/t6-cause-contract-judgments.json \
+    --output /tmp/t6-reviewed-pair-NEW
+
+Rescoring makes no model calls, preserves cases and original summary/manifest,
+records judgment/scorer hashes, and recomputes row status and pair comparisons.
+Raw prompts and provider streams remain in the original measurement directory.
+An existing review_sha256 must match the saved response before applying even a
+fresh judgment; a mismatch rejects rescoring without creating output. Legacy
+rows without that fingerprint cannot establish original-response immutability.
+Hashes bind judgments to case/response bytes, not judge identity or semantic truth.
 
 comparison.json reports observed verdict parity only when both calls produced
 valid successful responses, and reports both_match_oracle separately. Two wrong
 verdicts can agree; agreement is NOT correctness or approval. Missing, malformed,
-failed and unexecuted pairs cannot acquire parity or byte-savings claims.
+failed, unexecuted and adjudication-pending pairs cannot acquire parity or byte-savings claims.
 summary.json intentionally makes no savings-percentage claim. Exit 1 preserves
-all collected rows if a render, provider, fixture or oracle fails. Render-only
+all collected rows if a render, provider, fixture or oracle fails or judgment is pending. Render-only
 success means rendering worked, not that semantic parity passed.
 
 The original 21 fixtures cover the named T6 normal/violation/exception cases:
@@ -186,7 +204,7 @@ Main subsequently evaluated all 48 v2 cases (192 CLI calls across both sides and
 providers), reporting six failed rows across three cases and stable source
 snapshots. These full v2 observations remain v2 evidence, including failures.
 
-The current manifest identifies version 3, which changes only those three cases:
+Fixture version 3 changed only those three cases:
 ui-single-repository derives UiState through pure render-time mapping instead of
 inside the effect; sdui-event-direction uses sealed PageState.Content with actual
 zero initialization; ui-cross-context calibrates the same defect's bounded
@@ -200,9 +218,16 @@ Do not describe this mixed-version evidence as a homogeneous v3 rerun, or turn
 an earlier mismatch into a pass without a new measurement.
 The retained three-case v3 execution contains 12 valid oracle-matching responses
 and six equal before/after verdict pairs. Combined with the 45 unchanged v2
-cases, the current fixture evidence has 192 oracle matches and 96 equal pairs.
+cases, the historical location-based evidence has 192 oracle matches and 96 equal pairs.
 This combines identified historical executions, not a new homogeneous run or
 approval of a later runtime whose exact semantic inputs have not been compared.
+
+Version 4 declares the existing cause/contract invariant for each of the 16 defect
+cases without changing tasks, code, expected verdicts or finding regions.
+fixtures/repair-history-v4.json preserves the exact v3 corpus and manifest bytes.
+Historical v2/v3 location-only scores are not independent cause/contract judgments
+and cannot be presented as v4 oracle matches. Judge fresh saved responses before
+claiming v4 semantic correctness.
 
 No provider parity, token savings, wall-time improvement, complete delivery
 savings, or independent reviewer approval has been measured merely by adding

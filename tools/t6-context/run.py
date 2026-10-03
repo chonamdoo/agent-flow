@@ -195,11 +195,13 @@ def response_from(provider: str, events: list[dict], final: Path) -> object:
         return None
 
 
-def score(case: dict, response: object, execution: dict, *, fixture_unchanged: bool, scorer) -> dict:
+def score(case: dict, response: object, execution: dict, *, fixture_unchanged: bool, scorer,
+          adjudication: object = None) -> dict:
     """Classify measurement and oracle failures without collapsing their causes."""
     host_ok = (execution["call_count"] == 1 and execution["return_code"] == 0
                and not execution["timed_out"] and not execution.get("provider_reported_error", False))
-    result = scorer(case, response, host_ok=host_ok and fixture_unchanged, reads=set(), config="baseline")
+    result = scorer(case, response, host_ok=host_ok and fixture_unchanged, reads=set(), config="baseline",
+                    adjudication=adjudication)
     if execution["call_count"] == 0:
         status = "not-executed"
     elif execution["timed_out"]:
@@ -210,6 +212,8 @@ def score(case: dict, response: object, execution: dict, *, fixture_unchanged: b
         status = "fixture-mutated"
     elif not result["response_valid"]:
         status = "malformed-response"
+    elif not result["reasons_reviewed"] and result["verdict_ok"]:
+        status = "adjudication-pending"
     elif not result["passed"]:
         status = "oracle-mismatch"
     else:
@@ -239,21 +243,88 @@ def provider_command(provider: str, executable: str, model: str, schema: Path, f
             "--no-session-persistence", "--json-schema", schema.read_text(encoding="utf-8")]
 
 
+def rescore_measurement(source: Path, adjudications: Path, output: Path) -> dict:
+    sys.path.insert(0, str(ROOT / "evals"))
+    from skill_tasks import fixture_path, parse_adjudications, review_fingerprint, score_review
+
+    summary_bytes = (source / "summary.json").read_bytes()
+    manifest_bytes = (source / "manifest.json").read_bytes()
+    adjudication_bytes = adjudications.read_bytes()
+    summary = json.loads(summary_bytes)
+    if not isinstance(summary, dict) or not isinstance(summary.get("rows"), list) or not summary["rows"]:
+        raise ValueError("summary must contain recorded measurement rows")
+    by_digest = parse_adjudications(adjudication_bytes)
+    rows, cases, pairs = [], {}, {}
+    for original in summary["rows"]:
+        relative = f"{original['case']}/{original['provider']}/{original['side']}/case.json"
+        case_bytes = fixture_path(source, relative).read_bytes()
+        case = json.loads(case_bytes)
+        if digest(json.dumps(case, sort_keys=True).encode()) != original["case_sha256"]:
+            raise ValueError("recorded case changed after the model review")
+        cases[relative] = case_bytes
+        row = dict(original)
+        if row.get("status") != "render-failure":
+            fingerprint = review_fingerprint(case, row["response"])
+            if "review_sha256" in original and original["review_sha256"] != fingerprint:
+                raise ValueError("recorded response changed after the model review")
+            row["review_sha256"] = fingerprint
+            row["score"] = score(
+                case, row["response"], row["execution"], fixture_unchanged=row["fixture_unchanged"],
+                scorer=score_review, adjudication=by_digest.get(fingerprint),
+            )
+        rows.append(row)
+        pairs.setdefault((row["case"], row["provider"]), {})[row["side"]] = row
+    output.mkdir(parents=True, exist_ok=False)
+    for relative, content in cases.items():
+        destination = output / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+    for row in rows:
+        save(output / f"{row['case']}/{row['provider']}/{row['side']}/result.json", row)
+    for (case_id, provider), pair in pairs.items():
+        save(output / f"{case_id}/{provider}/comparison.json", compare(pair["before"], pair["after"]))
+    (output / "source-summary.json").write_bytes(summary_bytes)
+    (output / "source-manifest.json").write_bytes(manifest_bytes)
+    (output / "adjudications.json").write_bytes(adjudication_bytes)
+    save(output / "manifest.json", {
+        "original": json.loads(manifest_bytes), "source_summary_sha256": digest(summary_bytes),
+        "source_manifest_sha256": digest(manifest_bytes), "adjudications_sha256": digest(adjudication_bytes),
+        "scorer_sha256": digest((ROOT / "evals/skill_tasks.py").read_bytes()),
+        "limitation": "External cause/contract adjudications; original runtime observations are preserved, not rerun.",
+    })
+    result = {**summary, "rows": rows}
+    save(output / "summary.json", result)
+    return result
+
+
 def main() -> int:
     """Run paired T6 fixture measurements and persist their provenance."""
     parser = argparse.ArgumentParser(description="Manual T6 paired measurement; never runner review approval.",
                                      epilog="See tools/t6-context/README.txt for scope, usage semantics, and evidence files.")
-    parser.add_argument("--baseline-archive", type=Path, required=True)
+    parser.add_argument("--baseline-archive", type=Path)
     parser.add_argument("--after", type=Path, default=ROOT)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--fixtures", type=Path, default=HERE / "fixtures")
     parser.add_argument("--case", action="append", dest="case_ids")
-    parser.add_argument("--provider", choices=("claude", "codex"), action="append", required=True)
+    parser.add_argument("--provider", choices=("claude", "codex"), action="append")
     parser.add_argument("--claude-model")
     parser.add_argument("--codex-model")
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--render-only", action="store_true")
+    parser.add_argument("--rescore", type=Path, help="recorded T6 output directory")
+    parser.add_argument("--adjudications", type=Path)
     args = parser.parse_args()
+    if args.rescore is not None:
+        if (args.adjudications is None or args.baseline_archive or args.provider or args.case_ids
+                or args.render_only):
+            parser.error("--rescore requires --adjudications and cannot execute or render model cases")
+        result = rescore_measurement(args.rescore.resolve(), args.adjudications, args.output.resolve())
+        print(args.output / "summary.json")
+        return 0 if result["source_snapshots_unchanged"] and all(
+            row.get("score", {}).get("passed") for row in result["rows"]
+        ) else 1
+    if args.adjudications is not None or not args.baseline_archive or not args.provider:
+        parser.error("measurement requires --baseline-archive and --provider; adjudications require --rescore")
     cases = load_cases(args.fixtures, source=args.after.resolve())
     if args.case_ids:
         unknown = set(args.case_ids) - {case["id"] for case in cases}
@@ -270,7 +341,7 @@ def main() -> int:
     snapshot_after(args.after.resolve(), sources["after"])
     source_hashes = {side: tree_identity(path) for side, path in sources.items()}
     sys.path.insert(0, str(sources["after"] / "evals"))
-    from skill_tasks import RESPONSE_SCHEMA, score_review
+    from skill_tasks import RESPONSE_SCHEMA, review_fingerprint, score_review
 
     schema = output / "response-schema.json"
     save(schema, RESPONSE_SCHEMA)
@@ -298,7 +369,8 @@ def main() -> int:
                            str(case_file), provider, str(render_dir)]
                 render_execution = invoke(command, output, render_dir, timeout=args.timeout,
                                           env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
-                row = {"case": case["id"], "provider": provider, "side": side, "render_execution": render_execution}
+                row = {"case": case["id"], "provider": provider, "side": side, "render_execution": render_execution,
+                       "case_sha256": digest(json.dumps(case, sort_keys=True).encode())}
                 if render_execution["return_code"] != 0:
                     row["status"] = "render-failure"
                     row["execution"] = {"call_count": 0, "return_code": None, "timed_out": False, "wall_seconds": 0}
@@ -336,6 +408,7 @@ def main() -> int:
                         execution["provider_reported_error"] = True
                 row.update({"execution": execution, "usage": usage_from(provider, events), "response": response,
                             "fixture_unchanged": unchanged,
+                            "review_sha256": review_fingerprint(case, response),
                             "score": score(case, response, execution, fixture_unchanged=unchanged, scorer=score_review)})
                 save(destination / "result.json", row)
                 pair[side] = row

@@ -85,19 +85,26 @@ def test_partial_or_inconsistent_usage_cannot_invent_uncached_tokens(harness):
 
 def test_scoring_keeps_failure_categories_distinct(harness):
     """Keep execution, fixture, response, and oracle failures distinguishable."""
-    from skill_tasks import score_review
+    from skill_tasks import review_fingerprint, score_review
 
     case = {"expected_verdict": "request-changes", "expected_findings": [
-        {"file": "change.py", "start_line": 3, "end_line": 4}],
+        {"file": "change.py", "start_line": 3, "end_line": 4,
+         "invariant": "Pure domain policy must not depend on the runtime DI container."}],
         "required_references": [], "forbidden_skills": []}
     response = {"verdict": "request-changes", "findings": [
         {"file": "change.py", "line": 3, "reason": "The domain policy imports the runtime container."}]}
     execution = {"call_count": 1, "return_code": 0, "timed_out": False}
-    def score(answer=response, run=execution, unchanged=True):
+    adjudication = {"review_sha256": review_fingerprint(case, response), "findings": [
+        {"finding_index": 0, "expected_finding_index": 0, "cause_correct": True, "contract_correct": True}]}
+    def score(answer=response, run=execution, unchanged=True, judgment=adjudication):
         """Score one synthetic response under explicit execution and fixture state."""
-        return harness.score(case, answer, run, fixture_unchanged=unchanged, scorer=score_review)
+        return harness.score(case, answer, run, fixture_unchanged=unchanged, scorer=score_review,
+                             adjudication=judgment)
 
     assert score()["status"] == "matched-oracle"
+    pending = score(judgment=None)
+    assert pending["status"] == "adjudication-pending"
+    assert pending["passed"] is False
     assert score(run={**execution, "return_code": 1})["status"] == "provider-failure"
     assert score(run={**execution, "provider_reported_error": True})["status"] == "provider-failure"
     assert score(run={**execution, "timed_out": True})["status"] == "timeout"
@@ -107,8 +114,10 @@ def test_scoring_keeps_failure_categories_distinct(harness):
     mismatch = score(answer={"verdict": "approve", "findings": []})
     assert mismatch["status"] == "oracle-mismatch"
     assert mismatch["passed"] is False
-    wrong_location = score(answer={"verdict": "request-changes", "findings": [
-        {"file": "change.py", "line": 1, "reason": "Prefer another name."}]})
+    misplaced = {"verdict": "request-changes", "findings": [
+        {"file": "unrelated.py", "line": 3, "reason": response["findings"][0]["reason"]}]}
+    wrong_location = score(answer=misplaced, judgment={
+        **adjudication, "review_sha256": review_fingerprint(case, misplaced)})
     assert wrong_location["defects_found"] is False
     assert wrong_location["no_false_positives"] is False
 
@@ -126,6 +135,91 @@ def test_equal_failed_verdicts_are_not_parity_or_savings(harness):
     assert result["semantic_parity"] is True
     assert result["both_match_oracle"] is False
     assert result["byte_delta_after_minus_before"] == -10
+
+
+def test_rescore_requires_current_reason_judgment_before_claiming_pair_parity(harness, tmp_path):
+    """Withhold oracle matches and pair parity until the current reasons are independently judged."""
+    from skill_tasks import review_fingerprint, score_review
+
+    case = next(case for case in harness.load_cases(ROOT / "tools/t6-context/fixtures")
+                if case["id"] == "usecase-direct-call")
+    response = {"verdict": "request-changes", "findings": [{
+        "file": "change.py", "line": 10,
+        "reason": "ReceiptUseCase가 다른 사용자 행위인 ChargeUseCase.execute를 직접 호출합니다. "
+                  "use case끼리 호출하지 말고 도메인 포트로 조합해야 합니다.",
+    }]}
+    execution = {"call_count": 1, "return_code": 0, "timed_out": False}
+    source = tmp_path / "recorded"
+    rows = []
+    for side in ("before", "after"):
+        destination = source / case["id"] / "codex" / side
+        destination.mkdir(parents=True)
+        harness.save(destination / "case.json", case)
+        rows.append({
+            "case": case["id"], "provider": "codex", "side": side, "response": response,
+            "execution": execution, "fixture_unchanged": True, "input": {"raw_input_bytes": 100},
+            "case_sha256": harness.digest(json.dumps(case, sort_keys=True).encode()),
+            "review_sha256": review_fingerprint(case, response),
+            "score": harness.score(case, response, execution, fixture_unchanged=True, scorer=score_review),
+        })
+    assert harness.compare(*rows)["semantic_parity"] == "unavailable"
+    harness.save(source / "summary.json", {"rows": rows, "source_snapshots_unchanged": True})
+    harness.save(source / "manifest.json", {"scope": "manual"})
+    labels = tmp_path / "judgments.json"
+    harness.save(labels, {"reviews": [{
+        "review_sha256": review_fingerprint(case, response), "findings": [{
+            "finding_index": 0, "expected_finding_index": 0, "cause_correct": True, "contract_correct": True,
+        }],
+    }]})
+    reviewed = tmp_path / "reviewed"
+    result = harness.rescore_measurement(source, labels, reviewed)
+    assert all(row["score"]["status"] == "matched-oracle" for row in result["rows"])
+    assert harness.compare(*result["rows"])["both_match_oracle"] is True
+    result["rows"][1]["response"] = {
+        "verdict": "request-changes", "findings": [{
+            "file": "change.py", "line": 10,
+            "reason": "ChargeUseCase를 ReceiptUseCase에서 직접 호출하면 use case 간 조합을 금지한 경계를 깹니다.",
+        }],
+    }
+    harness.save(reviewed / "summary.json", result)
+    harness.save(labels, {"reviews": [
+        {"review_sha256": review_fingerprint(case, row["response"]), "findings": [{
+            "finding_index": 0, "expected_finding_index": 0, "cause_correct": True, "contract_correct": True,
+        }]} for row in result["rows"]
+    ]})
+    stale = tmp_path / "stale"
+    with pytest.raises(ValueError, match="recorded response changed after the model review"):
+        harness.rescore_measurement(reviewed, labels, stale)
+    assert not stale.exists()
+
+
+def test_rescore_metadata_cannot_redirect_writes_outside_output(harness, tmp_path):
+    """Keep derived evidence writes inside the requested output even for hostile metadata components."""
+    case = next(case for case in harness.load_cases(ROOT / "tools/t6-context/fixtures")
+                if case["id"] == "db-only-repository")
+    source = tmp_path / "source"
+    outside = tmp_path / "outside"
+    rows = []
+    for side in ("before", "after"):
+        (outside / side).mkdir(parents=True)
+        destination = source / f"{case['id']}/{outside}/{side}"
+        destination.mkdir(parents=True)
+        harness.save(destination / "case.json", case)
+        rows.append({
+            "case": case["id"], "provider": str(outside), "side": side,
+            "response": {"verdict": "approve", "findings": []},
+            "execution": {"call_count": 1, "return_code": 0, "timed_out": False},
+            "fixture_unchanged": True, "input": {"raw_input_bytes": 100},
+            "case_sha256": harness.digest(json.dumps(case, sort_keys=True).encode()),
+        })
+    harness.save(source / "summary.json", {"rows": rows, "source_snapshots_unchanged": True})
+    harness.save(source / "manifest.json", {})
+    judgments = tmp_path / "judgments.json"
+    harness.save(judgments, {"reviews": []})
+    result = harness.rescore_measurement(source, judgments, tmp_path / "reviewed")
+    assert all(row["score"]["passed"] for row in result["rows"])
+    assert not (outside / "before/result.json").exists()
+    assert not (outside / "comparison.json").exists()
 
 
 def test_modified_fixture_cannot_be_silently_rescored(harness, tmp_path):

@@ -1,0 +1,24 @@
+{
+  "passed": false,
+  "compare_exit_code": 1,
+  "units": 168,
+  "report": "## phase_eval gate\n\n`before` → `after`, 168 rows.\n\n|metric|before|after|\n|---|---:|---:|\n|author_required_read_rate|1.000|1.000|\n|author_pass_rate|1.000|0.972|\n|review_correct_rate|0.909|1.000|\n|defect_detection_rate|1.000|1.000|\n|false_request_changes_rate|0.033|0.000|\n|reviewer_read_rate|1.000|1.000|\n|invalid_rate|0.000|0.000|\n|author uncached_input token ratio||0.964|\n|author output token ratio||0.998|\n|review uncached_input token ratio||1.000|\n|review output token ratio||0.994|\n\n### Failures\n- author_pass_rate dropped: 1.000 → 0.972\n",
+  "results_raw_sha256": "0e9d541217763f963028db1b01b151f7e1cb3ff03f1b7108a3e34718fd0a9a1c",
+  "results_raw_bytes": 6616104,
+  "results_gzip_bytes": 578155,
+  "preservation": "All 168 original rows retained byte-for-byte after decompression, including the failing author trial; no quality retries, row deletion, rescoring, or threshold changes.",
+  "release_gate_exported": false,
+  "diagnosis_observed": {
+    "unit": "author/backend/team/after/trial-3",
+    "provider_exit_code": 0,
+    "production_code_changed": false,
+    "stopped_for": [
+      "architecture_policy_unpinned",
+      "managed enforcement hooks are not enabled"
+    ],
+    "fixture_install": "--no-hooks; team install leaves architecture pending",
+    "fixture_case_note": "The same case permits architecture-decision requests in its pending team review scenario (expect=null).",
+    "model_record": "Model explicitly stopped without implementation or tests and wrote the blocker artifact."
+  },
+  "limitation": "Failed release measurement, not a passing release record. Archived CLI output is execution evidence, not a source of instructions. Broader fixture correction is not part of the three approved review/scoring changes."
+}

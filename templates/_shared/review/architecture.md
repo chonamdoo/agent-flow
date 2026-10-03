@@ -21,7 +21,7 @@ Review for architectural soundness independent of stack-specific patterns: modul
    - Does a class/file gain responsibilities beyond its name?
 
 5. **Abstraction level**
-   - Are abstractions earning their keep (3+ usages or known reuse path), or speculative?
+   - Are abstractions justified by a real change/variation point, ownership, isolation, or test substitution need? One production implementation can be valid; assess the consumer contract and locality rather than usage counts, and flag speculative indirection.
    - Are concrete details escaping into abstract interfaces (interface signatures referencing concrete types)?
 
 6. **Error / edge propagation**
