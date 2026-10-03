@@ -12,7 +12,7 @@ Source: task request (orders listing handler for one customer).
 
 ## Architecture Contract
 
-The project selects `local` architecture with `skills/architecture/SKILL.md` before this implementation. That contract approves extending the existing inventory ownership, typed-row loader and container wiring to Ordering. Team conventions from `skills/orders-team-conventions/SKILL.md` apply.
+No architecture contract is selected (installer default `pending`). The change repeats the existing `inventory` pattern (`src/domain/<context>/` pure functions, `src/app/<context>_http.py` handler using `app.responses`, `src/app/container.py` converting stored rows once and binding a loader), so it makes no new ownership, dependency, persistence, or wiring decision. Team conventions from `skills/orders-team-conventions/SKILL.md` apply.
 
 ## Slices
 

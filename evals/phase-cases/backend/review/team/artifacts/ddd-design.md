@@ -29,7 +29,7 @@ Ordering - the customer's view of placed orders.
 query -> validate customer_id/status -> list customer orders -> filter -> sort newest first -> map to response (empty state per slice-plan FR-5).
 
 ## Architecture Boundary Map
-The selected local contract is `skills/architecture/SKILL.md`. It approves these Ordering boundaries and their composition before implementation, following the existing `inventory` pattern. Team conventions: record types are `typing.NamedTuple`; no dataclasses under `src/`.
+No architecture contract is selected (pending); the change follows the existing `inventory` pattern and adds no architecture decision. Team conventions: record types are `typing.NamedTuple`; no dataclasses under `src/`.
 - `src/domain/orders/models.py`: `OrderRowDTO`, `Order` records, status vocabulary.
 - `src/domain/orders/listing.py`: `list_customer_orders`.
 - `src/app/orders_http.py`: handler; `src/app/container.py`: wiring.

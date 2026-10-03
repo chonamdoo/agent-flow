@@ -220,8 +220,15 @@ bytes/4 추정이다.
 
 ### `phase_eval.py` — 실제 모델, 수동·비차단
 
-`phase-cases/{web,rn,app,backend}` × `clean`/`local`/`team`(설치 기본 mode + 팀
-skill)마다 두 kit를 설치하고 각 kit의 prompt를 그대로 쓴다.
+`phase-cases/{web,rn,app,backend}` × `clean`/`local`/`team`마다 두 kit를 설치하고
+각 kit의 prompt를 그대로 쓴다. `team`은 팀 skill을 적용한다. backend/team author는
+새 Ordering 모듈의 소유권·wiring을 결정해야 하므로 `author_install`로 승인된 local
+계약을 선택한다. 구현 요구를 pending 권한으로 채점하지 않는다. 같은 mode의 review는
+기존 pending 설치와 정상 판정 `expect: null`을 유지한다.
+
+author의 `setup/`은 설치 전에, red 테스트인 `pre/`는 설치 커밋 뒤에 복사한다.
+공유 계획 위에 `review/<mode>/artifacts/`를 덮어써 시나리오별 권한을 구분한다.
+이는 green 구현·리뷰 평가이며 run 전체의 lifecycle/hook 실행을 검증하지 않는다.
 
 - author: full-feature `green` envelope로 `--author-provider`가 선택한 Claude 또는
   Codex 세션 하나가 구현한다(기본값 `claude`).
@@ -233,8 +240,8 @@ skill)마다 두 kit를 설치하고 각 kit의 prompt를 그대로 쓴다.
   일반적인 Clean Architecture 인증이 아니다.
 - review: 실제 multi-review 리뷰어 job에서 `--review-providers`가 선택한 provider를
   모든 관점에 적용해 결함 diff와 정상 diff를 검토한다(기본값 `claude,codex`).
-  run 폴더에는 author와 같은 prd·ddd-design·slice-plan과
-  design-spec을 두고, 리뷰 대상 트리의 테스트 실행 기록(`test-evidence.md`, 전체 출력)을
+  run 폴더에는 공유 prd·ddd-design·slice-plan 위에 review 전용 계획이 있으면 덮어쓰고,
+  design-spec과 리뷰 대상 트리의 테스트 실행 기록(`test-evidence.md`, 전체 출력)을
   남긴다. 테스트는 프로젝트 복사본에서 돌려 실행 부산물이 리뷰 diff에 섞이지 않게 한다
   (`review_test_command`가 있으면 그것을 쓴다). 런타임과 같은 판정 계약을 쓰고, 무효
   리뷰어가 있으면 그 시행은 채점하지 않는다. 결함은 request-changes 판정의
@@ -391,9 +398,9 @@ author 필수 읽음률에서는 미관측 skill도 분모에 포함해 읽음 �
 
 - 시행 1회 결과는 방향만 보여 준다. 정확도 개선을 주장하려면 같은 case를
   반복해 차이가 표본 변동보다 큰지 확인한다.
-- flutter와 python은 설치 기본 mode가 `pending`이라 team case도 pending이다.
-  pending 규칙상 리뷰어가 구조 결정을 이유로 변경을 요청할 수 있어 정상 diff의 정답
-  판정이 정해지지 않는다. 그래서 두 case의 정상 diff는 `expect: null`로 두고 판정을
+- flutter team과 python team review는 설치 기본 mode인 `pending`을 유지한다.
+  python team author만 승인된 local 계약을 선택한다. pending 리뷰에서는 구조 결정을
+  이유로 변경을 요청할 수 있어 두 case의 정상 diff는 `expect: null`로 두고 판정을
   채점하지 않는다. 결함 diff는 그대로 채점한다.
 - author 평가는 한 phase만 새 세션에서 돌린다. 실제 run처럼 대화 맥락이 이어지는
   경우의 효과는 재지 않는다.
