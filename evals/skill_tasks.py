@@ -297,6 +297,8 @@ def rescore_report(report_path: Path, adjudications_path: Path, output: Path) ->
             raise ValueError("recorded case changed after the model review")
         response = original["response"]
         digest = review_fingerprint(case, response)
+        if "review_sha256" in original and original["review_sha256"] != digest:
+            raise ValueError("recorded response changed after the model review")
         row = dict(original)
         row["review_sha256"] = digest
         row["score"] = score_review(

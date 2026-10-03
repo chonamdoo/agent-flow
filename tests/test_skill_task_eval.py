@@ -174,6 +174,7 @@ def test_rescoring_cannot_reuse_credit_after_a_reason_changes(evaluator, defect_
     report = {"metadata": {}, "results": [{
         "case": defect_case["id"], "config": "baseline", "trial": 0,
         "case_sha256": hashlib.sha256(json.dumps(defect_case, sort_keys=True).encode()).hexdigest(),
+        "review_sha256": evaluator.review_fingerprint(defect_case, response),
         "response": response, "host_ok": True, "observed_skill_reads": [],
     }]}
     report_path = source / "report.json"
@@ -184,11 +185,17 @@ def test_rescoring_cannot_reuse_credit_after_a_reason_changes(evaluator, defect_
     result = evaluator.rescore_report(report_path, labels, reviewed)
     assert result["results"][0]["score"]["passed"] is True
 
-    result["results"][0]["response"]["findings"][0]["reason"] = "The module needs a shorter name."
+    result["results"][0]["response"]["findings"][0]["reason"] = (
+        "The item update crosses tenant isolation because it omits the trusted tenant predicate."
+    )
     (reviewed / "report.json").write_text(json.dumps(result), encoding="utf-8")
-    rechecked = evaluator.rescore_report(reviewed / "report.json", labels, tmp_path / "rechecked")
-    assert rechecked["results"][0]["score"]["reasons_reviewed"] is False
-    assert rechecked["results"][0]["score"]["passed"] is False
+    labels.write_text(json.dumps({"reviews": [
+        adjudicate(evaluator, defect_case, result["results"][0]["response"])
+    ]}), encoding="utf-8")
+    rechecked = tmp_path / "rechecked"
+    with pytest.raises(ValueError, match="recorded response changed after the model review"):
+        evaluator.rescore_report(reviewed / "report.json", labels, rechecked)
+    assert not rechecked.exists()
 
 
 def test_reference_self_report_is_not_an_executed_read(evaluator, tmp_path, monkeypatch):

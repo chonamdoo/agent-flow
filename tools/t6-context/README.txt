@@ -142,6 +142,9 @@ by each row's review_sha256. Never accept model self-ratings as judgments.
 Rescoring makes no model calls, preserves cases and original summary/manifest,
 records judgment/scorer hashes, and recomputes row status and pair comparisons.
 Raw prompts and provider streams remain in the original measurement directory.
+An existing review_sha256 must match the saved response before applying even a
+fresh judgment; a mismatch rejects rescoring without creating output. Legacy
+rows without that fingerprint cannot establish original-response immutability.
 Hashes bind judgments to case/response bytes, not judge identity or semantic truth.
 
 comparison.json reports observed verdict parity only when both calls produced

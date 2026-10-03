@@ -159,6 +159,7 @@ def test_rescore_requires_current_reason_judgment_before_claiming_pair_parity(ha
             "case": case["id"], "provider": "codex", "side": side, "response": response,
             "execution": execution, "fixture_unchanged": True, "input": {"raw_input_bytes": 100},
             "case_sha256": harness.digest(json.dumps(case, sort_keys=True).encode()),
+            "review_sha256": review_fingerprint(case, response),
             "score": harness.score(case, response, execution, fixture_unchanged=True, scorer=score_review),
         })
     assert harness.compare(*rows)["semantic_parity"] == "unavailable"
@@ -175,14 +176,21 @@ def test_rescore_requires_current_reason_judgment_before_claiming_pair_parity(ha
     assert all(row["score"]["status"] == "matched-oracle" for row in result["rows"])
     assert harness.compare(*result["rows"])["both_match_oracle"] is True
     result["rows"][1]["response"] = {
-        "verdict": "request-changes", "findings": [{"file": "change.py", "line": 10, "reason": "Prefer another name."}],
+        "verdict": "request-changes", "findings": [{
+            "file": "change.py", "line": 10,
+            "reason": "ChargeUseCase를 ReceiptUseCase에서 직접 호출하면 use case 간 조합을 금지한 경계를 깹니다.",
+        }],
     }
     harness.save(reviewed / "summary.json", result)
-    stale = harness.rescore_measurement(reviewed, labels, tmp_path / "stale")
-    assert stale["rows"][1]["score"]["status"] == "adjudication-pending"
-    comparison = harness.compare(*stale["rows"])
-    assert comparison["both_match_oracle"] is False
-    assert comparison["semantic_parity"] == "unavailable"
+    harness.save(labels, {"reviews": [
+        {"review_sha256": review_fingerprint(case, row["response"]), "findings": [{
+            "finding_index": 0, "expected_finding_index": 0, "cause_correct": True, "contract_correct": True,
+        }]} for row in result["rows"]
+    ]})
+    stale = tmp_path / "stale"
+    with pytest.raises(ValueError, match="recorded response changed after the model review"):
+        harness.rescore_measurement(reviewed, labels, stale)
+    assert not stale.exists()
 
 
 def test_rescore_metadata_cannot_redirect_writes_outside_output(harness, tmp_path):

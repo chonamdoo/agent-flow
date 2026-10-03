@@ -265,6 +265,8 @@ def rescore_measurement(source: Path, adjudications: Path, output: Path) -> dict
         row = dict(original)
         if row.get("status") != "render-failure":
             fingerprint = review_fingerprint(case, row["response"])
+            if "review_sha256" in original and original["review_sha256"] != fingerprint:
+                raise ValueError("recorded response changed after the model review")
             row["review_sha256"] = fingerprint
             row["score"] = score(
                 case, row["response"], row["execution"], fixture_unchanged=row["fixture_unchanged"],
