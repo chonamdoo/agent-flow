@@ -35,7 +35,8 @@
       {
         "file": "presentation/CheckoutState.ts",
         "start_line": 3,
-        "end_line": 8
+        "end_line": 8,
+        "invariant": "The UI hook sequences Inventory.reserve and Payments.charge across contexts; payment failure after reservation needs business compensation owned by an application workflow, not the presentation hook."
       }
     ],
     "required_references": [],
@@ -121,7 +122,8 @@
       {
         "file": "change.py",
         "start_line": 5,
-        "end_line": 10
+        "end_line": 10,
+        "invariant": "ReceiptUseCase directly invokes ChargeUseCase.execute, coupling independent user-action workflows; application use cases must compose domain ports rather than call another use case."
       }
     ],
     "required_references": [],
@@ -176,7 +178,8 @@
       {
         "file": "domain/DiscountPolicy.kt",
         "start_line": 2,
-        "end_line": 4
+        "end_line": 4,
+        "invariant": "The pure domain DiscountPolicy imports javax.inject.Inject and annotates its constructor; adopted app-level DI metadata must not introduce framework dependencies into pure business policy."
       }
     ],
     "required_references": [],
@@ -246,7 +249,8 @@
       {
         "file": "presentation/PriceNode.kt",
         "start_line": 2,
-        "end_line": 5
+        "end_line": 5,
+        "invariant": "The SDUI leaf renderer calls a raw network API and owns business loading state; leaf renderers must display parsed state supplied by their owner rather than fetch and orchestrate business data."
       }
     ],
     "required_references": [],
@@ -300,7 +304,8 @@
       {
         "file": "domain/discount.ts",
         "start_line": 1,
-        "end_line": 3
+        "end_line": 3,
+        "invariant": "Pure domain discount policy imports TSyringe and resolves its repository through the runtime container; DI ownership belongs at the composition edge and domain policy must remain framework-free."
       }
     ],
     "required_references": [],
@@ -337,7 +342,8 @@
       {
         "file": "features/billing/title.ts",
         "start_line": 1,
-        "end_line": 2
+        "end_line": 2,
+        "invariant": "Billing imports and constructs catalog's internal store; the selected local ownership contract permits cross-feature access only through public feature ports."
       }
     ],
     "required_references": [],
@@ -372,7 +378,8 @@
       {
         "file": "new_service/handler.py",
         "start_line": 1,
-        "end_line": 5
+        "end_line": 5,
+        "invariant": "The new request entrypoint establishes concrete SQLite persistence ownership while architecture is pending; new structural boundaries require an adopted architecture decision before implementation."
       }
     ],
     "required_references": [],
@@ -411,7 +418,8 @@
       {
         "file": "change.ts",
         "start_line": 2,
-        "end_line": 3
+        "end_line": 3,
+        "invariant": "The failure branch ignores notify's true handled result and also publishes a local error; a globally handled SessionExpired occurrence must not be displayed again by the feature."
       }
     ],
     "required_references": [],
@@ -468,7 +476,8 @@
       {
         "file": "change.ts",
         "start_line": 4,
-        "end_line": 5
+        "end_line": 5,
+        "invariant": "The occurrence is permanently consumed before recover succeeds; failure or cancellation then loses the pending recovery, so acknowledgement must follow successful recovery."
       }
     ],
     "required_references": [],
@@ -525,7 +534,8 @@
       {
         "file": "change.ts",
         "start_line": 1,
-        "end_line": 3
+        "end_line": 3,
+        "invariant": "A RAM-only observable queue is claimed to survive process restart without persistence or reconciliation; recovery guarantees must not exceed the state owner's lifetime."
       }
     ],
     "required_references": [],
@@ -582,7 +592,8 @@
       {
         "file": "network/interceptor.ts",
         "start_line": 1,
-        "end_line": 3
+        "end_line": 3,
+        "invariant": "A driven HTTP interceptor invokes AppShell UI with a raw provider exception; network adapters must normalize failures at their boundary rather than own global presentation or expose provider objects to it."
       }
     ],
     "required_references": [],
@@ -640,7 +651,8 @@
       {
         "file": "app/AppShellRecovery.kt",
         "start_line": 1,
-        "end_line": 2
+        "end_line": 2,
+        "invariant": "Session recovery appends Login while retaining authenticated root routes; successful recovery must remove protected navigation state so Back cannot reach the expired session."
       }
     ],
     "required_references": [],
@@ -697,7 +709,8 @@
       {
         "file": "features/CatalogViewModel.swift",
         "start_line": 3,
-        "end_line": 5
+        "end_line": 5,
+        "invariant": "A leaf feature ViewModel resets the global NavigationPath and root flow; common session recovery and root navigation ownership belong to AppShell or its root coordinator."
       }
     ],
     "required_references": [],
@@ -754,7 +767,8 @@
       {
         "file": "app/api/account/route.ts",
         "start_line": 1,
-        "end_line": 3
+        "end_line": 3,
+        "invariant": "The server handler exposes account private details without session authorization because browser history was replaced; client navigation cannot authorize direct HTTP access to protected account data."
       }
     ],
     "required_references": [],
@@ -811,7 +825,8 @@
       {
         "file": "features/CatalogScreen.tsx",
         "start_line": 2,
-        "end_line": 4
+        "end_line": 4,
+        "invariant": "An ordinary Expo Router feature adds an independent NavigationContainer for common session recovery; the existing root container and AppShell must retain global recovery ownership."
       }
     ],
     "required_references": [],
@@ -868,7 +883,8 @@
       {
         "file": "proposed-capability.yaml",
         "start_line": 1,
-        "end_line": 2
+        "end_line": 2,
+        "invariant": "An unconditional shared capability dependency selects clean-architecture-core in local mode; shared capabilities must not impose unadopted Clean structural rules on a local architecture contract."
       }
     ],
     "required_references": [],

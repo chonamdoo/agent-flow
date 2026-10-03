@@ -19,7 +19,7 @@ failure-path coverage.
 3. **Concurrency**
    - Coroutine cancellation tested (`cancelAndJoin` doesn't leak state).
    - `StateFlow` collectors don't miss values during transition.
-   - Idempotency: invoking the use case twice produces the same result.
+   - Where the contract promises idempotency, repeated or retried calls preserve the promised effects and result semantics without duplicate business effects. Equal return values alone do not prove idempotency; differing return values are not a defect unless the result contract requires equality.
 
 4. **Lifecycle**
    - ViewModel scope cancellation tested when `onCleared` runs.
