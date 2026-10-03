@@ -1,0 +1,146 @@
+{
+  "line": 164,
+  "scenario": "author",
+  "stack": "backend",
+  "mode": "team",
+  "kit": "after",
+  "trial": 3,
+  "provider": "codex",
+  "prompt_bytes": 15276,
+  "required": [
+    "code-generation-discipline",
+    "tdd",
+    "orders-team-conventions",
+    "python-development-guide",
+    "codebase-design",
+    "write-for-work"
+  ],
+  "inline_required": [],
+  "required_read": [
+    "code-generation-discipline",
+    "codebase-design",
+    "orders-team-conventions",
+    "python-development-guide",
+    "tdd",
+    "write-for-work"
+  ],
+  "required_unobserved": [],
+  "required_unread": [],
+  "required_read_rate": 1.0,
+  "required_read_rate_scope": "Successful SKILL.md read paths, not full-body or reference coverage",
+  "other_skill_reads": [],
+  "plan_artifacts_touched": [
+    "ddd-design.md",
+    "design-spec.md",
+    "prd.md",
+    "slice-plan.md"
+  ],
+  "failed_reads": [],
+  "usage": {
+    "input": 524543,
+    "uncached_input": 35839,
+    "cached_input": 488704,
+    "output": 2211
+  },
+  "cost_usd": null,
+  "turns": null,
+  "seconds": 103.2,
+  "rc": 0,
+  "error": null,
+  "execution": {
+    "argv": [
+      "codex",
+      "exec",
+      "--model",
+      "gpt-6.1-sol",
+      "--ephemeral",
+      "--ignore-user-config",
+      "--sandbox",
+      "workspace-write",
+      "--cd",
+      "/var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-phase-continuation-tjqkw_a5/author-backend-team-after-3",
+      "--json",
+      "--skip-git-repo-check",
+      "-"
+    ],
+    "cwd": "/var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-phase-continuation-tjqkw_a5/author-backend-team-after-3",
+    "returncode": 0,
+    "prompt_sha256": "aa9d21247b0c65b7297f43d76ff10fef0985ad77254305f3954365b67ee69ac4",
+    "stdout_sha256": "fcabc296b1639c1814da8e81a5acb4267e0705ed7d2e28d97bf9036615901c3e",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "evidence": "/var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-review-criteria-2jcmz81d/phase-release/evidence-continuation/fb77159c1345ad42d7e89e657bd1c0ffedca899fccefea6dee1355d74e33e53c"
+  },
+  "models_observed": null,
+  "provider_warnings": [],
+  "documents": [
+    {
+      "path": "/var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-phase-continuation-tjqkw_a5/author-backend-team-after-3/.agent-flow/skills/code-generation-discipline/SKILL.md",
+      "sha256": "610d7b76e0577c93f553af1b14c48d196240c1720017cf06493e11ca9e75aeeb",
+      "bytes": 15719,
+      "inline_in_prompt": false
+    },
+    {
+      "path": "/var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-phase-continuation-tjqkw_a5/author-backend-team-after-3/.agent-flow/skills/tdd/SKILL.md",
+      "sha256": "fcb9ba9c2dc7e8e8521fa47ac3952727aded0c7a8c89c95a9933acd8c3667adc",
+      "bytes": 3592,
+      "inline_in_prompt": false
+    },
+    {
+      "path": "/var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-phase-continuation-tjqkw_a5/author-backend-team-after-3/skills/orders-team-conventions/SKILL.md",
+      "sha256": "4b82676bab665059b1d2dcb5eea4b7e6e7eba2e568b0137f813384a39241cb77",
+      "bytes": 913,
+      "inline_in_prompt": false
+    },
+    {
+      "path": "/var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-phase-continuation-tjqkw_a5/author-backend-team-after-3/.agent-flow/skills/python-development-guide/SKILL.md",
+      "sha256": "0bd3b639c32fa45d7780d26a2e35912965e71878134e63ba203a2f6a0cb3114a",
+      "bytes": 1963,
+      "inline_in_prompt": false
+    },
+    {
+      "path": "/var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-phase-continuation-tjqkw_a5/author-backend-team-after-3/.agent-flow/skills/codebase-design/SKILL.md",
+      "sha256": "640615155783fcee7e1387f203e36f8165a6c38417b8ffa5bed635fc0313fca5",
+      "bytes": 6925,
+      "inline_in_prompt": false
+    },
+    {
+      "path": "/var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-phase-continuation-tjqkw_a5/author-backend-team-after-3/.agent-flow/skills/write-for-work/SKILL.md",
+      "sha256": "a4b741974792bf984cbca4220f067e46b4a8af997f8b5d571f3762456c3a1b5e",
+      "bytes": 9503,
+      "inline_in_prompt": false
+    }
+  ],
+  "norm_scope": "case-specific fixture contract; general architecture correctness is unverified",
+  "oracle": {
+    "behavior": false,
+    "plan": false,
+    "norm": false,
+    "checks": [
+      {
+        "id": "visible-tests",
+        "ok": false,
+        "detail": "restored=1 exit=1 ran=5 last='FAILED (errors=1)'"
+      },
+      {
+        "id": "hidden-tests",
+        "ok": false,
+        "detail": "exit=1 ran=1 last='FAILED (errors=1)'"
+      },
+      {
+        "id": "source-parses",
+        "ok": true,
+        "detail": "8 modules"
+      },
+      {
+        "id": "no-dataclasses",
+        "ok": true,
+        "detail": "no dataclasses under src/"
+      },
+      {
+        "id": "namedtuple-value-types",
+        "ok": false,
+        "detail": "no NamedTuple value type under src/"
+      }
+    ]
+  }
+}

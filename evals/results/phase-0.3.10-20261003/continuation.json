@@ -1,0 +1,20 @@
+{
+  "reason": "Outer controller deadline interrupted the original process after 3600 seconds; not a model-quality retry.",
+  "completed_rows_preserved": 75,
+  "remaining_unrecorded_units": 93,
+  "unrecorded_original_project_directories": [
+    "author-web-clean-after-2",
+    "author-web-local-after-2",
+    "author-web-local-before-2",
+    "review-web-clean-clean-after-2",
+    "review-web-clean-defect-after-2",
+    "review-web-local-clean-before-2",
+    "review-web-local-defect-after-2",
+    "review-web-local-defect-before-2"
+  ],
+  "original_meta_sha256": "3dfb2fff2161dd6f6ecf509de5cdf6ea128e1d9468a0cfad066f00489af0a96d",
+  "controller_sha256": "06249d1ebb384a088abbc38c45d7520b8b383b1dbd86ebbb885af1f1664ee869",
+  "resumed_at": "2026-10-03T12:09:49",
+  "work": "/var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-phase-continuation-tjqkw_a5",
+  "protocol": "Skip every recorded row, including errors. Preserve all original evidence. Execute only units without a result row; no automatic retries. Interrupted unrecorded attempts remain separately identified, not claimed as valid completed measurements."
+}
