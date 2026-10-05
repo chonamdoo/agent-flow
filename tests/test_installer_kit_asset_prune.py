@@ -84,6 +84,8 @@ PRUNE_NOTICE_PREFIX = _NOTICES["PRUNE_NOTICE_PREFIX"]
 SYMLINK_SKIP_NOTICE_PREFIX = _NOTICES["SYMLINK_SKIP_NOTICE_PREFIX"]
 PRUNE_SOURCE_MISSING_NOTICE_PREFIX = _NOTICES["PRUNE_SOURCE_MISSING_NOTICE_PREFIX"]
 PRUNE_SOURCE_UNREADABLE_NOTICE_PREFIX = _NOTICES["PRUNE_SOURCE_UNREADABLE_NOTICE_PREFIX"]
+PRUNE_TRACKED_NOTICE_PREFIX = _NOTICES["PRUNE_TRACKED_NOTICE_PREFIX"]
+PRUNE_GIT_UNKNOWN_NOTICE_PREFIX = _NOTICES["PRUNE_GIT_UNKNOWN_NOTICE_PREFIX"]
 PRUNE_FAILED_NOTICE_PREFIX = _NOTICES["PRUNE_FAILED_NOTICE_PREFIX"]
 PRUNE_UNREADABLE_NOTICE_PREFIX = _NOTICES["PRUNE_UNREADABLE_NOTICE_PREFIX"]
 BACKUP_EXHAUSTED_NOTICE_PREFIX = _NOTICES["BACKUP_EXHAUSTED_NOTICE_PREFIX"]
@@ -251,8 +253,8 @@ def test_prune_stays_inside_declared_asset_roots(tmp_path: Path) -> None:
 
 # kit에서 통째로 사라뜨려 볼 트리. `.Codex/agents`는 `assertInstalled`가 요구하는
 # 파일이 들어 있어, 지워지면 install이 다른 이유로 죽어 무엇을 반증했는지 흐려진다.
-MISSING_TREE_SRC = Path(".Codex") / "rules" / "context"
-MISSING_TREE_DEST = ".Codex/rules/context"
+MISSING_TREE_SRC = Path("templates")
+MISSING_TREE_DEST = ".agent-flow/templates"
 
 ASSET_LABEL = f".agent-flow/templates/{RETIRED_DIR}/{UNTOUCHED_ASSET}"
 
@@ -309,8 +311,8 @@ def test_install_keeps_assets_when_the_kit_source_tree_is_gone(tmp_path: Path, b
     project.mkdir()
     _install(kit, project, binary)
 
-    installed = project / MISSING_TREE_SRC
-    names = sorted(entry.name for entry in installed.iterdir() if entry.is_file())
+    installed = project.joinpath(*MISSING_TREE_DEST.split("/"))
+    names = sorted(entry.relative_to(installed).as_posix() for entry in installed.rglob("*") if entry.is_file())
     assert names, "이 트리가 깔리지 않으면 이 검사는 아무것도 반증하지 못한다"
     labels = [f"{MISSING_TREE_DEST}/{name}" for name in names]
     recorded_first = _recorded(project)
@@ -321,7 +323,7 @@ def test_install_keeps_assets_when_the_kit_source_tree_is_gone(tmp_path: Path, b
     shutil.rmtree(kit / MISSING_TREE_SRC)
     stdout = _install(kit, project, binary)
 
-    assert sorted(entry.name for entry in installed.iterdir() if entry.is_file()) == names, (
+    assert sorted(entry.relative_to(installed).as_posix() for entry in installed.rglob("*") if entry.is_file()) == names, (
         "kit 원본이 사라졌다는 이유로 설치본을 지웠다"
     )
     recorded_second = _recorded(project)
@@ -329,6 +331,89 @@ def test_install_keeps_assets_when_the_kit_source_tree_is_gone(tmp_path: Path, b
         # 기록까지 잃으면 다음 install은 그 파일을 "우리 것이 아니다"로 읽는다.
         assert recorded_second.get(label) == recorded_first[label]
     assert f"{PRUNE_SOURCE_MISSING_NOTICE_PREFIX}{MISSING_TREE_DEST}" in stdout.splitlines(), stdout
+
+
+# kit이 배포를 멈춘 트리(`RETIRED_KIT_ASSET_TREES`). 원본이 없다는 점은 위 패키징 사고와
+# 같지만, 은퇴로 선언했으므로 기록된 설치본을 걷어내야 한다.
+RETIRED_TREE_LABEL = ".Codex/rules/context/agent-flow-context-map.md"
+RETIRED_EDITED_LABEL = ".Codex/context/tree.jsonl"
+
+
+def _write_label(root: Path, label: str, content: str) -> Path:
+    target = root.joinpath(*label.split("/"))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return target
+
+
+def test_prune_retires_declared_trees_without_a_kit_source(tmp_path: Path) -> None:
+    """반증: 원본이 사라진 트리를 "kit source missing"으로만 읽으면 은퇴시킨 자산이
+    설치본에 영영 남는다. 은퇴로 선언한 트리는 같은 digest·사본 규칙으로 걷어낸다."""
+    root = tmp_path / "project"
+    kit = tmp_path / "kit"
+    root.mkdir()
+    kit.mkdir()
+    _write_label(root, RETIRED_TREE_LABEL, "kit\n")
+    _write_label(root, RETIRED_EDITED_LABEL, "mine\n")
+    # 같은 부모 아래의 다른 자산은 은퇴 대상이 아니다. 빈 루트를 걷어내다 부모까지 지우면 안 된다.
+    sibling = _write_label(root, ".Codex/rules/codebase-rubric.md", "rubric\n")
+    recorded = {RETIRED_TREE_LABEL: _digest("kit\n"), RETIRED_EDITED_LABEL: _digest("kit\n")}
+
+    result = _probe(tmp_path, root, kit, recorded)
+    assert result.returncode == 0, result.stderr
+
+    lines = result.stdout.splitlines()
+    backup = f".agent-flow/backups/{RETIRED_EDITED_LABEL}"
+    assert f"{PRUNE_NOTICE_PREFIX}{RETIRED_TREE_LABEL}" in lines, result.stdout
+    assert f"{PRUNE_NOTICE_PREFIX}{RETIRED_EDITED_LABEL} (backup: {backup})" in lines, result.stdout
+    assert root.joinpath(*backup.split("/")).read_text(encoding="utf-8") == "mine\n", "사용자 편집을 사본 없이 지웠다"
+    assert not (root / ".Codex" / "rules" / "context").exists(), "은퇴한 트리의 빈 루트가 남았다"
+    assert not (root / ".Codex" / "context").exists()
+    assert sibling.is_file(), "은퇴한 트리 밖의 자산을 지웠다"
+    assert _written(result) == []
+
+
+def test_prune_keeps_retired_files_that_git_tracks(tmp_path: Path) -> None:
+    """반증: 은퇴한 트리가 소스인 checkout(self-install, worktree kit으로 leader install)에서
+    기록만 보고 지우면 추적 중인 소스가 사라진다. 설치본은 `.Codex/`가 ignore되어 추적되지 않는다."""
+    root = tmp_path / "project"
+    kit = tmp_path / "kit"
+    root.mkdir()
+    kit.mkdir()
+    target = _write_label(root, RETIRED_TREE_LABEL, "kit\n")
+    for command in (
+        ["git", "init", "-q"],
+        ["git", "add", "-A"],
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", "commit", "-qm", "track"],
+    ):
+        subprocess.run(command, cwd=root, check=True, capture_output=True, text=True, timeout=30)
+
+    result = _probe(tmp_path, root, kit, {RETIRED_TREE_LABEL: _digest("kit\n")})
+    assert result.returncode == 0, result.stderr
+
+    assert target.read_text(encoding="utf-8") == "kit\n", "git이 추적하는 소스를 지웠다"
+    assert f"{PRUNE_TRACKED_NOTICE_PREFIX}{RETIRED_TREE_LABEL}" in result.stdout.splitlines(), result.stdout
+    # 기록을 들고 가면 매 install이 같은 알림을 되풀이한다. 그 파일은 이제 프로젝트 몫이다.
+    assert _written(result) == []
+
+
+def test_prune_keeps_retired_files_when_git_cannot_answer(tmp_path: Path) -> None:
+    """반증: 저장소 안에서 git이 실패(safe.directory 거부, 손상된 index)한 것을 "추적 안 함"으로
+    읽으면 추적 중일 수 있는 소스를 사본 없이 지운다. 답이 없으면 지우지 않고 다시 판정한다."""
+    root = tmp_path / "project"
+    kit = tmp_path / "kit"
+    root.mkdir()
+    kit.mkdir()
+    target = _write_label(root, RETIRED_TREE_LABEL, "kit\n")
+    # 저장소 표지는 있는데 git이 열 수 없는 checkout이다.
+    (root / ".git").write_text(f"gitdir: {tmp_path / 'missing-git-dir'}\n", encoding="utf-8")
+
+    result = _probe(tmp_path, root, kit, {RETIRED_TREE_LABEL: _digest("kit\n")})
+    assert result.returncode == 0, result.stderr
+
+    assert target.read_text(encoding="utf-8") == "kit\n", "git이 답하지 못했는데 지웠다"
+    assert f"{PRUNE_GIT_UNKNOWN_NOTICE_PREFIX}{RETIRED_TREE_LABEL}" in result.stdout.splitlines(), result.stdout
+    assert _written(result) == [RETIRED_TREE_LABEL], "판정을 미뤘는데 기록을 잃었다"
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root는 권한 검사를 통과한다")
@@ -1262,7 +1347,7 @@ def test_prune_keeps_deferred_records_but_drops_out_of_scope_ones(tmp_path: Path
     root.mkdir()
     kit.mkdir()
     manifest, _ = _seed_bundled_skill(root, kit, kit_ships_skill=True)
-    # kit에 `.Codex/rules/context`가 없다 - 원본 실종이라 판정을 미루는 자리다.
+    # kit에 `templates`가 없다 - 원본 실종이라 판정을 미루는 자리다.
     deferred = root.joinpath(*MISSING_TREE_DEST.split("/"), "scoped.md")
     deferred.parent.mkdir(parents=True)
     deferred.write_text("kit\n", encoding="utf-8")
