@@ -50,6 +50,7 @@ import {
   isRetiredHookCommand,
   KIT_ASSETS_RELATIVE,
   KIT_ROOT,
+  LEGACY_GLOSSARY_NOTICE_PREFIX,
   makeHooksExecutable,
   managedHookDigests,
   managedHookScriptName,
@@ -846,6 +847,7 @@ function runKitInstall(architectureInstall) {
       || line.startsWith(ASSET_UPGRADE_NOTICE_PREFIX)
       || line.startsWith(ASSET_BACKUP_NOTICE_PREFIX)
       || line.startsWith(ROOT_CONTEXT_NOTICE_PREFIX)
+      || line.startsWith(LEGACY_GLOSSARY_NOTICE_PREFIX)
       // 링크 너머로 쓴 host 설정. 자식이 쓰고 여기서 걸러 내면 프로젝트 밖 파일을
       // 갈아 끼운 사실이 어디에도 안 남는다.
       || line.startsWith(SYMLINK_FOLLOW_NOTICE_PREFIX)

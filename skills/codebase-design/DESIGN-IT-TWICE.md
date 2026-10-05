@@ -27,7 +27,7 @@ Prompt each sub-agent with a separate technical brief (file paths, coupling deta
 - Common caller: "Make the most common supported case straightforward."
 - Cross-seam dependencies, when applicable: "Design around ports and adapters."
 
-Include both [SKILL.md](SKILL.md) vocabulary and the project's established domain language in each brief. Read `CONTEXT.md` if it exists; otherwise use available glossary and codebase evidence without inventing a document or terminology.
+Include both [SKILL.md](SKILL.md) vocabulary and the project's established domain language in each brief. Read `GLOSSARY.md` if it exists; otherwise use available glossary and codebase evidence without inventing a document or terminology.
 
 Each sub-agent outputs:
 

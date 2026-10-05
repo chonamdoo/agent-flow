@@ -1504,6 +1504,49 @@ def test_fresh_and_repeated_install_preserve_root_context(
         assert bool(notices) is existing_roots
 
 
+_GLOSSARY_BODY = "# Ordering\n\n## Language\n\n**Order**:\nA customer's request to buy.\n"
+_HOT_CONTEXT_BODY = "# Project Hot Context\n\n## Working Rules\n\n- Keep answers short.\n"
+_MAP_BODY = "# Context Map\n\n## Contexts\n\n- [Ordering](./src/ordering/CONTEXT.md): orders\n"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        ({"CONTEXT.md": _GLOSSARY_BODY}, ["CONTEXT.md"]),
+        ({"CONTEXT.md": _GLOSSARY_BODY, "GLOSSARY.md": _GLOSSARY_BODY}, []),
+        ({"CONTEXT.md": _HOT_CONTEXT_BODY}, []),
+        ({"CONTEXT-MAP.md": _MAP_BODY}, ["CONTEXT-MAP.md"]),
+    ],
+    ids=["glossary", "migrated", "hot-context", "map"],
+)
+def test_install_points_a_legacy_glossary_at_the_new_name(
+    tmp_path: Path, binary: str, files: dict[str, str], expected: list[str],
+) -> None:
+    """반증: `agent-flow-install.mjs`는 자식 stdout을 걸러 다시 내므로 접두사가 필터에
+    없으면 그 진입점에서만 알림이 사라진다. 이미 옮긴 프로젝트나 같은 이름을 다른
+    용도로 쓰는 프로젝트에 알리면 끌 수 없는 소음이 매 install에 남는다."""
+    project = tmp_path / "project"
+    project.mkdir()
+    for name, body in files.items():
+        (project / name).write_text(body, encoding="utf-8")
+    notice_prefix = subprocess.check_output(
+        (
+            _node(), "--input-type=module", "-e",
+            "import { LEGACY_GLOSSARY_NOTICE_PREFIX } from "
+            + json.dumps((KIT_ROOT / "lib" / "installer-shared.mjs").as_uri())
+            + "; process.stdout.write(LEGACY_GLOSSARY_NOTICE_PREFIX);",
+        ),
+        text=True, timeout=30,
+    )
+    result = _install_with(binary, project)
+    assert result.returncode == 0, result.stderr
+    notices = [line for line in result.stdout.splitlines() if line.startswith(notice_prefix)]
+    assert [line[len(notice_prefix):].split(" ", 1)[0] for line in notices] == expected, result.stdout
+    for name, body in files.items():
+        assert (project / name).read_text(encoding="utf-8") == body, "install이 사용자 문서를 건드렸다"
+
+
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 @pytest.mark.parametrize("policy", [None, "preserve"])
 def test_opt_in_install_keeps_new_project_root_docs_visible_to_git(

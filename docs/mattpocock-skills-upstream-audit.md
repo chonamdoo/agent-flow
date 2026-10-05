@@ -112,3 +112,26 @@
 | 대상 | 기준 commit | 결정 | 내용 |
 | --- | --- | --- | --- |
 | `engineering/diagnosing-bugs` | `0ab1b63a410a03d3627979a109c8695de27af954` | 구조 적응 채택 | `agent-flow-diagnosing-bugs` lifecycle wrapper와 `diagnosing-bugs` 9-phase workflow로 분리하고, feedback command의 red/green 실행 증거를 workflow marker로 강제 |
+
+## 6. `9c9f36cc..4588b32` 대조 (2026-10-05)
+
+- 범위: upstream `skills/`를 건드린 commit 33개, 파일 67개.
+- 새 skill: `engineering/implement-spec`, `engineering/pr`, `engineering/retro`, `in-progress/chief-of-staff`.
+  삭제: `engineering/resolving-merge-conflicts` (`daa01d8`). 개명: `CONTEXT.md`/`CONTEXT-MAP.md` →
+  `GLOSSARY.md`/`GLOSSARY-MAP.md` (`d80fa0f`, merge `e484a80`).
+- vendored skill에 닿은 변경은 em-dash 제거(`3216582`), description quoting(`5c89081`), `grilling`
+  질문 구분선(`85f83d3`), GLOSSARY 개명, conflict skill 삭제다. 문장부호 변경 hunk를 전수 대조했고
+  그 안에 의미 변경은 없었다.
+
+| 대상 | 결정 | 내용 |
+| --- | --- | --- |
+| GLOSSARY 개명 | 채택 | `domain-modeling`(`GLOSSARY-FORMAT.md`), `tdd`, `codebase-design/DESIGN-IT-TWICE.md`, `diagnosing-bugs`, `default.yaml` design prompt. 로컬 trigger와 편집 권한 분기는 유지. 근거: 이 저장소에서 `CONTEXT.md`가 Agent Flow hot context(루트 `CONTEXT.md`, 설치되는 `.Codex/rules/context/context-maintenance.md`, workflow-contract)와 domain 용어집이라는 두 뜻으로 쓰였고, 이후 upstream skill은 모두 `GLOSSARY.md`를 전제한다. 설치 프로젝트 이전은 `docs/USAGE.md` |
+| `diagnosing-bugs` | verbatim 전진 | `4588b32`와 바이트 동일(directory tree `de4236cf`) |
+| `grilling` 구분선 | 적응 채택 | 로컬 `**Q1** —` / `→` 표기로 Q2와 `---` 추가 |
+| em-dash, description quoting | 미채택 | 의미 변화 없음. 로컬 description은 따옴표 없이도 같은 값으로 파싱됨 |
+| `resolving-merge-conflicts` 삭제 | 미추종 | upstream 사유는 "No longer needed"뿐이고, `default`/`full-feature` merge phase가 이 skill을 선언하고 읽는다 |
+| `implement-spec` | 미도입 | 티켓마다 worktree를 만들고 reset하는 절차(`SKILL.md:27-28`)가 단일 worktree 바인딩과 host write boundary에 충돌하고, `/setup-matt-pocock-skills`를 전제한다 |
+| `pr` | 미도입 | `skills/write-for-work/references/modes.md:30-60`이 같은 출처(show-me)를 이미 반영했고 고정 Summary/Evidence/Merge Danger 레이아웃을 의무로 두지 않는다 |
+| `retro` | 미도입 | 요구와 측정 근거가 없고, upstream 전제(`writing-for-agents` Skill tool 호출, standards를 review에만 맡기는 배분)를 다시 써야 한다. 필요해지면 Agent Flow 실행 기록(`.agent-flow/skills-read.jsonl`, `commands-run.jsonl`, run `events.jsonl`)을 근거로 로컬 설계 |
+| `chief-of-staff` | 미도입 | upstream in-progress(Beta), 실행 계약 없음 |
+| `skills/UPSTREAM.md` | 갱신·정정 | pin `9c9f36cc` → `4588b32`. `resolving-merge-conflicts`의 "Description quoting only"를 실제 본문 분기(`16ba2e7`)로 정정. `74ca5fe…`는 tree가 아니라 commit이므로 verbatim 기준을 commit + directory tree로 기록 |
