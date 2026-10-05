@@ -354,11 +354,12 @@ for the remaining task rather than automatically restarting a larger lifecycle.
 
 ## Domain glossary file name
 
-The domain skills (`domain-modeling`, `tdd`, `codebase-design`, `diagnosing-bugs`) and the
-default design prompt read and write the project glossary as `GLOSSARY.md`, and
-`GLOSSARY-MAP.md` for repositories with several contexts. Earlier releases used `CONTEXT.md` and
-`CONTEXT-MAP.md`. The skills do not fall back to the old names. After installing this release,
-move each existing glossary to the new name.
+The project glossary is now `GLOSSARY.md`, with a root `GLOSSARY-MAP.md` for repositories with
+several contexts. Earlier releases used `CONTEXT.md` and `CONTEXT-MAP.md`. `domain-modeling` writes
+the glossary and follows `GLOSSARY-MAP.md` to each context's `GLOSSARY.md`. `tdd`,
+`codebase-design`, `diagnosing-bugs`, and the default design prompt read only the root
+`GLOSSARY.md`, as they read only the root `CONTEXT.md` before. The skills do not fall back to the
+old names. After installing this release, move each existing glossary to the new name.
 
 Check first that the file is a domain glossary: a list of project terms in the
 `GLOSSARY-FORMAT.md` layout. A `CONTEXT.md` that holds anything else stays where it is. If one
