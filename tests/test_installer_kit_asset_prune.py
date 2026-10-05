@@ -84,6 +84,7 @@ PRUNE_NOTICE_PREFIX = _NOTICES["PRUNE_NOTICE_PREFIX"]
 SYMLINK_SKIP_NOTICE_PREFIX = _NOTICES["SYMLINK_SKIP_NOTICE_PREFIX"]
 PRUNE_SOURCE_MISSING_NOTICE_PREFIX = _NOTICES["PRUNE_SOURCE_MISSING_NOTICE_PREFIX"]
 PRUNE_SOURCE_UNREADABLE_NOTICE_PREFIX = _NOTICES["PRUNE_SOURCE_UNREADABLE_NOTICE_PREFIX"]
+PRUNE_MANIFEST_KEPT_NOTICE_PREFIX = _NOTICES["PRUNE_MANIFEST_KEPT_NOTICE_PREFIX"]
 PRUNE_TRACKED_NOTICE_PREFIX = _NOTICES["PRUNE_TRACKED_NOTICE_PREFIX"]
 PRUNE_GIT_UNKNOWN_NOTICE_PREFIX = _NOTICES["PRUNE_GIT_UNKNOWN_NOTICE_PREFIX"]
 PRUNE_FAILED_NOTICE_PREFIX = _NOTICES["PRUNE_FAILED_NOTICE_PREFIX"]
@@ -884,6 +885,29 @@ def test_prune_still_removes_a_retired_sibling_of_a_living_skill(tmp_path: Path)
     assert manifest.is_file(), "index hash가 오라클인 파일을 자산 prune이 지웠다"
     assert f"{PRUNE_NOTICE_PREFIX}{RETIRED_SKILL_REFERENCE}" in result.stdout.splitlines(), result.stdout
     assert _written(result) == []
+
+
+def test_prune_keeps_a_retired_sibling_while_the_skill_manifest_is_kept(tmp_path: Path) -> None:
+    """반증: 사용자가 고친 `SKILL.md`는 갱신되지 않고 남는데 kit이 은퇴시킨 동반 파일만
+    지우면, 남긴 manifest의 상대 참조가 깨진다(옛 `CONTEXT-FORMAT.md`를 가리키는 편집된
+    `domain-modeling`). manifest가 kit 판본이 될 때까지 동반 파일과 그 기록을 남긴다."""
+    root = tmp_path / "project"
+    kit = tmp_path / "kit"
+    root.mkdir()
+    kit.mkdir()
+    manifest, reference = _seed_bundled_skill(root, kit, kit_ships_skill=True)
+    manifest.write_text("---\nname: retired-demo\n---\nSee [guide](references/guide.md).\n", encoding="utf-8")
+    recorded = {RETIRED_SKILL_REFERENCE: _digest("kit\n")}
+
+    result = _probe(tmp_path, root, kit, recorded)
+    assert result.returncode == 0, result.stderr
+
+    assert reference.read_text(encoding="utf-8") == "kit\n", "남긴 manifest가 가리키는 동반 파일을 지웠다"
+    assert (
+        f"{PRUNE_MANIFEST_KEPT_NOTICE_PREFIX}.agent-flow/skills/{RETIRED_SKILL}/SKILL.md"
+        in result.stdout.splitlines()
+    ), result.stdout
+    assert _written(result) == [RETIRED_SKILL_REFERENCE], "판정을 미뤘는데 기록을 떨어뜨렸다"
 
 
 # 여기부터는 이 기록 구조보다 먼저 있던 삭제 경로 셋을 본다. `nextFreeBackupPath`의
