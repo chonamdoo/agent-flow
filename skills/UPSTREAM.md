@@ -6,9 +6,9 @@ compared, so the next sync can use
 `git -C <clone> diff <pinned>..HEAD -- skills/` instead of comparing the entire history.
 
 - upstream: `https://github.com/mattpocock/skills`
-- pinned commit: `9c9f36ccd3995266cd675468af71639c8dde1ec5` (2026-08-17)
+- pinned commit: `4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d` (2026-10-05)
 - `diagnosing-bugs` adoption source: `0ab1b63a410a03d3627979a109c8695de27af954` (2026-08-20)
-- `diagnosing-bugs` verbatim tree: `74ca5fe077456a0b3b2f5310cf9430999fd0b5fd` (`SKILL.md`, `agents/openai.yaml`, `scripts/hitl-loop.template.sh`)
+- `diagnosing-bugs` verbatim at upstream commit `4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d` (directory tree `de4236cf34757c4e9ea7afe78d46c023213ff254`: `SKILL.md`, `agents/openai.yaml`, `scripts/hitl-loop.template.sh`)
 
 When advancing the pin, record both adopted and intentionally omitted changes in
 the table and notes below. A pin alone cannot distinguish reviewed changes from
@@ -29,7 +29,7 @@ repository uses `skills/<name>/`. The remaining relative paths are unchanged.
 | `grill-with-docs` | `engineering/grill-with-docs` | Local `requires` and host-neutral skill access; see below |
 | `grilling` | `productivity/grilling` | Local emoji policy, exploration dispatch wording, and em-dash choice; see below |
 | `code-review` | `engineering/code-review` | Intentional divergence; see below |
-| `resolving-merge-conflicts` | `engineering/resolving-merge-conflicts` | Description quoting only |
+| `resolving-merge-conflicts` | `engineering/resolving-merge-conflicts` (deleted upstream in `daa01d8`) | Local body rewrite; retained for the merge phases; see below |
 | `to-prd` | `engineering/to-spec` | Adapted to local PRD terminology |
 
 ## Intentional divergences: preserve during sync
@@ -49,10 +49,18 @@ repository uses `skills/<name>/`. The remaining relative paths are unchanged.
   these commands and paths do not exist here. Do not import instructions that
   depend on them.
 - **`grilling` question formatting:** upstream uses question and arrow emoji.
-  This repository uses `**Q1** — ...` and a plain arrow instead. The design tree,
-  frontier, round-based questions, and termination conditions remain unchanged.
-- **`resolving-merge-conflicts` description quoting:** the parsed value is the
-  same, so the upstream quoting change is not adopted.
+  This repository uses `**Q1** — ...` and a plain arrow instead. The round
+  template's `---` separator between questions (`85f83d3`) is adopted in that
+  notation. The design tree, frontier, round-based questions, and termination
+  conditions remain unchanged.
+- **`resolving-merge-conflicts` body and retention:** the local body (`16ba2e7`)
+  stops and asks the user whether to abort or which intent wins when the merge
+  goal does not decide a conflict, runs the active profile's checks, and stages
+  only the paths resolved for the operation. Upstream said "Always resolve; never
+  `--abort`" and "Stage everything", then deleted the skill in `daa01d8` ("No
+  longer needed"). The `default` and `full-feature` merge phases still declare and
+  read it, so it stays. The upstream description quoting is not adopted; the
+  parsed value is the same.
 - **`Skill` tool invocation wording:** upstream standardized references on
   `call the Skill tool with "<name>"` in `tdd` and `grill-with-docs`. These vendored
   content skills are outside `BUNDLED_HOST_SKILL_NAMES`, so the host picker does
@@ -60,7 +68,7 @@ repository uses `skills/<name>/`. The remaining relative paths are unchanged.
   as in the full-feature domain-grill phase. Preserve the accessible path-based
   instruction rather than requiring an unavailable invocation route.
 - **`domain-modeling` description:** upstream switched to file-based triggers
-  for CONTEXT.md/ADR and removed `or when another skill needs to maintain the domain model`.
+  for GLOSSARY.md/ADR and removed `or when another skill needs to maintain the domain model`.
   That trigger is still used here by `grill-with-docs` through `requires` and by
   design/domain-grill phases in the default and full-feature workflows. Keep it
   alongside the file-based triggers.
@@ -71,13 +79,24 @@ repository uses `skills/<name>/`. The remaining relative paths are unchanged.
 - **`grilling` exploration dispatch:** upstream says `dispatch a sub-agent to find it`.
   The local instruction permits direct repository/tool inspection or a read-only
   exploration subagent. A fact available from one tool call does not require delegation.
-- **`grilling` em-dash choice:** upstream changed an em dash to a colon in
-  `86cba45`. This repository retains the em dash; the meaning is unchanged.
+- **Em-dash choice:** upstream removed em dashes repo-wide (`86cba45` in
+  `grilling`, `3216582` everywhere else). The vendored copies keep their em
+  dashes; the meaning is unchanged. `diagnosing-bugs` is the exception because it
+  is kept verbatim. The `5c89081` description quoting is not adopted: the local
+  descriptions contain no unquoted `: ` and parse to the same values.
+- **`GLOSSARY.md` convention (`d80fa0f`):** adopted. `domain-modeling`
+  (`GLOSSARY-FORMAT.md`, `GLOSSARY-MAP.md`), `tdd`, `codebase-design`,
+  `diagnosing-bugs`, and the default design prompt read and write `GLOSSARY.md`.
+  Skills do not fall back to `CONTEXT.md`; installed projects rename an existing
+  glossary as described in `docs/USAGE.md`.
+- **Upstream skills not imported:** `implement-spec`, `pr`, `retro`, and
+  `in-progress/chief-of-staff`, added after the previous pin. Reasons are in the
+  audit document.
 - **2026-09-11 local adaptations:** these changes do not advance the upstream pin.
   `codebase-design` uses semantic ownership and approved seams rather than fixed
   application scaffolds or candidate quotas; preserve behavior coverage before
   deleting tests. `domain-modeling` separates observed code, proposed intent,
-  agreed terminology, and permission to edit CONTEXT.md/ADRs. `code-review`
+  agreed terminology, and permission to edit GLOSSARY.md/ADRs. `code-review`
   distinguishes committed and WIP scopes, includes relevant untracked files, and
   keeps both review axes on the same snapshot without arbitrary finding caps.
   `to-prd` retains approval before publication and allows appropriately scoped

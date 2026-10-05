@@ -1,4 +1,4 @@
-# CONTEXT.md Format
+# GLOSSARY.md Format
 
 ## Structure
 
@@ -23,13 +23,13 @@ _Avoid_: {Confirmed ambiguous or competing terms for the same concept}
 
 ## Single vs multi-context repos
 
-**Single context (most repos):** One `CONTEXT.md` at the repo root.
+**Single context (most repos):** One `GLOSSARY.md` at the repo root.
 
-**Multiple contexts:** A `CONTEXT-MAP.md` at the repo root lists the contexts, where they live, and how they relate to each other:
+**Multiple contexts:** A `GLOSSARY-MAP.md` at the repo root lists the contexts, where they live, and how they relate to each other:
 
-Use `# Context Map`, `## Contexts`, and `## Relationships` to organize the map:
+Use `# Glossary Map`, `## Contexts`, and `## Relationships` to organize the map:
 
-- Under **Contexts**, link each confirmed context to its actual `CONTEXT.md`
+- Under **Contexts**, link each confirmed context to its actual `GLOSSARY.md`
   location and describe its responsibility.
 - Under **Relationships**, record verified direction, ownership, and translation
   between contexts. Record published or consumed events and shared contracts only
@@ -40,8 +40,8 @@ Use `# Context Map`, `## Contexts`, and `## Relationships` to organize the map:
 
 The skill infers which structure applies:
 
-- If `CONTEXT-MAP.md` exists, read it to find contexts
-- If only a root `CONTEXT.md` exists, single context
-- If neither exists, create a root `CONTEXT.md` lazily when the first term is resolved
+- If `GLOSSARY-MAP.md` exists, read it to find contexts
+- If only a root `GLOSSARY.md` exists, single context
+- If neither exists, create a root `GLOSSARY.md` lazily when the first term is resolved
 
 When multiple contexts exist, infer which one the current topic relates to. If unclear, ask.

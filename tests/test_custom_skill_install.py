@@ -1505,6 +1505,36 @@ def test_fresh_and_repeated_install_preserve_root_context(
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("migrated", [False, True])
+def test_install_points_a_legacy_glossary_at_the_new_name(
+    tmp_path: Path, binary: str, migrated: bool,
+) -> None:
+    """반증: `agent-flow-install.mjs`는 자식 stdout을 걸러 다시 내므로 접두사가 필터에
+    없으면 그 진입점에서만 알림이 사라진다. 이미 옮긴 프로젝트에 알리면 소음이다."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "CONTEXT.md").write_text("# Ordering\n", encoding="utf-8")
+    if migrated:
+        (project / "GLOSSARY.md").write_text("# Ordering\n", encoding="utf-8")
+    notice_prefix = subprocess.check_output(
+        (
+            _node(), "--input-type=module", "-e",
+            "import { LEGACY_GLOSSARY_NOTICE_PREFIX } from "
+            + json.dumps((KIT_ROOT / "lib" / "installer-shared.mjs").as_uri())
+            + "; process.stdout.write(LEGACY_GLOSSARY_NOTICE_PREFIX);",
+        ),
+        text=True, timeout=30,
+    )
+    result = _install_with(binary, project)
+    assert result.returncode == 0, result.stderr
+    notices = [line for line in result.stdout.splitlines() if line.startswith(notice_prefix)]
+    assert len(notices) == (0 if migrated else 1), result.stdout
+    if not migrated:
+        assert notices[0].startswith(f"{notice_prefix}CONTEXT.md;")
+    assert (project / "CONTEXT.md").read_text(encoding="utf-8") == "# Ordering\n", "install이 사용자 문서를 건드렸다"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 @pytest.mark.parametrize("policy", [None, "preserve"])
 def test_opt_in_install_keeps_new_project_root_docs_visible_to_git(
     tmp_path: Path, binary: str, policy: str | None,

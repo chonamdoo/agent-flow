@@ -48,6 +48,7 @@ import {
   isRetiredHookCommand,
   KIT_ASSETS_RELATIVE,
   KIT_ROOT,
+  legacyGlossaryNotices,
   makeHooksExecutable,
   managedHookDigests,
   managedHookScriptName,
@@ -367,6 +368,9 @@ function installProject(requestedRoot) {
     upsertDocsIndexBlock(root);
   } else if (rootContext === "preserve") {
     console.log(`${ROOT_CONTEXT_NOTICE_PREFIX}root ownership is unproven; review conflicting instructions manually. Automatic migration requires an unchanged receipt-owned block.`);
+  }
+  for (const notice of legacyGlossaryNotices(root)) {
+    console.log(notice);
   }
   pruneRetiredHookScripts(root, hooksDisabled);
   pruneRetiredManagedScripts(root);

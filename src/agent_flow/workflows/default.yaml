@@ -63,7 +63,7 @@ phases:
       question whose prerequisites are already settled in one numbered round,
       each with your recommended answer, then wait. Walk every branch of the
       decision tree. If the codebase can answer a question, search the codebase
-      rather than asking. Challenge terms against CONTEXT.md and ADRs, cross-check user
+      rather than asking. Challenge terms against GLOSSARY.md and ADRs, cross-check user
       claims against code, and update docs inline when terms are resolved.
       Continue until you reach shared understanding of: scope, acceptance
       criteria, edge cases, non-goals, dependencies, constraints. Trivial tasks

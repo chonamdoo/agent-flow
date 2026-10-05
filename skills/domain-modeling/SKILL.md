@@ -1,31 +1,31 @@
 ---
 name: domain-modeling
-description: Build and sharpen a project's domain model. Use when discussing codebase terminology or a ubiquitous language, writing or editing a CONTEXT.md, recording or editing an ADR, or when another skill needs to maintain the domain model.
+description: Build and sharpen a project's domain model. Use when discussing codebase terminology or a ubiquitous language, writing or editing a GLOSSARY.md, recording or editing an ADR, or when another skill needs to maintain the domain model.
 ---
 
 # Domain Modeling
 
-Actively build and sharpen the project's domain model as you design. This is the *active* discipline — challenging terms, inventing edge-case scenarios, and writing the glossary and decisions down the moment they crystallise. (Merely *reading* `CONTEXT.md` for vocabulary is not this skill — that's a one-line habit any skill can do. This skill is for when you're changing the model, not just consuming it.)
+Actively build and sharpen the project's domain model as you design. This is the *active* discipline — challenging terms, inventing edge-case scenarios, and writing the glossary and decisions down the moment they crystallise. (Merely *reading* `GLOSSARY.md` for vocabulary is not this skill — that's a one-line habit any skill can do. This skill is for when you're changing the model, not just consuming it.)
 
 ## File structure
 
 Discover the repository's existing documentation conventions before choosing a
-location. Most repos have a single context, with a root `CONTEXT.md` and
+location. Most repos have a single context, with a root `GLOSSARY.md` and
 system-wide decisions in `docs/adr/`.
 
-If a root `CONTEXT-MAP.md` exists, read it to locate each context and its glossary.
+If a root `GLOSSARY-MAP.md` exists, read it to locate each context and its glossary.
 Keep system-wide ADRs separate from context-specific ADRs at the locations
 established by that map or the repository's conventions. A source directory alone
 does not establish a business context; use the agreed meaning and ownership
 boundaries.
 
-Create files lazily — only when you have something to write. If no `CONTEXT.md` exists, create one when the first term is resolved. If no `docs/adr/` exists, create it when the first ADR is needed.
+Create files lazily — only when you have something to write. If no `GLOSSARY.md` exists, create one when the first term is resolved. If no `docs/adr/` exists, create it when the first ADR is needed.
 
 ## During the session
 
 ### Challenge against the glossary
 
-When the user uses a term that conflicts with the existing language in `CONTEXT.md`, call it out immediately. State the documented meaning and the meaning implied by the current discussion, then ask which meaning is intended.
+When the user uses a term that conflicts with the existing language in `GLOSSARY.md`, call it out immediately. State the documented meaning and the meaning implied by the current discussion, then ask which meaning is intended.
 
 ### Sharpen fuzzy language
 
@@ -39,11 +39,11 @@ When domain relationships are being discussed, stress-test them with specific sc
 
 When the user states how something works, check whether the code agrees. Surface any contradiction between observed implementation and stated intent, and resolve which behavior is current versus intended. Code is evidence of implementation, not authority to override the user's business meaning.
 
-### Update CONTEXT.md inline
+### Update GLOSSARY.md inline
 
-When a term's meaning is confirmed and editing is authorized, update `CONTEXT.md` right there rather than batching resolved terms. For review- or discussion-only requests, propose the update without editing; agreement on a definition is not itself permission to change files. Use the format in [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md).
+When a term's meaning is confirmed and editing is authorized, update `GLOSSARY.md` right there rather than batching resolved terms. For review- or discussion-only requests, propose the update without editing; agreement on a definition is not itself permission to change files. Use the format in [GLOSSARY-FORMAT.md](./GLOSSARY-FORMAT.md).
 
-`CONTEXT.md` should be totally devoid of implementation details. Do not treat `CONTEXT.md` as a spec, a scratch pad, or a repository for implementation decisions. It is a glossary and nothing else.
+`GLOSSARY.md` should be totally devoid of implementation details. Do not treat `GLOSSARY.md` as a spec, a scratch pad, or a repository for implementation decisions. It is a glossary and nothing else.
 
 ### Offer ADRs sparingly
 

@@ -352,6 +352,32 @@ agent-flow run "<remaining work>" --workflow development --reuse-existing-worktr
 artifact; do not transfer old approvals to the new definition. Choose the successor workflow
 for the remaining task rather than automatically restarting a larger lifecycle.
 
+## Domain glossary file name
+
+The domain skills (`domain-modeling`, `tdd`, `codebase-design`, `diagnosing-bugs`) and the
+default design prompt read and write the project glossary as `GLOSSARY.md`, and
+`GLOSSARY-MAP.md` for repositories with several contexts. Earlier releases used `CONTEXT.md` and
+`CONTEXT-MAP.md`. The skills do not fall back to the old names. After installing this release,
+move each existing glossary to the new name.
+
+Check first that the file is a domain glossary: a list of project terms in the
+`GLOSSARY-FORMAT.md` layout. A `CONTEXT.md` that holds anything else stays where it is. If one
+file mixes glossary terms with other content, move only the terms into a new `GLOSSARY.md`.
+
+```bash
+git mv CONTEXT.md GLOSSARY.md
+```
+
+For repositories with several contexts, rename the map and every per-context glossary it links
+to, then update the map's links to the new paths:
+
+```bash
+git mv CONTEXT-MAP.md GLOSSARY-MAP.md
+git mv <context-dir>/CONTEXT.md <context-dir>/GLOSSARY.md   # once per context in the map
+```
+
+Runs pinned before the upgrade keep their original design prompt.
+
 ## Running
 
 Use it inside a Claude or Codex session.
