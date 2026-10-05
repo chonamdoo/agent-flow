@@ -302,8 +302,6 @@ function installProject(requestedRoot) {
   }
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "agents"), path.join(root, ".Codex", "agents"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".claude", "agents"), path.join(root, ".claude", "agents"), forceManaged);
-  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"), forceManaged);
-  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "context"), path.join(root, ".Codex", "context"), forceManaged);
   removeCodexBroadTrustState(root);
   if (!hooksDisabled) {
     installCodexHooks(root);
@@ -1209,9 +1207,7 @@ const KIT_SOURCE_DIGEST_ROOTS = [
   "bin",
   "lib",
   ".Codex/agents",
-  ".Codex/rules/context",
   ".Codex/rules/codebase-rubric.md",
-  ".Codex/context",
   ".claude/agents",
 ];
 
@@ -2571,9 +2567,6 @@ Context rules:
 
 - Artifacts and manifests must use repo-relative paths; local absolute paths are forbidden.
 - Do not paste full docs or raw logs into artifacts. Summarize and link by relative path.
-- \`CONTEXT.md\` is hot context only.
-- Current and future vocabulary must stay separated.
-- Follow the phase context map in \`.Codex/rules/context/\` for phase-specific context loading.
 - User-facing agent-flow replies must be short and in the language the user writes in. Keep code, commands, paths, and identifiers in English.
 - Summarize only current phase, action, \`next_command\`, and blocker when useful.
 `;

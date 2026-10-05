@@ -10,8 +10,6 @@ description: |
   round cap belong to the Python runner (src/agent_flow/runner.py). JS relays the
   run lifecycle (start/status/next/advance) to that runner and never advances it.
 
-context_policy: ".Codex/rules/context/agent-flow-context-map.md"
-
 phases:
   - id: domain-grill
     skills:

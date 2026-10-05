@@ -26,9 +26,7 @@ KIT_SOURCE_DIGEST_ROOTS: tuple[str, ...] = (
     "bin",
     "lib",
     ".Codex/agents",
-    ".Codex/rules/context",
     ".Codex/rules/codebase-rubric.md",
-    ".Codex/context",
     ".claude/agents",
 )
 
