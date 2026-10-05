@@ -73,6 +73,7 @@ def _source_copy(destination: Path) -> Path:
         if source.is_dir():
             shutil.copytree(source, target, ignore=shutil.ignore_patterns(*EXCLUDED, "*.pyc"))
         else:
+            target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
     return destination
 
@@ -152,7 +153,10 @@ def test_pack_excludes_machine_local_host_state(tmp_path: Path, installed_skills
         excluded = bundle / "kit" / relative
         assert not excluded.exists()
         assert not excluded.is_symlink()
-    for relative in (".Codex/agents", ".Codex/context", ".Codex/rules/context", ".claude/agents"):
+    # 은퇴한 트리가 패키지로 돌아오면 모든 설치본에 Agent Flow 자기 용어집이 되살아난다.
+    for retired in (".Codex/rules/context", ".Codex/context"):
+        assert not (bundle / "kit" / retired).exists()
+    for relative in (".Codex/agents", ".claude/agents"):
         original = source / relative
         bundled = bundle / "kit" / relative
         assert bundled.is_dir()

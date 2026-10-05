@@ -63,6 +63,7 @@ import {
   PRUNE_BACKUP_SUFFIX,
   PRUNE_BACKUP_VERSIONED,
   PRUNE_NOTICE_PREFIX,
+  PRUNE_TRACKED_NOTICE_PREFIX,
   pruneRetiredHooks,
   pruneRetiredHookScripts,
   pruneRetiredManagedScripts,
@@ -840,6 +841,7 @@ function runKitInstall(architectureInstall) {
   for (const line of (result.stdout || "").split("\n")) {
     if (
       line.startsWith(PRUNE_NOTICE_PREFIX)
+      || line.startsWith(PRUNE_TRACKED_NOTICE_PREFIX)
       || line.startsWith(SKILL_UPGRADE_NOTICE_PREFIX)
       || line.startsWith(ASSET_UPGRADE_NOTICE_PREFIX)
       || line.startsWith(ASSET_BACKUP_NOTICE_PREFIX)
@@ -1050,20 +1052,6 @@ function install() {
     true,
     FORCE_MANAGED,
   );
-  const contextRulesCopied = copyDir(
-    path.join(KIT_ROOT, ".Codex", "rules", "context"),
-    path.join(PROJECT, ".Codex", "rules", "context"),
-    new Set(),
-    true,
-    FORCE_MANAGED,
-  );
-  const contextTreeCopied = copyDir(
-    path.join(KIT_ROOT, ".Codex", "context"),
-    path.join(PROJECT, ".Codex", "context"),
-    new Set(),
-    true,
-    FORCE_MANAGED,
-  );
   copyFileIfMissingOrSame(
     path.join(KIT_ROOT, ".Codex", "rules", "codebase-rubric.md"),
     path.join(PROJECT, ".Codex", "rules", "codebase-rubric.md"),
@@ -1149,7 +1137,6 @@ function install() {
     claude_agents_copied: claudeAgentsCopied,
     codex_hooks_copied: codexHooksCopied,
     omp_hooks_copied: ompHooksCopied,
-    context_tree_copied: contextTreeCopied,
     skill_links: {
       claude: claudeSkillStatus,
       codex: codexSkillStatus,

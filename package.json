@@ -20,8 +20,6 @@
     "skills",
     "scripts",
     ".Codex/agents",
-    ".Codex/context",
-    ".Codex/rules/context",
     ".Codex/rules/codebase-rubric.md",
     ".claude/agents",
     "src",
