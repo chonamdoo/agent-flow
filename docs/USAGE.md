@@ -376,7 +376,9 @@ git mv CONTEXT-MAP.md GLOSSARY-MAP.md
 git mv <context-dir>/CONTEXT.md <context-dir>/GLOSSARY.md   # once per context in the map
 ```
 
-Runs pinned before the upgrade keep their original design prompt.
+Install prints `legacy glossary name` for a root `CONTEXT.md` with a `## Language` heading or a
+root `CONTEXT-MAP.md` with a `## Contexts` heading when the matching `GLOSSARY` file is absent.
+It never renames files. Runs pinned before the upgrade keep their original design prompt.
 
 ## Running
 
