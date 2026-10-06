@@ -87,10 +87,15 @@ def test_the_formula_installs_every_asset_root_the_kit_resolves(tmp_path: Path) 
     assert required <= listed, f"formula does not install {sorted(required - listed)}"
 
 
-def test_the_formula_keeps_the_venv_below_the_asset_tree(tmp_path: Path) -> None:
-    """반증: venv가 libexec 자체면 설치된 패키지의 조상에 kit 서명이 없다."""
+def test_the_formula_keeps_the_venv_where_the_installers_look(tmp_path: Path) -> None:
+    """반증: venv가 libexec 자체면 설치된 패키지의 조상에 kit 서명이 없다. 이름이
+    installer가 찾는 `<kit>/.venv`와 다르면 프로젝트 launcher가 이 패키지 없는
+    다른 python에 고정된다 — brew 설치본이 `libexec/venv`였을 때 그랬다."""
     text = FORMULA.read_text(encoding="utf-8")
-    assert 'virtualenv_create(libexec/"venv"' in text
+    assert 'virtualenv_create(libexec/".venv"' in text
+    assert 'write_env_script libexec/".venv/bin/agent-flow"' in text
+    assert 'path.join(KIT_ROOT, ".venv", "bin", "python")' in (REPO / "lib" / "installer-shared.mjs").read_text(encoding="utf-8")
+    assert 'path.join(KIT_ROOT, ".venv",' in (REPO / "bin" / "agent-flow-kit.mjs").read_text(encoding="utf-8")
     # 래퍼가 없으면 PATH가 정리된 자리에서 node를 찾지 못해 프로젝트 설치가 죽는다.
     assert "write_env_script" in text
     assert 'formula_opt_bin("node")' in text

@@ -37,7 +37,11 @@ class AgentFlow < Formula
     libexec.install "bin", "lib", "scripts", "skills", "templates", "bootstrap",
                     "src", ".Codex", ".claude", "package.json", "pyproject.toml",
                     "README.md"
-    venv = virtualenv_create(libexec/"venv", "python3.13")
+    # `.venv` is the name the installers probe under the kit root
+    # (lib/installer-shared.mjs resolvePython, bin/agent-flow-kit.mjs
+    # preferredPython). Any other name makes project installs pin some other
+    # interpreter that lacks this package.
+    venv = virtualenv_create(libexec/".venv", "python3.13")
     venv.pip_install resources
     venv.pip_install libexec
     # A wrapper instead of the plain symlink: project install and the hooks
@@ -45,7 +49,7 @@ class AgentFlow < Formula
     # them from (launchd, CI, another process). The caller's PATH is kept because
     # the reviewers, git, and gh all come from it; the fallback exists so an unset
     # PATH cannot leave an empty entry, which resolves relative to the cwd.
-    (bin/"agent-flow").write_env_script libexec/"venv/bin/agent-flow",
+    (bin/"agent-flow").write_env_script libexec/".venv/bin/agent-flow",
                                         PATH: "#{formula_opt_bin("node")}:" \
                                               "${PATH:-#{HOMEBREW_PREFIX}/bin:/usr/bin:/bin}"
   end
