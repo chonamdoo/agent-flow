@@ -5,9 +5,9 @@ import shutil
 import pytest
 
 from agent_flow.adapters.hosted import HostedAdapter
-from agent_flow.artifact import _missing_completion_markers, create_run
+from agent_flow.artifact import _missing_completion_markers, create_run, read_meta, write_meta
 from agent_flow.core.local_skills import missing_local_skill_markers, phase_skill_resolution
-from agent_flow.core.phase_workflow import parse_phase_workflow_definition
+from agent_flow.core.phase_workflow import load_phase_workflow_definition, parse_phase_workflow_definition
 from agent_flow.core.profiles import load_profile_payload
 from agent_flow.core.skill_resolver import ResolutionContext
 from agent_flow.runner import Phase, Runner
@@ -208,6 +208,40 @@ def test_custom_pinned_plan_path_takes_precedence_over_legacy_file(planned_proje
     (run_dir / "plans/files.md").write_text("- Files: src/shared/api/endpoints.ts\n", encoding="utf-8")
     (run_dir / "slice-plan.md").write_text("- Files: scripts/unrelated.py\n", encoding="utf-8")
     assert "web-endpoint-registry" in {s.name for s in required(project, run_dir).required}
+
+
+def test_cli_recovers_legacy_custom_plan_from_its_selected_kit(planned_project, tmp_path, monkeypatch, capsys):
+    from agent_flow.cli import main
+
+    project, _ = planned_project
+    kit = tmp_path / "legacy-kit"
+    source = kit / "workflows/probe.yaml"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "id: probe\nphases:\n  - id: slice-plan\n    artifact: plans/files.md\n"
+        "  - id: green\n    artifact: output/green.md\n", encoding="utf-8",
+    )
+    definition = load_phase_workflow_definition(kit, "probe")
+    run_dir = create_run(project, "probe", "Implement orders", run_id="legacy", workflow_definition=definition)
+    meta = read_meta(run_dir)
+    del meta["workflow_definition"]
+    del meta["workflow_definition_digest"]
+    write_meta(run_dir, meta)
+    before = (run_dir / "meta.json").read_bytes()
+    (run_dir / "plans").mkdir()
+    (run_dir / "plans/files.md").write_text("- Files: src/shared/api/endpoints.ts\n", encoding="utf-8")
+    artifact = project / "inspection.md"
+    artifact.write_text("## Completion Gate\nproject-local-skills-used: n/a\n", encoding="utf-8")
+    monkeypatch.setattr("agent_flow.cli._find_kit_root", lambda: kit)
+    monkeypatch.setenv("AGENT_FLOW_PROFILE", "generic")
+    for command in ("resolve", "prompt", "markers"):
+        args = ["skills", command, "--root", str(project), "--phase", "green"]
+        if command == "markers":
+            args.extend(["--artifact", str(artifact)])
+        assert main(args) == 0
+        assert "web-endpoint-registry" in capsys.readouterr().out
+    assert (run_dir / "meta.json").read_bytes() == before
+    assert not (project / "src/shared/api/endpoints.ts").exists()
 
 
 @pytest.mark.parametrize("plan", [

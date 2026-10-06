@@ -7,7 +7,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping, Sequence, TYPE_CHECKING
 
 from agent_flow.core.markers import (
     completion_gate_marker_values,
@@ -30,6 +30,9 @@ from agent_flow.core.skill_resolver import (
     resolve_phase_skills,
     skill_prompt_block,
 )
+
+if TYPE_CHECKING:
+    from agent_flow.core.phase_workflow import PhaseWorkflowDefinition
 
 APPLIED_MARKER = "project-local-skill-docs: applied"
 AVAILABILITY_MARKER = "skill-availability: pass|degraded"
@@ -250,12 +253,15 @@ def skill_markers_enforced(phase_id: str) -> bool:
     return phase_id in CODE_PHASES
 
 
-def _planned_skill_paths(project_root: Path, run_dir: Path) -> tuple[str, ...]:
+def _planned_skill_paths(
+    project_root: Path, run_dir: Path, definition: PhaseWorkflowDefinition | None = None,
+) -> tuple[str, ...]:
     from agent_flow.artifact import _existing_phase_artifact, _phase_contract, read_meta
 
     meta = read_meta(run_dir)
     contract = _phase_contract(
         run_dir, meta.get("workflow", "default"), "slice-plan", config_root=project_root,
+        definition=definition,
     )
     if contract.artifact is None:
         return ()
@@ -298,9 +304,10 @@ def _planned_skill_paths(project_root: Path, run_dir: Path) -> tuple[str, ...]:
 
 def phase_skill_paths(
     project_root: Path, phase_id: str, changed_files: Sequence[str], run_dir: Path | None = None,
+    *, workflow_definition: PhaseWorkflowDefinition | None = None,
 ) -> tuple[str, ...]:
     if run_dir is not None and phase_id in IMPLEMENTATION_PHASES:
-        return tuple(dict.fromkeys((*changed_files, *_planned_skill_paths(project_root, run_dir))))
+        return tuple(dict.fromkeys((*changed_files, *_planned_skill_paths(project_root, run_dir, workflow_definition))))
     return tuple(changed_files)
 
 
@@ -312,6 +319,7 @@ def phase_skill_resolution(
     profile: dict | None = None,
     changed_files: Sequence[str] = (),
     run_dir: Path | None = None,
+    workflow_definition: PhaseWorkflowDefinition | None = None,
     document_scope: Sequence[str] | None = None,
     required_document_ids: Sequence[str] = (),
     task_text: str = "",
@@ -323,9 +331,13 @@ def phase_skill_resolution(
     provider_authority: str = "",
 ) -> SkillResolution:
     """Resolve all required skills for a workflow phase."""
-    changed_files = phase_skill_paths(project_root, phase_id, changed_files, run_dir)
+    changed_files = phase_skill_paths(
+        project_root, phase_id, changed_files, run_dir, workflow_definition=workflow_definition,
+    )
     if document_scope is not None:
-        document_scope = phase_skill_paths(project_root, phase_id, document_scope, run_dir)
+        document_scope = phase_skill_paths(
+            project_root, phase_id, document_scope, run_dir, workflow_definition=workflow_definition,
+        )
     return resolve_phase_skills(
         project_root=project_root,
         phase_id=phase_id,
@@ -411,6 +423,7 @@ def missing_local_skill_markers(
     profile: dict | None = None,
     changed_files: Sequence[str] = (),
     run_dir: Path | None = None,
+    workflow_definition: PhaseWorkflowDefinition | None = None,
     task_text: str = "",
     concerns: Sequence[str] = (),
     since: float | None = None,
@@ -436,6 +449,7 @@ def missing_local_skill_markers(
         profile=profile,
         changed_files=changed_files,
         run_dir=run_dir,
+        workflow_definition=workflow_definition,
         task_text=task_text,
         concerns=concerns,
         architecture_root=architecture_root,

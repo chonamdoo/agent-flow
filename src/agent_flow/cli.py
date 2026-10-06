@@ -3636,6 +3636,7 @@ def _run_skills_command(
             profile=merged,
             changed_files=context["changed_files"],
             run_dir=active.path if active is not None else None,
+            workflow_definition=definition,
             task_text=context["task_text"],
             concerns=context["concerns"],
             architecture_root=project_root,
@@ -3695,6 +3696,7 @@ def _run_skills_command(
                     source_root=project_root,
                     since=context["since"],
                     run_dir=active.path if active is not None else None,
+                    workflow_definition=definition,
                     context=resolution_context,
                     conditional_architecture_markers=conditional_markers,
                     reviewer_delivery=(

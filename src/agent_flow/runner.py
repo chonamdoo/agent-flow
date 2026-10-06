@@ -2202,6 +2202,7 @@ class Runner:
             profile=self.profile,
             changed_files=changed_files(self.project_root, self.profile),
             run_dir=self.run_dir,
+            workflow_definition=getattr(self, "workflow", None),
             task_text=str(meta.get("task", "")),
             concerns=run_concerns(meta),
             architecture_root=self.project_root,
@@ -2364,6 +2365,7 @@ class Runner:
                 profile=self.profile,
                 changed_files=changed_files(self.project_root, self.profile),
                 run_dir=self.run_dir,
+                workflow_definition=getattr(self, "workflow", None),
                 task_text=str(meta.get("task", "")),
                 concerns=run_concerns(meta),
                 since=_meta_timestamp(meta.get("phase_entered_at")),
@@ -2510,6 +2512,7 @@ class Runner:
                 scope = phase_skill_paths(
                     self.config_root, phase.id,
                     changed_files(self.project_root, self.profile), self.run_dir,
+                    workflow_definition=getattr(self, "workflow", None),
                 )
                 host = getattr(self, "_adapter_name", None)
                 roots = active_host_roots(
@@ -2563,6 +2566,7 @@ class Runner:
                     self.config_root, phase.id, phase_skills=phase.skills,
                     profile=self.profile, changed_files=scope,
                     run_dir=self.run_dir,
+                    workflow_definition=getattr(self, "workflow", None),
                     task_text=str(meta.get("task", "")), concerns=run_concerns(meta),
                     host=host, architecture_root=self.project_root,
                     source_root=self.project_root,
