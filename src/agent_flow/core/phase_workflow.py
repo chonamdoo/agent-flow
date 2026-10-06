@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import copy
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 import hashlib
 from importlib import resources
 from pathlib import Path
@@ -363,7 +365,20 @@ def parse_phase_workflow_definition(
     pinned_legacy: bool = False,
 ) -> PhaseWorkflowDefinition:
     """Parse verified workflow bytes while retaining their identity and authority."""
-    path = source
+    parsed = _parse_phase_workflow_definition(source_bytes, str(source), name, kit_owned, pinned_legacy)
+    # 캐시한 원본은 내보내지 않는다. 호출자가 결과를 고쳐도 다른 호출에 번지지 않도록 매번 복사본을 준다.
+    return copy.deepcopy(parsed)
+
+
+# planned-scope 조회, status, prompt 렌더가 같은 workflow YAML을 호출마다 다시 파싱한다(회당 약 10 ms).
+# 결과는 인자만으로 정해지고 입력 바이트가 키에 들어가므로, 정의가 바뀌면 키도 바뀌어 낡은 값이 나오지 않는다.
+# 경로는 출력에 문자열로만 쓰이므로 `str`로 받는다. Windows의 `Path` 비교는 대소문자를 무시해서
+# 문자열이 다른 두 경로가 같은 키가 된다.
+@lru_cache(maxsize=32, typed=True)
+def _parse_phase_workflow_definition(
+    source_bytes: bytes, source: str, name: str, kit_owned: bool, pinned_legacy: bool,
+) -> PhaseWorkflowDefinition:
+    path = Path(source)
     digest = hashlib.sha256(source_bytes).hexdigest()
     raw = yaml.safe_load(source_bytes.decode("utf-8")) or {}
     if not isinstance(raw, dict):

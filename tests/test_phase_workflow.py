@@ -1,4 +1,5 @@
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from typing import Any
 
 import pytest
 
@@ -283,3 +284,63 @@ def test_fresh_clean_review_preserves_boundary_exceptions(
     assert "repository-boundary: pass|fail" not in missing_markers(
         evidence + "repository-boundary: pass\n", markers
     )
+
+
+def test_edited_workflow_file_is_parsed_again(tmp_path: Path) -> None:
+    workflows = tmp_path / "workflows"
+    workflows.mkdir()
+    path = workflows / "custom.yaml"
+    path.write_text("id: custom\nphases:\n  - id: implement\n", encoding="utf-8")
+    assert load_phase_workflow_definition(tmp_path, "custom").phases[0].artifact == "implement.md"
+
+    path.write_text(
+        "id: custom\nphases:\n  - id: implement\n    artifact: out/implement.md\n", encoding="utf-8",
+    )
+
+    assert load_phase_workflow_definition(tmp_path, "custom").phases[0].artifact == "out/implement.md"
+
+
+@pytest.mark.parametrize("first_change,second_change", [
+    ({}, {"source": Path("kit/custom.yaml")}),
+    ({}, {"name": "other"}),
+    ({}, {"kit_owned": True}),
+    ({}, {"pinned_legacy": True}),
+    # Windows 경로 비교는 대소문자를 무시하지만 기록되는 source 문자열은 다르다.
+    ({"source": PureWindowsPath("C:/Proj/custom.yaml")}, {"source": PureWindowsPath("c:/proj/custom.yaml")}),
+])
+def test_same_bytes_keep_each_callers_identity_and_authority(
+    first_change: dict[str, Any], second_change: dict[str, Any],
+) -> None:
+    from agent_flow.core.phase_workflow import parse_phase_workflow_definition
+
+    source = b"phases:\n  - id: implement\n    skills:\n      required: [clean-architecture-core]\n"
+    base: dict[str, Any] = {
+        "source": Path("custom.yaml"), "name": "custom", "kit_owned": False, "pinned_legacy": False,
+    }
+    second = {**base, **second_change}
+    parse_phase_workflow_definition(source, **{**base, **first_change})
+
+    definition = parse_phase_workflow_definition(source, **second)
+
+    skills = definition.phases[0].skills
+    assert skills is not None
+    assert (
+        definition.source, definition.id, definition.kit_owned,
+        skills.replaceable_architecture, skills.pinned_legacy,
+    ) == (
+        str(second["source"]), second["name"], second["kit_owned"],
+        second["kit_owned"], second["pinned_legacy"],
+    )
+
+
+def test_changing_a_loaded_definition_does_not_leak_into_later_loads() -> None:
+    root = Path(__file__).resolve().parents[1]
+    first = load_phase_workflow_definition(root, "full-feature")
+    phase = next(phase for phase in first.phases if phase.routes)
+    assert phase.routes is not None
+    original = dict(phase.routes)
+    phase.routes.clear()
+
+    again = load_phase_workflow_definition(root, "full-feature")
+
+    assert next(item for item in again.phases if item.id == phase.id).routes == original
