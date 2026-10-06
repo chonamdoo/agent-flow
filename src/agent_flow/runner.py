@@ -184,6 +184,7 @@ from agent_flow.core.local_skills import (
     declared_concern_ids,
     missing_local_skill_markers,
     phase_skill_resolution,
+    phase_skill_paths,
     skill_markers_enforced,
 )
 from agent_flow.core.skill_scope import merge_scope, reviewer_delivery, scope_document_ids
@@ -2506,7 +2507,10 @@ class Runner:
             assert self.run_dir is not None
             meta = read_meta(self.run_dir)
             try:
-                scope = changed_files(self.project_root, self.profile)
+                scope = phase_skill_paths(
+                    self.config_root, phase.id,
+                    changed_files(self.project_root, self.profile), self.run_dir,
+                )
                 host = getattr(self, "_adapter_name", None)
                 roots = active_host_roots(
                     skill_roots(

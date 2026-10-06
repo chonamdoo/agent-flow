@@ -296,6 +296,14 @@ def _planned_skill_paths(project_root: Path, run_dir: Path) -> tuple[str, ...]:
     return tuple(dict.fromkeys(paths))
 
 
+def phase_skill_paths(
+    project_root: Path, phase_id: str, changed_files: Sequence[str], run_dir: Path | None = None,
+) -> tuple[str, ...]:
+    if run_dir is not None and phase_id in IMPLEMENTATION_PHASES:
+        return tuple(dict.fromkeys((*changed_files, *_planned_skill_paths(project_root, run_dir))))
+    return tuple(changed_files)
+
+
 def phase_skill_resolution(
     project_root: Path,
     phase_id: str,
@@ -315,8 +323,7 @@ def phase_skill_resolution(
     provider_authority: str = "",
 ) -> SkillResolution:
     """Resolve all required skills for a workflow phase."""
-    if run_dir is not None and phase_id in IMPLEMENTATION_PHASES:
-        changed_files = tuple(dict.fromkeys((*changed_files, *_planned_skill_paths(project_root, run_dir))))
+    changed_files = phase_skill_paths(project_root, phase_id, changed_files, run_dir)
     return resolve_phase_skills(
         project_root=project_root,
         phase_id=phase_id,

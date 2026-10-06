@@ -1,4 +1,5 @@
 from pathlib import Path
+import importlib.util
 import shutil
 
 import pytest
@@ -7,6 +8,7 @@ from agent_flow.adapters.hosted import HostedAdapter
 from agent_flow.artifact import _missing_completion_markers, create_run
 from agent_flow.core.local_skills import missing_local_skill_markers, phase_skill_resolution
 from agent_flow.core.phase_workflow import parse_phase_workflow_definition
+from agent_flow.core.profiles import load_profile_payload
 from agent_flow.core.skill_resolver import ResolutionContext
 from agent_flow.runner import Phase, Runner
 
@@ -199,3 +201,39 @@ def test_status_marker_check_includes_the_active_run_plan(planned_project, monke
     monkeypatch.setattr("agent_flow.artifact.changed_files", lambda *args: ("tests/orders.test.ts",))
     missing = _missing_completion_markers(run_dir, "probe", "green", config_root=project, project_root=project)
     assert any("web-endpoint-registry" in marker for marker in missing)
+
+
+@pytest.mark.parametrize("planned,expected", [
+    ("src/features/orders/api/fetchOrders.ts", "architecture_decision_pending"),
+    ("app/orders/page.tsx", None),
+])
+def test_pending_guard_checks_planned_structural_scope_before_writes(planned_project, monkeypatch, planned, expected):
+    project, run_dir = planned_project
+    (project / ".agent-flow/project.yaml").write_text(
+        "schema_version: 1\narchitecture:\n  mode: pending\n", encoding="utf-8",
+    )
+    (run_dir / "slice-plan.md").write_text(f"- Files: {planned}\n", encoding="utf-8")
+    monkeypatch.setattr("agent_flow.runner.changed_files", lambda *args: ("tests/orders.test.ts",))
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.config_root = runner.project_root = project
+    runner.profile = load_profile_payload("nextjs")
+    assert not (project / planned).exists()
+    assert runner._architecture_decision_block_reason(Phase(id="green", description="Implement")) == expected
+
+
+def test_budget_planned_condition_delivers_skills_for_files_absent_from_git(planned_project):
+    project, _ = planned_project
+    spec = importlib.util.spec_from_file_location("phase_budget_scope", ROOT / "evals/phase_budget.py")
+    assert spec is not None and spec.loader is not None
+    budget = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(budget)
+    result = budget.measure_combo(ROOT, "nextjs", "stack", root=project)
+    assert "install_error" not in result, result
+    planned = result["conditions"]["planned"]
+    assert planned["planned_files"]
+    assert not set(planned["changed_files"]) & set(planned["planned_files"])
+    green = planned["phases"]["green"]
+    assert "error" not in green, green
+    assert "web-endpoint-registry" in green["required"]
+    assert "web-endpoint-registry" not in result["conditions"]["none"]["phases"]["green"]["required"]
