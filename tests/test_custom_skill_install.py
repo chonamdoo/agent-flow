@@ -913,6 +913,31 @@ def test_skill_hash_updates_and_local_skills_are_gitignored(tmp_path: Path) -> N
     assert ".agent-flow/" in gitignore or ".agent-flow/local-skills/" in gitignore
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_git_install_hides_kit_dirs_in_local_exclude_not_tracked_gitignore(
+    tmp_path: Path, binary: str,
+) -> None:
+    """팀 저장소에서 사용자가 tracked `.gitignore`의 줄을 지워도 재설치가 매번 되살렸다."""
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(("git", "init", "-q"), cwd=project, check=True, capture_output=True, timeout=30)
+    team_ignore = b"node_modules/\r\n.claude/"
+    (project / ".gitignore").write_bytes(team_ignore)
+    for _ in range(2):
+        result = _install_with(binary, project)
+        assert result.returncode == 0, result.stderr
+
+    assert (project / ".gitignore").read_bytes() == team_ignore
+    exclude = (project / ".git" / "info" / "exclude").read_text(encoding="utf-8").splitlines()
+    assert exclude.count("/.agent-flow/") == 1
+    # 프로젝트 `.gitignore`가 이미 가린 이름은 exclude에 같은 뜻으로 또 적지 않는다.
+    assert "/.claude/" not in exclude
+    status = subprocess.run(
+        ("git", "status", "--porcelain", "--untracked-files=all"), cwd=project,
+        text=True, capture_output=True, check=True, timeout=30,
+    )
+    assert status.stdout.splitlines() == ["?? .gitignore"]
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_skill_index_separates_manifest_ownership_from_observed_content(
     tmp_path: Path, binary: str
 ) -> None:
@@ -1451,6 +1476,16 @@ def _owned_legacy_root_context(project: Path) -> dict[str, bytes]:
     return originals
 
 
+def _kit_dirs_ignored_by_previous_install(project: Path) -> None:
+    """예전 install은 kit 디렉터리를 프로젝트 `.gitignore`에 적었다. 그 줄이 있으면 install이
+    exclude에 kit 디렉터리를 더하지 않으므로, exclude 바이트를 비교하는 migration 검사가
+    루트 문서 줄만 본다."""
+    (project / ".gitignore").write_text(
+        ".agent-flow/\n.codex/\n.Codex/\n.claude/\n.omp/\nAGENTS/\nCLAUDE/\nagent-flow/\n",
+        encoding="utf-8",
+    )
+
+
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_legacy_operating_contract_requires_explicit_migration(tmp_path: Path, binary: str) -> None:
     project = tmp_path / "project"
@@ -1624,6 +1659,7 @@ def test_explicit_root_migration_keeps_rules_imports_and_indexes(
     project = tmp_path / "project"
     project.mkdir()
     originals = _owned_legacy_root_context(project)
+    _kit_dirs_ignored_by_previous_install(project)
     git_dir = project / ".git"
     subprocess.run(
         ("git", "init", "-q"),
@@ -1699,6 +1735,7 @@ def test_root_migration_preserves_concurrent_edits_on_failure_and_retry(
     project = (tmp_path / "project").resolve()
     project.mkdir()
     originals = _owned_legacy_root_context(project)
+    _kit_dirs_ignored_by_previous_install(project)
     subprocess.run(
         ("git", "init", "-q"), cwd=project, check=True, capture_output=True, timeout=30,
     )
@@ -1828,6 +1865,7 @@ def test_interrupted_root_migration_recovers_root_visibility(
     project = tmp_path / "project"
     project.mkdir()
     originals = _owned_legacy_root_context(project)
+    _kit_dirs_ignored_by_previous_install(project)
     subprocess.run(
         ("git", "init", "-q"), cwd=project, check=True, capture_output=True, timeout=30,
     )
@@ -2042,6 +2080,7 @@ def test_root_migration_removes_only_migrated_root_exclusions(
     project = tmp_path / "project"
     project.mkdir()
     _owned_legacy_root_context(project)
+    _kit_dirs_ignored_by_previous_install(project)
     user_claude = b"# Project-owned Claude rules\n"
     (project / "CLAUDE.md").write_bytes(user_claude)
     if not owned_agents:
@@ -3217,12 +3256,8 @@ def test_legacy_install_leaves_root_context_ignored(tmp_path: Path, binary: str)
         timeout=30,
     )
     assert nested_ignored.returncode != 0
-    # tracked `.gitignore`에는 여전히 적지 않는다.
-    gitignore = [
-        line.strip()
-        for line in (project / ".gitignore").read_text(encoding="utf-8").splitlines()
-    ]
-    assert "AGENTS.md" not in gitignore and "CLAUDE.md" not in gitignore
+    # git 저장소에서는 tracked `.gitignore`를 만들지도 고치지도 않는다.
+    assert not (project / ".gitignore").exists()
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])

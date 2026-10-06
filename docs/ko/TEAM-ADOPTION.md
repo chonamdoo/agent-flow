@@ -58,11 +58,13 @@
 배포해야 한다. 설치된 `.agent-flow/profiles/<id>.yaml`를 직접 고치는 것은 남지 않는다. install이
 새 필드를 기존 설치본에 닿게 하려고 배포 profile을 덮어쓰기 때문이다.
 
-그 override 파일은 저장소별이 아니라 작업 사본별이다. install이 프로젝트 `.gitignore`에
-`.agent-flow/`를 쓰기 때문에(`lib/installer-shared.mjs`의 `upsertGitignore`, 호출은
-`bin/agent-flow-kit.mjs`), 평범한 `git add`는 이 파일을 잡지 못하고 다른 클론은 이 파일을 보지
-못한다. 공유하려면 `git add -f .agent-flow/profiles/<profile-id>.local.yaml`이나 `.gitignore`의
-부정 규칙이 필요하고, 그 ignore 항목은 다음 `agent-flow .`에서 다시 추가된다.
+그 override 파일은 저장소별이 아니라 작업 사본별이다. git work tree에서 install은 `.agent-flow/`를
+그 클론의 로컬 exclude 파일 `.git/info/exclude`에 `/.agent-flow/`로 올리고(`lib/installer-shared.mjs`의
+`upsertLocalIgnores`, 호출은 `bin/agent-flow-kit.mjs`) 추적되는 `.gitignore`는 건드리지 않는다.
+저장소가 아니면 같은 항목을 `.gitignore`에 쓴다. 어느 쪽이든 평범한 `git add`는 이 파일을 잡지
+못하고 다른 클론은 이 파일을 보지 못한다. 공유하려면 `git add -f .agent-flow/profiles/<profile-id>.local.yaml`이
+필요하고, 프로젝트 `.gitignore`가 이미 `.agent-flow/`를 무시하지 않으면 그 exclude 항목은 다음
+`agent-flow .`에서 다시 추가된다.
 
 ### profile 해석 순서와 `AGENT_FLOW_PROFILE`
 
