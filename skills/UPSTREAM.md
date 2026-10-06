@@ -159,3 +159,14 @@ verbatim tree import. It does not add a native host entry; the existing
 - Conditional guidance-mode integration belongs to
   `templates/_shared/review/io-safety.md`; it does not modify the imported
   audit workflow or replace the runner's review verdict contract.
+
+## write-for-work
+
+- Upstream: [chonamdoo/write-for-work](https://github.com/chonamdoo/write-for-work).
+- Mapping: upstream `skills/write-for-work/` → local `skills/write-for-work/`.
+- Pinned: upstream commit `f3ae4a7` (chonamdoo/write-for-work#4), directory tree
+  `bbc98d5608a22a13cb4cc53b202149b73abb3bf0`. The four skill files here are
+  byte-identical to that tree; upstream `LICENSE` is not vendored.
+- Upstream is the source. Change the skill there first and copy it here
+  verbatim; a same-named global install shadows this copy, so a divergent copy
+  changes which rules apply depending on how the skill is loaded.
