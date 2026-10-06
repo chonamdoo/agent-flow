@@ -608,3 +608,45 @@ def test_freeform_string_tool_input_without_patch_marker_passes_silently() -> No
     assert result.returncode == 0
     assert result.stdout == ""
     assert result.stderr == ""
+
+
+def test_blocks_figma_reference_in_css_block_comment() -> None:
+    result = run_checker(
+        {
+            "file_path": "src/theme.css",
+            "content": "/* Figma 디자인 소스 값을 그대로 옮겼다. */\n:root { --gap: 8px; }\n",
+        }
+    )
+
+    assert result.returncode == 2
+    assert "src/theme.css:1" in result.stderr
+
+
+def test_css_url_and_string_double_slash_are_not_comments() -> None:
+    result = run_checker(
+        {
+            "file_path": "src/theme.css",
+            "content": (
+                ".hero { background: url(https://cdn.example.com/hero.png); }\n"
+                '.sep::before { content: "// not a comment"; }\n'
+            ),
+        }
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_scss_line_comment_is_checked_but_url_is_not() -> None:
+    result = run_checker(
+        {
+            "file_path": "src/theme.scss",
+            "content": (
+                ".hero { background: url(https://cdn.example.com/hero.png); }\n"
+                "// https://figma.com/file/abc\n"
+            ),
+        }
+    )
+
+    assert result.returncode == 2
+    assert "src/theme.scss:2" in result.stderr
+    assert "src/theme.scss:1" not in result.stderr

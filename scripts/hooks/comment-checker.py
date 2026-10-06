@@ -19,7 +19,16 @@ CODE_EXTENSIONS = {
     ".js",
     ".jsx",
     ".swift",
+    ".css",
+    ".scss",
+    ".sass",
+    ".less",
 }
+
+STYLESHEET_EXTENSIONS = {".css", ".scss", ".sass", ".less"}
+# 순수 CSS에는 `//` 주석 문법이 없다. 거기서 `//`는 따옴표 없는 url() 값의 일부다.
+NO_LINE_COMMENT_EXTENSIONS = {".css"}
+URL_FUNCTION_RE = re.compile(r"(?<![\w-])url\(", re.IGNORECASE)
 
 EXCLUDED_PATH_PARTS = {
     ".git",
@@ -298,6 +307,9 @@ def comment_lines(
     in_regex = False
     block_start = 0
     block_line = 0
+    suffix = Path(file_path).suffix.lower()
+    is_stylesheet = suffix in STYLESHEET_EXTENSIONS
+    line_comments = suffix not in NO_LINE_COMMENT_EXTENSIONS
     while index < len(text):
         char = text[index]
         if char == "\n":
@@ -330,7 +342,15 @@ def comment_lines(
                 in_regex = False
             index += 1
             continue
-        if text.startswith(("'''", '"""'), index):
+        if is_stylesheet and URL_FUNCTION_RE.match(text, index):
+            # 따옴표 없는 url(https://...)의 `//`를 주석 시작으로 읽지 않도록 값 전체를 건너뛴다.
+            end = text.find(")", index)
+            if end == -1:
+                end = len(text)
+            line += text.count("\n", index, end)
+            index = end
+            continue
+        if not is_stylesheet and text.startswith(("'''", '"""'), index):
             triple = text[index : index + 3]
             index += 3
             continue
@@ -350,7 +370,7 @@ def comment_lines(
                 yield line, strip_comment_marker(text[index:end])
             index = end
             continue
-        if text.startswith("//", index):
+        if line_comments and text.startswith("//", index):
             end = text.find("\n", index)
             if end == -1:
                 end = len(text)
