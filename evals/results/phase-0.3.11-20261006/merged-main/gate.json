@@ -1,0 +1,37 @@
+{
+  "passed": false,
+  "compare_exit_code": 1,
+  "units": 168,
+  "report": "## phase_eval gate\n\n`before` → `after`, 168 rows.\n\n|metric|before|after|\n|---|---:|---:|\n|author_required_read_rate|1.000|1.000|\n|author_pass_rate|1.000|0.944|\n|review_correct_rate|0.955|0.932|\n|defect_detection_rate|1.000|1.000|\n|false_request_changes_rate|0.017|0.033|\n|reviewer_read_rate|1.000|1.000|\n|invalid_rate|0.000|0.000|\n|author uncached_input token ratio||0.963|\n|author output token ratio||0.985|\n|review uncached_input token ratio||1.030|\n|review output token ratio||1.010|\n\n### Failures\n- review_correct_rate 0.932 is below floor 0.95\n- author_pass_rate dropped: 1.000 → 0.944\n- review_correct_rate dropped: 0.955 → 0.932\n- false_request_changes_rate rose: 0.017 → 0.033\n",
+  "results_raw_sha256": "410a781d12b44150b25c2c1b89fbd36dfb1880d87677299a5519bbbd8a13062e",
+  "results_raw_bytes": 6509044,
+  "results_gzip_bytes": 574490,
+  "preservation": "All 168 original rows retained byte-for-byte after decompression; no row deletion, rescoring, or threshold changes.",
+  "release_gate_exported": false,
+  "candidate": "main c1d8050 (#265, #266, #267, #268, #269, #270); kit digest after 5f7e455b3c9a7dd099c60e0d8414d9837907c5db2adc78c3daaa2876342bda93",
+  "failure": [
+    "review_correct_rate 0.932 is below floor 0.95",
+    "author_pass_rate dropped: 1.000 -> 0.944",
+    "review_correct_rate dropped: 0.955 -> 0.932",
+    "false_request_changes_rate rose: 0.017 -> 0.033"
+  ],
+  "diagnosis_observed": {
+    "author_failures": [
+      "after/app/team trial 2",
+      "after/app/team trial 3"
+    ],
+    "author_failure_mode": "Provider exit 0, no production code. The model read `agent-flow status` (architecture_policy_unpinned) and a failed `agent-flow continue` (managed hook registration mismatch under the evaluator's --no-hooks install), wrote the blocker to green.log, and asked whether to select the team rules as a project-local contract. Every author trial in both kits saw the same two status/continue results; before/app/team passed 3/3 under them. Same failure mode as v0.3.10 author/backend/team/after/trial-3, which the v0.3.10 fixture correction addressed for backend/team only.",
+    "incorrect_reviews": {
+      "before": [
+        "web/team/clean trial 1",
+        "backend/clean/clean trial 2"
+      ],
+      "after": [
+        "backend/local/clean trial 1",
+        "backend/clean/clean trial 2",
+        "backend/local/clean trial 2"
+      ]
+    }
+  },
+  "limitation": "Failed release measurement, not a passing release record. Not established whether the app/team stop is caused by the kit change or by model variance on a fixture whose architecture authority is pending."
+}
