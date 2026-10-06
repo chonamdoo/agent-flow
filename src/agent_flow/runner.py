@@ -184,6 +184,7 @@ from agent_flow.core.local_skills import (
     declared_concern_ids,
     missing_local_skill_markers,
     phase_skill_resolution,
+    phase_skill_paths,
     skill_markers_enforced,
 )
 from agent_flow.core.skill_scope import merge_scope, reviewer_delivery, scope_document_ids
@@ -2200,6 +2201,8 @@ class Runner:
             phase_skills=phase.skills,
             profile=self.profile,
             changed_files=changed_files(self.project_root, self.profile),
+            run_dir=self.run_dir,
+            workflow_definition=getattr(self, "workflow", None),
             task_text=str(meta.get("task", "")),
             concerns=run_concerns(meta),
             architecture_root=self.project_root,
@@ -2361,6 +2364,8 @@ class Runner:
                 phase_skills=phase.skills,
                 profile=self.profile,
                 changed_files=changed_files(self.project_root, self.profile),
+                run_dir=self.run_dir,
+                workflow_definition=getattr(self, "workflow", None),
                 task_text=str(meta.get("task", "")),
                 concerns=run_concerns(meta),
                 since=_meta_timestamp(meta.get("phase_entered_at")),
@@ -2504,7 +2509,11 @@ class Runner:
             assert self.run_dir is not None
             meta = read_meta(self.run_dir)
             try:
-                scope = changed_files(self.project_root, self.profile)
+                scope = phase_skill_paths(
+                    self.config_root, phase.id,
+                    changed_files(self.project_root, self.profile), self.run_dir,
+                    workflow_definition=getattr(self, "workflow", None),
+                )
                 host = getattr(self, "_adapter_name", None)
                 roots = active_host_roots(
                     skill_roots(
@@ -2556,6 +2565,8 @@ class Runner:
                 resolution = phase_skill_resolution(
                     self.config_root, phase.id, phase_skills=phase.skills,
                     profile=self.profile, changed_files=scope,
+                    run_dir=self.run_dir,
+                    workflow_definition=getattr(self, "workflow", None),
                     task_text=str(meta.get("task", "")), concerns=run_concerns(meta),
                     host=host, architecture_root=self.project_root,
                     source_root=self.project_root,

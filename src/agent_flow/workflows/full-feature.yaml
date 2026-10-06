@@ -123,6 +123,8 @@ phases:
       slice's boundary scope in the selected architecture contract's own terms.
       DDD is a separate modeling axis: record the bounded contexts and domain
       concerns for each slice when DDD is selected.
+      For each slice, declare concrete relative file paths as `- Files: path, path`.
+      Do not use globs or descriptions in that file list; it routes implementation skills.
       Output: artifacts/slice-plan.md.
 
   - id: plan-review

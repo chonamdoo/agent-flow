@@ -26,7 +26,7 @@ import tempfile
 from pathlib import Path
 
 MODES = ("clean", "stack", "local", "pending")
-CONDITIONS = ("none", "baseline", "layer", "committed")
+CONDITIONS = ("none", "planned", "baseline", "layer", "committed")
 
 # Detection manifest, a file the profile's baseline group routes, and a file inside
 # an architecture layer path. Paths are chosen to match the profile globs.
@@ -156,7 +156,7 @@ def _install(kit: Path, project: Path, profile: str, mode: str) -> str | None:
     return None
 
 
-def _measure_condition(project: Path, run_id: str) -> dict:
+def _measure_condition(project: Path, run_id: str, *, planned_files: tuple[str, ...] = ()) -> dict:
     from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
     from agent_flow.artifact import create_run
     from agent_flow.core.local_skills import changed_files
@@ -164,6 +164,11 @@ def _measure_condition(project: Path, run_id: str) -> dict:
 
     run_dir = create_run(project, "full-feature", TASK, run_id=run_id)
     runner = Runner(project, workflow="full-feature", run_dir=run_dir)
+    if planned_files:
+        plan_phase = next(phase for phase in runner.phases if phase.id == "slice-plan")
+        plan = run_dir / (plan_phase.artifact or "slice-plan.md")
+        plan.parent.mkdir(parents=True, exist_ok=True)
+        plan.write_text(f"- Files: {', '.join(planned_files)}\n", encoding="utf-8")
     adapter = HostedAdapter("claude")
     adapter._profile_id = runner.profile_id
     adapter._profile_snapshot = runner.profile
@@ -176,7 +181,10 @@ def _measure_condition(project: Path, run_id: str) -> dict:
     for phase in runner.phases:
         entry: dict = {}
         try:
-            resolution = adapter.phase_resolution(phase, project, skill_host="claude")
+            resolution_kwargs = (
+                {"run_dir": run_dir} if "run_dir" in inspect.signature(adapter.phase_resolution).parameters else {}
+            )
+            resolution = adapter.phase_resolution(phase, project, skill_host="claude", **resolution_kwargs)
             envelope = adapter.render_envelope(phase, run_dir, project, skill_host="claude", resolution=resolution)
             entry["author_bytes"] = len(envelope.encode())
             entry["required"] = [s.name for s in resolution.required]
@@ -203,7 +211,7 @@ def _measure_condition(project: Path, run_id: str) -> dict:
             entry["error"] = f"{type(exc).__name__}: {exc}"[:300]
         phases[phase.id] = entry
     shutil.rmtree(run_dir, ignore_errors=True)
-    return {"changed_files": list(adapter._changed_files), "phases": phases}
+    return {"changed_files": list(adapter._changed_files), "planned_files": list(planned_files), "phases": phases}
 
 
 def measure_combo(kit: Path, profile: str, mode: str, root: Path | None = None) -> dict:
@@ -248,7 +256,8 @@ def measure_combo(kit: Path, profile: str, mode: str, root: Path | None = None) 
                 _git(root, "add", "-A")
                 _git(root, "commit", "-qm", "feature")
             try:
-                results[condition] = _measure_condition(root, f"budget-{condition}")
+                planned = (str(spec["baseline"]), str(spec["layer"])) if condition == "planned" else ()
+                results[condition] = _measure_condition(root, f"budget-{condition}", planned_files=planned)
             except Exception as exc:
                 results[condition] = {"error": f"{type(exc).__name__}: {exc}"[:300]}
             if condition in ("baseline", "layer") and target is not None:

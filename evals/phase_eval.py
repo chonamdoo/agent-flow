@@ -183,7 +183,10 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
     adapter._task_text = case["task"]
     if scenario == "author":
         phase = next(p for p in runner.phases if p.id == "green")
-        resolution = adapter.phase_resolution(phase, project, skill_host=host)
+        resolution_kwargs = (
+            {"run_dir": run_dir} if "run_dir" in inspect.signature(adapter.phase_resolution).parameters else {}
+        )
+        resolution = adapter.phase_resolution(phase, project, skill_host=host, **resolution_kwargs)
         prompt = adapter.render_envelope(phase, run_dir, project, skill_host=host, resolution=resolution)
         return {
             "prompt": prompt + READ_EVIDENCE_PROMPT,
