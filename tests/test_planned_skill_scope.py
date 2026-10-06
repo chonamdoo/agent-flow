@@ -4,7 +4,9 @@ import shutil
 import pytest
 
 from agent_flow.adapters.hosted import HostedAdapter
+from agent_flow.artifact import _missing_completion_markers, create_run
 from agent_flow.core.local_skills import missing_local_skill_markers, phase_skill_resolution
+from agent_flow.core.phase_workflow import parse_phase_workflow_definition
 from agent_flow.core.skill_resolver import ResolutionContext
 from agent_flow.runner import Phase, Runner
 
@@ -143,3 +145,57 @@ def test_missing_planned_profile_skill_is_reported_in_prompt_and_gate(planned_pr
         corrected, project, phase.id, run_dir=run_dir, profile=profile,
         changed_files=adapter._changed_files,
     )
+
+
+@pytest.mark.parametrize("workflow,relative", [
+    ("full-feature", "artifacts/slice-plan.md"),
+    ("default", "slice-plan.md"),
+])
+def test_real_workflow_artifact_paths_select_planned_skills(planned_project, workflow, relative):
+    project, _ = planned_project
+    run_dir = create_run(project, workflow, "Implement orders", run_id="real")
+    plan = run_dir / relative
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text("- Files: src/shared/api/endpoints.ts\n", encoding="utf-8")
+    assert "web-endpoint-registry" in {s.name for s in required(project, run_dir).required}
+
+
+def custom_run(project):
+    definition = parse_phase_workflow_definition(
+        b"id: probe\nphases:\n  - id: slice-plan\n    artifact: plans/files.md\n"
+        b"  - id: green\n    artifact: output/green.md\n",
+        source=project / "probe.yaml", name="probe",
+    )
+    return create_run(project, "probe", "Implement orders", run_id="custom", workflow_definition=definition)
+
+
+def test_custom_pinned_plan_path_takes_precedence_over_legacy_file(planned_project):
+    project, _ = planned_project
+    run_dir = custom_run(project)
+    (run_dir / "plans").mkdir()
+    (run_dir / "plans/files.md").write_text("- Files: src/shared/api/endpoints.ts\n", encoding="utf-8")
+    (run_dir / "slice-plan.md").write_text("- Files: scripts/unrelated.py\n", encoding="utf-8")
+    assert "web-endpoint-registry" in {s.name for s in required(project, run_dir).required}
+
+
+@pytest.mark.parametrize("plan", [
+    "- Files:\n  - `src/shared/api/endpoints.ts`\n- Verification: tests\n",
+    "- Expected files: src/shared/api/endpoints.ts\n",
+])
+def test_existing_plan_file_lists_are_supported(planned_project, plan):
+    project, run_dir = planned_project
+    (run_dir / "slice-plan.md").write_text(plan, encoding="utf-8")
+    assert "web-endpoint-registry" in {s.name for s in required(project, run_dir).required}
+
+
+def test_status_marker_check_includes_the_active_run_plan(planned_project, monkeypatch):
+    project, _ = planned_project
+    run_dir = custom_run(project)
+    (run_dir / "plans").mkdir()
+    (run_dir / "plans/files.md").write_text("- Files: src/shared/api/endpoints.ts\n", encoding="utf-8")
+    artifact = run_dir / "output/green.md"
+    artifact.parent.mkdir()
+    artifact.write_text("## Completion Gate\nproject-local-skills-used: n/a\n", encoding="utf-8")
+    monkeypatch.setattr("agent_flow.artifact.changed_files", lambda *args: ("tests/orders.test.ts",))
+    missing = _missing_completion_markers(run_dir, "probe", "green", config_root=project, project_root=project)
+    assert any("web-endpoint-registry" in marker for marker in missing)

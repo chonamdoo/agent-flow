@@ -756,6 +756,7 @@ def _missing_completion_markers(
             phase_skills=contract.skills,
             profile=profile,
             changed_files=changed_files(project, profile),
+            run_dir=run_path,
             task_text=str(meta.get("task", "")),
             concerns=run_concerns(meta),
             since=phase_since,

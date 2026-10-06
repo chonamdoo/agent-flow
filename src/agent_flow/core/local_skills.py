@@ -250,22 +250,35 @@ def skill_markers_enforced(phase_id: str) -> bool:
     return phase_id in CODE_PHASES
 
 
-def _planned_skill_paths(run_dir: Path) -> tuple[str, ...]:
-    plan = run_dir / "slice-plan.md"
+def _planned_skill_paths(project_root: Path, run_dir: Path) -> tuple[str, ...]:
+    from agent_flow.artifact import _existing_phase_artifact, _phase_contract, read_meta
+
+    meta = read_meta(run_dir)
+    contract = _phase_contract(
+        run_dir, meta.get("workflow", "default"), "slice-plan", config_root=project_root,
+    )
+    if contract.artifact is None:
+        return ()
+    plan = _existing_phase_artifact(run_dir, "slice-plan", contract.artifact)
     try:
         lines = plan.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
         return ()
     paths: list[str] = []
     continued = False
+    file_indent: int | None = None
     for line in lines:
-        declaration = re.match(r"^[ \t]*[-*]\s+Files:\s*(.*)$", line, re.IGNORECASE)
+        declaration = re.match(r"^([ \t]*)[-*]\s+(?:Expected\s+)?Files:\s*(.*)$", line, re.IGNORECASE)
         if declaration is not None:
-            value = declaration.group(1)
+            value = declaration.group(2)
+            file_indent = len(declaration.group(1)) if not value else None
+        elif file_indent is not None and line.strip() and len(line) - len(line.lstrip()) > file_indent:
+            value = re.sub(r"^[-*]\s+", "", line.strip())
         elif continued and line.startswith((" ", "\t")):
             value = line.strip()
         else:
             continued = False
+            file_indent = None
             continue
         continued = value.rstrip().endswith(",")
         for entry in value.split(","):
@@ -303,7 +316,7 @@ def phase_skill_resolution(
 ) -> SkillResolution:
     """Resolve all required skills for a workflow phase."""
     if run_dir is not None and phase_id in IMPLEMENTATION_PHASES:
-        changed_files = tuple(dict.fromkeys((*changed_files, *_planned_skill_paths(run_dir))))
+        changed_files = tuple(dict.fromkeys((*changed_files, *_planned_skill_paths(project_root, run_dir))))
     return resolve_phase_skills(
         project_root=project_root,
         phase_id=phase_id,

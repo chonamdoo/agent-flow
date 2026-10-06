@@ -170,7 +170,8 @@ phases:
       - aggregates touched
       - test cases that will drive the upcoming TDD red phase (translate
         acceptance criteria into specific test names)
-      - files expected to change
+      - concrete relative files expected to change as `- Files: path, path`
+        (no globs or descriptions; this list routes implementation skills)
       - verification command (profile gate)
       For trivial tasks one slice is fine. Output: slice-plan.md.
       The chain pauses here for user review of design.md + slice-plan.md.
