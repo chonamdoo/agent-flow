@@ -103,6 +103,52 @@ def test_the_formula_keeps_the_venv_where_the_installers_look(tmp_path: Path) ->
     assert "${PATH:-" in text
 
 
+def _brew_keg(tmp_path: Path, *, opt_link: bool) -> tuple[Path, Path]:
+    """formula가 만드는 배치: `<prefix>/Cellar/agent-flow/<ver>/libexec`에 kit과
+    `.venv`, `<prefix>/opt/agent-flow`는 현재 keg를 가리키는 링크다."""
+    import yaml
+
+    prefix = (tmp_path / "homebrew").resolve()
+    keg = prefix / "Cellar" / "agent-flow" / "9.9.9"
+    shutil.copytree(REPO / "lib", keg / "libexec" / "lib")
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(keg / "libexec" / ".venv")],
+        check=True, timeout=120,
+    )
+    site_packages = next((keg / "libexec" / ".venv" / "lib").glob("python3*/site-packages"))
+    (site_packages / "kit-deps.pth").write_text(str(Path(yaml.__file__).parents[1]) + "\n", encoding="utf-8")
+    if opt_link:
+        (prefix / "opt").mkdir()
+        (prefix / "opt" / "agent-flow").symlink_to(keg)
+    return prefix, keg
+
+
+def _managed_python(kit_libexec: Path) -> str:
+    module = (kit_libexec / "lib" / "installer-shared.mjs").as_uri()
+    env = {key: value for key, value in __import__("os").environ.items()
+           if key not in {"PYTHON", "PYTHON_EXECUTABLE", "VIRTUAL_ENV"}}
+    return subprocess.check_output(
+        [_node(), "--input-type=module", "-e",
+         f"import {{ resolveManagedPython }} from {module!r}; process.stdout.write(resolveManagedPython().python);"],
+        text=True, timeout=60, env=env,
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Homebrew keg layout is POSIX-only")
+def test_a_brew_install_pins_the_runtime_through_the_opt_link(tmp_path: Path) -> None:
+    """반증: launcher가 `Cellar/<name>/<version>`에 고정되면 `brew upgrade`가 옛 keg를
+    지우는 순간 그 kit으로 설치한 모든 프로젝트의 CLI와 hook이 멈춘다."""
+    prefix, keg = _brew_keg(tmp_path, opt_link=True)
+    assert _managed_python(keg / "libexec") == str(prefix / "opt" / "agent-flow" / "libexec" / ".venv" / "bin" / "python")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Homebrew keg layout is POSIX-only")
+def test_a_keg_without_an_opt_link_keeps_its_own_venv(tmp_path: Path) -> None:
+    """반증: opt 링크가 없는데 opt 경로로 고정하면 없는 인터프리터를 launcher에 적는다."""
+    _, keg = _brew_keg(tmp_path, opt_link=False)
+    assert _managed_python(keg / "libexec") == str(keg / "libexec" / ".venv" / "bin" / "python")
+
+
 def test_the_stamper_points_the_formula_at_the_declared_version(tmp_path: Path) -> None:
     """반증: stable 태그와 digest를 손으로 적으면 그 오타는 설치에서만 드러난다."""
     root = _kit_copy(tmp_path)
