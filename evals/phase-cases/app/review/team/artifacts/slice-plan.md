@@ -1,8 +1,7 @@
 # Slice Plan: Orders list screen logic
 
-Architecture: the project selects `local` with `skills/architecture/SKILL.md` before this
-implementation. That contract approves the orders feature boundaries and composition; the team skill
-`skills/team-flutter-conventions/SKILL.md` also applies. All files live in `lib/features/orders/`.
+Architecture: not selected for this project (installer default); follow the team skill
+`skills/team-flutter-conventions/SKILL.md`. All files live in `lib/features/orders/`.
 
 ## Slice 1 — Order model and repository
 - Scope: `Order` (`id`, `customerName`, `totalCents`, `placedAt` UTC) and a concrete
