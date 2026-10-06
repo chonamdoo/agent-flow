@@ -2396,7 +2396,6 @@ class CliTest(unittest.TestCase):
                 f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-skill-read.py'}'",
                 f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-command-run.py'}'",
                 f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'bind-host-worktree.py'}'",
-                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-host-worktree.sh'}'",
                 f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'worktree-tripwire.py'}'",
                 f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
             ]
@@ -3133,16 +3132,6 @@ verify: manual
                 check=False,
             )
             self.assertEqual(install.returncode, 0, install.stderr)
-            subprocess.run(
-                ("git", "add", ".gitignore"),
-                cwd=project_root,
-                check=True,
-            )
-            subprocess.run(
-                ("git", "commit", "-q", "-m", "record agent-flow install"),
-                cwd=project_root,
-                check=True,
-            )
             start = subprocess.run(
                 (
                     node,

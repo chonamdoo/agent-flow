@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
@@ -301,6 +302,8 @@ def _create_worktree(
                 file=sys.stderr,
             )
         raise
+    if branch_created:
+        _warn_if_base_behind_remote(root=root, base_ref=plan.base_ref)
     return status
 
 
@@ -2941,6 +2944,103 @@ def _default_base_ref(root: Path) -> str:
             if _git_commit_ref_exists(root=root, ref=ref):
                 return ref
     return "HEAD"
+
+
+def _warn_if_base_behind_remote(*, root: Path, base_ref: str) -> None:
+    """로컬 base 브랜치가 원격 추적 ref보다 뒤처졌으면 한 줄로 알린다.
+
+    base는 오프라인·로컬 전용 브랜치도 쓸 수 있도록 로컬 ref를 먼저 고르고, fetch도
+    하지 않는다. 그 대가로 새 브랜치가 오래된 커밋에서 갈라질 수 있는데, 사용자가
+    그 사실을 알 수 있는 시점은 생성 직후뿐이다. 관측 실패는 생성을 막을 이유가
+    아니므로 침묵한다.
+    """
+    if not base_ref.startswith("refs/heads/"):
+        return
+    branch = base_ref.removeprefix("refs/heads/")
+    counterpart = _base_remote_counterpart(root=root, branch=branch)
+    if counterpart is None:
+        return
+    remote, remote_branch, remote_ref = counterpart
+    counts = git_safe(
+        "rev-list",
+        "--left-right",
+        "--count",
+        f"{base_ref}...{remote_ref}",
+        cwd=root,
+        optional_locks=False,
+    )
+    if not counts.ok:
+        return
+    try:
+        ahead, behind = (int(value) for value in counts.stdout.split())
+    except ValueError:
+        return
+    if behind <= 0:
+        return
+    remote_label = remote_ref.removeprefix("refs/remotes/")
+    if ahead:
+        print(
+            f"warning: worktree base {branch} is {behind} commit(s) behind and "
+            f"{ahead} ahead of {remote_label}; the new branch starts from the local tip. "
+            f"Reconcile {branch} with {remote_label} and recreate the worktree "
+            "if it needs the remote commits.",
+            file=sys.stderr,
+        )
+        return
+    checkout = _branch_checkout_path(root=root, branch=branch)
+    if checkout is None:
+        refspec = shlex.quote(f"{remote_branch}:{branch}")
+        fix = f"git -C {shlex.quote(str(root))} fetch {shlex.quote(remote)} {refspec}"
+    else:
+        # 체크아웃된 브랜치에는 `fetch <src>:<dst>`가 거절되므로 그 자리에서 당긴다.
+        fix = (
+            f"git -C {shlex.quote(str(checkout))} pull --ff-only "
+            f"{shlex.quote(remote)} {shlex.quote(remote_branch)}"
+        )
+    print(
+        f"warning: worktree base {branch} is {behind} commit(s) behind {remote_label}; "
+        f"the new branch starts from the local tip. Update it with `{fix}` and "
+        "recreate the worktree if it needs the remote commits.",
+        file=sys.stderr,
+    )
+
+
+def _base_remote_counterpart(*, root: Path, branch: str) -> tuple[str, str, str] | None:
+    """``(remote, 원격 브랜치 이름, 원격 추적 ref)``. 설정된 upstream이 먼저, 없으면 origin."""
+    candidates: list[tuple[str, str, str]] = []
+    upstream = git_safe(
+        "for-each-ref",
+        "--format=%(upstream)%09%(upstream:remotename)%09%(upstream:remoteref)",
+        f"refs/heads/{branch}",
+        cwd=root,
+        optional_locks=False,
+    )
+    if upstream.ok:
+        fields = upstream.stdout.strip().split("\t")
+        # upstream이 로컬 브랜치(`branch.<b>.remote=.`)면 원격과 비교할 대상이 아니다.
+        if (
+            len(fields) == 3
+            and fields[0].startswith("refs/remotes/")
+            and fields[1]
+            and fields[2].startswith("refs/heads/")
+        ):
+            candidates.append((fields[1], fields[2].removeprefix("refs/heads/"), fields[0]))
+    candidates.append(("origin", branch, f"refs/remotes/origin/{branch}"))
+    for candidate in candidates:
+        if _git_commit_ref_exists(root=root, ref=candidate[2]):
+            return candidate
+    return None
+
+
+def _branch_checkout_path(*, root: Path, branch: str) -> Path | None:
+    try:
+        registered = list_registered_worktrees(root)
+    except WorktreeIsolationError:
+        return None
+    for worktree in registered:
+        if worktree.branch == branch:
+            return worktree.path
+    return None
 
 
 def _profile_base_ref(root: Path) -> str:

@@ -19,7 +19,16 @@ CODE_EXTENSIONS = {
     ".js",
     ".jsx",
     ".swift",
+    ".css",
+    ".scss",
+    ".sass",
+    ".less",
 }
+
+STYLESHEET_EXTENSIONS = {".css", ".scss", ".sass", ".less"}
+# 순수 CSS에는 `//` 주석 문법이 없다. 거기서 `//`는 따옴표 없는 url() 값의 일부다.
+NO_LINE_COMMENT_EXTENSIONS = {".css"}
+URL_FUNCTION_RE = re.compile(r"(?<![\w-])url\(", re.IGNORECASE)
 
 EXCLUDED_PATH_PARTS = {
     ".git",
@@ -298,6 +307,9 @@ def comment_lines(
     in_regex = False
     block_start = 0
     block_line = 0
+    suffix = Path(file_path).suffix.lower()
+    is_stylesheet = suffix in STYLESHEET_EXTENSIONS
+    line_comments = suffix not in NO_LINE_COMMENT_EXTENSIONS
     while index < len(text):
         char = text[index]
         if char == "\n":
@@ -330,7 +342,15 @@ def comment_lines(
                 in_regex = False
             index += 1
             continue
-        if text.startswith(("'''", '"""'), index):
+        url = URL_FUNCTION_RE.match(text, index) if is_stylesheet else None
+        if url:
+            # url() 값 전체를 건너뛴다. 따옴표 없는 url(https://...)의 `//`를 주석 시작으로
+            # 읽지 않고, 따옴표 안의 `)`(url("a)b"))에서 값이 끝났다고 보지 않는다.
+            end = url_function_end(text, url.end())
+            line += text.count("\n", index, end)
+            index = end
+            continue
+        if not is_stylesheet and text.startswith(("'''", '"""'), index):
             triple = text[index : index + 3]
             index += 3
             continue
@@ -350,7 +370,7 @@ def comment_lines(
                 yield line, strip_comment_marker(text[index:end])
             index = end
             continue
-        if text.startswith("//", index):
+        if line_comments and text.startswith("//", index):
             end = text.find("\n", index)
             if end == -1:
                 end = len(text)
@@ -379,6 +399,25 @@ def comment_lines(
             index = end
             continue
         index += 1
+
+
+def url_function_end(text: str, start: int) -> int:
+    index = start
+    quote = ""
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char == ")":
+            return index + 1
+        index += 1
+    return len(text)
 
 
 def supports_hash_comments(file_path: str) -> bool:

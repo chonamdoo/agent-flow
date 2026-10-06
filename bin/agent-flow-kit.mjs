@@ -72,7 +72,6 @@ import {
   readJsonIfExists,
   readKitAssetRecord,
   removeCodexBroadTrustState,
-  removeGitignoreEntries,
   removeOmpHooksExtension,
   requestedInstallRootOption,
   resolveManagedWorktreeRoot,
@@ -95,7 +94,7 @@ import {
   unquoteShellWord,
   upsertGitExclude,
   upgradeBundledSkills,
-  upsertGitignore,
+  upsertLocalIgnores,
   upsertDocsIndexBlock,
   upsertSkillIndexBlock,
   validateSkillDependencies,
@@ -147,7 +146,7 @@ function installProject(requestedRoot) {
   }
   // linked worktree(Orca의 `~/orca/workspaces/<repo>/<slug>` 등)도 managed worktree와
   // 같은 정책이다. `resolveInstallRoot`가 leader로 올라가 버리면 다른 checkout에서
-  // leader의 tracked 파일(bootstrap markdown, .gitignore, profiles)을 갈아치운다.
+  // leader의 tracked 파일(bootstrap markdown, profiles)을 갈아치운다.
   const linkedLeader = resolveLinkedWorktreeLeader(requestedRoot);
   if (linkedLeader) {
     // managed 분기와 같은 종료코드 정책이다(leader에 설치본이 있으면 skip + rc 0).
@@ -340,8 +339,7 @@ function installProject(requestedRoot) {
   writeManagedFile(path.join(agentFlowDir, "rules", "workflow-contract.md"), workflowContract());
   writeManagedFile(path.join(agentFlowDir, "bootstrap", "AGENTS.md"), managedBootstrapMarkdown("AGENTS.md"));
   writeManagedFile(path.join(agentFlowDir, "bootstrap", "CLAUDE.md"), managedBootstrapMarkdown("CLAUDE.md"));
-  const gitignorePath = path.join(root, ".gitignore");
-  upsertGitignore(gitignorePath, [
+  upsertLocalIgnores(root, [
     ".agent-flow/",
     ".agent-flow/local-skills/",
     ".codex/",
@@ -356,7 +354,6 @@ function installProject(requestedRoot) {
     "CLAUDE/",
     "agent-flow/",
   ]);
-  removeGitignoreEntries(gitignorePath, ["scripts/check-context-docs.*"]);
   if (rootContext === "legacy") {
     upsertGitExclude(root, ROOT_CONTEXT_FILES.filter((label) => bootstrapBlockIsOurs(root, label)));
   }

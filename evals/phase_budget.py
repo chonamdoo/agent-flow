@@ -226,7 +226,8 @@ def measure_combo(kit: Path, profile: str, mode: str, root: Path | None = None) 
         if error:
             return {"profile": profile, "mode": mode, "install_error": error}
         _git(root, "add", "-A")
-        _git(root, "commit", "-qm", "install")
+        # git 저장소에서 install은 tracked 파일을 남기지 않을 수 있다(ignore 항목은 info/exclude).
+        _git(root, "commit", "-q", "--allow-empty", "-m", "install")
         _git(root, "checkout", "-q", "-b", "feat/eval")
         results: dict[str, dict] = {}
         for condition in CONDITIONS:

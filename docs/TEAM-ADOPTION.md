@@ -61,11 +61,13 @@ per repository: changing them means shipping a changed profile. Editing the inst
 `.agent-flow/profiles/<id>.yaml` directly does not survive, because install overwrites the
 shipped profile so new fields reach existing installs.
 
-That override file is per working copy, not per repository. Install writes `.agent-flow/` into
-the project's `.gitignore` (`upsertGitignore` in `lib/installer-shared.mjs`, called from
-`bin/agent-flow-kit.mjs`), so a plain `git add` never picks the file up and another clone never
-sees it. Sharing it takes `git add -f .agent-flow/profiles/<profile-id>.local.yaml` or a
-negation rule in `.gitignore`, and the ignore entry is re-added on the next `agent-flow .`.
+That override file is per working copy, not per repository. In a git work tree, install adds
+`/.agent-flow/` to the clone's local exclude file `.git/info/exclude` (`upsertLocalIgnores` in
+`lib/installer-shared.mjs`, called from `bin/agent-flow-kit.mjs`) and leaves the tracked
+`.gitignore` alone; outside a repository it writes the same entries to `.gitignore`. Either way a
+plain `git add` never picks the file up and another clone never sees it. Sharing it takes
+`git add -f .agent-flow/profiles/<profile-id>.local.yaml`, and the exclude entry is re-added on the
+next `agent-flow .` unless the project's `.gitignore` already ignores `.agent-flow/`.
 
 ### Profile resolution and `AGENT_FLOW_PROFILE`
 

@@ -180,10 +180,6 @@ def _run_command_result_handler(
             binding_recorder if script_name == "worktree-tripwire.py" else "pass\n",
             encoding="utf-8",
         )
-    (hooks / "guard-host-worktree.sh").write_text(
-        'exec python3 "$(dirname "$0")/bind-host-worktree.py" guard-host-worktree.sh\n',
-        encoding="utf-8",
-    )
 
     target = _install_extension(root, source)
     default_events = [
@@ -470,12 +466,12 @@ def test_omp_recorder_cwd_does_not_change_guard_context(tmp_path: Path):
         for line in (root / ".agent-flow" / "binding-events.jsonl").read_text().splitlines()
     ]
     for index, event in enumerate(events):
-        received = guards[index * 3:index * 3 + 3]
+        received = guards[index * 2:index * 2 + 2]
         assert [entry.pop("_hook") for entry in received] == [
-            "bind-host-worktree.py", "guard-host-worktree.sh", "worktree-tripwire.py"
+            "bind-host-worktree.py", "worktree-tripwire.py"
         ]
-        assert [entry.pop("_spawn_cwd") for entry in received] == [str(session)] * 3
-        assert received[0] == received[1] == received[2]
+        assert [entry.pop("_spawn_cwd") for entry in received] == [str(session)] * 2
+        assert received[0] == received[1]
         assert received[0]["cwd"] == str(session)
         assert received[0]["tool_input"] == event["input"]
         assert event["input"]["cwd"] == inputs[index]
@@ -498,6 +494,117 @@ def test_omp_recorder_keeps_unresolved_cwd_compatibility(tmp_path: Path):
     assert [entry["cwd"] for entry in commands] == [str(tmp_path)] * len(inputs)
     assert [entry["exit_code"] for entry in commands] == [7] * len(inputs)
     assert [entry["tool_input"] for entry in bindings] == [event["input"] for event in events]
+
+
+def _drive_extension(
+    root: Path, target: Path, calls: list[tuple[str, dict[str, object]]]
+) -> list[object]:
+    driver = (
+        f"import ext from {json.dumps(str(target))};\n"
+        "const handlers = {};\n"
+        "const pi = { setLabel() {}, on(name, fn) { (handlers[name] = handlers[name] || []).push(fn); } };\n"
+        "ext(pi);\n"
+        f"const calls = {json.dumps(calls)};\n"
+        f"const ctx = {{ cwd: {json.dumps(str(root))}, sessionManager: {{ getSessionId() {{ return 'session-1'; }} }} }};\n"
+        "const outputs = [];\n"
+        "for (const [name, event] of calls) {\n"
+        "  outputs.push((await handlers[name][0](event, ctx)) ?? null);\n"
+        "}\n"
+        "process.stdout.write(JSON.stringify(outputs));\n"
+    )
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", driver),
+        cwd=root,
+        env={**os.environ, "AGENT_FLOW_HOOK_PYTHON": sys.executable},
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+    )
+    assert result.returncode == 0, f"driver exited {result.returncode}: {result.stderr}"
+    return json.loads(result.stdout)
+
+
+def test_omp_post_tool_keeps_successful_run_output_and_pre_tool_still_blocks(
+    tmp_path: Path,
+):
+    """반증: 성공한 run 직후 경계를 다시 판정하면, 그 run이 만든 active run과 binding이
+    방금 끝난 명령을 위반으로 만든다. 도구 출력이 그 오류로 바뀌면 next_command가
+    사라지고, 실패로 읽은 사용자가 run을 중복으로 만든다.
+    """
+    from agent_flow.artifact import create_run
+    from agent_flow.core.host_write_boundary import bound_worktree_for_session
+    from agent_flow.core.worktrees import create_worktree, plan_worktree, worktree_runtime_root
+    from tests.test_host_write_boundary import _install_boundary_hooks
+
+    root = tmp_path.resolve() / "repo"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    (root / "README.md").write_text("base\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".agent-flow/\n.omp/\n", encoding="utf-8")
+    _git(root, "add", ".")
+    _git(root, "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+         "commit", "-q", "-m", "init")
+    hooks = _install_boundary_hooks(root)
+    (root / ".agent-flow" / "kit.json").write_text("{}", encoding="utf-8")
+    for name in ("record-skill-read.py", "record-command-run.py", "worktree-tripwire.py"):
+        (hooks / name).write_text("pass\n", encoding="utf-8")
+    (hooks / "guard-protected-branch.sh").write_text("exit 0\n", encoding="utf-8")
+    launcher = root / ".agent-flow" / "bin" / "agent-flow-hook"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        f'  *.py) exec {sys.executable} "$@" ;;\n'
+        '  *) exec /bin/sh "$@" ;;\n'
+        "esac\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    target = _install_extension(root, _extension_source())
+
+    def bash(kind: str, command: str, output: str = "") -> tuple[str, dict[str, object]]:
+        event: dict[str, object] = {"type": kind, "toolName": "bash", "input": {"command": command}}
+        if kind == "tool_result":
+            event.update(
+                content=[{"type": "text", "text": output}],
+                details={"wallTimeMs": 12},
+                isError=False,
+            )
+        return kind, event
+
+    # leader 경로가 리터럴로 들어간 run. 시작 전에는 active run이 없어 통과한다.
+    chained = f"cd {root} && agent-flow run task --worktree first"
+    assert _drive_extension(root, target, [bash("tool_call", chained)]) == [None]
+
+    status = create_worktree(root=root, plan=plan_worktree(root=root, name="first"))
+    run_dir = create_run(
+        worktree_runtime_root(root=root, name=status.name),
+        "default",
+        "task-first",
+        checkout_identity=f"worktree:{status.name}",
+        checkout_registration_identity=status.registration_identity,
+    )
+    run_output = "status_json: " + json.dumps({
+        "status": "awaiting_host",
+        "run": f"default/{run_dir.name}",
+        "next_command": f"agent-flow continue --root {root} --worktree {status.name}",
+    })
+    direct = f"agent-flow run task --root {root} --worktree {status.name}"
+    outputs = _drive_extension(root, target, [
+        bash("tool_result", chained, run_output),
+        bash("tool_result", direct, run_output),
+        bash("tool_call", direct),
+        bash("tool_call", f"touch {root}/leaked.py"),
+    ])
+
+    assert outputs[:2] == [None, None], "성공한 run의 출력은 그대로 에이전트에게 가야 한다"
+    binding = bound_worktree_for_session("session-1", root)
+    assert binding is not None and binding.checkout.checkout == status.path.resolve()
+    assert outputs[2]["block"] is True
+    assert "refusing to start a new run" in outputs[2]["reason"]
+    assert outputs[3]["block"] is True
 
 
 

@@ -77,7 +77,6 @@ import {
   readJsonIfExists,
   readKitAssetRecord,
   removeCodexBroadTrustState,
-  removeGitignoreEntries,
   removeOmpHooksExtension,
   reportSkippedUserEdit,
   requestedInstallRootOption,
@@ -99,7 +98,6 @@ import {
   unquoteShellWord,
   upgradeBundledSkills,
   upsertGitExclude,
-  upsertGitignore,
   upsertDocsIndexBlock,
   upsertSkillIndexBlock,
   validateSkillDependencies,
@@ -880,8 +878,7 @@ function install() {
   }
   // linked worktree(Orca의 `~/orca/workspaces/<repo>/<slug>` 등)도 managed 경로와
   // 똑같이 fail-closed다. 조용히 leader를 PROJECT로 잡으면 이 아래 전부가 leader를
-  // 때린다: 자식 installer가 legacy root 문서와
-  // tracked `.gitignore`를 고치고, `.claude/settings.json`과
+  // 때린다: 자식 installer가 legacy root 문서를 고치고, `.claude/settings.json`과
   // `.agent-flow/profiles/*`(미선택 profile 삭제)를 갈아치우며, `--force-managed`면
   // `removeDirIfSame`가 tracked `<leader>/scripts/`를 내용 확인 없이 recursive 삭제한다.
   const leaderRoot = resolveLinkedWorktreeLeader(REQUESTED_PROJECT);
@@ -929,23 +926,6 @@ function install() {
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, PROJECT);
   assertStackArchitectureSelection(installSelection, KIT_ROOT, PROJECT);
 
-  const gitignorePath = path.join(PROJECT, ".gitignore");
-  upsertGitignore(gitignorePath, [
-    ".agent-flow/",
-    ".agent-flow/local-skills/",
-    ".codex/",
-    ".Codex/",
-    ".claude/",
-    ".omp/",
-    // 루트 `AGENTS.md`/`CLAUDE.md`는 여기 올리지 않는다. 무엇을 커밋할지는 프로젝트가
-    // 정하고, 툴이 ignore로 밀어 넣으면 그 파일은 clone과 linked worktree에서 사라져
-    // 그쪽 세션이 계약을 못 받는다. 이미 적혀 있는 항목은 지우지 않는다 — 그건
-    // 프로젝트가 내린 결정이고, 되돌리는 것도 프로젝트 몫이다.
-    "AGENTS/",
-    "CLAUDE/",
-    "agent-flow/",
-  ]);
-  removeGitignoreEntries(gitignorePath, ["scripts/check-context-docs.*"]);
   if (rootContext === "legacy") {
     upsertGitExclude(PROJECT, ROOT_CONTEXT_FILES.filter((label) => bootstrapBlockIsOurs(PROJECT, label)));
   }

@@ -2,23 +2,29 @@
 
 Use one primary mode. Apply another mode only for a specific section that genuinely needs it.
 
+For reader-directed procedures and requests in any mode:
+
+- Give one independently executable instruction per sentence in the document's register. Keep coupled actions together when splitting would lose simultaneity, such as holding a key while selecting a file. Preserve the actor and whether the source requires, recommends, permits, or prohibits the action; a system requirement is not automatically a command to the reader.
+- Put execution-governing conditions and exceptions before the affected action, not before unrelated earlier steps. Preserve evaluation time, order, and shared scope: upload failure governs retry after upload, not whether to start the upload. Keep exact command syntax.
+- Replace procedural difficulty claims such as "간단히", "쉽게", "그냥", "simply", or "easy" with the actual action. Preserve exact UI labels, operational deadlines, and sourced timing or technical descriptions.
+
 ## Documentation
 
-Optimize for finding and completing a task.
+Choose the primary reader need: completing a task (how-to), looking up facts (reference), or understanding reasons (explanation). Keep brief supporting context together; split and link only when independent reader tasks or substantial digressions obstruct that primary need.
 
 - State what the document enables before explaining background.
 - Name the intended user or system when ambiguity is possible.
 - Put prerequisites before procedures.
 - Use exact screen names, file paths, commands, inputs, outputs, and observable behavior.
 - Explain failure cases and recovery when they are likely or costly.
-- Replace abstract labels such as "responsibility boundary" or "processing criteria" with the location or behavior the reader can inspect.
+- Replace an abstract label only when the location or behavior it names is unclear to the reader; retain established architecture terms and accurate content labels.
 - Keep architecture terminology when the reader needs it for precision.
 - Explain current behavior in durable reference material. Preserve before/after and version history when the document is a migration guide, release note, or change record.
 - Keep prerequisites, warnings, defaults, and requirement strength exact. A clearer sentence must not invent supported versions, recovery behavior, or successful verification.
 - Remove introductions that merely announce what the title already says.
-- End with the resulting state or the next linked task, not a generic summary.
+- In a how-to, end with the resulting state or the next linked task. Reference material needs complete lookup details; explanations need supported reasons, not a forced procedure or closing summary.
 
-Preferred sequence when applicable:
+Preferred how-to sequence when applicable:
 
 1. Purpose
 2. Prerequisites
@@ -125,6 +131,7 @@ Optimize for shared state and ownership.
 - Include only background needed to understand the change.
 - Separate completed work, evidence, decisions, risks, and open items.
 - Name owners and dates only when the source provides them.
+- State a supported response deadline neutrally when it affects coordination. Remove manufactured urgency or pressure rhetoric, not a real deadline; follow an explicit request to omit it without inventing a replacement.
 - State what changed since the last update.
 - Tie blockers to the decision or dependency they affect.
 - End with the next action and decision owner when known.

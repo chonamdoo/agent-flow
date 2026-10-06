@@ -149,7 +149,7 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
     if install.returncode != 0:
         raise RuntimeError(f"install failed: {install.stderr[-600:] or install.stdout[-600:]}")
     _git(project, "add", "-A")
-    _git(project, "commit", "-qm", "install agent-flow")
+    _git(project, "commit", "-q", "--allow-empty", "-m", "install agent-flow")
     _git(project, "checkout", "-q", "-b", "feat/orders")
 
     from agent_flow.adapters.hosted import HostedAdapter, _profile_base_branch, _reviewer_jobs, _write_review_input_snapshot
