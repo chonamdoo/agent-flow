@@ -1,0 +1,28 @@
+{
+  "passed": false,
+  "compare_exit_code": 1,
+  "units": 168,
+  "report": "## phase_eval gate\n\n`before` → `after`, 168 rows.\n\n|metric|before|after|\n|---|---:|---:|\n|author_required_read_rate|1.000|1.000|\n|author_pass_rate|1.000|1.000|\n|review_correct_rate|1.000|0.955|\n|defect_detection_rate|1.000|1.000|\n|false_request_changes_rate|0.000|0.017|\n|reviewer_read_rate|1.000|1.000|\n|invalid_rate|0.000|0.000|\n|author uncached_input token ratio||0.949|\n|author output token ratio||1.022|\n|review uncached_input token ratio||1.033|\n|review output token ratio||1.008|\n\n### Failures\n- review_correct_rate dropped: 1.000 → 0.955\n- false_request_changes_rate rose: 0.000 → 0.017\n",
+  "results_raw_sha256": "cbca83e2d360837951c471970efaf885b74ee2ae57551efe4a1bd8a3eedcbee3",
+  "results_raw_bytes": 6526057,
+  "results_gzip_bytes": 578224,
+  "preservation": "All 168 original rows retained byte-for-byte after decompression; no row deletion, rescoring, or threshold changes.",
+  "release_gate_exported": false,
+  "failure": [
+    "review_correct_rate dropped: 1.000 -> 0.955",
+    "false_request_changes_rate rose: 0.000 -> 0.017"
+  ],
+  "authorization": "User-approved single fresh re-measurement under the same conditions after the first failure (../gate.json), with the rule that a second failure stops the release. Both failures are retained.",
+  "diagnosis_observed": {
+    "incorrect_review_units_this_run": [
+      "after/backend/clean/clean trial 1: request-changes",
+      "after/backend/clean/clean trial 2: request-changes"
+    ],
+    "incorrect_review_units_first_run": [
+      "before/backend/clean/clean trial 2: request-changes",
+      "before/app/clean/clean trial 2: request-changes"
+    ],
+    "first_run_failure_resolved_here": "author uncached_input token ratio 0.949 (first run 1.051)."
+  },
+  "limitation": "Failed release measurement, not a passing release record. Two runs are too few to separate kit effect from model variance on the clean backend review case."
+}
