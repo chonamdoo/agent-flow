@@ -1,0 +1,53 @@
+{
+  "passed": false,
+  "compare_exit_code": 1,
+  "units": 168,
+  "report": "## phase_eval gate\n\n`before` → `after`, 168 rows.\n\n|metric|before|after|\n|---|---:|---:|\n|author_required_read_rate|1.000|1.000|\n|author_pass_rate|1.000|1.000|\n|review_correct_rate|0.955|1.000|\n|defect_detection_rate|1.000|1.000|\n|false_request_changes_rate|0.017|0.000|\n|reviewer_read_rate|1.000|1.000|\n|invalid_rate|0.000|0.000|\n|author uncached_input token ratio||1.051|\n|author output token ratio||1.053|\n|review uncached_input token ratio||1.006|\n|review output token ratio||1.008|\n\n### Failures\n- author uncached_input token ratio 1.051 exceeds 1.05\n",
+  "results_raw_sha256": "7f52d7bc95f02f6aafe40547688de8b3b470ee34bb6840ed94b4a9b09f19c7f1",
+  "results_raw_bytes": 6491091,
+  "results_gzip_bytes": 572493,
+  "preservation": "All 168 original rows retained byte-for-byte after decompression; no quality retries, row deletion, rescoring, or threshold changes.",
+  "release_gate_exported": false,
+  "failure": "author uncached_input token ratio 1.051 exceeds token_ratio_max 1.05",
+  "diagnosis_observed": {
+    "author_uncached_input": {
+      "before": 1992380,
+      "after": 2094857,
+      "ratio": 1.0514
+    },
+    "author_total_input": {
+      "before": 35559996,
+      "after": 39772041
+    },
+    "author_prompt_bytes": {
+      "before": 606735,
+      "after": 605634
+    },
+    "largest_cell": {
+      "cell": "author/backend/team",
+      "uncached_before": [
+        47160,
+        50623,
+        39479
+      ],
+      "uncached_after": [
+        48232,
+        94878,
+        46657
+      ],
+      "trial_2_total_input": {
+        "before": 1014079,
+        "after": 1116574
+      }
+    },
+    "cells_below_1": [
+      "app/clean",
+      "app/local",
+      "app/team",
+      "web/local"
+    ],
+    "skill_reads": "Required read rate 1.000 for both kits; other skill reads identical except one graphify read in before.",
+    "quality": "author pass, defect detection, reviewer read rate and invalid rate equal; review correct rate 0.955 -> 1.000; false request-changes 0.017 -> 0.000."
+  },
+  "limitation": "Failed release measurement, not a passing release record. The cell breakdown is observation, not proof that the token rise is model variance rather than a kit effect."
+}
