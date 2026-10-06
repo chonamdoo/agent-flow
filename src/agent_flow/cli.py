@@ -3635,6 +3635,7 @@ def _run_skills_command(
             phase_skills=phase.skills,
             profile=merged,
             changed_files=context["changed_files"],
+            run_dir=active.path if active is not None else None,
             task_text=context["task_text"],
             concerns=context["concerns"],
             architecture_root=project_root,
@@ -3693,6 +3694,7 @@ def _run_skills_command(
                     architecture_root=project_root,
                     source_root=project_root,
                     since=context["since"],
+                    run_dir=active.path if active is not None else None,
                     context=resolution_context,
                     conditional_architecture_markers=conditional_markers,
                     reviewer_delivery=(

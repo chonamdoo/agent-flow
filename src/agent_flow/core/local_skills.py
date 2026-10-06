@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -17,7 +18,7 @@ from agent_flow.core.profiles import (
     load_profile_payload,
     runtime_profile_selection,
 )
-from agent_flow.core.profile_routing import routed_profile_skills
+from agent_flow.core.profile_routing import IMPLEMENTATION_PHASES
 from agent_flow.core.review_input import branch_changed_paths, profile_base_branch
 from agent_flow.core.skill_scope import ReviewerDelivery
 from agent_flow.core.worktree_isolation import git_repo_state, git_safe
@@ -249,6 +250,39 @@ def skill_markers_enforced(phase_id: str) -> bool:
     return phase_id in CODE_PHASES
 
 
+def _planned_skill_paths(run_dir: Path) -> tuple[str, ...]:
+    plan = run_dir / "slice-plan.md"
+    try:
+        lines = plan.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return ()
+    paths: list[str] = []
+    continued = False
+    for line in lines:
+        declaration = re.match(r"^[ \t]*[-*]\s+Files:\s*(.*)$", line, re.IGNORECASE)
+        if declaration is not None:
+            value = declaration.group(1)
+        elif continued and line.startswith((" ", "\t")):
+            value = line.strip()
+        else:
+            continued = False
+            continue
+        continued = value.rstrip().endswith(",")
+        for entry in value.split(","):
+            entry = entry.strip()
+            if entry.startswith("`") and entry.endswith("`"):
+                entry = entry[1:-1]
+            if (
+                not entry or entry.startswith("/") or entry.endswith("/")
+                or any(char in entry for char in "*?[]\\:")
+                or any(char.isspace() for char in entry)
+                or any(part in {"", ".", ".."} for part in entry.split("/"))
+            ):
+                continue
+            paths.append(entry)
+    return tuple(dict.fromkeys(paths))
+
+
 def phase_skill_resolution(
     project_root: Path,
     phase_id: str,
@@ -256,6 +290,7 @@ def phase_skill_resolution(
     phase_skills: PhaseSkills | None = None,
     profile: dict | None = None,
     changed_files: Sequence[str] = (),
+    run_dir: Path | None = None,
     document_scope: Sequence[str] | None = None,
     required_document_ids: Sequence[str] = (),
     task_text: str = "",
@@ -267,6 +302,8 @@ def phase_skill_resolution(
     provider_authority: str = "",
 ) -> SkillResolution:
     """Resolve all required skills for a workflow phase."""
+    if run_dir is not None and phase_id in IMPLEMENTATION_PHASES:
+        changed_files = tuple(dict.fromkeys((*changed_files, *_planned_skill_paths(run_dir))))
     return resolve_phase_skills(
         project_root=project_root,
         phase_id=phase_id,
@@ -331,14 +368,7 @@ def local_skill_prompt_block(
     )
     if not block:
         return ""
-    routed_missing = _missing_routed_names(
-        phase_id,
-        profile=profile,
-        changed_files=changed_files,
-        task_text=task_text,
-        concerns=concerns,
-        resolution=resolution,
-    )
+    routed_missing = _missing_routed_names(resolution)
     return block + _marker_instruction(
         resolution, enforced=enforced, routed_missing=routed_missing, role=role,
         architecture_markers=missing_architecture_assessment_markers(
@@ -358,6 +388,7 @@ def missing_local_skill_markers(
     phase_skills: PhaseSkills | None = None,
     profile: dict | None = None,
     changed_files: Sequence[str] = (),
+    run_dir: Path | None = None,
     task_text: str = "",
     concerns: Sequence[str] = (),
     since: float | None = None,
@@ -382,6 +413,7 @@ def missing_local_skill_markers(
         phase_skills=phase_skills,
         profile=profile,
         changed_files=changed_files,
+        run_dir=run_dir,
         task_text=task_text,
         concerns=concerns,
         architecture_root=architecture_root,
@@ -487,16 +519,7 @@ def missing_local_skill_markers(
     # L4: profile 표로 붙었는데 host에 없는 skill. 설치를 강요하지는 않지만,
     #     "없다"는 사실이 artifact에 이름으로 남아야 한다. `none`으로 덮으면
     #     Android scope만 조용히 검증 없이 통과한다.
-    routed_missing = _missing_routed_names(
-        phase_id,
-        profile=profile,
-        changed_files=changed_files,
-        task_text=task_text,
-        # 프롬프트 쪽과 같은 입력이어야 한다. concern을 빼면 concern으로 켜진 group의
-        # 부재를 프롬프트는 알리고 게이트는 검사하지 않는다.
-        concerns=concerns,
-        resolution=resolution,
-    )
+    routed_missing = _missing_routed_names(resolution)
     if reviewer_delivery is not None:
         # controller host에 없어도 reviewer가 받았다면 이 phase에서 빠진 skill이 아니다.
         routed_missing = [name for name in routed_missing if name not in reviewer_delivery.delivered]
@@ -631,30 +654,8 @@ def _marker_instruction(
     )
 
 
-def _missing_routed_names(
-    phase_id: str,
-    *,
-    profile: dict | None,
-    changed_files: Sequence[str],
-    task_text: str,
-    concerns: Sequence[str] = (),
-    resolution: SkillResolution,
-) -> list[str]:
-    routed = {
-        skill.name
-        for skill in routed_profile_skills(
-            profile,
-            phase_id=phase_id,
-            changed_files=changed_files,
-            task_text=task_text,
-            concerns=concerns,
-            declared_skill_phases=(
-                {skill.name: (phase_id,) for skill in resolution.required}
-                if phase_id not in CODE_PHASES
-                else None
-            ),
-        )
-    }
+def _missing_routed_names(resolution: SkillResolution) -> list[str]:
+    routed = {route.skill for route in resolution.routes if route.kind == "profile"}
     if not routed:
         return []
     return [skill.name for skill in resolution.missing if skill.name in routed]

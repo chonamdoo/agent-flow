@@ -110,12 +110,14 @@ class Adapter(ABC):
         self, phase: "Phase", project_root: Path, *, skill_host: str | None = None,
         document_scope: tuple[str, ...] | None = None,
         required_document_ids: tuple[str, ...] = (),
+        run_dir: Path | None = None,
     ) -> SkillResolution:
         """Resolve the immutable skill context used to render one phase."""
         return phase_skill_resolution(
             self.config_root_or(project_root), phase.id,
             phase_skills=getattr(phase, "skills", None),
             profile=self._profile_snapshot, changed_files=self._changed_files,
+            run_dir=run_dir,
             task_text=self._task_text, concerns=self._concerns, host=skill_host,
             architecture_root=project_root, context=self._resolution_context,
             source_root=project_root,
@@ -148,7 +150,7 @@ class Adapter(ABC):
         architecture_block = self._render_architecture_block(phase)
         config_root = self.config_root_or(project_root)
         if resolution is None:
-            resolution = self.phase_resolution(phase, project_root, skill_host=skill_host)
+            resolution = self.phase_resolution(phase, project_root, skill_host=skill_host, run_dir=run_dir)
         mode = (
             resolution.architecture_snapshot.selection.mode
             if resolution.architecture_snapshot is not None else "pending"

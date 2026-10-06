@@ -176,7 +176,10 @@ def _measure_condition(project: Path, run_id: str) -> dict:
     for phase in runner.phases:
         entry: dict = {}
         try:
-            resolution = adapter.phase_resolution(phase, project, skill_host="claude")
+            resolution_kwargs = (
+                {"run_dir": run_dir} if "run_dir" in inspect.signature(adapter.phase_resolution).parameters else {}
+            )
+            resolution = adapter.phase_resolution(phase, project, skill_host="claude", **resolution_kwargs)
             envelope = adapter.render_envelope(phase, run_dir, project, skill_host="claude", resolution=resolution)
             entry["author_bytes"] = len(envelope.encode())
             entry["required"] = [s.name for s in resolution.required]
