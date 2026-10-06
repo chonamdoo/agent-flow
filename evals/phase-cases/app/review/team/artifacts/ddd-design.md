@@ -14,8 +14,7 @@ Screen opens → notifier `load()` → `OrdersRepository.fetchOrders()` (`GET /o
 newest first → state.
 
 ## Architecture Boundary Map
-The selected local contract is `skills/architecture/SKILL.md`. It approves these Ordering boundaries
-and their composition before implementation, following the existing cart feature and the team skill
+No project architecture contract is selected; structure follows the team skill
 `team-flutter-conventions`: `lib/features/orders/{order.dart, orders_repository.dart,
 orders_list_state.dart, orders_list_notifier.dart}` over the shared `lib/team/api_client.dart`.
 

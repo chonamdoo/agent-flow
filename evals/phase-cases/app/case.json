@@ -27,7 +27,13 @@
       ]
     },
     "team": {
-      "install": []
+      "install": [],
+      "author_install": [
+        "--architecture-mode",
+        "local",
+        "--architecture-skill",
+        "skills/architecture/SKILL.md"
+      ]
     }
   },
   "review": {

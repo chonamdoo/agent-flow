@@ -221,10 +221,10 @@ bytes/4 추정이다.
 ### `phase_eval.py` — 실제 모델, 수동·비차단
 
 `phase-cases/{web,rn,app,backend}` × `clean`/`local`/`team`마다 두 kit를 설치하고
-각 kit의 prompt를 그대로 쓴다. `team`은 팀 skill을 적용한다. backend/team author는
-새 Ordering 모듈의 소유권·wiring을 결정해야 하므로 `author_install`로 승인된 local
-계약을 선택한다. 구현 요구를 pending 권한으로 채점하지 않는다. 같은 mode의 review는
-기존 pending 설치와 정상 판정 `expect: null`을 유지한다.
+각 kit의 prompt를 그대로 쓴다. `team`은 팀 skill을 적용한다. backend/team과 app/team
+author는 새 orders 모듈의 소유권·wiring을 결정해야 하므로 `author_install`로 승인된
+local 계약을 선택한다. 구현 요구를 pending 권한으로 채점하지 않는다. 같은 mode의
+review는 기존 pending 설치와 정상 판정 `expect: null`을 유지한다.
 
 author의 `setup/`은 설치 전에, red 테스트인 `pre/`는 설치 커밋 뒤에 복사한다.
 공유 계획 위에 `review/<mode>/artifacts/`를 덮어써 시나리오별 권한을 구분한다.
@@ -399,7 +399,7 @@ author 필수 읽음률에서는 미관측 skill도 분모에 포함해 읽음 �
 - 시행 1회 결과는 방향만 보여 준다. 정확도 개선을 주장하려면 같은 case를
   반복해 차이가 표본 변동보다 큰지 확인한다.
 - flutter team과 python team review는 설치 기본 mode인 `pending`을 유지한다.
-  python team author만 승인된 local 계약을 선택한다. pending 리뷰에서는 구조 결정을
+  두 case의 team author만 승인된 local 계약을 선택한다. pending 리뷰에서는 구조 결정을
   이유로 변경을 요청할 수 있어 두 case의 정상 diff는 `expect: null`로 두고 판정을
   채점하지 않는다. 결함 diff는 그대로 채점한다.
 - author 평가는 한 phase만 새 세션에서 돌린다. 실제 run처럼 대화 맥락이 이어지는
