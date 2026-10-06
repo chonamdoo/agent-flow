@@ -324,6 +324,8 @@ def phase_skill_resolution(
 ) -> SkillResolution:
     """Resolve all required skills for a workflow phase."""
     changed_files = phase_skill_paths(project_root, phase_id, changed_files, run_dir)
+    if document_scope is not None:
+        document_scope = phase_skill_paths(project_root, phase_id, document_scope, run_dir)
     return resolve_phase_skills(
         project_root=project_root,
         phase_id=phase_id,

@@ -99,6 +99,36 @@ def test_runner_and_marker_gate_require_the_same_planned_skill(planned_project, 
     assert any("web-endpoint-registry" in marker for marker in missing)
 
 
+@pytest.mark.parametrize("phase,selected", [("green", True), ("review", False)])
+def test_local_contract_documents_use_planned_paths_only_for_authors(planned_project, monkeypatch, phase, selected):
+    project, run_dir = planned_project
+    contract = project / ".agent-flow/local-skills/architecture"
+    (contract / "references").mkdir(parents=True)
+    (contract / "SKILL.md").write_text(
+        '---\nname: architecture\nrequires_docs:\n'
+        '  - path: references/api.md\n    pathGlobs: ["src/shared/api/**"]\n'
+        '---\nKeep transport in shared/api/.\n', encoding="utf-8",
+    )
+    (contract / "references/api.md").write_text("Use the endpoint registry.\n", encoding="utf-8")
+    (project / ".agent-flow/project.yaml").write_text(
+        "schema_version: 1\narchitecture:\n  mode: local\n"
+        "  skill: .agent-flow/local-skills/architecture/SKILL.md\n", encoding="utf-8",
+    )
+    monkeypatch.setattr("agent_flow.runner.changed_files", lambda *args: ("tests/orders.test.ts",))
+    monkeypatch.setattr("agent_flow.runner.review_document_scope", lambda *args, **kwargs: ("tests/orders.test.ts",))
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.config_root = runner.project_root = project
+    runner.profile = None
+    stage = Phase(id=phase, description="Implement or review orders")
+    resolution = runner._required_skill_resolution(stage, {})
+    reference = next(doc for doc in resolution.normative_documents if doc.document.path.endswith("references/api.md"))
+    assert reference.selected is selected
+    assert not (project / "src/shared/api/endpoints.ts").exists()
+    prompt = HostedAdapter("codex").render_envelope(stage, run_dir, project, resolution=resolution)
+    assert ("Use the endpoint registry." in prompt) is selected
+
+
 def test_plan_does_not_select_a_skill_for_unrelated_paths(planned_project):
     project, run_dir = planned_project
     (run_dir / "slice-plan.md").write_text("- Files: scripts/task.py\n", encoding="utf-8")
