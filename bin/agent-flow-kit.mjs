@@ -72,7 +72,6 @@ import {
   readJsonIfExists,
   readKitAssetRecord,
   removeCodexBroadTrustState,
-  removeGitignoreEntries,
   removeOmpHooksExtension,
   requestedInstallRootOption,
   resolveManagedWorktreeRoot,
@@ -355,7 +354,6 @@ function installProject(requestedRoot) {
     "CLAUDE/",
     "agent-flow/",
   ]);
-  removeGitignoreEntries(path.join(root, ".gitignore"), ["scripts/check-context-docs.*"]);
   if (rootContext === "legacy") {
     upsertGitExclude(root, ROOT_CONTEXT_FILES.filter((label) => bootstrapBlockIsOurs(root, label)));
   }

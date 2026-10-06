@@ -2989,11 +2989,13 @@ def _warn_if_base_behind_remote(*, root: Path, base_ref: str) -> None:
         return
     checkout = _branch_checkout_path(root=root, branch=branch)
     if checkout is None:
-        fix = f"git -C {shlex.quote(str(root))} fetch {remote} {remote_branch}:{branch}"
+        refspec = shlex.quote(f"{remote_branch}:{branch}")
+        fix = f"git -C {shlex.quote(str(root))} fetch {shlex.quote(remote)} {refspec}"
     else:
         # 체크아웃된 브랜치에는 `fetch <src>:<dst>`가 거절되므로 그 자리에서 당긴다.
         fix = (
-            f"git -C {shlex.quote(str(checkout))} pull --ff-only {remote} {remote_branch}"
+            f"git -C {shlex.quote(str(checkout))} pull --ff-only "
+            f"{shlex.quote(remote)} {shlex.quote(remote_branch)}"
         )
     print(
         f"warning: worktree base {branch} is {behind} commit(s) behind {remote_label}; "

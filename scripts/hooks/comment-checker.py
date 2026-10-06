@@ -342,11 +342,11 @@ def comment_lines(
                 in_regex = False
             index += 1
             continue
-        if is_stylesheet and URL_FUNCTION_RE.match(text, index):
-            # 따옴표 없는 url(https://...)의 `//`를 주석 시작으로 읽지 않도록 값 전체를 건너뛴다.
-            end = text.find(")", index)
-            if end == -1:
-                end = len(text)
+        url = URL_FUNCTION_RE.match(text, index) if is_stylesheet else None
+        if url:
+            # url() 값 전체를 건너뛴다. 따옴표 없는 url(https://...)의 `//`를 주석 시작으로
+            # 읽지 않고, 따옴표 안의 `)`(url("a)b"))에서 값이 끝났다고 보지 않는다.
+            end = url_function_end(text, url.end())
             line += text.count("\n", index, end)
             index = end
             continue
@@ -399,6 +399,25 @@ def comment_lines(
             index = end
             continue
         index += 1
+
+
+def url_function_end(text: str, start: int) -> int:
+    index = start
+    quote = ""
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char == ")":
+            return index + 1
+        index += 1
+    return len(text)
 
 
 def supports_hash_comments(file_path: str) -> bool:

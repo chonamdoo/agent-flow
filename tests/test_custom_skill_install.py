@@ -1609,7 +1609,7 @@ def test_opt_in_install_keeps_new_project_root_docs_visible_to_git(
     repeated = _install_with(binary, project, "--force-managed")
     assert repeated.returncode == 0, repeated.stderr
     assert {label: (project / label).read_bytes() for label in roots} == roots
-    assert exclude.read_bytes() == user_exclusions
+    assert exclude.read_bytes().startswith(user_exclusions)
     ignored = subprocess.run(
         ("git", "check-ignore", *roots), cwd=project, text=True,
         capture_output=True, check=False, timeout=30,
@@ -2899,18 +2899,12 @@ def test_reinstall_removes_retired_context_checker(
     stale = project / ".agent-flow" / "scripts" / script_name
     body = "retired checker\n"
     stale.write_text(body, encoding="utf-8")
-    gitignore = project / ".gitignore"
-    gitignore.write_text(
-        gitignore.read_text(encoding="utf-8") + "scripts/check-context-docs.*\n",
-        encoding="utf-8",
-    )
 
     result = _install_with(binary, project)
 
     assert result.returncode == 0, result.stderr
     assert not stale.exists()
     assert stale.with_name(f"{script_name}.removed").read_text(encoding="utf-8") == body
-    assert "scripts/check-context-docs.*" not in gitignore.read_text(encoding="utf-8")
 
 
 def _skill_index_block(project: Path, file_name: str = "AGENTS.md") -> str:

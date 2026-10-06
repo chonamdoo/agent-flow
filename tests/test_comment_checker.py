@@ -636,6 +636,18 @@ def test_css_url_and_string_double_slash_are_not_comments() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_css_comment_after_a_quoted_url_with_a_paren_is_checked() -> None:
+    result = run_checker(
+        {
+            "file_path": "src/theme.css",
+            "content": '.x { background: url("foo)bar.png"); } /* Figma source */\n',
+        }
+    )
+
+    assert result.returncode == 2
+    assert "src/theme.css:1" in result.stderr
+
+
 def test_scss_line_comment_is_checked_but_url_is_not() -> None:
     result = run_checker(
         {
