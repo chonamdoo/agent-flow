@@ -360,3 +360,64 @@ def test_profile_base_fetch_retries_remote_ref_lock_contention(
 
     assert fetch_attempts == 2
     assert _git("rev-parse", "HEAD", cwd=status.path) == release_tip
+
+
+def _commit(root: Path, text: str) -> str:
+    (root / "f.txt").write_text(f"{text}\n", encoding="utf-8")
+    _git("commit", "-am", text, cwd=root)
+    return _git("rev-parse", "HEAD", cwd=root)
+
+
+def _with_origin(tmp_path: Path, root: Path) -> None:
+    remote = tmp_path / "origin.git"
+    remote.mkdir()
+    _git("init", "--bare", cwd=remote)
+    _git("remote", "add", "origin", str(remote), cwd=root)
+    _git("push", "-u", "origin", "main", cwd=root)
+
+
+def test_local_base_behind_origin_warns_and_still_starts_from_local(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """회귀: 로컬 main이 origin/main보다 뒤처진 채 worktree가 만들어져도 아무도 몰랐다."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    _with_origin(tmp_path, root)
+    local_tip = _git("rev-parse", "HEAD", cwd=root)
+    _commit(root, "remote 1")
+    _commit(root, "remote 2")
+    _git("push", "origin", "main", cwd=root)
+    _git("reset", "--hard", local_tip, cwd=root)
+
+    status = create_worktree(root=root, plan=plan_worktree(root=root, name="feat"))
+
+    err = capsys.readouterr().err
+    assert "worktree base main is 2 commit(s) behind origin/main" in err
+    assert f"git -C {root} pull --ff-only origin main" in err
+    assert _git("rev-parse", "HEAD", cwd=status.path) == local_tip
+
+
+def test_up_to_date_base_does_not_warn(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    _with_origin(tmp_path, root)
+
+    create_worktree(root=root, plan=plan_worktree(root=root, name="feat"))
+
+    assert "behind" not in capsys.readouterr().err
+
+
+def test_base_without_remote_does_not_warn(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+
+    create_worktree(root=root, plan=plan_worktree(root=root, name="feat"))
+
+    assert "behind" not in capsys.readouterr().err
