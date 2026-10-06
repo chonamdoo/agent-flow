@@ -87,15 +87,66 @@ def test_the_formula_installs_every_asset_root_the_kit_resolves(tmp_path: Path) 
     assert required <= listed, f"formula does not install {sorted(required - listed)}"
 
 
-def test_the_formula_keeps_the_venv_below_the_asset_tree(tmp_path: Path) -> None:
-    """반증: venv가 libexec 자체면 설치된 패키지의 조상에 kit 서명이 없다."""
+def test_the_formula_keeps_the_venv_where_the_installers_look(tmp_path: Path) -> None:
+    """반증: venv가 libexec 자체면 설치된 패키지의 조상에 kit 서명이 없다. 이름이
+    installer가 찾는 `<kit>/.venv`와 다르면 프로젝트 launcher가 이 패키지 없는
+    다른 python에 고정된다 — brew 설치본이 `libexec/venv`였을 때 그랬다."""
     text = FORMULA.read_text(encoding="utf-8")
-    assert 'virtualenv_create(libexec/"venv"' in text
+    assert 'virtualenv_create(libexec/".venv"' in text
+    assert 'write_env_script libexec/".venv/bin/agent-flow"' in text
+    assert 'path.join(KIT_ROOT, ".venv", "bin", "python")' in (REPO / "lib" / "installer-shared.mjs").read_text(encoding="utf-8")
+    assert 'path.join(KIT_ROOT, ".venv",' in (REPO / "bin" / "agent-flow-kit.mjs").read_text(encoding="utf-8")
     # 래퍼가 없으면 PATH가 정리된 자리에서 node를 찾지 못해 프로젝트 설치가 죽는다.
     assert "write_env_script" in text
     assert 'formula_opt_bin("node")' in text
     # 빈 PATH를 그대로 이어 붙이면 빈 항목이 남고, 빈 항목은 cwd로 해석된다.
     assert "${PATH:-" in text
+
+
+def _brew_keg(tmp_path: Path, *, opt_link: bool) -> tuple[Path, Path]:
+    """formula가 만드는 배치: `<prefix>/Cellar/agent-flow/<ver>/libexec`에 kit과
+    `.venv`, `<prefix>/opt/agent-flow`는 현재 keg를 가리키는 링크다."""
+    import yaml
+
+    prefix = (tmp_path / "homebrew").resolve()
+    keg = prefix / "Cellar" / "agent-flow" / "9.9.9"
+    shutil.copytree(REPO / "lib", keg / "libexec" / "lib")
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(keg / "libexec" / ".venv")],
+        check=True, timeout=120,
+    )
+    site_packages = next((keg / "libexec" / ".venv" / "lib").glob("python3*/site-packages"))
+    (site_packages / "kit-deps.pth").write_text(str(Path(yaml.__file__).parents[1]) + "\n", encoding="utf-8")
+    if opt_link:
+        (prefix / "opt").mkdir()
+        (prefix / "opt" / "agent-flow").symlink_to(keg)
+    return prefix, keg
+
+
+def _managed_python(kit_libexec: Path) -> str:
+    module = (kit_libexec / "lib" / "installer-shared.mjs").as_uri()
+    env = {key: value for key, value in __import__("os").environ.items()
+           if key not in {"PYTHON", "PYTHON_EXECUTABLE", "VIRTUAL_ENV"}}
+    return subprocess.check_output(
+        [_node(), "--input-type=module", "-e",
+         f"import {{ resolveManagedPython }} from {module!r}; process.stdout.write(resolveManagedPython().python);"],
+        text=True, timeout=60, env=env,
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Homebrew keg layout is POSIX-only")
+def test_a_brew_install_pins_the_runtime_through_the_opt_link(tmp_path: Path) -> None:
+    """반증: launcher가 `Cellar/<name>/<version>`에 고정되면 `brew upgrade`가 옛 keg를
+    지우는 순간 그 kit으로 설치한 모든 프로젝트의 CLI와 hook이 멈춘다."""
+    prefix, keg = _brew_keg(tmp_path, opt_link=True)
+    assert _managed_python(keg / "libexec") == str(prefix / "opt" / "agent-flow" / "libexec" / ".venv" / "bin" / "python")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Homebrew keg layout is POSIX-only")
+def test_a_keg_without_an_opt_link_keeps_its_own_venv(tmp_path: Path) -> None:
+    """반증: opt 링크가 없는데 opt 경로로 고정하면 없는 인터프리터를 launcher에 적는다."""
+    _, keg = _brew_keg(tmp_path, opt_link=False)
+    assert _managed_python(keg / "libexec") == str(keg / "libexec" / ".venv" / "bin" / "python")
 
 
 def test_the_stamper_points_the_formula_at_the_declared_version(tmp_path: Path) -> None:
