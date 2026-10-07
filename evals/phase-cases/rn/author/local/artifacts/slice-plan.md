@@ -5,12 +5,14 @@ Bounded context: Ordering (read side: order history). DDD depth: light — one r
 
 ## Slice 1 — Read orders
 
+- Files: src/orders/orders.types.ts, src/orders/orders.api.ts
 - Scope: `src/orders/orders.types.ts` (order record type) and `src/orders/orders.api.ts` (`fetchOrders(getJson)` converting the payload).
 - Behavior: `GET /v1/orders` returns `{"orders": [{"order_id", "placed_at", "total_cents", "status"}]}`; each entry becomes a record with `id`, `placedAt` (`Date`), `totalCents`, `status`.
 - Verification: `tests/orders.api.test.ts`.
 
 ## Slice 2 — Screen state holder
 
+- Files: src/orders/orders.store.ts
 - Scope: `src/orders/orders.store.ts` (`createOrdersStore(loadOrders)` state holder, newest-first rows, totals via `formatCents`).
 - States: `loading` (initial and while a load runs), `content` with `rows` (`id`, `totalLabel`), `empty`, `error` with a user-facing `message`.
 - Ordering: rows are sorted by `placedAt`, newest first.
@@ -21,6 +23,7 @@ Bounded context: Ordering (read side: order history). DDD depth: light — one r
 
 ## Slice 3 — Screen
 
+- Files: App.tsx, src/orders/orders.screen.tsx
 - Scope: `src/orders/orders.screen.tsx` wires `fetchOrders(getJson)` into the store and renders it.
 - Behavior: trigger `load()` on mount and `cancel()` on unmount; render a loading indicator, the `message` for empty/error, a retry action in the error state, and a list of rows for content.
 - Verification: type check by review; no runtime test (screen is not executed in unit tests).

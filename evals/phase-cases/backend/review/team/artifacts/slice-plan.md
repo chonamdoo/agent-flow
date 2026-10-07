@@ -17,10 +17,12 @@ No architecture contract is selected (installer default `pending`). The change r
 ## Slices
 
 ### Slice 1 - Order records and listing
+- Files: src/domain/orders/__init__.py, src/domain/orders/models.py, src/domain/orders/listing.py
 - Boundary scope: `src/domain/orders/` - `OrderRowDTO` and `Order` records, `list_customer_orders` (customer scope, status filter, newest first).
 - Bounded context: Ordering. Domain concerns: order status vocabulary, per-customer listing.
 - Verification: `python3 -m unittest discover -s tests -t .`.
 
 ### Slice 2 - HTTP handler and wiring
+- Files: src/app/orders_http.py, src/app/container.py
 - Boundary scope: `src/app/orders_http.py` (query validation, error bodies, response mapping, FR-5 message); `src/app/container.py` converts stored rows to `OrderRowDTO` once and binds the loader, as `build_stock_level_handler` does.
 - Verification: full visible suite plus FR-5 empty-state cases.

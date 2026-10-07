@@ -17,14 +17,17 @@ Selected contract: Clean (`clean-architecture-core` + `python-api-clean-architec
 ## Slices
 
 ### Slice 1 - Order domain and listing use case
+- Files: src/domain/__init__.py, src/domain/orders/__init__.py, src/domain/orders/order.py, src/domain/orders/order_repository.py, src/domain/orders/list_orders.py
 - Boundary scope: core-domain `src/domain/orders/` - `Order`, `OrderStatus`, `OrderRepository` Protocol port, `ListOrders` use case (status filter + newest-first sort).
 - Bounded context: Ordering. Domain concerns: order status vocabulary, per-customer listing.
 - Verification: `python3 -m unittest discover -s tests -t .` (filter/sort cases).
 
 ### Slice 2 - Data adapter
+- Files: src/data/__init__.py, src/data/orders/__init__.py, src/data/orders/order_row_mapper.py, src/data/orders/in_memory_order_repository.py
 - Boundary scope: core-data `src/data/orders/` - row mapper `order_from_row` (parses the stored timestamp), `InMemoryOrderRepository` implementing the domain port; raw rows never leave data.
 - Verification: listing tests through the handler.
 
 ### Slice 3 - Inbound handler and composition root
+- Files: src/api/__init__.py, src/api/orders/__init__.py, src/api/orders/list_orders_handler.py, src/app/__init__.py, src/app/container.py
 - Boundary scope: inbound adapter `src/api/orders/` (query parsing, error bodies, response mapping, FR-5 message); app-shell `src/app/container.py` wires repository -> use case -> handler.
 - Verification: full visible suite plus FR-5 empty-state cases.

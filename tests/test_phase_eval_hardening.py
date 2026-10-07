@@ -3,8 +3,9 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import re
 import shlex
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 from types import SimpleNamespace
 
@@ -13,6 +14,26 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 REVIEW = "## Reviewer\nreviewer-source: sub-agent\nverdict: approve"
+
+
+@pytest.mark.parametrize("plan", sorted((ROOT / "evals/phase-cases").glob("*/**/artifacts/slice-plan.md")))
+def test_phase_case_slice_plans_declare_concrete_reference_files(plan):
+    stack, _, mode = plan.relative_to(ROOT / "evals/phase-cases").parts[:3]
+    reference = ROOT / "evals/phase-cases" / stack / "reference" / mode
+    slices = re.findall(r"^#{2,3} Slice \d+[^\n]*\n(.*?)(?=^#{1,3} |\Z)", plan.read_text(encoding="utf-8"), re.M | re.S)
+    assert slices, plan
+    declared = set()
+    for body in slices:
+        fields = re.findall(r"^- Files:[^\n]*(?:\n[ \t]+[^\n]*)*", body, re.M)
+        assert len(fields) == 1, plan
+        paths = [value.strip() for value in fields[0].removeprefix("- Files:").split(",")]
+        for value in paths:
+            path = PurePosixPath(value)
+            assert value and not path.is_absolute() and ".." not in path.parts, (plan, value)
+            assert not any(char in value for char in "*?[]\\:") and not any(char.isspace() for char in value), (plan, value)
+            assert (reference / value).is_file(), (plan, value)
+        declared.update(paths)
+    assert declared == {path.relative_to(reference).as_posix() for path in reference.rglob("*") if path.is_file()}
 
 
 @pytest.fixture

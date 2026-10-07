@@ -5,12 +5,14 @@ Architecture contract: Clean (profile `flutter`). Roles: `lib/core/domain/orders
 `lib/features/orders/presentation` (feature-presentation), `lib/app` (app-shell).
 
 ## Slice 1 — Order domain model and repository port
+- Files: lib/core/domain/orders/order.dart, lib/core/domain/orders/order_repository.dart, lib/core/domain/orders/orders_unavailable_exception.dart
 - Scope (core-domain): `Order` entity (`id`, `customerName`, `totalCents`, `placedAt` UTC), the
   `OrderRepository` port with `Future<List<Order>> fetchOrders()`, and the domain error
   `OrdersUnavailableException` the port throws when orders cannot be loaded.
 - Verification: compiled through the slice 2 and slice 3 tests.
 
 ## Slice 2 — Remote-backed repository adapter
+- Files: lib/core/data/orders/orders_remote_source.dart, lib/core/data/orders/order_dto.dart, lib/core/data/orders/order_repository_impl.dart, lib/core/data/orders/http_orders_remote_source.dart
 - Scope (core-data): `OrdersRemoteSource` transport port returning raw records
   (`id`, `customer`, `total_cents`, `placed_at` ISO-8601), an `OrderDto` with `fromJson`/`toDomain`,
   `OrderRepositoryImpl implements OrderRepository` (translates transport and decoding failures into
@@ -19,6 +21,7 @@ Architecture contract: Clean (profile `flutter`). Roles: `lib/core/domain/orders
 - Verification: `dart test/order_repository_impl_test.dart`.
 
 ## Slice 3 — Orders list state holder
+- Files: lib/features/orders/presentation/orders_list_state.dart, lib/features/orders/presentation/orders_list_holder.dart, lib/features/orders/api/orders_route.dart, lib/app/orders_composition.dart
 - Scope (feature-presentation): sealed `OrdersListState` (`OrdersLoading`, `OrdersLoaded(rows)`,
   `OrdersEmpty(message)`, `OrdersError(message)`), `OrderRow` UI model with `totalLabel` (`$12.50`),
   and `OrdersListHolder(OrderRepository)` exposing `state` and `load()`.
