@@ -427,6 +427,31 @@ def test_equal_required_files_have_one_read_and_keep_both_routes(tmp_path, role,
             assert f"route: {route.kind} / {route.skill} / {route.detail}" in prompt
 
 
+def test_bundled_author_read_plan_keeps_aliases_and_digest_without_repeating_routes(tmp_path):
+    paths = []
+    for name in ("first", "alias"):
+        path = tmp_path / ".agent-flow" / "skills" / name / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("BUNDLED_SHARED_RULE\n", encoding="utf-8")
+        paths.append(path)
+    result = resolve(tmp_path, phase_skills=PhaseSkills(required=("first", "alias")))
+    assert {item.source for item in result.required} == {"bundled"}
+    identities = result.required_document_ids
+    prompt = skill_prompt_block(tmp_path, result)
+    assert required_read_paths(prompt) == [str(paths[0])]
+    assert prompt.count(str(paths[0])) == 1
+    assert "`first` (bundled) — body 1" in prompt
+    assert "`alias` (bundled) — body 1" in prompt
+    assert hashlib.sha256(paths[0].read_bytes()).hexdigest() in prompt
+    assert "route: " not in prompt and "Bytes:" not in prompt
+    assert result.required_document_ids == identities
+    assert {item.document.path for item in result.normative_documents} == set(map(str, paths))
+    assert {route.skill for item in result.normative_documents for route in item.routes} == {"first", "alias"}
+    reviewer = skill_prompt_block(tmp_path, result, role="reviewer")
+    assert required_read_paths(reviewer) == [str(paths[0])]
+    assert "Body 1." not in reviewer
+
+
 @pytest.mark.parametrize("mode", ["local", "pending", "clean"])
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "oversized"])
 def test_unselected_unsafe_clean_catalog_does_not_block_other_work(tmp_path, mode, unsafe_kind):
