@@ -10,7 +10,9 @@ formula가 틀렸다는 사실은 사용자의 `brew install`에서만 드러난
 """
 from __future__ import annotations
 
+import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -140,6 +142,22 @@ def test_a_brew_install_pins_the_runtime_through_the_opt_link(tmp_path: Path) ->
     지우는 순간 그 kit으로 설치한 모든 프로젝트의 CLI와 hook이 멈춘다."""
     prefix, keg = _brew_keg(tmp_path, opt_link=True)
     assert _managed_python(keg / "libexec") == str(prefix / "opt" / "agent-flow" / "libexec" / ".venv" / "bin" / "python")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Homebrew keg layout is POSIX-only")
+@pytest.mark.parametrize("same_interpreter", [True, False], ids=["canonical-keg", "different-interpreter"])
+def test_a_brew_probe_keeps_the_invoked_alias_only_for_the_same_interpreter(
+    tmp_path: Path, same_interpreter: bool,
+) -> None:
+    prefix, keg = _brew_keg(tmp_path, opt_link=True)
+    candidate = keg / "libexec" / ".venv" / "bin" / "python"
+    candidate.unlink()
+    reported = candidate if same_interpreter else Path(sys.executable)
+    identity = {"python": str(reported), "realpath": str(reported.resolve())}
+    candidate.write_text("#!/bin/sh\nprintf '%s' " + shlex.quote(json.dumps(identity)) + "\n", encoding="utf-8")
+    candidate.chmod(0o755)
+    expected = prefix / "opt" / "agent-flow" / "libexec" / ".venv" / "bin" / "python" if same_interpreter else reported
+    assert _managed_python(keg / "libexec") == str(expected)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Homebrew keg layout is POSIX-only")
