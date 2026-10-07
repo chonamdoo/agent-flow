@@ -1049,6 +1049,7 @@ def skill_prompt_block(
     if not resolution.required and not resolution.optional and resolution.architecture_snapshot is None:
         return ""
     controller = delivered_to_reviewers and role == "author"
+    compact_paths = {str(skill.path) for skill in resolution.required if skill.source == "bundled"}
     lines = ["\n## Required skills for this phase", ""]
     # 훈련 데이터의 일반 통념과 이 파일이 갈리면 파일이 이긴다. 우리 skill은
     # 일반 개념이 아니라 **이 프로젝트의 규범**이라, 기억으로 대체하면 조용히 틀린다.
@@ -1095,9 +1096,18 @@ def skill_prompt_block(
                 "here are provenance only, not additional read instructions:",
                 "",
             ))
+        body_numbers = {
+            item.document.path: index
+            for index, delivery in enumerate(resolution.delivery, 1)
+            for item in delivery.documents
+        }
         for skill in resolution.required:
             if skill.exists:
-                lines.append(_skill_prompt_line(project_root, skill))
+                body = body_numbers.get(str(skill.path))
+                if role == "author" and str(skill.path) in compact_paths and body is not None:
+                    lines.append(f"- `{skill.name}` ({skill.source}) — body {body} in the required-read plan.")
+                else:
+                    lines.append(_skill_prompt_line(project_root, skill))
             else:
                 hint = f" — install: {skill.install_hint}" if skill.install_hint else ""
                 lines.append(f"- `{skill.name}` — **MISSING**{hint}")
@@ -1150,13 +1160,12 @@ def skill_prompt_block(
     if deliveries:
         lines.extend(("## Required-read plan", ""))
         for index, delivery in enumerate(deliveries, 1):
-            # reviewer 프롬프트는 digest로 전달된 문서 버전에 묶인다(계약이 바뀌면 prompt digest도
-            # 바뀐다). route/bytes 같은 나머지 provenance는 reviewer가 쓰지 않아 뺀다.
-            digest = f" (SHA-256: `{delivery.documents[0].document.sha256}`)" if role == "reviewer" else ""
+            digest = f" (SHA-256: `{delivery.documents[0].document.sha256}`)"
             if delivery.inline:
                 lines.append(f"- Apply inline body {index} below{digest}; no file read is required for this body.")
             else:
-                lines.append(f"- Read `{delivery.documents[0].document.path}`{digest}.")
+                body = f" Body {index}." if role == "author" else ""
+                lines.append(f"- Read `{delivery.documents[0].document.path}`{digest}.{body}")
         if role == "reviewer":
             if any(delivery.inline for delivery in deliveries):
                 lines.extend(("", "## Inline bodies", ""))
@@ -1174,6 +1183,8 @@ def skill_prompt_block(
         if role == "reviewer":
             if delivery.inline:
                 lines.extend((f"### Normative body {index}", "", delivery.content.decode("utf-8"), ""))
+            continue
+        if not delivery.inline and all(item.document.path in compact_paths for item in delivery.documents):
             continue
         lines.append(f"### Normative body {index}")
         for item in delivery.documents:
