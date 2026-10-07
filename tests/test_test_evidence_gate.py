@@ -238,6 +238,17 @@ def test_behavior_preserving_requires_reason_and_related_green(tmp_path):
     ]
 
 
+def test_uv_run_pytest_counts_as_the_related_test_run(tmp_path):
+    """반증: `uv run`을 벗기지 못하면 uv 사용자가 정상으로 돌린 테스트가
+    "테스트 미실행"으로 막히는데, 이를 단언하는 테스트가 없어 전체 스위트가 green이었다(#285).
+    """
+    root = _project(tmp_path)
+    text = GATE + "change-kind: behavior-preserving\nbehavior-preserving-reason: only the adapter boundary moves\n"
+    _observe(root, "uv run pytest tests/test_x.py::test_bug", 0)
+
+    assert missing_test_evidence_markers(root, "implement", text, profile=PYTHON_PROFILE) == []
+
+
 def test_behavior_preserving_ci_only_test_is_deferred_without_command_evidence(tmp_path):
     root = _project(tmp_path)
     text = (

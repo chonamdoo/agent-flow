@@ -221,6 +221,26 @@ def test_default_gate_run_excludes_the_pre_push_test_gate():
     )
 
 
+def test_python_profile_tools_run_through_the_current_interpreter():
+    """반증: `mypy`·`ruff`·`pytest`를 argv 그대로 두면 PATH의 다른 venv 도구가
+    실행되는데, 이 변환을 단언하는 테스트가 없어 전체 스위트가 green이었다(#285).
+    """
+    local = {
+        command.gate_id: command.command
+        for command in _profile_gate_commands(["python"], phase=GATE_PHASE_ALL)
+    }
+    ci = {
+        command.gate_id: command.command
+        for command in _profile_gate_commands(
+            ["python"], phase=GATE_PHASE_ALL, execution="ci"
+        )
+    }
+
+    assert local["type"] == (sys.executable, "-m", "mypy", ".")
+    assert local["lint"] == (sys.executable, "-m", "ruff", "check", ".")
+    assert ci["test"] == (sys.executable, "-m", "pytest", "-q")
+
+
 def test_phase_all_runs_only_local_gates_by_default():
     by_id = {
         command.gate_id: command.command
