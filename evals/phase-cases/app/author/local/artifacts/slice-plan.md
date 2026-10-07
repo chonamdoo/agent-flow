@@ -4,12 +4,14 @@ Architecture contract: local `skills/architecture/SKILL.md` (flat feature folder
 feature, concrete repositories). All slices live in `lib/orders/` as parts of `lib/orders/orders.dart`.
 
 ## Slice 1 — Order model and repository
+- Files: lib/orders/order.dart, lib/orders/orders_repository.dart, lib/orders/orders.dart
 - Scope (`lib/orders/` part files): `Order` (`id`, `customerName`, `totalCents`, `placedAt` UTC)
   decoded by `Order.fromRecord` from raw records (`id`, `customer`, `total_cents`, `placed_at`
   ISO-8601); concrete `OrdersRepository(fetch)` exposing `Future<List<Order>> fetchOrders()`.
 - Verification: `dart test/orders_repository_test.dart`.
 
 ## Slice 2 — Orders list state holder
+- Files: lib/orders/orders_list_state.dart, lib/orders/orders_list_holder.dart, lib/orders/orders.dart
 - Scope (`lib/orders/` part files): sealed `OrdersListState` (`OrdersLoading`, `OrdersLoaded(rows)`,
   `OrdersEmpty(message)`, `OrdersError(message)`), `OrderRow` with `totalLabel` (`$12.50`), and
   `OrdersListHolder(OrdersRepository)` exposing `state` and `load()`.

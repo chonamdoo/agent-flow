@@ -17,10 +17,12 @@ Selected contract: project-local `skills/architecture/SKILL.md` (flat feature pa
 ## Slices
 
 ### Slice 1 - Listing service
+- Files: src/orders/ord_service.py
 - Boundary scope: feature package `src/orders/` - `ord_service.py`: status vocabulary and `list_customer_orders(load_rows, customer_id, status)` over a plain `load_rows` callable (customer scope, status filter, newest first, row -> response dict mapping, total formatting).
 - Bounded context: Ordering. Domain concerns: order status vocabulary, per-customer listing.
 - Verification: `python3 -m unittest discover -s tests -t .`.
 
 ### Slice 2 - HTTP handler and package wiring
+- Files: src/orders/ord_http.py, src/orders/__init__.py
 - Boundary scope: `src/orders/ord_http.py` (query validation, error bodies, FR-5 message, response wrapping only); `src/orders/__init__.py` binds `load_rows` to the handler and exports `build_list_orders_handler`.
 - Verification: full visible suite plus FR-5 empty-state cases.

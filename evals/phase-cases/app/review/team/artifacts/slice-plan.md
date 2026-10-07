@@ -4,12 +4,14 @@ Architecture: not selected for this project (installer default); follow the team
 `skills/team-flutter-conventions/SKILL.md`. All files live in `lib/features/orders/`.
 
 ## Slice 1 — Order model and repository
+- Files: lib/features/orders/order.dart, lib/features/orders/orders_repository.dart
 - Scope: `Order` (`id`, `customerName`, `totalCents`, `placedAt` UTC) and a concrete
   `OrdersRepository(ApiClient)` whose `fetchOrders()` calls `GET /orders` and decodes records
   (`id`, `customer`, `total_cents`, `placed_at` ISO-8601).
 - Verification: `dart test/orders_repository_test.dart`.
 
 ## Slice 2 — Orders list notifier
+- Files: lib/features/orders/orders_list_state.dart, lib/features/orders/orders_list_notifier.dart
 - Scope: sealed `OrdersListState` (`OrdersLoading`, `OrdersLoaded(rows)`, `OrdersEmpty(message)`,
   `OrdersError(message)`), `OrderRow` with `totalLabel` (`$12.50`), and
   `OrdersListNotifier(OrdersRepository)` exposing `state` and `load()`.

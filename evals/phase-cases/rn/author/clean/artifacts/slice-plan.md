@@ -5,12 +5,14 @@ Bounded context: Ordering (read side: order history). DDD depth: light — one r
 
 ## Slice 1 — Read orders
 
+- Files: src/core/domain/orders/Order.ts, src/core/domain/orders/OrderRepository.ts, src/core/domain/orders/OrdersUnavailableError.ts, src/core/data/orders/OrderDto.ts, src/core/data/orders/OrderRepositoryImpl.ts
 - Scope: `src/core/domain/orders/` (Order entity, newest-first ordering, `OrderRepository` port) and `src/core/data/orders/` (`OrderDto`, mapper, `OrderRepositoryImpl` over `GetJson`).
 - Behavior: `GET /v1/orders` returns `{"orders": [{"order_id", "placed_at", "total_cents", "status"}]}`; each entry becomes a record with `id`, `placedAt` (`Date`), `totalCents`, `status`.
 - Verification: `tests/orders-repository.test.ts`.
 
 ## Slice 2 — Screen state holder
 
+- Files: src/features/orders/presentation/OrdersUiState.ts, src/features/orders/presentation/ordersScreenStore.ts
 - Scope: `src/features/orders/presentation/` (`OrdersUiState`, row UiModel mapping, `createOrdersScreenStore(repository)`).
 - States: `loading` (initial and while a load runs), `content` with `rows` (`id`, `totalLabel`), `empty`, `error` with a user-facing `message`.
 - Ordering: rows are sorted by `placedAt`, newest first.
@@ -21,6 +23,7 @@ Bounded context: Ordering (read side: order history). DDD depth: light — one r
 
 ## Slice 3 — Feature entry and screen
 
+- Files: App.tsx, src/app/AppShell.tsx, src/features/orders/api/OrdersEntry.ts, src/features/orders/presentation/createOrdersEntry.tsx, src/features/orders/presentation/OrdersScreen.tsx
 - Scope: feature-api entry contract `src/features/orders/api/OrdersEntry.ts` (`OrdersEntry`, `CreateOrdersEntry`, `OrdersEntryDependencies`); `src/features/orders/presentation/createOrdersEntry.tsx` implements it and owns the store instance; `OrdersScreen.tsx` renders the store; `src/app/AppShell.tsx` composes `createOrdersEntry({ orderRepository: new OrderRepositoryImpl(getJson) })` and depends on presentation only through that contract.
 - Behavior: trigger `load()` on mount and `cancel()` on unmount; render a loading indicator, the `message` for empty/error, a retry action in the error state, and a list of rows for content.
 - Verification: type check by review; no runtime test (screen is not executed in unit tests).
