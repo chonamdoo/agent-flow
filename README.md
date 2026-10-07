@@ -210,6 +210,45 @@ handoff              write the handoff document
 Review and verification are a loop, not a one-way street. A failure goes back to the fix phase,
 and after the fix, the comment pass and the reviews run again before verification is re-run.
 
+```mermaid
+flowchart TD
+    domain-grill --> product-brief --> prd
+    prd -->|pause| slice-plan --> plan-review
+    plan-review -->|approve| ddd-design
+    plan-review -->|request-changes| slice-plan
+    ddd-design --> worktree --> run-start --> red --> green --> refactor
+    refactor --> comment-authoring --> multi-review
+    multi-review -->|approve| architecture-review
+    multi-review -->|request-changes| fix-loop
+    architecture-review -->|approve| gates
+    architecture-review -->|request-changes| refactor
+    gates -->|green| commit
+    gates -->|fail| fix-loop
+    fix-loop --> comment-authoring
+    commit --> push-pr --> pr-watch
+    pr-watch -->|comments| pr-comment-fix
+    pr-watch -->|ci-failed| pr-ci-fix
+    pr-comment-fix -->|no code change| pr-watch
+    pr-ci-fix -->|no code change| pr-watch
+    pr-comment-fix -->|code changed| multi-review
+    pr-ci-fix -->|code changed| multi-review
+    pr-watch -->|green| merge-approval
+    pr-watch -->|merged| handoff
+    merge-approval -->|approve| merge --> handoff
+```
+
+### The `development` flow
+
+```mermaid
+flowchart TD
+    explore --> implement --> review
+    review -->|approve| qa
+    review -->|request-changes| fix-loop
+    qa -->|green| handoff
+    qa -->|fail| fix-loop
+    fix-loop --> review
+```
+
 ---
 
 ## Skills and profiles
