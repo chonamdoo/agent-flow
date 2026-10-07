@@ -9,7 +9,9 @@
   ],
   "review_test_command": [
     "flutter",
-    "test"
+    "test",
+    "--reporter",
+    "expanded"
   ],
   "modes": {
     "clean": {
