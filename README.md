@@ -226,8 +226,12 @@ flowchart TD
     gates -->|fail| fix-loop
     fix-loop --> comment-authoring
     commit --> push-pr --> pr-watch
-    pr-watch -->|comments| pr-comment-fix --> pr-watch
-    pr-watch -->|ci-failed| pr-ci-fix --> pr-watch
+    pr-watch -->|comments| pr-comment-fix
+    pr-watch -->|ci-failed| pr-ci-fix
+    pr-comment-fix -->|no code change| pr-watch
+    pr-ci-fix -->|no code change| pr-watch
+    pr-comment-fix -->|code changed| multi-review
+    pr-ci-fix -->|code changed| multi-review
     pr-watch -->|green| merge-approval
     pr-watch -->|merged| handoff
     merge-approval -->|approve| merge --> handoff
