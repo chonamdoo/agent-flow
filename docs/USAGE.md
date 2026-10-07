@@ -720,8 +720,8 @@ execution:
 - Each reviewer artifact records `- model:` and `- effort:`. `unspecified` means no flag was
   passed and the CLI used its own default. It is not a config value: omit the field instead.
   `model: unspecified` would reach the CLI as a model id, and `effort: unspecified` is rejected.
-- Lists replace rather than merge, so a local `execution.reviewers` replaces every shipped rule.
-  Re-declare shipped pins you want to keep, such as `python.yaml`'s `architecture-design` rule.
+- No shipped profile declares `execution`, so reviewer model and effort are a project choice;
+  without a local declaration every reviewer runs with CLI defaults.
 - The declaration is read from the leader checkout, not a worker worktree, each time a review
   wave starts; no reinstall is needed, and install does not overwrite `.local.yaml`. The file is
   gitignored, so sharing it takes `git add -f`. If two active profiles both declare `execution`,
