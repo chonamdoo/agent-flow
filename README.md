@@ -292,6 +292,28 @@ reinstalling a legacy install on a stack-capable project switches it to `stack`.
 with `--architecture-mode clean`. Details are in
 [Architecture selection](docs/USAGE.md#architecture-selection).
 
+### Reviewer models
+
+No shipped profile pins a reviewer model, so reviewer subprocesses run on each CLI's default
+model and effort. To choose them for a project, declare rules in
+`.agent-flow/profiles/<profile-id>.local.yaml`:
+
+```yaml
+execution:
+  reviewers:
+    - match: {phase: review, angle: architecture-design}
+      candidates:
+        - {provider: claude, model: opus, effort: xhigh}
+        - {provider: codex, effort: xhigh}
+```
+
+`model` reaches that provider's CLI as `--model`; leave it out to keep the CLI default and skip
+renaming on every model release. `match.phase` is the review phase id of the workflow
+(`final-review`, `multi-review`, `architecture-review`, or `review`); drop `match` to cover every
+review phase. Each reviewer artifact records the declared `- model:` and `- effort:`
+(`unspecified` when left out). The file is gitignored, so sharing it takes `git add -f`. Details
+are in [Reviewer model and effort](docs/USAGE.md#reviewer-model-and-effort).
+
 ---
 
 ## Approaches dropped along the way
