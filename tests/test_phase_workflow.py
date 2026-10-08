@@ -1,9 +1,19 @@
 from pathlib import Path, PureWindowsPath
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
-from agent_flow.core.phase_workflow import load_phase_workflow_definition
+from agent_flow.core.phase_workflow import (
+    load_phase_workflow_definition,
+    workflow_names,
+)
+from agent_flow.core.review_evidence import ReviewVerdict
+from agent_flow.core.route_verdicts import (
+    ARTIFACT_ROUTE_KEYS,
+    GATE_FAIL_STATUSES,
+    GATE_PASS_STATUSES,
+)
+from agent_flow.runner import Phase, Runner, _phases_from_definition
 
 
 def test_unknown_completion_disposition_cannot_fall_back_to_cleanup(tmp_path: Path) -> None:
@@ -344,3 +354,177 @@ def test_changing_a_loaded_definition_does_not_leak_into_later_loads() -> None:
     again = load_phase_workflow_definition(root, "full-feature")
 
     assert next(item for item in again.phases if item.id == phase.id).routes == original
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+# PR 이벤트 루프는 리뷰 코멘트와 CI 결과 같은 외부 이벤트로만 다시 돈다. 그래서 fix-loop 라운드 상한
+# 대상이 아니다(CI 수리 횟수는 `CI_REPAIR_MAX_ROUNDS`가 따로 막는다). 예외는 그 이벤트로 `pr-watch`를
+# 떠나는 edge뿐이고, `pr-watch`를 지나는 다른 순환은 그대로 검사한다.
+_PR_EVENT_LOOP_PHASE = "pr-watch"
+_PR_EVENT_ROUTE_KEYS = frozenset({"comments", "has_comments", "ci-failed", "ci_failed"})
+# route 없는 phase가 다음 자리로 넘어가는 edge의 key. runner가 이 이동에 붙이는 key와 같다.
+_FALLTHROUGH = "none"
+
+
+def _emittable_route_keys(phase: Phase) -> frozenset[str]:
+    """runner(`_next_index`)가 이 phase의 artifact에서 읽어 낼 수 있는 route key.
+
+    multi-review의 증거 실패 key는 route를 찾기 전에 제자리에서 막히므로 넣지 않는다.
+    """
+    if phase.multi_review:
+        return frozenset(get_args(ReviewVerdict))
+    if phase.id == "gates":
+        return GATE_PASS_STATUSES | GATE_FAIL_STATUSES | {"default"}
+    return ARTIFACT_ROUTE_KEYS | {"default"}
+
+
+def _route_edges(phases: list[Phase]) -> dict[int, dict[str, int]]:
+    """phase마다 읽어 낼 수 있는 route key → 다음 자리.
+
+    runner처럼 선언되지 않은 key는 `default`로 가고, `block`이거나 갈 곳이 없으면 제자리에서
+    멈추므로 edge가 없다. 코드가 바뀐 PR fix를 첫 review phase로 돌리는 runtime 전용 edge는
+    YAML에 없어서 넣지 않는다. 그 edge가 만드는 순환은 모두 PR 이벤트 edge를 지나므로 판정은 같다.
+    """
+    index = {phase.id: position for position, phase in enumerate(phases)}
+    edges: dict[int, dict[str, int]] = {}
+    for position, phase in enumerate(phases):
+        if not phase.routes:
+            edges[position] = {_FALLTHROUGH: position + 1}
+            continue
+        edges[position] = {}
+        for key in _emittable_route_keys(phase):
+            target = phase.routes.get(key)
+            if target is None:
+                target = phase.routes.get("default")
+            if target is not None and target != "block":
+                edges[position][key] = index[target]
+    return edges
+
+
+def _route_graph(phases: list[Phase]) -> dict[int, set[int]]:
+    return {position: set(by_key.values()) for position, by_key in _route_edges(phases).items()}
+
+
+def _unemittable_route_keys(phases: list[Phase]) -> list[tuple[str, str]]:
+    """선언됐지만 runner가 읽어 낼 수 없어 한 번도 쓰이지 않는 route key."""
+    return [
+        (phase.id, key)
+        for phase in phases
+        for key in phase.routes or {}
+        if key != "default" and key not in _emittable_route_keys(phase)
+    ]
+
+
+def _reachable(graph: dict[int, set[int]], start: int) -> set[int]:
+    seen = {start}
+    pending = [start]
+    while pending:
+        for successor in graph.get(pending.pop(), ()):
+            if successor not in seen:
+                seen.add(successor)
+                pending.append(successor)
+    return seen
+
+
+def _uncapped_cycle_phases(phases: list[Phase]) -> list[str]:
+    """상한에 걸리지 않고 반복될 수 있는 순환 위의 phase.
+
+    runner는 route로 fix collector에 들어갈 때만 상한을 검사한다. route 없는 phase에서 넘어가는
+    진입은 라운드를 기록해도 막히지 않으므로 그 edge는 끊지 않는다.
+    """
+    runner = object.__new__(Runner)
+    runner.phases = phases
+    collectors = runner._fix_collector_targets()
+    graph = {
+        position: {
+            target
+            for key, target in by_key.items()
+            if target < len(phases)
+            and not (key != _FALLTHROUGH and phases[target].id in collectors)
+            and not (phases[position].id == _PR_EVENT_LOOP_PHASE and key in _PR_EVENT_ROUTE_KEYS)
+        }
+        for position, by_key in _route_edges(phases).items()
+    }
+    return [
+        phases[position].id
+        for position, successors in graph.items()
+        if any(position in _reachable(graph, successor) for successor in successors)
+    ]
+
+
+@pytest.mark.parametrize("name", workflow_names(_ROOT))
+def test_every_packaged_workflow_reaches_completion_and_bounds_its_rework_cycles(name: str) -> None:
+    """반증: route 하나를 잘못 고치면 그 key가 쓰이지 않거나, phase가 조용히 skip되거나, 완료로
+    가는 길이 끊기거나, 재작업 순환이 상한 없이 반복된다."""
+    phases = _phases_from_definition(load_phase_workflow_definition(_ROOT, name))
+    graph = _route_graph(phases)
+    completion = len(phases)
+
+    assert _unemittable_route_keys(phases) == []
+    reachable = _reachable(graph, 0)
+    assert [phase.id for position, phase in enumerate(phases) if position not in reachable] == []
+    assert [
+        phase.id
+        for position, phase in enumerate(phases)
+        if completion not in _reachable(graph, position)
+    ] == []
+    assert _uncapped_cycle_phases(phases) == []
+
+
+def test_a_rework_cycle_is_capped_only_by_a_routed_entry_into_a_fix_collector() -> None:
+    """반증: 순환 판정이 늘 빈 목록을 돌려주면 위 불변식은 아무것도 지키지 못하고,
+    runner가 막지 않는 진입까지 상한으로 치면 실제로 끝나지 않는 순환을 놓친다."""
+    implement = Phase(id="implement", description="")
+    handoff = Phase(id="handoff", description="")
+    by_comment = Phase(id="review", description="", routes={"approve": "handoff", "comments": "implement"})
+    by_rejection = Phase(
+        id="review", description="", routes={"approve": "handoff", "request-changes": "implement"}
+    )
+
+    assert _uncapped_cycle_phases([implement, by_comment, handoff]) == ["implement", "review"]
+    assert _uncapped_cycle_phases([implement, by_rejection, handoff]) == []
+
+    # `fix`는 collector지만 이 순환은 route 없는 `prep`에서 넘어가며 들어가므로 상한 검사를 받지 않는다.
+    triage = Phase(
+        id="review",
+        description="",
+        routes={"approve": "handoff", "request-changes": "fix", "comments": "prep"},
+    )
+    prep = Phase(id="prep", description="")
+    fix = Phase(id="fix", description="", routes={"default": "review"})
+    assert _uncapped_cycle_phases([triage, prep, fix, handoff]) == ["review", "prep", "fix"]
+
+
+def test_the_pr_event_loop_exemption_does_not_hide_other_cycles_through_pr_watch() -> None:
+    """반증: `pr-watch`를 통째로 빼면 그 phase를 지나는 잘못된 역방향 route까지 상한 검사에서 사라진다."""
+    commit = Phase(id="commit", description="")
+    comment_fix = Phase(id="pr-comment-fix", description="", routes={"default": "pr-watch"})
+    handoff = Phase(id="handoff", description="")
+    watch = Phase(
+        id="pr-watch", description="", routes={"green": "handoff", "comments": "pr-comment-fix"}
+    )
+    watch_back_to_commit = Phase(
+        id="pr-watch", description="", routes={"green": "commit", "comments": "pr-comment-fix"}
+    )
+
+    assert _uncapped_cycle_phases([commit, watch, comment_fix, handoff]) == []
+    assert _uncapped_cycle_phases([commit, watch_back_to_commit, comment_fix, handoff]) == [
+        "commit",
+        "pr-watch",
+    ]
+
+
+def test_a_route_key_the_phase_cannot_emit_is_not_an_edge() -> None:
+    """반증: 선언된 key를 모두 edge로 치면 오타 난 route가 도달 가능성을 거짓으로 채운다."""
+    review = Phase(
+        id="review",
+        description="",
+        multi_review=True,
+        routes={"approev": "handoff", "request-changes": "fix"},
+    )
+    fix = Phase(id="fix", description="", routes={"default": "review"})
+    handoff = Phase(id="handoff", description="")
+    phases = [review, fix, handoff]
+
+    assert _unemittable_route_keys(phases) == [("review", "approev")]
+    assert 2 not in _reachable(_route_graph(phases), 0)
