@@ -223,7 +223,7 @@ MAX_REVIEW_REGENERATION_ATTEMPTS = 1
 # fix collector 판정에 쓰는 rejection verdict 키. review/gate가 "다시 해라"라고
 # 되돌려 보내는 route만 상한 대상이다 — 정상 진행(default·approve·green)과 PR
 # 이벤트 루프(comments·ci-failed)는 여기 없어서 상한에서 빠진다.
-_FIX_COLLECTOR_ROUTE_KEYS = frozenset({"request-changes", "blocked", "error", "fail"})
+_FIX_COLLECTOR_ROUTE_KEYS = frozenset({"request-changes", "blocked", "error"})
 # 전이 원장. run_dir 안에 두되 **phase artifact가 아니다** — backward route의 무효화
 # 대상은 workflow가 선언한 artifact뿐이고, 이 파일이 그 범위에 들면 복구 근거가
 # 복구 대상과 함께 사라진다.
@@ -1270,7 +1270,7 @@ class Runner:
             if candidate.id == target:
                 # 상한은 리터럴 이름("fix-loop")이 아니라 "fix collector"로 판정한다.
                 # collector = 어떤 phase가 rejection verdict(request-changes·blocked·
-                # error·fail)로 되돌려 보내는 target이다. 이름은 workflow마다 달라도
+                # error)로 되돌려 보내는 target이다. 이름은 workflow마다 달라도
                 # (fix-loop·refactor·implement-fix·slice-plan) 모두 이 집합에 든다.
                 # 일단 collector면 이후 어떤 key로 그리 보내도(gates의 default/blocked/
                 # error 포함) 카운트해 gate 재시도 루프가 상한에 걸린다. pr-watch는

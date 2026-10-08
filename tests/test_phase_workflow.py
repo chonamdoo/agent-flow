@@ -3,7 +3,11 @@ from typing import Any
 
 import pytest
 
-from agent_flow.core.phase_workflow import load_phase_workflow_definition
+from agent_flow.core.phase_workflow import (
+    load_phase_workflow_definition,
+    workflow_names,
+)
+from agent_flow.runner import Phase, Runner, _phases_from_definition
 
 
 def test_unknown_completion_disposition_cannot_fall_back_to_cleanup(tmp_path: Path) -> None:
@@ -344,3 +348,105 @@ def test_changing_a_loaded_definition_does_not_leak_into_later_loads() -> None:
     again = load_phase_workflow_definition(root, "full-feature")
 
     assert next(item for item in again.phases if item.id == phase.id).routes == original
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+# PR 이벤트 루프는 리뷰 코멘트와 CI 결과 같은 외부 이벤트로만 다시 돈다. 그래서 fix-loop 라운드 상한
+# 대상이 아니다(CI 수리 횟수는 `CI_REPAIR_MAX_ROUNDS`가 따로 막는다).
+_PR_EVENT_LOOP_PHASE = "pr-watch"
+
+
+def _route_graph(phases: list[Phase]) -> dict[int, set[int]]:
+    """runner와 같은 다음 자리 규칙: route가 없으면 다음 phase로 가고, `block`은 제자리에 멈춘다.
+
+    코드가 바뀐 PR fix를 첫 review phase로 돌리는 runtime 전용 edge는 YAML에 없어서 넣지 않는다.
+    그 edge가 만드는 순환은 모두 `pr-watch`를 지나므로 순환 판정 결과는 같다.
+    """
+    index = {phase.id: position for position, phase in enumerate(phases)}
+    return {
+        position: (
+            {index[target] for target in phase.routes.values() if target != "block"}
+            if phase.routes
+            else {position + 1}
+        )
+        for position, phase in enumerate(phases)
+    }
+
+
+def _reachable(graph: dict[int, set[int]], start: int) -> set[int]:
+    seen = {start}
+    pending = [start]
+    while pending:
+        for successor in graph.get(pending.pop(), ()):
+            if successor not in seen:
+                seen.add(successor)
+                pending.append(successor)
+    return seen
+
+
+def _uncapped_cycle_phases(phases: list[Phase]) -> list[str]:
+    """상한에 걸리지 않고 반복될 수 있는 순환 위의 phase.
+
+    runner는 route로 fix collector에 들어갈 때만 상한을 검사한다. route 없는 phase에서 넘어가는
+    진입은 라운드를 기록해도 막히지 않으므로 그 edge는 끊지 않는다.
+    """
+    runner = object.__new__(Runner)
+    runner.phases = phases
+    collectors = runner._fix_collector_targets()
+    kept = {position for position, phase in enumerate(phases) if phase.id != _PR_EVENT_LOOP_PHASE}
+    graph = {
+        position: {
+            successor
+            for successor in successors & kept
+            if not (phases[position].routes and phases[successor].id in collectors)
+        }
+        for position, successors in _route_graph(phases).items()
+        if position in kept
+    }
+    return [
+        phases[position].id
+        for position, successors in graph.items()
+        if any(position in _reachable(graph, successor) for successor in successors)
+    ]
+
+
+@pytest.mark.parametrize("name", workflow_names(_ROOT))
+def test_every_packaged_workflow_reaches_completion_and_bounds_its_rework_cycles(name: str) -> None:
+    """반증: route 하나를 잘못 고치면 phase가 조용히 skip되거나, 완료로 가는 길이 끊기거나,
+    재작업 순환이 상한 없이 반복된다."""
+    phases = _phases_from_definition(load_phase_workflow_definition(_ROOT, name))
+    graph = _route_graph(phases)
+    completion = len(phases)
+
+    reachable = _reachable(graph, 0)
+    assert [phase.id for position, phase in enumerate(phases) if position not in reachable] == []
+    assert [
+        phase.id
+        for position, phase in enumerate(phases)
+        if completion not in _reachable(graph, position)
+    ] == []
+    assert _uncapped_cycle_phases(phases) == []
+
+
+def test_a_rework_cycle_is_capped_only_by_a_routed_entry_into_a_fix_collector() -> None:
+    """반증: 순환 판정이 늘 빈 목록을 돌려주면 위 불변식은 아무것도 지키지 못하고,
+    runner가 막지 않는 진입까지 상한으로 치면 실제로 끝나지 않는 순환을 놓친다."""
+    implement = Phase(id="implement", description="")
+    handoff = Phase(id="handoff", description="")
+    by_comment = Phase(id="review", description="", routes={"approve": "handoff", "comments": "implement"})
+    by_rejection = Phase(
+        id="review", description="", routes={"approve": "handoff", "request-changes": "implement"}
+    )
+
+    assert _uncapped_cycle_phases([implement, by_comment, handoff]) == ["implement", "review"]
+    assert _uncapped_cycle_phases([implement, by_rejection, handoff]) == []
+
+    # `fix`는 collector지만 이 순환은 route 없는 `prep`에서 넘어가며 들어가므로 상한 검사를 받지 않는다.
+    triage = Phase(
+        id="review",
+        description="",
+        routes={"approve": "handoff", "request-changes": "fix", "comments": "prep"},
+    )
+    prep = Phase(id="prep", description="")
+    fix = Phase(id="fix", description="", routes={"default": "review"})
+    assert _uncapped_cycle_phases([triage, prep, fix, handoff]) == ["review", "prep", "fix"]

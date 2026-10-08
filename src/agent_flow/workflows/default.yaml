@@ -466,7 +466,7 @@ phases:
       `verdict: approve` or `verdict: request-changes`.
 
   - id: gates
-    description: Runner runs the profile gates itself after final-review approve. Routes fail→fix-loop, pass→commit.
+    description: Runner runs gates after final-review approve; green/approve→commit, pending→block, else→fix-loop.
     artifact: artifacts/gate-results.json
     routes:
       green: commit

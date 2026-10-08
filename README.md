@@ -223,7 +223,7 @@ flowchart TD
     architecture-review -->|approve| gates
     architecture-review -->|request-changes| refactor
     gates -->|green| commit
-    gates -->|fail| fix-loop
+    gates -->|request-changes / blocked / error / default| fix-loop
     fix-loop --> comment-authoring
     commit --> push-pr --> pr-watch
     pr-watch -->|comments| pr-comment-fix
@@ -245,7 +245,7 @@ flowchart TD
     review -->|approve| qa
     review -->|request-changes| fix-loop
     qa -->|green| handoff
-    qa -->|fail| fix-loop
+    qa -->|request-changes / blocked / error / default| fix-loop
     fix-loop --> review
 ```
 
