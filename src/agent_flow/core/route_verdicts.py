@@ -14,6 +14,27 @@ import re
 
 from agent_flow.core.profiles import GATE_PHASE_ALL
 
+# artifact의 `verdict:`/`status:` 줄에서 route key로 읽는 값. 이 밖의 값은 `default`가 된다.
+ARTIFACT_ROUTE_KEYS = frozenset(
+    {
+        "blocked",
+        "request-changes",
+        "ci-failed",
+        "ci_failed",
+        "comments",
+        "has_comments",
+        "skipped",
+        "pending",
+        "green",
+        "approve",
+        "merged",
+        "closed",
+        "error",
+    }
+)
+GATE_PASS_STATUSES = frozenset({"green", "approve"})
+GATE_FAIL_STATUSES = frozenset({"request-changes", "blocked", "error", "pending"})
+
 
 def route_key(text: str) -> str:
     lowered = text.lower()
@@ -29,27 +50,12 @@ def route_key(text: str) -> str:
                 return "green"
             return "default"
         return "request-changes"
-    checks = (
-        "blocked",
-        "request-changes",
-        "ci-failed",
-        "ci_failed",
-        "comments",
-        "has_comments",
-        "skipped",
-        "pending",
-        "green",
-        "approve",
-        "merged",
-        "closed",
-        "error",
-    )
     for line in lowered.splitlines():
         match = re.match(r"^(?:verdict|status):\s*([a-z_-]+)\s*$", line)
         if not match:
             continue
         key = match.group(1)
-        if key in checks:
+        if key in ARTIFACT_ROUTE_KEYS:
             return key
     return "default"
 
@@ -95,9 +101,9 @@ def gates_route_key(text: str, *, nonce: str = "") -> str:
     status = payload.get("status")
     if isinstance(status, str):
         normalized_status = status.strip().lower().replace("_", "-")
-        if payload["passed"] is True and normalized_status in {"green", "approve"}:
+        if payload["passed"] is True and normalized_status in GATE_PASS_STATUSES:
             return normalized_status if proven else "default"
-        if payload["passed"] is False and normalized_status in {"request-changes", "blocked", "error", "pending"}:
+        if payload["passed"] is False and normalized_status in GATE_FAIL_STATUSES:
             return normalized_status
     if payload["passed"] is True:
         return "green" if proven else "default"
