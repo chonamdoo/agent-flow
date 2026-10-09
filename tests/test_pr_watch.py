@@ -86,6 +86,37 @@ def test_require_ready_preserves_ci_failure_feedback_and_pending_precedence(
     assert snapshot.status == expected
 
 
+@pytest.mark.parametrize(("checks", "decision", "required", "expected"), [
+    ([{"name": "unit", "conclusion": "SUCCESS"}], "", (), "green"),
+    ([{"name": "unit", "conclusion": "SUCCESS"}], None, (), "green"),
+    ([{"name": "unit", "conclusion": "SUCCESS"}], "REVIEW_REQUIRED", (), "green"),
+    ([{"name": "unit", "conclusion": "SUCCESS"}], "CHANGES_REQUESTED", (), "has_comments"),
+    ([], "", (), "pending"),
+    (None, "", (), "pending"),
+    ([{"name": "unit", "status": "IN_PROGRESS"}], "", (), "pending"),
+    ([{"name": "unit", "conclusion": "SUCCESS"}], "", ("pytest",), "pending"),
+    ([{"name": "unit", "conclusion": "FAILURE"}], "", (), "ci_failed"),
+])
+def test_review_approval_waiver_keeps_ci_and_change_request_gates(
+    monkeypatch, checks, decision, required, expected,
+):
+    """A repository without a review rule reports no decision, and its author can never
+    approve their own PR. Waiving the decision must keep every other readiness gate."""
+    from agent_flow.pr_watch import fetch_pr
+
+    data = {
+        "state": "OPEN", "url": "https://github.com/owner/repo/pull/7",
+        "statusCheckRollup": checks, "reviewDecision": decision,
+    }
+    monkeypatch.setattr("agent_flow.pr_watch._fetch_pr_data", lambda *args: data)
+    monkeypatch.setattr("agent_flow.pr_watch._fetch_review_threads", lambda *args: [])
+
+    snapshot = fetch_pr(
+        7, required_checks=required, require_ready=True, require_review_approval=False,
+    )
+    assert snapshot.status == expected
+
+
 def test_watch_require_ready_waits_for_checks_then_approval(tmp_path, monkeypatch):
     from agent_flow.pr_watch import _read_feedback_state, watch_pr
 

@@ -651,6 +651,53 @@ def test_premerge_publication_honors_acknowledged_feedback(project, run_dir, mon
     assert requeued.missing == ("pre-merge SPEC: expected green publication (has_comments)",)
 
 
+def test_premerge_manual_approval_does_not_wait_for_review_but_merge_entry_does(
+    project, run_dir, monkeypatch,
+):
+    """반증: review 규칙이 없는 저장소는 `reviewDecision`이 비고 작성자는 자기 PR을 승인할 수 없어,
+    green 게시 HEAD에서도 pre-merge 수동 승인을 영영 기록하지 못하고 run이 abort로만 끝났다.
+
+    승인 기록은 게시 HEAD와 필수 CI만 본다. merge 진입은 여전히 GitHub 승인을 기다린다.
+    """
+    import agent_flow.pr_watch as pr_watch
+    import agent_flow.spec_publication as publication_module
+
+    _capture_spec_ledger(run_dir, "manual", due="pre-merge")
+    head = _git("rev-parse", "HEAD", cwd=project).stdout.strip()
+    (run_dir / "push-pr.md").write_text(
+        f"remote-oid: {head}\npr-url: https://github.com/example/repo/pull/1\n",
+    )
+    gates = run_dir / "artifacts" / "gate-results.json"
+    gates.parent.mkdir(exist_ok=True)
+    gates.write_text(json.dumps({"produced_by": {"gate_phase": "all", "gate_execution": "local"}}))
+    payload = {
+        "url": "https://github.com/example/repo/pull/1", "state": "OPEN",
+        "headRefOid": head, "reviewDecision": "CHANGES_REQUESTED",
+        "statusCheckRollup": [{"name": "pytest", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+    }
+    monkeypatch.setattr(publication_module, "missing_delivery_evidence", lambda *a, **k: [])
+    monkeypatch.setattr(pr_watch, "_fetch_pr_data", lambda *a, **k: payload)
+    monkeypatch.setattr(pr_watch, "_fetch_review_threads", lambda *a, **k: [])
+    statement = manual_spec_approval_statement(run_dir, "SPEC-1", project_root=project)
+
+    with pytest.raises(ValueError, match=r"expected green publication \(has_comments\)"):
+        record_manual_spec_approval(
+            run_dir, "SPEC-1", statement, project_root=project,
+            publication_observer=observe_spec_publication,
+        )
+    assert read_manual_spec_approvals(run_dir, project_root=project) == set()
+
+    payload["reviewDecision"] = ""
+    record_manual_spec_approval(
+        run_dir, "SPEC-1", statement, project_root=project,
+        publication_observer=observe_spec_publication,
+    )
+    assert read_manual_spec_approvals(run_dir, project_root=project) == {"SPEC-1"}
+    assert missing_spec_item_evidence(
+        project, run_dir, "merge", GATE, publication_observer=observe_spec_publication,
+    ) == ["pre-merge SPEC: expected green publication (pending)"]
+
+
 @pytest.mark.parametrize("surface", ["status", "spec-markers"])
 def test_publication_checkpoint_uses_selected_merge_markers(project, monkeypatch, capsys, surface):
     import agent_flow.pr_watch as pr_watch

@@ -1838,7 +1838,7 @@ def main(argv: list[str] | None = None) -> int:
                     return 1
             checkout_was_live = _worktree_checkout_exists(status)
             try:
-                metadata_removed = remove_worktree(
+                removal = remove_worktree(
                     root=root,
                     status=status,
                     delete_branch=not args.keep_branch,
@@ -1852,17 +1852,22 @@ def main(argv: list[str] | None = None) -> int:
             ) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
+            if removal.archived_runs:
+                print(
+                    f"archived {len(removal.archived_runs)} run(s): "
+                    f"{removal.archived_runs[0].parent}"
+                )
             if checkout_was_live:
                 print(f"removed {status.name} {status.path}")
-            elif metadata_removed and status.path.exists():
+            elif removal.metadata_removed and status.path.exists():
                 print(f"removed stale metadata {status.name}; kept path {status.path}")
-            elif metadata_removed:
+            elif removal.metadata_removed:
                 print(f"removed stale metadata {status.name} {status.path}")
             if not args.keep_branch and worktree_branch_exists(root=root, branch=status.branch):
                 # agent-flow가 만든 브랜치라는 증거가 없어 남긴 경우다. 조용히 두면
                 # 사용자는 정리가 끝난 줄 안다.
                 print(f"kept branch {status.branch}")
-            if not checkout_was_live and not metadata_removed:
+            if not checkout_was_live and not removal.metadata_removed:
                 # 지웠다고 말하고 남겨 두면 사용자는 목록에 계속 뜨는 이유를 모른다.
                 # 살아 있는 자리를 지키느라 보존한 것은 정상 동작이고, 이 머신에서
                 # 소유 증명이 영구히 불가능한 기록만 막다른 길이다.

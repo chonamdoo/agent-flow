@@ -348,9 +348,15 @@ agent-flow abort --root <leader-path> --worktree <worktree-name> --yes
 agent-flow run "<remaining work>" --workflow development --reuse-existing-worktree
 ```
 
-`abort` preserves the old run's artifacts. Reference them from the successor's exploration
-artifact; do not transfer old approvals to the new definition. Choose the successor workflow
-for the remaining task rather than automatically restarting a larger lifecycle.
+`abort` leaves the old run's artifacts in the checkout's runtime state. Before `agent-flow
+worktree remove` deletes the runtime state that belongs to that checkout, it copies every run
+there to the cleanup archive, `.git/agent-flow/archive/worktrees/<name>-<hash>/.agent-flow/runs/`,
+and prints that path. It verifies each copy before any deletion. If a run cannot be archived, it
+exits 2 and deletes nothing. Runtime state that another checkout owns is neither archived nor
+deleted. Reference the old artifacts from the
+successor's exploration artifact; do not transfer old approvals to the new definition. Choose
+the successor workflow for the remaining task rather than automatically restarting a larger
+lifecycle.
 
 ## Domain glossary file name
 
@@ -474,6 +480,12 @@ runs this on their behalf.
 ```bash
 agent-flow spec approve <spec-id> --run-dir <run-dir>
 ```
+
+For a `due: pre-merge` item, the approval records the published HEAD. It also requires that HEAD
+to have green required CI checks and no unresolved feedback. It does not wait for a GitHub review
+decision: a repository without a review rule has none, and the PR author cannot approve their own
+PR. Entering `merge` still requires `reviewDecision: APPROVED`. In such a repository the merge
+happens on GitHub, and the run continues through the watcher's `merged` route.
 
 ### Gates
 
@@ -621,6 +633,8 @@ classification and recorded feedback evidence. It passes `--require-ready` to
 preserve its stricter readiness contract: at least one check must be registered
 and `reviewDecision` must be `APPROVED` before the result can be green. The Python
 watcher also accepts this flag; without it, no-CI repositories remain supported.
+The runner's merge entry applies the same contract. Recording a pre-merge SPEC
+approval applies it without the review decision.
 
 ## Repository layout
 

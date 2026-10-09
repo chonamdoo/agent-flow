@@ -113,6 +113,12 @@ class CleanupResumeResult:
     aborted: bool
 
 
+@dataclass(frozen=True)
+class WorktreeRemoval:
+    metadata_removed: bool
+    archived_runs: tuple[Path, ...]
+
+
 
 class AmbiguousWorktreeSelector(ValueError):
     """선택자가 등록된 worktree 여러 개와 맞았다.
@@ -589,10 +595,11 @@ def remove_worktree(
     require_merged: bool = True,
     allow_unmerged: bool = False,
     force_metadata: bool = False,
-) -> bool:
+) -> WorktreeRemoval:
     """Remove one checkout only while repository-wide cleanup exclusion is held.
 
-    Returns whether the runtime metadata for this name was cleared.
+    Reports whether the runtime metadata for this name was cleared and where its
+    runs were archived first.
     """
     with _cleanup_lease(root, status.path):
         runtime_root = _runtime_root_for_status(root=root, status=status)
@@ -616,7 +623,7 @@ def _remove_worktree_locked(
     require_merged: bool,
     allow_unmerged: bool,
     force_metadata: bool = False,
-) -> bool:
+) -> WorktreeRemoval:
     leader = leader_worktree_path(root)
     if leader is None:
         if git_repo_state(root) != "non-repo":
@@ -634,53 +641,137 @@ def _remove_worktree_locked(
             f"refusing to remove {status.path}: "
             f"not registered as a worktree of this repository"
         )
-    if live:
-        _retire_provisioned_host_hook_registrations(root=root, checkout=status.path)
-    if live and require_merged and not allow_unmerged:
-        assert_worktree_mergeable(root=root, path=status.path)
-
-    branch_delete = (
-        _branch_delete_identity(root=root, status=status, registered=registered)
-        if live and delete_branch
-        else None
-    )
-    _assert_registration_and_ref_unchanged(
-        root=root,
-        status=status,
-        expected_registration=registered,
-        branch_delete=branch_delete,
-    )
-
-    if live:
-        force_args = ("--force",) if allow_unmerged else ()
-        _run_git(root, "worktree", "remove", *force_args, str(status.path))
-    else:
-        if registered is not None:
-            if status.path.exists():
-                raise WorktreeIsolationError(
-                    f"stale worktree path is occupied at {status.path}; preserving it"
-                )
-            _run_git(root, "worktree", "remove", str(status.path))
-            if _registered_at_path(root=root, path=status.path) is not None:
-                raise WorktreeIsolationError(
-                    f"stale worktree registration remains for {status.path}; preserving metadata"
-                )
-
-    if branch_delete is not None:
-        branch, expected_oid = branch_delete
-        _delete_branch_ref_cas(root=root, branch=branch, expected_oid=expected_oid)
-    metadata_removed = remove_worktree_metadata(
+    # 소유 증명 일부는 checkout 경로가 사라진 뒤에야 통과한다(이전 layout 자리 승계,
+    # `--force-metadata`). 그래서 삭제 직전에 내릴 판정을 checkout이 지워진 상태로 미리
+    # 내리고, 그 기록을 hook 회수를 포함한 어떤 변경보다 먼저 보관한다.
+    archived_key = _removable_runtime_key(
         root=root,
         name=status.name,
         path=status.path,
         force=force_metadata,
+        checkout_gone=live,
+    )
+    archived_runs, new_archives = _archive_removed_runs(
+        root=root, status=status, key=archived_key
+    )
+    try:
+        if live:
+            _retire_provisioned_host_hook_registrations(root=root, checkout=status.path)
+        if live and require_merged and not allow_unmerged:
+            assert_worktree_mergeable(root=root, path=status.path)
+
+        branch_delete = (
+            _branch_delete_identity(root=root, status=status, registered=registered)
+            if live and delete_branch
+            else None
+        )
+        _assert_registration_and_ref_unchanged(
+            root=root,
+            status=status,
+            expected_registration=registered,
+            branch_delete=branch_delete,
+        )
+
+        if live:
+            force_args = ("--force",) if allow_unmerged else ()
+            _run_git(root, "worktree", "remove", *force_args, str(status.path))
+        else:
+            if registered is not None:
+                if status.path.exists():
+                    raise WorktreeIsolationError(
+                        f"stale worktree path is occupied at {status.path}; preserving it"
+                    )
+                _run_git(root, "worktree", "remove", str(status.path))
+                if _registered_at_path(root=root, path=status.path) is not None:
+                    raise WorktreeIsolationError(
+                        f"stale worktree registration remains for {status.path}; "
+                        "preserving metadata"
+                    )
+
+        if branch_delete is not None:
+            branch, expected_oid = branch_delete
+            _delete_branch_ref_cas(root=root, branch=branch, expected_oid=expected_oid)
+        deleted_key = _removable_runtime_key(
+            root=root, name=status.name, path=status.path, force=force_metadata
+        )
+        if deleted_key is not None and deleted_key != archived_key:
+            raise CleanupBlockedError(
+                f"runtime metadata {deleted_key} was not archived before removal; "
+                "preserving it"
+            )
+    except BaseException:
+        # 여기까지 실패하면 원본 run은 runtime metadata에 그대로 있다. 이번 호출이 새로 쓴
+        # 사본만 걷는다. 남겨 두면 그 뒤 run이 바뀌었을 때 재시도가 digest 불일치로 막힌다.
+        _discard_archives(new_archives)
+        raise
+    metadata_removed = deleted_key is not None and _remove_runtime_metadata(
+        root=root, key=deleted_key
     )
     if not live and status.path.is_dir() and _is_creation_layout_child(root=root, path=status.path):
         try:
             status.path.rmdir()
         except OSError:
             pass
-    return metadata_removed
+    return WorktreeRemoval(metadata_removed=metadata_removed, archived_runs=archived_runs)
+
+
+def _archive_removed_runs(
+    *, root: Path, status: WorktreeStatus, key: str | None
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """이 remove가 지울 runtime의 run을 cleanup과 같은 자리에 먼저 보관한다.
+
+    abort와 local-handoff 완료는 active 표시만 걷는다. 여기서 보관하지 않으면 그
+    run의 artifact는 runtime metadata와 함께 사라진다. 하나라도 보관하지 못하면
+    `CleanupBlockedError`로 멈춰 아무것도 지우지 않는다.
+
+    보관된 run 전체와 그중 이번 호출이 새로 만든 사본을 따로 돌려준다.
+    """
+    if key is None:
+        return (), ()
+    source_runs = _runtime_state_root(root=root, name=key) / ".agent-flow" / "runs"
+    for part in (source_runs.parent, source_runs):
+        try:
+            identity = part.lstat()
+        except FileNotFoundError:
+            return (), ()
+        except OSError as exc:
+            raise CleanupBlockedError(f"cannot inspect run history: {part}") from exc
+        if not stat.S_ISDIR(identity.st_mode):
+            raise CleanupBlockedError(f"run history is not a real directory: {part}")
+    archive_runs = (
+        _checkout_run_archive_root(root=root, name=status.name, path=status.path)
+        / ".agent-flow"
+        / "runs"
+    )
+    archived: list[Path] = []
+    created: list[Path] = []
+    try:
+        for source in _run_history_candidates(source_runs):
+            if not _is_history_run(source):
+                continue
+            destination = archive_runs / source.name
+            try:
+                if _archive_run_tree(
+                    source=source,
+                    destination=destination,
+                    digest=_run_tree_digest(source, exclude_lifecycle=False),
+                ):
+                    created.append(destination)
+            except OSError as exc:
+                raise CleanupBlockedError(
+                    f"cannot archive run before removal: {source}: {exc}"
+                ) from exc
+            archived.append(destination)
+    except BaseException:
+        _discard_archives(tuple(created))
+        raise
+    return tuple(archived), tuple(created)
+
+
+def _discard_archives(paths: tuple[Path, ...]) -> None:
+    """이번 remove가 새로 쓴 보관 사본만 걷는다. 걷지 못한 사본은 다음 remove가 digest로 검사한다."""
+    for path in paths:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _assert_registration_and_ref_unchanged(
@@ -1101,15 +1192,8 @@ def _abort_cleanup_context(
         else status.registration_identity
         in {None, checkout["registration_identity"]}
     )
-    digest = hashlib.sha256(
-        f"{worktree_path_key(_git_common_dir(root))}\0"
-        f"{worktree_path_key(status.path)}".encode()
-    ).hexdigest()[:16]
-    expected_archive_state = (
-        _agent_flow_state_dir(root)
-        / "archive"
-        / "worktrees"
-        / f"{_safe_component(status.name)}-{digest}"
+    expected_archive_state = _checkout_run_archive_root(
+        root=root, name=status.name, path=status.path
     )
     expected_archive = (
         expected_archive_state / ".agent-flow" / "runs" / run_dir.name
@@ -1398,14 +1482,9 @@ def _prepare_or_load_cleanup_journal(
             f"run directory is outside checkout runtime state: {run_dir}"
         )
 
-    digest = hashlib.sha256(
-        f"{worktree_path_key(_git_common_dir(root))}\0{worktree_path_key(status.path)}".encode()
-    ).hexdigest()[:16]
-    archive_state = (
-        _agent_flow_state_dir(root)
-        / "archive"
-        / "worktrees"
-        / f"{_safe_component(status.name)}-{digest}"
+    digest = _checkout_path_digest(root=root, path=status.path)
+    archive_state = _checkout_run_archive_root(
+        root=root, name=status.name, path=status.path
     )
     archive_run = archive_state / ".agent-flow" / "runs" / run_dir.name
     journal_path = _cleanup_pending_root(root) / f"{digest}-{run_dir.name}.json"
@@ -1533,39 +1612,35 @@ def _bind_run_to_cleanup(
     write_meta(run_dir, meta)
 
 
+def _checkout_path_digest(*, root: Path, path: Path) -> str:
+    return hashlib.sha256(
+        f"{worktree_path_key(_git_common_dir(root))}\0{worktree_path_key(path)}".encode()
+    ).hexdigest()[:16]
+
+
+def _checkout_run_archive_root(*, root: Path, name: str, path: Path) -> Path:
+    """cleanup과 수동 remove가 같은 checkout의 run을 함께 보관하는 자리."""
+    return (
+        _agent_flow_state_dir(root)
+        / "archive"
+        / "worktrees"
+        / f"{_safe_component(name)}-{_checkout_path_digest(root=root, path=path)}"
+    )
+
+
 def _archive_historical_runs(
     *, journal_path: Path, journal: dict[str, Any]
 ) -> None:
     source_runs = Path(journal["run"]["source_state_root"]) / ".agent-flow" / "runs"
     archive_runs = Path(journal["run"]["archive_state_root"]) / ".agent-flow" / "runs"
     owner = Path(journal["run"]["source_dir"])
-    try:
-        candidates = sorted(source_runs.iterdir(), key=lambda path: path.name)
-    except OSError as exc:
-        raise CleanupBlockedError(
-            f"cannot enumerate checkout run history: {source_runs}"
-        ) from exc
+    candidates = _run_history_candidates(source_runs)
     records = journal["run"].setdefault("historical_archives", {})
     if not isinstance(records, dict):
         raise CleanupBlockedError("cleanup historical archive records are malformed")
     for source in candidates:
-        if source == owner:
+        if source == owner or not _is_history_run(source):
             continue
-        try:
-            identity = source.lstat()
-        except OSError as exc:
-            raise CleanupBlockedError(
-                f"cannot inspect historical run: {source}"
-            ) from exc
-        if (
-            source.name in _RUN_COORDINATION_FILES
-            and stat.S_ISREG(identity.st_mode)
-        ):
-            continue
-        if not stat.S_ISDIR(identity.st_mode) or stat.S_ISLNK(identity.st_mode):
-            raise CleanupBlockedError(
-                f"historical run is not a real directory: {source}"
-            )
         digest = _run_tree_digest(source, exclude_lifecycle=False)
         record = records.get(source.name)
         destination = archive_runs / source.name
@@ -1582,50 +1657,101 @@ def _archive_historical_runs(
             raise CleanupBlockedError(
                 f"historical run changed after cleanup preparation: {source}"
             )
-        if destination.exists():
-            # 0.2.6의 abort는 source marker만 걷었다. owner archive digest는 active를
-            # 제외하므로, 다음 cleanup lease 아래에서 그 lifecycle marker만 맞춘다.
-            # 이후 full digest를 다시 비교해 meta나 payload 차이는 그대로 차단한다.
-            if (
-                not (source / ACTIVE_MARKER).exists()
-                and (destination / ACTIVE_MARKER).exists()
-                and _run_tree_digest(
-                    source,
-                    exclude_lifecycle=False,
-                    exclude_active_marker=True,
-                )
-                == _run_tree_digest(
-                    destination,
-                    exclude_lifecycle=False,
-                    exclude_active_marker=True,
-                )
-            ):
-                mark_inactive(destination)
-            if _run_tree_digest(destination, exclude_lifecycle=False) != digest:
-                raise CleanupBlockedError(
-                    f"historical run archive checksum mismatch: {destination}"
-                )
-            continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(
-            f".{destination.name}.tmp-{os.getpid()}"
+        _archive_run_tree(
+            source=source,
+            destination=destination,
+            digest=digest,
+            reconcile_legacy_active=True,
         )
+
+
+def _run_history_candidates(source_runs: Path) -> list[Path]:
+    try:
+        return sorted(source_runs.iterdir(), key=lambda path: path.name)
+    except OSError as exc:
+        raise CleanupBlockedError(
+            f"cannot enumerate checkout run history: {source_runs}"
+        ) from exc
+
+
+def _is_history_run(source: Path) -> bool:
+    """`runs/`의 한 항목이 보관할 run인가. 조정용 lock 파일만 건너뛴다."""
+    try:
+        identity = source.lstat()
+    except OSError as exc:
+        raise CleanupBlockedError(
+            f"cannot inspect historical run: {source}"
+        ) from exc
+    if (
+        source.name in _RUN_COORDINATION_FILES
+        and stat.S_ISREG(identity.st_mode)
+    ):
+        return False
+    if not stat.S_ISDIR(identity.st_mode) or stat.S_ISLNK(identity.st_mode):
+        raise CleanupBlockedError(
+            f"historical run is not a real directory: {source}"
+        )
+    return True
+
+
+def _archive_run_tree(
+    *,
+    source: Path,
+    destination: Path,
+    digest: str,
+    reconcile_legacy_active: bool = False,
+) -> bool:
+    """run 하나를 ``digest``가 같은 사본으로 보관한다. 새로 만들었으면 True다.
+
+    기존 사본은 ``reconcile_legacy_active``일 때만 고친다. 수동 remove는 다른
+    digest의 같은 run을 고치지 않고 멈춰야 한다.
+    """
+    if destination.exists():
+        # 0.2.6의 abort는 source marker만 걷었다. owner archive digest는 active를
+        # 제외하므로, 다음 cleanup lease 아래에서 그 lifecycle marker만 맞춘다.
+        # 이후 full digest를 다시 비교해 meta나 payload 차이는 그대로 차단한다.
+        if (
+            reconcile_legacy_active
+            and not (source / ACTIVE_MARKER).exists()
+            and (destination / ACTIVE_MARKER).exists()
+            and _run_tree_digest(
+                source,
+                exclude_lifecycle=False,
+                exclude_active_marker=True,
+            )
+            == _run_tree_digest(
+                destination,
+                exclude_lifecycle=False,
+                exclude_active_marker=True,
+            )
+        ):
+            mark_inactive(destination)
+        if _run_tree_digest(destination, exclude_lifecycle=False) != digest:
+            raise CleanupBlockedError(
+                f"historical run archive checksum mismatch: {destination}"
+            )
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(
+        f".{destination.name}.tmp-{os.getpid()}"
+    )
+    if temporary.exists():
+        shutil.rmtree(temporary)
+    try:
+        shutil.copytree(source, temporary, symlinks=True)
+        if _run_tree_digest(source, exclude_lifecycle=False) != digest:
+            raise CleanupBlockedError(
+                f"historical run changed during archive copy: {source}"
+            )
+        if _run_tree_digest(temporary, exclude_lifecycle=False) != digest:
+            raise CleanupBlockedError(
+                f"historical run archive copy checksum mismatch: {temporary}"
+            )
+        os.replace(temporary, destination)
+    finally:
         if temporary.exists():
             shutil.rmtree(temporary)
-        try:
-            shutil.copytree(source, temporary, symlinks=True)
-            if _run_tree_digest(source, exclude_lifecycle=False) != digest:
-                raise CleanupBlockedError(
-                    f"historical run changed during archive copy: {source}"
-                )
-            if _run_tree_digest(temporary, exclude_lifecycle=False) != digest:
-                raise CleanupBlockedError(
-                    f"historical run archive copy checksum mismatch: {temporary}"
-                )
-            os.replace(temporary, destination)
-        finally:
-            if temporary.exists():
-                shutil.rmtree(temporary)
+    return True
 
 
 def _archive_cleanup_run(
@@ -3469,14 +3595,40 @@ def remove_worktree_metadata(
     기록은 증명이 영구히 실패해서, 그것 없이는 지울 방법이 없다. 살아 있는
     checkout의 상태는 force로도 지우지 않는다.
     """
+    key = _removable_runtime_key(root=root, name=name, path=path, force=force)
+    if key is None:
+        return False
+    return _remove_runtime_metadata(root=root, key=key)
+
+
+def _removable_runtime_key(
+    *,
+    root: Path,
+    name: str,
+    path: Path | None,
+    force: bool,
+    checkout_gone: bool = False,
+) -> str | None:
+    """``remove_worktree_metadata``가 지울 runtime 상태의 키. 소유를 증명하지 못하면 None."""
     try:
         key = _runtime_state_key(root=root, name=name)
     except ValueError:
         # agent-flow 이름 규칙으로 정규화되지 않는 이름에는 애초에 메타데이터가 없다.
-        return False
-    if path is not None and not _metadata_belongs_to_path(root=root, key=key, path=path):
-        if not (force and _metadata_paths_are_absent(root=root, key=key, path=path)):
-            return False
+        return None
+    if path is not None and not _metadata_belongs_to_path(
+        root=root, key=key, path=path, checkout_gone=checkout_gone
+    ):
+        if not (
+            force
+            and _metadata_paths_are_absent(
+                root=root, key=key, path=path, checkout_gone=checkout_gone
+            )
+        ):
+            return None
+    return key
+
+
+def _remove_runtime_metadata(*, root: Path, key: str) -> bool:
     runtime_root = _runtime_state_root(root=root, name=key)
     removed = False
     if runtime_root.exists():
@@ -3506,9 +3658,14 @@ def worktree_metadata_is_unreachable(*, root: Path, name: str, path: Path) -> bo
     return _metadata_paths_are_absent(root=root, key=key, path=path)
 
 
-def _metadata_paths_are_absent(*, root: Path, key: str, path: Path) -> bool:
-    """기록된 경로와 대상 경로가 **둘 다** 디스크에 없는가."""
-    if path.exists():
+def _metadata_paths_are_absent(
+    *, root: Path, key: str, path: Path, checkout_gone: bool = False
+) -> bool:
+    """기록된 경로와 대상 경로가 **둘 다** 디스크에 없는가.
+
+    ``checkout_gone``이면 대상 경로는 이미 지운 것으로 본다(곧 지울 checkout의 판정).
+    """
+    if path.exists() and not checkout_gone:
         return False
     payload = _state_key_manifest(root=root, key=key)
     if payload is None:
@@ -3539,7 +3696,9 @@ def _runtime_state_key(*, root: Path, name: str) -> str:
     return resolved
 
 
-def _metadata_belongs_to_path(*, root: Path, key: str, path: Path) -> bool:
+def _metadata_belongs_to_path(
+    *, root: Path, key: str, path: Path, checkout_gone: bool = False
+) -> bool:
     """``key`` 자리의 메타데이터가 이 등록 경로의 것인가.
 
     manifest가 있으면 그 안에 기록된 경로가 진실이다. manifest가 없으면 생성
@@ -3566,7 +3725,7 @@ def _metadata_belongs_to_path(*, root: Path, key: str, path: Path) -> bool:
     # 두 관리 경로끼리는 소유권을 이어 간다. 존재하는 다른 경로는 절대 신뢰하지 않는다.
     return (
         not candidate.exists()
-        and not path.exists()
+        and (checkout_gone or not path.exists())
         and any(same_worktree_path(candidate, managed) for managed in managed_paths)
         and any(same_worktree_path(path, managed) for managed in managed_paths)
     )

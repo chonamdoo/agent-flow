@@ -62,6 +62,7 @@ class SpecPublicationObserver(Protocol):
         profile: dict | None = None,
         post_merge: bool = False,
         config_root: Path | None = None,
+        require_review_approval: bool = True,
     ) -> SpecPublicationEvidence: ...
 
 
@@ -505,8 +506,12 @@ def record_manual_spec_approval(
                 raise ValueError("pre-merge SPEC approval requires the bound project root")
             if publication_observer is None:
                 raise ValueError("pre-merge SPEC: publication observer is unavailable")
+            # 승인 기록은 게시 HEAD와 필수 CI만 증명한다. GitHub review 결정은 merge
+            # 진입 gate의 몫이다. review 규칙이 없는 저장소는 그 결정이 비어 있고, 작성자는
+            # 자기 PR을 승인할 수 없어 여기서까지 요구하면 승인을 영영 기록하지 못한다.
             publication = publication_observer(
                 project_root, run_dir, profile=profile, config_root=config_root,
+                require_review_approval=False,
             )
             if publication.missing:
                 raise ValueError("; ".join(publication.missing))
