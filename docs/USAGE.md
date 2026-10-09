@@ -633,8 +633,9 @@ classification and recorded feedback evidence. It passes `--require-ready` to
 preserve its stricter readiness contract: at least one check must be registered
 and `reviewDecision` must be `APPROVED` before the result can be green. The Python
 watcher also accepts this flag; without it, no-CI repositories remain supported.
-The runner's merge entry applies the same contract. Recording a pre-merge SPEC
-approval applies it without the review decision.
+The runner's `merge-approval` and `merge` entries apply the same contract, and
+`merge-approval` then pauses for the user's merge approval. Recording a pre-merge
+SPEC approval applies the contract without the review decision.
 
 ## Repository layout
 

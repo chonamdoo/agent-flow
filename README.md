@@ -141,7 +141,7 @@ module-split: none
 - All work happens inside an isolated git worktree. A branch alone is not enough
 - The `guard-protected-branch.sh` hook blocks commits and pushes on protected branches
 - `worktree-tripwire.py` detects drift in the leader checkout
-- A separate phase has the user approve directly, just before the merge
+- Just before the merge, the runner pauses until the user approves that exact approval artifact
 
 ### Treat the approval path itself as attack surface
 
@@ -173,7 +173,7 @@ and `DDD` means domain-driven design.
 | `bugfix` | one reproducible bug | 5 |
 | `diagnosing-bugs` | one hard, intermittent, or performance bug | 9 |
 | `development` | one concern | 6 |
-| `default` | through PR and merge | 15 |
+| `default` | through PR and merge | 16 |
 | `full-feature` | from PRD and DDD | 24 |
 
 Use `default` for a small change and waiting on phases costs more than the work itself.
@@ -202,7 +202,7 @@ push-pr              push the branch and open the PR
 pr-watch             watch PR checks and comments
 pr-comment-fix       respond to review comments → pr-watch
 pr-ci-fix            respond to CI failures → pr-watch
-merge-approval       explicit user approval
+merge-approval       explicit user approval   [pause]
 merge                merge
 handoff              write the handoff document
 ```
@@ -234,7 +234,7 @@ flowchart TD
     pr-ci-fix -->|code changed| multi-review
     pr-watch -->|green| merge-approval
     pr-watch -->|merged| handoff
-    merge-approval -->|approve| merge --> handoff
+    merge-approval -->|pause, approve| merge --> handoff
 ```
 
 ### The `development` flow

@@ -34,7 +34,7 @@ This is the always-loaded hot context. Read long domain/workflow explanations on
 3. The agent reads only the documents that match the phase context map.
 4. Even after writing an artifact, transition only via the `next_command` the runner printed.
 5. A gates/review/PR comment failure goes back to fix-loop.
-6. push/pr-watch proceeds to merge only when checks and review threads are green.
+6. push/pr-watch proceeds to merge-approval only when checks and review threads are green; the runner pauses there for the user's merge approval before merge.
 
 ## Future Vocabulary
 
