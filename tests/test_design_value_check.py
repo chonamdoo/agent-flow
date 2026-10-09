@@ -1072,6 +1072,71 @@ def test_pr_watch_merged_route_proves_the_live_merge_after_the_head_branch_is_de
     assert not (run_dir / "cleanup.md").exists()
 
 
+def test_default_merge_approval_entry_still_requires_review_approval(
+    project, run_dir, tmp_path, monkeypatch,
+):
+    """반증: default가 green PR을 곧장 `merge`로 보내면 merge 직전 사용자 승인 pause가 없다.
+    새 `merge-approval` 진입도 merge와 같은 pre-merge gate(GitHub 승인)를 거쳐야 한다."""
+    import agent_flow.pr_watch as pr_watch
+    from agent_flow.core.commands import SafeCommandResult
+    from agent_flow.core.phase_workflow import find_kit_root
+    from agent_flow.core.worktree_isolation import WorktreeIsolationError
+
+    branch = "feat/merge-approval"
+    _git("switch", "-c", branch, cwd=project)
+    (project / "feature.txt").write_text("feature\n", encoding="utf-8")
+    _git("add", "feature.txt", cwd=project)
+    _git("commit", "-m", "feat: merge approval", cwd=project)
+    remote = tmp_path / "remote.git"
+    _git("init", "--bare", str(remote), cwd=tmp_path)
+    _git("remote", "add", "origin", str(remote), cwd=project)
+    _git("push", "origin", "HEAD", cwd=project)
+    head = _git("rev-parse", "HEAD", cwd=project).stdout.strip()
+    url = "https://github.com/example/repo/pull/1"
+    (run_dir / "push-pr.md").write_text(
+        f"remote: origin\nbranch: {branch}\nremote-oid: {head}\npr-url: {url}\npr-base: main\n",
+    )
+    gates = run_dir / "artifacts" / "gate-results.json"
+    gates.parent.mkdir(exist_ok=True)
+    gates.write_text(json.dumps({"produced_by": {"gate_phase": "all", "gate_execution": "local"}}))
+    pr = {
+        "url": url, "state": "OPEN", "baseRefName": "main", "headRefName": branch, "headRefOid": head,
+        "reviewDecision": "",
+        "statusCheckRollup": [{"name": "pytest", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+    }
+    monkeypatch.setattr(
+        "agent_flow.core.delivery_evidence.run_safe_command",
+        lambda command, **_: SafeCommandResult(
+            args=tuple(command), returncode=0, stdout=json.dumps(pr), stderr="",
+        ),
+    )
+    monkeypatch.setattr(pr_watch, "_fetch_pr_data", lambda *a, **k: pr)
+    monkeypatch.setattr(pr_watch, "_fetch_review_threads", lambda *a, **k: [])
+    _capture_spec_ledger(run_dir, "manual", due="pre-merge")
+    definition = load_phase_workflow_definition(find_kit_root(), "default")
+    watch = [phase.id for phase in definition.phases].index("pr-watch")
+    write_meta(run_dir, {
+        "run_id": "merge-approval-entry", "workflow": "default", "task": "",
+        **workflow_pin_metadata(definition, workflow="default"),
+        "phase_index": watch, "current_phase": "pr-watch",
+        "phase_entered_at": "2026-10-09T00:00:00+00:00",
+    })
+    runner = Runner(project, run_dir=run_dir)
+    record_manual_spec_approval(
+        run_dir, "SPEC-1", manual_spec_approval_statement(run_dir, "SPEC-1", project_root=project),
+        project_root=project, profile=runner.profile, publication_observer=observe_spec_publication,
+    )
+    (run_dir / "pr-watch.md").write_text("status: green\n", encoding="utf-8")
+
+    with pytest.raises(WorktreeIsolationError, match=r"expected green publication \(pending\)"):
+        runner._commit_transition(runner._plan_transition(watch, runner.phases[watch]))
+    assert read_meta(run_dir)["current_phase"] == "pr-watch"
+
+    pr["reviewDecision"] = "APPROVED"
+    runner._commit_transition(runner._plan_transition(watch, runner.phases[watch]))
+    assert read_meta(run_dir)["current_phase"] == "merge-approval"
+
+
 @pytest.mark.parametrize("phase_id", ["final-review", "merge"])
 @pytest.mark.parametrize("missing_ledger", [False, True])
 def test_all_completion_paths_share_spec_evidence_check(

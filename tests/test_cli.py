@@ -254,6 +254,12 @@ class CliTest(unittest.TestCase):
         self.assertEqual(phases["pr-comment-fix"]["routes"]["default"], "pr-watch")
         self.assertEqual(phases["pr-ci-fix"]["routes"]["default"], "pr-watch")
         self.assertEqual(phases["merge-approval"]["routes"]["default"], "block")
+        self.assertEqual(phases["pr-watch"]["routes"]["green"], "merge-approval")
+        self.assertEqual(phases["pr-watch"]["routes"]["merged"], "handoff")
+        self.assertEqual(
+            phases["merge-approval"]["routes"], {"approve": "merge", "default": "block"}
+        )
+        self.assertIs(phases["merge-approval"].get("pause_after"), True)
 
         default_path = (
             Path(__file__).resolve().parents[1]
@@ -270,7 +276,12 @@ class CliTest(unittest.TestCase):
         self.assertEqual(default_phases["gates"]["routes"]["request-changes"], "fix-loop")
         self.assertEqual(default_phases["fix-loop"]["routes"]["default"], "comment-authoring")
         self.assertEqual(default_phases["comment-authoring"]["routes"]["default"], "final-review")
-        self.assertEqual(default_phases["pr-watch"]["routes"]["green"], "merge")
+        self.assertEqual(default_phases["pr-watch"]["routes"]["green"], "merge-approval")
+        self.assertEqual(default_phases["pr-watch"]["routes"]["merged"], "cleanup")
+        self.assertEqual(
+            default_phases["merge-approval"]["routes"], {"approve": "merge", "default": "block"}
+        )
+        self.assertIs(default_phases["merge-approval"].get("pause_after"), True)
         self.assertEqual(default_phases["pr-watch"]["routes"]["has_comments"], "pr-comment-fix")
         self.assertEqual(default_phases["pr-watch"]["routes"]["ci_failed"], "pr-ci-fix")
         self.assertEqual(default_phases["pr-watch"]["routes"]["pending"], "block")

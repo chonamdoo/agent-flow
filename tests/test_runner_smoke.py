@@ -157,6 +157,28 @@ def _write_stub_review_evidence(run_dir: Path, phase_id: str) -> None:
     )
 
 
+def _approve_paused_merge(
+    project: Path, run_dir: Path, worktree: str
+) -> subprocess.CompletedProcess[str]:
+    """merge 직전 pause에서 표시된 merge-approval artifact를 승인하고 이어 간다(#290).
+
+    generic stub은 pr-watch의 `status: green`처럼 verdict를 쓰지 않는다. host가 쓸 결정을
+    같은 stub 표식으로 쓰고, runner pause가 요구하는 그 artifact의 토큰으로 승인한다.
+    """
+    from agent_flow.adapters.generic import STUB_SENTINEL
+    from agent_flow.artifact import pending_phase_approval, read_meta
+
+    meta = read_meta(run_dir)
+    assert meta["current_phase"] == "merge-approval"
+    artifact = run_dir / meta["phase_approval_request"]["artifact"]
+    write_run_subpath_text(
+        run_dir, artifact, f"# merge-approval\n\n<!-- {STUB_SENTINEL} -->\n\nverdict: approve\n",
+    )
+    approval = pending_phase_approval(run_dir)
+    assert approval is not None
+    return _run_cli(["continue", "--worktree", worktree, "--approve", approval["token"]], project)
+
+
 def test_full_cycle(tmp_path: Path):
     project = tmp_path / "proj"
     project.mkdir()
@@ -195,7 +217,10 @@ def test_full_cycle(tmp_path: Path):
     _write_stub_review_evidence(run_dir, "final-review")
     r3 = _run_cli(["continue", "--worktree", plan.name], project)
     assert r3.returncode == 0, r3.stderr
-    assert "run complete" in r3.stdout
+    assert "reason: phase_approval_required" in r3.stdout
+    r4 = _approve_paused_merge(project, run_dir, plan.name)
+    assert r4.returncode == 0, r4.stderr
+    assert "run complete" in r4.stdout
 
     # 계약 변경: 완주하면 cleanup이 worktree를 제거하고 run을 archive로 옮긴다.
     # 따라서 완주 후 아티팩트는 cleanup journal이 가리키는 archive_dir에서 본다.
@@ -208,7 +233,7 @@ def test_full_cycle(tmp_path: Path):
 
     expected_post = [
         "worktree", "implement", "comment-authoring", "final-review", "artifacts/gate-results", "fix-loop",
-        "commit", "push-pr", "pr-watch", "merge", "cleanup",
+        "commit", "push-pr", "pr-watch", "merge-approval", "merge", "cleanup",
     ]
     for a in expected_post:
         assert (completed_run / f"{a}.md").exists() or (completed_run / f"{a}.json").exists(), f"missing post-pause: {a}"
@@ -424,6 +449,9 @@ def test_worktree_run_continue_status_abort(tmp_path: Path):
     assert "current_phase: final-review" in r_continue.stdout
     _write_stub_review_evidence(run_dir, "final-review")
     r_complete = _run_cli(["continue", "--worktree", "long-press"], project)
+    assert r_complete.returncode == 0, r_complete.stderr
+    assert "reason: phase_approval_required" in r_complete.stdout
+    r_complete = _approve_paused_merge(project, run_dir, "long-press")
     assert r_complete.returncode == 0, r_complete.stderr
     assert "run complete" in r_complete.stdout
     assert not worktree.exists()
@@ -2573,6 +2601,7 @@ def test_preserve_existing_workflow_runtime_contracts() -> None:
         "pr-watch",
         "pr-comment-fix",
         "pr-ci-fix",
+        "merge-approval",
         "merge",
         "cleanup",
     )
