@@ -5,9 +5,12 @@ from pathlib import Path
 import pytest
 
 from agent_flow.adapters.hosted import HostedAdapter
-from agent_flow.artifact import ActiveRun, approve_phase_artifact, create_run, read_meta, write_meta
+from agent_flow.artifact import (
+    ActiveRun, approve_phase_artifact, create_run, pending_phase_approval, read_meta, write_meta,
+)
 from agent_flow.cli import main
-from agent_flow.core.phase_workflow import load_phase_workflow_definition
+from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
+from agent_flow.core.worktree_isolation import WorktreeIsolationError, resolve_run_subpath
 from agent_flow.runner import Runner
 
 
@@ -80,3 +83,49 @@ def test_next_command_can_approve_only_the_displayed_artifact(tmp_path, monkeypa
     artifact.write_text("Different target scope, not yet approved.\n", encoding="utf-8")
     with pytest.raises(ValueError, match="does not match"):
         approve_phase_artifact(run_dir, token=token)
+
+
+@pytest.mark.parametrize("workflow", ["default", "full-feature"])
+def test_merge_approval_pauses_before_merge_until_the_displayed_artifact_is_approved(
+    tmp_path, monkeypatch, workflow,
+):
+    """반증: default는 green PR을 곧장 merge로 보냈고, full-feature는 에이전트가 쓴
+    `verdict: approve`만으로 merge에 들어갔다. merge 직전 승인은 runner pause가 막아야 한다."""
+    project = tmp_path / "project"
+    project.mkdir()
+    definition = load_phase_workflow_definition(find_kit_root(), workflow)
+    ids = [phase.id for phase in definition.phases]
+    assert "merge-approval" in ids
+    index = ids.index("merge-approval")
+    assert ids[index + 1] == "merge"
+    run_dir = create_run(project, workflow, "Merge the reviewed change.", workflow_definition=definition)
+    meta = read_meta(run_dir)
+    meta.update(
+        phase_index=index, current_phase="merge-approval",
+        phase_entered_at="2026-10-09T00:00:00+00:00",
+    )
+    write_meta(run_dir, meta)
+    runner = Runner(project, run_dir=run_dir)
+    phase = runner.phases[index]
+    monkeypatch.setattr(runner, "_emit_observation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runner, "_check_spec_transition", lambda *args, **kwargs: None)
+    artifact = resolve_run_subpath(run_dir, Path(phase.artifact))
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("Merge PR #1 at the published HEAD.\n\nverdict: approve\n", encoding="utf-8")
+
+    assert runner._pause_for_approval(phase)
+    displayed = pending_phase_approval(run_dir)["token"]
+    with pytest.raises(WorktreeIsolationError, match="approval is missing or stale"):
+        runner._commit_transition(runner._plan_transition(index, phase))
+    assert read_meta(run_dir)["current_phase"] == "merge-approval"
+
+    artifact.write_text("Merge a different HEAD.\n\nverdict: approve\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match"):
+        approve_phase_artifact(run_dir, token=displayed)
+    with pytest.raises(WorktreeIsolationError, match="approval is missing or stale"):
+        runner._commit_transition(runner._plan_transition(index, phase))
+
+    assert runner._pause_for_approval(phase)
+    approve_phase_artifact(run_dir, token=pending_phase_approval(run_dir)["token"])
+    runner._commit_transition(runner._plan_transition(index, phase))
+    assert read_meta(run_dir)["current_phase"] == "merge"

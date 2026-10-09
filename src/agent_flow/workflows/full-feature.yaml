@@ -811,14 +811,15 @@ phases:
 
   - id: merge-approval
     description: Require explicit user approval before merge. Runner routes approve→merge.
+    pause_after: true
     routes:
       approve: merge
       default: block
     prompt: |
       Entry requires evidence for all confirmed SPEC items, including pre-merge
       items. SPEC approval and merge approval remain separate authorizations.
-      Ask the user for explicit merge approval. Do not merge yet. Output
-      merge-approval.md with exactly `verdict: approve` only after approval.
+      Do not merge yet. Write merge-approval.md ending `verdict: approve`; the
+      runner pauses for the user's merge approval.
 
   - id: merge
     skills:

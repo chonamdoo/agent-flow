@@ -603,7 +603,7 @@ phases:
       required: [push-watch]
     description: Observe PR checks and feedback; leave mutations to the fix phases.
     routes:
-      green: merge
+      green: merge-approval
       merged: cleanup
       comments: pr-comment-fix
       has_comments: pr-comment-fix
@@ -628,7 +628,7 @@ phases:
       Branch on status:
 
       - **green** → write pr-watch.md noting "all checks green, ready to
-        merge". Workflow advances to the merge phase.
+        merge". Workflow advances to the merge-approval phase.
 
       - **has_comments** → record the unprocessed `feedback_ids` and their
         `repo` / PR number / `head` from the watcher. Leave code changes,
@@ -672,6 +672,18 @@ phases:
       policy. Output: pr-ci-fix.md with check identities, commands actually
       run, fixes, and log URLs, or `status: blocked` with the required
       human decision.
+
+  - id: merge-approval
+    description: Require explicit user approval before merge. Runner routes approve→merge.
+    pause_after: true
+    routes:
+      approve: merge
+      default: block
+    prompt: |
+      Entry requires evidence for all confirmed SPEC items, including pre-merge
+      items. SPEC approval and merge approval remain separate authorizations.
+      Do not merge yet. Write merge-approval.md ending `verdict: approve`; the
+      runner pauses for the user's merge approval.
 
   - id: merge
     skills:
