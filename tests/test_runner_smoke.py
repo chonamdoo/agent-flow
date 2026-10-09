@@ -462,6 +462,13 @@ def test_worktree_run_continue_status_abort(tmp_path: Path):
     r_remove = _run_cli(["worktree", "remove", "--name", "long-press"], project)
     assert r_remove.returncode == 0, r_remove.stderr
     assert not worktree.exists()
+    # abort가 남긴다고 한 기록은 remove가 cleanup과 같은 보관 자리로 옮긴 뒤에만 지운다.
+    archived_aborted = archived_run.parent / active.name
+    assert f"archived 1 run(s): {archived_run.parent}" in r_remove.stdout
+    assert json.loads(
+        (archived_aborted / "meta.json").read_text(encoding="utf-8")
+    )["task"] == "abort me"
+    assert not (archived_aborted / "active").exists()
 
 
 def _write_host_phase_workflow(

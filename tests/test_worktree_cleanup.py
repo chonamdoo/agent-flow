@@ -1092,6 +1092,231 @@ def test_cleanup_archives_inactive_run_history_before_metadata_removal(
     assert read_meta(archived_old)["run_id"] == "run-old"
     assert not state_root.exists()
 
+
+def _inactive_run(
+    root: Path, status: W.WorktreeStatus, run_id: str, evidence: str
+) -> Path:
+    run_dir = create_run(
+        W.worktree_runtime_root(root=root, name=status.name),
+        "default",
+        run_id,
+        run_id=run_id,
+        checkout_identity=f"worktree:{status.name}",
+        checkout_registration_identity=status.registration_identity,
+    )
+    (run_dir / "evidence.txt").write_text(evidence, encoding="utf-8")
+    mark_inactive(run_dir)
+    return run_dir
+
+
+def _archived_runs(root: Path, status: W.WorktreeStatus) -> Path:
+    return (
+        W._checkout_run_archive_root(root=root, name=status.name, path=status.path)
+        / ".agent-flow"
+        / "runs"
+    )
+
+
+def test_manual_remove_archives_inactive_runs_before_deleting_runtime_metadata(
+    tmp_path: Path,
+) -> None:
+    """반증: abort나 local-handoff로 끝난 run은 수동 `worktree remove`가 runtime
+    metadata와 함께 지워, abort가 "artifacts preserved"라고 한 기록이 사라졌다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status = W.create_worktree(
+        root=root, plan=W.plan_worktree(root=root, name="manual-archive")
+    )
+    state_root = W.worktree_runtime_root(root=root, name=status.name)
+    runs = (
+        _inactive_run(root, status, "run-aborted", "aborted evidence\n"),
+        _inactive_run(root, status, "run-handoff", "handoff evidence\n"),
+    )
+    digests = {
+        run.name: W._run_tree_digest(run, exclude_lifecycle=False) for run in runs
+    }
+    leader_before = W_ISO.capture_leader_snapshot(root)
+
+    removal = W.remove_worktree(root=root, status=status, allow_unmerged=True)
+
+    archived = _archived_runs(root, status)
+    assert removal.archived_runs == (archived / "run-aborted", archived / "run-handoff")
+    assert removal.metadata_removed
+    assert not state_root.exists()
+    assert {
+        run_id: W._run_tree_digest(archived / run_id, exclude_lifecycle=False)
+        for run_id in digests
+    } == digests
+    assert (archived / "run-aborted" / "evidence.txt").read_text(
+        encoding="utf-8"
+    ) == "aborted evidence\n"
+    W_ISO.assert_leader_unchanged(root, leader_before)
+
+
+@pytest.mark.parametrize(
+    "damage", ["symlinked-entry", "different-archive", "copy-error"]
+)
+def test_manual_remove_archive_failure_preserves_checkout_branch_and_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status = W.create_worktree(
+        root=root, plan=W.plan_worktree(root=root, name="archive-blocked")
+    )
+    run_dir = _inactive_run(root, status, "run-blocked", "keep me\n")
+    if damage == "symlinked-entry":
+        (run_dir / "linked.txt").symlink_to(run_dir / "evidence.txt")
+    elif damage == "different-archive":
+        stale = _archived_runs(root, status) / run_dir.name
+        shutil.copytree(run_dir, stale)
+        (stale / "evidence.txt").write_text("different\n", encoding="utf-8")
+    else:
+        def no_space(*_args: object, **_kwargs: object) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(W.shutil, "copytree", no_space)
+
+    with pytest.raises(W.CleanupBlockedError):
+        W.remove_worktree(root=root, status=status, allow_unmerged=True)
+    assert cli_module.main([
+        "worktree", "remove", "--root", str(root), "--name", status.name,
+        "--allow-unmerged",
+    ]) == 2
+
+    assert status.path.exists()
+    assert W.worktree_branch_exists(root=root, branch=status.branch)
+    assert (run_dir / "evidence.txt").read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_manual_remove_archives_late_owned_metadata_before_deleting_the_checkout(
+    tmp_path: Path,
+) -> None:
+    """반증: 소유 판정이 checkout 삭제 뒤에야 통과하는 기록(`--force-metadata`로 정리하는
+    가져온 manifest)은 보관도 checkout과 branch를 지운 뒤에 했다. 그 보관이 실패하면
+    exit 2여도 checkout과 branch는 이미 없었다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status = W.create_worktree(
+        root=root, plan=W.plan_worktree(root=root, name="late-owner")
+    )
+    state_root = W.worktree_runtime_root(root=root, name=status.name)
+    run_dir = _inactive_run(root, status, "run-imported", "keep me\n")
+    manifest = state_root / "manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["path"] = str(tmp_path / "elsewhere" / status.name)
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    linked = run_dir / "linked.txt"
+    linked.symlink_to(run_dir / "evidence.txt")
+
+    with pytest.raises(W.CleanupBlockedError):
+        W.remove_worktree(
+            root=root, status=status, allow_unmerged=True, force_metadata=True
+        )
+    assert status.path.exists()
+    assert W.worktree_branch_exists(root=root, branch=status.branch)
+
+    linked.unlink()
+    removal = W.remove_worktree(
+        root=root, status=status, allow_unmerged=True, force_metadata=True
+    )
+    assert removal.archived_runs == (_archived_runs(root, status) / run_dir.name,)
+    assert removal.metadata_removed
+    assert not state_root.exists()
+
+
+def test_manual_remove_refuses_run_history_that_is_not_a_directory(
+    tmp_path: Path,
+) -> None:
+    """반증: `--force-metadata`로 가져온 manifest를 정리하면 run lifecycle lock을 건너뛴다.
+    그때 runtime의 `runs`가 디렉터리가 아니면, 보관할 run이 없다고 보고 checkout,
+    branch, runtime metadata를 그대로 지웠다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status = W.create_worktree(
+        root=root, plan=W.plan_worktree(root=root, name="runs-not-dir")
+    )
+    state_root = W.worktree_runtime_root(root=root, name=status.name)
+    manifest = state_root / "manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["path"] = str(tmp_path / "elsewhere" / status.name)
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    runs = state_root / ".agent-flow" / "runs"
+    runs.parent.mkdir(parents=True, exist_ok=True)
+    runs.write_text("not a run directory\n", encoding="utf-8")
+
+    with pytest.raises(W.CleanupBlockedError):
+        W.remove_worktree(
+            root=root, status=status, allow_unmerged=True, force_metadata=True
+        )
+
+    assert status.path.exists()
+    assert W.worktree_branch_exists(root=root, branch=status.branch)
+    assert runs.read_text(encoding="utf-8") == "not a run directory\n"
+
+
+def test_manual_remove_archive_failure_keeps_provisioned_hook_registrations(
+    tmp_path: Path,
+) -> None:
+    """반증: 보관보다 먼저 checkout의 host hook 등록을 걷어, 보관이 실패해 exit 2로
+    멈춰도 남은 checkout은 보호 hook 없이 남았다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _ignore_host_dirs(root)
+    status, run_dir = _provisioned_checkout(root, "hooks-kept")
+    mark_inactive(run_dir)
+    (run_dir / "linked.txt").symlink_to(run_dir / "design.md")
+
+    with pytest.raises(W.CleanupBlockedError):
+        W.remove_worktree(root=root, status=status, allow_unmerged=True)
+
+    assert status.path.exists()
+    assert all(
+        (status.path / rel).is_file() for rel in W.HOST_HOOK_REGISTRATION_FILES
+    )
+
+
+def test_manual_remove_skips_identical_existing_archive(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status = W.create_worktree(
+        root=root, plan=W.plan_worktree(root=root, name="archive-reuse")
+    )
+    run_dir = _inactive_run(root, status, "run-kept", "keep me\n")
+    existing = _archived_runs(root, status) / run_dir.name
+    shutil.copytree(run_dir, existing)
+    before = (existing / "evidence.txt").stat()
+
+    removal = W.remove_worktree(root=root, status=status, allow_unmerged=True)
+
+    after = (existing / "evidence.txt").stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    assert removal.archived_runs == (existing,)
+    assert not W.worktree_runtime_root(root=root, name=status.name).exists()
+
+
+def test_manual_remove_never_rewrites_an_existing_archive(tmp_path: Path) -> None:
+    """반증: 기존 보관본에만 `active`가 남아 있으면, 수동 remove가 cleanup의 0.2.6 호환
+    조정으로 그 표시를 걷어 digest를 맞춘 뒤 삭제로 넘어갔다. 다른 digest의 같은 run은
+    보관본을 고치지 않고 멈춰야 한다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status = W.create_worktree(
+        root=root, plan=W.plan_worktree(root=root, name="archive-untouched")
+    )
+    run_dir = _inactive_run(root, status, "run-legacy", "keep me\n")
+    existing = _archived_runs(root, status) / run_dir.name
+    shutil.copytree(run_dir, existing)
+    (existing / W.ACTIVE_MARKER).write_text("", encoding="utf-8")
+
+    with pytest.raises(W.CleanupBlockedError, match="checksum mismatch"):
+        W.remove_worktree(root=root, status=status, allow_unmerged=True)
+
+    assert (existing / W.ACTIVE_MARKER).exists()
+    assert status.path.exists()
+    assert (run_dir / "evidence.txt").read_text(encoding="utf-8") == "keep me\n"
+
+
 def test_status_prefers_pending_cleanup_runtime_while_checkout_still_exists(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
