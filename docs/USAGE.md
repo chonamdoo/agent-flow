@@ -447,9 +447,12 @@ Short workflows (`review`, `development`, `bugfix`, `diagnosing-bugs`) declare
 An already-pending cleanup journal still resumes; this setting is not a way to hide
 unfinished cleanup. Other workflows retain integrated cleanup.
 
-At a `pause_after` boundary, review the artifact and use the exact `next_command`
-reported by `status`. Its `--approve` token identifies the run, phase attempt, and
-artifact bytes. Rewriting the artifact or re-entering the phase requires a new
+At a `pause_after` boundary, `status` reports `reason: phase_approval_required` and prints
+the approval separately as `approval_command`; `next_command` carries no token and only
+reports the same pause again. The agent summarizes the artifact in chat and runs
+`approval_command` only after the user replies to that summary with approval. An approval
+given before the pause does not count. The `--approve` token identifies the run, phase
+attempt, and artifact bytes. Rewriting the artifact or re-entering the phase requires a new
 approval. The token binds an approval to content; it is not user authentication.
 
 ### The SPEC ledger

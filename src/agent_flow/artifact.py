@@ -181,6 +181,7 @@ class ActiveRun:
         reason = "in_progress"
         missing_markers: list[str] = []
         detail: str | None = None
+        approval_command: str | None = None
         review_regeneration = False
         artifact_exists = (
             required_artifact is not None and required_artifact.exists()
@@ -291,7 +292,7 @@ class ActiveRun:
                         pending = pending_phase_approval(self.path)
                         if pending is not None:
                             reason = "phase_approval_required"
-                            next_command = f"{next_command} --approve {pending['token']}"
+                            approval_command = phase_approval_command(next_command, pending["token"])
         payload = workflow_status_payload(
             status=structured_status,
             run=f"{self.workflow}/{self.run_id}",
@@ -302,6 +303,7 @@ class ActiveRun:
             next_command=next_command,
             missing_completion_markers=missing_markers,
             detail=detail,
+            approval_command=approval_command,
         )
         print_structured_status(payload)
 
@@ -554,6 +556,10 @@ def pending_phase_approval(run_dir: Path) -> dict[str, str] | None:
     meta = read_meta(run_dir)
     identity = _phase_approval_identity(run_dir, meta)
     return identity if identity != meta.get("phase_approval") else None
+
+
+def phase_approval_command(next_command: str, token: str) -> str:
+    return f"{next_command} --approve {token}"
 
 
 def approve_phase_artifact(
