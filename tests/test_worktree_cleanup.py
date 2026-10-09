@@ -1317,6 +1317,32 @@ def test_manual_remove_never_rewrites_an_existing_archive(tmp_path: Path) -> Non
     assert (run_dir / "evidence.txt").read_text(encoding="utf-8") == "keep me\n"
 
 
+def test_refused_manual_remove_discards_the_archive_it_just_wrote(
+    tmp_path: Path,
+) -> None:
+    """반증: merge되지 않은 checkout의 기본 remove는 보관부터 쓰고 merge 가능 검사에서
+    거부됐다. 남은 사본은 그 뒤 run이 바뀌면 재시도를 digest 불일치로 막았다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status = W.create_worktree(
+        root=root, plan=W.plan_worktree(root=root, name="refused-archive")
+    )
+    run_dir = _inactive_run(root, status, "run-later", "first\n")
+    (status.path / "unmerged.txt").write_text("work\n", encoding="utf-8")
+    _git("add", "unmerged.txt", cwd=status.path)
+    _git("commit", "-m", "unmerged work", cwd=status.path)
+    archived = _archived_runs(root, status) / run_dir.name
+
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W.remove_worktree(root=root, status=status)
+
+    assert not archived.exists()
+    (run_dir / "pr-feedback.json").write_text("{}\n", encoding="utf-8")
+    removal = W.remove_worktree(root=root, status=status, allow_unmerged=True)
+    assert removal.archived_runs == (archived,)
+    assert (archived / "pr-feedback.json").read_text(encoding="utf-8") == "{}\n"
+
+
 def test_status_prefers_pending_cleanup_runtime_while_checkout_still_exists(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

@@ -651,49 +651,59 @@ def _remove_worktree_locked(
         force=force_metadata,
         checkout_gone=live,
     )
-    archived_runs = _archive_removed_runs(root=root, status=status, key=archived_key)
-    if live:
-        _retire_provisioned_host_hook_registrations(root=root, checkout=status.path)
-    if live and require_merged and not allow_unmerged:
-        assert_worktree_mergeable(root=root, path=status.path)
-
-    branch_delete = (
-        _branch_delete_identity(root=root, status=status, registered=registered)
-        if live and delete_branch
-        else None
+    archived_runs, new_archives = _archive_removed_runs(
+        root=root, status=status, key=archived_key
     )
-    _assert_registration_and_ref_unchanged(
-        root=root,
-        status=status,
-        expected_registration=registered,
-        branch_delete=branch_delete,
-    )
+    try:
+        if live:
+            _retire_provisioned_host_hook_registrations(root=root, checkout=status.path)
+        if live and require_merged and not allow_unmerged:
+            assert_worktree_mergeable(root=root, path=status.path)
 
-    if live:
-        force_args = ("--force",) if allow_unmerged else ()
-        _run_git(root, "worktree", "remove", *force_args, str(status.path))
-    else:
-        if registered is not None:
-            if status.path.exists():
-                raise WorktreeIsolationError(
-                    f"stale worktree path is occupied at {status.path}; preserving it"
-                )
-            _run_git(root, "worktree", "remove", str(status.path))
-            if _registered_at_path(root=root, path=status.path) is not None:
-                raise WorktreeIsolationError(
-                    f"stale worktree registration remains for {status.path}; preserving metadata"
-                )
-
-    if branch_delete is not None:
-        branch, expected_oid = branch_delete
-        _delete_branch_ref_cas(root=root, branch=branch, expected_oid=expected_oid)
-    deleted_key = _removable_runtime_key(
-        root=root, name=status.name, path=status.path, force=force_metadata
-    )
-    if deleted_key is not None and deleted_key != archived_key:
-        raise CleanupBlockedError(
-            f"runtime metadata {deleted_key} was not archived before removal; preserving it"
+        branch_delete = (
+            _branch_delete_identity(root=root, status=status, registered=registered)
+            if live and delete_branch
+            else None
         )
+        _assert_registration_and_ref_unchanged(
+            root=root,
+            status=status,
+            expected_registration=registered,
+            branch_delete=branch_delete,
+        )
+
+        if live:
+            force_args = ("--force",) if allow_unmerged else ()
+            _run_git(root, "worktree", "remove", *force_args, str(status.path))
+        else:
+            if registered is not None:
+                if status.path.exists():
+                    raise WorktreeIsolationError(
+                        f"stale worktree path is occupied at {status.path}; preserving it"
+                    )
+                _run_git(root, "worktree", "remove", str(status.path))
+                if _registered_at_path(root=root, path=status.path) is not None:
+                    raise WorktreeIsolationError(
+                        f"stale worktree registration remains for {status.path}; "
+                        "preserving metadata"
+                    )
+
+        if branch_delete is not None:
+            branch, expected_oid = branch_delete
+            _delete_branch_ref_cas(root=root, branch=branch, expected_oid=expected_oid)
+        deleted_key = _removable_runtime_key(
+            root=root, name=status.name, path=status.path, force=force_metadata
+        )
+        if deleted_key is not None and deleted_key != archived_key:
+            raise CleanupBlockedError(
+                f"runtime metadata {deleted_key} was not archived before removal; "
+                "preserving it"
+            )
+    except BaseException:
+        # 여기까지 실패하면 원본 run은 runtime metadata에 그대로 있다. 이번 호출이 새로 쓴
+        # 사본만 걷는다. 남겨 두면 그 뒤 run이 바뀌었을 때 재시도가 digest 불일치로 막힌다.
+        _discard_archives(new_archives)
+        raise
     metadata_removed = deleted_key is not None and _remove_runtime_metadata(
         root=root, key=deleted_key
     )
@@ -707,21 +717,23 @@ def _remove_worktree_locked(
 
 def _archive_removed_runs(
     *, root: Path, status: WorktreeStatus, key: str | None
-) -> tuple[Path, ...]:
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     """이 remove가 지울 runtime의 run을 cleanup과 같은 자리에 먼저 보관한다.
 
     abort와 local-handoff 완료는 active 표시만 걷는다. 여기서 보관하지 않으면 그
     run의 artifact는 runtime metadata와 함께 사라진다. 하나라도 보관하지 못하면
     `CleanupBlockedError`로 멈춰 아무것도 지우지 않는다.
+
+    보관된 run 전체와 그중 이번 호출이 새로 만든 사본을 따로 돌려준다.
     """
     if key is None:
-        return ()
+        return (), ()
     source_runs = _runtime_state_root(root=root, name=key) / ".agent-flow" / "runs"
     for part in (source_runs.parent, source_runs):
         try:
             identity = part.lstat()
         except FileNotFoundError:
-            return ()
+            return (), ()
         except OSError as exc:
             raise CleanupBlockedError(f"cannot inspect run history: {part}") from exc
         if not stat.S_ISDIR(identity.st_mode):
@@ -732,22 +744,34 @@ def _archive_removed_runs(
         / "runs"
     )
     archived: list[Path] = []
-    for source in _run_history_candidates(source_runs):
-        if not _is_history_run(source):
-            continue
-        destination = archive_runs / source.name
-        try:
-            _archive_run_tree(
-                source=source,
-                destination=destination,
-                digest=_run_tree_digest(source, exclude_lifecycle=False),
-            )
-        except OSError as exc:
-            raise CleanupBlockedError(
-                f"cannot archive run before removal: {source}: {exc}"
-            ) from exc
-        archived.append(destination)
-    return tuple(archived)
+    created: list[Path] = []
+    try:
+        for source in _run_history_candidates(source_runs):
+            if not _is_history_run(source):
+                continue
+            destination = archive_runs / source.name
+            try:
+                if _archive_run_tree(
+                    source=source,
+                    destination=destination,
+                    digest=_run_tree_digest(source, exclude_lifecycle=False),
+                ):
+                    created.append(destination)
+            except OSError as exc:
+                raise CleanupBlockedError(
+                    f"cannot archive run before removal: {source}: {exc}"
+                ) from exc
+            archived.append(destination)
+    except BaseException:
+        _discard_archives(tuple(created))
+        raise
+    return tuple(archived), tuple(created)
+
+
+def _discard_archives(paths: tuple[Path, ...]) -> None:
+    """이번 remove가 새로 쓴 보관 사본만 걷는다. 걷지 못한 사본은 다음 remove가 digest로 검사한다."""
+    for path in paths:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _assert_registration_and_ref_unchanged(
@@ -1676,8 +1700,8 @@ def _archive_run_tree(
     destination: Path,
     digest: str,
     reconcile_legacy_active: bool = False,
-) -> None:
-    """run 하나를 ``digest``가 같은 사본으로 보관한다. 같은 사본이 이미 있으면 둔다.
+) -> bool:
+    """run 하나를 ``digest``가 같은 사본으로 보관한다. 새로 만들었으면 True다.
 
     기존 사본은 ``reconcile_legacy_active``일 때만 고친다. 수동 remove는 다른
     digest의 같은 run을 고치지 않고 멈춰야 한다.
@@ -1706,7 +1730,7 @@ def _archive_run_tree(
             raise CleanupBlockedError(
                 f"historical run archive checksum mismatch: {destination}"
             )
-        return
+        return False
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(
         f".{destination.name}.tmp-{os.getpid()}"
@@ -1727,6 +1751,7 @@ def _archive_run_tree(
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)
+    return True
 
 
 def _archive_cleanup_run(
