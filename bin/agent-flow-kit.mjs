@@ -2542,6 +2542,8 @@ function workflowContract() {
 
 The workflow runner is the source of truth for phase order. Agents may read skills and prompts, but must follow the runner's printed \`next_command\` exactly to move through the workflow.
 
+A paused phase prints its approval separately as \`approval_command\`. Summarize the artifact in chat and run \`approval_command\` only after the user replies to that summary with approval. An approval given before the pause does not count.
+
 Phases with completion markers are not complete just because the artifact file exists. The artifact must include every required marker printed by the current phase or status output.
 
 Implementation rules:

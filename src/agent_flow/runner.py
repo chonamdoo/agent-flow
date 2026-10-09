@@ -48,6 +48,7 @@ from agent_flow.artifact import (
     phase_review_rejected,
     phase_spec_checkpoint,
     pending_phase_approval,
+    phase_approval_command,
     run_concerns,
     run_concerns_value,
     write_meta,
@@ -973,7 +974,10 @@ class Runner:
             pending = pending_phase_approval(self.run_dir)
         if pending is None:
             return False
-        print(f"  [approval] {self.next_command} --approve {pending['token']}")
+        print(
+            f"  [approval] phase '{phase.id}' is paused for user review. Summarize the "
+            "artifact in chat; run approval_command only after the user approves it."
+        )
         self._print_structured_status(
             status="blocked",
             phase=phase,
@@ -2720,10 +2724,11 @@ class Runner:
         assert self.run_dir is not None
         meta = read_meta(self.run_dir)
         next_command = "none" if status == "complete" else self.next_command
+        approval_command = None
         if reason == "phase_approval_required":
             pending = pending_phase_approval(self.run_dir)
             if pending is not None:
-                next_command = f"{next_command} --approve {pending['token']}"
+                approval_command = phase_approval_command(next_command, pending["token"])
         payload = workflow_status_payload(
             status=status,
             run=f"{self.workflow_name}/{self.run_dir.name}",
@@ -2734,6 +2739,7 @@ class Runner:
             report=report,
             next_command=next_command,
             missing_completion_markers=missing_completion_markers,
+            approval_command=approval_command,
         )
         # 사람이 읽는 blocker는 stdout으로만 나가고 사라진다. 같은 판정을
         # trace에도 남겨야 실패한 run을 나중에 재현하거나 eval로 옮길 수 있다.
