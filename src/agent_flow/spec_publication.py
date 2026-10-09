@@ -20,6 +20,7 @@ def observe_spec_publication(
     project_root: Path, run_dir: Path, *, profile: dict | None = None,
     post_merge: bool = False,
     config_root: Path | None = None,
+    require_review_approval: bool = True,
 ) -> SpecPublicationEvidence:
     artifact = next((
         path for path in (run_dir / "push-pr.md", run_dir / "artifacts/push-pr.md")
@@ -93,6 +94,7 @@ def observe_spec_publication(
     snapshot = fetch_pr(
         int(match.group(2)), repo=f"{url.netloc}/{match.group(1)}",
         required_checks=required_checks, require_ready=True,
+        require_review_approval=require_review_approval,
         run_dir=run_dir, record_feedback=False,
     )
     if snapshot.status == "error":

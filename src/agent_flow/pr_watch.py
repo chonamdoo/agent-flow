@@ -117,6 +117,7 @@ def fetch_pr(
     *,
     required_checks: tuple[str, ...] = (),
     require_ready: bool = False,
+    require_review_approval: bool = True,
     run_dir: Path | None = None,
     record_feedback: bool = True,
 ) -> PRSnapshot:
@@ -150,7 +151,8 @@ def fetch_pr(
         handled = _read_feedback_state(run_dir, repository, number).get("handled", [])
         snapshot = _classify(
             number, data, required_checks=required_checks, repo=repository,
-            require_ready=require_ready, handled_ids=handled,
+            require_ready=require_ready, require_review_approval=require_review_approval,
+            handled_ids=handled,
         )
         if run_dir is not None and record_feedback and snapshot.status != "error":
             _record_feedback_observation(run_dir, snapshot)
@@ -232,6 +234,7 @@ def _classify(
     *,
     required_checks: tuple[str, ...] = (),
     require_ready: bool = False,
+    require_review_approval: bool = True,
     repo: str = "",
     handled_ids: list[str] | tuple[str, ...] = (),
 ) -> PRSnapshot:
@@ -433,7 +436,8 @@ def _classify(
             pending_checks=pending,
             issue_comments=issue_comments,
         )
-    if pending or (require_ready and (not rollup or data.get("reviewDecision") != "APPROVED")):
+    awaiting_review = require_review_approval and data.get("reviewDecision") != "APPROVED"
+    if pending or (require_ready and (not rollup or awaiting_review)):
         return PRSnapshot(
             number=number,
             title=title,
