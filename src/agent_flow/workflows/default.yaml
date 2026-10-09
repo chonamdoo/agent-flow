@@ -59,6 +59,9 @@ phases:
       Produce the unified design document. Sections in order:
 
       ## 1. Interview (grill-with-docs + domain-modeling)
+      Before asking, reuse decisions that already exist: an earlier interview
+      result that the task or the repository points to, the repository
+      glossary, and the decisions in `docs/adr/`. Ask only what is still open.
       Interview the user in rounds, as the `grilling` skill defines: ask every
       question whose prerequisites are already settled in one numbered round,
       each with your recommended answer, then wait. Walk every branch of the

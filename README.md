@@ -181,7 +181,7 @@ Use `default` for a small change and waiting on phases costs more than the work 
 ### The `full-feature` flow
 
 ```
-domain-grill         domain interview (one question at a time, until shared understanding)
+domain-grill         domain interview (reuse settled decisions, ask the open ones)   [pause]
 product-brief        verify it is worth building
 prd                  requirements doc + SPEC ledger + Design Values   [pause]
 slice-plan           split into independently shippable units
@@ -212,7 +212,7 @@ and after the fix, the comment pass and the reviews run again before verificatio
 
 ```mermaid
 flowchart TD
-    domain-grill --> product-brief --> prd
+    domain-grill -->|pause| product-brief --> prd
     prd -->|pause| slice-plan --> plan-review
     plan-review -->|approve| ddd-design
     plan-review -->|request-changes| slice-plan

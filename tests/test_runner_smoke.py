@@ -3107,6 +3107,9 @@ def test_runner_uses_normalized_artifact_path(tmp_path: Path):
     artifact = run_dir / phase.artifact
     artifact.parent.mkdir(parents=True)
     artifact.write_text(
+        "## Decision Sources\n"
+        "- scope: task\n"
+        "\n"
         "## Completion Gate\n"
         "domain-grill: complete\n"
         "shared_understanding: reached\n"

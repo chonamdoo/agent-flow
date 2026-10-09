@@ -15,7 +15,9 @@ phases:
     skills:
       required: [grill-with-docs, grilling, domain-modeling]
     description: Interview the user in rounds until the domain problem is clear.
+    pause_after: true
     required_markers:
+      - "## Decision Sources"
       - "domain-grill: complete"
       - "shared_understanding: reached"
       - "context_docs_checked: true"
@@ -27,14 +29,33 @@ phases:
       `.agent-flow/skills/grilling/SKILL.md` and
       `.agent-flow/skills/domain-modeling/SKILL.md`.
 
+      Before asking anything, reuse decisions that already exist: an earlier
+      interview result that the task or the repository points to, the
+      repository glossary (`GLOSSARY.md`, or the files `GLOSSARY-MAP.md` names),
+      and the decisions in `docs/adr/`. Ask only the decisions that are still
+      open, one round at a time, then end your turn and wait for the answers.
+
+      Record where each decision came from under `## Decision Sources`, one line
+      per decision: `- <decision>: <source>`, where the source is the task, a
+      file path, `GLOSSARY.md`, `docs/adr/<file>`, or `user round <n>`. This
+      section is your record, not proof that the user agreed.
+
+      Even when no question is left open, show the user a summary of the
+      decisions and ask them to confirm it. A document is not the user's
+      agreement. The runner pauses after this phase; run the printed
+      `approval_command` only after the user replies to that summary with
+      approval.
+
       Write the session result to domain-grill.md. When shared understanding is
-      reached, end with a `## Completion Gate` section:
+      reached, end with a `## Completion Gate` section. Replace every
+      placeholder below with the actual value; a copied placeholder fails the
+      gate:
 
           ## Completion Gate
-          domain-grill: complete
-          shared_understanding: reached
-          context_docs_checked: true
-          context_docs_updated: not_needed
+          domain-grill: <complete>
+          shared_understanding: <reached>
+          context_docs_checked: <true>
+          context_docs_updated: <true|not_needed>
 
       If no context doc update is needed, use `context_docs_updated: not_needed`
       and explain why in the artifact.
