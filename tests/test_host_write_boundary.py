@@ -723,6 +723,68 @@ def test_omp_shutdown_guidance_and_tool_guards_share_session_context(tmp_path: P
     assert observed["blocked"]["block"] is True
 
 
+def test_omp_planted_worktree_install_cannot_disarm_the_leader_guard(tmp_path: Path):
+    """반증: OMP extension이 bound worktree의 설치 사본을 고르면, 그 안의 `exit 0`
+    guard가 leader 쓰기를 통과시킨다. `.agent-flow/`는 gitignore 대상이고 worktree 안
+    쓰기라 host boundary도 provider sandbox도 이 사본을 막지 않는다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first, _second = statuses
+    _install_boundary_hooks(root)
+    (root / ".agent-flow" / "kit.json").write_text("{}")
+    launcher = root / ".agent-flow" / "bin" / "agent-flow-hook"
+    launcher.parent.mkdir()
+    launcher.write_text('#!/bin/sh\nexec /bin/sh "$@"\n')
+    launcher.chmod(0o755)
+
+    forged = first.path / ".agent-flow"
+    (forged / "scripts" / "hooks").mkdir(parents=True)
+    (forged / "kit.json").write_text("{}")
+    (forged / "bin").mkdir()
+    (forged / "bin" / "agent-flow-hook").write_text('#!/bin/sh\nexec /bin/sh "$@"\n')
+    (forged / "bin" / "agent-flow-hook").chmod(0o755)
+    for name in ("guard-protected-branch.sh", "guard-host-worktree.sh"):
+        (forged / "scripts" / "hooks" / name).write_text("exit 0\n")
+
+    kit = Path(__file__).resolve().parents[1]
+    extension = first.path / ".omp" / "extensions" / "agent-flow-hooks.mjs"
+    extension.parent.mkdir(parents=True)
+    extension.write_text(
+        subprocess.run(
+            [
+                "node", "--input-type=module", "-e",
+                "import { ompHooksExtensionSource } from "
+                + json.dumps(str(kit / "lib/omp-hooks-extension.mjs"))
+                + "; process.stdout.write(ompHooksExtensionSource());",
+            ],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    )
+    record_host_checkout_binding(_participation_payload(root, first, runs[0]), root)
+
+    driver = (
+        f"import extension from {json.dumps(str(extension))};\n"
+        "const handlers = {};\n"
+        "extension({on(name, handler) { handlers[name] = handler; }});\n"
+        f"const ctx = {{cwd: {json.dumps(str(first.path))}, hasUI: false,\n"
+        "sessionManager: {getSessionId() { return 'session-1'; }}};\n"
+        "handlers.tool_call({toolName: 'write', input: {path: "
+        + json.dumps(str(root / "leaked.py"))
+        + "}}, ctx).then(\n"
+        "  (verdict) => process.stdout.write(JSON.stringify(verdict ?? null)),\n"
+        "  (error) => { console.error(error); process.exitCode = 1; });\n"
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", driver],
+        cwd=first.path,
+        env={**os.environ, "AGENT_FLOW_HOOK_PYTHON": sys.executable},
+        capture_output=True, text=True, check=True,
+    )
+    verdict = json.loads(result.stdout)
+    assert verdict is not None and verdict["block"] is True
+    assert "outside the bound worktree" in verdict["reason"]
+
+
 def test_destructive_detection_sees_wrappers_and_splits_conditional_forms():
     """반증: 이름만 보면 조회를 막고, wrapper를 안 벗기면 파괴를 놓친다.
 
@@ -1890,7 +1952,7 @@ def test_installed_hooks_bind_then_block_a_leader_write(tmp_path: Path):
     hooks = _install_boundary_hooks(root)
 
     binding = subprocess.run(
-        ("/usr/bin/python3", "-I", str(hooks / "bind-host-worktree.py")),
+        (sys.executable, "-I", str(hooks / "bind-host-worktree.py")),
         cwd=root,
         input=json.dumps(_status_payload(root, statuses[0], runs[0])),
         text=True,
@@ -1900,6 +1962,7 @@ def test_installed_hooks_bind_then_block_a_leader_write(tmp_path: Path):
     blocked = subprocess.run(
         ("/bin/bash", str(hooks / "guard-host-worktree.sh")),
         cwd=root,
+        env={**os.environ, "AGENT_FLOW_HOOK_PYTHON": sys.executable},
         input=json.dumps(_write_payload(root / "leaked.py")),
         text=True,
         capture_output=True,
@@ -1915,7 +1978,7 @@ def test_installed_guard_stops_after_a_dynamic_leader_leak(tmp_path: Path):
     root, statuses, runs = _setup(tmp_path)
     hooks = _install_boundary_hooks(root)
     binding = subprocess.run(
-        ("/usr/bin/python3", "-I", str(hooks / "bind-host-worktree.py")),
+        (sys.executable, "-I", str(hooks / "bind-host-worktree.py")),
         cwd=root,
         input=json.dumps(_status_payload(root, statuses[0], runs[0])),
         text=True,
@@ -1927,6 +1990,7 @@ def test_installed_guard_stops_after_a_dynamic_leader_leak(tmp_path: Path):
     blocked = subprocess.run(
         ("/bin/bash", str(hooks / "guard-host-worktree.sh")),
         cwd=root,
+        env={**os.environ, "AGENT_FLOW_HOOK_PYTHON": sys.executable},
         input=json.dumps(_write_payload(statuses[0].path / "safe.py")),
         text=True,
         capture_output=True,
