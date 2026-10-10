@@ -55,7 +55,8 @@
 `architecture`, `branching`, `commit_convention`, `execution`, `gates`, `pr`, `review_angles`.
 그 밖의 키는 조용히 무시되지 않고 에러로 거부된다 — 반영되지 않는 선언을 삼키지 않기
 위해서다. 그래서 `vocabulary`, `skills`는 저장소별로 설정할 수 없고, 바꾸려면 바뀐 profile을
-배포해야 한다. 설치된 `.agent-flow/profiles/<id>.yaml`를 직접 고치는 것은 남지 않는다. install이
+배포해야 한다. 한 mapping 안에 같은 키가 두 번 나오는 것도 뒤엣값이 조용히 이기게 두지 않고,
+파일·줄·키를 에러에 적어 거부한다. 설치된 `.agent-flow/profiles/<id>.yaml`를 직접 고치는 것은 남지 않는다. install이
 새 필드를 기존 설치본에 닿게 하려고 배포 profile을 덮어쓰기 때문이다.
 
 그 override 파일은 저장소별이 아니라 작업 사본별이다. git work tree에서 install은 `.agent-flow/`를

@@ -25,6 +25,7 @@ from agent_flow.core.security import (
     validate_git_branch,
     validate_safe_name,
 )
+from agent_flow.core.skill_metadata import SkillMetadataError, reject_duplicate_keys
 from agent_flow.core.worktree_isolation import LEADER_SWEEP_SCOPES
 
 
@@ -445,6 +446,35 @@ def load_profile(profile_id: str, root: Path | None = None) -> ProjectProfile:
     )
 
 
+class ProfileYamlError(ValueError):
+    """profile YAML이 키 규칙(중복 키, 문자열이 아닌 키, merge, 재귀 alias)을 어겼다.
+
+    YAML 문법 오류(`yaml.YAMLError`)와 따로 둔다. leader tripwire 선언 해석은 문법 오류를
+    읽기 실패로 보고 전수 sweep으로 접지만, 키 규칙 위반은 잘못된 선언으로 올린다.
+    """
+
+
+def load_profile_yaml(text: str, *, source: str | Path) -> Any:
+    """`yaml.safe_load`와 같은 값을 돌려주되, 키 규칙을 어긴 문서는 막는다.
+
+    `safe_load`는 같은 키가 두 번 나오면 뒤엣것으로 덮는다. 사람이 파일에서 본 값과
+    run이 쓰는 값이 갈리므로 실행 중 profile YAML을 읽는 곳은 모두 이 함수를 쓴다.
+    """
+    loader = yaml.SafeLoader(text)
+    try:
+        node = loader.get_single_node()
+        if node is None:
+            return None
+        try:
+            reject_duplicate_keys(node, source=str(source))
+        except SkillMetadataError as exc:
+            raise ProfileYamlError(str(exc)) from exc
+        return loader.construct_document(node)
+    finally:
+        loader.dispose()
+
+
+
 def load_profile_payload(
     profile_id: str,
     root: Path | None = None,
@@ -452,7 +482,7 @@ def load_profile_payload(
     fallback_unknown_to_generic: bool = False,
 ) -> dict[str, Any]:
     try:
-        text = (
+        text, source = (
             _read_profile_text(profile_id)
             if root is None
             else _read_project_profile_text(root, profile_id)
@@ -461,12 +491,12 @@ def load_profile_payload(
         if not fallback_unknown_to_generic:
             raise
         profile_id = "generic"
-        text = (
+        text, source = (
             _read_profile_text(profile_id)
             if root is None
             else _read_project_profile_text(root, profile_id)
         )
-    payload = yaml.safe_load(text)
+    payload = load_profile_yaml(text, source=source)
     if not isinstance(payload, dict):
         raise ValueError(f"profile must be a mapping: {profile_id}")
     if payload.get("id") != profile_id:
@@ -484,10 +514,10 @@ def project_profile_override_path(root: Path, profile_id: str) -> Path:
     return _project_profile_path(root, profile_id, suffix=PROJECT_OVERRIDE_SUFFIX)
 
 
-def _read_project_profile_text(root: Path, profile_id: str) -> str:
+def _read_project_profile_text(root: Path, profile_id: str) -> tuple[str, str]:
     path = project_profile_path(root, profile_id)
     if path.is_file():
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8"), str(path)
     return _read_profile_text(profile_id)
 
 
@@ -522,7 +552,9 @@ def resolve_project_profile_payload(
             resource = resources.files("agent_flow").joinpath("profiles", f"_{safe_id}.yaml")
             context = f"{resource} (declared in {source})"
             try:
-                capability = yaml.safe_load(resource.read_text(encoding="utf-8"))
+                capability = load_profile_yaml(
+                    resource.read_text(encoding="utf-8"), source=str(resource)
+                )
             except (OSError, UnicodeDecodeError) as exc:
                 raise ValueError(f"cannot read profile capability {context}: {exc}") from exc
             except yaml.YAMLError as exc:
@@ -544,7 +576,11 @@ def resolve_project_profile_payload(
     variants = payload.get("gate_variants", [])
     if "gate_variants" in payload:
         override_path = project_profile_override_path(root, profile_id)
-        override = yaml.safe_load(override_path.read_text(encoding="utf-8")) if override_path.is_file() else None
+        override = (
+            load_profile_yaml(override_path.read_text(encoding="utf-8"), source=override_path)
+            if override_path.is_file()
+            else None
+        )
         if not isinstance(override, dict) or "gates" not in override:
             _validate_gate_variants(variants, profile_id=profile_id, source=source)
             matches = [
@@ -623,7 +659,7 @@ def legacy_architecture_overrides(root: Path) -> tuple[Path, ...]:
     found: list[Path] = []
     for path in sorted((root / ".agent-flow" / "profiles").glob("*.local.yaml")):
         try:
-            override = yaml.safe_load(path.read_text(encoding="utf-8"))
+            override = load_profile_yaml(path.read_text(encoding="utf-8"), source=path)
         except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
             raise ValueError(f"cannot read profile override {path}: {exc}") from exc
         if isinstance(override, dict) and "architecture" in override:
@@ -676,7 +712,7 @@ def apply_project_profile_override(
             payload,
             source=project_profile_path(root, profile_id),
         )
-    override = yaml.safe_load(path.read_text(encoding="utf-8"))
+    override = load_profile_yaml(path.read_text(encoding="utf-8"), source=path)
     if override is None:
         return _validate_project_profile_branch_contract(
             payload,
@@ -1105,15 +1141,15 @@ def _gate_phase_from_payload(
     )
 
 
-def _read_profile_text(profile_id: str) -> str:
+def _read_profile_text(profile_id: str) -> tuple[str, str]:
     safe_id = validate_safe_name(profile_id, "profile")
     package_path = resources.files("agent_flow").joinpath("profiles", f"{safe_id}.yaml")
     if package_path.is_file():
-        return package_path.read_text(encoding="utf-8")
+        return package_path.read_text(encoding="utf-8"), str(package_path)
     repo_path = Path(__file__).resolve().parents[3] / "profiles" / f"{safe_id}.yaml"
     if not repo_path.is_file():
         raise _UnknownProfileError(f"unknown profile: {profile_id}")
-    return repo_path.read_text(encoding="utf-8")
+    return repo_path.read_text(encoding="utf-8"), str(repo_path)
 
 
 def kit_declared_profiles(root: Path) -> list[str]:

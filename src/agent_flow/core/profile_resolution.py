@@ -20,11 +20,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from agent_flow.core.local_skills import merged_profile_payload
 from agent_flow.core.phase_workflow import package_root
 from agent_flow.core.profiles import (
+    load_profile_yaml,
     resolve_project_profile_payload,
     runtime_profile_selection,
     project_profile_path,
@@ -119,7 +118,7 @@ def load_single_profile(
             if packaged_generic is not None:
                 profile_path = packaged_generic
 
-    raw = yaml.safe_load(profile_path.read_text(encoding="utf-8")) or {}
+    raw = load_profile_yaml(profile_path.read_text(encoding="utf-8"), source=profile_path) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"profile {profile_path}: top-level must be a mapping")
     if raw.get("id") != profile_id:
