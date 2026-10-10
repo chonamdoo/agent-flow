@@ -50,7 +50,7 @@ _WRITE_TOOLS = frozenset(
         "multi_edit",
     }
 )
-_COMMAND_KEYS = frozenset({"command", "cmd", "script", "shell_command"})
+_COMMAND_KEYS = ("command", "cmd", "script", "shell_command")
 _PATH_KEYS = frozenset(
     {
         "path",
@@ -250,7 +250,7 @@ def record_host_checkout_binding(
     session_id = _first_string(payload, ("session_id", "sessionId"))
     if not session_id:
         return None
-    command = _first_string(payload, tuple(_COMMAND_KEYS))
+    command = _first_string(payload, _COMMAND_KEYS)
     # 이름으로 고르지 않는다. binding에 필요한 근거는 아래에서 전부 확인한다 —
     # 신뢰된 설치 산출물의 호출인가, exit 0인가, 출력에 실제 status payload가
     # 있는가. status를 내지 않는 명령은 그 셋에서 자동으로 탈락한다.
@@ -296,7 +296,7 @@ def record_host_checkout_binding(
         and str(
             payload.get("tool_name", payload.get("toolName", payload.get("tool", "")))
         ).lower() in _COMMAND_TOOLS
-        and _first_string(_tool_input(payload), tuple(_COMMAND_KEYS)) == command
+        and _first_string(_tool_input(payload), _COMMAND_KEYS) == command
         and result_exit_code == 0
         and _lifecycle_operation(
             command, root=root, cwd=_session_cwd(payload, command)
@@ -350,7 +350,7 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
     active = survey.active
     if not active:
         return None
-    command = _first_string(payload, tuple(_COMMAND_KEYS))
+    command = _first_string(payload, _COMMAND_KEYS)
     session_id = _first_string(payload, ("session_id", "sessionId"))
     binding = _load_binding(root, session_id, active) if session_id else None
     # 이 cwd는 두 곳에서 같은 값이어야 한다: 설치된 CLI를 상대 경로로 부른 경우의

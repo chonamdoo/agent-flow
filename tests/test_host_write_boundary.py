@@ -2298,3 +2298,111 @@ def test_recovery_command_passes_in_every_blocked_state(tmp_path: Path):
     assert host_write_boundary_violation(
         _command_payload(lifecycle, cwd=first.path), root
     ) is None, "leader가 dirty해진 뒤에 복구 명령이 막혔다"
+
+
+def test_command_key_priority_is_independent_of_hash_seed(tmp_path: Path):
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    installed = root / ".agent-flow"
+    installed.mkdir(exist_ok=True)
+    (installed / "kit.json").write_text("{}", encoding="utf-8")
+    lifecycle = f"agent-flow continue --root {root} --worktree {first.name}"
+    destructive = f"rm -rf {root}/must-not-be-executed"
+    cases = [
+        ({key: lifecycle}, lifecycle, False)
+        for key in ("command", "cmd", "script", "shell_command")
+    ]
+    cases.extend(
+        [
+            (
+                {
+                    "shell_command": lifecycle,
+                    "script": lifecycle,
+                    "cmd": lifecycle,
+                    "command": destructive,
+                },
+                destructive,
+                True,
+            ),
+            (
+                {
+                    "shell_command": destructive,
+                    "script": destructive,
+                    "cmd": destructive,
+                    "command": lifecycle,
+                },
+                lifecycle,
+                False,
+            ),
+            (
+                {"shell_command": lifecycle, "script": lifecycle, "cmd": destructive, "command": ""},
+                destructive,
+                True,
+            ),
+            (
+                {"shell_command": lifecycle, "script": destructive, "cmd": "", "command": ""},
+                destructive,
+                True,
+            ),
+        ]
+    )
+    script = """
+import io
+import json
+import runpy
+import sys
+from pathlib import Path
+from agent_flow.core.host_write_boundary import (
+    host_write_boundary_violation,
+    record_host_checkout_binding,
+)
+
+root = Path(sys.argv[1])
+recorder = runpy.run_path(sys.argv[2])
+payloads = json.load(sys.stdin)
+results = []
+for payload in payloads:
+    violation = host_write_boundary_violation(payload, root)
+    binding = record_host_checkout_binding(payload, root)
+    guidance_eligible = (
+        json.loads(binding.read_text())["guidance_eligible"]
+        if binding is not None else False
+    )
+    sys.stdin = io.StringIO(json.dumps(payload))
+    recorder["main"]()
+    entries = (root / ".agent-flow" / "commands-run.jsonl").read_text().splitlines()
+    results.append({
+        "recorded": json.loads(entries[-1])["command"],
+        "blocked": violation is not None,
+        "bound": binding is not None,
+        "guidance_eligible": guidance_eligible,
+    })
+print(json.dumps(results))
+"""
+    expected = [
+        {
+            "recorded": command,
+            "blocked": blocked,
+            "bound": not blocked,
+            "guidance_eligible": not blocked,
+        }
+        for _, command, blocked in cases
+    ]
+    recorder = Path(__file__).resolve().parents[1] / "scripts/hooks/record-command-run.py"
+    for seed in range(8):
+        payloads = []
+        for index, (tool_input, _, _) in enumerate(cases):
+            payload = _status_payload(root, first, runs[0], session=f"seed-{seed}-{index}")
+            payload["tool_input"] = tool_input
+            payload["cwd"] = str(first.path)
+            payloads.append(payload)
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(root), str(recorder)],
+            input=json.dumps(payloads),
+            env={**os.environ, "PYTHONHASHSEED": str(seed), "PYTHONPATH": SRC},
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+        assert json.loads(result.stdout) == expected, f"PYTHONHASHSEED={seed}: {result.stdout}"
