@@ -916,9 +916,10 @@ def _macos_sandbox_profile(
     protected = sorted(
         {
             *(
-                real_path(parent / name)
+                path
                 for parent in protected_parents
                 for name in _HOST_STATE_DIR_NAMES
+                for path in (parent / name, real_path(parent / name))
             ),
             checkout_install,
             real_path(checkout_install),
