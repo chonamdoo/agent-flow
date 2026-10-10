@@ -19,6 +19,7 @@ from agent_flow.pr_watch import fetch_pr
 def observe_spec_publication(
     project_root: Path, run_dir: Path, *, profile: dict | None = None,
     post_merge: bool = False,
+    for_manual_approval: bool = False,
     config_root: Path | None = None,
     require_review_approval: bool = True,
 ) -> SpecPublicationEvidence:
@@ -58,11 +59,12 @@ def observe_spec_publication(
         return SpecPublicationEvidence(missing=(
             "pre-merge SPEC: push-pr publication evidence is unreadable",
         ))
-    missing = missing_delivery_evidence(
-        project_root, "push-pr", text, profile=profile, post_merge=post_merge,
-    )
-    if missing:
-        return SpecPublicationEvidence(missing=tuple(missing))
+    if not for_manual_approval:
+        missing = missing_delivery_evidence(
+            project_root, "push-pr", text, profile=profile, post_merge=post_merge,
+        )
+        if missing:
+            return SpecPublicationEvidence(missing=tuple(missing))
     fields, missing = parse_delivery_fields(text, ("pr-url", "remote-oid"))
     if missing:
         return SpecPublicationEvidence(missing=tuple(missing))
@@ -95,12 +97,24 @@ def observe_spec_publication(
         int(match.group(2)), repo=f"{url.netloc}/{match.group(1)}",
         required_checks=required_checks, require_ready=True,
         require_review_approval=require_review_approval,
+        require_merged_ci=for_manual_approval,
         run_dir=run_dir, record_feedback=False,
     )
     if snapshot.status == "error":
         return SpecPublicationEvidence(missing=(
             f"pre-merge SPEC: PR observation failed: {snapshot.error}",
         ))
+    if for_manual_approval:
+        if snapshot.status not in {"green", "merged"}:
+            return SpecPublicationEvidence(missing=(
+                f"pre-merge SPEC: expected green publication ({snapshot.status})",
+            ))
+        missing = missing_delivery_evidence(
+            project_root, "push-pr", text, profile=profile,
+            post_merge=snapshot.status == "merged",
+        )
+        if missing:
+            return SpecPublicationEvidence(missing=tuple(missing))
     current = git_safe(
         "rev-parse", "--verify", "HEAD^{commit}", cwd=project_root, optional_locks=False,
     )
@@ -114,7 +128,7 @@ def observe_spec_publication(
             "pre-merge SPEC: CI observation does not match current publication HEAD",
         ))
     expected_status = "merged" if post_merge else "green"
-    if snapshot.status != expected_status:
+    if not for_manual_approval and snapshot.status != expected_status:
         return SpecPublicationEvidence(missing=(
             f"pre-merge SPEC: expected {expected_status} publication ({snapshot.status})",
         ))
