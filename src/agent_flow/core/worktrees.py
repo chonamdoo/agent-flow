@@ -27,6 +27,7 @@ from agent_flow.artifact import (
     write_meta,
 )
 from agent_flow.core.architecture_policy import PROJECT_ARCHITECTURE_FILE
+from agent_flow.core.atomic_io import atomic_write_text
 from agent_flow.core.hook_integrity import (
     JSON_REGISTRATION_FILES,
     OMP_REGISTRATION_FILE,
@@ -3520,7 +3521,7 @@ def write_worktree_manifest(*, root: Path, status: WorktreeStatus) -> Path:
         "base_oid": status.base_oid,
         "branch_created_by_agent_flow": status.branch_created_by_agent_flow,
     }
-    path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
+    atomic_write_text(path, f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
     return path
 
 
