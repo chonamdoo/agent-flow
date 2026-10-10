@@ -91,11 +91,18 @@ def support_level(
     """`detected_by`는 이 host가 active host일 때만 값이 있다(`env:<NAME>` 또는 `path`).
 
     관측된 실행에는 host 표시가 없다. 그래서 env로 확인된 active host에만 귀속한다 —
-    PATH에 있다는 것은 그 CLI가 이 세션의 host라는 증거가 아니다.
+    PATH에 있다는 것은 그 CLI가 이 세션의 host라는 증거가 아니다. 실행 기록도 hook마다
+    남지 않는다. 신뢰를 확인하지 못하면 기록을 남긴 hook 옆에서 guard가 건너뛰어졌을 수
+    있으므로, 신뢰가 `yes`이거나 신뢰 개념이 없는(`n/a`) host만 `hook_enforced`가 된다.
     """
     if not installed or not registered or trust == "no":
         return RUNNER_ONLY
-    if executed and detected_by is not None and detected_by.startswith("env:"):
+    if (
+        trust in ("yes", "n/a")
+        and executed
+        and detected_by is not None
+        and detected_by.startswith("env:")
+    ):
         return HOOK_ENFORCED
     return HOOK_UNPROVEN
 

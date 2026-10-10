@@ -435,12 +435,12 @@ blocks a run and never changes the status exit code; the run-start hook check st
 
 | Level | Meaning |
 |---|---|
-| `hook_enforced` | Registered, not distrusted, and a session binding or a recorded command was seen in this checkout since the run started. Only the active host detected from its environment variable can reach this level, because the records do not name a host. |
-| `hook_unproven` | Registered and not distrusted, but no execution can be attributed to this host. |
+| `hook_enforced` | Registered, trusted (`yes`, or `n/a` for OMP, which has no per-project hook trust), and a session binding or a recorded command was seen in this checkout since the run started. Only the active host detected from its environment variable can reach this level, because the records do not name a host. |
+| `hook_unproven` | Registered and not distrusted, but trust is `unknown` or no execution can be attributed to this host. The records do not say which hooks ran, so with unconfirmed trust an observed execution does not rule out a skipped guard. |
 | `runner_only` | Not installed, not registered, distrusted, or hooks disabled. Required markers, pause approval tokens, independent reviewers, runner gates, route invariants, and the run-start check still apply. The two pre-block rules, the tripwire, session binding, and command recording are not proven. |
 
 Trust is read from each host's own files and never written: `~/.claude.json` and the Claude
-settings (`disableAllHooks`), `$CODEX_HOME/config.toml` (the project `trust_level` and a
+settings (`disableAllHooks`), `$CODEX_HOME/config.toml` (the project `trust_level` and the
 `hooks.state` entry for each hook of the checkout's `.codex/hooks.json`), and
 `~/.omp/agent/config.yml` (`disabledExtensions`). A file that cannot be parsed shows `unknown`.
 As of Claude Code 2.1.296, Claude runs hooks in `-p` sessions without the trust dialog, so a
@@ -449,7 +449,10 @@ The installer removes Codex project trust on every install, and Codex skips untr
 hooks. Trust the folder in Codex. Then approve the agent-flow hooks with `/hooks`. Codex looks up
 project trust for a linked worktree at its main checkout, so the card accepts trust recorded for
 either path. Hook approval is recorded per `hooks.json` path, so each worktree needs its own
-approval.
+approval. Codex also skips a hook turned off in `/hooks` (`enabled = false`), which shows `no`,
+and a hook whose recorded `trusted_hash` differs from the hash of its current registration. That
+hash is Codex's internal serialization and is not checked, so Codex shows at most `unknown` and
+`hook_unproven`; confirm in `/hooks` that every agent-flow hook is trusted, not modified.
 
 The execution line also counts recorded commands that carry no exit code. As of Claude Code
 2.1.296 and Codex CLI 0.162.1, neither passes an exit code to PostToolUse hooks, and Claude does not

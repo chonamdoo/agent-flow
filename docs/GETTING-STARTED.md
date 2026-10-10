@@ -187,8 +187,10 @@ the host, and seen running in this checkout, and it gives each host a level: `ho
 `hook_unproven`, or `runner_only`. The card never blocks the run.
 
 The installer removes Codex project trust on purpose, and Codex does not run untrusted project
-hooks. If Codex shows `trusted=no`, trust the folder in Codex. Then approve the agent-flow hooks with
-`/hooks` and restart the session. See [Host connection](USAGE.md#host-connection).
+hooks. If Codex shows `trusted=no`, follow its hint: trust the folder in Codex, approve the
+agent-flow hooks or turn them back on with `/hooks`, and restart the session. Even after approval
+Codex shows `trusted=unknown`, because the card cannot check Codex's hook hash; confirm in
+`/hooks` that every agent-flow hook is trusted. See [Host connection](USAGE.md#host-connection).
 
 Walk that loop five times and `bugfix` is done. The last output looks like this:
 

@@ -127,7 +127,9 @@ def test_status_keeps_its_exit_code_and_one_status_line_on_hostile_diagnostic_in
     ("installed", "registered", "trust", "detected_by", "executed", "expected"),
     (
         (True, True, "yes", "env:CLAUDECODE", True, "hook_enforced"),
-        (True, True, "unknown", "env:CLAUDECODE", True, "hook_enforced"),
+        # 신뢰를 확인하지 못하면 다른 hook의 실행 기록이 건너뛰어진 guard를 가린다.
+        (True, True, "unknown", "env:CLAUDECODE", True, "hook_unproven"),
+        (True, True, "unknown", "env:CODEX_HOME", True, "hook_unproven"),
         (True, True, "n/a", "env:OMP_PROFILE", True, "hook_enforced"),
         # PATH에 있다는 것은 host 증거가 아니다. 실행을 그 host에 귀속하지 않는다.
         (True, True, "yes", "path", True, "hook_unproven"),
@@ -176,7 +178,12 @@ def _codex_hooks(checkout: Path) -> Path:
 
 
 def _codex_config(
-    checkout: Path, *, project: Path | None, hooks: tuple[str, ...], hash_value: str = '"sha256:00"'
+    checkout: Path,
+    *,
+    project: Path | None,
+    hooks: tuple[str, ...],
+    hash_value: str = '"sha256:00"',
+    disabled: tuple[str, ...] = (),
 ) -> str:
     lines = []
     if project is not None:
@@ -185,6 +192,7 @@ def _codex_config(
         lines += [
             f'[hooks.state."{checkout}/.codex/hooks.json:{key}"]',
             f"trusted_hash = {hash_value}",
+            *(["enabled = false"] if key in disabled else []),
             "",
         ]
     return "\n".join(lines)
@@ -205,6 +213,9 @@ def _host_files(tmp_path: Path, case: str) -> tuple[str, Path, Path, Path, dict[
             "codex-project-untrusted": _codex_config(checkout, project=None, hooks=both),
             "codex-hook-untrusted": _codex_config(
                 checkout, project=checkout, hooks=("pre_tool_use:0:0",)
+            ),
+            "codex-hook-disabled": _codex_config(
+                checkout, project=checkout, hooks=both, disabled=("stop:0:0",)
             ),
             "codex-hook-hash-malformed": _codex_config(
                 checkout, project=checkout, hooks=both, hash_value="true"
@@ -231,10 +242,14 @@ def _host_files(tmp_path: Path, case: str) -> tuple[str, Path, Path, Path, dict[
     return "omp", home, checkout, leader, files
 
 
-# 사용자가 고칠 수 있는 상태에만 힌트가 붙는다. 신뢰됐거나 파일을 못 읽는 경우는 고칠 길을 모른다.
+# 사용자가 host에서 확인하거나 고칠 수 있는 상태에만 힌트가 붙는다. 신뢰가 확인됐거나
+# 파일을 못 읽는 경우에는 붙지 않는다.
 _HINTED_TRUST_CASES = {
+    "codex-trusted",
+    "codex-trusted-at-leader",
     "codex-project-untrusted",
     "codex-hook-untrusted",
+    "codex-hook-disabled",
     "claude-untrusted",
     "claude-unrecorded",
     "claude-hooks-disabled",
@@ -245,12 +260,12 @@ _HINTED_TRUST_CASES = {
 @pytest.mark.parametrize(
     ("case", "expected"),
     (
-        ("codex-trusted", "yes"),
-        ("codex-trusted-at-leader", "yes"),
+        ("codex-trusted", "unknown"),
+        ("codex-trusted-at-leader", "unknown"),
         ("codex-project-untrusted", "no"),
         ("codex-hook-untrusted", "no"),
+        ("codex-hook-disabled", "no"),
         ("codex-hook-hash-malformed", "unknown"),
-        ("codex-broken", "unknown"),
         ("claude-trusted", "yes"),
         ("claude-untrusted", "unknown"),
         ("claude-unrecorded", "unknown"),
@@ -265,7 +280,9 @@ def test_host_trust_is_read_only_and_reports_unknown_on_unreadable_config(
     tmp_path: Path, case: str, expected: str
 ):
     """반증: Codex는 project와 hook마다 신뢰가 있어야 project hook을 실행한다. 등록만
-    보고 '보호됨'으로 표시하면 실제로는 아무 hook도 돌지 않는 세션을 놓친다. Codex는
+    보고 '보호됨'으로 표시하면 실제로는 아무 hook도 돌지 않는 세션을 놓친다. `/hooks`에서
+    끈 hook과 hash가 바뀐 hook도 건너뛴다. hash는 확인할 수 없으므로 기록이 다 있어도
+    `yes`라고 하면 건너뛰어진 guard를 신뢰된 것으로 보인다. Codex는
     linked worktree의 project 신뢰를 main checkout에서 찾으므로, worktree 경로만 보면
     신뢰된 leader의 worktree를 고칠 수 없는 `no`로 보인다. Claude는 `-p` 실행을
     신뢰로 취급하므로 신뢰 기록이 없다고 `no`로 단정하면 실제로 도는 hook을

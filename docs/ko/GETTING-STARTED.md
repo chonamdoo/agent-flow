@@ -137,8 +137,10 @@ run이 진행 중이면 이 출력 끝에 host 연결 카드가 붙는다. Claud
 않는다.
 
 installer는 Codex project 신뢰를 일부러 지우고, Codex는 신뢰하지 않은 project hook을 실행하지
-않는다. Codex가 `trusted=no`이면 Codex에서 이 폴더를 신뢰한다. 그다음 `/hooks`에서 agent-flow 훅을
-승인하고 세션을 다시 시작한다. 자세한 내용은 [Host connection](../USAGE.md#host-connection)에 있다.
+않는다. Codex가 `trusted=no`이면 힌트를 따른다. Codex에서 이 폴더를 신뢰하고, `/hooks`에서
+agent-flow 훅을 승인하거나 다시 켠 뒤 세션을 다시 시작한다. 승인한 뒤에도 카드는 Codex의 hook
+hash를 확인할 수 없어 `trusted=unknown`을 보인다. `/hooks`에서 agent-flow 훅이 모두 trusted인지
+확인한다. 자세한 내용은 [Host connection](../USAGE.md#host-connection)에 있다.
 
 이 반복을 다섯 번 돌면 `bugfix`가 끝난다. 마지막 출력은 이렇다.
 

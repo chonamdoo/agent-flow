@@ -4,7 +4,8 @@
 세탁 방지). 진단이 host 설정을 쓰면 그 금지선을 다른 입구로 넘는다.
 
 등록과 신뢰는 서로를 증명하지 않는다. Codex는 project 신뢰와 hook별 신뢰가 모두
-있어야 project hook을 실행하고, 신뢰가 없으면 등록된 hook을 말없이 건너뛴다.
+있어야 project hook을 실행하고, 신뢰가 없으면 등록된 hook을 말없이 건너뛴다. hook별
+신뢰는 그 hook이 꺼져 있지 않고 기록된 hash가 현재 등록의 hash와 같을 때만 유효하다.
 """
 from __future__ import annotations
 
@@ -23,6 +24,10 @@ TrustState = Literal["yes", "no", "unknown", "n/a"]
 
 CODEX_TRUST_HINT = (
     "Codex에서 이 폴더를 신뢰하고 /hooks에서 agent-flow 훅을 승인한 뒤 세션을 다시 시작하세요"
+)
+CODEX_DISABLED_HINT = "Codex /hooks에서 꺼진 agent-flow 훅을 켜고 세션을 다시 시작하세요"
+CODEX_HASH_HINT = (
+    "Codex /hooks에서 agent-flow 훅이 모두 trusted인지 확인하세요(modified면 다시 승인하세요)"
 )
 CLAUDE_TRUST_HINT = (
     "interactive Claude 세션은 이 폴더의 신뢰 대화를 수락해야 hook을 실행합니다"
@@ -126,20 +131,41 @@ def _codex_trust(
     if handlers is None:
         return HostTrust("unknown", str(hooks_path), "cannot read the Codex hook registration")
     hooks = config.get("hooks")
-    trusted = hooks.get("state") if isinstance(hooks, dict) else None
-    trusted = trusted if isinstance(trusted, dict) else {}
-    hashes = {
+    states = hooks.get("state") if isinstance(hooks, dict) else None
+    states = states if isinstance(states, dict) else {}
+    records = {
         handler: [
-            trusted[f"{prefix}:{handler}"].get("trusted_hash")
-            for prefix in _path_keys(hooks_path)
-            if isinstance(trusted.get(f"{prefix}:{handler}"), dict)
-            and "trusted_hash" in trusted[f"{prefix}:{handler}"]
+            states[key]
+            for key in (f"{prefix}:{handler}" for prefix in _path_keys(hooks_path))
+            if isinstance(states.get(key), dict)
         ]
         for handler in handlers
     }
-    if any(not isinstance(value, str) or not value for found in hashes.values() for value in found):
+    if any(
+        "trusted_hash" in record
+        and (not isinstance(record["trusted_hash"], str) or not record["trusted_hash"])
+        for found in records.values()
+        for record in found
+    ):
         return HostTrust("unknown", str(config_path), "a Codex hook trust record is malformed")
-    untrusted = [handler for handler, found in hashes.items() if not found]
+    # `/hooks`에서 끈 hook은 신뢰 hash가 남아 있어도 실행되지 않는다.
+    disabled = [
+        handler
+        for handler, found in records.items()
+        if any(record.get("enabled") is False for record in found)
+    ]
+    if disabled:
+        return HostTrust(
+            "no",
+            str(config_path),
+            f"{len(disabled)} of {len(handlers)} hooks are disabled",
+            CODEX_DISABLED_HINT,
+        )
+    untrusted = [
+        handler
+        for handler, found in records.items()
+        if not any("trusted_hash" in record for record in found)
+    ]
     if untrusted:
         return HostTrust(
             "no",
@@ -147,8 +173,14 @@ def _codex_trust(
             f"{len(untrusted)} of {len(handlers)} hooks are not trusted",
             CODEX_TRUST_HINT,
         )
-    # hash는 Codex 내부 직렬화로 계산한다. 키가 있다는 것까지만 확인할 수 있다.
-    return HostTrust("yes", str(config_path), "project and hook trust recorded (hash not verified)")
+    # Codex는 기록된 hash가 현재 등록의 hash와 다르면 수정된 hook으로 보고 건너뛴다. hash는
+    # Codex 내부 직렬화로 계산하므로 같은지 알 수 없다. 그래서 기록이 다 있어도 `yes`가 아니다.
+    return HostTrust(
+        "unknown",
+        str(config_path),
+        "project and hook trust recorded; the Codex hook hash is not verified",
+        CODEX_HASH_HINT,
+    )
 
 
 def _omp_trust(
