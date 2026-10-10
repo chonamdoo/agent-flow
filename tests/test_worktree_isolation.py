@@ -2324,7 +2324,7 @@ def test_state_root_refuses_to_fall_back_into_the_leader(tmp_path, monkeypatch):
 
 
 def test_tripwire_watches_installed_runtime_code(tmp_path):
-    """불변: `.agent-flow/runtime/`은 gate가 PYTHONPATH 최우선으로 실행하는 코드다.
+    """불변: gate는 find_install_root가 선택한 가용 설치 runtime을 PYTHONPATH 맨 앞에 둔다.
 
     상태 디렉터리라고 통째로 빼면 tripwire 자기 자신을 포함한 런타임 전체가
     사각지대가 된다. 정당하게 생기는 것은 bytecode뿐이다.

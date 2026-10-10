@@ -965,3 +965,199 @@ def test_a_gate_result_written_before_the_phase_is_replaced_by_the_runner(
     gate_ids = [entry["gate_id"] for entry in payload["results"]]
     assert "planted" not in gate_ids
     assert gate_ids == ["architecture-lint"]
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    (
+        "managed", "legacy", "manual", "managed-subdirectory",
+        "leader-runtime-missing", "leader-initializer-directory",
+        "metadata-missing", "git-boundary", "home-boundary", "start-boundary",
+        "no-install", "local-install", "nested-install", "home-unavailable",
+    ),
+)
+def test_gate_pythonpath_respects_install_root_boundary(tmp_path, monkeypatch, scenario):
+    from tests.test_hook_integrity import _git, _repo
+
+    root = tmp_path.resolve()
+    home = root / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    expected_runtime = None
+
+    def seed_runtime(project, *, metadata=True, initializer="file"):
+        kit = project / ".agent-flow"
+        kit.mkdir(parents=True, exist_ok=True)
+        if metadata:
+            (kit / "kit.json").write_text("{}\n", encoding="utf-8")
+        runtime = kit / "runtime" / "python"
+        package = runtime / "agent_flow"
+        package.mkdir(parents=True)
+        if initializer == "file":
+            (package / "__init__.py").write_text("", encoding="utf-8")
+        elif initializer == "directory":
+            (package / "__init__.py").mkdir()
+        return runtime
+
+    linked = scenario in {
+        "managed", "legacy", "manual", "managed-subdirectory",
+        "leader-runtime-missing", "leader-initializer-directory",
+    }
+    if linked:
+        leader = home / "leader"
+        _repo(leader)
+        initializer = {
+            "leader-runtime-missing": "missing",
+            "leader-initializer-directory": "directory",
+        }.get(scenario, "file")
+        leader_runtime = seed_runtime(leader, initializer=initializer)
+        checkout = {
+            "legacy": leader / ".agent-flow" / "worktrees" / "w1",
+            "manual": root / "manual-wt",
+        }.get(scenario, home / ".agent-flow" / "worktrees" / "repo-id" / "w1")
+        _git("worktree", "add", "-b", "w1", str(checkout), cwd=leader)
+        seed_runtime(home)
+        seed_runtime(checkout.parent)
+        seed_runtime(checkout)
+        cwd = checkout
+        if scenario == "managed-subdirectory":
+            cwd = checkout / "pkg" / "app"
+            cwd.mkdir(parents=True)
+            seed_runtime(cwd.parent)
+        if initializer == "file":
+            expected_runtime = leader_runtime
+    elif scenario in {"metadata-missing", "git-boundary", "local-install", "nested-install"}:
+        repository = home / "repo"
+        _repo(repository)
+        cwd = repository
+        if scenario == "git-boundary":
+            seed_runtime(home)
+        else:
+            runtime = seed_runtime(repository, metadata=scenario != "metadata-missing")
+            if scenario != "metadata-missing":
+                expected_runtime = runtime
+        if scenario == "nested-install":
+            cwd = repository / "pkg" / "app"
+            cwd.mkdir(parents=True)
+            expected_runtime = seed_runtime(cwd.parent)
+    else:
+        cwd = (root / "outside" if scenario == "start-boundary" else home) / "project"
+        cwd.mkdir(parents=True)
+        if scenario == "home-boundary":
+            seed_runtime(home)
+        elif scenario == "start-boundary":
+            seed_runtime(cwd.parent)
+        elif scenario == "home-unavailable":
+            seed_runtime(cwd)
+
+            def unavailable_home():
+                raise RuntimeError("home unavailable")
+
+            monkeypatch.setattr(Path, "home", staticmethod(unavailable_home))
+
+    src = cwd / "src"
+    with_src = scenario not in {"no-install", "start-boundary"}
+    if with_src:
+        src.mkdir()
+    inherited = root / "inherited"
+    current_paths = [str(inherited), SRC, str(inherited)]
+    if expected_runtime is not None:
+        current_paths.append(str(expected_runtime))
+    if with_src:
+        current_paths.append(str(src))
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(current_paths) + os.pathsep)
+
+    expected_paths = (
+        ([str(expected_runtime)] if expected_runtime is not None else [])
+        + ([str(src)] if with_src else [])
+        + [SRC, str(inherited)]
+    )
+    package_root = expected_runtime if expected_runtime is not None else Path(SRC)
+    command = GateCommand(
+        gate_id="runtime-origin",
+        command=(
+            sys.executable, "-c",
+            "import agent_flow, json, os; "
+            "print(json.dumps({'paths': os.environ['PYTHONPATH'].split(os.pathsep), "
+            "'module': agent_flow.__file__}))",
+        ),
+        required=True,
+    )
+    result = run_gate(command, cwd=cwd)
+
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "paths": expected_paths,
+        "module": str(package_root / "agent_flow" / "__init__.py"),
+    }
+
+
+@pytest.mark.parametrize("initially_installed", (True, False))
+def test_gate_runtime_selection_is_scoped_to_each_plan(tmp_path, monkeypatch, initially_installed):
+    from agent_flow.core.gates import run_gates
+    from tests.test_hook_integrity import _git, _repo
+
+    root = tmp_path.resolve()
+    home = root / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    leader = home / "leader"
+    _repo(leader)
+    kit = leader / ".agent-flow"
+    runtime = kit / "runtime" / "python"
+    package = runtime / "agent_flow"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    metadata = kit / "kit.json"
+    if initially_installed:
+        metadata.write_text("{}\n", encoding="utf-8")
+    checkout = home / ".agent-flow" / "worktrees" / "repo-id" / "worker"
+    _git("worktree", "add", "-b", "worker", str(checkout), cwd=leader)
+
+    def command(gate_id):
+        return GateCommand(
+            gate_id,
+            (
+                sys.executable, "-c",
+                "import agent_flow, json, os; "
+                "print(json.dumps({'paths': os.environ['PYTHONPATH'].split(os.pathsep), "
+                "'module': agent_flow.__file__}))",
+            ),
+            timeout_s=1,
+        )
+
+    announced = []
+
+    def on_start(gate, index, total):
+        announced.append((gate.gate_id, index, total))
+        inherited = root / gate.gate_id
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join((str(inherited), SRC, str(inherited))))
+        if gate.gate_id == "second":
+            if initially_installed:
+                metadata.unlink()
+            else:
+                metadata.write_text("{}\n", encoding="utf-8")
+
+    results = run_gates(
+        [command("first"), command("second")],
+        cwd=checkout,
+        on_start=on_start,
+    )
+    next_results = run_gates([command("next")], cwd=checkout, on_start=on_start)
+
+    def expected(gate_id, installed):
+        package_root = runtime if installed else Path(SRC)
+        return {
+            "paths": ([str(runtime)] if installed else []) + [SRC, str(root / gate_id)],
+            "module": str(package_root / "agent_flow" / "__init__.py"),
+        }
+
+    assert announced == [("first", 1, 2), ("second", 2, 2), ("next", 1, 1)]
+    assert [
+        (result.gate_id, result.passed, result.exit_code, result.timed_out, json.loads(result.stdout))
+        for result in results + next_results
+    ] == [
+        ("first", True, 0, False, expected("first", initially_installed)),
+        ("second", True, 0, False, expected("second", initially_installed)),
+        ("next", True, 0, False, expected("next", not initially_installed)),
+    ]
