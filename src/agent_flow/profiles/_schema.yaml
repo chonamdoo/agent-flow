@@ -92,6 +92,9 @@ optional:
 
   gates:
     # ordered list of verification commands
+    # Each gate mapping accepts only id, command, required, phase, timeout_s, execution, ci_check.
+    # Unknown keys are errors, including typos and metadata; this also applies inside gate_variants.
+    # Explicit local gates replace variant selection; unused variants are not newly validated.
     - id: "stable id (e.g. build, test, lint)"
       command: ["command", "argument"]
       required: true

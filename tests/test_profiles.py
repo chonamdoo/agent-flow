@@ -1440,6 +1440,17 @@ def _write_project_profile(root: Path, **declarations: object) -> Path:
     return source
 
 
+def _write_gate_declaration(root: Path, source_kind: str, gate: dict[str, object]) -> Path:
+    if source_kind == "override":
+        _write_project_profile(root)
+        return _write_override(root, "probe", yaml.safe_dump({"gates": [gate]}))
+    if source_kind == "variant":
+        return _write_project_profile(
+            root, gate_variants=[{"tool": "probe", "gates": [gate]}],
+        )
+    return _write_project_profile(root, gates=[gate])
+
+
 @pytest.mark.parametrize(
     "angles",
     [
@@ -1616,6 +1627,85 @@ def test_malformed_gate_variants_report_context(
 
 def test_explicit_gates_override_unused_malformed_variants(tmp_path: Path) -> None:
     _write_project_profile(tmp_path, gate_variants=[{"tool": "gradle"}])
+    _write_override(tmp_path, "probe", "gates:\n  - id: build\n    command: [./checks, custom]\n")
+    commands = _profile_gate_commands(["probe"], root=tmp_path)
+    assert [command.command for command in commands] == [("./checks", "custom")]
+
+
+@pytest.mark.parametrize("source_kind", ["installed", "override", "variant"])
+@pytest.mark.parametrize(
+    "unknown_fields,unknown_keys",
+    [
+        ({"time_out_s": 1800, "phas": "pre-push"}, "phas, time_out_s"),
+        ({"metadata": {"owner": "qa"}}, "metadata"),
+    ],
+    ids=["typos", "metadata"],
+)
+def test_gate_mappings_reject_unknown_keys(
+    tmp_path: Path, source_kind: str, unknown_fields: dict[str, object], unknown_keys: str,
+) -> None:
+    source = _write_gate_declaration(
+        tmp_path, source_kind,
+        {"id": "verify", "command": ["pytest", "-q"], **unknown_fields},
+    )
+    with pytest.raises(ValueError) as caught:
+        load_profile("probe", tmp_path)
+    message = str(caught.value)
+    assert "probe:verify" in message
+    assert message.endswith(f": {unknown_keys}")
+    if source_kind != "installed":
+        assert str(source) in message
+    if source_kind == "variant":
+        assert "gate_variants[0]" in message
+
+
+@pytest.mark.parametrize("key", [1, None, ("metadata",)])
+def test_gate_mapping_rejects_non_string_keys(key: object) -> None:
+    with pytest.raises(ValueError) as caught:
+        _gate_from_payload(
+            {"id": "verify", "command": ["pytest", "-q"], "phas": "pre-push", key: "unexpected"},
+            profile_id="probe",
+        )
+    assert "probe:verify" in str(caught.value)
+
+
+@pytest.mark.parametrize("source_kind", ["installed", "override", "variant"])
+def test_gate_mappings_preserve_supported_fields(tmp_path: Path, source_kind: str) -> None:
+    _write_gate_declaration(
+        tmp_path, source_kind,
+        {
+            "id": "verify",
+            "command": ["pytest", "-q"],
+            "required": False,
+            "phase": "pre-push",
+            "timeout_s": 1800,
+            "execution": "ci",
+            "ci_check": "pytest",
+        },
+    )
+    assert load_profile("probe", tmp_path).gates == (
+        ProfileGate(
+            gate_id="verify",
+            command=("pytest", "-q"),
+            required=False,
+            phase="pre-push",
+            timeout_s=1800,
+            execution="ci",
+            ci_check="pytest",
+        ),
+    )
+
+
+def test_local_gates_replace_unused_variants_with_unknown_gate_keys(tmp_path: Path) -> None:
+    _write_project_profile(
+        tmp_path,
+        gate_variants=[
+            {
+                "tool": "probe",
+                "gates": [{"id": "unused", "command": ["false"], "phas": "pre-push"}],
+            },
+        ],
+    )
     _write_override(tmp_path, "probe", "gates:\n  - id: build\n    command: [./checks, custom]\n")
     commands = _profile_gate_commands(["probe"], root=tmp_path)
     assert [command.command for command in commands] == [("./checks", "custom")]
