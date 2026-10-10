@@ -26,6 +26,9 @@ This is the always-loaded hot context. Read long domain/workflow explanations on
 - **Handoff**: an artifact summarizing the decisions, risks, related files, and remaining work the next phase needs.
 - **Gate**: an automated verification command such as build, typecheck, lint, test.
 - **Personal Workflow**: the current default execution mode where the lead owns the Run and phase transitions.
+- **Host**: the AI CLI a session runs in (Claude Code, Codex, OMP). Its hooks enforce the run-time protections.
+- **Host Connection**: whether a host actually runs this install's hooks, judged as four separate states: installed, registered, trusted, executed. None of them proves another.
+- **Host Support Level**: how much protection a host is shown to provide: `hook_enforced`, `hook_unproven`, or `runner_only`. It is a display; it never allows or blocks a run.
 
 ## Current Lifecycle
 
@@ -54,6 +57,7 @@ Team Orchestration is an optional future module. Do not mix it with the current 
 - Do not confuse Artifact with raw log, manifest, or source change.
 - Do not confuse Gate with a phase completion marker.
 - Do not confuse Adapter with Provider.
+- Do not confuse Host with Adapter or Provider. A host is the CLI the session runs in; an adapter is the runner's strategy; a provider wraps a CLI the runner launches.
 
 ## Context Loading
 

@@ -1,0 +1,19 @@
+{
+  "host": "codex",
+  "event": "PreToolUse",
+  "host_version": "codex-cli 0.162.1",
+  "payload": {
+    "session_id": "${SESSION}",
+    "turn_id": "${ID}",
+    "transcript_path": "${TRANSCRIPT}",
+    "cwd": "${CHECKOUT}",
+    "hook_event_name": "PreToolUse",
+    "model": "gpt-6.1-sol",
+    "permission_mode": "bypassPermissions",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "${COMMAND}"
+    },
+    "tool_use_id": "${ID}"
+  }
+}

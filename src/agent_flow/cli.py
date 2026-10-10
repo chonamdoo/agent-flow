@@ -181,6 +181,8 @@ from agent_flow.core.hook_integrity import (
     assert_managed_hooks_registered,
 )
 from agent_flow.core.host_write_boundary import assert_adoption_allowed
+from agent_flow.cli_detect import detect_host_cli_source
+from agent_flow.core.host_connection import collect_host_connection, render_host_connection
 from agent_flow.core.leader_tripwire import leader_sweep_include_ignored_for
 from agent_flow.core.worktree_isolation import (
     leader_sweep_includes_ignored,
@@ -205,6 +207,7 @@ from agent_flow.core.worktree_isolation import (
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
 from agent_flow.artifact import (
+    ActiveRun,
     approve_phase_artifact,
     find_active_run,
     find_active_runs,
@@ -1123,6 +1126,7 @@ def main(argv: list[str] | None = None) -> int:
             except (OSError, ValueError) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
+            _print_host_connection(root, run_root, active)
             _print_architecture_selection_guidance(run_root)
             return 0
         if _legacy_js_state_exists(root):
@@ -3814,6 +3818,27 @@ def _print_pending_spec_change_status(run_dir: Path) -> None:
         "spec_confirm_command: agent-flow spec confirm --run-dir "
         f"{shlex.quote(str(run_dir))}"
     )
+
+
+def _print_host_connection(project_root: Path, checkout: Path, active: ActiveRun) -> None:
+    """진단 실패는 status를 바꾸지 않는다. exit code와 앞선 출력은 그대로다."""
+    try:
+        lines = render_host_connection(
+            collect_host_connection(
+                project_root=project_root,
+                checkout=checkout,
+                run_id=active.run_id,
+                run_started_at=_run_meta_timestamp({"started_at": active.started_at}),
+                active=detect_host_cli_source(),
+                home=Path.home(),
+                env=os.environ,
+            )
+        )
+    except Exception as exc:  # host 소유 파일과 기록을 읽는다. 어떤 형식 변화도 status를 실패시키면 안 된다
+        print(f"host_connection: unavailable ({exc!r})")
+        return
+    for line in lines:
+        print(line)
 
 
 def _spec_run_context(run_dir: Path) -> dict:

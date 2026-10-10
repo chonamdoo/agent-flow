@@ -95,8 +95,9 @@ def _install_extension(root: Path, source: str, extra: str = "") -> Path:
     return target
 
 
-def _resolved_hook_dir(root: Path, source: str) -> Path:
+def _resolved_hook_dir(root: Path, source: str, *, home: Path | None = None) -> Path:
     target = _install_extension(root, source, "\nexport const __HOOK_DIR = HOOK_DIR;\n")
+    env = None if home is None else {**os.environ, "HOME": str(home)}
     return Path(
         subprocess.run(
             (
@@ -107,6 +108,7 @@ def _resolved_hook_dir(root: Path, source: str) -> Path:
                 ".then((m) => process.stdout.write(m.__HOOK_DIR));",
             ),
             cwd=root,
+            env=env,
             check=True,
             capture_output=True,
             text=True,
@@ -360,6 +362,61 @@ def test_omp_extension_resolves_its_hook_dir_from_the_install_root(tmp_path: Pat
     resolved = _resolved_hook_dir(outsider, source)
     assert resolved != foreign_hooks, "조상의 남의 설치본을 집으면 안 된다"
     assert resolved == outsider / ".agent-flow" / "scripts" / "hooks"
+
+
+@pytest.mark.parametrize("layout", ("managed", "legacy", "manual"))
+@pytest.mark.parametrize("plant", ("checkout", "subdirectory"))
+def test_omp_extension_prefers_the_leader_install_over_a_worktree_copy(
+    tmp_path: Path, layout: str, plant: str
+):
+    """반증: linked worktree에 `.agent-flow/kit.json` 사본이 있으면 OMP가 그 사본의
+    hook을 돌린다. 위조본이면 leader 쓰기 guard와 tripwire가 사본 스크립트로 바뀌고,
+    Python run 시작 검사는 leader 설치만 보므로 이것을 못 본다.
+
+    `find_install_root`와 같은 답이어야 두 구현이 같은 설치본의 hook을 실행한다.
+    """
+    from agent_flow.core.hook_integrity import find_install_root
+
+    source = _extension_source()
+    root = tmp_path.resolve()
+    home = root / "home"
+    home.mkdir()
+    leader = root / "leader"
+    leader.mkdir()
+    _git(leader, "init", "-q")
+    (leader / ".gitignore").write_text(".agent-flow/\n.omp/\n", encoding="utf-8")
+    _git(leader, "add", "-A")
+    _git(
+        leader,
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+    )
+    leader_hooks = _seed_install(leader)
+    checkout = {
+        "managed": home / ".agent-flow" / "worktrees" / "repo-id" / "w1",
+        "legacy": leader / ".agent-flow" / "worktrees" / "w1",
+        "manual": root / "manual-wt",
+    }[layout]
+    _git(leader, "worktree", "add", "-q", "-b", "w1", str(checkout))
+
+    if plant == "checkout":
+        session_root = checkout
+        _seed_install(checkout)
+    else:
+        session_root = checkout / "pkg" / "app"
+        session_root.mkdir(parents=True)
+        _seed_install(checkout / "pkg")
+
+    assert _resolved_hook_dir(session_root, source, home=home) == leader_hooks
+    assert find_install_root(session_root) == leader
 
 
 def test_omp_extension_separates_no_install_from_a_deleted_guard(tmp_path: Path):

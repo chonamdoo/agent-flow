@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+from agent_flow.core.atomic_io import read_bounded_regular_file
 from agent_flow.core.worktree_isolation import leader_root_for
 
 # install이 심는 정확히 그 스크립트들. JS 쪽 등록 지점 3곳
@@ -115,6 +116,8 @@ JSON_REGISTRATION_FILES = (
     Path(".codex") / "hooks.json",
 )
 OMP_REGISTRATION_FILE = Path(".omp") / "extensions" / "agent-flow-hooks.ts"
+# 등록 파일은 사용자 설정과 함께 있어도 수 KB 수준이다. 이보다 크면 읽지 못한 것으로 본다.
+_REGISTRATION_MAX_BYTES = 8 * 1024 * 1024
 
 # 관리 디렉터리 안에서 hook이 아닌 것으로 인정하는 이름. `--no-hooks`가 남기는
 # 은퇴 사본과 실행으로 생기는 bytecode다.
@@ -253,6 +256,59 @@ def _verify_root(root: Path) -> HookIntegrityReport:
     )
 
 
+@dataclass(frozen=True)
+class HookSurfaceState:
+    name: str
+    present: bool
+    readable: bool
+    violations: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class HookInstallDescription:
+    """status 진단용 서술. run 허용은 `assert_managed_hooks_registered`만 정한다."""
+
+    root: Path
+    enabled: bool | None  # kit.json `hooks`. 기록이 없으면 None
+    install_violations: tuple[str, ...]
+    surfaces: tuple[HookSurfaceState, ...]
+
+
+def describe_managed_hooks(install_root: Path, surface_root: Path) -> HookInstallDescription:
+    """설치 무결성과 등록 파일별 상태를 따로 돌려준다.
+
+    worktree에는 leader 등록 파일의 사본이 깔린다(`provision_host_hook_registrations`).
+    host 세션은 그 checkout의 사본을 읽으므로 등록은 `surface_root`에서, 명령이
+    가리키는 관리 경로는 `install_root` 기준으로 판정한다.
+    """
+    kit = _read_kit_json(install_root)
+    recorded = kit.get("hooks")
+    enabled = recorded if isinstance(recorded, bool) else None
+    install: list[str] = list(_unapproved_scripts_on_disk(install_root))
+    if enabled:
+        install.extend(_missing_scripts_on_disk(install_root))
+        install.extend(_managed_hook_digest_violations(install_root, kit))
+        install.extend(_project_launcher_violations(install_root, kit))
+        install.extend(_hook_launcher_violations(install_root, kit))
+    states: list[HookSurfaceState] = []
+    for surface in _read_surfaces(install_root, surface_root=surface_root):
+        single = (surface,)
+        violations: list[str] = []
+        if surface.present and not surface.readable:
+            violations.append(f"cannot read the hook registration file: {surface.name}")
+        if enabled:
+            violations.extend(_unregistered_scripts(single))
+            violations.extend(_misplaced_managed_hooks(single))
+        else:
+            violations.extend(_unexpected_registrations(single))
+        violations.extend(_unapproved_registrations(single))
+        violations.extend(_malformed_registrations(single))
+        states.append(
+            HookSurfaceState(surface.name, surface.present, surface.readable, tuple(violations))
+        )
+    return HookInstallDescription(install_root, enabled, tuple(install), tuple(states))
+
+
 def _unapproved_scripts_on_disk(root: Path) -> Iterator[str]:
     """관리 디렉터리에 관리 대상이 아닌 실행 파일이 있는가.
 
@@ -282,10 +338,18 @@ def _unapproved_scripts_on_disk(root: Path) -> Iterator[str]:
 
 
 def _missing_registrations(root: Path, surfaces: tuple[_Surface, ...]) -> Iterator[str]:
+    yield from _missing_scripts_on_disk(root)
+    yield from _unregistered_scripts(surfaces)
+
+
+def _missing_scripts_on_disk(root: Path) -> Iterator[str]:
     hook_dir = root / HOOK_DIR_RELATIVE
     for script in MANAGED_HOOK_SCRIPTS:
         if not _is_file(hook_dir / script):
             yield f"managed hook script is missing from disk: {script}"
+
+
+def _unregistered_scripts(surfaces: tuple[_Surface, ...]) -> Iterator[str]:
     for surface in surfaces:
         if not surface.present:
             yield f"{surface.name} is missing, so no managed hook is registered there"
@@ -579,19 +643,21 @@ def _malformed_registrations(surfaces: tuple[_Surface, ...]) -> Iterator[str]:
             )
 
 
-def _read_surfaces(root: Path) -> Iterator[_Surface]:
+def _read_surfaces(root: Path, *, surface_root: Path | None = None) -> Iterator[_Surface]:
     """install이 쓰는 등록 파일마다 `(event, script)` 목록을 만든다.
 
     존재하지 않는 파일도 레코드를 남긴다. 없는 것을 건너뛰면 등록 파일을
-    통째로 지우는 것이 가장 싼 우회가 된다.
+    통째로 지우는 것이 가장 싼 우회가 된다. 등록 파일은 `surface_root`(기본은
+    `root`)에서 읽고, 명령이 가리키는 관리 경로는 `root` 기준으로 판정한다.
     """
+    files_root = root if surface_root is None else surface_root
     for relative in JSON_REGISTRATION_FILES:
-        path = root / relative
+        path = files_root / relative
         if not _is_file(path):
             yield _Surface(str(relative), present=False, readable=False, entries=())
             continue
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(_read_registration_text(path))
         except (OSError, ValueError):
             # 읽지 못하는 등록 파일을 "등록 없음"으로 접으면, 파일을 깨뜨리는
             # 것만으로 검증이 사라진다. 읽기 실패 자체를 위반으로 든다.
@@ -605,13 +671,13 @@ def _read_surfaces(root: Path) -> Iterator[_Surface]:
             entries=entries,
             malformed=malformed,
         )
-    omp = root / OMP_REGISTRATION_FILE
+    omp = files_root / OMP_REGISTRATION_FILE
     if not _is_file(omp):
         yield _Surface(str(OMP_REGISTRATION_FILE), present=False, readable=False, entries=())
         return
     try:
-        text = omp.read_text(encoding="utf-8")
-    except OSError:
+        text = _read_registration_text(omp)
+    except (OSError, ValueError):
         yield _Surface(str(OMP_REGISTRATION_FILE), present=True, readable=False, entries=())
         return
     # OMP 확장은 kit이 통째로 생성하는 소스다. 이벤트 자리는 소스 안의
@@ -623,6 +689,19 @@ def _read_surfaces(root: Path) -> Iterator[_Surface]:
         readable=True,
         entries=tuple(("", "", script) for script in MANAGED_HOOK_SCRIPTS if script in text),
     )
+
+
+def _read_registration_text(path: Path) -> str:
+    """등록 파일 본문. 일반 파일이 아니면 OSError다.
+
+    status는 매번 checkout의 등록 사본을 읽고, 그 사본은 agent가 바꿀 수 있다. `_is_file`로
+    확인한 뒤 이름으로 다시 열면 그 사이에 FIFO로 바뀐 파일에서 멈춘다. 비차단으로 연
+    descriptor의 종류를 본다. host는 등록 파일 symlink를 따라가므로 여기서도 따라간다.
+    """
+    raw, _ = read_bounded_regular_file(
+        path, max_bytes=_REGISTRATION_MAX_BYTES, follow_symlinks=True
+    )
+    return raw.decode("utf-8")
 
 
 def _json_registrations(

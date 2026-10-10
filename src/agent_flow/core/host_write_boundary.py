@@ -2241,6 +2241,29 @@ def bound_worktree_for_session(
     return _load_binding(root, session_id, active)
 
 
+def run_session_bindings(project_root: Path, run_id: str) -> tuple[HostCheckoutBinding, ...]:
+    """이 run에 맺힌 host 세션 binding. status 진단이 읽기만 한다.
+
+    `_binding_dir`은 디렉터리를 만들고 권한을 고치므로 쓰지 않는다. binding은
+    PostToolUse hook이 성공한 lifecycle 명령 뒤에만 쓰므로, 이 run의 binding이
+    있다는 것은 그 checkout에서 hook이 실제로 실행됐다는 관측이다.
+    """
+    try:
+        root = _validated_project_root(project_root)
+        directory = root / ".git" / "agent-flow" / _BINDING_DIR
+        if directory.is_symlink() or not directory.is_dir():
+            return ()
+        active = _active_checkouts(root)
+        paths = sorted(directory.glob("*.json"))
+    except (HostWriteBoundaryError, WorktreeIsolationError, OSError):
+        return ()
+    found = []
+    for path in paths:
+        binding = _load_binding_file(path, path.stem, root, active)
+        if binding is not None and binding.checkout.run_id == run_id:
+            found.append(binding)
+    return tuple(found)
+
 
 def _is_within(path: Path, root: Path) -> bool:
     try:

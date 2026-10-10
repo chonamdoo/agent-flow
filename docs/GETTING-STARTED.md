@@ -181,6 +181,17 @@ Check where you are at any point without advancing anything:
 agent-flow status --root /path/to/project --worktree fix-login-timeout
 ```
 
+While a run is active, that output ends with a host connection card. For Claude, Codex, and OMP it
+says separately whether the hooks are installed, registered in that host's settings, trusted by
+the host, and seen running in this checkout, and it gives each host a level: `hook_enforced`,
+`hook_unproven`, or `runner_only`. The card never blocks the run.
+
+The installer removes Codex project trust on purpose, and Codex does not run untrusted project
+hooks. If Codex shows `trusted=no`, follow its hint: trust the folder in Codex, approve the
+agent-flow hooks or turn them back on with `/hooks`, and restart the session. Even after approval
+Codex shows `trusted=unknown`, because the card cannot check Codex's hook hash; confirm in
+`/hooks` that every agent-flow hook is trusted. See [Host connection](USAGE.md#host-connection).
+
 Walk that loop five times and `bugfix` is done. The last output looks like this:
 
 ```text
