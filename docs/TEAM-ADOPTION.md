@@ -57,7 +57,9 @@ on top through `.agent-flow/profiles/<profile-id>.local.yaml`, and
 `architecture`, `branching`, `commit_convention`, `execution`, `gates`, `pr`, `review_angles`.
 Any other key is rejected with an error rather than ignored, so a declaration that would not
 take effect is never swallowed silently. `vocabulary` and `skills` are therefore not settable
-per repository: changing them means shipping a changed profile. Editing the installed
+per repository: changing them means shipping a changed profile. A key that appears twice in one
+mapping is rejected the same way, with the file, line, and key in the error, instead of letting
+the later value win silently. Editing the installed
 `.agent-flow/profiles/<id>.yaml` directly does not survive, because install overwrites the
 shipped profile so new fields reach existing installs.
 

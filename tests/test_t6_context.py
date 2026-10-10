@@ -61,7 +61,6 @@ def yaml_profile(root):
     path.write_text(
         "id: yaml-values\n"
         "adopted: 2026-01-01\n"
-        "metadata:\n  1: integer key\n  '1': string key\n"
         "labels: !!set\n  security: null\n  architecture: null\n"
         "execution:\n  reviewers:\n    - candidates:\n"
         "        - provider: codex\n          model: gpt-5.6-sol\n",
@@ -542,7 +541,6 @@ def test_yaml_profile_values_resolve_and_date_to_string_invalidates_capture(tmp_
     skill(tmp_path, "ordinary", "YAML_PROFILE_REQUIRED_NORM\n")
     profile = load_profile_payload("yaml-values", tmp_path)
     assert profile["adopted"] == date(2026, 1, 1)
-    assert profile["metadata"] == {1: "integer key", "1": "string key"}
     assert profile["labels"] == {"security", "architecture"}
     context = ResolutionContext()
     args = {"phase_skills": PhaseSkills(required=("ordinary",))}

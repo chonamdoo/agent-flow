@@ -34,6 +34,7 @@ from agent_flow.core.profiles import (  # noqa: E402
     ProjectProfile,
     _gate_from_payload,
     detect_profile,
+    legacy_architecture_overrides,
     load_profile,
     load_profile_payload,
 )
@@ -481,6 +482,125 @@ def test_override_rejects_a_foreign_profile_id(tmp_path):
     with pytest.raises(ValueError, match="id mismatch"):
         load_profile_payload("android", tmp_path)
 
+
+@pytest.mark.parametrize("profile_id", ["spring", "python"])
+def test_profile_override_with_a_duplicate_key_stops_profile_loading(tmp_path, profile_id):
+    """불변: override의 같은 키는 처음부터 에러다.
+
+    반증: `safe_load`는 뒤엣것으로 덮는다. 사람은 파일 위쪽의 `squash`를 보고 넘어가는데
+    run은 `merge`로 PR을 합친다. gate_variants를 선언한 profile(`spring`)은 override를
+    gate 선택 단계에서 먼저 읽으므로 그 경로도 같은 규칙을 지켜야 한다.
+    """
+    path = _write_override(
+        tmp_path, profile_id, "pr:\n  merge_strategy: squash\n  merge_strategy: merge\n"
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        load_profile_payload(profile_id, tmp_path)
+
+    assert str(excinfo.value) == f"{path}:3: duplicate key 'merge_strategy' (first at line 2)"
+
+
+def test_legacy_architecture_override_scan_reports_a_duplicate_key(tmp_path):
+    """불변: installer와 architecture 호환 검사가 쓰는 스캔도 같은 키에서 멈춘다.
+
+    반증: 이 스캔만 뒤엣것을 읽으면, 설치는 선언 하나를 보고 모드를 정하는데 사람은 파일에서
+    다른 선언을 본다. installer만 통과시키는 예외는 두지 않는다.
+    """
+    path = _write_override(
+        tmp_path, "python", "architecture:\n  roles: []\narchitecture:\n  roles: []\n"
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        legacy_architecture_overrides(tmp_path)
+
+    assert str(excinfo.value).endswith(
+        f"{path}:3: duplicate key 'architecture' (first at line 1)"
+    )
+
+
+class _ReplacedResources:
+    """패키지 자원 하나만 tmp 파일로 바꾼다. 나머지는 실제 패키지를 읽는다."""
+
+    def __init__(self, real, replaced: dict[tuple[str, ...], Path]) -> None:
+        self._real = real
+        self._replaced = replaced
+
+    def joinpath(self, *parts: str):
+        return self._replaced.get(parts) or self._real.joinpath(*parts)
+
+
+def test_installed_profile_and_capability_with_a_duplicate_key_are_rejected(
+    tmp_path, monkeypatch
+):
+    """불변: override만이 아니라 실행 중 읽는 profile YAML은 모두 같은 규칙을 쓴다.
+
+    반증: 설치본 `<id>.yaml`은 손으로 고칠 수 있는 자리이고, profile 해석은 두 진입점
+    (`load_profile_payload`, runner의 `load_single_profile`)이 따로 읽는다. capability는
+    profile을 해석하는 중에 읽힌다. 한 곳이라도 뒤엣것을 읽으면 같은 파일이 경로마다
+    다른 값이 된다.
+    """
+    from agent_flow.core import profiles
+    from agent_flow.core.profile_resolution import load_single_profile
+
+    shipped = (PROFILES_DIR / "python.yaml").read_text(encoding="utf-8")
+    installed = tmp_path / ".agent-flow" / "profiles" / "python.yaml"
+    installed.parent.mkdir(parents=True)
+    installed.write_text(shipped + "id: python\n", encoding="utf-8")
+    duplicate_line = len(shipped.splitlines()) + 1
+    expected = f"{installed}:{duplicate_line}: duplicate key 'id' (first at line 1)"
+
+    with pytest.raises(ValueError) as excinfo:
+        load_profile_payload("python", tmp_path)
+    assert str(excinfo.value) == expected
+    with pytest.raises(ValueError) as excinfo:
+        load_single_profile(
+            KIT_ROOT, "python", strict_missing=True, explicit_fallback=False,
+            source="fixture", project_root=tmp_path,
+        )
+    assert str(excinfo.value) == expected
+
+    capability = tmp_path / "_webview-json-rpc.yaml"
+    capability.write_text(
+        "requires_dependencies: []\nrequires_dependencies: []\n", encoding="utf-8"
+    )
+    real_files = profiles.resources.files
+    monkeypatch.setattr(
+        profiles.resources,
+        "files",
+        lambda package: _ReplacedResources(
+            real_files(package), {("profiles", "_webview-json-rpc.yaml"): capability}
+        ),
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        load_profile_payload("android", tmp_path)
+    assert str(excinfo.value).endswith(
+        f"{capability}:2: duplicate key 'requires_dependencies' (first at line 1)"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        "pr:\n  <<: {merge_strategy: squash}\n",
+        "1: x\n",
+    ),
+    ids=("merge", "non-string-key"),
+)
+def test_profile_yaml_rejects_merge_and_non_string_keys(tmp_path, body):
+    """불변: profile YAML은 architecture 선언·skill 메타데이터와 같은 키 규칙을 쓴다.
+
+    반증: merge는 어느 값이 이기는지를 파일 밖 anchor에 숨긴다. YAML 1.1은 `on`·`1` 같은
+    키를 문자열이 아닌 값으로 읽어, 사람이 쓴 키와 런타임이 찾는 키가 갈린다.
+    """
+    path = _write_override(tmp_path, "python", body)
+
+    with pytest.raises(ValueError) as excinfo:
+        load_profile_payload("python", tmp_path)
+
+    assert str(excinfo.value).startswith(f"{path}:")
+    assert "YAML mapping keys must be strings; merges are unsupported" in str(excinfo.value)
 
 
 def test_override_rejects_a_target_that_differs_from_integration(tmp_path):
