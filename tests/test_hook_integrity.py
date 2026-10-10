@@ -701,23 +701,16 @@ def test_install_root_resolves_from_a_nested_worktree(tmp_path, monkeypatch):
     assert find_install_root(loose / nested) is None
 
 
-def test_install_root_without_a_resolvable_home_stops_at_the_repository_or_start(
-    tmp_path, monkeypatch
-):
-    """반증: HOME도 passwd 항목도 없으면 `Path.home()`이 `RuntimeError`를 낸다. 그 예외가
-    새어 나가면 설치본이 시작점에 바로 있어도 run 시작 검사가 죽는다.
+def test_run_gate_refuses_when_the_home_directory_cannot_be_determined(tmp_path, monkeypatch):
+    """반증: HOME도 passwd 항목도 없으면 OMP extension은 `os.homedir()`에서 로드되지
+    못한다. 이때 run 시작 검사가 설치본을 찾아 통과하면 OMP 보호 hook 없이 run이 시작된다.
     """
     import pwd
 
     repo = tmp_path / "repo"
     _repo(repo)
     _install(repo)
-    app = repo / "pkg" / "app"
-    app.mkdir(parents=True)
-    standalone = tmp_path / "standalone"
-    _install(standalone)
-    below = standalone / "sub"
-    below.mkdir()
+    assert [report.ok for report in assert_managed_hooks_registered(repo)] == [True]
 
     def no_passwd_entry(uid):
         raise KeyError(uid)
@@ -725,9 +718,9 @@ def test_install_root_without_a_resolvable_home_stops_at_the_repository_or_start
     monkeypatch.delenv("HOME", raising=False)
     monkeypatch.setattr(pwd, "getpwuid", no_passwd_entry)
 
-    assert find_install_root(app) == repo
-    assert find_install_root(standalone) == standalone
-    assert find_install_root(below) is None
+    assert find_install_root(repo) is None
+    with pytest.raises(HookIntegrityError, match="home directory could not be determined"):
+        assert_managed_hooks_registered(repo)
 
 
 def _git(*args: str, cwd: Path) -> None:
