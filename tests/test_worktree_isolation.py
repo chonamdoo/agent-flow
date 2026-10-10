@@ -854,6 +854,61 @@ def test_real_provider_process_is_confined_to_attested_checkout(tmp_path):
     sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
     reason="macOS sandbox-exec confinement is required",
 )
+def test_real_provider_cannot_plant_an_install_in_its_checkout(tmp_path):
+    """반증: worker가 자기 checkout에 `.agent-flow/kit.json`을 쓰면 그 사본이 이
+    checkout의 설치본 행세를 한다. 같은 provider가 checkout의 다른 파일은 써야
+    거부가 workspace 전체 잠금이 아니라는 것이 드러난다.
+    """
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+    _git("add", ".gitignore", cwd=tmp_path)
+    _git("commit", "-m", "ignore runtime", cwd=tmp_path)
+    worker = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="worker"),
+    )
+    install = worker.path / ".agent-flow"
+    program = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "action, report = sys.argv[1], Path(sys.argv[2])\n"
+        "install = Path('.agent-flow')\n"
+        "try:\n"
+        "    if action == 'mkdir':\n"
+        "        install.mkdir()\n"
+        "    else:\n"
+        "        (install / 'kit.json').write_text('{\"hooks\": false}', encoding='utf-8')\n"
+        "    outcome = 'written'\n"
+        "except PermissionError:\n"
+        "    outcome = 'denied'\n"
+        "report.write_text(outcome, encoding='utf-8')\n"
+    )
+
+    def plant(action: str) -> str:
+        report = f"plant-{action}.txt"
+        result = run_provider(
+            ProviderCommand(
+                name="install-plant-probe",
+                argv=(sys.executable, "-c", program, action, report),
+            ),
+            prompt="",
+            cwd=worker.path,
+        )
+        assert result.failed is False, result.stderr
+        return (worker.path / report).read_text(encoding="utf-8")
+
+    assert plant("mkdir") == "denied"
+    assert not install.exists()
+
+    install.mkdir()
+    assert plant("kit") == "denied"
+    assert not (install / "kit.json").exists()
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec confinement is required",
+)
 def test_provider_commits_from_its_worktree_without_reaching_git_control_files(tmp_path):
     """반증: 공유 gitdir를 통째로 막으면 worker는 자기 작업을 커밋조차 못 한다.
 

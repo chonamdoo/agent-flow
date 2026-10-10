@@ -909,11 +909,19 @@ def _macos_sandbox_profile(
     }
     if host_home is not None:
         protected_parents.add(real_path(host_home))
+    # checkout의 `.agent-flow`는 링크 이름과 실경로를 함께 막는다. 이것이 symlink면
+    # 그 아래 쓰기는 대상 경로로 가므로 실경로 규칙이 막고, 링크를 지우고 그 자리에
+    # 디렉터리를 새로 만드는 것은 링크 이름 규칙이 막는다.
+    checkout_install = canonical / ".agent-flow"
     protected = sorted(
         {
-            real_path(parent / name)
-            for parent in protected_parents
-            for name in _HOST_STATE_DIR_NAMES
+            *(
+                real_path(parent / name)
+                for parent in protected_parents
+                for name in _HOST_STATE_DIR_NAMES
+            ),
+            checkout_install,
+            real_path(checkout_install),
         },
         key=str,
     )

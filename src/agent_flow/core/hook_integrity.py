@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Iterator
 
 from agent_flow.core.atomic_io import read_bounded_regular_file
-from agent_flow.core.worktree_isolation import leader_root_for
+from agent_flow.core.worktree_isolation import git_common_dir, leader_root_for, real_path
 
 # install이 심는 정확히 그 스크립트들. JS 쪽 등록 지점 3곳
 # (`bin/agent-flow-install.mjs`, `bin/agent-flow-kit.mjs`,
@@ -160,23 +160,45 @@ class _Surface:
 
 
 def find_install_root(start) -> Path | None:
-    """이 checkout이 딛고 있는 설치본. leader를 먼저 묻고, 그다음 조상 탐색이다.
+    """이 경로를 지탱하는 설치본. OMP extension의 `resolveInstallRoot`와 같은 규칙이어야
+    run 시작 검사가 증명한 hook과 OMP가 실행하는 hook이 같은 설치본의 것이다.
 
-    순서가 중요하다. 조상 탐색을 먼저 하면 (1) `$HOME/.agent-flow/kit.json`이 있는
-    사용자에게는 홈이 모든 저장소의 설치본을 가려 버리고, (2) 워커가 자기 checkout에
-    `.agent-flow/kit.json`을 쓰면 그 파일이 자기 무결성 기준선이 된다. leader를 먼저
-    확정하면 두 경로 모두 닫힌다 — leader의 git dir은 워커가 쓸 수 없다.
+    1. linked worktree면 leader 설치본을 먼저 고른다. 워커가 자기 checkout에 쓴
+       `.agent-flow/kit.json`이 자기 무결성 기준선이 되지 않는다. leader의 git dir은
+       워커가 쓸 수 없다.
+    2. 조상 탐색은 git common root에서 멈춘다. 저장소 밖이면 HOME에서, HOME 밖이면
+       시작점에서 멈춘다. HOME 자신은 후보가 아니다. `$HOME/.agent-flow/kit.json`
+       하나가 그 아래 모든 프로젝트의 설치본이 되지 않게 한다.
+    3. 그다음 git common root를 본다. HOME이 아니면 같은 저장소의 설치본이라 남의 것이 아니다.
+    4. 그래도 없으면 시작점 자신의 설치본만 인정한다. HOME에서 바로 시작한 경우다.
     """
     if start is None:
         return None
-    current = Path(start)
+    current = real_path(start)
+    home = real_path(Path.home())
     leader = leader_root_for(current)
-    if leader is not None and _is_file(leader / KIT_JSON_RELATIVE):
+    if leader is not None and leader != home and _has_install(leader):
         return leader
-    for candidate in [current, *current.parents]:
-        if _is_file(candidate / KIT_JSON_RELATIVE):
+    common = git_common_dir(current)
+    git_root = common.parent if common is not None else None
+    if git_root is not None and current.is_relative_to(git_root):
+        boundary = git_root
+    elif current.is_relative_to(home):
+        boundary = home
+    else:
+        boundary = current
+    for candidate in (current, *current.parents):
+        if candidate != home and _has_install(candidate):
             return candidate
-    return None
+        if candidate == boundary:
+            break
+    if git_root is not None and git_root != home and _has_install(git_root):
+        return git_root
+    return current if _has_install(current) else None
+
+
+def _has_install(root: Path) -> bool:
+    return _is_file(root / KIT_JSON_RELATIVE)
 
 
 def assert_managed_hooks_registered(*roots) -> tuple[HookIntegrityReport, ...]:

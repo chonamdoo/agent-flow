@@ -419,6 +419,131 @@ def test_omp_extension_prefers_the_leader_install_over_a_worktree_copy(
     assert find_install_root(session_root) == leader
 
 
+def _omp_install_root(start: Path, source: str, *, home: Path) -> Path | None:
+    """OMP가 실행할 hook의 설치본. 못 찾으면 OMP는 시작점을 돌려주므로 `kit.json`이
+    없는 결과를 Python `find_install_root`의 `None`과 맞춘다.
+    """
+    chosen = _resolved_hook_dir(start, source, home=home).parents[2]
+    return chosen if (chosen / ".agent-flow" / "kit.json").is_file() else None
+
+
+def test_python_install_root_matches_the_omp_resolver_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """반증: Python과 OMP가 다른 설치본을 고르면 run 시작 검사가 증명한 hook과 OMP가
+    실행하는 hook이 갈린다. 조상 탐색이 경계 없이 올라가면 `~/.agent-flow/kit.json`
+    하나가 HOME 아래 모든 프로젝트의 설치본이 된다.
+
+    기대값을 사례마다 적는다. 두 구현이 같은 오답을 내면 동일성만으로는 드러나지 않는다.
+    """
+    from agent_flow.core.hook_integrity import find_install_root
+
+    source = _extension_source()
+    root = tmp_path.resolve()
+
+    def repository(path: Path) -> Path:
+        path.mkdir(parents=True, exist_ok=True)
+        _git(path, "init", "-q")
+        _git(
+            path,
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        )
+        return path
+
+    home = root / "home"
+    _seed_install(home)
+    loose = home / "projects" / "loose"
+    loose.mkdir(parents=True)
+
+    foreign = root / "foreign"
+    _seed_install(foreign)
+    foreign_src = repository(foreign / "repo") / "src"
+    foreign_src.mkdir()
+
+    mono = repository(root / "mono")
+    _seed_install(mono / "pkg")
+    nested = mono / "pkg" / "app"
+    nested.mkdir()
+
+    outside = root / "outside"
+    _seed_install(outside)
+    outside_child = outside / "child"
+    outside_child.mkdir()
+
+    leader = repository(root / "leader")
+    _seed_install(leader)
+    manual = root / "manual-wt"
+    _git(leader, "worktree", "add", "-q", "-b", "w1", str(manual))
+
+    repo_home = repository(root / "repo-home")
+    _seed_install(repo_home)
+    repo_home_src = repo_home / "src"
+    repo_home_src.mkdir()
+
+    cases = (
+        ("git 밖, HOME 아래: HOME 설치는 후보가 아니다", loose, home, None),
+        ("HOME에서 바로 시작", home, home, home),
+        ("저장소 밖 조상 설치", foreign_src, home, None),
+        ("저장소 안 가까운 설치", nested, home, mono / "pkg"),
+        ("git 밖, HOME 밖: 시작점만 본다", outside_child, home, None),
+        ("leader 밖 수동 worktree", manual, home, leader),
+        ("저장소가 HOME: 하위 폴더", repo_home_src, repo_home, None),
+        ("저장소가 HOME: HOME에서 바로 시작", repo_home, repo_home, repo_home),
+    )
+    for label, start, case_home, expected in cases:
+        monkeypatch.setenv("HOME", str(case_home))
+        assert _omp_install_root(start, source, home=case_home) == expected, label
+        assert find_install_root(start) == expected, label
+
+
+def test_python_and_omp_agree_when_home_is_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """반증: HOME을 symlink 이름 그대로 실경로 시작점과 비교하면 HOME 아래가 HOME 밖으로
+    보인다. 그러면 HOME 경계와 "HOME은 후보가 아니다" 규칙이 구현마다 다르게 걸려,
+    run 시작 검사가 증명한 설치본과 OMP가 실행하는 hook의 설치본이 갈린다.
+    """
+    from agent_flow.core.hook_integrity import find_install_root
+
+    source = _extension_source()
+    root = tmp_path.resolve()
+
+    real_home = root / "real-home"
+    _seed_install(real_home / "projects")
+    app = real_home / "projects" / "app"
+    app.mkdir()
+    home_link = root / "home-link"
+    home_link.symlink_to(real_home, target_is_directory=True)
+
+    real_repo_home = root / "real-repo-home"
+    real_repo_home.mkdir()
+    _git(real_repo_home, "init", "-q")
+    _seed_install(real_repo_home)
+    repo_src = real_repo_home / "src"
+    repo_src.mkdir()
+    repo_home_link = root / "repo-home-link"
+    repo_home_link.symlink_to(real_repo_home, target_is_directory=True)
+
+    cases = (
+        ("git 밖, HOME 아래 설치", app, home_link, real_home / "projects"),
+        ("저장소가 HOME: HOME 설치는 후보가 아니다", repo_src, repo_home_link, None),
+    )
+    for label, start, case_home, expected in cases:
+        monkeypatch.setenv("HOME", str(case_home))
+        assert _omp_install_root(start, source, home=case_home) == expected, label
+        assert find_install_root(start) == expected, label
+
+
 def test_omp_extension_separates_no_install_from_a_deleted_guard(tmp_path: Path):
     """부재의 두 종류를 가른다.
 
