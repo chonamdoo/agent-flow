@@ -678,14 +678,49 @@ def test_run_gate_rejects_a_home_only_install(tmp_path, monkeypatch):
         assert_managed_hooks_registered(repo)
 
 
-def test_install_root_resolves_from_a_nested_worktree(tmp_path):
-    # git 밖이면서 HOME 밖인 폴더에서는 시작점만 본다. 하위 폴더에서 올라가 설치본을
-    # 찾는 사례는 저장소 안이어야 성립한다.
-    _repo(tmp_path)
-    _install(tmp_path)
-    nested = tmp_path / ".agent-flow" / "worktrees" / "feat-x" / "src"
-    nested.mkdir(parents=True)
-    assert find_install_root(nested) == tmp_path
+def test_install_root_resolves_from_a_nested_worktree(tmp_path, monkeypatch):
+    """#100 P0 guard. 설치본 아래 하위 폴더(legacy worktree 모양)에서 설치본을 찾는다.
+
+    #314부터 탐색은 git common root에서 멈춘다. git 밖이면 HOME에서, HOME 밖이면
+    시작점에서 멈춘다(OMP `resolveInstallRoot`와 같은 규칙). 그래서 같은 모양이라도 git
+    저장소 안이면 저장소 설치본을 찾고, git 밖이면서 HOME 밖이면 찾지 않는다. 처음
+    이 guard는 git 밖 배치에서도 조상 설치본을 찾는다고 단정했다.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    nested = Path(".agent-flow") / "worktrees" / "feat-x" / "src"
+
+    repo = tmp_path / "repo"
+    _repo(repo)
+    _install(repo)
+    (repo / nested).mkdir(parents=True)
+    assert find_install_root(repo / nested) == repo
+
+    loose = tmp_path / "loose"
+    _install(loose)
+    (loose / nested).mkdir(parents=True)
+    assert find_install_root(loose / nested) is None
+
+
+def test_run_gate_refuses_when_the_home_directory_cannot_be_determined(tmp_path, monkeypatch):
+    """반증: HOME도 passwd 항목도 없으면 OMP extension은 `os.homedir()`에서 로드되지
+    못한다. 이때 run 시작 검사가 설치본을 찾아 통과하면 OMP 보호 hook 없이 run이 시작된다.
+    """
+    import pwd
+
+    repo = tmp_path / "repo"
+    _repo(repo)
+    _install(repo)
+    assert [report.ok for report in assert_managed_hooks_registered(repo)] == [True]
+
+    def no_passwd_entry(uid):
+        raise KeyError(uid)
+
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.setattr(pwd, "getpwuid", no_passwd_entry)
+
+    assert find_install_root(repo) is None
+    with pytest.raises(HookIntegrityError, match="home directory could not be determined"):
+        assert_managed_hooks_registered(repo)
 
 
 def _git(*args: str, cwd: Path) -> None:

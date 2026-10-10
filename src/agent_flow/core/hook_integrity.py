@@ -171,11 +171,16 @@ def find_install_root(start) -> Path | None:
        하나가 그 아래 모든 프로젝트의 설치본이 되지 않게 한다.
     3. 그다음 git common root를 본다. HOME이 아니면 같은 저장소의 설치본이라 남의 것이 아니다.
     4. 그래도 없으면 시작점 자신의 설치본만 인정한다. HOME에서 바로 시작한 경우다.
+
+    HOME을 정할 수 없으면 `None`이다. OMP extension은 그 환경에서 로드되지 않아 어느
+    설치본의 hook도 실행하지 않는다.
     """
     if start is None:
         return None
+    home = _real_home()
+    if home is None:
+        return None
     current = real_path(start)
-    home = real_path(Path.home())
     leader = leader_root_for(current)
     if leader is not None and leader != home and _has_install(leader):
         return leader
@@ -201,8 +206,23 @@ def _has_install(root: Path) -> bool:
     return _is_file(root / KIT_JSON_RELATIVE)
 
 
+def _real_home() -> Path | None:
+    # HOME 환경변수도 passwd 항목도 없으면 `Path.home()`이 RuntimeError를 낸다.
+    try:
+        return real_path(Path.home())
+    except RuntimeError:
+        return None
+
+
 def assert_managed_hooks_registered(*roots) -> tuple[HookIntegrityReport, ...]:
     """런 시작 게이트. 강제 hook을 증명하지 못하면 시작 전에 멈춘다."""
+    if _real_home() is None:
+        raise HookIntegrityError(
+            "the home directory could not be determined: HOME is unset and the "
+            "current user has no passwd entry. The OMP hook extension cannot load "
+            "without it, so the enforcement hooks this run depends on cannot be "
+            "proven active. Nothing was changed. Set HOME before starting a run."
+        )
     reports = verify_managed_hooks(*roots)
     if not reports:
         raise HookIntegrityError(
