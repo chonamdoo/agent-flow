@@ -168,14 +168,15 @@ def find_install_root(start) -> Path | None:
        워커가 쓸 수 없다.
     2. 조상 탐색은 git common root에서 멈춘다. 저장소 밖이면 HOME에서, HOME 밖이면
        시작점에서 멈춘다. HOME 자신은 후보가 아니다. `$HOME/.agent-flow/kit.json`
-       하나가 그 아래 모든 프로젝트의 설치본이 되지 않게 한다.
+       하나가 그 아래 모든 프로젝트의 설치본이 되지 않게 한다. HOME을 정할 수 없으면
+       HOME 경계도 HOME 후보 제외도 없이 git common root나 시작점에서 멈춘다.
     3. 그다음 git common root를 본다. HOME이 아니면 같은 저장소의 설치본이라 남의 것이 아니다.
     4. 그래도 없으면 시작점 자신의 설치본만 인정한다. HOME에서 바로 시작한 경우다.
     """
     if start is None:
         return None
     current = real_path(start)
-    home = real_path(Path.home())
+    home = _real_home()
     leader = leader_root_for(current)
     if leader is not None and leader != home and _has_install(leader):
         return leader
@@ -183,7 +184,7 @@ def find_install_root(start) -> Path | None:
     git_root = common.parent if common is not None else None
     if git_root is not None and current.is_relative_to(git_root):
         boundary = git_root
-    elif current.is_relative_to(home):
+    elif home is not None and current.is_relative_to(home):
         boundary = home
     else:
         boundary = current
@@ -199,6 +200,14 @@ def find_install_root(start) -> Path | None:
 
 def _has_install(root: Path) -> bool:
     return _is_file(root / KIT_JSON_RELATIVE)
+
+
+def _real_home() -> Path | None:
+    # HOME 환경변수도 passwd 항목도 없으면 `Path.home()`이 RuntimeError를 낸다.
+    try:
+        return real_path(Path.home())
+    except RuntimeError:
+        return None
 
 
 def assert_managed_hooks_registered(*roots) -> tuple[HookIntegrityReport, ...]:
