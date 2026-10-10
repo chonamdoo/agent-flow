@@ -426,6 +426,38 @@ Which workflow fits which task, the optional `Source-URL` / `Source-Revision`
 task-text convention, and the subsystems that change only through a reproduced
 bug are in [IDENTITY-AND-FREEZE-POLICY.md](IDENTITY-AND-FREEZE-POLICY.md).
 
+### Host connection
+
+With an active run, `agent-flow status` ends with a host connection card. For Claude, Codex, and
+OMP separately it shows whether the managed hooks are installed, registered in that host's settings
+file, trusted by that host, and seen running in this checkout since the run started. The card never
+blocks a run and never changes the status exit code; the run-start hook check stays the only gate.
+
+| Level | Meaning |
+|---|---|
+| `hook_enforced` | Registered, not distrusted, and a session binding or a recorded command was seen in this checkout since the run started. Only the active host detected from its environment variable can reach this level, because the records do not name a host. |
+| `hook_unproven` | Registered and not distrusted, but no execution can be attributed to this host. |
+| `runner_only` | Not installed, not registered, distrusted, or hooks disabled. Required markers, pause approval tokens, independent reviewers, runner gates, route invariants, and the run-start check still apply. The two pre-block rules, the tripwire, session binding, and command recording are not proven. |
+
+Trust is read from each host's own files and never written: `~/.claude.json` and the Claude
+settings (`disableAllHooks`), `$CODEX_HOME/config.toml` (the project `trust_level` and a
+`hooks.state` entry for each hook of the checkout's `.codex/hooks.json`), and
+`~/.omp/agent/config.yml` (`disabledExtensions`). A file that cannot be parsed shows `unknown`.
+As of Claude Code 2.1.296, Claude runs hooks in `-p` sessions without the trust dialog, so a
+checkout with no recorded acceptance also shows `unknown`, not `no`.
+The installer removes Codex project trust on every install, and Codex skips untrusted project
+hooks. Trust the folder in Codex. Then approve the agent-flow hooks with `/hooks`. Codex looks up
+project trust for a linked worktree at its main checkout, so the card accepts trust recorded for
+either path. Hook approval is recorded per `hooks.json` path, so each worktree needs its own
+approval.
+
+The execution line also counts recorded commands that carry no exit code. As of Claude Code
+2.1.296 and Codex CLI 0.162.1, neither passes an exit code to PostToolUse hooks, and Claude does not
+run PostToolUse hooks for a failed command. On those hosts a failing test cannot be observed, so
+the red-phase check cannot require one. OMP passes exit codes.
+
+A machine-readable copy follows on one `host_connection_json:` line.
+
 ### worktree
 
 ```bash
@@ -557,8 +589,9 @@ this does not promise rollback of every earlier write. Explicit `--no-hooks`
 cleanup remains independent. User-edited copied references survive reinstall and
 retirement, and the installation digest is taken after reference synchronization.
 
-Hook registration is not proof that a host executes hooks. Check the native
-host's activation/trust requirements and observed command evidence. Managed
+Hook registration is not proof that a host executes hooks. `agent-flow status` shows installation,
+registration, trust, and observed execution per host ([Host connection](#host-connection)), and
+`tools/host-smoke` exercises the real host CLIs ([Real host smoke](#real-host-smoke)). Managed
 provider confinement currently has a verified macOS `sandbox-exec` backend only;
 other operating systems fail closed instead of receiving the same isolation claim.
 
@@ -785,6 +818,46 @@ npm test
 ```
 
 Runs the Python tests together with the check above.
+
+### Real host smoke
+
+```bash
+python tools/host-smoke/run.py [--hosts claude,codex,omp] [--keep] [--out results.json]
+python tools/host-smoke/run.py --capture
+python tools/host-smoke/run.py --validate
+```
+
+Run it from a kit checkout with Python 3.11 or newer and `node`. It installs this kit into a scratch
+git project, starts a run in a worktree, drives each installed host CLI non-interactively, and
+reports every scenario as `pass`, `fail`, `not-run`, or `unsupported`:
+
+1. `agent-flow status` binds the session to the run checkout.
+2. `agent-flow continue` makes the binding eligible for guidance (explicit resume).
+3. A failing command is recorded with a non-zero exit code.
+4. A write to a literal leader path is blocked before it runs.
+5. A write to the leader through a dynamic path trips the tripwire.
+6. After the host resumes the session, the binding still holds.
+
+Scenario 1 runs `agent-flow status` alone in a first host session, so a binding that `continue`
+creates later cannot pass it. Scenarios 2–5 resume that session, and scenario 6 resumes it once
+more. The verdicts come from the binding files, the target files, `commands-run.jsonl`, and the
+hosts' JSON output and session transcripts, not from the model's reply. An attempt counts only when
+the transcript records a tool call for it; the prompt itself names every file, so text search would
+pass a session that ran nothing. A blocked write passes only when the refusal linked to that call
+names the bound checkout. A scenario the host never attempted is `not-run`. Codex runs twice: once
+as installed, where a missing binding after `agent-flow status` is a `fail` whose likely cause is
+`trust_required`, and once with `--dangerously-bypass-hook-trust`. Codex gets an isolated
+`CODEX_HOME` with only `auth.json` copied, and OMP gets an isolated session directory. Claude's
+login is tied to its configuration directory, so Claude uses the real `~/.claude` unless
+`CLAUDE_CODE_OAUTH_TOKEN` is set; the result notes say so. With `--keep`, each host session's
+stdout and stderr stay under `sessions/` in the scratch directory. Each host runs in its own
+process group, and a timeout or Ctrl-C ends that whole group before the scratch directory is
+removed.
+
+The smoke calls models, so run it by hand after a host upgrade. CI runs only `--validate`, which
+checks the scenario list and the captured fixtures without calling a model. `--capture` refreshes
+`tests/fixtures/host-payloads/`, the real hook payloads that `tests/test_host_protection_matrix.py`
+replays. The tool is not part of the installed kit.
 
 ## A known trait
 

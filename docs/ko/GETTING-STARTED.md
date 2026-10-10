@@ -131,6 +131,15 @@ agent-flow continue --root /path/to/project --worktree fix-login-timeout
 agent-flow status --root /path/to/project --worktree fix-login-timeout
 ```
 
+run이 진행 중이면 이 출력 끝에 host 연결 카드가 붙는다. Claude, Codex, OMP마다 hook이 설치됐는지,
+그 host 설정에 등록됐는지, host가 신뢰하는지, 이 checkout에서 실제로 돌았는지를 따로 보여 주고,
+보호 수준을 `hook_enforced`, `hook_unproven`, `runner_only` 중 하나로 붙인다. 카드는 run을 막지
+않는다.
+
+installer는 Codex project 신뢰를 일부러 지우고, Codex는 신뢰하지 않은 project hook을 실행하지
+않는다. Codex가 `trusted=no`이면 Codex에서 이 폴더를 신뢰한다. 그다음 `/hooks`에서 agent-flow 훅을
+승인하고 세션을 다시 시작한다. 자세한 내용은 [Host connection](../USAGE.md#host-connection)에 있다.
+
 이 반복을 다섯 번 돌면 `bugfix`가 끝난다. 마지막 출력은 이렇다.
 
 ```text
