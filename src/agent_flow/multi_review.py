@@ -1039,12 +1039,18 @@ def _rate_limit_payload(r: SubprocessResult) -> _RateLimitPayload | None:
     reviewer = r.job_id.split("-", 1)[0]
     text = "\n".join(part for part in (r.stdout, r.stderr, r.error or "") if part)
     lowered = text.lower()
-    signals = ("rate limit", "too many requests", "429")
+    signals = ("rate limit", "too many requests")
     if reviewer == "claude":
         signals += ("you've hit your limit", "usage limit", "limit reached")
     if r.returncode == 0 and _REVIEWER_PROVENANCE_RE.search(r.stdout):
         return None
-    if not any(signal in lowered for signal in signals):
+    # 문장 속 숫자나 경로가 아닌 진단 줄의 HTTP/API status만 받는다.
+    if not any(signal in lowered for signal in signals) and re.search(
+        r"^[ \t]*(?:http(?:/\d+(?:\.\d+)?)?[ \t]+|api error:[ \t]*|"
+        r"(?:last )?status(?: code)?[ \t]*[:=][ \t]*)429\b",
+        lowered,
+        re.MULTILINE,
+    ) is None:
         return None
     retry_after = _parse_retry_after(text)
     return {
