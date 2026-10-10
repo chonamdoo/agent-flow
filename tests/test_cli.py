@@ -8673,6 +8673,111 @@ if (codexContext !== undefined) {
 
             self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
 
+    def test_rate_limit_classifier_requires_diagnostic_context(self) -> None:
+        from agent_flow.multi_review import (
+            ResolvedLaunch,
+            _render_angle_result,
+            reviewer_result_error,
+        )
+        from agent_flow.subprocess_pool import SubprocessResult
+
+        now = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
+        cases = [
+            ("codex", "429 too many requests; rate limit resets in 5 minutes", 5),
+            ("codex", "HTTP 429 Too Many Requests", 60),
+            ("codex", "HTTP 429", 60),
+            ("codex", "HTTP/1.1 429", 60),
+            ("codex", "status code: 429", 60),
+            ("codex", "last status: 429 Too Many Requests", 60),
+            (
+                "claude",
+                'API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}',
+                60,
+            ),
+            ("claude", "API Error: 429", 60),
+            ("claude", "You've hit your limit. Usage limit resets in 5 minutes.", 5),
+            ("claude", "Usage limit", 60),
+            ("claude", "Limit reached", 60),
+            ("codex", 'Traceback ...\n  File "x.py", line 429, in main\nValueError: bad', None),
+            ("codex", "ENOENT: /tmp/case-4291/missing.py", None),
+            ("codex", "/tmp/error/429/failed.py", None),
+            ("codex", "unexpected status 429 of 500 cases", None),
+            ("claude", "Traceback: rate_limit_fixture failed", None),
+            ("codex", "429", None),
+            ("codex", "HTTP 4291", None),
+            ("claude", "API Error: 4291", None),
+        ]
+        with mock.patch("agent_flow.multi_review.datetime", wraps=datetime) as clock:
+            clock.now.return_value = now
+            for provider, diagnostic, retry_minutes in cases:
+                with self.subTest(provider=provider, diagnostic=diagnostic):
+                    result = SubprocessResult(
+                        job_id=f"{provider}-generalist",
+                        returncode=1,
+                        stderr=diagnostic,
+                    )
+                    artifact = _render_angle_result(
+                        result,
+                        launch=ResolvedLaunch(provider, None, None, (), "test"),
+                    )
+                    if retry_minutes is None:
+                        self.assertEqual(reviewer_result_error(result), "exit 1")
+                        self.assertIn("- status: ERROR", artifact.splitlines())
+                        self.assertNotIn("reason: reviewer_rate_limited", artifact.splitlines())
+                        self.assertNotIn("retry_after:", artifact)
+                    else:
+                        retry_after = (now + timedelta(minutes=retry_minutes)).isoformat()
+                        self.assertEqual(
+                            reviewer_result_error(result),
+                            f"rate limited until {retry_after}",
+                        )
+                        self.assertIn("status: blocked", artifact.splitlines())
+                        self.assertIn("reason: reviewer_rate_limited", artifact.splitlines())
+                        self.assertIn(f"retry_after: {retry_after}", artifact.splitlines())
+
+    def test_rate_limit_classifier_preserves_provenance_exception(self) -> None:
+        from agent_flow.multi_review import (
+            ResolvedLaunch,
+            _render_angle_result,
+            reviewer_result_error,
+        )
+        from agent_flow.subprocess_pool import SubprocessResult
+
+        now = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
+        with mock.patch("agent_flow.multi_review.datetime", wraps=datetime) as clock:
+            clock.now.return_value = now
+            for provider in ("claude", "codex"):
+                for returncode, provenance in ((0, True), (0, False), (1, True)):
+                    with self.subTest(
+                        provider=provider, returncode=returncode, provenance=provenance,
+                    ):
+                        output = (
+                            "HTTP 429 Too Many Requests is handled correctly.\n"
+                            "verdict: approve\n"
+                        )
+                        if provenance:
+                            output = "reviewer-source: sub-agent\n" + output
+                        result = SubprocessResult(
+                            job_id=f"{provider}-generalist",
+                            returncode=returncode,
+                            stdout=output,
+                        )
+                        artifact = _render_angle_result(
+                            result,
+                            launch=ResolvedLaunch(provider, None, None, (), "test"),
+                        )
+                        if returncode == 0 and provenance:
+                            self.assertIsNone(reviewer_result_error(result))
+                            self.assertIn("- status: OK", artifact.splitlines())
+                            self.assertNotIn("retry_after:", artifact)
+                        else:
+                            self.assertEqual(
+                                reviewer_result_error(result),
+                                "rate limited until 2026-10-10T13:00:00+00:00",
+                            )
+                            self.assertIn("status: blocked", artifact.splitlines())
+                            self.assertNotIn("## Reviewer verdict", artifact)
+
     def test_provider_rate_limits_render_retry_status(self) -> None:
         from agent_flow.multi_review import (
             ResolvedLaunch,
