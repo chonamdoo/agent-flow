@@ -673,6 +673,13 @@ The runner's `merge-approval` and `merge` entries apply the same contract, and
 `merge-approval` then pauses for the user's merge approval. Recording a pre-merge
 SPEC approval applies the contract without the review decision.
 
+If the PR was already merged before that SPEC approval was recorded, approval
+can still be recorded for the same published HEAD after its remote branch is
+deleted. The live PR must be `MERGED`, with the exact published URL, base, head
+branch and HEAD; required CI checks must still succeed. Merge does not approve
+the SPEC automatically: cleanup remains blocked until the user approval is
+recorded, and a new local HEAD invalidates that approval.
+
 ## Repository layout
 
 ```text
