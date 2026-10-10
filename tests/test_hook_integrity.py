@@ -664,7 +664,24 @@ def test_run_gate_rejects_hooks_disabled_install(tmp_path):
         assert_managed_hooks_registered(tmp_path)
 
 
+def test_run_gate_rejects_a_home_only_install(tmp_path, monkeypatch):
+    """반증: 조상 탐색이 HOME까지 올라가면 `~/.agent-flow/kit.json` 하나가 HOME 아래
+    모든 저장소의 설치본이 되고, 이 저장소의 hook 등록은 한 번도 확인되지 않는다.
+    """
+    home = tmp_path / "home"
+    _install(home)
+    repo = home / "projects" / "repo"
+    _repo(repo)
+    monkeypatch.setenv("HOME", str(home))
+
+    with pytest.raises(HookIntegrityError, match="installation could not be found"):
+        assert_managed_hooks_registered(repo)
+
+
 def test_install_root_resolves_from_a_nested_worktree(tmp_path):
+    # git 밖이면서 HOME 밖인 폴더에서는 시작점만 본다. 하위 폴더에서 올라가 설치본을
+    # 찾는 사례는 저장소 안이어야 성립한다.
+    _repo(tmp_path)
     _install(tmp_path)
     nested = tmp_path / ".agent-flow" / "worktrees" / "feat-x" / "src"
     nested.mkdir(parents=True)
