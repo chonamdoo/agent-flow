@@ -186,30 +186,19 @@ def _gate_environment(cwd: Path) -> dict[str, str]:
 
 
 def _installed_python_runtime_path(cwd: Path) -> Path | None:
-    for root in _candidate_agent_flow_roots(cwd):
-        runtime_path = root / ".agent-flow" / "runtime" / "python"
-        if (runtime_path / "agent_flow" / "__init__.py").is_file():
-            return runtime_path
+    from agent_flow.core.hook_integrity import find_install_root
+
+    root = find_install_root(cwd)
+    if root is None:
+        return None
+    runtime_path = root / ".agent-flow" / "runtime" / "python"
+    if (runtime_path / "agent_flow" / "__init__.py").is_file():
+        return runtime_path
     return None
-
-
 
 
 def _recorded_gate_command(command: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
     return tuple(relativize_local_path(part, cwd) for part in command)
-
-
-def _candidate_agent_flow_roots(cwd: Path) -> list[Path]:
-    resolved = cwd.resolve()
-    roots: list[Path] = []
-    if (resolved / ".agent-flow").is_dir():
-        roots.append(resolved)
-    parts = resolved.parts
-    if ".agent-flow" in parts:
-        marker_index = parts.index(".agent-flow")
-        roots.append(Path(*parts[:marker_index]) if marker_index else Path("/"))
-    roots.extend(resolved.parents)
-    return list(dict.fromkeys(roots))
 
 
 def _text(value: str | bytes | None) -> str:
