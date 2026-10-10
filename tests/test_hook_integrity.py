@@ -30,6 +30,7 @@ from agent_flow.core.hook_integrity import (
     RUNTIME_CLI_RELATIVE,
     HookIntegrityError,
     assert_managed_hooks_registered,
+    describe_managed_hooks,
     find_install_root,
     verify_managed_hooks,
 )
@@ -183,6 +184,18 @@ def test_corrupt_registration_file_is_detected(tmp_path):
     _install(tmp_path)
     (tmp_path / CLAUDE_SETTINGS).write_text("{ not json", encoding="utf-8")
     assert any("cannot read the hook registration file" in v for v in _violations(tmp_path))
+
+
+def test_undecodable_omp_registration_is_detected(tmp_path):
+    """반증: OMP 등록 파일을 UTF-8이 아닌 바이트로 바꾸면 검사가 예외로 끝난다. 읽지
+    못하는 등록 파일은 JSON 쪽처럼 위반으로 들어야 게이트와 status가 같은 답을 낸다.
+    """
+    _install(tmp_path)
+    (tmp_path / OMP_EXTENSION).write_bytes(b"\xff\xfe runHook")
+    assert any(
+        "cannot read the hook registration file" in v and str(OMP_EXTENSION) in v
+        for v in _violations(tmp_path)
+    )
 
 
 def test_missing_hook_script_on_disk_is_detected(tmp_path):
@@ -553,6 +566,83 @@ def test_missing_launcher_interpreter_is_detected(tmp_path):
         "the interpreter the managed launcher execs is missing" in value
         for value in _violations(tmp_path)
     )
+
+
+def _drop_skill_read_registration(root: Path) -> None:
+    def drop(payload):
+        payload["hooks"]["PostToolUse"] = [
+            entry
+            for entry in payload["hooks"]["PostToolUse"]
+            if not any("record-skill-read.py" in h["command"] for h in entry["hooks"])
+        ]
+
+    _rewrite_claude(root, drop)
+
+
+def _move_branch_guard_off_pretooluse(root: Path) -> None:
+    def move(payload):
+        blocks = payload["hooks"]["PreToolUse"]
+        moved = [b for b in blocks if any("guard-protected-branch.sh" in h["command"] for h in b["hooks"])]
+        payload["hooks"]["PreToolUse"] = [b for b in blocks if b not in moved]
+        payload["hooks"]["PostToolUse"].extend(moved)
+
+    _rewrite_claude(root, move)
+
+
+def _register_planted_hook(root: Path) -> None:
+    def add(payload):
+        payload["hooks"]["PreToolUse"].append(
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": _hook_command(root, "evil.sh")}]}
+        )
+
+    _rewrite_claude(root, add)
+
+
+def _plant_executable(root: Path) -> None:
+    evil = root / HOOK_DIR / "evil.sh"
+    evil.write_text("#!/bin/sh\n", encoding="utf-8")
+    evil.chmod(0o755)
+
+
+def _reregister_disabled_hooks(root: Path) -> None:
+    (root / CLAUDE_SETTINGS).write_text(json.dumps(_host_settings(root)), encoding="utf-8")
+
+
+# run 게이트(`_verify_root`)가 보는 검사 종류마다 하나씩.
+_GATE_DRIFT_CASES = {
+    "clean": lambda root: None,
+    "registration-dropped": _drop_skill_read_registration,
+    "registration-file-deleted": lambda root: (root / CLAUDE_SETTINGS).unlink(),
+    "registration-file-corrupt": lambda root: (root / CLAUDE_SETTINGS).write_text("{", encoding="utf-8"),
+    "script-missing": lambda root: (root / HOOK_DIR / "record-skill-read.py").unlink(),
+    "script-modified": lambda root: (root / HOOK_DIR / "guard-host-worktree.sh").write_text(
+        "#!/bin/sh\nexit 1\n", encoding="utf-8"
+    ),
+    "script-planted": _plant_executable,
+    "planted-hook-registered": _register_planted_hook,
+    "enforcement-hook-moved": _move_branch_guard_off_pretooluse,
+    "project-launcher-missing": lambda root: (root / PROJECT_LAUNCHER_RELATIVE).unlink(),
+    "hook-launcher-missing": lambda root: (root / HOOK_LAUNCHER_RELATIVE).unlink(),
+    "disabled-but-registered": _reregister_disabled_hooks,
+}
+
+
+@pytest.mark.parametrize("case", sorted(_GATE_DRIFT_CASES))
+def test_status_description_reports_the_violations_the_run_gate_reports(tmp_path, case):
+    """반증: status 진단은 게이트와 같은 검사를 다른 자리에서 조립한다. 검사가 한쪽에만
+    추가되면 게이트가 run을 거부하는 설치본을 카드는 `install: ok`로 보여 주거나 그 반대가 된다.
+    """
+    _install(tmp_path, hooks=case != "disabled-but-registered")
+    _GATE_DRIFT_CASES[case](tmp_path)
+
+    description = describe_managed_hooks(tmp_path, tmp_path)
+    described = [
+        *description.install_violations,
+        *(violation for surface in description.surfaces for violation in surface.violations),
+    ]
+
+    assert sorted(described) == sorted(_violations(tmp_path))
+    assert bool(described) == (case != "clean")
 
 
 def test_assert_passes_for_a_clean_install(tmp_path):
