@@ -1090,3 +1090,74 @@ def test_gate_pythonpath_respects_install_root_boundary(tmp_path, monkeypatch, s
         "paths": expected_paths,
         "module": str(package_root / "agent_flow" / "__init__.py"),
     }
+
+
+@pytest.mark.parametrize("initially_installed", (True, False))
+def test_gate_runtime_selection_is_scoped_to_each_plan(tmp_path, monkeypatch, initially_installed):
+    from agent_flow.core.gates import run_gates
+    from tests.test_hook_integrity import _git, _repo
+
+    root = tmp_path.resolve()
+    home = root / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    leader = home / "leader"
+    _repo(leader)
+    kit = leader / ".agent-flow"
+    runtime = kit / "runtime" / "python"
+    package = runtime / "agent_flow"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    metadata = kit / "kit.json"
+    if initially_installed:
+        metadata.write_text("{}\n", encoding="utf-8")
+    checkout = home / ".agent-flow" / "worktrees" / "repo-id" / "worker"
+    _git("worktree", "add", "-b", "worker", str(checkout), cwd=leader)
+
+    def command(gate_id):
+        return GateCommand(
+            gate_id,
+            (
+                sys.executable, "-c",
+                "import agent_flow, json, os; "
+                "print(json.dumps({'paths': os.environ['PYTHONPATH'].split(os.pathsep), "
+                "'module': agent_flow.__file__}))",
+            ),
+            timeout_s=1,
+        )
+
+    announced = []
+
+    def on_start(gate, index, total):
+        announced.append((gate.gate_id, index, total))
+        inherited = root / gate.gate_id
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join((str(inherited), SRC, str(inherited))))
+        if gate.gate_id == "second":
+            if initially_installed:
+                metadata.unlink()
+            else:
+                metadata.write_text("{}\n", encoding="utf-8")
+
+    results = run_gates(
+        [command("first"), command("second")],
+        cwd=checkout,
+        on_start=on_start,
+    )
+    next_results = run_gates([command("next")], cwd=checkout, on_start=on_start)
+
+    def expected(gate_id, installed):
+        package_root = runtime if installed else Path(SRC)
+        return {
+            "paths": ([str(runtime)] if installed else []) + [SRC, str(root / gate_id)],
+            "module": str(package_root / "agent_flow" / "__init__.py"),
+        }
+
+    assert announced == [("first", 1, 2), ("second", 2, 2), ("next", 1, 1)]
+    assert [
+        (result.gate_id, result.passed, result.exit_code, result.timed_out, json.loads(result.stdout))
+        for result in results + next_results
+    ] == [
+        ("first", True, 0, False, expected("first", initially_installed)),
+        ("second", True, 0, False, expected("second", initially_installed)),
+        ("next", True, 0, False, expected("next", not initially_installed)),
+    ]
