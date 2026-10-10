@@ -1,0 +1,39 @@
+{
+  "host": "omp",
+  "event": "tool_result",
+  "host_version": "omp/18.8.7",
+  "payload": {
+    "event": {
+      "type": "tool_result",
+      "toolName": "bash",
+      "toolCallId": "${ID}",
+      "input": {
+        "command": "${COMMAND}"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "${STATUS_OUTPUT}"
+        }
+      ],
+      "details": {
+        "timeoutSeconds": 300,
+        "wallTimeMs": 693.0843340000001,
+        "meta": {
+          "limits": {
+            "columnTruncated": {
+              "maxColumn": 768,
+              "unit": "bytes",
+              "artifactId": "0"
+            }
+          }
+        }
+      },
+      "isError": false
+    },
+    "ctx": {
+      "cwd": "${CHECKOUT}",
+      "sessionId": "${SESSION}"
+    }
+  }
+}
