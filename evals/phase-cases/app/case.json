@@ -36,6 +36,17 @@
         "--architecture-skill",
         "skills/architecture/SKILL.md"
       ]
+    },
+    "team-approved": {
+      "fixture_mode": "team",
+      "review_only": true,
+      "review_setup": "author/team/setup",
+      "install": [
+        "--architecture-mode",
+        "local",
+        "--architecture-skill",
+        "skills/architecture/SKILL.md"
+      ]
     }
   },
   "review": {
@@ -92,6 +103,25 @@
       "clean": {
         "expect": null,
         "note": "flutter installs pending by default; pending mode lets a reviewer ask for an architecture decision on a new module, so approve is not a fixed answer"
+      }
+    },
+    "team-approved": {
+      "clean": {
+        "expect": "approve",
+        "note": "Diagnostic counterpart explicitly selects the existing approved local team contract before review; the original team pending case is unchanged."
+      },
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "mode-rule",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:reportTeamError|telemetry(\\.dart)?|teamErrorLog))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:catch|on Exception|error))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:missing|without|not call|n't call|never|dropp|removed|silent|swallow|must|lack|skip))"
+          },
+          {
+            "id": "bug",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:_formatCents|cents\\s*/\\s*100|totalLabel))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:decimal|two (decimal|digit)|\\$?12\\.5\\b|3\\.05|double|floating|trailing zero|pad|format))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:wrong|drops?|loses?|lost|missing|instead|incorrect|not (pad|two|keep)|\\$?12\\.5\\b|double|floating|without))"
+          }
+        ]
       }
     }
   }
