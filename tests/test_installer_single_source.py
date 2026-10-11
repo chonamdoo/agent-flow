@@ -587,7 +587,10 @@ def test_linked_worktree_without_leader_install_ignores_all_local_copies(
     }[layout]
     _git(leader, "worktree", "add", "-q", "-b", "w1", str(checkout))
     for planted in (checkout.parent, checkout, checkout / "pkg"):
-        _seed_install(planted)
+        hooks = _seed_install(planted)
+        for name in ("guard-protected-branch.sh", "guard-host-worktree.sh"):
+            (hooks / name).write_text('echo "worker copy ran" >&2\nexit 1\n', encoding="utf-8")
+            (hooks / name).chmod(0o755)
     if layout == "home-leader":
         _seed_install(home)
     nested = checkout / "pkg" / "app"
@@ -602,6 +605,8 @@ def test_linked_worktree_without_leader_install_ignores_all_local_copies(
         )
         for hook, chosen in _observation_hook_roots(start).items():
             assert chosen is None, f"{layout}: {hook} chose a worker copy"
+        stdout, _ = _run_bash_tool_call(start, source)
+        assert json.loads(stdout) is None, f"{layout}: OMP ran a worker hook"
 
 
 def test_install_resolvers_compare_directory_identity(
@@ -823,6 +828,12 @@ def test_python_install_root_matches_the_omp_resolver_boundary(
     repo_home_src = repo_home / "src"
     repo_home_src.mkdir()
 
+    superproject = repository(home / "projects" / "super")
+    _seed_install(superproject)
+    library = repository(root / "library")
+    _git(superproject, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(library), "sub")
+    submodule = superproject / "sub"
+
     cases = (
         ("git 밖, HOME 아래: HOME 설치는 후보가 아니다", loose, home, None),
         ("HOME에서 바로 시작", home, home, home),
@@ -832,6 +843,7 @@ def test_python_install_root_matches_the_omp_resolver_boundary(
         ("leader 밖 수동 worktree", manual, home, leader),
         ("저장소가 HOME: 하위 폴더", repo_home_src, repo_home, None),
         ("저장소가 HOME: HOME에서 바로 시작", repo_home, repo_home, repo_home),
+        ("HOME 아래 submodule은 상위 저장소 설치", submodule, home, superproject),
     )
     for label, start, case_home, expected in cases:
         monkeypatch.setenv("HOME", str(case_home))

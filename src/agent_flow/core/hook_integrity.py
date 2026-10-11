@@ -183,7 +183,9 @@ def find_install_root(start) -> Path | None:
     current = real_path(start)
     common = git_common_dir(current)
     git_root = common.parent if common is not None else None
-    checkout_root = git_toplevel(current) if git_root is not None else None
+    # submodule의 common dir은 `.git/modules/<name>`이라 leader checkout이 아니다.
+    linked_candidate = common is not None and common.name == ".git"
+    checkout_root = git_toplevel(current) if linked_candidate else None
     if git_root is not None and checkout_root is not None and not _same_directory(git_root, checkout_root):
         return git_root if not _same_directory(git_root, home) and _has_install(git_root) else None
     if _is_directory_ancestor(git_root, current):
