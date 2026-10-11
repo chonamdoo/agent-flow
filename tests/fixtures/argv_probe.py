@@ -15,7 +15,7 @@ def main() -> int:
     if args == ["--version"]:
         print("Python 3.12.0")
         return 0
-    if args[:2] == ["-c", "import yaml"]:
+    if args[:1] == ["-c"]:
         return 0
     print(f"argv-received: {' '.join(args)}")
     return 0
