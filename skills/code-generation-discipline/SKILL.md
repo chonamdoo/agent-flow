@@ -14,8 +14,6 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
 - Restate the requested behavior in one or two lines.
 - State assumptions and uncertainty. If the repo can answer a question, inspect it first.
 - Check existing patterns, helpers, APIs, and project instructions before adding a new approach.
-- Host memory is optional, user-owned context. Before relying on a remembered claim, recheck current files and primary evidence, especially after linked code, branch, tool, or team-decision changes. Current project rules take precedence.
-- Propose remembered knowledge as a team rule only if reusable and worth maintaining, as its own user-approved change to tracked `AGENTS.md` outside installer-managed blocks or a tracked project skill, not folded into unrelated work. Cite current evidence and any original human correction. AI summaries are not human originals or approval; use existing review and gates.
 - Choose the smallest code path that can satisfy the request.
 - Define the authorized verification command or observable check before editing;
   account for the active phase's execution permissions and assigned owner.

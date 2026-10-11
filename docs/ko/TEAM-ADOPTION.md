@@ -110,58 +110,6 @@ Economy 문구·일반 Claude 프로젝트 import·블록 밖 바이트는 보�
 `docs/`의 팀 문서는 더 이상 자동 주입되는 루트 인덱스가 아니다. 프로젝트 안내와 import는
 프로젝트가 소유하고, 필수 문서는 기존 profile·architecture·범위 지정 skill 계약에서 선언한다.
 
-개인 참고 사본 `.agent-flow/bootstrap/CLAUDE.md`의 `@AGENTS.md` import는 author용이며,
-해당 파일 기준으로 해석한다. 이 사본은 세션 시작 때 로드되지 않는다. 격리된 Claude reviewer는
-`--safe-mode`로 실행되고 runner가 명시적으로 구성한 리뷰 입력을 받는다
-(`src/agent_flow/multi_review.py`). import만으로 reviewer에게 프로젝트 산문이 전달됐다고
-판단할 수 없다. 전달 여부는 렌더링된 리뷰 입력에서 확인한다.
-
-### 호스트 메모리와 팀 공유 규칙
-
-호스트 메모리는 사용자가 소유하는 선택적 참고 정보다. author는 Agent Flow를 실행하는 호스트인
-Claude Code, Codex, OMP가 제공하는 메모리를 사용할 수 있다. Gemini 같은 다른 에이전트는 설치된
-호스트 skill 없이 generic adapter를 통해서만 phase prompt를 따른다. Agent Flow는 호스트 메모리를
-자동으로 켜거나 저장소를 관리하지 않으며, 별도 추출 모델이나 주입 경로를 추가하지 않는다.
-Gemini와 OMP 모두 Agent Flow의 Claude/Codex reviewer 풀에 들어가지 않는다.
-
-`code-generation-discipline`은 Agent Flow 코드 작업에서 메모리의 근거 확인과 규칙 승격 기준을
-적용한다. 호스트 메모리를 켜거나 세션 기록을 훑도록 요구하지 않는다.
-
-기억한 내용은 유지할 가치가 있는 팀 공통 규칙일 때만 공유 규칙으로 제안한다. 반복 조사나 코드에서
-바로 확인할 수 있는 사실이라는 이유만으로 승격하지 않는다. tracked `AGENTS.md`의 installer 관리
-블록 밖이나 tracked 프로젝트 skill에 대한 작은 변경을 사용자가 승인한 별도 작업으로 제안하고,
-관련 없는 작업에 섞지 않는다. 확인할 수 있는 사람의 교정 원문, 현재 코드 등 직접 근거, 규칙의
-적용 범위를 함께 남긴다. AI 요약이나 호스트 메모리 문장은 AI의 해석이며 사람의 원문이나 승인
-증거가 아니다. 원문이 없으면 현재 근거로 주장을 검토하되 과거 사람의 교정으로 소급하지 않는다.
-기존 리뷰와 gates를 거치며, 제안한 규칙이 자기 채택을 승인하거나 검증을 완화할 수 없다. 대상
-파일이 tracked인지 확인한다. 설치만으로 팀 공유 파일이 되는 것은 아니다.
-
-현재 Agent Flow의 격리 reviewer backend는 macOS만 지원하며, 검증된 `sandbox-exec`와 필요한
-Claude/Codex CLI reviewer가 설치돼 있어야 한다. Linux와 Windows에서는 reviewer 실행 전에
-차단된다. 차단된 run에는 Agent Flow 리뷰 승인이 없으며, 사람의 PR 리뷰나 CI 통과가 필수 reviewer
-증거를 대신하지 않는다. backend 추가는 메모리 처리와 별도 변경이다.
-
-연결된 파일이나 규칙, branch, 도구/API가 바뀌거나 현재 작업과 메모리가 충돌하면 근거를 다시
-확인한다. 관련 경로와 검증 근거를 규칙 변경에 남기고, 특정 branch나 작업에만 해당하는 사실은 run
-artifact나 PR에 둔다. 근거가 사라진 공유 규칙은 같은 검토 경로로 수정하거나 삭제한다. 독립 리뷰와
-gates 통과는 위험을 줄이지만 메모리의 최신성이나 의미적 정확성을 보장하지 않는다. 개인 메모리의
-갱신은 사용자와 호스트가 맡으며 Agent Flow가 동기화하지 않는다.
-
-전달을 확인할 때는 승인한 파일과 실제 선택·렌더링·제출한 입력을 구분한다. 관측한 단계만 기록하고
-나머지는 tracked 파일이어도 `unknown`으로 둔다. 이는 기존 artifact나 리뷰에서 주장할 때 지킬
-한계이며 새 metadata schema, journal, 완료 gate가 아니다. commit이나 파일 digest는 파일의
-정체성을 보여줄 뿐 실제 소비나 모델의 준수를 입증하지 않는다. 관측을 위해 사용자 메모리/home을
-reviewer와 공유하거나 격리를 해제하지 않는다. Codex는 worktree의 프로젝트 `AGENTS.md`를 읽을 수
-있으므로 사용자 메모리의 격리가 검토 대상 프로젝트 지침의 영향까지 없애지는 않는다. 이 reviewer
-독립성 문제는 미해결이며 이번 메모리 지침이 이를 해결하거나 새 reviewer 설정을 선택하지 않는다.
-
-메모리 off/on 평가는 현재 호스트 메모리 방안의 구현이나 팀 규칙 채택 조건에 포함하지 않는다.
-향후 평가가 필요하면 결과에 따라 바뀔 결정을 먼저 정하고 그 제안 범위에서 설계한다. 이 경우
-코드·지침, dataset과 assertions의 출처·검토 상태, model 설정, evaluator·prompt·scorer를 고정한다.
-관측한 host/CLI 버전·설정·snapshot은 실제 소비 입력의 증거와 구분한다. 관측하지 못한 입력은
-재현성과 인과적 주장의 한계로 남긴다. 실제 모델 평가는 수동·비차단이며 required CI에 넣지 않는다.
-별도 메모리 분석 파이프라인은 필요하지 않다.
-
 ### 프로젝트 로컬 skill
 
 `src/agent_flow/core/skill_resolver.py`의 `_DEFAULT_PROJECT_TEMPLATES`가 저장소 쪽 skill root를

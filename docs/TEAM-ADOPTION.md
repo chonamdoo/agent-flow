@@ -118,66 +118,6 @@ Team documents in `docs/` are no longer an automatically injected root index. Ke
 instructions and imports under project ownership, and name required documents through the
 existing profile, architecture or scoped skill contracts.
 
-The private `.agent-flow/bootstrap/CLAUDE.md` reference contains an `@AGENTS.md` import
-for author context, resolved relative to the file that holds it; it is not loaded at session
-start. Isolated Claude reviewers run with `--safe-mode` and receive explicit review input
-from the runner (`src/agent_flow/multi_review.py`). An import is not evidence that a reviewer
-received project prose; inspect the rendered review input to establish that delivery.
-
-### Host memory and shared team rules
-
-Host memory is optional context owned by the user. Authors can use the memory of the host
-they run Agent Flow in: Claude Code, Codex, or OMP. Other agents, such as Gemini, follow phase
-prompts only through the generic adapter, without installed host skills. Agent Flow does not
-enable host memory, manage its store, or add an extraction model or injection path. Neither
-Gemini nor OMP joins Agent Flow's Claude/Codex reviewer pool.
-
-`code-generation-discipline` applies the memory evidence and rule-promotion criteria during
-Agent Flow code work. It does not require enabling host memory or scanning session history.
-
-Promote a remembered item only when it supports a reusable team rule worth maintaining.
-Repeated research or a fact readily checked in code is not sufficient by itself. Propose it as
-its own small, user-approved change to tracked `AGENTS.md` outside installer-managed blocks or
-to a tracked project skill, not folded into unrelated work. Include the original human
-correction when available, current code or other primary evidence, and the rule's scope. An AI
-summary or host memory entry is an AI interpretation, not the human original or proof of
-approval. If the original is missing, assess the claim against current evidence without
-relabeling it as a past human correction. Use the existing review and gates; a proposed rule
-cannot authorize its own adoption or weaken those checks. Confirm the target is tracked:
-installation alone does not make a file shared.
-
-Agent Flow's current confined reviewer backend supports macOS only and also requires a
-verified `sandbox-exec` and the required installed Claude/Codex CLI reviewers. Linux and
-Windows fail closed before reviewer launch. A blocked run has no Agent Flow review approval;
-human PR review or CI success does not replace its required reviewer evidence. Adding a
-backend is a separate change from memory handling.
-
-Recheck claims when their linked files or rules change, when the branch changes, when a tool
-or API changes, or when current work contradicts the memory. Record relevant paths and
-verification evidence in the rule change; keep facts tied to one branch or task in its run
-artifact or PR. Correct or remove an unsupported shared rule through the same review path.
-Independent review and passing gates reduce risk but do not guarantee that a remembered
-claim is current or semantically correct. Personal host memory updates remain with the user
-and host; Agent Flow does not synchronize them.
-
-When checking delivery, distinguish the approved file from the selected, rendered, and
-submitted input. Record only stages actually observed and leave the others `unknown`, even
-for tracked files. This is a limit on claims in existing artifacts or reviews, not a new
-metadata schema, journal, or completion gate. A commit or file digest establishes identity,
-not consumption or model compliance. Do not share user memory/home with reviewers or remove
-their isolation to make delivery observable. Codex may still read project `AGENTS.md` in the
-worktree, so isolating user memory does not remove the influence of project instructions
-under review. That reviewer independence question remains open; this memory guidance does
-not resolve it or select a new reviewer setting.
-
-Memory off/on evaluation is not part of this host-memory approach or team-rule acceptance.
-A future proposal should define the decision an evaluation will change before designing
-one. If such an evaluation is needed, freeze code and instructions, dataset and assertions
-with their source and review status, model settings, evaluator and prompt, and scorer.
-Separate observed host/CLI versions, settings, and snapshots from proof of consumed input;
-unobserved input limits reproducibility and causal claims. Live model evaluations remain
-manual and nonblocking, outside required CI. No separate memory-analysis pipeline is needed.
-
 ### Project-local skills
 
 `_DEFAULT_PROJECT_TEMPLATES` in `src/agent_flow/core/skill_resolver.py` lists the
