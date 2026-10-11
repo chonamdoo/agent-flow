@@ -2016,7 +2016,6 @@ function preferredPython() {
     fs.existsSync(kitVenvPython) ? kitVenvPython : null,
     "python3.12",
     "python3.11",
-    "python3.10",
     "python3",
     "python",
   ].filter(Boolean);
@@ -2033,7 +2032,12 @@ function preferredPython() {
 }
 
 function pythonSupportsWorkflowExport(candidate) {
-  const result = spawnSync(candidate, ["-c", "import yaml"], {
+  const probe = [
+    "import sys",
+    "if sys.version_info < (3, 11): raise SystemExit(1)",
+    "import yaml",
+  ].join("\n");
+  const result = spawnSync(candidate, ["-c", probe], {
     stdio: "ignore",
     timeout: 5_000,
   });

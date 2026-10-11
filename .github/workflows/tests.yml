@@ -147,19 +147,44 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}" || true
           exit "$status"
 
+  python-minimum:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - name: Minimum Python compatibility
+        env:
+          AGENT_FLOW_SKIP_CODEX_TRUST: "1"
+          AGENT_FLOW_NO_UPDATE_CHECK: "1"
+        run: |
+          python -c 'import sys; assert sys.version_info[:2] == (3, 11)'
+          python -m pytest tests/test_python_compatibility.py -q -p no:cacheprovider -o addopts="" -n 0
+
   # 기존 required check 이름을 유지하고 모든 분할의 성공을 요구한다.
   pytest:
     if: always()
-    needs: pytest-shards
+    needs: [pytest-shards, python-minimum]
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require all test partitions to pass
+      - name: Require all test partitions and minimum Python compatibility to pass
         env:
           SHARD_RESULT: ${{ needs.pytest-shards.result }}
-        run: test "$SHARD_RESULT" = success
+          MINIMUM_RESULT: ${{ needs.python-minimum.result }}
+        run: |
+          test "$SHARD_RESULT" = success
+          test "$MINIMUM_RESULT" = success
 
   # 전 스위트는 통과/실패 하나로 답한다. 그 신호로는 "회귀되면 안 되는 것이
   # 회귀했다"와 "무관한 테스트가 깨졌다"를 가릴 수 없고, 가드 테스트가 이름만
