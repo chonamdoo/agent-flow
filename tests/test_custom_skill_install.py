@@ -175,10 +175,11 @@ def _codex_implicit_invocation(skill_dir: Path) -> bool:
     metadata = skill_dir / "agents" / "openai.yaml"
     if not metadata.is_file():
         return True
-    policy = (yaml.safe_load(metadata.read_text(encoding="utf-8")) or {}).get("policy") or {}
-    # Codex는 bool `false`만 숨김으로 읽는다. null은 미지정이고, YAML 1.1의 `no`/`off`는
-    # Codex 파서에서 문자열이다.
-    return policy.get("allow_implicit_invocation") is not False
+    # Codex는 bool `false`만 숨김으로 읽는다. null은 미지정이고, `no`/`off`는 PyYAML에서만
+    # False다 — Codex 파서에는 문자열이라 스칼라를 원문 그대로 본다.
+    raw = yaml.load(metadata.read_text(encoding="utf-8"), Loader=yaml.BaseLoader) or {}
+    policy = raw.get("policy") or {}
+    return policy.get("allow_implicit_invocation") != "false"
 
 
 def test_bundled_host_skills_are_explicit_only_in_codex() -> None:
@@ -200,6 +201,9 @@ def test_installed_codex_links_keep_kit_skills_out_of_the_implicit_catalog(
     project = tmp_path / "project"
     project.mkdir()
     _skill(project / "skills" / "my-skill", "team skill")
+    team_policy = b"policy:\n  allow_implicit_invocation: true\n"
+    (project / "skills" / "my-skill" / "agents").mkdir()
+    (project / "skills" / "my-skill" / "agents" / "openai.yaml").write_bytes(team_policy)
 
     result = _install_with(binary, project, "--architecture-mode", "clean")
 
@@ -209,14 +213,14 @@ def test_installed_codex_links_keep_kit_skills_out_of_the_implicit_catalog(
     codex_links = {
         link["name"]: project / link["path"]
         for link in index["links"]
-        if link["host"] == "codex" and link.get("status") == "linked"
+        if link["host"] == "codex" and link.get("status") in {"linked", "copied"}
     }
     bundled = {name: entry for name, entry in codex_links.items() if sources[name] == "bundled"}
 
     assert "comment-authoring-discipline" in bundled
     assert [name for name, entry in bundled.items() if _codex_implicit_invocation(entry)] == []
     # 팀이 둔 skill의 호출 정책은 그 팀이 정한다.
-    assert not (codex_links["my-skill"] / "agents").exists()
+    assert (codex_links["my-skill"] / "agents" / "openai.yaml").read_bytes() == team_policy
 
 
 def test_app_shell_skills_install_shared_contract_dependency(tmp_path: Path) -> None:

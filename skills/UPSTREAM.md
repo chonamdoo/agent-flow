@@ -131,15 +131,16 @@ unverified; they are not represented as verified external standards.
 Upstream includes this file with each skill for Codex picker
 `interface.display_name`/`short_description` and, for user-invoked skills,
 `policy.allow_implicit_invocation: false`. Do not add it to vendored content skills
-that the host picker does not expose.
+that are not linked into a host skill root (`BUNDLED_HOST_SKILL_NAMES`).
 
 `agent-flow-diagnosing-bugs` is an exception: it is a user-invoked lifecycle wrapper
 in `BUNDLED_HOST_SKILL_NAMES`, linked into `.claude/skills`, `.agents/skills`, and
 `.omp/skills`. It carries both Claude's `disable-model-invocation: true` and Codex's
 `policy.allow_implicit_invocation: false` to preserve the invocation policy.
 
-Every other skill in `BUNDLED_HOST_SKILL_NAMES`, vendored `security-audit` included,
-carries a policy-only file with `policy.allow_implicit_invocation: false`. Codex lists
+Every skill in `BUNDLED_HOST_SKILL_NAMES`, vendored `security-audit` included, carries
+`policy.allow_implicit_invocation: false`. `agent-flow` also keeps its picker
+`interface` block; the files added for #346 are policy-only. Codex lists
 `.agents/skills` entries without that policy in the model's skill catalog and requires
 their use whenever a task matches the description. Most of these skills reach a phase
 through the runner, and the catalog bypassed that scoping in every author phase (#346).
