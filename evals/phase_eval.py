@@ -161,7 +161,10 @@ def _fixture_tooling(project: Path, case: dict, scenario: str) -> dict:
 
 
 def _author_execution_contract(prompt: str, project: Path, tooling: dict) -> str:
-    tool_lines = "\n".join(f"- {name}: {shlex.quote(path)}" for name, path in tooling["tools"].items())
+    tool_lines = "\n".join(
+        f"- {name}: {shlex.join([path, '-c', 'exit 0'] if name == 'sh' else [path, '--version'])}"
+        for name, path in tooling["tools"].items()
+    )
     command = shlex.join(tooling["test_command"])
     path = tooling.get("path", _project_tool_path(project))
     return prompt + (
@@ -173,10 +176,10 @@ def _author_execution_contract(prompt: str, project: Path, tooling: dict) -> str
         "above to follow next_command are outside this evaluation; finish after writing the green artifact. "
         "Production hook enforcement remains unchanged.\n"
         f"Project launcher for applicable non-lifecycle checks: {shlex.quote(tooling['launcher'])}\n"
-        f"Resolved stack tools:\n{tool_lines}\n"
+        f"Native child readiness commands:\n{tool_lines}\n"
         f"Fixture test command, from {shlex.quote(str(project))}: PATH={shlex.quote(path)} {command}\n"
-        "Before implementation, verify the listed stack executables in the native child shell with "
-        "their absolute paths and --version; retain the evidence. For native shell tools omit login "
+        "Before implementation, execute the listed readiness commands in the native child shell "
+        "and retain the evidence. For native shell tools omit login "
         "or set login=false. Do not search outside this project for tools or use another fixture's launcher. "
         "If a listed executable cannot run, report that exact error instead of searching or installing tools."
     )

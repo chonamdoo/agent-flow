@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import shlex
 import subprocess
 
 import pytest
@@ -133,3 +134,20 @@ def test_project_tool_path_finds_fixture_compiler_before_global_tool(evaluator, 
                            env={"PATH": path}, capture_output=True, text=True)
     assert child.returncode == 0
     assert child.stdout.splitlines() == [str(compiler), "fixture compiler"]
+
+
+def test_author_shell_readiness_uses_runnable_posix_command(evaluator, tmp_path):
+    shell = evaluator.shutil.which("sh")
+    assert shell is not None
+    tooling = {"launcher": str(tmp_path / ".agent-flow/bin/agent-flow"),
+               "tools": {"sh": shell, "dart": "/verified tools/dart", "node": "/verified tools/node"},
+               "test_command": [shell, "-c", "exit 0"]}
+    prompt = evaluator._author_execution_contract("Implement the green task.", tmp_path, tooling)
+    shell_line = next(line.removeprefix("- sh: ") for line in prompt.splitlines() if line.startswith("- sh: "))
+    command = shlex.split(shell_line)
+    assert command == [shell, "-c", "exit 0"]
+    readiness = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
+    assert readiness.returncode == 0, readiness.stderr
+    assert f"- dart: {shlex.quote('/verified tools/dart')} --version" in prompt
+    assert f"- node: {shlex.quote('/verified tools/node')} --version" in prompt
+    assert "their absolute paths and --version" not in prompt
