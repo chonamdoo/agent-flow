@@ -150,8 +150,12 @@ def architecture_lint_command(
     *,
     profile_root: Path | None = None,
 ) -> tuple[str, ...]:
+    # gate의 cwd는 작업 중인 checkout이다. `-m`만 쓰면 cwd가 `sys.path[0]`에 들어가
+    # checkout 루트에 둔 `agent_flow/` 패키지가 진짜 lint를 대신한다. `-P`는 cwd만
+    # 빼고 `PYTHONPATH`는 남겨 설치 runtime 선택을 지킨다. `-I`는 둘 다 끊는다.
     command = (
         sys.executable,
+        "-P",
         "-m",
         "agent_flow.core.architecture_lint",
         "--profile",

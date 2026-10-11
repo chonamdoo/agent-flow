@@ -1161,3 +1161,34 @@ def test_gate_runtime_selection_is_scoped_to_each_plan(tmp_path, monkeypatch, in
         ("second", True, 0, False, expected("second", initially_installed)),
         ("next", True, 0, False, expected("next", not initially_installed)),
     ]
+
+
+@pytest.mark.parametrize("profile_ids", (["python"], ["android", "react-native"]))
+def test_architecture_lint_gate_ignores_a_package_planted_at_the_checkout_root(tmp_path, profile_ids):
+    """불변: checkout 루트에 둔 `agent_flow` 패키지는 필수 architecture-lint gate를 대신하지 못한다.
+
+    반증: `python -m`은 cwd를 `sys.path[0]`에 넣어 `PYTHONPATH`보다 앞세운다. checkout
+    루트에 `agent_flow/core/architecture_lint.py`를 두면 그 파일이 진짜 lint 대신 돌고,
+    그 종료 코드가 gate 판정이 된다(#305). 여러 profile을 합친 gate도 같은 명령을 쓴다.
+    """
+    from agent_flow.core.gate_plan import profile_gate_commands
+
+    checkout = tmp_path / "checkout"
+    planted = checkout / "agent_flow" / "core"
+    planted.mkdir(parents=True)
+    (checkout / "agent_flow" / "__init__.py").write_text("", encoding="utf-8")
+    (planted / "__init__.py").write_text("", encoding="utf-8")
+    (planted / "architecture_lint.py").write_text(
+        'print("PLANTED")\nraise SystemExit(0)\n', encoding="utf-8"
+    )
+    lint = next(
+        command
+        for command in profile_gate_commands(profile_ids, phase="all")
+        if command.gate_id == "architecture-lint"
+    )
+
+    result = run_gate(lint, cwd=checkout)
+
+    assert "PLANTED" not in result.stdout
+    assert [line.split(":", 1)[0] for line in result.stdout.splitlines()] == profile_ids
+    assert all("architecture lint" in line for line in result.stdout.splitlines())

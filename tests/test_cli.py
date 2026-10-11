@@ -8221,6 +8221,7 @@ if (codexContext !== undefined) {
             commands = [command.command for command in captured]
             architecture_command = (
                 sys.executable,
+                "-P",
                 "-m",
                 "agent_flow.core.architecture_lint",
                 "--profile",
@@ -8229,8 +8230,8 @@ if (codexContext !== undefined) {
                 str(root.resolve()),
             )
             self.assertIn(architecture_command, commands)
-            self.assertNotIn((sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "android"), commands)
-            self.assertNotIn((sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "react-native"), commands)
+            self.assertNotIn((sys.executable, "-P", "-m", "agent_flow.core.architecture_lint", "--profile", "android"), commands)
+            self.assertNotIn((sys.executable, "-P", "-m", "agent_flow.core.architecture_lint", "--profile", "react-native"), commands)
             gate_ids = [command.gate_id for command in captured]
             self.assertLess(gate_ids.index("android:build"), gate_ids.index("architecture-lint"))
             self.assertLess(gate_ids.index("react-native:android-build"), gate_ids.index("react-native:lint"))
@@ -8318,6 +8319,7 @@ if (codexContext !== undefined) {
             self.assertIn(
                 (
                     sys.executable,
+                    "-P",
                     "-m",
                     "agent_flow.core.architecture_lint",
                     "--profile",
