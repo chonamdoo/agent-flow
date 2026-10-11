@@ -51,10 +51,15 @@ def _result() -> dict:
     }
 
 
-def _run(tmp_path: Path, before: dict, after: dict) -> list[str]:
+def _write_measurements(tmp_path: Path, before: dict, after: dict) -> tuple[Path, Path]:
     before_path, after_path = tmp_path / "before.json", tmp_path / "after.json"
     before_path.write_text(json.dumps(before), encoding="utf-8")
     after_path.write_text(json.dumps(after), encoding="utf-8")
+    return before_path, after_path
+
+
+def _run(tmp_path: Path, before: dict, after: dict) -> list[str]:
+    before_path, after_path = _write_measurements(tmp_path, before, after)
     _, failures = compare_module.compare(before_path, after_path)
     return failures
 
@@ -114,3 +119,64 @@ def test_a_broken_head_phase_is_not_read_as_a_saving(tmp_path, breakage):
 def test_a_combination_that_stopped_installing_fails(tmp_path):
     after = {"results": [{"profile": "react-native", "mode": "local", "install_error": "refused"}]}
     assert any("measured before, not after" in item for item in _run(tmp_path, _result(), after))
+
+
+@pytest.mark.parametrize("failure_kind", ["install_error", "worker_error", None], ids=["install", "worker", "empty"])
+def test_a_base_that_measured_nothing_cannot_pass(tmp_path, monkeypatch, capsys, failure_kind):
+    before = {"results": []}
+    if failure_kind is not None:
+        before["results"].append({"profile": "react-native", "mode": "local", failure_kind: "baseline failed"})
+    before_path, after_path = _write_measurements(tmp_path, before, _result())
+
+    lines, failures = compare_module.compare(before_path, after_path)
+
+    assert len(failures) == 1
+    assert "base measured nothing" in failures[0]
+    if failure_kind is not None:
+        assert "react-native:local" in failures[0]
+        assert "baseline failed" in failures[0]
+    else:
+        assert "no measurement rows" in failures[0]
+    assert "### Findings" in lines
+    assert "No skill-delivery regression found." not in lines
+    monkeypatch.setattr("sys.argv", ["phase_budget_compare.py", str(before_path), str(after_path)])
+    assert compare_module.main() == 1
+    assert "base measured nothing" in capsys.readouterr().out
+
+
+def test_accept_keeps_empty_base_findings_and_summary(tmp_path, monkeypatch, capsys):
+    before = {"results": [{"profile": "react-native", "mode": "local", "install_error": "baseline failed"}]}
+    before_path, after_path = _write_measurements(tmp_path, before, _result())
+    summary_path = tmp_path / "summary.md"
+    argv = ["phase_budget_compare.py", str(before_path), str(after_path), "--summary", str(summary_path)]
+    monkeypatch.setattr("sys.argv", argv)
+    assert compare_module.main() == 1
+    rejected = capsys.readouterr()
+    report = summary_path.read_text(encoding="utf-8")
+    assert rejected.out == report + "\n"
+    assert "### Findings" in report
+    assert "base measured nothing" in report
+    assert "baseline failed" in report
+
+    monkeypatch.setattr("sys.argv", [*argv, "--accept"])
+    assert compare_module.main() == 0
+    accepted = capsys.readouterr()
+    assert accepted.out == report + "\n"
+    assert summary_path.read_text(encoding="utf-8") == report + report
+    assert "findings accepted by the phase-budget-accepted label" in accepted.err
+
+
+def test_a_partially_failed_base_keeps_comparing_successful_measurements(tmp_path, monkeypatch, capsys):
+    before = _result()
+    before["results"].append({"profile": "python", "mode": "clean", "install_error": "unsupported base mode"})
+    before_path, after_path = _write_measurements(tmp_path, before, _result())
+
+    lines, failures = compare_module.compare(before_path, after_path)
+
+    assert failures == []
+    assert any("1 profile × mode combinations" in line for line in lines)
+    assert any("before python:clean; after none" in line for line in lines)
+    assert "No skill-delivery regression found." in lines
+    monkeypatch.setattr("sys.argv", ["phase_budget_compare.py", str(before_path), str(after_path)])
+    assert compare_module.main() == 0
+    assert "No skill-delivery regression found." in capsys.readouterr().out
