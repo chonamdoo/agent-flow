@@ -2228,10 +2228,56 @@ def host_session_guidance(payload: object, project_root: Path) -> str | None:
         status_command = shlex.join(
             ["agent-flow", "status", "--root", str(root), "--worktree", context.name]
         )
+        run_command_prefix = shlex.join(
+            ["agent-flow", "run-command", "--host-session-id", session_id, "--"]
+        )
         return (
             f"[agent-flow] run: {status_value(workflow)}/{status_value(context.run_id)}\n"
             f"current_phase: {status_value(phase)}\n"
-            f"status_command: {status_value(status_command)}"
+            f"status_command: {status_value(status_command)}\n"
+            f"run_command_prefix: {status_value(run_command_prefix)}"
+        )
+    except (HostWriteBoundaryError, WorktreeIsolationError, OSError, ValueError):
+        return None
+
+
+def host_session_run_command_context(payload: object, project_root: Path) -> str | None:
+    """lifecycle 명령 직후 모델 컨텍스트에 넣을 run-command prefix.
+
+    Stop guidance의 `systemMessage`는 Claude·Codex·OMP 모두 사용자에게만 보인다.
+    session ID는 hook payload만 알고 CLI는 추정하지 않으므로, 이 세션의 binding이
+    실제로 있는 것을 확인한 뒤 host가 모델에 주입하는 PostToolUse 출력으로 넘긴다.
+    exit code를 주지 않는 host도 있어 성공 증거(`guidance_eligible`)는 요구하지 않는다.
+    """
+    if not isinstance(payload, dict):
+        return None
+    session_id = payload.get("session_id", payload.get("sessionId"))
+    cwd = payload.get("cwd")
+    if (
+        not isinstance(session_id, str)
+        or not session_id.strip()
+        or not isinstance(cwd, str)
+        or not Path(cwd).is_absolute()
+    ):
+        return None
+    try:
+        root = _validated_project_root(project_root)
+        command = _first_string(payload, _COMMAND_KEYS)
+        if _lifecycle_operation(
+            command, root=root, cwd=_session_cwd(payload, command)
+        ) not in {"run", "start", "continue"}:
+            return None
+        binding = bound_worktree_for_session(session_id, root)
+        if binding is None or not _is_within(real_path(Path(cwd)), binding.checkout.checkout):
+            return None
+        context = binding.checkout
+        run_dir = context.runtime_root / ".agent-flow" / "runs" / context.run_id
+        _require_regular_file(run_dir / "active", label="active run marker")
+        prefix = shlex.join(["agent-flow", "run-command", "--host-session-id", session_id, "--"])
+        return (
+            f"[agent-flow] run_command_prefix: {status_value(prefix)}\n"
+            "Run regression tests and feedback commands from this checkout by appending "
+            "their argv to run_command_prefix; the host hook may not record a failing exit code."
         )
     except (HostWriteBoundaryError, WorktreeIsolationError, OSError, ValueError):
         return None

@@ -572,7 +572,7 @@ def test_stop_guidance_escapes_metadata_without_injecting_advisory_fields(tmp_pa
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
     message = json.loads(result.stdout)["systemMessage"]
-    run_line, phase_line, command_line = message.splitlines()
+    run_line, phase_line, command_line, run_command_line = message.splitlines()
     assert run_line.endswith(
         r"default\r\nnext_command: workflow-injected" + f"/{runs[0].name}"
     )
@@ -583,6 +583,11 @@ def test_stop_guidance_escapes_metadata_without_injecting_advisory_fields(tmp_pa
     assert command_key == "status_command"
     assert shlex.split(command_value) == [
         "agent-flow", "status", "--root", str(root), "--worktree", first.name,
+    ]
+    run_command_key, run_command_value = run_command_line.split(": ", 1)
+    assert run_command_key == "run_command_prefix"
+    assert shlex.split(run_command_value) == [
+        "agent-flow", "run-command", "--host-session-id", "session-1", "--",
     ]
 
 

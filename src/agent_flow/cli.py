@@ -24,6 +24,7 @@ from agent_flow.core.artifacts import (
     write_recovery,
 )
 from agent_flow.core.architecture_lint import main as architecture_lint_main
+from agent_flow.core.command_runner import run_observed_command
 from agent_flow.core.architecture_policy import (
     ArchitectureMode,
     ArchitectureSelection,
@@ -305,6 +306,14 @@ def main(argv: list[str] | None = None) -> int:
     install_parser.add_argument("installer_args", nargs=argparse.REMAINDER)
 
     subparsers.add_parser("update")
+
+    command_run_parser = subparsers.add_parser(
+        "run-command", help="execute argv and record its actual exit code for regression evidence"
+    )
+    command_run_parser.add_argument(
+        "--host-session-id", help="use this actual host session's existing checkout/run binding"
+    )
+    command_run_parser.add_argument("command_argv", nargs=argparse.REMAINDER)
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("task")
@@ -786,6 +795,28 @@ def main(argv: list[str] | None = None) -> int:
         root,
         getattr(args, "worktree", None),
     )
+    if args.command == "run-command":
+        command_argv = args.command_argv
+        if command_argv[:1] == ["--"]:
+            command_argv = command_argv[1:]
+        if not command_argv:
+            parser.error("run-command requires an executable after --")
+        try:
+            state_root = root if unadopted_checkout is None else None
+            if inferred_worktree is not None:
+                _, state_root = _worktree_context(root, inferred_worktree)
+            active = find_active_run(state_root) if state_root is not None else None
+            return run_observed_command(
+                command_argv,
+                project_root=root,
+                checkout_root=git_toplevel(requested_root) or requested_root,
+                cwd=requested_root,
+                run_dir=active.path if active is not None else None,
+                host_session_id=args.host_session_id,
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
     if unadopted_checkout is not None and args.command in {"run", "start"}:
         # 조용히 leader root만 반환하면 사용자가 서 있는 checkout이 아닌 곳에서 런이
         # 돌고, task 이름으로 세 번째 worktree까지 생긴다. 여기서 멈추는 쪽이 낫다.

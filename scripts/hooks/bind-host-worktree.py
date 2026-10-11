@@ -18,10 +18,13 @@ def load_recorder(script_dir: Path):
             break
     else:
         raise RuntimeError("trusted host worktree binding recorder is unavailable")
-    from agent_flow.core.host_write_boundary import record_host_checkout_binding
+    from agent_flow.core.host_write_boundary import (
+        host_session_run_command_context,
+        record_host_checkout_binding,
+    )
 
     project_root = install_root.parent if install_root.name == ".agent-flow" else install_root
-    return project_root, record_host_checkout_binding
+    return project_root, record_host_checkout_binding, host_session_run_command_context
 
 
 def main() -> int:
@@ -49,8 +52,22 @@ def main() -> int:
             sys.argv[2] if len(sys.argv) == 3 and sys.argv[1] == "--host"
             and sys.argv[2] in ("claude", "codex", "omp") else None
         )
-        project_root, recorder = load_recorder(Path(__file__).resolve().parent)
-        recorder(payload, project_root, successful_tool_event=successful_tool_event, host=host)
+        project_root, recorder, run_command_context = load_recorder(
+            Path(__file__).resolve().parent
+        )
+        if recorder(
+            payload, project_root, successful_tool_event=successful_tool_event, host=host
+        ) is None:
+            return 0
+        context = run_command_context(payload, project_root)
+        if context:
+            # systemMessage는 사용자에게만 보인다. 모델이 읽는 채널은 additionalContext다.
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": context,
+                },
+            }, ensure_ascii=False))
     except Exception as exc:
         print(f"host worktree binding failed: {exc}", file=sys.stderr)
         return 2
