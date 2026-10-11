@@ -552,6 +552,8 @@ def test_clean_phase_case_trees_pass_their_profile_architecture_lint(stack, tree
     ("react-native: architecture lint passed; source candidates=2, role-matched=2, findings=0\n"
      "android: architecture lint n/a (activation_roots absent); source candidates=0, role-matched=0, findings=0", 0, "pass"),
     ("python: architecture lint failed; source candidates=3, role-matched=0, findings=3", 1, "fail"),
+    ("python: architecture lint failed; source candidates=3, role-matched=0, findings=3\n>&2", 1, "fail"),
+    ("git diff failed while discovering architecture lint candidates", 1, "error"),
     ("agent-flow: managed python runtime is missing", 127, "error"),
     ("", 0, "error"),
 ])
@@ -559,7 +561,8 @@ def test_author_gate_result_keeps_not_applicable_apart_from_pass(evaluator, tmp_
     """반증 #347: exit 0만 보고 n/a를 PASS로 세거나, 실행 실패를 lint 실패로 세면 안 된다."""
     launcher = tmp_path / ".agent-flow/bin/agent-flow"
     launcher.parent.mkdir(parents=True)
-    launcher.write_text(f"#!/bin/sh\nprintf '%s\\n' {shlex.quote(printed)}\nexit {rc}\n", encoding="utf-8")
+    text, redirect = (printed[:-4], " >&2") if printed.endswith("\n>&2") else (printed, "")
+    launcher.write_text(f"#!/bin/sh\nprintf '%s' {shlex.quote(text)}{redirect}\nexit {rc}\n", encoding="utf-8")
     launcher.chmod(0o755)
 
     result = evaluator._architecture_lint(tmp_path, "python")

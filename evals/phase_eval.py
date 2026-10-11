@@ -591,7 +591,7 @@ def _architecture_lint(project: Path, profile: str) -> dict:
         return {"status": "error", "rc": None, "output": "installed launcher missing"}
     process = _run_group([str(launcher), "architecture-lint", "--root", str(project), "--profile", profile],
                          timeout=300)
-    output = (process.stdout + process.stderr).strip()
+    output = f"{process.stdout}\n{process.stderr}".strip()
     statuses = set(LINT_STATUS_RE.findall(output))
     if process.returncode == 0 and "passed" in statuses:
         status = "pass"
