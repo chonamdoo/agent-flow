@@ -35,6 +35,18 @@
         "--architecture-skill",
         "skills/architecture/SKILL.md"
       ]
+    },
+    "team-approved": {
+      "fixture_mode": "team",
+      "review_only": true,
+      "review_setup": "author/team/setup",
+      "review_artifacts": "author/team/artifacts",
+      "install": [
+        "--architecture-mode",
+        "local",
+        "--architecture-skill",
+        "skills/architecture/SKILL.md"
+      ]
     }
   },
   "review": {
@@ -91,6 +103,25 @@
       "clean": {
         "expect": null,
         "note": "python installs pending by default; pending mode lets a reviewer ask for an architecture decision on a new module, so approve is not a fixed answer"
+      }
+    },
+    "team-approved": {
+      "clean": {
+        "expect": "approve",
+        "note": "Diagnostic counterpart explicitly selects the existing approved local team contract before review; the original team pending case is unchanged."
+      },
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "mode-rule",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:models\\.py|OrderRowDTO|\\bOrder\\b))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:NamedTuple|named tuple|orders-team-conventions|team convention))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:dataclass|banned|must|should|instead|violat|replace))"
+          },
+          {
+            "id": "bug",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:list_customer_orders|listing\\.py|customer_id))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:filter|scop|other customers?|every customer|all customers|leak|isolation|필터|다른 고객|모든 고객|전체 고객|노출))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:ignor|unused|missing|never|dropp|not (filter|used|appl)|without|leak|all customers|other customers|every customer|쓰지 않|사용하지 않|검사하지 않|무관|노출|다른 고객|모든 고객))"
+          }
+        ]
       }
     }
   }

@@ -226,6 +226,8 @@ base에서 측정에 성공한 profile·mode 조합이 하나도 없거나, 어�
 author는 새 orders 모듈의 소유권·wiring을 결정해야 하므로 `author_install`로 승인된
 local 계약을 선택한다. 구현 요구를 pending 권한으로 채점하지 않는다. 같은 mode의
 review는 기존 pending 설치와 정상 판정 `expect: null`을 유지한다.
+app/backend의 `team-approved`는 기본 matrix 밖의 review-only 진단이다. standalone oracle의
+`norm`은 설정의 `fixture_mode`(`team`)로 검사하고, `author`는 project를 만지기 전에 거부한다.
 
 author의 `setup/`은 설치 전에, red 테스트인 `pre/`는 설치 커밋 뒤에 복사한다.
 공유 계획 위에 `review/<mode>/artifacts/`를 덮어써 시나리오별 권한을 구분한다.
@@ -249,6 +251,18 @@ author의 `setup/`은 설치 전에, red 테스트인 `pre/`는 설치 커밋 �
   Must-fix/blocking 지적 안에서만 찾는다. Should-fix·Notes 같은 비차단 구간의 언급은
   탐지로 세지 않는다.
 
+fixture 준비는 버전 probe, cache lock, 의존성 설치, installer 재시도, Git, review 검사를
+합산한 4983초 한도를 사용한다. cache lock 대기는 최대 600초다. evaluator·준비 helper·
+네 oracle의 실행 helper가 소유한 새 session/group은 timeout·SIGTERM·SIGINT에 의한 취소를 하위
+소유 process까지 전달하고, 유한한 grace 뒤 강제 종료·pipe drain·reap을 수행한다.
+signal callback은 취소 의도만 기록하고, 0.2초 간격의 worker loop가 process 정리·reap을 소유한다.
+이전 handler 복원 중 받은 취소도 정리 뒤 전파하며, 종료한 group leader는 signal 전에 reap한다.
+임의의 제3자 process가 별도로 만든 session까지 소유한 것으로 추정하지 않는다.
+Node cache는 manifest·lock·tool fingerprint·설치 version을 검증한다. 정상 cache hit는
+`readiness.json`을 다시 쓰지 않으며, 새 receipt는 검증 후 같은 디렉터리의 staging file을
+flush/fsync하고 원자적으로 교체한다. fixture별 TypeScript/React probe는 hit에서도 수행하며,
+cache receipt만으로 fixture typecheck·framework build·실제 모델 릴리스 통과를 주장하지 않는다.
+
 Claude 리뷰어는 `plan` 대신 `default` permission mode에서 `Read,Glob,Grep`만
 사용한다. Write/Edit/Bash/Agent는 제공하지 않는다. 이는 평가 CLI의 도구 제한이지
 host 전체의 파일시스템 sandbox가 아니다. Codex author는 `workspace-write`,
@@ -258,9 +272,14 @@ Codex도 성공한 명시적 읽기 경로와 실제 문서 내용이 출력에�
 실패한 읽기, 모호한 경로, 모델의 자기신고, grep 명령 문장만으로는 읽었다고 보지 않는다.
 관측할 수 없는 문서 읽음은 `null`로 남긴다. `null`과 inline 본문은 읽음률 분모에서 제외하며,
 미관측을 읽기 실패(`false`)로 바꾸지 않는다.
-양쪽 kit에 같은 관측 계약을 덧붙인다. Codex는 skill마다 literal 경로의 단독 `cat` 또는
-`sed` 출력 명령을 사용하도록 요청한다. Python 일괄 읽기·불명확한 복합 명령은
-성공 경로로 추정하지 않는다. 미관측 author 필수 읽기는 읽기 실패로 바꾸지 않고
+양쪽 kit에 같은 관측 계약을 덧붙인다. native `Read`가 없으면 skill마다 하나의 literal 경로를
+단독 `/bin/cat` 또는 `/usr/bin/sed -n` 출력 명령으로 읽도록 요청한다. Codex 실행 도구는
+`shell=/bin/sh`, `login=false`로 요청한다. 명령 안에 `/bin/sh`를 쓰는 것만으로는
+도구의 바깥 기본 shell이 바뀌지 않는다. 정확한 `/bin`·`/usr/bin` reader 경로와
+non-login `/bin/sh -c`·`/usr/bin/sh -c` wrapper만 인정하며, 성공 종료·완료 상태·문서별
+고유한 실제 내용 출력이 필요하다. bare/PATH-shadowed·project-local reader·설정 로딩 shell·
+Python 일괄 읽기·불명확한 복합 명령은 성공 경로로 추정하지 않는다.
+미관측 author 필수 읽기는 읽기 실패로 바꾸지 않고
 `required_unobserved`와 `required_unread: null`로 남긴다. 미관측 필수 skill도 author 읽음률
 분모에는 포함한다. 실제 읽음 증거가 없는 시행을 무효 처리해 0.95 읽음률 기준이나
 실패한 behavior 판정을 피할 수 없다. 알려진 읽기 실패는 별도 `required_unread`에 남긴다.

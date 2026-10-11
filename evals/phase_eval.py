@@ -33,7 +33,6 @@ import os
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -42,6 +41,15 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from phase_eval_environment import (
+    CACHE_LOCK_TIMEOUT, COMMAND_TIMEOUT, DEPENDENCY_TIMEOUT, PIPE_DRAIN_TIMEOUT,
+    PROCESS_CLEANUP_GRACE, PROCESS_REAP_TIMEOUT, _cancellation_scope, _run_process,
+    environment_for_project, prepare_fixture_environment,
+)
+from phase_eval_fingerprint import evaluator_sha256
+from phase_eval_web_verification import verify_web_review
+
 CASES = HERE / "phase-cases"
 MODES = ("clean", "local", "team")
 # "Non-blocking"의 `blocking`을 차단 표지로 읽지 않는다.
@@ -50,7 +58,8 @@ FINDING_TAG_RE = re.compile(r"must[- ]?fix|(?<!non)(?<!non-)(?<!non )blocking|<s
 HEADING_RE = re.compile(r"^\s{0,3}(?:#{1,6}\s+\S|\*\*[^*]+\*\*:?\s*$)")
 AUTHOR_TOOLS = (
     "Read Edit Write Glob Grep Bash(node:*) Bash(python3:*) Bash(python:*) "
-    "Bash(dart:*) Bash(sh:*) Bash(ls:*) Bash(cat:*)"
+    "Bash(dart:*) Bash(sh:*) Bash(ls:*) Bash(/bin/cat:*) Bash(/usr/bin/cat:*) "
+    "Bash(/bin/sed:*) Bash(/usr/bin/sed:*) Bash(/bin/sh:*) Bash(/usr/bin/sh:*)"
 )
 AUTHOR_DENIED = "Bash(agent-flow:*) Bash(git:*) Bash(rm:*)"
 PY = sys.executable
@@ -59,10 +68,20 @@ REQUESTED_MODELS: dict[str, str | None] = {"claude": None, "codex": None}
 REQUESTED_PROVIDERS: dict[str, str | list[str]] = {"author": "claude", "review": ["claude", "codex"]}
 READ_EVIDENCE_PROMPT = (
     "\n\nEvaluation read-evidence contract: when reading a skill document, use the native Read tool "
-    "if available. Otherwise use a standalone cat or sed print command with one literal file path "
-    "per tool call. Do not bulk-read skill documents through Python, loops, pipes, or mixed shell "
-    "commands: those reads cannot be attributed by this evaluator. This changes only evidence "
-    "collection, not the task requirements or implementation."
+    "if available. Otherwise use a standalone /bin/cat or /usr/bin/sed -n print command with one "
+    "literal file path per tool call. "
+    "For a Codex execution tool, set the tool's shell parameter to /bin/sh and login to false; "
+    "an inner /bin/sh command does not change the tool's outer default shell. "
+    "If a shell wrapper is needed, use /bin/sh -c (not a login shell). "
+    "Only cat/sed/head/tail at exact /bin or /usr/bin paths and /bin/sh or /usr/bin/sh -c wrappers "
+    "are attributable; bare commands, project-local executables, Python, loops, pipes, and mixed "
+    "shell commands are not read evidence. "
+    "This changes only evidence collection, not the task requirements or implementation."
+)
+PREPARATION_TIMEOUT = (
+    2 * COMMAND_TIMEOUT + CACHE_LOCK_TIMEOUT + DEPENDENCY_TIMEOUT + COMMAND_TIMEOUT
+    + 2 * 600 + 6 * COMMAND_TIMEOUT + 600 + 2 * COMMAND_TIMEOUT
+    + 600 + 3 * (PROCESS_CLEANUP_GRACE + PIPE_DRAIN_TIMEOUT + PROCESS_REAP_TIMEOUT + 1)
 )
 
 
@@ -76,20 +95,7 @@ def _token_sum(values: list[int | None]) -> int | None:
 
 
 def _run_group(args: list[str], *, timeout: int, cwd: Path | None = None) -> subprocess.CompletedProcess:
-    """새 세션으로 실행한다. timeout이면 그 명령이 띄운 installer·테스트까지 프로세스 그룹째 끝낸다.
-
-    `subprocess.run(timeout=)`은 직접 띄운 프로세스만 죽여서 손자 프로세스가 임시 폴더에 계속 쓴다.
-    """
-    process = subprocess.Popen(
-        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd, start_new_session=True,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        stdout, stderr = process.communicate()
-        stderr = f"timeout after {timeout}s\n{stderr}"
-    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+    return _run_process(args, timeout=timeout, cwd=cwd, env=environment_for_project(cwd), timeout_result=True)
 
 
 # --------------------------------------------------------------------------- prepare
@@ -99,10 +105,11 @@ def _run_group(args: list[str], *, timeout: int, cwd: Path | None = None) -> sub
 def _git(cwd: Path, *args: str) -> None:
     # 바깥 세션의 GIT_DIR·GIT_WORK_TREE 등이 남아 있으면 임시 프로젝트가 아닌 저장소에 쓴다.
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    subprocess.run(
+    result = _run_process(
         ["git", "-c", "user.email=eval@example.com", "-c", "user.name=eval", *args],
-        cwd=cwd, check=True, capture_output=True, env=env,
+        cwd=cwd, env=env, timeout=COMMAND_TIMEOUT,
     )
+    result.check_returncode()
 
 
 def _overlay(src: Path, dst: Path) -> None:
@@ -124,21 +131,84 @@ def _document_manifest(resolution, prompt: str) -> list[dict]:
     ]
 
 
+def _project_tool_path(project: Path) -> str:
+    inherited = os.environ.get("PATH", os.defpath)
+    directories = [project / ".agent-flow" / "bin", project / "node_modules" / ".bin"]
+    return os.pathsep.join([*(str(path) for path in directories if path.is_dir()), inherited])
+
+
+def _fixture_tooling(project: Path, case: dict, scenario: str) -> dict:
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    if not launcher.is_file() or not os.access(launcher, os.X_OK):
+        raise RuntimeError(f"evaluation project launcher unavailable: {launcher}")
+    command = list(case.get("review_test_command", case["test_command"]) if scenario == "review"
+                   else case["test_command"])
+    names = {"node", "python3", command[0]}
+    if case["stack"] == "app":
+        names.add("dart")
+    tools = {}
+    for name in sorted(names):
+        path = shutil.which(name)
+        if path is None:
+            raise RuntimeError(f"evaluation stack tool unavailable: {name}")
+        tools[name] = str(Path(path).absolute())
+    for name in ("tsc", "next"):
+        local = project / "node_modules" / ".bin" / name
+        if local.is_file() and os.access(local, os.X_OK):
+            tools[name] = str(local)
+    command[0] = tools[command[0]]
+    return {"launcher": str(launcher), "tools": tools, "test_command": command,
+            "path": _project_tool_path(project), "readiness_scope": "controller executable discovery"}
+
+
+def _author_execution_contract(prompt: str, project: Path, tooling: dict) -> str:
+    tool_lines = "\n".join(
+        f"- {name}: {shlex.join([path, '-c', 'exit 0'] if name == 'sh' else [path, '--version'])}"
+        for name, path in tooling["tools"].items()
+    )
+    command = shlex.join(tooling["test_command"])
+    path = tooling.get("path", _project_tool_path(project))
+    return prompt + (
+        "\n\n## Evaluation execution scope\n"
+        "This is a phase-only evaluation of the rendered green task. Keep every implementation, "
+        "required-skill, plan, and phase-artifact requirement above. The controller owns workflow lifecycle. "
+        "The fixture was installed with --no-hooks; do not install or enable hooks, and do not run "
+        "Agent Flow status, continue, advance, next, run, or start. Those commands and any instruction "
+        "above to follow next_command are outside this evaluation; finish after writing the green artifact. "
+        "Production hook enforcement remains unchanged.\n"
+        f"Project launcher for applicable non-lifecycle checks: {shlex.quote(tooling['launcher'])}\n"
+        f"Native child readiness commands:\n{tool_lines}\n"
+        f"Fixture test command, from {shlex.quote(str(project))}: PATH={shlex.quote(path)} {command}\n"
+        "Before implementation, execute the listed readiness commands in the native child shell "
+        "and retain the evidence. For native shell tools omit login "
+        "or set login=false. Do not search outside this project for tools or use another fixture's launcher. "
+        "If a listed executable cannot run, report that exact error instead of searching or installing tools."
+    )
+
+
 def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, project: Path,
             *, author_provider: str = "claude", review_providers: tuple[str, ...] = ("claude", "codex")) -> dict:
     sys.path.insert(0, str(kit / "src"))
     host = author_provider if scenario == "author" else review_providers[0]
     os.environ["AGENT_FLOW_HOST"] = host
     case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
+    mode_config = case["modes"][mode]
+    if mode_config.get("review_only") and scenario != "review":
+        raise ValueError(f"evaluation mode {mode} is review-only")
+    fixture_mode = mode_config.get("fixture_mode", mode)
     project.mkdir(parents=True)
     _overlay(case_dir / "seed", project)
-    _overlay(case_dir / "modes" / mode / "overlay", project)
+    _overlay(case_dir / "modes" / fixture_mode / "overlay", project)
     if scenario == "author":
-        _overlay(case_dir / "author" / mode / "setup", project)
+        _overlay(case_dir / "author" / fixture_mode / "setup", project)
+    elif mode_config.get("review_setup"):
+        _overlay(case_dir / mode_config["review_setup"], project)
+    fixture_environment = prepare_fixture_environment(
+        project, case_dir, project.parent / ".phase-eval-dependencies", scenario=scenario,
+    )
     _git(project, "init", "-q", "-b", "main")
     _git(project, "add", "-A")
     _git(project, "commit", "-qm", "seed")
-    mode_config = case["modes"][mode]
     install_args = mode_config.get("author_install", mode_config["install"]) if scenario == "author" else mode_config["install"]
     command = ["node", str(kit / "bin" / "agent-flow-kit.mjs"), "install", "--root", str(project),
                "--profile", case["profile"], *install_args, "--no-hooks"]
@@ -148,6 +218,7 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
         install = _run_group(command, timeout=600)
     if install.returncode != 0:
         raise RuntimeError(f"install failed: {install.stderr[-600:] or install.stdout[-600:]}")
+    tooling = _fixture_tooling(project, case, scenario)
     _git(project, "add", "-A")
     _git(project, "commit", "-q", "--allow-empty", "-m", "install agent-flow")
     _git(project, "checkout", "-q", "-b", "feat/orders")
@@ -158,14 +229,18 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
     from agent_flow.runner import Runner
 
     if scenario == "author":
-        _overlay(case_dir / "author" / mode / "pre", project)
+        _overlay(case_dir / "author" / fixture_mode / "pre", project)
     else:
-        _overlay(case_dir / "review" / mode / variant, project)
+        _overlay(case_dir / "review" / fixture_mode / variant, project)
     run_dir = create_run(project, "full-feature", case["task"], run_id=f"eval-{scenario}")
-    artifacts = case_dir / "author" / mode / "artifacts"
+    artifacts = case_dir / "author" / fixture_mode / "artifacts"
     _overlay(artifacts, run_dir)
     if scenario == "review":
-        _overlay(case_dir / "review" / mode / "artifacts", run_dir)
+        _overlay(case_dir / "review" / fixture_mode / "artifacts", run_dir)
+        if mode_config.get("review_artifacts"):
+            _overlay(case_dir / mode_config["review_artifacts"], run_dir)
+        if fixture_mode != mode:
+            _overlay(case_dir / "review" / mode / "artifacts", run_dir)
     prd = run_dir / "prd.md"
     if prd.is_file():
         from agent_flow.core.design_ledger import capture_design_ledger
@@ -189,7 +264,10 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
         resolution = adapter.phase_resolution(phase, project, skill_host=host, **resolution_kwargs)
         prompt = adapter.render_envelope(phase, run_dir, project, skill_host=host, resolution=resolution)
         return {
-            "prompt": prompt + READ_EVIDENCE_PROMPT,
+            "prompt": _author_execution_contract(prompt, project, tooling) + READ_EVIDENCE_PROMPT,
+            "execution_scope": "phase-only green; controller owns lifecycle; hooks disabled",
+            "tooling": tooling,
+            "fixture_environment": fixture_environment,
             "required": [
                 {"name": s.name, "path": str(s.path) if s.path else ""}
                 for s in resolution.required
@@ -206,11 +284,12 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
     # review 기한 항목을 본 리뷰어가 "실행 근거 없음"으로 변경을 요청한다. phase artifact(green.md)
     # 모양으로 두면 리뷰어가 그 phase의 Completion Gate까지 요구하므로, 하네스 기록임을 밝힌 별도
     # 파일에 전체 출력을 남긴다. 복사본에서 돌린다: `pubspec.lock` 같은 부산물이 리뷰 diff에 섞이면 안 된다.
-    command = case.get("review_test_command", case["test_command"])
+    command = tooling["test_command"]
     with tempfile.TemporaryDirectory(prefix="af-phase-eval-tests-") as scratch:
         copy = Path(scratch) / "project"
-        shutil.copytree(project, copy, ignore=shutil.ignore_patterns(".git"))
+        shutil.copytree(project, copy, symlinks=True, ignore=shutil.ignore_patterns(".git"))
         tests = _run_group(command, cwd=copy, timeout=600)
+        review_verification = verify_web_review(copy) if case["stack"] == "web" and mode == "team" else []
     (run_dir / "test-evidence.md").write_text(
         "# Test run before review\n\n"
         "Recorded by the evaluation harness on the reviewed tree (the green phase's test evidence).\n\n"
@@ -218,16 +297,37 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
         f"{(tests.stdout + tests.stderr).strip()[-20000:]}\n```\n",
         encoding="utf-8",
     )
+    if review_verification:
+        with (run_dir / "test-evidence.md").open("a", encoding="utf-8") as evidence:
+            for check in review_verification:
+                evidence.write(
+                    f"\n## {check['kind']}\n\n"
+                    f"{check.get('scope', 'Fixture TypeScript compiler check.')}\n\n"
+                    f"status {check['status']}\n"
+                    f"$ {shlex.join(check.get('command', []))}\nexit {check.get('exit_code', 'unavailable')}\n\n```text\n"
+                    f"{check.get('output', check.get('reason', 'No execution evidence available.'))}\n```\n"
+                )
     phase = next(p for p in runner.phases if p.id == "multi-review")
     review_input = _write_review_input_snapshot(
         project, run_dir, phase.id, base_branch=_profile_base_branch(adapter),
     )
     jobs, resolutions = _reviewer_jobs(phase, run_dir, project, adapter, review_input=review_input,
                              providers=review_providers)
+    tool_locations = "\n".join(f"- {name}: {shlex.quote(path)}" for name, path in tooling["tools"].items())
+    review_tools = (
+        "\n\nEvaluation executable locations (controller discovery, not proof of native execution):\n"
+        f"- project agent-flow: {shlex.quote(tooling['launcher'])}\n{tool_locations}\n"
+        "Use these absolute locations for applicable permitted commands. Do not search outside this "
+        "project for tools or substitute another fixture's runtime. For native shell tools omit login "
+        "or set login=false. Keep the review read-only."
+    )
     return {
+        "tooling": tooling,
+        "fixture_environment": fixture_environment,
+        "review_verification": review_verification,
         "jobs": [
             {"angle": job.angle_id, "provider": provider,
-             "prompt": job.prompt_by_provider[provider] + READ_EVIDENCE_PROMPT +
+             "prompt": job.prompt_by_provider[provider] + review_tools + READ_EVIDENCE_PROMPT +
              "\n\nWrite the review report in English. Keep code identifiers and exact workflow markers unchanged.",
              "documents": _document_manifest(resolutions[provider], job.prompt_by_provider[provider])}
             for job in jobs for provider in review_providers
@@ -241,19 +341,11 @@ _slots: threading.Semaphore
 
 
 def _run_cli(args: list[str], prompt: str, cwd: Path, timeout: int) -> subprocess.CompletedProcess:
-    """모델 CLI를 새 세션으로 띄운다. timeout이면 CLI가 띄운 셸·테스트까지 프로세스 그룹째 끝낸다."""
     with _slots:
-        process = subprocess.Popen(
-            args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            cwd=cwd, text=True, start_new_session=True,
+        return _run_process(
+            args, input=prompt, cwd=cwd, timeout=timeout, timeout_result=True,
+            env={**environment_for_project(cwd), "PATH": _project_tool_path(cwd)},
         )
-        try:
-            stdout, stderr = process.communicate(prompt, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            stdout, stderr = process.communicate()
-            stderr = f"timeout after {timeout}s\n{stderr}"
-    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
 
@@ -278,8 +370,17 @@ def _claude(prompt: str, cwd: Path, *, author: bool, timeout: int, evidence: Pat
     if REQUESTED_MODELS["claude"]:
         args += ["--model", REQUESTED_MODELS["claude"]]
     if author:
+        allowed = AUTHOR_TOOLS.split(" ")
+        for tool in ("node", "python3", "python", "dart", "sh", "ls", "cat"):
+            absolute = shutil.which(tool)
+            if absolute:
+                allowed.append(f"Bash({Path(absolute).absolute()}:*)")
+        for tool in ("tsc", "next"):
+            local = cwd / "node_modules" / ".bin" / tool
+            if local.is_file() and os.access(local, os.X_OK):
+                allowed.append(f"Bash({local}:*)")
         args += ["--permission-mode", "acceptEdits",
-                 "--allowedTools", *AUTHOR_TOOLS.split(" "), "--disallowedTools", *AUTHOR_DENIED.split(" ")]
+                 "--allowedTools", *allowed, "--disallowedTools", *AUTHOR_DENIED.split(" ")]
     else:
         args += ["--permission-mode", "default", "--tools", "Read,Glob,Grep",
                  "--allowedTools", "Read", "Glob", "Grep"]
@@ -345,10 +446,8 @@ def _claude(prompt: str, cwd: Path, *, author: bool, timeout: int, evidence: Pat
 def _read_command_paths(command: str, cwd: Path) -> list[str]:
     try:
         arguments = shlex.split(command)
-        if (len(arguments) == 3 and Path(arguments[0]).name in {"sh", "bash", "zsh"}
-                and arguments[1] in {"-c", "-lc"}):
-            if "/" in arguments[0] and Path(arguments[0]).parent not in (Path("/bin"), Path("/usr/bin")):
-                return []
+        if (len(arguments) == 3 and arguments[0] in {"/bin/sh", "/usr/bin/sh"}
+                and arguments[1] == "-c"):
             command = arguments[2]
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";|&<>()\n")
         lexer.commenters = ""
@@ -379,7 +478,10 @@ def _read_command_paths(command: str, cwd: Path) -> list[str]:
         segments.pop()
     paths = []
     for segment in segments:
-        if "/" in segment[0] and Path(segment[0]).parent not in (Path("/bin"), Path("/usr/bin")):
+        if segment[0] not in {
+                "/bin/cat", "/usr/bin/cat", "/bin/sed", "/usr/bin/sed",
+                "/bin/head", "/usr/bin/head", "/bin/tail", "/usr/bin/tail",
+        }:
             return []
         reader, operands = Path(segment[0]).name, segment[1:]
         if reader == "sed":
@@ -408,7 +510,7 @@ def _read_command_paths(command: str, cwd: Path) -> list[str]:
 def _codex_read_paths(item: dict, cwd: Path) -> tuple[list[str], list[str]]:
     command = item.get("command")
     paths = _read_command_paths(command, cwd) if isinstance(command, str) else []
-    if type(item.get("exit_code")) is not int or item["exit_code"] != 0 or item.get("status") not in (None, "completed"):
+    if type(item.get("exit_code")) is not int or item["exit_code"] != 0 or item.get("status") != "completed":
         return [], paths if len(paths) == 1 else []
     output = item.get("aggregated_output")
     if not isinstance(output, str) or not output:
@@ -433,6 +535,13 @@ def _codex(prompt: str, cwd: Path, *, author: bool = False, timeout: int, eviden
             "--cd", str(cwd), "--json", "--skip-git-repo-check", "-"]
     if REQUESTED_MODELS["codex"]:
         args[2:2] = ["--model", REQUESTED_MODELS["codex"]]
+    overrides = {key: value for key, value in environment_for_project(cwd).items()
+                 if key in {"DASH__SUPPRESS_ANALYTICS", "ANALYZER_STATE_LOCATION_OVERRIDE", "npm_config_cache"}}
+    overrides["PATH"] = _project_tool_path(cwd)
+    args[2:2] = ["-c", "allow_login_shell=false"] + [
+        value for key, setting in overrides.items()
+        for value in ("-c", f"shell_environment_policy.set.{key}={json.dumps(setting)}")
+    ]
     started = time.time()
     proc = _run_cli(args, prompt, cwd, timeout)
     execution = _call_evidence(args, prompt, cwd, proc, evidence)
@@ -462,7 +571,7 @@ def _codex(prompt: str, cwd: Path, *, author: bool = False, timeout: int, eviden
             observation_complete = observation_complete and bool(paths) and set(paths) <= set(observed + failed)
             tool_calls.append({"id": item.get("id"), "name": "command_execution",
                                "succeeded": type(item.get("exit_code")) is int and item["exit_code"] == 0
-                               and item.get("status") in (None, "completed")})
+                               and item.get("status") == "completed"})
             tool_inputs.append(json.dumps({"command": item.get("command")}))
         if event.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
             texts.append(item.get("text", ""))
@@ -565,8 +674,7 @@ def _findings(text: str) -> str:
 
 
 def _oracle(case_dir: Path, *args: str) -> dict:
-    # oracle 안의 테스트 실행은 각자 자기 프로세스 그룹을 한도(최대 300초 × 2회) 안에 끝낸다.
-    # 바깥 한도가 그 합보다 커야 안쪽 정리가 먼저 돌고, 바깥 killpg가 놓치는 자손이 없다.
+    # 테스트 두 회(각 최대 300초)와 자손 프로세스 정리 시간을 수용한다.
     process = _run_group([PY, str(case_dir / "oracle.py"), *args], timeout=900)
     try:
         return json.loads(process.stdout)
@@ -579,9 +687,9 @@ def _prepare_subprocess(kit: Path, case_dir: Path, mode: str, scenario: str, var
         [PY, __file__, "--prepare", json.dumps([str(kit), str(case_dir), mode, scenario, variant, str(project)]),
          "--author-provider", REQUESTED_PROVIDERS["author"],
          "--review-providers", ",".join(REQUESTED_PROVIDERS["review"])],
-        # prepare 안의 설치(600초, ETIMEDOUT이면 1회 재시도)와 테스트(600초)는 각자 자기 그룹을
-        # 끝낸다. 바깥 한도는 그 합(1800초)보다 크게 둔다.
-        timeout=2400,
+        # 버전·lock·의존성·설치 재시도·Git·리뷰 검사는 합산한다.
+        # 파일 복사·렌더링에 600초를 더하고 중첩된 프로세스 정리 시간도 남긴다.
+        timeout=PREPARATION_TIMEOUT,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"prepare failed: {proc.stderr[-1200:]}")
@@ -598,6 +706,7 @@ def run_author(kit_name: str, kit: Path, case_dir: Path, mode: str, trial: int, 
     except Exception as exc:
         return {**row, "error": str(exc)[-1200:]}
     row["prompt_bytes"] = len(prepared["prompt"].encode())
+    row.update({key: prepared[key] for key in ("execution_scope", "tooling", "fixture_environment") if key in prepared})
     row["required"] = [r["name"] for r in prepared["required"]]
     invoke = _claude if row["provider"] == "claude" else _codex
     try:
@@ -647,6 +756,7 @@ def run_review(kit_name: str, kit: Path, case_dir: Path, mode: str, variant: str
     except Exception as exc:
         return {**row, "error": str(exc)[-1200:]}
     jobs = prepared["jobs"]
+    row.update({key: prepared[key] for key in ("tooling", "fixture_environment", "review_verification") if key in prepared})
 
     def invoke_review(job):
         if job["provider"] not in REQUESTED_PROVIDERS["review"]:
@@ -830,7 +940,7 @@ def main() -> int:
         "requested_models": REQUESTED_MODELS.copy(),
         "requested_providers": {"author": args.author_provider, "review": reviewers},
         "review_report_language": "en",
-        "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "evaluator_sha256": evaluator_sha256(Path(__file__).resolve().parents[1]),
         "case_files": {
             path.relative_to(CASES).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(CASES.rglob("*")) if path.is_file() and "__pycache__" not in path.parts
@@ -839,11 +949,14 @@ def main() -> int:
     (args.output / "meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     # 한 unit 안에서도 리뷰어가 병렬이므로, unit 동시성은 CLI 슬롯으로만 제한한다.
     with concurrent.futures.ThreadPoolExecutor(max(4, args.concurrency)) as pool:
-        list(pool.map(execute, units))
+        with _cancellation_scope():
+            list(pool.map(execute, units))
     if not args.keep:
         shutil.rmtree(work, ignore_errors=True)
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    with _cancellation_scope():
+        exit_code = main()
+    raise SystemExit(exit_code)

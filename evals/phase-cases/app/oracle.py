@@ -11,12 +11,13 @@ import os
 import posixpath
 import re
 import shutil
-import signal
 import subprocess
 import sys
 from pathlib import Path
 
 CASE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(CASE_DIR.parents[1]))
+from phase_eval_environment import _run_process, environment_for_project
 CASE = json.loads((CASE_DIR / "case.json").read_text(encoding="utf-8"))
 MODES = tuple(CASE["modes"])
 
@@ -279,19 +280,12 @@ NORMS = {"clean": norm_clean, "local": norm_local, "team": norm_team}
 # ---------------------------------------------------------------- behavior / plan
 
 def run(command, project):
-    # 새 세션으로 띄워 timeout이면 테스트가 띄운 자손까지 그룹째 끝낸다.
     try:
-        process = subprocess.Popen(command, cwd=str(project), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   universal_newlines=True, start_new_session=True)
-    except OSError as exc:
+        process = _run_process(command, cwd=Path(project), env=environment_for_project(Path(project)), timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
-    try:
-        stdout, _ = process.communicate(timeout=300)
-    except subprocess.TimeoutExpired as exc:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.communicate()
-        return False, str(exc)
-    return process.returncode == 0, f"exit {process.returncode}: {stdout[-600:].strip()}"
+    output = process.stdout + process.stderr
+    return process.returncode == 0, f"exit {process.returncode}: {output[-600:].strip()}"
 
 
 def behavior(project, mode, checks):
@@ -330,14 +324,18 @@ def main(argv=None):
     parser.add_argument("--project", required=True, type=Path)
     parser.add_argument("--mode", required=True, choices=MODES)
     args = parser.parse_args(argv)
+    config = CASE["modes"][args.mode]
+    if args.command == "author" and config.get("review_only"):
+        parser.error(f"{args.mode} is review-only")
+    mode = config.get("fixture_mode", args.mode)
     project = args.project.resolve()
 
     checks = []
     result = {"behavior": None, "plan": None, "norm": None, "checks": checks}
     if args.command == "author":
-        result["behavior"] = behavior(project, args.mode, checks)
-        result["plan"] = plan(project, args.mode, checks)
-    norm_checks = NORMS[args.mode](project)
+        result["behavior"] = behavior(project, mode, checks)
+        result["plan"] = plan(project, mode, checks)
+    norm_checks = NORMS[mode](project)
     checks.extend(norm_checks)
     result["norm"] = all(item["ok"] for item in norm_checks)
     print(json.dumps(result, indent=2))
