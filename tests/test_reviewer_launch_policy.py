@@ -25,9 +25,9 @@ _CLAUDE = CliInfo("claude", ("claude",), ("-p",))
 _CODEX = CliInfo("codex", ("codex",), ("exec",))
 _CLIS = {"claude": _CLAUDE, "codex": _CODEX, "omp": CliInfo("omp", ("omp",), ("-p",))}
 
-# 수정 전 argv. 여기를 손대면 "선언하지 않은 저장소는 아무것도 달라지지 않는다"가
-# 깨진 것이므로, 기대값을 고치기 전에 그 변경이 의도된 것인지 먼저 판단해야 한다.
-_LEGACY_CLAUDE_ARGV = (
+# identity 선언 유무와 무관하게 reviewer 격리를 유지한다. #338은 Codex의
+# 프로젝트 지시 로딩만 차단하며 model/effort 기본값은 바꾸지 않는다.
+_DEFAULT_CLAUDE_ARGV = (
     "-p",
     "--safe-mode",
     "--permission-mode",
@@ -35,10 +35,12 @@ _LEGACY_CLAUDE_ARGV = (
     "--no-session-persistence",
     "review",
 )
-_LEGACY_CODEX_ARGV = (
+_DEFAULT_CODEX_ARGV = (
     "exec",
     "--ephemeral",
     "--ignore-user-config",
+    "-c",
+    "project_doc_max_bytes=0",
     "--sandbox",
     "danger-full-access",
     "--cd",
@@ -120,20 +122,37 @@ def test_unsupported_declarations_fail_closed(candidate):
 
 
 @pytest.mark.parametrize(
-    "cli, legacy",
-    [(_CLAUDE, _LEGACY_CLAUDE_ARGV), (_CODEX, _LEGACY_CODEX_ARGV)],
+    "cli, expected",
+    [(_CLAUDE, _DEFAULT_CLAUDE_ARGV), (_CODEX, _DEFAULT_CODEX_ARGV)],
 )
-def test_no_declaration_keeps_the_previous_argv(cli, legacy):
-    """선언하지 않은 저장소에서는 argv가 한 글자도 달라지지 않는다."""
-    assert _resolve(None, cli=cli).argv == legacy
-    assert _resolve({}, cli=cli).argv == legacy
+def test_no_declaration_keeps_default_identity_and_isolation(cli, expected):
+    """선언이 없거나 매칭되지 않아도 기본 identity와 격리 인자를 유지한다."""
+    assert _resolve(None, cli=cli).argv == expected
+    assert _resolve({}, cli=cli).argv == expected
     # phase/angle이 맞지 않는 rule도 "선언 없음"과 같아야 한다.
     unmatched = _policy(
         {"provider": "claude", "model": "fable"},
         match={"angle": "compose-stability"},
     )
-    assert _resolve(unmatched, cli=cli).argv == legacy
+    assert _resolve(unmatched, cli=cli).argv == expected
     assert _resolve(unmatched, cli=cli).model is None
+
+
+@pytest.mark.parametrize("declared_identity", [False, True])
+def test_codex_reviewer_disables_checkout_project_instructions(declared_identity):
+    profile = (
+        _policy({"provider": "codex", "model": "gpt-5.6-sol", "effort": "xhigh"})
+        if declared_identity
+        else None
+    )
+
+    launch = _resolve(profile, cli=_CODEX)
+
+    overrides = [value for flag, value in zip(launch.argv, launch.argv[1:]) if flag == "-c"]
+    assert overrides.count("project_doc_max_bytes=0") == 1
+    assert launch.argv[launch.argv.index("--cd") + 1] == str(PROJECT_ROOT.resolve())
+    assert launch.model == ("gpt-5.6-sol" if declared_identity else None)
+    assert launch.effort == ("xhigh" if declared_identity else None)
 
 
 def test_declaration_decorates_the_assigned_provider_and_never_switches_it():
@@ -159,7 +178,7 @@ def test_declaration_decorates_the_assigned_provider_and_never_switches_it():
         None,
         None,
     )
-    assert untouched.argv == _LEGACY_CODEX_ARGV
+    assert untouched.argv == _DEFAULT_CODEX_ARGV
 
     # 같은 provider가 여러 번 선언되면 선언 순서가 우선순위다.
     ordered = _policy(

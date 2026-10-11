@@ -298,6 +298,9 @@ def _reviewer_cli_args(
             *_codex_identity_args(model, effort),
             "--ephemeral",
             "--ignore-user-config",
+            # 리뷰 대상 AGENTS.md가 reviewer 지시가 되지 않도록 자동 로딩을 끈다.
+            "-c",
+            "project_doc_max_bytes=0",
             "--sandbox",
             "danger-full-access",
             "--cd",
