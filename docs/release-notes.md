@@ -11,6 +11,9 @@ v0.3.14 이후의 변경을 정리한다. 버전 변경은 main에 반영됐으�
   `CLAUDE.md`에 Agent Flow 지침을 추가하지 않는다. 재설치는 소유 기록과 내용이
   일치하는 기존 관리 블록만 은퇴시키고, 프로젝트 규칙·사용자 수정·백업은 보존한다.
   설치하거나 세션을 여는 것만으로 workflow를 시작하지 않는다. [#335](https://github.com/chonamdoo/agent-flow/pull/335)
+- bundled host skill은 Codex의 암묵적 호출 목록에서 제외한다. 명시 호출과 runner의
+  phase별 skill 전달은 유지하며 사용자·팀 skill의 자체 정책은 덮지 않는다.
+  [#354](https://github.com/chonamdoo/agent-flow/pull/354)
 - 사용자 확인 단계는 `approval_command`로 승인한다. `next_command`는 승인을
   대신하지 않는다. `domain-grill`은 결정 출처를 남기고 사용자 확인에서 멈추며,
   `merge-approval`은 병합 직전 별도의 승인을 기다린다. [#291](https://github.com/chonamdoo/agent-flow/pull/291),
@@ -43,6 +46,9 @@ v0.3.14 이후의 변경을 정리한다. 버전 변경은 main에 반영됐으�
   Claude·Codex·OMP이며, ADR에는 Gemini/antigravity 제거 사실과 당시 결정의
   역사적 범위를 구분해 적었다. [#329](https://github.com/chonamdoo/agent-flow/pull/329),
   [#343](https://github.com/chonamdoo/agent-flow/pull/343)
+- Python Clean profile은 HTTP handler를 inbound adapter로 인정하고, Next.js의
+  App Router presentation에는 빈 feature API 계층을 요구하지 않는다.
+  [#356](https://github.com/chonamdoo/agent-flow/pull/356)
 
 ### 기존 프로젝트 업데이트
 
