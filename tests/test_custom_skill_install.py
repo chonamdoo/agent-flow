@@ -4705,6 +4705,39 @@ def test_unverified_retired_copy_keeps_explicit_recovery_path(
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("copy_status", ["copied", "copied:2:0"])
+def test_unverified_selected_copy_keeps_explicit_recovery_path(
+    tmp_path: Path, binary: str, copy_status: str,
+) -> None:
+    canonical = tmp_path / "skills/demo"
+    _skill(canonical, "previous source", hosts="[codex]")
+    assert _install_with(binary, tmp_path).returncode == 0
+    host = tmp_path / ".agents/skills/demo"
+    if host.is_symlink():
+        host.unlink()
+        shutil.copytree(canonical, host)
+    index_path = tmp_path / ".agent-flow/skills/index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    for link in index["links"]:
+        if link["name"] == "demo":
+            link["status"] = copy_status
+            link.pop("installedContentDigest", None)
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    policy = host / "policy.txt"
+    policy.write_text("user policy\n", encoding="utf-8")
+    _skill(canonical, "updated source", hosts="[codex]")
+
+    for _ in range(2):
+        result = _install_with(binary, tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert policy.read_text(encoding="utf-8") == "user policy\n"
+    recovered = _install_with(binary, tmp_path, "--force-managed")
+    assert recovered.returncode == 0, recovered.stderr
+    assert (host / "SKILL.md").read_bytes() == (canonical / "SKILL.md").read_bytes()
+    assert not policy.exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_install_rejects_an_unrelated_inherited_descriptor(tmp_path: Path, binary: str) -> None:
     project = tmp_path / "project"
     project.mkdir()
