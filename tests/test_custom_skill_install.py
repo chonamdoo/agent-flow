@@ -159,6 +159,72 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(
     assert "write-for-work" in indexed
 
 
+def _bundled_host_skill_names() -> list[str]:
+    script = (
+        "import { BUNDLED_HOST_SKILL_NAMES } from './lib/skill-selection.mjs';"
+        "console.log(JSON.stringify([...BUNDLED_HOST_SKILL_NAMES]));"
+    )
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", script),
+        cwd=KIT_ROOT, text=True, capture_output=True, check=True, timeout=30,
+    )
+    return json.loads(result.stdout)
+
+
+def _codex_implicit_invocation(skill_dir: Path) -> bool:
+    metadata = skill_dir / "agents" / "openai.yaml"
+    if not metadata.is_file():
+        return True
+    # Codex는 bool `false`만 숨김으로 읽는다. null은 미지정이고, `no`/`off`는 PyYAML에서만
+    # False다 — Codex 파서에는 문자열이라 스칼라를 원문 그대로 본다.
+    raw = yaml.load(metadata.read_text(encoding="utf-8"), Loader=yaml.BaseLoader) or {}
+    policy = raw.get("policy") or {}
+    return policy.get("allow_implicit_invocation") != "false"
+
+
+def test_bundled_host_skills_are_explicit_only_in_codex() -> None:
+    """Codex는 `.agents/skills`의 skill을 정책이 없으면 모델 catalog에 올리고, 설명이 작업과
+    맞으면 반드시 읽게 한다. kit skill은 runner가 phase별로 전달하므로 catalog가 그 범위를
+    우회하면 implement마다 comment-authoring-discipline 등을 추가로 읽는다(#346)."""
+    names = _bundled_host_skill_names()
+
+    assert names
+    assert [
+        name for name in names if _codex_implicit_invocation(KIT_ROOT / "skills" / name)
+    ] == []
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_installed_codex_links_keep_kit_skills_out_of_the_implicit_catalog(
+    tmp_path: Path, binary: str
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    _skill(project / "skills" / "my-skill", "team skill")
+    team_policy = b"policy:\n  allow_implicit_invocation: true\n"
+    (project / "skills" / "my-skill" / "agents").mkdir()
+    (project / "skills" / "my-skill" / "agents" / "openai.yaml").write_bytes(team_policy)
+
+    result = _install_with(binary, project, "--architecture-mode", "clean")
+
+    assert result.returncode == 0, result.stderr
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    sources = {skill["name"]: skill["source"] for skill in index["skills"]}
+    codex_links = {
+        link["name"]: project / link["path"]
+        for link in index["links"]
+        # copy fallback은 `copied`(kit)나 `copied:<written>:<skipped>`(install)로 남는다.
+        if link["host"] == "codex"
+        and (link.get("status") == "linked" or str(link.get("status")).startswith("copied"))
+    }
+    bundled = {name: entry for name, entry in codex_links.items() if sources[name] == "bundled"}
+
+    assert "comment-authoring-discipline" in bundled
+    assert [name for name, entry in bundled.items() if _codex_implicit_invocation(entry)] == []
+    # 팀이 둔 skill의 호출 정책은 그 팀이 정한다.
+    assert (codex_links["my-skill"] / "agents" / "openai.yaml").read_bytes() == team_policy
+
+
 def test_app_shell_skills_install_shared_contract_dependency(tmp_path: Path) -> None:
     """Verify that app shell skills install shared contract dependency."""
     project = tmp_path / "project"
