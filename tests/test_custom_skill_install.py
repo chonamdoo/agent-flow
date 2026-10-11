@@ -176,7 +176,9 @@ def _codex_implicit_invocation(skill_dir: Path) -> bool:
     if not metadata.is_file():
         return True
     policy = (yaml.safe_load(metadata.read_text(encoding="utf-8")) or {}).get("policy") or {}
-    return policy.get("allow_implicit_invocation", True)
+    # Codex는 bool `false`만 숨김으로 읽는다. null은 미지정이고, YAML 1.1의 `no`/`off`는
+    # Codex 파서에서 문자열이다.
+    return policy.get("allow_implicit_invocation") is not False
 
 
 def test_bundled_host_skills_are_explicit_only_in_codex() -> None:
@@ -191,14 +193,15 @@ def test_bundled_host_skills_are_explicit_only_in_codex() -> None:
     ] == []
 
 
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_installed_codex_links_keep_kit_skills_out_of_the_implicit_catalog(
-    tmp_path: Path,
+    tmp_path: Path, binary: str
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
     _skill(project / "skills" / "my-skill", "team skill")
 
-    result = _install(project, "--architecture-mode", "clean")
+    result = _install_with(binary, project, "--architecture-mode", "clean")
 
     assert result.returncode == 0, result.stderr
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))

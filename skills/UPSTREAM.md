@@ -141,8 +141,11 @@ in `BUNDLED_HOST_SKILL_NAMES`, linked into `.claude/skills`, `.agents/skills`, a
 Every other skill in `BUNDLED_HOST_SKILL_NAMES`, vendored `security-audit` included,
 carries a policy-only file with `policy.allow_implicit_invocation: false`. Codex lists
 `.agents/skills` entries without that policy in the model's skill catalog and requires
-their use whenever a task matches the description, which bypasses the runner's
-per-phase delivery (#346). Explicit `$name` invocation still works.
+their use whenever a task matches the description. Most of these skills reach a phase
+through the runner, and the catalog bypassed that scoping in every author phase (#346).
+`security-audit` (io-safety review angle only) and `comment-checker` (hook contract)
+are hidden too: Codex never listed any Agent Flow skill before v0.3.15, and Claude
+still selects them from `.claude/skills`. Explicit `$name` invocation still works.
 
 Other vendored content skills are exposed through `.agent-flow/skills/`,
 the AGENTS.md index, and phase prompts. Adding an unconsumed `agents/openai.yaml`
@@ -159,6 +162,8 @@ verbatim tree import. It does not add a native host entry; the existing
 - Mapping: upstream `skills/security-audit/` → local `skills/security-audit/`.
 - The 21 upstream files are imported verbatim, including domain companions,
   validators, their tests, and the [MIT license](security-audit/LICENSE).
+  The local `agents/openai.yaml` is not an upstream file; it holds the Codex
+  invocation policy described above.
 - [Local provenance manifest](security-audit/upstream.json) records this pin
   and each imported file's SHA-256. The manifest is local metadata, not an
   upstream file or an install-time integrity verifier.
