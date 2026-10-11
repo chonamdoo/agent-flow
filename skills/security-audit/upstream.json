@@ -3,7 +3,9 @@
   "revision": "c1c8a8c1471069fb0e188eeaff69b8e8db6564a8",
   "license": "MIT",
   "upstream_directory": "skills/security-audit",
-  "local_modifications": [],
+  "local_modifications": [
+    "agents/openai.yaml: local Codex invocation policy (allow_implicit_invocation: false); not an upstream file"
+  ],
   "files": {
     "AI-AND-LLM.md": "7335a95c43554eadefcf03ece639291bb0e038c398a179299e3887ffe06bd2ef",
     "ATTACK-CLASSES.md": "3ee4f00c6e8c9dcf6dd02dd5ac2a4ceb322e2085f3e9fbe79cf0c6330bc7ef83",
