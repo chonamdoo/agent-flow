@@ -55,13 +55,35 @@ def _raise_cancelled() -> None:
         raise SystemExit(128 + _CANCEL_SIGNAL)
 
 
+def _signal_process_group(process: subprocess.Popen, signum: int) -> None:
+    process.poll()
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        if process.poll() is None:
+            raise
+        try:
+            os.killpg(process.pid, signum)
+        except ProcessLookupError:
+            pass
+
+
 def _signal_owned(signum: int) -> None:
     with _PROCESS_LOCK:
         for process in _OWNED_PROCESSES:
-            try:
-                os.killpg(process.pid, signum)
-            except ProcessLookupError:
-                pass
+            _signal_process_group(process, signum)
+
+
+def _wait_owned_cleanup() -> None:
+    deadline = time.monotonic() + PROCESS_CLEANUP_GRACE + PIPE_DRAIN_TIMEOUT + PROCESS_REAP_TIMEOUT + 1
+    while time.monotonic() < deadline:
+        with _PROCESS_LOCK:
+            if not _OWNED_PROCESSES:
+                break
+        time.sleep(0.05)
+    _signal_owned(signal.SIGKILL)
 
 
 @contextmanager
@@ -75,16 +97,18 @@ def _cancellation_scope():
             yield
         except (KeyboardInterrupt, SystemExit):
             _CANCELLED.set()
-            _signal_owned(signal.SIGTERM)
             raise
         return
     previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
+    cancel_received = False
 
+    # Worker loops own cleanup; signal callbacks must not re-enter subprocess locks.
     def cancel(signum, frame):
         global _CANCEL_SIGNAL
+        nonlocal cancel_received
+        cancel_received = True
         _CANCEL_SIGNAL = signum
         _CANCELLED.set()
-        _signal_owned(signal.SIGTERM)
 
     _CANCELLATION_DEPTH += 1
     try:
@@ -95,23 +119,21 @@ def _cancellation_scope():
             _raise_cancelled()
         except BaseException:
             _CANCELLED.set()
-            _signal_owned(signal.SIGTERM)
-            deadline = time.monotonic() + PROCESS_CLEANUP_GRACE + PIPE_DRAIN_TIMEOUT + PROCESS_REAP_TIMEOUT + 1
-            while time.monotonic() < deadline:
-                with _PROCESS_LOCK:
-                    if not _OWNED_PROCESSES:
-                        break
-                time.sleep(0.05)
-            _signal_owned(signal.SIGKILL)
+            _wait_owned_cleanup()
             raise
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
         _CANCELLATION_DEPTH -= 1
-        with _PROCESS_LOCK:
-            if not _OWNED_PROCESSES:
-                _CANCELLED.clear()
-                _CANCEL_SIGNAL = signal.SIGINT
+        try:
+            if cancel_received:
+                _wait_owned_cleanup()
+                _raise_cancelled()
+        finally:
+            with _PROCESS_LOCK:
+                if not _OWNED_PROCESSES:
+                    _CANCELLED.clear()
+                    _CANCEL_SIGNAL = signal.SIGINT
 
 
 def _output_text(value: str | bytes | None) -> str:
@@ -122,20 +144,14 @@ def _stop_process(process: subprocess.Popen, grace: float) -> tuple[str, str]:
     for signum, budget in ((signal.SIGTERM, grace), (signal.SIGKILL, PIPE_DRAIN_TIMEOUT)):
         if process.poll() is not None:
             budget = min(budget, PIPE_DRAIN_TIMEOUT)
-        try:
-            os.killpg(process.pid, signum)
-        except ProcessLookupError:
-            pass
+        _signal_process_group(process, signum)
         try:
             stdout, stderr = process.communicate(timeout=budget)
         except subprocess.TimeoutExpired as error:
             stdout, stderr = _output_text(error.output), _output_text(error.stderr)
         else:
             # 그룹의 leader가 끝나도 같은 그룹의 다른 자손은 남을 수 있다.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            _signal_process_group(process, signal.SIGKILL)
             return stdout, stderr
     for pipe in (process.stdin, process.stdout, process.stderr):
         if pipe is not None:

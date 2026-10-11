@@ -302,14 +302,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--project", required=True, type=Path)
     parser.add_argument("--mode", required=True, choices=MODES)
     args = parser.parse_args(argv)
+    config = CASE["modes"][args.mode]
+    if args.command == "author" and config.get("review_only"):
+        parser.error(f"{args.mode} is review-only")
+    mode = config.get("fixture_mode", args.mode)
     project = args.project.resolve()
 
-    norms = norm_checks(project, args.mode)
+    norms = norm_checks(project, mode)
     result: Dict[str, object] = {"behavior": False, "plan": False, "norm": all(check["ok"] for check in norms)}
     checks: List[Check] = []
     if args.command == "author":
-        behavior = behavior_check(project, args.mode)
-        plan = plan_check(project, args.mode)
+        behavior = behavior_check(project, mode)
+        plan = plan_check(project, mode)
         result["behavior"], result["plan"] = behavior["ok"], plan["ok"]
         checks.extend((behavior, plan))
     result["checks"] = checks + norms

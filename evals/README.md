@@ -226,6 +226,8 @@ base에서 측정에 성공한 profile·mode 조합이 하나도 없거나, 어�
 author는 새 orders 모듈의 소유권·wiring을 결정해야 하므로 `author_install`로 승인된
 local 계약을 선택한다. 구현 요구를 pending 권한으로 채점하지 않는다. 같은 mode의
 review는 기존 pending 설치와 정상 판정 `expect: null`을 유지한다.
+app/backend의 `team-approved`는 기본 matrix 밖의 review-only 진단이다. standalone oracle의
+`norm`은 설정의 `fixture_mode`(`team`)로 검사하고, `author`는 project를 만지기 전에 거부한다.
 
 author의 `setup/`은 설치 전에, red 테스트인 `pre/`는 설치 커밋 뒤에 복사한다.
 공유 계획 위에 `review/<mode>/artifacts/`를 덮어써 시나리오별 권한을 구분한다.
@@ -253,6 +255,8 @@ fixture 준비는 버전 probe, cache lock, 의존성 설치, installer 재시�
 합산한 4983초 한도를 사용한다. cache lock 대기는 최대 600초다. evaluator·준비 helper·
 네 oracle의 실행 helper가 소유한 새 session/group은 timeout·SIGTERM·SIGINT에 의한 취소를 하위
 소유 process까지 전달하고, 유한한 grace 뒤 강제 종료·pipe drain·reap을 수행한다.
+signal callback은 취소 의도만 기록하고, 0.2초 간격의 worker loop가 process 정리·reap을 소유한다.
+이전 handler 복원 중 받은 취소도 정리 뒤 전파하며, 종료한 group leader는 signal 전에 reap한다.
 임의의 제3자 process가 별도로 만든 session까지 소유한 것으로 추정하지 않는다.
 Node cache는 manifest·lock·tool fingerprint·설치 version을 검증한다. 정상 cache hit는
 `readiness.json`을 다시 쓰지 않으며, 새 receipt는 검증 후 같은 디렉터리의 staging file을
