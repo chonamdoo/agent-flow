@@ -152,13 +152,12 @@ def observed_code_baseline(cwd: Path, command: str, code: int | None) -> str:
         return ""
 
 
-def git_leader_checkout(start: Path) -> Path | None:
-    """`start`가 속한 저장소의 leader checkout. git이 없거나 저장소가 아니면 None이다."""
+def _git_rev_parse(cwd: Path, *args: str) -> list[str] | None:
     env = {name: value for name, value in os.environ.items() if name not in LEAKY_GIT_ENV_VARS}
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            cwd=str(start),
+            ["git", "rev-parse", *args],
+            cwd=str(cwd),
             env=env,
             capture_output=True,
             text=True,
@@ -169,26 +168,70 @@ def git_leader_checkout(start: Path) -> Path | None:
         return None
     if result.returncode != 0:
         return None
-    common = Path(result.stdout.strip() or ".")
+    return result.stdout.strip().splitlines()
+
+
+def git_checkout_roots(start: Path) -> tuple[Path, Path] | None:
+    """sanitize한 git으로 common root와 checkout root를 얻는다.
+
+    submodule은 자기 common dir로 checkout 종류를 알 수 없어 가장 바깥 superproject에서 묻는다.
+    """
+    anchor = start
+    while superproject := _git_rev_parse(anchor, "--show-superproject-working-tree"):
+        anchor = Path(superproject[0])
+    lines = _git_rev_parse(anchor, "--git-common-dir", "--show-toplevel")
+    if lines is None or len(lines) != 2 or not all(lines):
+        return None
+    common = Path(lines[0])
     if not common.is_absolute():
-        # leader 자신에서는 `.git`처럼 상대경로가 나온다. 기준은 실행 cwd인 `start`다.
-        common = start / common
+        # leader 자신에서는 `.git`처럼 상대경로가 나온다. 기준은 실행 cwd인 `anchor`다.
+        common = anchor / common
     if common.name != ".git":
         return None
-    return common.parent
+    try:
+        return common.resolve().parent, Path(lines[1]).resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def _same_directory(left: Path | None, right: Path | None) -> bool:
+    if left is None or right is None:
+        return False
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return left == right
+
+
+def _is_directory_ancestor(ancestor: Path | None, descendant: Path) -> bool:
+    return ancestor is not None and any(
+        _same_directory(ancestor, candidate) for candidate in (descendant, *descendant.parents)
+    )
 
 
 def find_project_root(start: Path) -> Path | None:
-    # leader-first. `.agent-flow/worktrees/` 밖의 linked worktree(Orca workspace 등)에는
-    # `.agent-flow`가 아예 없어서 조상 탐색만으로는 증거가 통째로 사라진다. 반대로 조상
-    # 탐색을 먼저 하면 `$HOME/.agent-flow/kit.json`이 실제 leader를 가려버린다.
-    leader = git_leader_checkout(start)
-    if leader is not None and (leader / ".agent-flow" / "kit.json").is_file():
-        return leader
+    try:
+        start = start.resolve()
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        return None
+    roots = git_checkout_roots(start)
+    git_root = roots[0] if roots is not None else None
+    if roots is not None and not _same_directory(roots[0], roots[1]):
+        # linked checkout의 사본은 worker가 쓸 수 있어 leader의 기준선이 될 수 없다.
+        return git_root if not _same_directory(git_root, home) and (git_root / ".agent-flow" / "kit.json").is_file() else None
+    if _is_directory_ancestor(git_root, start):
+        boundary = git_root
+    elif _is_directory_ancestor(home, start):
+        boundary = home
+    else:
+        boundary = start
     for candidate in [start, *start.parents]:
-        if (candidate / ".agent-flow" / "kit.json").is_file():
+        if not _same_directory(candidate, home) and (candidate / ".agent-flow" / "kit.json").is_file():
             return candidate
-    return None
+        if _same_directory(candidate, boundary):
+            break
+    return start if (start / ".agent-flow" / "kit.json").is_file() else None
 
 
 def find_first(payload: object, keys: tuple[str, ...]) -> object:

@@ -765,30 +765,63 @@ function normalizeExportedRoutes(value, name, index) {
 
 
 
-function resolveAgentFlowRoot(start) {
-  const worktreeRoot = resolveManagedWorktreeRoot(start);
-  if (worktreeRoot && fs.existsSync(path.join(worktreeRoot, ".agent-flow", "kit.json"))) {
-    return worktreeRoot;
+function sameDiscoveryDirectory(left, right) {
+  try {
+    const a = fs.statSync(left, { bigint: true });
+    const b = fs.statSync(right, { bigint: true });
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return path.resolve(left) === path.resolve(right);
   }
-  const gitCommonRoot = resolveGitCommonWorktreeRoot(start);
-  if (gitCommonRoot) {
-    return gitCommonRoot;
-  }
-  const parts = start.split(path.sep);
-  const markerIndex = parts.lastIndexOf(".agent-flow");
-  if (markerIndex !== -1) {
-    const root = parts.slice(0, markerIndex).join(path.sep) || path.sep;
-    if (fs.existsSync(path.join(root, ".agent-flow", "kit.json"))) {
-      return root;
-    }
-  }
-  let current = start;
-  while (true) {
-    if (fs.existsSync(path.join(current, ".agent-flow", "kit.json"))) {
-      return current;
+}
+
+function isDiscoveryAncestor(ancestor, descendant) {
+  let current = descendant;
+  for (;;) {
+    if (sameDiscoveryDirectory(ancestor, current)) {
+      return true;
     }
     const parent = path.dirname(current);
     if (parent === current) {
+      return false;
+    }
+    current = parent;
+  }
+}
+
+function resolveAgentFlowRoot(start) {
+  start = canonicalPath(start);
+  const home = canonicalPath(os.homedir());
+  // `<leader>/.agent-flow/worktrees/<name>` 같은 관리 경로는 git 판정보다 먼저 본다.
+  // 그 안의 submodule은 common dir이 `.git/modules/...`라 git으로는 leader에 닿지 못한다.
+  const worktreeRoot = resolveManagedWorktreeRoot(start);
+  if (
+    worktreeRoot
+    && !sameDiscoveryDirectory(worktreeRoot, home)
+    && fs.existsSync(path.join(worktreeRoot, ".agent-flow", "kit.json"))
+  ) {
+    return worktreeRoot;
+  }
+  let anchor = start;
+  for (
+    let superproject = gitOutput(anchor, ["rev-parse", "--show-superproject-working-tree"]);
+    superproject;
+    superproject = gitOutput(anchor, ["rev-parse", "--show-superproject-working-tree"])
+  ) {
+    anchor = superproject;
+  }
+  const gitCommonRoot = resolveGitCommonWorktreeRoot(anchor);
+  if (gitCommonRoot) {
+    return gitCommonRoot;
+  }
+  const boundary = isDiscoveryAncestor(home, start) ? home : start;
+  let current = start;
+  while (true) {
+    if (!sameDiscoveryDirectory(current, home) && fs.existsSync(path.join(current, ".agent-flow", "kit.json"))) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (sameDiscoveryDirectory(current, boundary) || parent === current) {
       return start;
     }
     current = parent;
@@ -2064,7 +2097,6 @@ function preferredPython() {
     leaderVenvPython && fs.existsSync(leaderVenvPython) ? leaderVenvPython : null,
     "python3.12",
     "python3.11",
-    "python3.10",
     "python3",
     "python",
   ].filter(Boolean);
@@ -2078,13 +2110,18 @@ function preferredPython() {
   // 없는지와 무엇을 하면 되는지를 같이 적지 않으면 사용자는 인터프리터를 손으로
   // 찾아 헤매다 PyYAML 없는 python을 타고 ModuleNotFoundError를 본다.
   throw new Error(
-    "no Python with PyYAML found. Install it (pip install pyyaml) or point PYTHON at an interpreter that has it. "
+    "no Python >=3.11 with PyYAML found. Install Python >=3.11 and PyYAML (pip install pyyaml) or point PYTHON at an interpreter that has them. "
     + `Tried: ${candidates.join(", ")}`,
   );
 }
 
 function pythonSupportsWorkflowExport(candidate) {
-  const result = safeSpawnSync(candidate, ["-c", "import yaml"], {
+  const probe = [
+    "import sys",
+    "if sys.version_info < (3, 11): raise SystemExit(1)",
+    "import yaml",
+  ].join("\n");
+  const result = safeSpawnSync(candidate, ["-c", probe], {
     stdio: "ignore",
     timeout: 5_000,
   });

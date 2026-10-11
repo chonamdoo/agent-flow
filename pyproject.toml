@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "agent-flow"
 version = "0.3.14"
 description = "Project-agnostic AI workflow kit"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "pyyaml>=6.0",
   "click>=8.0",

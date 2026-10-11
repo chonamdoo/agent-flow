@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,11 +101,6 @@ def _codex_trust(
 ) -> HostTrust:
     codex_home = Path(env["CODEX_HOME"]) if env.get("CODEX_HOME") else home / ".codex"
     config_path = codex_home / "config.toml"
-    # 3.11 표준 모듈이다. 진단 하나 때문에 `agent_flow.cli` import가 실패하면 안 된다.
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        return HostTrust("unknown", str(config_path), "this Python has no TOML reader")
     text = _read_text(config_path)
     if text is _UNREADABLE:
         return HostTrust("unknown", str(config_path), "cannot read the Codex config")
