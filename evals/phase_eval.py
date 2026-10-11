@@ -9,7 +9,9 @@ kit's own prompts with its own runner code:
   and norm (mode rule, static). Required reads use successful tool evidence,
   never self-report. `slice-plan.md`, `ddd-design.md` and
   `prd.md` are staged; `design-spec.md` is captured from `prd.md` by the kit's own
-  ledger code, so the green envelope carries that kit's SPEC ledger block.
+  ledger code, so the green envelope carries that kit's SPEC ledger block. The
+  installed kit's architecture-lint gate result is recorded apart from the three
+  axes (`architecture_lint`: pass/fail/n/a/error; n/a is not a pass).
 - review: the real `multi-review` reviewer jobs (every angle × selected providers)
   on a defect diff and a clean diff. Validity uses the runtime reviewer contract; a
   seeded defect counts only inside must-fix findings of a valid request-changes output.
@@ -190,6 +192,7 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
         prompt = adapter.render_envelope(phase, run_dir, project, skill_host=host, resolution=resolution)
         return {
             "prompt": prompt + READ_EVIDENCE_PROMPT,
+            "profile": case["profile"],
             "required": [
                 {"name": s.name, "path": str(s.path) if s.path else ""}
                 for s in resolution.required
@@ -574,6 +577,33 @@ def _oracle(case_dir: Path, *args: str) -> dict:
         return {"error": (process.stderr or process.stdout)[-600:]}
 
 
+LINT_STATUS_RE = re.compile(r"^\S+: architecture lint (passed|failed|n/a)\b", re.M)
+
+
+def _architecture_lint(project: Path, profile: str) -> dict:
+    """설치된 launcher로 그 kit의 필수 architecture-lint gate를 생성물에 돌린다.
+
+    oracle 세 축은 case 계약만 본다. 실제 gate 결과는 따로 남기고 세 축에 섞지 않는다.
+    n/a(Clean이 아닌 선택 등)는 exit 0이어도 검사하지 않은 것이므로 `pass`로 세지 않는다.
+    """
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    if not launcher.is_file():
+        return {"status": "error", "rc": None, "output": "installed launcher missing"}
+    process = _run_group([str(launcher), "architecture-lint", "--root", str(project), "--profile", profile],
+                         timeout=300)
+    output = (process.stdout + process.stderr).strip()
+    statuses = set(LINT_STATUS_RE.findall(output))
+    if process.returncode == 0 and "passed" in statuses:
+        status = "pass"
+    elif process.returncode == 0 and statuses == {"n/a"}:
+        status = "n/a"
+    elif process.returncode == 1 and "failed" in statuses:
+        status = "fail"
+    else:
+        status = "error"
+    return {"status": status, "rc": process.returncode, "output": output[-4000:]}
+
+
 def _prepare_subprocess(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, project: Path) -> dict:
     proc = _run_group(
         [PY, __file__, "--prepare", json.dumps([str(kit), str(case_dir), mode, scenario, variant, str(project)]),
@@ -634,6 +664,7 @@ def run_author(kit_name: str, kit: Path, case_dir: Path, mode: str, trial: int, 
     row["documents"] = prepared.get("documents", [])
     row["norm_scope"] = "case-specific fixture contract; general architecture correctness is unverified"
     row["oracle"] = _oracle(case_dir, "author", "--project", str(project), "--mode", mode)
+    row["architecture_lint"] = _architecture_lint(project, prepared.get("profile", "auto"))
     return row
 
 

@@ -721,3 +721,23 @@ def test_unknown_author_reads_keep_floor_and_failed_behavior_scored(gate, tmp_pa
     assert any("author_required_read_rate" in failure for failure in failures)
     assert any("author_pass_rate" in failure for failure in failures)
     assert not destination.exists()
+
+
+def test_architecture_lint_pass_rate_counts_only_rows_where_the_gate_applied(gate, tmp_path):
+    """반증 #347: oracle 세 축이 모두 true여도 실제 gate가 실패한 생성물은 따로 보여야 하고,
+    Clean이 아니라 검사하지 않은 n/a 행을 PASS로 세면 안 된다."""
+    before, after = rows_for("before", mode="local"), rows_for("after")
+    for row in before:
+        if row["scenario"] == "author":
+            row["architecture_lint"] = {"status": "n/a", "rc": 0, "output": "/Users/someone/project"}
+    authors = [row for row in after if row["scenario"] == "author"]
+    for row, status in zip(authors, ("pass", "fail", "error")):
+        row["architecture_lint"] = {"status": status, "rc": 0, "output": "/Users/someone/project"}
+    assert all(all(row["oracle"].values()) for row in authors)
+    rows = before + after
+
+    assert gate.kit_metrics(rows, "after")["author_architecture_lint_pass_rate"] == 0.5
+    assert gate.kit_metrics(rows, "after")["author_pass_rate"] == 1.0
+    assert gate.kit_metrics(rows, "before")["author_architecture_lint_pass_rate"] is None
+    record = gate._record_row(authors[1])
+    assert record["architecture_lint"] == {"status": "fail"}

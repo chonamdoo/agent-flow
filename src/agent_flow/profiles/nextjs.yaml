@@ -176,9 +176,10 @@ architecture:
       paths: ["src/features/<feature>/api"]
       pair_with: feature-presentation
       forbidden: ["Component", "Screen", "RepositoryImpl", "ApiClient"]
+    # App Router에서는 `app/` route가 feature 진입점이다. 진입 계약이 없는 feature에
+    # 빈 `api`를 강제하면 계약 없는 파일만 늘어난다(#347). 반대 방향은 유지한다.
     - id: feature-presentation
       paths: ["src/features/<feature>/presentation"]
-      pair_with: feature-api
       forbidden: ["ApiClient", "DataSource", "Dto", "Entity"]
     - id: shared-presentation-contract
       paths: ["src/core/presentation"]

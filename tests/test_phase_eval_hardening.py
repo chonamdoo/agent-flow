@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import shlex
+import shutil
 from pathlib import Path, PurePosixPath
 import subprocess
 from types import SimpleNamespace
@@ -518,3 +519,68 @@ def test_error_defect_detection_is_independent_of_inline_code_not_finding_scope(
         "after", ROOT, ROOT / "evals/phase-cases/rn", "local", "defect", 1, tmp_path, 10,
     )
     assert row["defects"]["bug"] is detected
+
+
+CLEAN_CASE_PROFILES = {"web": "nextjs", "rn": "react-native", "app": "flutter", "backend": "python"}
+
+
+@pytest.mark.parametrize("tree", ["reference/clean", "review/clean/clean"])
+@pytest.mark.parametrize("stack", sorted(CLEAN_CASE_PROFILES))
+def test_clean_phase_case_trees_pass_their_profile_architecture_lint(stack, tree, tmp_path, capsys, monkeypatch):
+    """반증 #347: 승인된 slice-plan대로 만든 Clean 정답과 approve 기대 리뷰 fixture가 같은 stack
+    profile의 필수 architecture-lint gate에서 막히면 oracle 통과와 실제 gate가 갈라진다."""
+    monkeypatch.syspath_prepend(str(ROOT / "src"))
+    from agent_flow.core.architecture_lint import main
+
+    case = ROOT / "evals/phase-cases" / stack
+    source = case / tree
+    for part in (case / "seed", source):
+        shutil.copytree(part, tmp_path, dirs_exist_ok=True)
+    files = sorted(path.relative_to(source).as_posix() for path in source.rglob("*") if path.is_file())
+
+    rc = main(["--root", str(tmp_path), "--profile", CLEAN_CASE_PROFILES[stack], "--files", *files])
+    output = capsys.readouterr()
+
+    assert json.loads((case / "case.json").read_text(encoding="utf-8"))["profile"] == CLEAN_CASE_PROFILES[stack]
+    assert rc == 0, output.err
+    assert "architecture lint passed" in output.out, output.out
+
+
+@pytest.mark.parametrize(("printed", "rc", "status"), [
+    ("python: architecture lint passed; source candidates=3, role-matched=3, findings=0", 0, "pass"),
+    ("python: architecture lint n/a (architecture selection: local)", 0, "n/a"),
+    ("react-native: architecture lint passed; source candidates=2, role-matched=2, findings=0\n"
+     "android: architecture lint n/a (activation_roots absent); source candidates=0, role-matched=0, findings=0", 0, "pass"),
+    ("python: architecture lint failed; source candidates=3, role-matched=0, findings=3", 1, "fail"),
+    ("agent-flow: managed python runtime is missing", 127, "error"),
+    ("", 0, "error"),
+])
+def test_author_gate_result_keeps_not_applicable_apart_from_pass(evaluator, tmp_path, printed, rc, status):
+    """반증 #347: exit 0만 보고 n/a를 PASS로 세거나, 실행 실패를 lint 실패로 세면 안 된다."""
+    launcher = tmp_path / ".agent-flow/bin/agent-flow"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(f"#!/bin/sh\nprintf '%s\\n' {shlex.quote(printed)}\nexit {rc}\n", encoding="utf-8")
+    launcher.chmod(0o755)
+
+    result = evaluator._architecture_lint(tmp_path, "python")
+
+    assert (result["status"], result["rc"]) == (status, rc)
+
+
+def test_author_row_records_the_gate_without_changing_oracle_axes(evaluator, monkeypatch, tmp_path):
+    case = tmp_path / "case"
+    case.mkdir()
+    monkeypatch.setattr(evaluator, "_prepare_subprocess",
+                        lambda *args: {"prompt": "p", "required": [], "profile": "python"})
+    monkeypatch.setattr(evaluator, "_claude", lambda *args, **kwargs: {"reads": [], "usage": {}})
+    oracle = {"behavior": True, "plan": True, "norm": True}
+    monkeypatch.setattr(evaluator, "_oracle", lambda *args: dict(oracle))
+    linted = []
+    monkeypatch.setattr(evaluator, "_architecture_lint",
+                        lambda project, profile: linted.append(profile) or {"status": "fail", "rc": 1, "output": ""})
+
+    row = evaluator.run_author("after", ROOT, case, "clean", 1, tmp_path, 10)
+
+    assert linted == ["python"]
+    assert row["oracle"] == oracle
+    assert row["architecture_lint"]["status"] == "fail"
