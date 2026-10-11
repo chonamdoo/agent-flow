@@ -25,6 +25,7 @@ _OWNED_PROCESSES: dict[subprocess.Popen, float] = {}
 _PROCESS_LOCK = threading.RLock()
 _CANCELLED = threading.Event()
 _CANCEL_SIGNAL = signal.SIGINT
+_CANCEL_REQUESTED = False
 _CANCELLATION_DEPTH = 0
 
 
@@ -49,7 +50,7 @@ def _command(args: list[str], cwd: Path, env: dict[str, str], *, timeout: int = 
 
 
 def _raise_cancelled() -> None:
-    if _CANCELLED.is_set():
+    if _CANCELLED.is_set() or _CANCEL_REQUESTED:
         if _CANCEL_SIGNAL == signal.SIGINT:
             raise KeyboardInterrupt
         raise SystemExit(128 + _CANCEL_SIGNAL)
@@ -88,7 +89,7 @@ def _wait_owned_cleanup() -> None:
 
 @contextmanager
 def _cancellation_scope():
-    global _CANCELLATION_DEPTH, _CANCEL_SIGNAL
+    global _CANCELLATION_DEPTH, _CANCEL_SIGNAL, _CANCEL_REQUESTED
     if threading.current_thread() is not threading.main_thread():
         yield
         return
@@ -102,13 +103,13 @@ def _cancellation_scope():
     previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
     cancel_received = False
 
-    # Worker loops own cleanup; signal callbacks must not re-enter subprocess locks.
+    # Signal callbacks only set plain flags: taking any lock (even Event.set) can deadlock on re-entry.
     def cancel(signum, frame):
-        global _CANCEL_SIGNAL
+        global _CANCEL_SIGNAL, _CANCEL_REQUESTED
         nonlocal cancel_received
         cancel_received = True
         _CANCEL_SIGNAL = signum
-        _CANCELLED.set()
+        _CANCEL_REQUESTED = True
 
     _CANCELLATION_DEPTH += 1
     try:
@@ -134,6 +135,7 @@ def _cancellation_scope():
                 if not _OWNED_PROCESSES:
                     _CANCELLED.clear()
                     _CANCEL_SIGNAL = signal.SIGINT
+                    _CANCEL_REQUESTED = False
 
 
 def _output_text(value: str | bytes | None) -> str:

@@ -580,3 +580,39 @@ def test_exited_owned_leader_does_not_prevent_signaling_live_group(environment):
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=5)
+
+
+def test_signal_burst_during_cache_lock_wait_does_not_deadlock(tmp_path):
+    code = (
+        "import importlib.util, sys\n"
+        "from pathlib import Path\n"
+        "spec = importlib.util.spec_from_file_location('env', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "with m._cancellation_scope():\n"
+        "    print('ready', flush=True)\n"
+        "    with m._cache_lock(Path(sys.argv[2]), timeout=60):\n"
+        "        pass\n"
+    )
+    lock_path = tmp_path / "cache.lock"
+    with lock_path.open("a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        child = subprocess.Popen(
+            [sys.executable, "-c", code, str(ROOT / "evals/phase_eval_environment.py"), str(lock_path)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            assert child.stdout.readline().strip() == "ready"
+            time.sleep(0.1)
+            for index in range(60):
+                try:
+                    child.send_signal(signal.SIGTERM if index % 2 == 0 else signal.SIGINT)
+                except ProcessLookupError:
+                    break
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pytest.fail("cancellation deadlocked while handling repeated signals")
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=5)
