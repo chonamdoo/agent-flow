@@ -161,11 +161,61 @@ def test_red_with_only_passing_test_runs_is_blocked(tmp_path):
     assert any(item.startswith("red-observed:") for item in missing)
 
 
-def test_red_passes_when_the_host_reports_no_exit_codes(tmp_path):
-    """반증: exit code를 안 실어 보내는 host를 위반으로 들면 red가 통째로 막힌다."""
+@pytest.mark.parametrize("phase_id", ("red", "implement-fix", "implement", "fix-loop"))
+@pytest.mark.parametrize("self_report", ("verified", "unavailable"))
+def test_red_requires_a_reported_exit_code(tmp_path, phase_id, self_report):
     root = _project(tmp_path)
     _observe(root, "pytest -q")
-    assert missing_test_evidence_markers(root, "red", GATE, profile=PYTHON_PROFILE) == []
+    missing = missing_test_evidence_markers(
+        root,
+        phase_id,
+        GATE + f"test-run-evidence: {self_report}\n",
+        profile=PYTHON_PROFILE,
+    )
+    assert any(item.startswith("red-observed:") for item in missing)
+    assert any("run-command" in item for item in missing)
+
+
+def test_runner_result_satisfies_red_beside_unknown_host_records(tmp_path):
+    """반증: exit code 없는 host 기록만으로 red가 통과하면 자기신고 RED가 남고, runner가
+    직접 관측한 실패가 같은 창에 있어도 막히면 Claude·Codex 세션의 탈출구가 없다.
+    """
+    from agent_flow.core.command_runner import run_observed_command
+
+    root = _project(tmp_path)
+    _observe(root, "pytest tests/test_x.py::test_bug")
+    _observe(root, "agent-flow run-command -- pytest tests/test_x.py::test_bug")
+    unknown_only = missing_test_evidence_markers(
+        root, "red", GATE, profile=PYTHON_PROFILE, cwd_root=root,
+    )
+    assert any(item.startswith("red-observed:") for item in unknown_only)
+
+    fake_pytest = root / "bin" / "pytest"
+    fake_pytest.parent.mkdir()
+    fake_pytest.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake_pytest.chmod(0o755)
+    assert run_observed_command(
+        [str(fake_pytest), "tests/test_x.py::test_bug"],
+        project_root=root, checkout_root=root, cwd=root,
+    ) == 1
+
+    assert missing_test_evidence_markers(
+        root, "red", GATE, profile=PYTHON_PROFILE, cwd_root=root,
+    ) == []
+
+
+def test_unknown_only_red_reference_asks_for_an_observed_green_rerun(tmp_path):
+    """반증: RED가 이미 참조로 게시됐는데 새 실패를 요구하면 고친 코드로는 낼 수 없는
+    증거를 요구하게 된다. 남은 것은 같은 회귀가 초록으로 끝나는 관측뿐이다.
+    """
+    root = _project(tmp_path)
+    _observe(root, "pytest tests/test_x.py::test_bug")
+    missing = missing_test_evidence_markers(
+        root, "implement", GATE + f"red-reference: {'0' * 64}\n", profile=PYTHON_PROFILE,
+    )
+    assert len(missing) == 1
+    assert missing[0].startswith("test-run-evidence: verified")
+    assert "run-command" in missing[0] and "ending green" in missing[0]
 
 
 def test_implement_fix_with_only_passing_test_runs_is_blocked(tmp_path):

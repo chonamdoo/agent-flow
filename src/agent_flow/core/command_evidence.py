@@ -1,8 +1,8 @@
-"""실행 관측 증거 — `record-command-run.py`가 남긴 기록을 읽는다.
+"""실행 관측 증거 — host hook과 runner-owned 명령 실행 기록을 읽는다.
 
 `local_skills.read_skill_evidence`와 같은 모양이다. 주장자가 쓰는 마커와 달리
-이 증거는 host tool 런타임이 만든다. 그래서 "안 돌렸다"는 주장자가 뒤집을 수
-없다.
+이 증거는 host tool 런타임이나 직접 실행한 runner가 만든다. 그래서
+"안 돌렸다"는 주장자가 뒤집을 수 없다.
 
 **이 증거가 증명하지 않는 것**을 먼저 적는다. hook은 argv와 exit code만 본다.
 `pytest tests/test_x.py::test_trivial`도 exit 0이고, `assert False` 한 줄도
@@ -19,9 +19,9 @@ hook이 없는 host에서는 로그 파일 자체가 없다. 그때는 `availabl
 관측으로 막는다(`missing_test_evidence_markers`: 창에 기록이 있는데 테스트
 실행만 없으면 자기신고가 무엇이든 차단이다). skill 쪽 L2
 (`local_skills.missing_local_skill_markers`)는 자기신고 하나만 요구하고 관측은
-진단에만 쓴다. 갈라진 이유는 생산자다 — `record-command-run.py`는 argv를 실행
-시점에 잡으므로 hook이 로드된 세션이면 빠짐이 없고, 그 세션은 창을 비우지
-않는다. 두 층을 같은 문장으로 요약하지 마라.
+진단에만 쓴다. 명령 hook은 실패 실행을 생략하거나 exit code를 주지 않을 수
+있다. 그런 실행은 `run-command`가 직접 관측하며, exit 없는 기록은 RED 근거가
+되지 않는다. 두 층을 같은 문장으로 요약하지 마라.
 
 관측 해석과 RED 참조 내용 계산은 파일을 만들지 않는다. 참조 게시와 phase 진입
 기준선 캡처 시점은 runner가 소유한다.
@@ -450,6 +450,22 @@ def missing_test_evidence_markers(
             "phase; the regression test has to actually run)"
         ]
     reported = [run.exit_code for run in observed if run.exit_code is not None]
+    if not reported:
+        bound_hint = (
+            "in a bound active checkout use the run_command_prefix reported after "
+            "agent-flow continue"
+        )
+        if values.get("red-reference"):
+            return [
+                "test-run-evidence: verified (no test exit code was observed; rerun the "
+                "referenced regression with agent-flow run-command -- <test argv> so it is "
+                f"observed ending green; {bound_hint})"
+            ]
+        return [
+            "red-observed: <observed failing exit code> (no test exit code was observed; "
+            "use agent-flow run-command -- <test argv> to record the actual result; "
+            f"{bound_hint})"
+        ]
     if reported and all(code == 0 for code in reported) and values.get("red-reference"):
         relevant = _selected_test_runs(evidence, profile, values.get("regression-test", "").strip())
         if not relevant or max(relevant, key=lambda run: run.at).exit_code != 0:
@@ -632,7 +648,12 @@ def missing_feedback_evidence_markers(
         run.exit_code for run in observed if run.exit_code is not None
     }
     if not observed_codes:
-        return []
+        return [
+            "feedback-run-evidence: verified (no exit code was observed; "
+            "use agent-flow run-command -- <feedback argv> to record the actual result; "
+            "in a bound active checkout use the run_command_prefix reported after "
+            "agent-flow continue)"
+        ]
 
     if red_exit is not None and red_exit not in observed_codes:
         return [
