@@ -261,9 +261,8 @@ def test_explicit_resume_grants_guidance_only_on_continue_for_every_host(
 ):
     """반증: status만으로 guidance가 열리면 run을 재개하지 않은 세션이 흐름에 끌려든다.
 
-    Codex PostToolUse는 exit code 없이 stdout 문자열만 준다. 성공을 증명할 수 없으므로
-    continue에도 guidance를 열지 않는다(fail-closed). 이 기대가 바뀌면 Codex payload가
-    성공 신호를 싣기 시작했거나 성공 추론이 넓어진 것이다.
+    Codex PostToolUse는 exit code 없이 stdout 문자열만 준다. 이 fixture 출력에는 실제
+    runner의 성공 receipt가 없어 continue에도 guidance를 열지 않는다(fail-closed).
     """
     root, checkout, run_dir = _project(tmp_path)
     output = _status_output(root, checkout, run_dir)
