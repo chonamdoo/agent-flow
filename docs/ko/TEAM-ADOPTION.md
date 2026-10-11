@@ -30,9 +30,12 @@
 
 팀이 선언할 수 있는 것:
 
-- `gates` — 순서 있는 검증 명령. 각 항목이 `id`, `command`, `required`,
-  `phase`(`pre-commit | pre-push | post-merge`), `timeout_s`를 갖는다. 분 단위로 도는 gate는
-  여기서 자기 상한을 선언한다. timeout은 실패가 아니라 판정 불가로 기록되기 때문이다.
+- `gates` — 순서 있는 검증 명령. 각 gate는 `id`, `command`, `required`,
+  `phase`(`pre-commit | pre-push | post-merge`), `timeout_s`, `execution`
+  (`local | ci`, 기본값 `local`), `ci_check`(CI에서 필수인 정확한 PR check 이름,
+  local 실행에서는 금지)만 받는다. 오타나 메타데이터를 포함한 그 밖의 키는 조용히 무시하지
+  않고 거부한다. 분 단위로 도는 gate는 여기서 자기 상한을 선언한다. timeout은 실패가 아니라
+  판정 불가로 기록되기 때문이다.
 - `review_angles` — 최종 리뷰 phase에 붙는 전문 reviewer. 각 항목이 `id`와 kit root 기준
   `prompt` 경로를 갖는다. `src/agent_flow/profiles/android.yaml`는 여섯 개를 선언한다:
   `architecture-design`, `android-skills`, `compose-stability`, `test-edge`, `sdui`, `udf`.
@@ -58,6 +61,12 @@
 배포해야 한다. 한 mapping 안에 같은 키가 두 번 나오는 것도 뒤엣값이 조용히 이기게 두지 않고,
 파일·줄·키를 에러에 적어 거부한다. 설치된 `.agent-flow/profiles/<id>.yaml`를 직접 고치는 것은 남지 않는다. install이
 새 필드를 기존 설치본에 닿게 하려고 배포 profile을 덮어쓰기 때문이다.
+
+배포 profile, local override, `gate_variants` 안의 gate mapping 모두 같은 일곱 gate 키만
+받는다. 명시적 local `gates`가 variant 선택을 대체하면 미사용 variant는 새로 검사하지 않는다.
+이전에 무시하던 gate 오타나 메타데이터도 이제 오류가 된다. 해당 키를 제거하거나 지원 키로
+고쳐야 한다. 진행 중인 run도 다음 관련 profile 로드에서 이 오류를 만날 수 있다.
+이 gate 검사가 payload만 읽는 경로까지 profile 전체를 검증한다는 뜻은 아니다.
 
 그 override 파일은 저장소별이 아니라 작업 사본별이다. git work tree에서 install은 `.agent-flow/`를
 그 클론의 로컬 exclude 파일 `.git/info/exclude`에 `/.agent-flow/`로 올리고(`lib/installer-shared.mjs`의

@@ -91,11 +91,14 @@ A test that passes on the first run is not a red phase.
 
 Whatever a marker says, the runner reads the log itself.
 
-The log holds only what the host hands to its hooks. As of Claude Code 2.1.296 and Codex CLI
-0.162.1, neither passes an exit code to those hooks, and Claude does not run them for a failed
-command, so on those hosts the runner cannot see a failing test and the red check cannot demand
-one. OMP passes exit codes. `agent-flow status` shows, per host, whether the hooks are actually
-running ([Host connection](docs/USAGE.md#host-connection)).
+The log holds what the host hands to its hooks. As of Claude Code 2.1.296 and Codex CLI 0.162.1,
+neither passes an exit code to those hooks, and Claude does not run them for a failed command.
+A record without an exit code is not RED evidence: when every observed test or feedback run lacks
+one, the check is refused until `agent-flow run-command -- <argv>` records the actual result. After
+an explicit `run`/`start`/`continue` binds the session, the binding hook hands the model a
+`run_command_prefix` carrying the session ID for the bound worktree. OMP passes exit codes.
+`agent-flow status` shows, per host, whether the hooks are actually running
+([Host connection](docs/USAGE.md#host-connection)).
 
 ### Attach one verification method to each requirement
 

@@ -5,6 +5,7 @@ from collections.abc import Callable
 import os
 import re
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 # 여러 운영체제의 로컬 절대 경로를 같은 기준으로 가려 artifact에 개발자 경로가 남지 않게 한다.
@@ -47,6 +48,21 @@ class GateResult:
 
 
 def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int | None = None) -> GateResult:
+    return _run_gate(
+        command,
+        cwd=cwd,
+        timeout_s=timeout_s,
+        runtime_path_for=_installed_python_runtime_path,
+    )
+
+
+def _run_gate(
+    command: GateCommand,
+    *,
+    cwd: Path,
+    timeout_s: int | None,
+    runtime_path_for: Callable[[Path], Path | None],
+) -> GateResult:
     # 우선순위: 호출자가 명시한 값 > profile 선언 > 기본값. `or`로 접으면 명시한
     # 상한이 선언에 먹힌다. 그러면 `--timeout`을 낮춰도 실제 상한은 그대로여서,
     # 그 플래그로 총예산을 계산하는 node wrapper의 예산이 실제보다 작아진다
@@ -59,7 +75,7 @@ def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int | None = None) -
         completed = subprocess.run(
             executable_command,
             cwd=cwd,
-            env=_gate_environment(cwd),
+            env=_gate_environment(cwd, runtime_path_for(cwd)),
             text=True,
             capture_output=True,
             timeout=timeout_s,
@@ -114,13 +130,19 @@ def run_gates(
     직접 print하면 테스트가 실행마다 출력을 뒤집어쓰고, CLI와 runner가 서로 다른
     형식을 쓸 수 없게 된다. `subprocess.run(capture_output=True)`이라 이 콜백이
     없으면 긴 gate가 도는 동안 관측 가능한 신호가 0이다.
+
+    Git discovery는 subprocess timeout 전에 실행되므로 plan마다 한 번만 수행한다.
+    선택은 다음 plan에 넘기지 않고 환경 변수는 각 gate에서 다시 읽는다.
     """
     results: list[GateResult] = []
     total = len(commands)
+    runtime_path_for = cache(_installed_python_runtime_path)
     for index, command in enumerate(commands, start=1):
         if on_start is not None:
             on_start(command, index, total)
-        results.append(run_gate(command, cwd=cwd, timeout_s=timeout_s))
+        results.append(
+            _run_gate(command, cwd=cwd, timeout_s=timeout_s, runtime_path_for=runtime_path_for)
+        )
     return results
 
 
@@ -167,10 +189,9 @@ def _relativized_match(raw: str, base: Path) -> str:
     return relativize_local_path(trimmed, base) + raw[len(trimmed) :]
 
 
-def _gate_environment(cwd: Path) -> dict[str, str]:
+def _gate_environment(cwd: Path, runtime_path: Path | None) -> dict[str, str]:
     env = os.environ.copy()
     python_paths: list[Path] = []
-    runtime_path = _installed_python_runtime_path(cwd)
     if runtime_path is not None:
         python_paths.append(runtime_path)
     src_path = cwd / "src"
@@ -186,30 +207,19 @@ def _gate_environment(cwd: Path) -> dict[str, str]:
 
 
 def _installed_python_runtime_path(cwd: Path) -> Path | None:
-    for root in _candidate_agent_flow_roots(cwd):
-        runtime_path = root / ".agent-flow" / "runtime" / "python"
-        if (runtime_path / "agent_flow" / "__init__.py").is_file():
-            return runtime_path
+    from agent_flow.core.hook_integrity import find_install_root
+
+    root = find_install_root(cwd)
+    if root is None:
+        return None
+    runtime_path = root / ".agent-flow" / "runtime" / "python"
+    if (runtime_path / "agent_flow" / "__init__.py").is_file():
+        return runtime_path
     return None
-
-
 
 
 def _recorded_gate_command(command: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
     return tuple(relativize_local_path(part, cwd) for part in command)
-
-
-def _candidate_agent_flow_roots(cwd: Path) -> list[Path]:
-    resolved = cwd.resolve()
-    roots: list[Path] = []
-    if (resolved / ".agent-flow").is_dir():
-        roots.append(resolved)
-    parts = resolved.parts
-    if ".agent-flow" in parts:
-        marker_index = parts.index(".agent-flow")
-        roots.append(Path(*parts[:marker_index]) if marker_index else Path("/"))
-    roots.extend(resolved.parents)
-    return list(dict.fromkeys(roots))
 
 
 def _text(value: str | bytes | None) -> str:

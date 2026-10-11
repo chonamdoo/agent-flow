@@ -14,6 +14,7 @@ import os
 import stat
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 SRC = str(Path(__file__).resolve().parents[1] / "src")
@@ -37,6 +38,8 @@ from agent_flow.core.worktrees import (
     plan_worktree,
     remove_worktree,
     remove_worktree_metadata,
+    worktree_runtime_root,
+    write_worktree_manifest,
 )
 from agent_flow.cli import _resolve_cli_root_context, _verified_checkout_identity
 from agent_flow.core.worktree_isolation import (
@@ -179,6 +182,37 @@ def test_status_resolves_the_created_checkout(tmp_path: Path):
     assert same_worktree_path(status.path, created.path)
     assert status.branch == "feat/slice"
     assert status.branch_created_by_agent_flow is True
+
+
+def test_manifest_publish_failure_preserves_ownership_and_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _leader(tmp_path)
+    created = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+    manifest = worktree_runtime_root(root=root, name=created.name) / "manifest.json"
+    previous = manifest.read_bytes()
+    previous_entries = set(manifest.parent.iterdir())
+    updated = replace(
+        created,
+        branch_created_by_agent_flow=False,
+        base_ref="refs/heads/replacement",
+        base_oid="a" * 40,
+    )
+
+    def fail_replace(source: Path, target: Path) -> None:
+        raise OSError("manifest publish failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", fail_replace)
+        with pytest.raises(OSError, match="manifest publish failed"):
+            write_worktree_manifest(root=root, status=updated)
+
+    assert manifest.read_bytes() == previous
+    assert set(manifest.parent.iterdir()) == previous_entries
+    restored = get_worktree_status(root=root, name=created.name)
+    assert restored.branch_created_by_agent_flow is True
+    assert restored.base_ref == created.base_ref
+    assert restored.base_oid == created.base_oid
 
 
 def test_central_root_is_stable_from_a_linked_checkout(tmp_path: Path):

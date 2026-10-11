@@ -39,7 +39,12 @@ from pathlib import Path
 from typing import Iterator
 
 from agent_flow.core.atomic_io import read_bounded_regular_file
-from agent_flow.core.worktree_isolation import git_common_dir, leader_root_for, real_path
+from agent_flow.core.worktree_isolation import (
+    git_common_dir,
+    git_superproject_root,
+    git_toplevel,
+    real_path,
+)
 
 # install이 심는 정확히 그 스크립트들. JS 쪽 등록 지점 3곳
 # (`bin/agent-flow-install.mjs`, `bin/agent-flow-kit.mjs`,
@@ -116,6 +121,8 @@ JSON_REGISTRATION_FILES = (
     Path(".codex") / "hooks.json",
 )
 OMP_REGISTRATION_FILE = Path(".omp") / "extensions" / "agent-flow-hooks.ts"
+# 등록 파일의 첫 경로 요소 → host. `.Codex`와 `.codex`는 같은 host다.
+_REGISTRATION_HOSTS = {".claude": "claude", ".codex": "codex", ".omp": "omp"}
 # 등록 파일은 사용자 설정과 함께 있어도 수 KB 수준이다. 이보다 크면 읽지 못한 것으로 본다.
 _REGISTRATION_MAX_BYTES = 8 * 1024 * 1024
 
@@ -163,9 +170,10 @@ def find_install_root(start) -> Path | None:
     """이 경로를 지탱하는 설치본. OMP extension의 `resolveInstallRoot`와 같은 규칙이어야
     run 시작 검사가 증명한 hook과 OMP가 실행하는 hook이 같은 설치본의 것이다.
 
-    1. linked worktree면 leader 설치본을 먼저 고른다. 워커가 자기 checkout에 쓴
+    1. linked worktree면 leader 설치본만 고른다. 워커가 자기 checkout에 쓴
        `.agent-flow/kit.json`이 자기 무결성 기준선이 되지 않는다. leader의 git dir은
-       워커가 쓸 수 없다.
+       워커가 쓸 수 없다. submodule은 자기 common dir로 checkout 종류를 알 수 없어
+       가장 바깥 superproject checkout으로 판정한다.
     2. 조상 탐색은 git common root에서 멈춘다. 저장소 밖이면 HOME에서, HOME 밖이면
        시작점에서 멈춘다. HOME 자신은 후보가 아니다. `$HOME/.agent-flow/kit.json`
        하나가 그 아래 모든 프로젝트의 설치본이 되지 않게 한다.
@@ -181,25 +189,45 @@ def find_install_root(start) -> Path | None:
     if home is None:
         return None
     current = real_path(start)
-    leader = leader_root_for(current)
-    if leader is not None and leader != home and _has_install(leader):
-        return leader
-    common = git_common_dir(current)
+    anchor = current
+    while (superproject := git_superproject_root(anchor)) is not None:
+        anchor = superproject
+    common = git_common_dir(anchor)
     git_root = common.parent if common is not None else None
-    if git_root is not None and current.is_relative_to(git_root):
+    # common dir이 `.git`이 아니면 그 부모를 leader checkout으로 볼 수 없다.
+    linked_candidate = common is not None and common.name == ".git"
+    checkout_root = git_toplevel(anchor) if linked_candidate else None
+    if git_root is not None and checkout_root is not None and not _same_directory(git_root, checkout_root):
+        return git_root if not _same_directory(git_root, home) and _has_install(git_root) else None
+    if _is_directory_ancestor(git_root, current):
         boundary = git_root
-    elif current.is_relative_to(home):
+    elif _is_directory_ancestor(home, current):
         boundary = home
     else:
         boundary = current
     for candidate in (current, *current.parents):
-        if candidate != home and _has_install(candidate):
+        if not _same_directory(candidate, home) and _has_install(candidate):
             return candidate
-        if candidate == boundary:
+        if _same_directory(candidate, boundary):
             break
-    if git_root is not None and git_root != home and _has_install(git_root):
+    if git_root is not None and not _same_directory(git_root, home) and _has_install(git_root):
         return git_root
     return current if _has_install(current) else None
+
+
+def _same_directory(left: Path | None, right: Path | None) -> bool:
+    if left is None or right is None:
+        return False
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return left == right
+
+
+def _is_directory_ancestor(ancestor: Path | None, descendant: Path) -> bool:
+    return ancestor is not None and any(
+        _same_directory(ancestor, candidate) for candidate in (descendant, *descendant.parents)
+    )
 
 
 def _has_install(root: Path) -> bool:
@@ -705,7 +733,9 @@ def _read_surfaces(root: Path, *, surface_root: Path | None = None) -> Iterator[
             # 것만으로 검증이 사라진다. 읽기 실패 자체를 위반으로 든다.
             yield _Surface(str(relative), present=True, readable=False, entries=())
             continue
-        entries, malformed = _json_registrations(root, payload)
+        entries, malformed = _json_registrations(
+            root, payload, host=registration_host(relative)
+        )
         yield _Surface(
             str(relative),
             present=True,
@@ -746,8 +776,13 @@ def _read_registration_text(path: Path) -> str:
     return raw.decode("utf-8")
 
 
+def registration_host(relative: Path | str) -> str | None:
+    """등록 파일이 속한 host. 기록 hook은 이 host 이름만 `--host`로 받는다."""
+    return _REGISTRATION_HOSTS.get(Path(relative).parts[0].lower())
+
+
 def _json_registrations(
-    root: Path, payload: object
+    root: Path, payload: object, *, host: str | None
 ) -> tuple[tuple[tuple[str, str, str], ...], tuple[str, ...]]:
     hooks = payload.get("hooks") if isinstance(payload, dict) else None
     if not isinstance(hooks, dict):
@@ -760,7 +795,7 @@ def _json_registrations(
         for block in blocks:
             matcher = block.get("matcher", "") if isinstance(block, dict) else ""
             for command in _entry_commands(block):
-                script = managed_path_hook_name(root, command)
+                script = managed_path_hook_name(root, command, host=host)
                 if script is not None:
                     entries.append((str(event), str(matcher or ""), script))
                 elif mentions_managed_hook_dir(root, command):
@@ -779,22 +814,23 @@ def _entry_commands(entry: object) -> Iterator[str]:
             yield hook["command"]
 
 
-def managed_path_hook_name(root: Path, command: str) -> str | None:
+def managed_path_hook_name(root: Path, command: str, *, host: str | None) -> str | None:
     """Return the script name only for one exact trusted hook invocation.
 
     관리 hook은 오직 managed hook launcher로만 실행된다:
     `<root>/.agent-flow/bin/agent-flow-hook <root>/.agent-flow/scripts/hooks/<name>`.
     하드코딩 인터프리터(`/usr/bin/python3`·`/bin/bash`)는 더는 인정하지 않는다 —
     그 경로가 없거나 host가 직접 execve하지 못하는 자리에서 hook exec가 EPERM으로
-    죽던 자리다.
+    죽던 자리다. 기록 hook의 `--host` 값은 등록 파일의 `host`와 같아야 한다. 다른
+    host 이름을 박은 등록은 그 host의 실행 증거를 만든다.
     """
     try:
         tokens = shlex.split(command, posix=True)
     except ValueError:
         return None
-    if len(tokens) != 2:
+    if len(tokens) not in (2, 4):
         return None
-    launcher, candidate = tokens
+    launcher, candidate = tokens[:2]
     try:
         launcher_real = os.path.realpath(launcher.replace("\\", "/"))
         expected_launcher = os.path.realpath(Path(root) / HOOK_LAUNCHER_RELATIVE)
@@ -807,6 +843,13 @@ def managed_path_hook_name(root: Path, command: str) -> str | None:
     if (
         not (name.endswith(".py") or name.endswith(".sh"))
         or not _SAFE_HOOK_NAME.fullmatch(name)
+    ):
+        return None
+    if len(tokens) == 4 and (
+        name not in ("record-command-run.py", "bind-host-worktree.py")
+        or tokens[2] != "--host"
+        or host is None
+        or tokens[3] != host
     ):
         return None
     try:

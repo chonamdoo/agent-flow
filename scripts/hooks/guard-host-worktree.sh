@@ -21,10 +21,13 @@ def load_boundary(script_dir: Path):
             break
     else:
         raise RuntimeError("trusted host worktree boundary is unavailable")
-    from agent_flow.core.host_write_boundary import host_write_boundary_violation
+    from agent_flow.core.host_write_boundary import (
+        host_write_boundary_violation,
+        record_host_continue_request,
+    )
 
     project_root = install_root.parent if install_root.name == ".agent-flow" else install_root
-    return project_root, host_write_boundary_violation
+    return project_root, host_write_boundary_violation, record_host_continue_request
 
 
 try:
@@ -34,13 +37,14 @@ except (json.JSONDecodeError, OSError, UnicodeError) as exc:
     raise RuntimeError("invalid host worktree guard payload") from exc
 if not isinstance(payload, dict):
     raise RuntimeError("invalid host worktree guard payload")
-project_root, checker = load_boundary(Path(sys.argv[1]))
+project_root, checker, record_continue = load_boundary(Path(sys.argv[1]))
 violation = checker(payload, project_root)
 if violation is not None and not isinstance(violation, str):
     raise RuntimeError("host worktree boundary returned an invalid decision")
 if violation:
     print(violation, file=sys.stderr)
     raise SystemExit(2)
+record_continue(payload, project_root)
 PY
 STATUS=$?
 if [ "$STATUS" -eq 2 ]; then

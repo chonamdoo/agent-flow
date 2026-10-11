@@ -435,6 +435,17 @@ agent-flow status --worktree "feat-user-profile"
 agent-flow continue --worktree "feat-user-profile"
 ```
 
+Codex CLI 0.162.1 can bind a session after `status`, but phase guidance requires a successful
+`continue`. The managed PreToolUse hook records the call without changing the command, the runner
+finds that record through the `CODEX_THREAD_ID` Codex sets for the command and issues a one-use
+success receipt, and the PostToolUse hook checks the session, tool call, arguments, and current
+run before granting guidance. A `status_json:` line alone does not grant guidance. If Codex skips
+the hooks, guidance stays unavailable. The same happens when the `agent-flow` on `PATH` is older
+than the installed kit, or when one session runs the same `continue` twice in parallel:
+`continue` still runs, but it issues no receipt. Confirm folder trust and hook approval in
+`/hooks`, then run `continue` again with the updated kit installed, or call the project launcher
+`.agent-flow/bin/agent-flow` directly.
+
 Add `--workflow` to pick the smallest workflow that fits. Omitted, the CLI falls back to `default`
 for compatibility, but policy-compliant starts name the workflow explicitly.
 
@@ -455,7 +466,7 @@ blocks a run and never changes the status exit code; the run-start hook check st
 
 | Level | Meaning |
 |---|---|
-| `hook_enforced` | Registered, trusted (`yes`, or `n/a` for OMP, which has no per-project hook trust), and a session binding or a recorded command was seen in this checkout since the run started. Only the active host detected from its environment variable can reach this level, because the records do not name a host. |
+| `hook_enforced` | Registered, trusted (`yes`, or `n/a` for OMP, which has no per-project hook trust), and a session binding or a recorded command was seen in this checkout since the run started. Only records tagged with this host by its own hooks count, and only the active host detected from its environment variable can reach this level. Records from an install made before the hooks tagged their host name no host and count for none; reinstall to tag new records. |
 | `hook_unproven` | Registered and not distrusted, but trust is `unknown` or no execution can be attributed to this host. The records do not say which hooks ran, so with unconfirmed trust an observed execution does not rule out a skipped guard. |
 | `runner_only` | Not installed, not registered, distrusted, or hooks disabled. Required markers, pause approval tokens, independent reviewers, runner gates, route invariants, and the run-start check still apply. The two pre-block rules, the tripwire, session binding, and command recording are not proven. |
 
@@ -476,8 +487,31 @@ hash is Codex's internal serialization and is not checked, so Codex shows at mos
 
 The execution line also counts recorded commands that carry no exit code. As of Claude Code
 2.1.296 and Codex CLI 0.162.1, neither passes an exit code to PostToolUse hooks, and Claude does not
-run PostToolUse hooks for a failed command. On those hosts a failing test cannot be observed, so
-the red-phase check cannot require one. OMP passes exit codes.
+run PostToolUse hooks for a failed command. OMP passes exit codes. For tests and feedback commands
+whose results the hook cannot observe, run the authorized command through the execution wrapper
+from the bound checkout. After an explicit `agent-flow run`/`start`/`continue` binds the session,
+the PostToolUse binding hook passes `run_command_prefix` with that payload's actual session ID to
+the model as `additionalContext` (the Stop guidance repeats it, but its `systemMessage` is shown
+only to the user). Append the test argv to that prefix:
+
+```bash
+agent-flow run-command --host-session-id <actual-session-id> -- pytest tests/test_example.py::test_regression
+```
+
+The ID must match this checkout's current active run. An unknown, stale, or sibling session is
+refused. The CLI does not infer the ID from environment variables or select another session's
+binding. Without an ID it keeps the existing unbound boundary; standalone commands can use
+`agent-flow run-command -- <argv>` when no active run protects that checkout.
+
+The wrapper executes argv directly, passes through the command's output and normal exit code,
+and records the inner command with its actual result, run, phase, and pre-execution code baseline.
+It records the result even when a failed command has no PostToolUse event. Run the regression
+before the fix and after it; this command does not change a CI-only gate's execution policy.
+Use the recorded inner command for `feedback-command`. Wrapper evidence proves a command result,
+not that a host hook ran. A signal termination keeps its raw returncode and signal but has no
+exit code eligible as RED; an interrupted or unstarted command leaves no completed-run evidence.
+When all observed test or feedback results have unknown exit codes, the evidence check requires
+an actual wrapper result. A self-reported failing exit does not resolve that missing observation.
 
 A machine-readable copy follows on one `host_connection_json:` line.
 
@@ -692,6 +726,13 @@ watcher also accepts this flag; without it, no-CI repositories remain supported.
 The runner's `merge-approval` and `merge` entries apply the same contract, and
 `merge-approval` then pauses for the user's merge approval. Recording a pre-merge
 SPEC approval applies the contract without the review decision.
+
+If the PR was already merged before that SPEC approval was recorded, approval
+can still be recorded for the same published HEAD after its remote branch is
+deleted. The live PR must be `MERGED`, with the exact published URL, base, head
+branch and HEAD; required CI checks must still succeed. Merge does not approve
+the SPEC automatically: cleanup remains blocked until the user approval is
+recorded, and a new local HEAD invalidates that approval.
 
 ## Repository layout
 

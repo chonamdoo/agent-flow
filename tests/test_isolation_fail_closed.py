@@ -600,6 +600,51 @@ def test_provider_sandbox_writes_only_to_the_verified_worktree(tmp_path):
     )
 
 
+@pytest.mark.parametrize("name", (".claude", ".Codex", ".codex", ".omp", ".agents"))
+@pytest.mark.parametrize("target_exists", (True, False), ids=("existing", "dangling"))
+@pytest.mark.parametrize("allow_workspace_writes", (True, False), ids=("writable", "readonly"))
+def test_provider_sandbox_denies_host_state_symlink_names_and_targets(
+    tmp_path, monkeypatch, name, target_exists, allow_workspace_writes
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    leader = tmp_path / "leader"
+    leader.mkdir()
+    linked = _repo_with_linked(leader).resolve()
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    scratch = linked / "scratch"
+    scratch.mkdir()
+    paths = []
+    for index, parent in enumerate((home.resolve(), leader.resolve(), linked, host_home.resolve())):
+        target = scratch / f"host-state-{index}"
+        if target_exists:
+            target.mkdir()
+        link = parent / name
+        link.symlink_to(target, target_is_directory=True)
+        paths.extend((link, target))
+
+    profile = PROVIDER_PROCESS._macos_sandbox_profile(
+        linked,
+        allow_workspace_writes=allow_workspace_writes,
+        scratch=scratch,
+        host_home=host_home,
+    )
+    allowances = [f'(allow file-write* (subpath "{scratch}"))']
+    if allow_workspace_writes:
+        allowances.append(f'(allow file-write* (subpath "{linked}"))')
+    else:
+        assert f'(allow file-write* (subpath "{linked}"))' not in profile
+    for allowance in allowances:
+        assert allowance in profile
+    for path in paths:
+        deny = f'(deny file-write* (subpath "{path}"))'
+        assert deny in profile, path
+        for allowance in allowances:
+            assert profile.index(allowance) < profile.index(deny), path
+
+
 def test_provider_sandbox_denies_the_checkout_agent_flow_dir(tmp_path):
     """반증: workspace 쓰기가 열린 provider가 자기 checkout에 `.agent-flow`를 만들면
     그 안의 `kit.json`·hook·`project.yaml`이 이 checkout의 설치본과 설정 행세를 한다.

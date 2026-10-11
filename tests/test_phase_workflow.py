@@ -452,6 +452,21 @@ def _uncapped_cycle_phases(phases: list[Phase]) -> list[str]:
     ]
 
 
+def test_every_packaged_workflow_uses_only_known_top_level_keys() -> None:
+    """반증: 읽히지 않는 context_policy가 배포되거나 completion_dispositon 오타로
+    local-handoff 대신 기본 cleanup 처분이 적용된다."""
+    import yaml
+
+    names = workflow_names(_ROOT)
+    assert names, f"no packaged workflows found for {_ROOT}"
+    allowed_keys = {"id", "description", "completion_disposition", "phases"}
+    for name in names:
+        definition = load_phase_workflow_definition(_ROOT, name)
+        raw = yaml.safe_load(definition.source_bytes)
+        unexpected_keys = raw.keys() - allowed_keys
+        assert not unexpected_keys, f"{definition.source}: unknown top-level keys {unexpected_keys!r}"
+
+
 @pytest.mark.parametrize("name", workflow_names(_ROOT))
 def test_every_packaged_workflow_reaches_completion_and_bounds_its_rework_cycles(name: str) -> None:
     """반증: route 하나를 잘못 고치면 그 key가 쓰이지 않거나, phase가 조용히 skip되거나, 완료로

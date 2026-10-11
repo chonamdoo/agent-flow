@@ -117,6 +117,43 @@ def test_review_approval_waiver_keeps_ci_and_change_request_gates(
     assert snapshot.status == expected
 
 
+@pytest.mark.parametrize(("checks", "expected"), [
+    ([{"name": "pytest", "conclusion": "SUCCESS"}], "merged"),
+    ([{"context": "pytest", "state": "SUCCESS"}], "merged"),
+    (None, "pending"),
+    ([], "pending"),
+    ([{"name": "other", "conclusion": "SUCCESS"}], "pending"),
+    ([{"name": "pytest", "status": "IN_PROGRESS"}], "pending"),
+    ([{"name": "pytest", "conclusion": "FAILURE"}], "ci_failed"),
+    ([{"name": "pytest", "conclusion": "NEUTRAL"}], "ci_failed"),
+    ({"pytest": "SUCCESS"}, "error"),
+    ([{"conclusion": "SUCCESS"}], "error"),
+    ([{"name": "pytest", "conclusion": "SUCCESS"}] * 2, "error"),
+    ([{"name": "unit", "workflowName": "pytest", "conclusion": "SUCCESS"}], "pending"),
+])
+def test_merged_ci_approval_preserves_completed_merge_routing(monkeypatch, checks, expected):
+    from agent_flow.pr_watch import fetch_pr
+
+    data = {
+        "state": "MERGED", "url": "https://github.com/owner/repo/pull/7",
+        "headRefOid": "a" * 40, "statusCheckRollup": checks,
+        "reviewDecision": "CHANGES_REQUESTED", "isDraft": True,
+        "comments": [{"id": "c1", "body": "old discussion"}],
+    }
+    monkeypatch.setattr("agent_flow.pr_watch._fetch_pr_data", lambda *args: data)
+
+    ordinary = fetch_pr(7, required_checks=("pytest",), require_ready=True, record_feedback=False)
+    assert ordinary.status == "merged"
+    approval = fetch_pr(
+        7, required_checks=("pytest",), require_ready=True,
+        require_merged_ci=True, record_feedback=False,
+    )
+    assert approval.status == expected
+    if expected == "ci_failed":
+        assert [check["name"] for check in approval.failed_checks] == ["pytest"]
+
+
+
 def test_watch_require_ready_waits_for_checks_then_approval(tmp_path, monkeypatch):
     from agent_flow.pr_watch import _read_feedback_state, watch_pr
 

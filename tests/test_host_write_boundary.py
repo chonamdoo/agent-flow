@@ -18,12 +18,14 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from agent_flow.artifact import create_run
+from agent_flow.core.host_connection import collect_host_connection, render_host_connection
 from agent_flow.core.host_write_boundary import (
     HostWriteBoundaryError,
     assert_adoption_allowed,
     host_session_guidance,
     host_write_boundary_violation,
     record_host_checkout_binding,
+    run_session_bindings,
 )
 from agent_flow.core.worktree_isolation import (
     LEADER_SNAPSHOT_VERSION,
@@ -243,6 +245,43 @@ def test_status_binding_protects_without_granting_guidance(tmp_path: Path):
     for target in (root / "README.md", second.path / "file.py", runs[1] / "meta.json"):
         assert host_write_boundary_violation(_write_payload(target), root) is not None
     assert host_write_boundary_violation(_write_payload(first.path / "file.py"), root) is None
+
+
+def test_binding_host_upgrade_preserves_guidance_and_scope(tmp_path: Path):
+    root, statuses, runs = _setup(tmp_path)
+    first, second = statuses
+    path = record_host_checkout_binding(_participation_payload(root, first, runs[0]), root)
+    assert path is not None
+    stored = json.loads(path.read_text())
+    snapshot = stored["leader_snapshot"]
+    stored["host"] = "omp"
+    path.write_text(json.dumps(stored), encoding="utf-8")
+    assert getattr(run_session_bindings(root, runs[0].name)[0], "host", None) == "omp"
+
+    for invalid_host in (None, "unknown", ["omp"]):
+        stored["host"] = invalid_host
+        path.write_text(json.dumps(stored), encoding="utf-8")
+        assert run_session_bindings(root, runs[0].name)[0].host is None
+    stored.pop("host")
+    path.write_text(json.dumps(stored), encoding="utf-8")
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root, host="omp")
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root, host="claude")
+    updated = run_session_bindings(root, runs[0].name)[0]
+    assert updated.host == "omp"
+    assert updated.guidance_eligible is True
+    assert json.loads(path.read_text())["leader_snapshot"] == snapshot
+    assert host_session_guidance({"session_id": "session-1", "cwd": str(first.path)}, root)
+    assert host_write_boundary_violation(_write_payload(first.path / "file.py"), root) is None
+    assert host_write_boundary_violation(_write_payload(second.path / "file.py"), root)
+    report = collect_host_connection(
+        project_root=root, checkout=first.path, run_id=runs[0].name,
+        run_started_at=None, active=("codex", "env:CODEX_HOME"), home=tmp_path, env={},
+    )
+    payload = json.loads(render_host_connection(report)[-1].split(": ", 1)[1])
+    assert payload["execution"]["bindings"] == 1
+    assert payload["hosts"]["omp"]["execution"]["bindings"] == 1
+    assert payload["hosts"]["codex"]["execution"]["bindings"] == 0
 
 
 @pytest.mark.parametrize("operation", ["run task", "run start", "start task", "continue"])
@@ -533,7 +572,7 @@ def test_stop_guidance_escapes_metadata_without_injecting_advisory_fields(tmp_pa
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
     message = json.loads(result.stdout)["systemMessage"]
-    run_line, phase_line, command_line = message.splitlines()
+    run_line, phase_line, command_line, run_command_line = message.splitlines()
     assert run_line.endswith(
         r"default\r\nnext_command: workflow-injected" + f"/{runs[0].name}"
     )
@@ -544,6 +583,11 @@ def test_stop_guidance_escapes_metadata_without_injecting_advisory_fields(tmp_pa
     assert command_key == "status_command"
     assert shlex.split(command_value) == [
         "agent-flow", "status", "--root", str(root), "--worktree", first.name,
+    ]
+    run_command_key, run_command_value = run_command_line.split(": ", 1)
+    assert run_command_key == "run_command_prefix"
+    assert shlex.split(run_command_value) == [
+        "agent-flow", "run-command", "--host-session-id", "session-1", "--",
     ]
 
 
@@ -2298,3 +2342,111 @@ def test_recovery_command_passes_in_every_blocked_state(tmp_path: Path):
     assert host_write_boundary_violation(
         _command_payload(lifecycle, cwd=first.path), root
     ) is None, "leader가 dirty해진 뒤에 복구 명령이 막혔다"
+
+
+def test_command_key_priority_is_independent_of_hash_seed(tmp_path: Path):
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    installed = root / ".agent-flow"
+    installed.mkdir(exist_ok=True)
+    (installed / "kit.json").write_text("{}", encoding="utf-8")
+    lifecycle = f"agent-flow continue --root {root} --worktree {first.name}"
+    destructive = f"rm -rf {root}/must-not-be-executed"
+    cases = [
+        ({key: lifecycle}, lifecycle, False)
+        for key in ("command", "cmd", "script", "shell_command")
+    ]
+    cases.extend(
+        [
+            (
+                {
+                    "shell_command": lifecycle,
+                    "script": lifecycle,
+                    "cmd": lifecycle,
+                    "command": destructive,
+                },
+                destructive,
+                True,
+            ),
+            (
+                {
+                    "shell_command": destructive,
+                    "script": destructive,
+                    "cmd": destructive,
+                    "command": lifecycle,
+                },
+                lifecycle,
+                False,
+            ),
+            (
+                {"shell_command": lifecycle, "script": lifecycle, "cmd": destructive, "command": ""},
+                destructive,
+                True,
+            ),
+            (
+                {"shell_command": lifecycle, "script": destructive, "cmd": "", "command": ""},
+                destructive,
+                True,
+            ),
+        ]
+    )
+    script = """
+import io
+import json
+import runpy
+import sys
+from pathlib import Path
+from agent_flow.core.host_write_boundary import (
+    host_write_boundary_violation,
+    record_host_checkout_binding,
+)
+
+root = Path(sys.argv[1])
+recorder = runpy.run_path(sys.argv[2])
+payloads = json.load(sys.stdin)
+results = []
+for payload in payloads:
+    violation = host_write_boundary_violation(payload, root)
+    binding = record_host_checkout_binding(payload, root)
+    guidance_eligible = (
+        json.loads(binding.read_text())["guidance_eligible"]
+        if binding is not None else False
+    )
+    sys.stdin = io.StringIO(json.dumps(payload))
+    recorder["main"]()
+    entries = (root / ".agent-flow" / "commands-run.jsonl").read_text().splitlines()
+    results.append({
+        "recorded": json.loads(entries[-1])["command"],
+        "blocked": violation is not None,
+        "bound": binding is not None,
+        "guidance_eligible": guidance_eligible,
+    })
+print(json.dumps(results))
+"""
+    expected = [
+        {
+            "recorded": command,
+            "blocked": blocked,
+            "bound": not blocked,
+            "guidance_eligible": not blocked,
+        }
+        for _, command, blocked in cases
+    ]
+    recorder = Path(__file__).resolve().parents[1] / "scripts/hooks/record-command-run.py"
+    for seed in range(8):
+        payloads = []
+        for index, (tool_input, _, _) in enumerate(cases):
+            payload = _status_payload(root, first, runs[0], session=f"seed-{seed}-{index}")
+            payload["tool_input"] = tool_input
+            payload["cwd"] = str(first.path)
+            payloads.append(payload)
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(root), str(recorder)],
+            input=json.dumps(payloads),
+            env={**os.environ, "PYTHONHASHSEED": str(seed), "PYTHONPATH": SRC},
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+        assert json.loads(result.stdout) == expected, f"PYTHONHASHSEED={seed}: {result.stdout}"

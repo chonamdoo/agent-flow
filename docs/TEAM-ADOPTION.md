@@ -31,9 +31,12 @@ stays stack-neutral.
 
 A team can express:
 
-- `gates` — the ordered verification commands, each with `id`, `command`, `required`, `phase`
-  (`pre-commit | pre-push | post-merge`) and `timeout_s`. A gate that runs for minutes declares
-  its own ceiling here, because a timeout is recorded as "not judged", not as a failure.
+- `gates` — the ordered verification commands. Each gate accepts only `id`, `command`,
+  `required`, `phase` (`pre-commit | pre-push | post-merge`), `timeout_s`, `execution`
+  (`local | ci`, default `local`), and `ci_check` (the required exact PR check name for CI;
+  forbidden for local execution). Unknown keys, including typos and metadata, are rejected
+  rather than ignored. A gate that runs for minutes declares its own ceiling here, because
+  a timeout is recorded as "not judged", not as a failure.
 - `review_angles` — the specialist reviewers added at the final review phase, each an `id` plus
   a `prompt` path relative to the kit root. `src/agent_flow/profiles/android.yaml` declares six:
   `architecture-design`, `android-skills`, `compose-stability`, `test-edge`, `sdui` and `udf`;
@@ -62,6 +65,13 @@ mapping is rejected the same way, with the file, line, and key in the error, ins
 the later value win silently. Editing the installed
 `.agent-flow/profiles/<id>.yaml` directly does not survive, because install overwrites the
 shipped profile so new fields reach existing installs.
+
+The same seven gate keys apply to gate mappings in shipped profiles, local overrides, and
+`gate_variants`. Explicit local `gates` replace the variant selection, so unused variants
+are not newly validated. Previously ignored gate typos or metadata now cause errors; remove
+them or use the supported key. A run already in progress may encounter that error at its
+next relevant profile load. This gate check does not make payload-only profile loads a
+whole-profile validation.
 
 That override file is per working copy, not per repository. In a git work tree, install adds
 `/.agent-flow/` to the clone's local exclude file `.git/info/exclude` (`upsertLocalIgnores` in

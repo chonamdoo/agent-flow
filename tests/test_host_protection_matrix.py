@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -111,16 +112,21 @@ def _hook_env() -> dict[str, str]:
     return {**os.environ, "AGENT_FLOW_HOOK_PYTHON": sys.executable}
 
 
-def _run_hook(root: Path, checkout: Path, script: str, payload: dict) -> subprocess.CompletedProcess:
+def _run_hook(
+    root: Path, checkout: Path, script: str, payload: dict, *, host: str | None = None
+) -> subprocess.CompletedProcess:
     """host가 등록 명령(`<launcher> <script>`)을 실행하는 것과 같은 모양으로 돌린다."""
     event, matcher = MANAGED_HOOK_PLACEMENT[script]
     assert payload["hook_event_name"] == event
     assert re.fullmatch(matcher, payload["tool_name"]), (
         f"{payload['tool_name']!r} does not match the registered {script} matcher {matcher!r}"
     )
+    host_args = ("--host", host) if host and script in (
+        "record-command-run.py", "bind-host-worktree.py"
+    ) else ()
     return subprocess.run(
         (str(root / ".agent-flow" / "bin" / "agent-flow-hook"),
-         str(root / ".agent-flow" / "scripts" / "hooks" / script)),
+         str(root / ".agent-flow" / "scripts" / "hooks" / script), *host_args),
         input=json.dumps(payload),
         cwd=checkout,
         env=_hook_env(),
@@ -168,7 +174,7 @@ def _post(host: str, root: Path, checkout: Path, command: str, output: str) -> A
                     _payload(host, "tool_result", root, checkout, command, output))
     payload = _payload(host, "post_tool_use", root, checkout, command, output)
     results = [
-        _run_hook(root, checkout, script, payload)
+        _run_hook(root, checkout, script, payload, host=host)
         for script in ("record-command-run.py", "bind-host-worktree.py", "worktree-tripwire.py")
     ]
     return results
@@ -243,6 +249,7 @@ def test_binding_records_the_session_for_every_host(tmp_path: Path, host: str):
     assert binding.checkout.checkout == Path(os.path.realpath(checkout))
     assert binding.checkout.run_id == run_dir.name
     assert binding.guidance_eligible is False
+    assert getattr(binding, "host", None) == host
 
 
 @pytest.mark.parametrize(
@@ -254,9 +261,8 @@ def test_explicit_resume_grants_guidance_only_on_continue_for_every_host(
 ):
     """반증: status만으로 guidance가 열리면 run을 재개하지 않은 세션이 흐름에 끌려든다.
 
-    Codex PostToolUse는 exit code 없이 stdout 문자열만 준다. 성공을 증명할 수 없으므로
-    continue에도 guidance를 열지 않는다(fail-closed). 이 기대가 바뀌면 Codex payload가
-    성공 신호를 싣기 시작했거나 성공 추론이 넓어진 것이다.
+    Codex PostToolUse는 exit code 없이 stdout 문자열만 준다. 이 fixture 출력에는 실제
+    runner의 성공 receipt가 없어 continue에도 guidance를 열지 않는다(fail-closed).
     """
     root, checkout, run_dir = _project(tmp_path)
     output = _status_output(root, checkout, run_dir)
@@ -269,3 +275,55 @@ def test_explicit_resume_grants_guidance_only_on_continue_for_every_host(
     assert after_status is not None and after_status.guidance_eligible is False
     assert after_continue is not None
     assert after_continue.guidance_eligible is continue_grants_guidance
+
+
+def _model_context(host: str, result: Any) -> str:
+    """host가 모델 컨텍스트에 넣는 PostToolUse 출력. systemMessage는 사용자에게만 간다."""
+    if host == "omp":
+        return (result or {}).get("additionalContext", "")
+    bound = result[1]
+    assert bound.returncode == 0, bound.stderr
+    if not bound.stdout.strip():
+        return ""
+    output = json.loads(bound.stdout)
+    assert "systemMessage" not in output
+    assert output["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+    return output["hookSpecificOutput"]["additionalContext"]
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_explicit_resume_hands_the_run_command_prefix_to_the_model_for_every_host(
+    tmp_path: Path, host: str
+):
+    """반증: session ID가 Stop systemMessage로만 나가면 세 host 모두 사용자에게만 보여
+    모델은 bound worktree에서 run-command를 쓸 수 없다. 모델 채널로 받은 prefix를 그대로
+    실행하면 실제 종료 결과가 이 run의 증거로 남아야 한다.
+    """
+    root, checkout, run_dir = _project(tmp_path)
+    output = _status_output(root, checkout, run_dir)
+
+    status = _post(host, root, checkout, _status(root, checkout), output)
+    resumed = _post(host, root, checkout, _status(root, checkout, "continue"), output)
+
+    assert _model_context(host, status) == ""
+    marker = "[agent-flow] run_command_prefix: "
+    lines = [line for line in _model_context(host, resumed).splitlines() if line.startswith(marker)]
+    assert len(lines) == 1
+    prefix = shlex.split(lines[0].removeprefix(marker))
+    assert prefix == ["agent-flow", "run-command", "--host-session-id", SESSION, "--"]
+    env = {**_hook_env(), "PYTHONPATH": str(KIT / "src")}
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"):
+        env.pop(key, None)
+    executed = subprocess.run(
+        (sys.executable, "-m", "agent_flow.cli", *prefix[1:],
+         sys.executable, "-c", "raise SystemExit(3)"),
+        cwd=checkout, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert executed.returncode == 3, executed.stderr
+    entries = [
+        json.loads(line)
+        for line in (root / ".agent-flow" / "commands-run.jsonl").read_text().splitlines()
+    ]
+    observed = [entry for entry in entries if entry.get("source") == "runner"]
+    assert len(observed) == 1
+    assert observed[0]["exit_code"] == 3 and observed[0]["run_id"] == run_dir.name

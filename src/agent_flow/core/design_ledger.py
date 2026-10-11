@@ -61,6 +61,7 @@ class SpecPublicationObserver(Protocol):
         *,
         profile: dict | None = None,
         post_merge: bool = False,
+        for_manual_approval: bool = False,
         config_root: Path | None = None,
         require_review_approval: bool = True,
     ) -> SpecPublicationEvidence: ...
@@ -511,7 +512,7 @@ def record_manual_spec_approval(
             # 자기 PR을 승인할 수 없어 여기서까지 요구하면 승인을 영영 기록하지 못한다.
             publication = publication_observer(
                 project_root, run_dir, profile=profile, config_root=config_root,
-                require_review_approval=False,
+                require_review_approval=False, for_manual_approval=True,
             )
             if publication.missing:
                 raise ValueError("; ".join(publication.missing))

@@ -1049,6 +1049,15 @@ def _gate_from_payload(item: object, *, profile_id: str) -> ProfileGate:
     command = item.get("command")
     if not isinstance(gate_id, str) or not gate_id:
         raise ValueError(f"profile gate id missing: {profile_id}")
+    if not all(isinstance(key, str) for key in item):
+        raise ValueError(f"profile gate keys must be strings: {profile_id}:{gate_id}")
+    allowed_fields = ("id", "command", "required", "phase", "timeout_s", "execution", "ci_check")
+    unsupported = sorted(key for key in item if key not in allowed_fields)
+    if unsupported:
+        raise ValueError(
+            "profile gate supports only "
+            f"{', '.join(allowed_fields)}: {profile_id}:{gate_id}: {', '.join(unsupported)}"
+        )
     if (
         not isinstance(command, list)
         or not command

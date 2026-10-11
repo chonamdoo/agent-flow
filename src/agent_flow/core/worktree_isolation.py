@@ -1179,6 +1179,14 @@ def git_toplevel(path) -> Optional[Path]:
     return _git_toplevel(path)
 
 
+def git_superproject_root(path) -> Optional[Path]:
+    """sanitize된 git으로 얻은 superproject checkout 최상위. submodule이 아니면 None."""
+    result = git_safe("rev-parse", "--show-superproject-working-tree", cwd=path, optional_locks=False)
+    if not result.ok:
+        return None
+    raw = result.stdout.strip()
+    return real_path(raw) if raw else None
+
 
 def _read_stable_regular_text(
     path: Path,

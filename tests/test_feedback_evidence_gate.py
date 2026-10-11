@@ -5,6 +5,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[1]
 SRC = str(REPO / "src")
 if SRC not in sys.path:
@@ -119,25 +121,34 @@ def test_feedback_red_requires_the_reported_observed_failure(tmp_path: Path) -> 
     assert any("reported 1" in marker for marker in missing)
 
 
-def test_feedback_observation_without_exit_code_uses_reported_exit(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("exit_marker", "required_exit"),
+    (
+        ("feedback-red-exit: 1", FEEDBACK_RED_EXIT_MARKER),
+        ("feedback-green-exit: 0", FEEDBACK_GREEN_EXIT_MARKER),
+    ),
+)
+def test_feedback_observation_without_exit_code_requires_runner_observation(
+    tmp_path: Path, exit_marker: str, required_exit: str,
 ) -> None:
     root = _project(tmp_path)
     _observe(root, "scripts/reproduce-session-loss.sh", None)
     gate = _feedback_gate(
         command="scripts/reproduce-session-loss.sh",
-        exit_marker="feedback-red-exit: 1",
+        exit_marker=exit_marker,
     )
 
-    assert missing_feedback_evidence_markers(
+    missing = missing_feedback_evidence_markers(
         root,
         gate,
         required_markers=(
-            FEEDBACK_RED_EXIT_MARKER,
+            required_exit,
             FEEDBACK_RUN_EVIDENCE_MARKER,
         ),
         cwd_root=root,
-    ) == []
+    )
+    assert any("exit code" in marker for marker in missing)
+    assert any("run-command" in marker for marker in missing)
 
 
 def test_feedback_command_match_is_exact_and_case_sensitive(tmp_path: Path) -> None:

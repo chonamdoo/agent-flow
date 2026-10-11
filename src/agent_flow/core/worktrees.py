@@ -27,10 +27,12 @@ from agent_flow.artifact import (
     write_meta,
 )
 from agent_flow.core.architecture_policy import PROJECT_ARCHITECTURE_FILE
+from agent_flow.core.atomic_io import atomic_write_text
 from agent_flow.core.hook_integrity import (
     JSON_REGISTRATION_FILES,
     OMP_REGISTRATION_FILE,
     managed_path_hook_name,
+    registration_host,
 )
 from agent_flow.core.profiles import active_profile_ids, load_profile_payload
 from agent_flow.core.run_storage import (
@@ -3533,7 +3535,7 @@ def write_worktree_manifest(*, root: Path, status: WorktreeStatus) -> Path:
         "base_oid": status.base_oid,
         "branch_created_by_agent_flow": status.branch_created_by_agent_flow,
     }
-    path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
+    atomic_write_text(path, f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
     return path
 
 
@@ -5836,8 +5838,9 @@ def _host_hook_registration_is_kit_owned(
     commands = list(_json_hook_commands(document))
     # 등록이 하나도 없으면 kit이 쓴 결과일 수 없다. 하나라도 이 leader의 관리 hook
     # 호출이 아니면 사용자가 자기 hook을 넣어 둔 파일이다.
+    host = registration_host(rel)
     if not commands or any(
-        managed_path_hook_name(leader, command) is None for command in commands
+        managed_path_hook_name(leader, command, host=host) is None for command in commands
     ):
         return False
     # hook 밖의 키(`permissions`, `env`, MCP 설정 …)는 installer가 병합해 보존하는
