@@ -3,6 +3,7 @@
     python evals/phase_budget_compare.py before.json after.json [--summary out.md] [--accept]
 
 Failure conditions, from `maintainer/verification-policy.md`:
+- no base profile · mode combination was successfully measured;
 - a skill required before is no longer required in some profile · mode · condition · phase;
 - a non-Clean mode envelope carries the Clean `roles` table;
 - the total of phase envelopes, controller sessions and reviewer subprocesses grew;
@@ -65,6 +66,10 @@ def compare(before_path: Path, after_path: Path) -> tuple[list[str], list[str]]:
     after, after_failed = _load(after_path)
     common = sorted(set(before) & set(after))
     failures: list[str] = []
+
+    if not before:
+        reasons = ", ".join(f"{p}:{m} ({reason})" for (p, m), reason in sorted(before_failed.items()))
+        failures.append(f"base measured nothing ({reasons or 'no measurement rows'}); cannot compare skill delivery")
 
     lost_combos = sorted(key for key in before if key not in after)
     if lost_combos:
