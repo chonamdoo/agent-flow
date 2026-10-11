@@ -17,7 +17,7 @@ import { installProfile } from "../lib/profile-detection.mjs";
 import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
 import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
 import { parseSimpleYaml, splitFrontmatter } from "../lib/frontmatter.mjs";
-import { captureLegacySkillCopyReceipts, observeSkillContent, parseSkillMetadata, recordSkillLinkReceipt, skillCopyMatchesReceipt, skippedSkillCopy } from "../lib/skill-metadata.mjs";
+import { captureLegacySkillCopyReceipts, forceMayRemoveSkillEntry, observeSkillContent, parseSkillMetadata, recordSkillLinkReceipt, recordsInstalledSkillLink, skillCopyIsInstallerOwned, skillCopyMatchesReceipt, skippedSkillCopy } from "../lib/skill-metadata.mjs";
 import {
   activeInstallProfileIds,
   ensureInstallLease,
@@ -31,7 +31,6 @@ import {
   assertKnownInstallArgs,
   atomicWriteFileSync,
   backupIfDifferent,
-  bootstrapBlockIsOurs,
   claudeHooksSettings,
   codexConfigPath,
   codexHooksSettings,
@@ -77,29 +76,24 @@ import {
   readJsonIfExists,
   readKitAssetRecord,
   removeCodexBroadTrustState,
+  removeRetiredSkillIgnores,
   removeOmpHooksExtension,
   reportSkippedUserEdit,
   requestedInstallRootOption,
   resolveManagedWorktreeRoot,
   resolveLinkedWorktreeLeader,
-  ROOT_CONTEXT_FILES,
   resolveInstallRoot,
   retiredHookScripts,
   samePath,
   shellQuote,
-  SKILL_INDEX_END,
-  SKILL_INDEX_START,
+  skillLinkMatchesReceipt,
   SKILL_UPGRADE_NOTICE_PREFIX,
-  skillIndexBlock,
   SYMLINK_FOLLOW_NOTICE_PREFIX,
   SYMLINK_SKIP_NOTICE_PREFIX,
   syncRecordedKitAssets,
   tomlBasicString,
   unquoteShellWord,
   upgradeBundledSkills,
-  upsertGitExclude,
-  upsertDocsIndexBlock,
-  upsertSkillIndexBlock,
   validateSkillDependencies,
   writeKitAssetRecord,
   withoutInstallRootOption,
@@ -550,6 +544,10 @@ function pathExists(p) {
 }
 
 function linkOrCopyDir(src, dest) {
+  if (pathHasSymlink(PROJECT, path.dirname(dest))) {
+    console.warn(`${SYMLINK_SKIP_NOTICE_PREFIX}${path.relative(PROJECT, path.dirname(dest))}`);
+    return "skipped-host-root-symlink";
+  }
   if (!fs.existsSync(src)) return "missing-source";
   if (pathExists(dest)) return "exists";
   ensureDir(path.dirname(dest));
@@ -583,7 +581,9 @@ function installProjectSkills(forceManaged = false, installSelection = null) {
       links.push(recordSkillLinkReceipt(linkProjectSkill(skill, host, previousIndex, forceManaged), skill, previousIndex));
     }
   }
-  links.push(...removeStaleProjectSkillLinks(selected.skills, previousIndex, forceManaged));
+  const retiredLinks = removeStaleProjectSkillLinks(selected.skills, previousIndex, forceManaged);
+  removeRetiredSkillIgnores(PROJECT, retiredLinks);
+  links.push(...retiredLinks);
   const index = preserveKitSkillHashes({ ...selected, links }, previousIndex, path.join(KIT_ROOT, "skills"));
   // 잘린 index.json은 `readJsonIfExists`가 조용히 삼켜 "설치된 skill 없음"으로
   // 읽힌다. 그러면 다음 install이 관리 링크를 stale로 보고 걷어낸다.
@@ -702,28 +702,38 @@ function discoverSkills(baseDir, source, ignoredNames = new Set(), allowedNames 
 
 function removeStaleProjectSkillLinks(skills, previousIndex, forceManaged = false) {
   if (!previousIndex || !Array.isArray(previousIndex.links)) return [];
-  const desired = new Set(skills.flatMap((skill) => skill.hosts.map((host) => `${host}:${skill.name}`)));
+  const desired = new Set(skills.flatMap((skill) => skill.hosts.map((host) =>
+    `${host}:${skill.name}:${path.relative(PROJECT, path.join(hostSkillRoot(host), skill.name)).replaceAll("\\", "/")}`)));
   const removed = [];
   for (const link of previousIndex.links) {
     if (!link || !link.name || !link.host || !link.path) continue;
-    if (desired.has(`${link.host}:${link.name}`)) continue;
+    if (desired.has(`${link.host}:${link.name}:${String(link.path).replaceAll("\\", "/")}`)) continue;
     const target = path.join(PROJECT, link.path);
-    // 과거 index는 .codex(소문자) 경로를 기록했다. case-sensitive FS에서
-    // ensureChildPath가 .Codex와 어긋나 throw하지 않도록 기록된 casing을 따른다.
     const hostRoot = legacyHostSkillRoot(link.path) ?? hostSkillRoot(link.host);
     if (pathHasSymlink(PROJECT, hostRoot)) {
+      console.warn(`${SYMLINK_SKIP_NOTICE_PREFIX}${path.relative(PROJECT, hostRoot)}`);
       removed.push({ name: link.name, host: link.host, path: link.path, status: "skipped-host-root-symlink" });
       continue;
     }
     ensureChildPath(hostRoot, target);
     const stat = lstatIfExists(target);
-    if (!stat) continue;
+    if (!stat) {
+      if (recordsInstalledSkillLink(link)) {
+        removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale" });
+      }
+      continue;
+    }
     if (stat.isSymbolicLink()) {
+      if (link.host === "codex" && !skillLinkMatchesReceipt(PROJECT, target, link, previousIndex)) {
+        console.warn(`${SYMLINK_SKIP_NOTICE_PREFIX}${link.path}`);
+        removed.push({ ...link, status: "skipped-user-modified" });
+        continue;
+      }
       fs.unlinkSync(target);
       removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale" });
       continue;
     }
-    if (forceManaged) {
+    if (forceMayRemoveSkillEntry(link.host, link, forceManaged)) {
       fs.rmSync(target, { recursive: true, force: true });
       removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-forced" });
       continue;
@@ -732,6 +742,7 @@ function removeStaleProjectSkillLinks(skills, previousIndex, forceManaged = fals
       fs.rmSync(target, { recursive: true, force: true });
       removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-copied" });
     } else if (stat.isDirectory()) {
+      console.warn(`kept user-modified skill: ${link.path}`);
       removed.push(skippedSkillCopy(link));
     }
   }
@@ -751,28 +762,38 @@ function linkProjectSkill(skill, host, previousIndex, forceManaged = false) {
   const srcDir = path.dirname(path.join(PROJECT, skill.path));
   const hostRoot = hostSkillRoot(host);
   if (pathHasSymlink(PROJECT, hostRoot)) {
+    console.warn(`${SYMLINK_SKIP_NOTICE_PREFIX}${path.relative(PROJECT, hostRoot)}`);
     return { name: skill.name, host, path: path.relative(PROJECT, hostRoot), status: "skipped-host-root-symlink" };
   }
   const destDir = path.join(hostRoot, skill.name);
   ensureChildPath(hostRoot, destDir);
   const destSkill = path.join(destDir, "SKILL.md");
-  const previousLink = previousIndex?.links?.find((link) => link.name === skill.name && link.host === host);
+  const previousLink = previousIndex?.links?.find((link) =>
+    link.name === skill.name && link.host === host && typeof link.path === "string"
+    && path.resolve(PROJECT, link.path) === destDir);
   // `existsSync`는 심링크를 **따라가서** 끊어진 링크에 false를 준다. 그러면 stale
   // link 정리 분기를 못 타고 곧바로 링크 생성이 EEXIST로 죽는다. profile을 좁히거나
   // `--skills` 선택을 바꾸면 이전 선택의 host 링크가 끊긴 채 남으므로 실제로 밟는다.
   // lstat은 링크 자체를 보므로 끊어진 링크도 정리 대상으로 잡힌다.
   const stat = lstatIfExists(destDir);
   if (stat) {
-    if (forceManaged) {
-      if (stat.isSymbolicLink()) fs.unlinkSync(destDir);
-      else fs.rmSync(destDir, { recursive: true, force: true });
-    } else if (stat.isSymbolicLink()) fs.unlinkSync(destDir);
-    else if (fs.existsSync(destSkill)) {
-      if (!skillCopyMatchesReceipt(destDir, skill.observedContentDigest, previousLink?.installedContentDigest)) {
+    if (stat.isSymbolicLink()) {
+      if (host === "codex" && !skillLinkMatchesReceipt(PROJECT, destDir, previousLink, previousIndex)) {
+        console.warn(`${SYMLINK_SKIP_NOTICE_PREFIX}${path.relative(PROJECT, destDir)}`);
+        return { name: skill.name, host, path: path.relative(PROJECT, destDir), status: "skipped-user-modified" };
+      }
+      fs.unlinkSync(destDir);
+    } else if (fs.existsSync(destSkill)) {
+      const owned = skillCopyIsInstallerOwned(host, destDir, skill, previousLink, forceManaged);
+      if (!owned) {
+        console.warn(`kept user-modified skill: ${path.relative(PROJECT, destDir)}`);
         return skippedSkillCopy({ ...previousLink, name: skill.name, host, path: path.relative(PROJECT, destDir) });
       }
       fs.rmSync(destDir, { recursive: true, force: true });
+    } else if (forceMayRemoveSkillEntry(host, previousLink, forceManaged)) {
+      fs.rmSync(destDir, { recursive: true, force: true });
     } else {
+      console.warn(`kept existing skill: ${path.relative(PROJECT, destDir)}`);
       return { name: skill.name, host, path: path.relative(PROJECT, destDir), status: "skipped-existing" };
     }
   }
@@ -780,9 +801,8 @@ function linkProjectSkill(skill, host, previousIndex, forceManaged = false) {
 }
 
 function hostSkillRoot(host) {
-  // case-sensitive FS에서 .codex/.Codex가 갈라지지 않도록 .Codex로 고정한다.
   if (host === "codex") {
-    return path.join(PROJECT, ".Codex", "skills");
+    return path.join(PROJECT, ".agents", "skills");
   }
   if (host === "omp") {
     return path.join(PROJECT, ".omp", "skills");
@@ -792,6 +812,9 @@ function hostSkillRoot(host) {
 
 function legacyHostSkillRoot(linkPath) {
   const normalized = String(linkPath).replaceAll("\\", "/");
+  if (normalized.startsWith(".Codex/skills/")) {
+    return path.join(PROJECT, ".Codex", "skills");
+  }
   if (normalized.startsWith(".codex/skills/")) {
     return path.join(PROJECT, ".codex", "skills");
   }
@@ -925,12 +948,8 @@ function install() {
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, PROJECT);
   assertStackArchitectureSelection(installSelection, KIT_ROOT, PROJECT);
 
-  if (rootContext === "legacy") {
-    upsertGitExclude(PROJECT, ROOT_CONTEXT_FILES.filter((label) => bootstrapBlockIsOurs(PROJECT, label)));
-  }
-
   // Copy bundled skills into project-local skills dir.
-  // Host-AI-specific skill paths (`.claude/skills/`, `.Codex/skills/`, `.omp/skills/`) are
+  // Host-AI-specific skill paths (`.claude/skills/`, `.agents/skills/`, `.omp/skills/`) are
   // populated by symlinking from .agent-flow/skills/ where possible, so
   // updates to the kit propagate without re-installing.
   const recordedAssets = readKitAssetRecord(PROJECT);
@@ -1051,10 +1070,6 @@ function install() {
     console.warn(`warning: ${KIT_ASSETS_RELATIVE} is unreadable; kit asset sync skipped (delete it to re-bootstrap)`);
   }
   const skillIndex = installProjectSkills(FORCE_MANAGED, installSelection);
-  if (rootContext === "legacy") {
-    upsertSkillIndexBlock(PROJECT);
-    upsertDocsIndexBlock(PROJECT);
-  }
 
   const agentFlowSkill = path.join(AF_DIR, "skills", "agent-flow");
   const claudeSkillStatus = linkOrCopyDir(

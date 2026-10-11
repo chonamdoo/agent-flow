@@ -12,19 +12,17 @@ import { BUNDLED_HOST_SKILL_NAMES, assertStackArchitectureSelection, mergeInstal
 import { installProfile } from "../lib/profile-detection.mjs";
 import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
 import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
-import { captureLegacySkillCopyReceipts, observeSkillContent, parseSkillMetadata, recordSkillLinkReceipt, skillCopyMatchesReceipt, skippedSkillCopy } from "../lib/skill-metadata.mjs";
+import { captureLegacySkillCopyReceipts, forceMayRemoveSkillEntry, observeSkillContent, parseSkillMetadata, recordSkillLinkReceipt, recordsInstalledSkillLink, skillCopyIsInstallerOwned, skillCopyMatchesReceipt, skippedSkillCopy } from "../lib/skill-metadata.mjs";
 import {
   activeInstallProfileIds,
   ensureInstallLease,
   prepareArchitectureInstall,
   migrateRootContext,
-  rootContextPolicy,
   AGENT_FLOW_COMMAND,
   assertInstallRootIsFinal,
   assertKnownInstallArgs,
   atomicWriteFileSync,
   backupIfDifferent,
-  bootstrapBlockIsOurs,
   BOOTSTRAP_TEMPLATE_FILE,
   claudeHooksSettings,
   canonicalPath,
@@ -79,24 +77,19 @@ import {
   resolveLinkedWorktreeLeader,
   resolveInstallRoot,
   resolveGitCommonWorktreeRoot,
-  ROOT_CONTEXT_FILES,
   ROOT_CONTEXT_NOTICE_PREFIX,
   rootBootstrapBlock,
   retiredHookScripts,
   samePath,
   shellQuote,
-  SKILL_INDEX_END,
-  SKILL_INDEX_START,
-  skillIndexBlock,
+  skillLinkMatchesReceipt,
   SYMLINK_SKIP_NOTICE_PREFIX,
   syncRecordedKitAssets,
   tomlBasicString,
   unquoteShellWord,
-  upsertGitExclude,
   upgradeBundledSkills,
   upsertLocalIgnores,
-  upsertDocsIndexBlock,
-  upsertSkillIndexBlock,
+  removeRetiredSkillIgnores,
   validateSkillDependencies,
   writeKitAssetRecord,
 } from "../lib/installer-shared.mjs";
@@ -178,8 +171,7 @@ function installProject(requestedRoot) {
   const architectureMode = architectureInstall.plan.mode;
   let installSelection = resolveInstallSelection({ args: installArgs, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: root, architectureMode, architecturePlan: architectureInstall.plan });
   const existingPayload = readExistingKit(agentFlowDir);
-  const rootContext = installArgs.includes("--migrate-root-context")
-    ? migrateRootContext(root) : rootContextPolicy(root);
+  const rootContext = migrateRootContext(root, { strict: installArgs.includes("--migrate-root-context") });
   // 명시 플래그 > 이전 설정 > 기본(켜짐)
   hooksDisabled = hooksFlagOff || (!hooksFlagOn && existingPayload?.hooks === false);
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, root);
@@ -310,11 +302,6 @@ function installProject(requestedRoot) {
     fs.readFileSync(path.join(KIT_ROOT, ".Codex", "rules", "codebase-rubric.md"), "utf8"),
     forceManaged,
   );
-  writeManagedFileIfMissingOrSame(
-    path.join(root, ".Codex", "rules", "concise-output.md"),
-    fs.readFileSync(path.join(KIT_ROOT, "skills", "agent-flow-concise-output", "concise-output.md"), "utf8"),
-    forceManaged,
-  );
   // 복사 단계는 내용이 다르면 손대지 않으므로 kit이 고친 자산이 기존 설치본에
   // 닿지 않는다. `SKILL.md`는 index hash가, managed hook은 digest가 오라클이고,
   // 나머지는 이 기록이다. 목록은 `RECORDED_KIT_ASSET_TREES` 한 벌이다.
@@ -346,6 +333,12 @@ function installProject(requestedRoot) {
     ".Codex/",
     ".claude/",
     ".omp/",
+    // `.agents/skills`는 다른 도구와 팀 skill이 함께 쓰는 공용 경로라 디렉터리째 숨기면
+    // 새 팀 skill이 `git status`에서 사라진다. installer가 만든 entry만 가린다. symlink
+    // entry가 있으므로 끝에 `/`를 붙이지 않는다 — 그 패턴은 디렉터리에만 걸린다.
+    ...skillIndex.links
+      .filter((link) => link.host === "codex" && recordsInstalledSkillLink(link))
+      .map((link) => String(link.path).replaceAll("\\", "/")),
     // 루트 `AGENTS.md`/`CLAUDE.md`는 여기 올리지 않는다. 무엇을 커밋할지는 프로젝트가
     // 정하고, 툴이 ignore로 밀어 넣으면 그 파일은 clone과 linked worktree에서 사라져
     // 그쪽 세션이 계약을 못 받는다. 이미 적혀 있는 항목은 지우지 않는다 — 그건
@@ -354,14 +347,7 @@ function installProject(requestedRoot) {
     "CLAUDE/",
     "agent-flow/",
   ]);
-  if (rootContext === "legacy") {
-    upsertGitExclude(root, ROOT_CONTEXT_FILES.filter((label) => bootstrapBlockIsOurs(root, label)));
-  }
-  if (rootContext === "legacy") {
-    console.log(`${ROOT_CONTEXT_NOTICE_PREFIX}use --migrate-root-context for explicit conversion`);
-    upsertSkillIndexBlock(root);
-    upsertDocsIndexBlock(root);
-  } else if (rootContext === "preserve") {
+  if (rootContext === "preserve") {
     console.log(`${ROOT_CONTEXT_NOTICE_PREFIX}root ownership is unproven; review conflicting instructions manually. Automatic migration requires an unchanged receipt-owned block.`);
   }
   for (const notice of legacyGlossaryNotices(root)) {
@@ -1224,9 +1210,9 @@ function assertInstalled(root) {
 // `assertInstalled`가 필수로 요구하는 파일이라 반드시 포함한다. `bin`/`lib`는
 // 설치 산출물의 본문(`rules/workflow-contract.md`, 생성되는 SKILL.md 등)을 만들어
 // 내는 소스라 여기 빠지면 그 변경이 지문에 안 잡힌다. host 경로는 installer가 kit에서
-// **읽는** 자리만 넣는다 — `.Codex/hooks.json`, `.claude/settings.json`,
-// `.Codex/rules/concise-output.md`는 installer가 target에 만들어 내는 산출물이라
-// 넣으면 self-install 직후부터 자산 변경 없이 지문이 흔들린다.
+// **읽는** 자리만 넣는다 — `.Codex/hooks.json`, `.claude/settings.json`은 installer가
+// target에 만들어 내는 산출물이라 넣으면 self-install 직후부터 자산 변경 없이 지문이
+// 흔들린다.
 // Python `core/kit_digest.py`와 같은 목록이어야 한다. parity가 두 값을 대조한다.
 const KIT_SOURCE_DIGEST_ROOTS = [
   "templates",
@@ -1809,7 +1795,9 @@ function installProjectSkills(root, agentFlowDir, previousIndex, force = false, 
       links.push(recordSkillLinkReceipt(linkProjectSkill(root, skill, host, previousIndex, force), skill, previousIndex));
     }
   }
-  links.push(...removeStaleProjectSkillLinks(root, selected.skills, previousIndex, force));
+  const retiredLinks = removeStaleProjectSkillLinks(root, selected.skills, previousIndex, force);
+  removeRetiredSkillIgnores(root, retiredLinks);
+  links.push(...retiredLinks);
   const index = preserveKitSkillHashes({ ...selected, links }, previousIndex, path.join(KIT_ROOT, "skills"));
   // 잘린 index.json은 `readJsonIfExists`가 조용히 삼켜 "설치된 skill 없음"으로
   // 읽힌다. 그러면 다음 install이 관리 링크를 stale로 보고 걷어낸다.
@@ -1952,35 +1940,43 @@ function removeStaleProjectSkillLinks(root, skills, previousIndex, force = false
   if (!previousIndex || !Array.isArray(previousIndex.links)) {
     return [];
   }
-  const desired = new Set(skills.flatMap((skill) => skill.hosts.map((host) => `${host}:${skill.name}`)));
+  const desired = new Set(skills.flatMap((skill) => skill.hosts.map((host) =>
+    `${host}:${skill.name}:${path.relative(root, path.join(hostSkillRoot(root, host), skill.name)).replaceAll("\\", "/")}`)));
   const removed = [];
   for (const link of previousIndex.links) {
     if (!link || !link.name || !link.host || !link.path) {
       continue;
     }
-    const key = `${link.host}:${link.name}`;
+    const key = `${link.host}:${link.name}:${String(link.path).replaceAll("\\", "/")}`;
     if (desired.has(key)) {
       continue;
     }
     const target = path.join(root, link.path);
-    // 과거 index는 .codex(소문자) 경로를 기록했다. case-sensitive FS에서
-    // ensureChildPath가 .Codex와 어긋나 throw하지 않도록 기록된 casing을 따른다.
     const hostRoot = legacyHostSkillRoot(root, link.path) ?? hostSkillRoot(root, link.host);
     if (pathHasSymlink(root, hostRoot)) {
+      console.warn(`${SYMLINK_SKIP_NOTICE_PREFIX}${path.relative(root, hostRoot)}`);
       removed.push({ name: link.name, host: link.host, path: link.path, status: "skipped-host-root-symlink" });
       continue;
     }
     ensureChildPath(hostRoot, target);
     const stat = lstatIfExists(target);
     if (!stat) {
+      if (recordsInstalledSkillLink(link)) {
+        removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale" });
+      }
       continue;
     }
     if (stat.isSymbolicLink()) {
+      if (link.host === "codex" && !skillLinkMatchesReceipt(root, target, link, previousIndex)) {
+        console.warn(`${SYMLINK_SKIP_NOTICE_PREFIX}${link.path}`);
+        removed.push({ ...link, status: "skipped-user-modified" });
+        continue;
+      }
       fs.unlinkSync(target);
       removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale" });
       continue;
     }
-    if (force) {
+    if (forceMayRemoveSkillEntry(link.host, link, force)) {
       fs.rmSync(target, { recursive: true, force: true });
       removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-forced" });
       continue;
@@ -1989,6 +1985,7 @@ function removeStaleProjectSkillLinks(root, skills, previousIndex, force = false
       fs.rmSync(target, { recursive: true, force: true });
       removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-copied" });
     } else if (stat.isDirectory()) {
+      console.warn(`kept user-modified skill: ${link.path}`);
       removed.push(skippedSkillCopy(link));
     }
   }
@@ -2010,12 +2007,15 @@ function linkProjectSkill(root, skill, host, previousIndex, force = false) {
   const srcDir = path.dirname(path.join(root, skill.path));
   const hostRoot = hostSkillRoot(root, host);
   if (pathHasSymlink(root, hostRoot)) {
+    console.warn(`${SYMLINK_SKIP_NOTICE_PREFIX}${path.relative(root, hostRoot)}`);
     return { name: skill.name, host, path: path.relative(root, hostRoot), status: "skipped-host-root-symlink" };
   }
   const destDir = path.join(hostRoot, skill.name);
   ensureChildPath(hostRoot, destDir);
   const destSkill = path.join(destDir, "SKILL.md");
-  const previousLink = previousIndex?.links?.find((link) => link.name === skill.name && link.host === host);
+  const previousLink = previousIndex?.links?.find((link) =>
+    link.name === skill.name && link.host === host && typeof link.path === "string"
+    && path.resolve(root, link.path) === destDir);
   // `existsSync`는 심링크를 **따라가서** 끊어진 링크에 false를 준다. 그러면 stale
   // link 정리 분기를 못 타고 곧바로 링크 생성이 EEXIST로 죽는다. profile을 좁히거나
   // `--skills` 선택을 바꾸면 이전 선택의 host 링크가 끊긴 채 남으므로 실제로 밟는다.
@@ -2023,15 +2023,22 @@ function linkProjectSkill(root, skill, host, previousIndex, force = false) {
   const destStat = lstatIfExists(destDir);
   if (destStat) {
     if (destStat.isSymbolicLink()) {
+      if (host === "codex" && !skillLinkMatchesReceipt(root, destDir, previousLink, previousIndex)) {
+        console.warn(`${SYMLINK_SKIP_NOTICE_PREFIX}${path.relative(root, destDir)}`);
+        return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-user-modified" };
+      }
       fs.unlinkSync(destDir);
     } else if (fs.existsSync(destSkill)) {
-      if (!force && !skillCopyMatchesReceipt(destDir, skill.observedContentDigest, previousLink?.installedContentDigest)) {
+      const owned = skillCopyIsInstallerOwned(host, destDir, skill, previousLink, force);
+      if (!owned) {
+        console.warn(`kept user-modified skill: ${path.relative(root, destDir)}`);
         return skippedSkillCopy({ ...previousLink, name: skill.name, host, path: path.relative(root, destDir) });
       }
       fs.rmSync(destDir, { recursive: true, force: true });
-    } else if (force) {
+    } else if (forceMayRemoveSkillEntry(host, previousLink, force)) {
       fs.rmSync(destDir, { recursive: true, force: true });
     } else {
+      console.warn(`kept existing skill: ${path.relative(root, destDir)}`);
       return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-existing" };
     }
   }
@@ -2047,9 +2054,8 @@ function linkProjectSkill(root, skill, host, previousIndex, force = false) {
 }
 
 function hostSkillRoot(root, host) {
-  // case-sensitive FS에서 .codex/.Codex가 갈라지지 않도록 .Codex로 고정한다.
   if (host === "codex") {
-    return path.join(root, ".Codex", "skills");
+    return path.join(root, ".agents", "skills");
   }
   if (host === "omp") {
     return path.join(root, ".omp", "skills");
@@ -2059,6 +2065,9 @@ function hostSkillRoot(root, host) {
 
 function legacyHostSkillRoot(root, linkPath) {
   const normalized = String(linkPath).replaceAll("\\", "/");
+  if (normalized.startsWith(".Codex/skills/")) {
+    return path.join(root, ".Codex", "skills");
+  }
   if (normalized.startsWith(".codex/skills/")) {
     return path.join(root, ".codex", "skills");
   }
@@ -2324,19 +2333,18 @@ function readBootstrapTemplate() {
 
 
 
-// `.agent-flow/bootstrap/<label>`는 루트 블록의 **관리 사본**이다 — 루트 파일을 지웠거나
-// 손으로 고친 프로젝트에서 "install이 심는 계약이 원래 무엇이었나"를 확인하는 자리다.
+// `.agent-flow/bootstrap/<label>`는 정본 템플릿에서 파생한 비공개 bootstrap 사본이다.
+// 신규 설치는 루트 파일에 심지 않지만, 설치 확인(`assertInstalled`)이 이 사본을 요구한다.
 //
 // 예전에는 이 함수가 자기 문구를 지어냈고, 그래서 정확히 예고된 대로 갈라졌다:
 // 템플릿에만 있는 `--workflow` 선택 기준, leader 빌드 금지, gates-only 검증 정책 셋이
 // 사본에는 없었다. parity의 needle 루프는 템플릿만 보므로 그 드리프트를 잡지도 못했다.
 // 그래서 이제 짓지 않고 파생시킨다: 제목 한 줄 + 마커를 뗀 정본 본문.
 //
-// 본문은 `rootBootstrapBlock`이 그 label에 대해 내는 것과 같아야 한다. 사본이 루트에
-// 실제로 심긴 것과 다르면 "원래 무엇이었나"를 확인하러 온 사람에게 거짓을 말한다 —
-// `AGENTS.md`는 계약 본문, `CLAUDE.md`는 `@AGENTS.md` 포인터다.
+// `AGENTS.md` 사본은 계약 본문, `CLAUDE.md` 사본은 `rootBootstrapBlock`이 내는
+// `@AGENTS.md` 포인터다.
 
-// 마커는 루트 파일 **안에서** 블록의 경계를 표시하는 장치라 독립 사본에는 뜻이 없다.
+// 마커는 루트 파일 안에서 블록 경계를 표시하던 장치라 독립 사본에는 뜻이 없다.
 // 리터럴 대신 패턴으로 잡는다: parity가 두 installer 소스에 마커 리터럴이 다시
 // 나타나는 것을 금지한다 — 그 리터럴은 "템플릿에서 읽는다"가 "여기서 짓는다"로
 // 되돌아갔다는 신호이기 때문이다.
@@ -2345,21 +2353,7 @@ const BOOTSTRAP_MARKER_LINE = /^<!--\s*agent-flow:([a-z:]*)\s*-->$/;
 function managedBootstrapMarkdown(label) {
   const template = readBootstrapTemplate();
   const lines = rootBootstrapBlock(label, template.text).split(/\r?\n/);
-  const body = [];
-  let insideIndexBlock = false;
-  for (const line of lines) {
-    const marker = BOOTSTRAP_MARKER_LINE.exec(line.trim());
-    if (marker) {
-      // 인덱스 자리(skill·docs)는 install이 **루트 파일에만** 채운다. 사본에 그 자리를
-      // 남기면 "아직 없다. install이 채운다"가 영원히 참이 되지 않는 문장으로 굳는다.
-      // 인덱스별로 이 판정을 따로 적으면 새로 더한 인덱스만 사본으로 새어 나간다.
-      if (marker[1].endsWith(":start")) insideIndexBlock = true;
-      else if (marker[1].endsWith(":end")) insideIndexBlock = false;
-      continue;
-    }
-    if (insideIndexBlock) continue;
-    body.push(line);
-  }
+  const body = lines.filter((line) => !BOOTSTRAP_MARKER_LINE.test(line.trim()));
   const text = body.join("\n").trim();
   if (!text) {
     throw new Error(`bootstrap template has no body outside markers: ${template.path}`);

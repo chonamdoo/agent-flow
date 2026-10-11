@@ -1,15 +1,10 @@
 <!-- agent-flow:start -->
 ## Agent Flow
 
-- Invoke `/agent-flow` explicitly to start or resume an Agent Flow task. Follow `.agent-flow/skills/agent-flow/SKILL.md` only for that invocation; installation or opening a session does not start a workflow.
+- Invoke the host's native `agent-flow` skill explicitly to start or resume a task. Follow `.agent-flow/skills/agent-flow/SKILL.md` only for that invocation; installation or opening a session does not start a workflow.
 - Existing project rules and installed runtime protection remain applicable outside Agent Flow participation.
 
 ### Context Economy
 
 - Keep answers short and in the language the user writes in; keep code, commands, paths, identifiers, and exact workflow markers verbatim.
-<!-- agent-flow:skills:start -->
-- No installed skill index yet. Install fills this slot.
-<!-- agent-flow:skills:end -->
-<!-- agent-flow:docs:start -->
-<!-- agent-flow:docs:end -->
 <!-- agent-flow:end -->

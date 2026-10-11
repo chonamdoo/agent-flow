@@ -77,12 +77,13 @@ agent-flow . --profile android --skills tdd,code-review
 `bugfix`를 쓴다. phase가 5개 — `reproduce`, `implement-fix`, `review`, `qa`, `handoff` — 이고,
 실제 review와 실제 검증 단계를 모두 가진 workflow 중 가장 저렴하다.
 
-이 명령들은 빈 셸이 아니라 Claude Code 또는 Codex 세션 안에서 실행한다. agent-flow는 phase
+이 명령들은 빈 셸이 아니라 Claude Code, Codex 또는 OMP 세션 안에서 실행한다. agent-flow는 phase
 prompt를 출력하고 기다리며, 그 prompt를 읽고 phase의 일을 하고 `required_artifact`를 쓰는 주체는
-그 세션의 호스트 CLI다. 세션 안에서는 같은 단계에 슬래시 명령 형태가 있다 — 시작은
-`/agent-flow <task>`, 계속은 `/agent-flow`. 터미널에서 바이너리만 직접 실행하면
-`status: awaiting_host`에 멈춘 채 artifact를 쓸 주체가 없다. USAGE.md의
-[Running](../USAGE.md#running)을 본다.
+호스트 CLI다. native skill로도 시작할 수 있다: Claude Code는 `/agent-flow <task>`, Codex는
+`$agent-flow <task>`, OMP는 `/skill:agent-flow <task>`. 계속할 때는 선택한 run의 재개를 요청한다.
+skill 발견이나 세션 시작만으로 run이 시작되지는 않는다. 터미널에서 바이너리만 실행하면
+`status: awaiting_host`에 멈춘 채 artifact를 쓸 주체가 없다. native entry 경로와 기존 루트 블록의
+안전한 정리는 USAGE.md의 [Running](../USAGE.md#running)을 본다.
 
 ```bash
 agent-flow run "fix the login timeout on slow networks" --workflow bugfix --worktree fix-login-timeout

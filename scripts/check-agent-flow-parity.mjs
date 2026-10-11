@@ -9,20 +9,13 @@ import { fileURLToPath } from "node:url";
 
 import {
   activeInstallProfileIds,
-  blockWithoutIndexBodies,
-  DOCS_INDEX_END,
-  DOCS_INDEX_START,
-  docsIndexBlock,
   installedProfileFileNames,
   PROJECT_LAUNCHER_RELATIVE,
   HOOK_LAUNCHER_RELATIVE,
   resolveLinkedWorktreeLeader,
   resolveManagedWorktreeContext,
-  SKILL_INDEX_END,
-  SKILL_INDEX_START,
-  skillIndexBlock,
 } from "../lib/installer-shared.mjs";
-import { BUNDLED_HOST_SKILL_NAMES, resolveInstallSelection } from "../lib/skill-selection.mjs";
+import { BUNDLED_HOST_SKILL_NAMES } from "../lib/skill-selection.mjs";
 
 // Python `LEAKY_GIT_ENV_VARS`(`src/agent_flow/core/worktree_isolation.py`) 및 두
 // installer와 같은 목록이다. ambient discovery 변수가 남아 있으면 이 검사가 검사
@@ -218,17 +211,7 @@ function assertAbsent(rel, needle, why) {
   }
 }
 
-// 넓은 trust를 걷어내는 본문과 skill 인덱스 본문은 이제 공유 모듈에만 있다.
 assertContains("lib/installer-shared.mjs", "export function removeCodexBroadTrustState(root)");
-assertContains("lib/installer-shared.mjs", "export function skillIndexBlock(root)");
-assertContains("lib/installer-shared.mjs", "export function upsertSkillIndexBlock(root)");
-assertContains("lib/installer-shared.mjs", 'export const SKILL_INDEX_START = "<!-- agent-flow:skills:start -->"');
-assertContains("lib/installer-shared.mjs", "export function docsIndexBlock(root)");
-assertContains("lib/installer-shared.mjs", "export function upsertDocsIndexBlock(root)");
-assertContains("lib/installer-shared.mjs", 'export const DOCS_INDEX_START = "<!-- agent-flow:docs:start -->"');
-// 두 인덱스가 소유권 판정과 receipt 갱신을 한 벌로 공유해야 한다. 각자 적으면
-// 새 인덱스만 `kept-user-edited` 블록을 덮는 쪽으로 갈라진다.
-assertContains("lib/installer-shared.mjs", "function upsertManagedSubBlock(root, startMarker, endMarker, block)");
 
 // `installCodexHooks`/`installClaudeHooks`/`installOmpHooks` 본문은 각 진입점의
 // 전역을 읽어 아직 각자 갖고 있다. 아래 단언은 그 본문에 걸린 계약이라 두 파일을
@@ -237,10 +220,6 @@ for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]
   assertNotContains(installer, "function installCodexTrustState(root)");
   assertContains(installer, "function installOmpHooks(root)");
   assertContains(installer, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
-  // 두 진입점이 같은 인덱스를 만들어야 한다. 한쪽만 채우면 install 순서에 따라
-  // AGENTS.md의 인덱스가 있었다 없었다 한다.
-  assertContains(installer, "upsertSkillIndexBlock(");
-  assertContains(installer, "upsertDocsIndexBlock(");
   // install이 **현재 등록된** hook의 해시를 trusted로 되받아 적으면, 변조된
   // 등록이 다음 install에서 승인 상태로 세탁된다. 읽는 코드도 없었다.
   // 등록 무결성은 런 시작 시 hook_integrity가 kit.json과 대조한다.
@@ -662,140 +641,11 @@ function externalDomainsWithoutTerms(text) {
 
 // bootstrap은 반복 install 대신 기존 설치된 CLI로 worktree run을 시작해야 한다.
 //
-// 블록의 정본은 `bootstrap/AGENTS.md.template` 한 벌이고, 루트 `AGENTS.md`와
-// `CLAUDE.md`는 그 한 벌을 받는다. 예전에는 label마다 템플릿이 따로 있었다:
-// 처음에는 두 벌의 바이트 동일성을 요구했고(같은 본문을 두 벌 유지하라는 요구),
-// 다음에는 `CLAUDE.md.template`을 `@AGENTS.md` **포인터만** 담은 파일로 바꿨다.
-// 포인터 하나만 두면 Claude는 계약을 import로 받고 Codex/OMP는 직접 읽어 host마다
-// 로드되는 텍스트가 갈렸다. 지금은 둘 다 같은 블록을 받고, import는 블록 **밖**
-// 프로젝트 산문을 Claude에게 전달하는 한 줄로만 남는다(`rootBootstrapBlock`).
-// 여기서는 label별 템플릿이 되살아나지 않았는지를 본다.
 assertMissing("bootstrap/CLAUDE.md.template");
 assertContains("bootstrap/AGENTS.md.template", "<!-- agent-flow:end -->");
-// 인덱스 자리는 템플릿이 연다. 여기 없으면 install이 채울 자리가 없어 문서 인덱스가
-// 조용히 생기지 않고, 그 침묵은 "docs/가 비었다"와 구별되지 않는다.
-assertContains("bootstrap/AGENTS.md.template", "<!-- agent-flow:docs:start -->");
-assertContains("bootstrap/AGENTS.md.template", "<!-- agent-flow:docs:end -->");
 // 템플릿 자신은 import를 담지 않는다. 담으면 `AGENTS.md`가 자기 자신을 import한다.
 assertNotContains("bootstrap/AGENTS.md.template", "@AGENTS.md");
 
-// 이 저장소 자신의 루트 `AGENTS.md`도 템플릿에서 파생된 사본이다. 아래 install 검사는
-// 임시 tempRoot만 보므로, 여기 커밋된 파일이 손으로 갈라져도 지금까지 아무도 말해 주지
-// 않았다. generated index **본문**은 install이 채우므로 도려내고 마커 줄은 남긴다 —
-// 마커 쌍이 없으면 `upsertManagedSubBlock`이 조용히 건너뛰어 그 인덱스가 영구히 안 생긴다.
-assertRepoRootAgentsMatchesTemplate();
-
-function assertRepoRootAgentsMatchesTemplate() {
-  const template = readIfExists("bootstrap/AGENTS.md.template");
-  const root = readIfExists("AGENTS.md");
-  if (template === null || root === null) return;
-  const expected = managedBlockWithoutIndexBodies(template, "bootstrap/AGENTS.md.template");
-  const actual = managedBlockWithoutIndexBodies(root, "AGENTS.md");
-  if (expected === null || actual === null || expected === actual) return;
-  const expectedLines = expected.split("\n");
-  const actualLines = actual.split("\n");
-  const firstDiff = expectedLines.findIndex((line, index) => line !== actualLines[index]);
-  const at = firstDiff === -1 ? expectedLines.length : firstDiff;
-  failures.push(
-    `AGENTS.md managed block diverged from bootstrap/AGENTS.md.template at block line ${at + 1}\n`
-      + `  bootstrap/AGENTS.md.template: ${expectedLines[at] ?? "<no line>"}\n`
-      + `  AGENTS.md: ${actualLines[at] ?? "<no line>"}`,
-  );
-}
-
-// 위 검사가 인덱스 본문을 도려내고, install 산출물 대조는 임시 tempRoot를 본다. 그래서
-// **커밋된** `AGENTS.md`의 인덱스가 낡아도 지금까지 아무 검사도 그것을 보지 못했고,
-// 실제로 `docs` 인덱스는 이 저장소의 커밋 히스토리 전 구간에서 비어 있었다.
-assertCommittedRootIndexesAreFresh();
-
-function assertCommittedRootIndexesAreFresh() {
-  // working tree가 아니라 HEAD를 본다. parity는 CI에서 install 뒤에 돌고 install이 방금
-  // 인덱스를 다시 채우므로, working tree를 보면 이 검사는 언제나 통과한다.
-  const committed = gitOutput(SOURCE_ROOT, ["show", "HEAD:AGENTS.md"]);
-  if (committed === null) return;
-  // 기대값은 generator가 만들고 generator는 워킹 트리를 읽는다. 그래서 그 입력이 HEAD와
-  // 어긋나 있으면 이 검사는 남이 재현할 수 없는 실패를 낸다 — 커밋하지 않은 `docs/`
-  // 초안 하나로 `npm test`가 통째로 막히고, 안내를 따르면 그 초안 이름이 tracked
-  // `AGENTS.md`에 박힌다. 입력이 git과 일치할 때만 판정한다.
-  const docsDirty = gitOutput(SOURCE_ROOT, ["status", "--porcelain", "--untracked-files=all", "--", "docs"]);
-  const installedSkills = readJsonSafe(path.join(SOURCE_ROOT, ".agent-flow", "skills", "index.json"));
-  const indexes = [
-    {
-      name: "skills",
-      start: SKILL_INDEX_START,
-      end: SKILL_INDEX_END,
-      available: installedSelectionIsCanonical(installedSkills),
-      expected: () => skillIndexBlock(SOURCE_ROOT),
-    },
-    {
-      name: "docs",
-      start: DOCS_INDEX_START,
-      end: DOCS_INDEX_END,
-      available: docsDirty === null,
-      expected: () => docsIndexBlock(SOURCE_ROOT),
-    },
-  ];
-  for (const index of indexes) {
-    if (!index.available) continue;
-    const from = committed.indexOf(index.start);
-    const to = committed.indexOf(index.end);
-    if (from === -1 || to === -1 || to < from) {
-      failures.push(`committed AGENTS.md has no ${index.name} index markers`);
-      continue;
-    }
-    if (committed.slice(from, to + index.end.length) === index.expected()) continue;
-    failures.push(
-      `committed AGENTS.md ${index.name} index does not match the installer output;`
-        + " re-run install and commit AGENTS.md",
-    );
-  }
-}
-
-// 커밋된 skill 인덱스는 **이 저장소의 기본 install**이 고르는 집합만 검증할 수 있다.
-// skill 선택은 `--profile`/`--skills`와 감지된 profile이 정하므로(`lib/skill-selection.mjs`),
-// 좁혀 설치한 checkout의 `index.json`을 기대값으로 쓰면 그 host의 부분집합을 커밋하라는
-// 실패가 난다 — 이 저장소 자신도 python profile로 이미 24개로 좁혀져 있다.
-//
-// 그래서 기록된 선택이 인자 없는 install의 선택과 같을 때만 판정한다. `detectedProfile`은
-// install이 기록해 둔 감지값을 쓴다: 그 값은 저장소에서 파생되고, `--profile`로 넘긴 것과
-// 무관하게 항상 기록된다.
-function installedSelectionIsCanonical(installedSkills) {
-  const installed = Array.isArray(installedSkills?.skills)
-    ? installedSkills.skills.map((skill) => String(skill.name))
-    : [];
-  if (installed.length === 0) return false;
-  const kit = readJsonSafe(path.join(SOURCE_ROOT, ".agent-flow", "kit.json"));
-  if (typeof kit?.profile !== "string") return false;
-  let canonical;
-  try {
-    canonical = resolveInstallSelection({
-      args: [],
-      detectedProfile: kit.profile,
-      kitRoot: SOURCE_ROOT,
-      projectRoot: SOURCE_ROOT,
-    }).skillNames;
-  } catch {
-    return false;
-  }
-  // `skillNames === null`은 "좁히지 않았다"이고, 그때 install은 배포된 skill 전부를 깐다.
-  if (canonical === null) return true;
-  if (canonical.size !== installed.length) return false;
-  return installed.every((name) => canonical.has(name));
-}
-
-// 인덱스 본문 도려내기는 `lib/installer-shared.mjs`의 `blockWithoutIndexBodies`가 정본이다.
-// installer가 그 함수로 블록 소유를 판정하므로, 여기 사본을 두면 한쪽만 고친 순간 installer는
-// 블록을 "우리 것"으로 보고 인덱스를 덮는데 parity는 같은 줄을 산문 편집으로 읽어, 고칠 수
-// 없는 실패를 요구한다.
-function managedBlockWithoutIndexBodies(text, label) {
-  const start = text.indexOf("<!-- agent-flow:start -->");
-  const end = text.indexOf("<!-- agent-flow:end -->");
-  if (start === -1 || end === -1) {
-    failures.push(`${label} is missing the agent-flow managed block markers`);
-    return null;
-  }
-  return blockWithoutIndexBodies(text.slice(start, end));
-}
 
 
 if (CHECK_INSTALLED_COPY) {
@@ -1301,24 +1151,12 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
 function assertInstalledBootstrapDerivesFromTemplate(label, tempRoot) {
   const template = readIfExists("bootstrap/AGENTS.md.template");
   if (template === null) return;
-  const body = [];
-  let insideIndexBlock = false;
-  for (const line of template.split(/\r?\n/)) {
-    const marker = /^<!--\s*agent-flow:([a-z:]*)\s*-->$/.exec(line.trim());
-    if (marker) {
-      // 인덱스 자리(skill·docs)는 install이 루트 파일에만 채운다. 인덱스마다 이름을
-      // 적으면 새 인덱스가 사본 대조에서 빠져 드리프트가 통과한다.
-      if (marker[1].endsWith(":start")) insideIndexBlock = true;
-      else if (marker[1].endsWith(":end")) insideIndexBlock = false;
-      continue;
-    }
-    if (insideIndexBlock) continue;
-    body.push(line);
-  }
-  const derived = body.join("\n").trim();
+  const derived = template
+    .split(/\r?\n/)
+    .filter((line) => !/^<!--\s*agent-flow:[a-z:]*\s*-->$/.test(line.trim()))
+    .join("\n")
+    .trim();
   // `AGENTS.md` 사본은 계약 본문, `CLAUDE.md` 사본은 그 본문을 가리키는 포인터다.
-  // 사본이 루트에 실제로 심긴 것과 다르면 "원래 무엇이었나"를 확인하러 온 사람에게
-  // 거짓을 말한다.
   const managedPath = path.join(tempRoot, ".agent-flow", "bootstrap", "AGENTS.md");
   if (!fs.existsSync(managedPath)) {
     failures.push(`${label} install missing .agent-flow/bootstrap/AGENTS.md`);
@@ -1725,7 +1563,7 @@ function seedPreviousIndexStaleHostSkill(root) {
   index.links = [
     ...(index.links ?? []),
     { name: staleName, host: "claude", path: ".claude/skills/demo-stale", status: "copied" },
-    { name: staleName, host: "codex", path: ".Codex/skills/demo-stale", status: "copied" },
+    { name: staleName, host: "codex", path: ".agents/skills/demo-stale", status: "copied" },
     { name: staleName, host: "omp", path: ".omp/skills/demo-stale", status: "copied" },
   ];
   fs.writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
@@ -1748,7 +1586,7 @@ function removePathOrSymlink(target) {
 
 function hostSkillRoot(root, host) {
   if (host === "codex") {
-    return path.join(root, ".Codex", "skills");
+    return path.join(root, ".agents", "skills");
   }
   if (host === "omp") {
     return path.join(root, ".omp", "skills");
