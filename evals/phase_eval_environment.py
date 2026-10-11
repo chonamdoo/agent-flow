@@ -9,9 +9,23 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
+import time
 
 
 WEB_VERIFICATION_DEPENDENCIES = {"jsdom": "26.1.0", "esbuild": "0.25.2"}
+COMMAND_TIMEOUT = 120
+DEPENDENCY_TIMEOUT = 600
+CACHE_LOCK_TIMEOUT = 600
+PROCESS_CLEANUP_GRACE = 16
+PIPE_DRAIN_TIMEOUT = 2
+PROCESS_REAP_TIMEOUT = 2
+_CLEANUP_ENV = "_AGENT_FLOW_EVAL_CLEANUP_GRACE"
+_OWNED_PROCESSES: dict[subprocess.Popen, float] = {}
+_PROCESS_LOCK = threading.RLock()
+_CANCELLED = threading.Event()
+_CANCEL_SIGNAL = signal.SIGINT
+_CANCELLATION_DEPTH = 0
 
 
 def environment_for_project(project: Path | None, base: dict[str, str] | None = None) -> dict[str, str]:
@@ -27,33 +41,148 @@ def environment_for_project(project: Path | None, base: dict[str, str] | None = 
     return env
 
 
-def _command(args: list[str], cwd: Path, env: dict[str, str], *, timeout: int = 120) -> dict:
+def _command(args: list[str], cwd: Path, env: dict[str, str], *, timeout: int = COMMAND_TIMEOUT) -> dict:
     result = _run_process(args, cwd=cwd, env=env, timeout=timeout)
     return {"command": args, "exit_code": result.returncode,
             "status": "PASS" if result.returncode == 0 else "FAIL",
             "output": (result.stdout + result.stderr).strip()[-4000:]}
 
 
-def _run_process(args: list[str], *, cwd: Path, env: dict[str, str], timeout: int) -> subprocess.CompletedProcess:
-    process = subprocess.Popen(args, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, text=True, start_new_session=True)
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except (subprocess.TimeoutExpired, KeyboardInterrupt):
+def _raise_cancelled() -> None:
+    if _CANCELLED.is_set():
+        if _CANCEL_SIGNAL == signal.SIGINT:
+            raise KeyboardInterrupt
+        raise SystemExit(128 + _CANCEL_SIGNAL)
+
+
+def _signal_owned(signum: int) -> None:
+    with _PROCESS_LOCK:
+        for process in _OWNED_PROCESSES:
+            try:
+                os.killpg(process.pid, signum)
+            except ProcessLookupError:
+                pass
+
+
+@contextmanager
+def _cancellation_scope():
+    global _CANCELLATION_DEPTH, _CANCEL_SIGNAL
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    if _CANCELLATION_DEPTH:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            yield
+        except (KeyboardInterrupt, SystemExit):
+            _CANCELLED.set()
+            _signal_owned(signal.SIGTERM)
+            raise
+        return
+    previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
+
+    def cancel(signum, frame):
+        global _CANCEL_SIGNAL
+        _CANCEL_SIGNAL = signum
+        _CANCELLED.set()
+        _signal_owned(signal.SIGTERM)
+
+    _CANCELLATION_DEPTH += 1
+    try:
+        for signum in previous:
+            signal.signal(signum, cancel)
+        try:
+            yield
+            _raise_cancelled()
+        except BaseException:
+            _CANCELLED.set()
+            _signal_owned(signal.SIGTERM)
+            deadline = time.monotonic() + PROCESS_CLEANUP_GRACE + PIPE_DRAIN_TIMEOUT + PROCESS_REAP_TIMEOUT + 1
+            while time.monotonic() < deadline:
+                with _PROCESS_LOCK:
+                    if not _OWNED_PROCESSES:
+                        break
+                time.sleep(0.05)
+            _signal_owned(signal.SIGKILL)
+            raise
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        _CANCELLATION_DEPTH -= 1
+        with _PROCESS_LOCK:
+            if not _OWNED_PROCESSES:
+                _CANCELLED.clear()
+                _CANCEL_SIGNAL = signal.SIGINT
+
+
+def _output_text(value: str | bytes | None) -> str:
+    return value.decode(errors="replace") if isinstance(value, bytes) else value or ""
+
+
+def _stop_process(process: subprocess.Popen, grace: float) -> tuple[str, str]:
+    for signum, budget in ((signal.SIGTERM, grace), (signal.SIGKILL, PIPE_DRAIN_TIMEOUT)):
+        if process.poll() is not None:
+            budget = min(budget, PIPE_DRAIN_TIMEOUT)
+        try:
+            os.killpg(process.pid, signum)
         except ProcessLookupError:
             pass
         try:
-            process.communicate(timeout=2)
-        except subprocess.TimeoutExpired:
-            if process.stdout is not None:
-                process.stdout.close()
-            if process.stderr is not None:
-                process.stderr.close()
-            process.wait(timeout=2)
-        raise
-    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+            stdout, stderr = process.communicate(timeout=budget)
+        except subprocess.TimeoutExpired as error:
+            stdout, stderr = _output_text(error.output), _output_text(error.stderr)
+        else:
+            # 그룹의 leader가 끝나도 같은 그룹의 다른 자손은 남을 수 있다.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            return stdout, stderr
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is not None:
+            pipe.close()
+    process.wait(timeout=PROCESS_REAP_TIMEOUT)
+    return stdout, stderr
+
+
+def _run_process(args: list[str], *, cwd: Path | None, env: dict[str, str], timeout: int,
+                 input: str | None = None, timeout_result: bool = False) -> subprocess.CompletedProcess:
+    grace = min(PROCESS_CLEANUP_GRACE, max(1.0, float(env.get(_CLEANUP_ENV, PROCESS_CLEANUP_GRACE))))
+    child_env = dict(env, **{_CLEANUP_ENV: str(max(1.0, grace - PIPE_DRAIN_TIMEOUT - PROCESS_REAP_TIMEOUT - 1))})
+    with _cancellation_scope():
+        with _PROCESS_LOCK:
+            _raise_cancelled()
+            process = subprocess.Popen(
+                args, cwd=cwd, env=child_env, stdin=subprocess.PIPE if input is not None else None,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+            )
+            _OWNED_PROCESSES[process] = grace
+        deadline = time.monotonic() + timeout
+        try:
+            while True:
+                _raise_cancelled()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(args, timeout)
+                try:
+                    stdout, stderr = process.communicate(input, timeout=min(remaining, 0.2))
+                    break
+                except subprocess.TimeoutExpired:
+                    input = None
+            return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired as error:
+            stdout, stderr = _stop_process(process, grace)
+            if timeout_result:
+                return subprocess.CompletedProcess(
+                    args, process.returncode or -signal.SIGKILL, stdout, f"timeout after {timeout}s\n{stderr}",
+                )
+            error.timeout, error.output, error.stderr = timeout, stdout, stderr
+            raise
+        except BaseException:
+            _stop_process(process, grace)
+            raise
+        finally:
+            with _PROCESS_LOCK:
+                del _OWNED_PROCESSES[process]
 
 
 def _executable(name: str) -> str:
@@ -68,11 +197,21 @@ def _sha(path: Path) -> str:
 
 
 @contextmanager
-def _cache_lock(path: Path):
+def _cache_lock(path: Path, *, timeout: float = CACHE_LOCK_TIMEOUT):
     import fcntl
 
     with path.open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        deadline = time.monotonic() + timeout
+        while True:
+            _raise_cancelled()
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"evaluation dependency cache lock timed out after {timeout}s: {path}")
+                _CANCELLED.wait(min(remaining, 0.05))
         try:
             yield
         finally:
@@ -121,22 +260,39 @@ def _node_dependencies(project: Path, case_dir: Path, cache_root: Path, stack: s
     with _cache_lock(cache_root / f"{key}.lock"):
         cache.mkdir(exist_ok=True)
         receipt_path = cache / "readiness.json"
-        if receipt_path.is_file():
+        cached = receipt_path.is_file()
+        for staging in cache.glob(".readiness-*.json"):
+            staging.unlink()
+        if cached:
             receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            if receipt["cache_key"] != key:
+                raise RuntimeError("evaluation dependency cache tool fingerprint changed")
             if receipt["lock_sha256"] != _sha(cache / "package-lock.json"):
                 raise RuntimeError("evaluation dependency cache lock fingerprint changed")
-            if json.loads((cache / "package.json").read_text(encoding="utf-8")) != manifest:
-                raise RuntimeError("evaluation dependency cache manifest changed")
         else:
             (cache / "package.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
             install_env = dict(env, npm_config_cache=str(cache_root / "npm-cache"))
             install = _command([npm, "install", "--ignore-scripts", "--no-audit", "--no-fund"],
-                               cache, install_env, timeout=600)
+                               cache, install_env, timeout=DEPENDENCY_TIMEOUT)
             if install["exit_code"] != 0:
                 raise RuntimeError(f"evaluation dependency preparation failed: npm exit {install['exit_code']}")
             receipt = {"cache_key": key, "lock_sha256": _sha(cache / "package-lock.json")}
+        if json.loads((cache / "package.json").read_text(encoding="utf-8")) != manifest:
+            raise RuntimeError("evaluation dependency cache manifest changed")
         versions = _installed_versions(cache, manifest)
-        receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+        if not cached:
+            staging = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix=".readiness-",
+                                                 suffix=".json", dir=cache, delete=False) as receipt_file:
+                    staging = Path(receipt_file.name)
+                    receipt_file.write(json.dumps(receipt, sort_keys=True) + "\n")
+                    receipt_file.flush()
+                    os.fsync(receipt_file.fileno())
+                staging.replace(receipt_path)
+            finally:
+                if staging is not None:
+                    staging.unlink(missing_ok=True)
         target = project / "node_modules"
         if target.exists():
             raise RuntimeError("evaluation fixture already contains node_modules")

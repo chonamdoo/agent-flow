@@ -33,7 +33,6 @@ import os
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -43,7 +42,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from phase_eval_environment import environment_for_project, prepare_fixture_environment
+from phase_eval_environment import (
+    CACHE_LOCK_TIMEOUT, COMMAND_TIMEOUT, DEPENDENCY_TIMEOUT, PIPE_DRAIN_TIMEOUT,
+    PROCESS_CLEANUP_GRACE, PROCESS_REAP_TIMEOUT, _cancellation_scope, _run_process,
+    environment_for_project, prepare_fixture_environment,
+)
 from phase_eval_fingerprint import evaluator_sha256
 from phase_eval_web_verification import verify_web_review
 
@@ -55,7 +58,8 @@ FINDING_TAG_RE = re.compile(r"must[- ]?fix|(?<!non)(?<!non-)(?<!non )blocking|<s
 HEADING_RE = re.compile(r"^\s{0,3}(?:#{1,6}\s+\S|\*\*[^*]+\*\*:?\s*$)")
 AUTHOR_TOOLS = (
     "Read Edit Write Glob Grep Bash(node:*) Bash(python3:*) Bash(python:*) "
-    "Bash(dart:*) Bash(sh:*) Bash(ls:*) Bash(cat:*)"
+    "Bash(dart:*) Bash(sh:*) Bash(ls:*) Bash(/bin/cat:*) Bash(/usr/bin/cat:*) "
+    "Bash(/bin/sed:*) Bash(/usr/bin/sed:*) Bash(/bin/sh:*) Bash(/usr/bin/sh:*)"
 )
 AUTHOR_DENIED = "Bash(agent-flow:*) Bash(git:*) Bash(rm:*)"
 PY = sys.executable
@@ -64,10 +68,20 @@ REQUESTED_MODELS: dict[str, str | None] = {"claude": None, "codex": None}
 REQUESTED_PROVIDERS: dict[str, str | list[str]] = {"author": "claude", "review": ["claude", "codex"]}
 READ_EVIDENCE_PROMPT = (
     "\n\nEvaluation read-evidence contract: when reading a skill document, use the native Read tool "
-    "if available. Otherwise use a standalone cat or sed print command with one literal file path "
-    "per tool call. Do not bulk-read skill documents through Python, loops, pipes, or mixed shell "
-    "commands: those reads cannot be attributed by this evaluator. This changes only evidence "
-    "collection, not the task requirements or implementation."
+    "if available. Otherwise use a standalone /bin/cat or /usr/bin/sed -n print command with one "
+    "literal file path per tool call. "
+    "For a Codex execution tool, set the tool's shell parameter to /bin/sh and login to false; "
+    "an inner /bin/sh command does not change the tool's outer default shell. "
+    "If a shell wrapper is needed, use /bin/sh -c (not a login shell). "
+    "Only cat/sed/head/tail at exact /bin or /usr/bin paths and /bin/sh or /usr/bin/sh -c wrappers "
+    "are attributable; bare commands, project-local executables, Python, loops, pipes, and mixed "
+    "shell commands are not read evidence. "
+    "This changes only evidence collection, not the task requirements or implementation."
+)
+PREPARATION_TIMEOUT = (
+    2 * COMMAND_TIMEOUT + CACHE_LOCK_TIMEOUT + DEPENDENCY_TIMEOUT + COMMAND_TIMEOUT
+    + 2 * 600 + 6 * COMMAND_TIMEOUT + 600 + 2 * COMMAND_TIMEOUT
+    + 600 + 3 * (PROCESS_CLEANUP_GRACE + PIPE_DRAIN_TIMEOUT + PROCESS_REAP_TIMEOUT + 1)
 )
 
 
@@ -81,21 +95,7 @@ def _token_sum(values: list[int | None]) -> int | None:
 
 
 def _run_group(args: list[str], *, timeout: int, cwd: Path | None = None) -> subprocess.CompletedProcess:
-    """새 세션으로 실행한다. timeout이면 그 명령이 띄운 installer·테스트까지 프로세스 그룹째 끝낸다.
-
-    `subprocess.run(timeout=)`은 직접 띄운 프로세스만 죽여서 손자 프로세스가 임시 폴더에 계속 쓴다.
-    """
-    process = subprocess.Popen(
-        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd, start_new_session=True,
-        env=environment_for_project(cwd),
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        stdout, stderr = process.communicate()
-        stderr = f"timeout after {timeout}s\n{stderr}"
-    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+    return _run_process(args, timeout=timeout, cwd=cwd, env=environment_for_project(cwd), timeout_result=True)
 
 
 # --------------------------------------------------------------------------- prepare
@@ -105,10 +105,11 @@ def _run_group(args: list[str], *, timeout: int, cwd: Path | None = None) -> sub
 def _git(cwd: Path, *args: str) -> None:
     # 바깥 세션의 GIT_DIR·GIT_WORK_TREE 등이 남아 있으면 임시 프로젝트가 아닌 저장소에 쓴다.
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    subprocess.run(
+    result = _run_process(
         ["git", "-c", "user.email=eval@example.com", "-c", "user.name=eval", *args],
-        cwd=cwd, check=True, capture_output=True, env=env,
+        cwd=cwd, env=env, timeout=COMMAND_TIMEOUT,
     )
+    result.check_returncode()
 
 
 def _overlay(src: Path, dst: Path) -> None:
@@ -340,20 +341,11 @@ _slots: threading.Semaphore
 
 
 def _run_cli(args: list[str], prompt: str, cwd: Path, timeout: int) -> subprocess.CompletedProcess:
-    """모델 CLI를 새 세션으로 띄운다. timeout이면 CLI가 띄운 셸·테스트까지 프로세스 그룹째 끝낸다."""
     with _slots:
-        process = subprocess.Popen(
-            args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            cwd=cwd, text=True, start_new_session=True,
+        return _run_process(
+            args, input=prompt, cwd=cwd, timeout=timeout, timeout_result=True,
             env={**environment_for_project(cwd), "PATH": _project_tool_path(cwd)},
         )
-        try:
-            stdout, stderr = process.communicate(prompt, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            stdout, stderr = process.communicate()
-            stderr = f"timeout after {timeout}s\n{stderr}"
-    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
 
@@ -454,10 +446,8 @@ def _claude(prompt: str, cwd: Path, *, author: bool, timeout: int, evidence: Pat
 def _read_command_paths(command: str, cwd: Path) -> list[str]:
     try:
         arguments = shlex.split(command)
-        if (len(arguments) == 3 and Path(arguments[0]).name in {"sh", "bash", "zsh"}
-                and arguments[1] in {"-c", "-lc"}):
-            if "/" in arguments[0] and Path(arguments[0]).parent not in (Path("/bin"), Path("/usr/bin")):
-                return []
+        if (len(arguments) == 3 and arguments[0] in {"/bin/sh", "/usr/bin/sh"}
+                and arguments[1] == "-c"):
             command = arguments[2]
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";|&<>()\n")
         lexer.commenters = ""
@@ -488,7 +478,10 @@ def _read_command_paths(command: str, cwd: Path) -> list[str]:
         segments.pop()
     paths = []
     for segment in segments:
-        if "/" in segment[0] and Path(segment[0]).parent not in (Path("/bin"), Path("/usr/bin")):
+        if segment[0] not in {
+                "/bin/cat", "/usr/bin/cat", "/bin/sed", "/usr/bin/sed",
+                "/bin/head", "/usr/bin/head", "/bin/tail", "/usr/bin/tail",
+        }:
             return []
         reader, operands = Path(segment[0]).name, segment[1:]
         if reader == "sed":
@@ -517,7 +510,7 @@ def _read_command_paths(command: str, cwd: Path) -> list[str]:
 def _codex_read_paths(item: dict, cwd: Path) -> tuple[list[str], list[str]]:
     command = item.get("command")
     paths = _read_command_paths(command, cwd) if isinstance(command, str) else []
-    if type(item.get("exit_code")) is not int or item["exit_code"] != 0 or item.get("status") not in (None, "completed"):
+    if type(item.get("exit_code")) is not int or item["exit_code"] != 0 or item.get("status") != "completed":
         return [], paths if len(paths) == 1 else []
     output = item.get("aggregated_output")
     if not isinstance(output, str) or not output:
@@ -578,7 +571,7 @@ def _codex(prompt: str, cwd: Path, *, author: bool = False, timeout: int, eviden
             observation_complete = observation_complete and bool(paths) and set(paths) <= set(observed + failed)
             tool_calls.append({"id": item.get("id"), "name": "command_execution",
                                "succeeded": type(item.get("exit_code")) is int and item["exit_code"] == 0
-                               and item.get("status") in (None, "completed")})
+                               and item.get("status") == "completed"})
             tool_inputs.append(json.dumps({"command": item.get("command")}))
         if event.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
             texts.append(item.get("text", ""))
@@ -681,8 +674,7 @@ def _findings(text: str) -> str:
 
 
 def _oracle(case_dir: Path, *args: str) -> dict:
-    # oracle 안의 테스트 실행은 각자 자기 프로세스 그룹을 한도(최대 300초 × 2회) 안에 끝낸다.
-    # 바깥 한도가 그 합보다 커야 안쪽 정리가 먼저 돌고, 바깥 killpg가 놓치는 자손이 없다.
+    # 테스트 두 회(각 최대 300초)와 자손 프로세스 정리 시간을 수용한다.
     process = _run_group([PY, str(case_dir / "oracle.py"), *args], timeout=900)
     try:
         return json.loads(process.stdout)
@@ -695,9 +687,9 @@ def _prepare_subprocess(kit: Path, case_dir: Path, mode: str, scenario: str, var
         [PY, __file__, "--prepare", json.dumps([str(kit), str(case_dir), mode, scenario, variant, str(project)]),
          "--author-provider", REQUESTED_PROVIDERS["author"],
          "--review-providers", ",".join(REQUESTED_PROVIDERS["review"])],
-        # prepare 안의 설치(600초, ETIMEDOUT이면 1회 재시도)와 테스트(600초)는 각자 자기 그룹을
-        # 끝낸다. 바깥 한도는 그 합(1800초)보다 크게 둔다.
-        timeout=2400,
+        # 버전·lock·의존성·설치 재시도·Git·리뷰 검사는 합산한다.
+        # 파일 복사·렌더링에 600초를 더하고 중첩된 프로세스 정리 시간도 남긴다.
+        timeout=PREPARATION_TIMEOUT,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"prepare failed: {proc.stderr[-1200:]}")
@@ -957,11 +949,14 @@ def main() -> int:
     (args.output / "meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     # 한 unit 안에서도 리뷰어가 병렬이므로, unit 동시성은 CLI 슬롯으로만 제한한다.
     with concurrent.futures.ThreadPoolExecutor(max(4, args.concurrency)) as pool:
-        list(pool.map(execute, units))
+        with _cancellation_scope():
+            list(pool.map(execute, units))
     if not args.keep:
         shutil.rmtree(work, ignore_errors=True)
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    with _cancellation_scope():
+        exit_code = main()
+    raise SystemExit(exit_code)

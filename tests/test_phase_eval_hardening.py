@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import os
 import re
 import shlex
 from pathlib import Path, PurePosixPath
@@ -278,8 +279,8 @@ def test_evidence_write_failure_is_invalid_with_unknown_usage(evaluator, monkeyp
 SKILL_RULE = "Never approve a release without successful behavioral evidence."
 
 
-def codex_command_event(project, command):
-    process = subprocess.run(["sh", "-c", command], cwd=project, capture_output=True, text=True)
+def codex_command_event(project, command, *, env=None):
+    process = subprocess.run(["/bin/sh", "-c", command], cwd=project, env=env, capture_output=True, text=True)
     return {
         "type": "item.completed",
         "item": {"id": "read", "type": "command_execution", "command": command,
@@ -289,15 +290,15 @@ def codex_command_event(project, command):
 
 
 @pytest.mark.parametrize("reader", [
-    "cat {path}", "sed -n '1,2p' {path}", "head -n 1 {path}", "tail -n 1 {path}",
-    "sh -lc {wrapped}",
+    "/bin/cat {path}", "/usr/bin/sed -n '1,2p' {path}", "/usr/bin/head -n 1 {path}", "/usr/bin/tail -n 1 {path}",
+    "/bin/sh -c {wrapped}",
 ])
 def test_codex_observes_successful_reader_output_not_self_report(evaluator, monkeypatch, tmp_path, reader):
     skill = tmp_path / "skill with spaces" / "SKILL.md"
     skill.parent.mkdir()
     skill.write_text(SKILL_RULE + "\n", encoding="utf-8")
     path = shlex.quote(str(skill.relative_to(tmp_path)))
-    command = reader.format(path=path, wrapped=shlex.quote(f"cd {shlex.quote(str(tmp_path))} && cat {path}"))
+    command = reader.format(path=path, wrapped=shlex.quote(f"cd {shlex.quote(str(tmp_path))} && /bin/cat {path}"))
     event = codex_command_event(tmp_path, command)
     stdout = "\n".join(map(json.dumps, [
         event, {"type": "item.completed", "item": {"type": "agent_message", "text": "I read another skill."}},
@@ -311,7 +312,7 @@ def test_codex_observes_successful_reader_output_not_self_report(evaluator, monk
 
 def test_codex_failed_command_is_not_a_successful_read(evaluator, monkeypatch, tmp_path):
     skill = tmp_path / "missing.md"
-    event = codex_command_event(tmp_path, "cat missing.md")
+    event = codex_command_event(tmp_path, "/bin/cat missing.md")
     stdout = "\n".join(map(json.dumps, [
         event, {"type": "item.completed", "item": {"type": "agent_message", "text": REVIEW}},
     ]))
@@ -326,13 +327,13 @@ def test_codex_failed_command_is_not_a_successful_read(evaluator, monkeypatch, t
     "printf '%s\\n' 'cat SKILL.md'",
     "printf '%s\\n' {rule}",
     "grep -n 'cat SKILL.md' SKILL.md",
-    "FILE=SKILL.md; cat \"$FILE\"",
-    "cat $(printf SKILL.md)",
-    "cat SKILL.*",
-    "cat SKILL.md | cat",
-    "cat missing.md || printf '%s\\n' {rule}",
-    "sed -n 's/.*/Never approve a release without successful behavioral evidence./p' another.md",
-    "cd missing; cat SKILL.md",
+    "FILE=SKILL.md; /bin/cat \"$FILE\"",
+    "/bin/cat $(printf SKILL.md)",
+    "/bin/cat SKILL.*",
+    "/bin/cat SKILL.md | /bin/cat",
+    "/bin/cat missing.md || printf '%s\\n' {rule}",
+    "/usr/bin/sed -n 's/.*/Never approve a release without successful behavioral evidence./p' another.md",
+    "cd missing; /bin/cat SKILL.md",
 ])
 def test_codex_deceptive_dynamic_or_ambiguous_reads_are_not_observed(evaluator, tmp_path, command):
     (tmp_path / "SKILL.md").write_text(SKILL_RULE + "\n", encoding="utf-8")
@@ -343,18 +344,51 @@ def test_codex_deceptive_dynamic_or_ambiguous_reads_are_not_observed(evaluator, 
 
 def test_codex_reader_without_source_content_does_not_count(evaluator, tmp_path):
     (tmp_path / "SKILL.md").write_text("# Skill\n" + SKILL_RULE + "\n", encoding="utf-8")
-    event = codex_command_event(tmp_path, "head -n 1 SKILL.md")
+    event = codex_command_event(tmp_path, "/usr/bin/head -n 1 SKILL.md")
     assert evaluator._codex_read_paths(event["item"], tmp_path) == ([], [])
 
 
 def test_codex_local_reader_named_cat_cannot_fabricate_read_evidence(evaluator, tmp_path):
     (tmp_path / "SKILL.md").write_text(SKILL_RULE + "\n", encoding="utf-8")
-    reader = tmp_path / "cat"
-    reader.write_text("#!/bin/sh\nprintf '%s\\n' " + shlex.quote(SKILL_RULE) + "\n", encoding="utf-8")
-    reader.chmod(0o755)
-    event = codex_command_event(tmp_path, "./cat SKILL.md")
-    assert event["item"]["aggregated_output"].strip() == SKILL_RULE
-    assert evaluator._codex_read_paths(event["item"], tmp_path) == ([], [])
+    item = {"command": "./cat SKILL.md", "exit_code": 0, "status": "completed",
+            "aggregated_output": SKILL_RULE + "\n"}
+    assert evaluator._codex_read_paths(item, tmp_path) == ([], [])
+
+
+def test_codex_path_shadow_cannot_fabricate_read_evidence(evaluator, tmp_path):
+    (tmp_path / "SKILL.md").write_text(SKILL_RULE + "\n", encoding="utf-8")
+    for directory in (".agent-flow/bin", "node_modules/.bin"):
+        for executable in ("cat", "sh"):
+            shadow = tmp_path / directory / executable
+            shadow.parent.mkdir(parents=True, exist_ok=True)
+            shadow.write_text("#!/bin/sh\nprintf '%s\\n' " + shlex.quote(SKILL_RULE) + "\n", encoding="utf-8")
+            shadow.chmod(0o755)
+    path = evaluator._project_tool_path(tmp_path)
+    for command in ("cat SKILL.md", "sh -c '/bin/cat SKILL.md'"):
+        item = {"command": command, "exit_code": 0, "status": "completed",
+                "aggregated_output": SKILL_RULE + "\n"}
+        assert evaluator._codex_read_paths(item, tmp_path) == ([], [])
+    genuine = codex_command_event(tmp_path, "/bin/sh -c '/bin/cat SKILL.md'", env={**os.environ, "PATH": path})
+    assert evaluator._codex_read_paths(genuine["item"], tmp_path) == ([str(tmp_path / "SKILL.md")], [])
+
+
+@pytest.mark.parametrize("command", ["cat SKILL.md", "sed -n '1p' SKILL.md", "head SKILL.md", "tail SKILL.md",
+                                     "sh -c '/bin/cat SKILL.md'", "bash -c '/bin/cat SKILL.md'",
+                                     "zsh -c '/bin/cat SKILL.md'", "./cat SKILL.md",
+                                     "/tmp/sh -c '/bin/cat SKILL.md'", "/bin/sh -lc '/bin/cat SKILL.md'",
+                                     "/bin/bash -c '/bin/cat SKILL.md'", "/bin/zsh -c '/bin/cat SKILL.md'"])
+def test_codex_reader_provenance_requires_trusted_absolute_executables(evaluator, tmp_path, command):
+    assert evaluator._read_command_paths(command, tmp_path) == []
+
+
+@pytest.mark.parametrize("updates", [{"exit_code": None}, {"exit_code": True}, {"exit_code": 1},
+                                    {"status": "failed"}, {"status": "in_progress"}, {"status": None},
+                                    {"aggregated_output": ""}, {"aggregated_output": None}])
+def test_codex_source_output_requires_successful_exit_and_completion(evaluator, tmp_path, updates):
+    (tmp_path / "SKILL.md").write_text(SKILL_RULE + "\n", encoding="utf-8")
+    event = codex_command_event(tmp_path, "/bin/cat SKILL.md")
+    event["item"].update(updates)
+    assert evaluator._codex_read_paths(event["item"], tmp_path)[0] == []
 
 
 def test_codex_author_read_metric_distinguishes_success_missing_and_self_report(evaluator, monkeypatch, tmp_path):
@@ -374,8 +408,8 @@ def test_codex_author_read_metric_distinguishes_success_missing_and_self_report(
     })
     monkeypatch.setattr(evaluator, "_oracle", lambda *args: {"behavior": True, "plan": True, "norm": True})
     events = [
-        codex_command_event(project, "cat read/SKILL.md"),
-        codex_command_event(project, "cat missing/SKILL.md"),
+        codex_command_event(project, "/bin/cat read/SKILL.md"),
+        codex_command_event(project, "/bin/cat missing/SKILL.md"),
         {"type": "item.completed", "item": {"type": "agent_message", "text": "I read unread/SKILL.md too."}},
     ]
     stdout = "\n".join(map(json.dumps, events))
@@ -439,17 +473,21 @@ def test_codex_batch_reads_require_distinct_printed_source_evidence(evaluator, t
     second = tmp_path / "second.md"
     first.write_text(SKILL_RULE + "\nFirst document has its own specific requirement.\n", encoding="utf-8")
     second.write_text(SKILL_RULE + "\nSecond document has a different specific requirement.\n", encoding="utf-8")
-    event = codex_command_event(tmp_path, "cat first.md second.md")
+    event = codex_command_event(tmp_path, "/bin/cat first.md second.md")
     assert set(evaluator._codex_read_paths(event["item"], tmp_path)[0]) == {str(first), str(second)}
-    event = codex_command_event(tmp_path, "sed -n '1p' first.md; cat second.md")
+    event = codex_command_event(tmp_path, "/usr/bin/sed -n '1p' first.md; /bin/cat second.md")
     assert evaluator._codex_read_paths(event["item"], tmp_path)[0] == [str(second)]
+    first.write_text(SKILL_RULE + "\n", encoding="utf-8")
+    second.write_text(SKILL_RULE + "\n", encoding="utf-8")
+    event = codex_command_event(tmp_path, "/bin/cat first.md second.md")
+    assert evaluator._codex_read_paths(event["item"], tmp_path) == ([], [])
 
 
 def test_codex_hash_suffix_is_a_real_filename_not_a_comment(evaluator, tmp_path):
     (tmp_path / "SKILL.md").write_text(SKILL_RULE + "\n", encoding="utf-8")
     copy = tmp_path / "SKILL.md#copy"
     copy.write_text(SKILL_RULE + "\n", encoding="utf-8")
-    event = codex_command_event(tmp_path, "cat SKILL.md#copy")
+    event = codex_command_event(tmp_path, "/bin/cat SKILL.md#copy")
     assert evaluator._codex_read_paths(event["item"], tmp_path)[0] == [str(copy)]
 
 
@@ -464,20 +502,34 @@ def test_codex_unattributed_command_reads_remain_unknown(evaluator, monkeypatch,
     assert row["angles"][0]["documents"][0]["read_path_observed"] is None
 
 
-def test_codex_author_missing_read_channel_preserves_unknown_and_behavior(evaluator, monkeypatch, tmp_path):
+@pytest.mark.parametrize("read_channel", ["missing", "bare-command"])
+def test_codex_author_missing_read_channel_preserves_unknown_and_behavior(
+    evaluator, monkeypatch, tmp_path, read_channel,
+):
     evaluator.REQUESTED_PROVIDERS.update(author="codex", review=["codex"])
     monkeypatch.setattr(evaluator, "_prepare_subprocess", lambda *args: {
         "prompt": "Implement.", "required": [{"name": "policy", "path": str(tmp_path / "SKILL.md")}],
     })
-    monkeypatch.setattr(evaluator, "_oracle", lambda *args: {"behavior": True, "plan": True, "norm": True})
-    event = {"type": "item.completed", "item": {"type": "agent_message", "text": "Implemented."}}
+    monkeypatch.setattr(evaluator, "_oracle", lambda *args: {"behavior": False, "plan": True, "norm": True})
+    (tmp_path / "SKILL.md").write_text(SKILL_RULE + "\n", encoding="utf-8")
+    events = []
+    if read_channel == "bare-command":
+        events.append({"type": "item.completed", "item": {
+            "type": "command_execution", "command": "cat SKILL.md", "exit_code": 0,
+            "status": "completed", "aggregated_output": SKILL_RULE + "\n",
+        }})
+    events.extend([
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "Implemented."}},
+        {"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 80, "output_tokens": 10}},
+    ])
     monkeypatch.setattr(evaluator, "_run_cli", lambda args, *rest:
-                        subprocess.CompletedProcess(args, 0, json.dumps(event), ""))
+                        subprocess.CompletedProcess(args, 0, "\n".join(map(json.dumps, events)), ""))
     row = evaluator.run_author("after", ROOT, tmp_path / "case", "local", 1, tmp_path, 10)
     assert row["required_unread"] is None
     assert row["required_unobserved"] == ["policy"]
     assert row["required_read_rate"] is None
     assert not row["error"]
+    assert row["oracle"]["behavior"] is False
 
 
 def test_codex_recovered_stream_error_preserves_warning_not_invalid_result(evaluator, monkeypatch, tmp_path):

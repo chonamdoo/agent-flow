@@ -14,11 +14,13 @@ import os
 import posixpath
 import re
 import shutil
-import signal
 import subprocess
 import sys
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, str(Path(HERE).parents[1]))
+from phase_eval_environment import _run_process, environment_for_project
 MODES = ("clean", "local", "team")
 SOURCE_ROOTS = ("src", "app")
 SOURCE_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs")
@@ -42,21 +44,12 @@ def check(check_id, ok, detail):
 
 
 def run(command, cwd):
-    # 새 세션으로 띄워 timeout이면 테스트가 띄운 자손까지 그룹째 끝낸다.
     try:
-        process = subprocess.Popen(
-            command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            universal_newlines=True, start_new_session=True,
-        )
-    except OSError as error:
+        process = _run_process(command, cwd=Path(cwd), env=environment_for_project(Path(cwd)),
+                               timeout=TEST_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as error:
         return False, str(error)
-    try:
-        stdout, _ = process.communicate(timeout=TEST_TIMEOUT)
-    except subprocess.TimeoutExpired as error:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.communicate()
-        return False, str(error)
-    tail = "\n".join(stdout.strip().splitlines()[-8:])
+    tail = "\n".join((process.stdout + process.stderr).strip().splitlines()[-8:])
     return process.returncode == 0, "exit {}: {}".format(process.returncode, tail)
 
 
