@@ -12,13 +12,14 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 CASE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(CASE_DIR.parents[1]))
+from phase_eval_environment import _run_process, environment_for_project
 CASE = json.loads((CASE_DIR / "case.json").read_text(encoding="utf-8"))
 SOURCE_SUFFIXES = (".ts", ".tsx")
 TIMEOUT_SECONDS = 180
@@ -263,21 +264,11 @@ NORMS: Dict[str, Callable[[Path], List[Dict[str, object]]]] = {
 
 
 def _run(command: List[str], project: Path) -> Dict[str, object]:
-    # 새 세션으로 띄워 timeout이면 테스트가 띄운 자손까지 그룹째 끝낸다.
     try:
-        process = subprocess.Popen(
-            command, cwd=project, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            start_new_session=True,
-        )
-    except OSError as exc:
+        process = _run_process(command, cwd=project, env=environment_for_project(project), timeout=TIMEOUT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "detail": f"{' '.join(command)}: {exc}"}
-    try:
-        stdout, stderr = process.communicate(timeout=TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired as exc:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.communicate()
-        return {"ok": False, "detail": f"{' '.join(command)}: {exc}"}
-    output = (stdout + stderr).strip().splitlines()
+    output = (process.stdout + process.stderr).strip().splitlines()
     return {"ok": process.returncode == 0, "detail": f"exit {process.returncode}: " + " | ".join(output[-6:])}
 
 

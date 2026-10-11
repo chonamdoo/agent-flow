@@ -14,13 +14,14 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 CASE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(CASE_DIR.parents[1]))
+from phase_eval_environment import _run_process, environment_for_project
 CASE = json.loads((CASE_DIR / "case.json").read_text(encoding="utf-8"))
 MODES = tuple(CASE["modes"])
 TEST_TIMEOUT_S = 120
@@ -42,21 +43,10 @@ def _ran_count(output: str) -> int:
 
 
 def _run_tests(project: Path, argv: List[str]) -> Tuple[bool, str]:
-    # 새 세션으로 띄워 timeout이면 테스트가 띄운 자손까지 그룹째 끝낸다.
     try:
-        process = subprocess.Popen(
-            argv, cwd=str(project), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            start_new_session=True,
-        )
-    except OSError as error:
+        result = _run_process(argv, cwd=project, env=environment_for_project(project), timeout=TEST_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired) as error:
         return False, f"{' '.join(argv)}: {error}"
-    try:
-        stdout, stderr = process.communicate(timeout=TEST_TIMEOUT_S)
-    except subprocess.TimeoutExpired as error:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.communicate()
-        return False, f"{' '.join(argv)}: {error}"
-    result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
     output = result.stdout + result.stderr
     ran = _ran_count(output)
     ok = result.returncode == 0 and ran > 0

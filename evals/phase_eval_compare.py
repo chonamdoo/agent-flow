@@ -46,6 +46,9 @@ import zlib
 from pathlib import Path
 from typing import IO
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from phase_eval_fingerprint import evaluator_sha256
+
 DEFAULT_THRESHOLDS = Path(__file__).resolve().parent / "phase-eval-thresholds.json"
 DEFAULT_CASES = Path(__file__).resolve().parent / "phase-cases"
 CONDITION_KEYS = ("evaluator_sha256", "requested_providers", "requested_models", "review_report_language", "case_files")
@@ -144,7 +147,7 @@ def evaluation_fingerprint(tree: Path) -> dict:
     """The evaluator and case hashes `phase_eval.py` records, computed for another tree."""
     cases = tree / "evals" / "phase-cases"
     return {
-        "evaluator_sha256": hashlib.sha256((tree / "evals" / "phase_eval.py").read_bytes()).hexdigest(),
+        "evaluator_sha256": evaluator_sha256(tree),
         "case_files": {
             path.relative_to(cases).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(cases.rglob("*")) if path.is_file() and "__pycache__" not in path.parts
@@ -522,6 +525,59 @@ def _fmt(value: float | None) -> str:
     return "unmeasured" if value is None else f"{value:.3f}"
 
 
+def _unscored_case_reason(row: dict, condition: dict, cases: Path) -> str:
+    """Use a reason only from the case contract bound to the measured rows."""
+    relative = f"{row['stack']}/case.json"
+    try:
+        body = (cases / relative).read_bytes()
+        recorded = condition.get("case_files")
+        if not isinstance(recorded, dict) or recorded.get(relative) != hashlib.sha256(body).hexdigest():
+            return "Reason unavailable: case contract does not match measurement."
+        spec = json.loads(body)["review"][row["mode"]][row.get("variant")]
+        if spec.get("expect", "missing") is not None:
+            return "Reason unavailable: case contract does not declare expect=null."
+        note = spec.get("note")
+        return note if isinstance(note, str) and note.strip() else "Case explicitly declares expect=null; no reason recorded."
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return "Reason unavailable: case contract unreadable."
+
+
+def _review_coverage_lines(rows: list[dict], before: str, after: str, condition: dict, cases: Path) -> list[str]:
+    """Show accuracy denominators without treating intentional unscored cases as invalid."""
+    reviews = {kit: [row for row in rows if row.get("kit") == kit and row["scenario"] == "review"]
+               for kit in (before, after)}
+    valid = {kit: [row for row in own if not _invalid(row)] for kit, own in reviews.items()}
+    scored = {kit: [row for row in own if row.get("expected") is not None] for kit, own in valid.items()}
+    unscored = {kit: [row for row in own if row.get("expected") is None] for kit, own in valid.items()}
+    counts = {
+        "review completed": {kit: len(own) for kit, own in reviews.items()},
+        "review valid": {kit: len(own) for kit, own in valid.items()},
+        "review invalid": {kit: len(reviews[kit]) - len(valid[kit]) for kit in reviews},
+        "review accuracy scored": {kit: len(own) for kit, own in scored.items()},
+        "review accuracy unscored (expected=null)": {kit: len(own) for kit, own in unscored.items()},
+        "review correct / accuracy scored": {
+            kit: f"{sum(row['correct'] for row in own)}/{len(own)}" for kit, own in scored.items()
+        },
+    }
+    lines = ["### Review scoring coverage", "", "|count|before|after|", "|---|---:|---:|"]
+    lines.extend(f"|{name}|{values[before]}|{values[after]}|" for name, values in counts.items())
+    lines.extend(["", "Valid expected=null units remain in completion, token and reading measurements; "
+                  "they are excluded from accuracy and clean-verdict false-positive denominators."])
+    if any(unscored.values()):
+        lines.extend(["", "|kit|unscored combination|valid units|case reason|", "|---|---|---:|---|"])
+        for kit, own in unscored.items():
+            groups: dict[tuple, list[dict]] = {}
+            for row in own:
+                key = row["stack"], row["mode"], row.get("variant") or ""
+                groups.setdefault(key, []).append(row)
+            for key, group in sorted(groups.items()):
+                fields = [kit, "/".join(part for part in key if part), str(len(group)),
+                          _unscored_case_reason(group[0], condition, cases)]
+                fields = [field.replace("|", "\\|").replace("\n", " ").replace("\r", " ") for field in fields]
+                lines.append("|" + "|".join(fields) + "|")
+    return lines
+
+
 def compare(directories: list[Path], before: str, after: str, thresholds: dict, *,
             export: Path | None = None, require: dict[str, Path] | None = None,
             evaluator_tree: Path | None = None) -> tuple[list[str], list[str]]:
@@ -589,6 +645,8 @@ def compare(directories: list[Path], before: str, after: str, thresholds: dict, 
     lines.extend(f"|{metric}|{_fmt(metrics[before][metric])}|{_fmt(new[metric])}|" for metric in new)
     lines.extend(f"|{scenario} {axis} token ratio||{_fmt(ratio)}|"
                  for scenario, by_axis in ratios.items() for axis, ratio in by_axis.items())
+    lines.append("")
+    lines.extend(_review_coverage_lines(rows, before, after, condition, cases))
     lines.append("")
     lines.append("### Failures" if failures else "All thresholds met.")
     lines.extend(f"- {reason}" for reason in failures)
