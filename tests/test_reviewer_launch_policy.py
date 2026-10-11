@@ -41,6 +41,8 @@ _DEFAULT_CODEX_ARGV = (
     "--ignore-user-config",
     "-c",
     "project_doc_max_bytes=0",
+    "-c",
+    "skills.include_instructions=false",
     "--sandbox",
     "danger-full-access",
     "--cd",
@@ -150,6 +152,7 @@ def test_codex_reviewer_disables_checkout_project_instructions(declared_identity
 
     overrides = [value for flag, value in zip(launch.argv, launch.argv[1:]) if flag == "-c"]
     assert overrides.count("project_doc_max_bytes=0") == 1
+    assert overrides.count("skills.include_instructions=false") == 1
     assert launch.argv[launch.argv.index("--cd") + 1] == str(PROJECT_ROOT.resolve())
     assert launch.model == ("gpt-5.6-sol" if declared_identity else None)
     assert launch.effort == ("xhigh" if declared_identity else None)
