@@ -792,9 +792,9 @@ def managed_path_hook_name(root: Path, command: str) -> str | None:
         tokens = shlex.split(command, posix=True)
     except ValueError:
         return None
-    if len(tokens) != 2:
+    if len(tokens) not in (2, 4):
         return None
-    launcher, candidate = tokens
+    launcher, candidate = tokens[:2]
     try:
         launcher_real = os.path.realpath(launcher.replace("\\", "/"))
         expected_launcher = os.path.realpath(Path(root) / HOOK_LAUNCHER_RELATIVE)
@@ -807,6 +807,12 @@ def managed_path_hook_name(root: Path, command: str) -> str | None:
     if (
         not (name.endswith(".py") or name.endswith(".sh"))
         or not _SAFE_HOOK_NAME.fullmatch(name)
+    ):
+        return None
+    if len(tokens) == 4 and (
+        name not in ("record-command-run.py", "bind-host-worktree.py")
+        or tokens[2] != "--host"
+        or tokens[3] not in ("claude", "codex", "omp")
     ):
         return None
     try:

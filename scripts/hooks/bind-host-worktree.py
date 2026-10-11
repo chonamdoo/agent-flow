@@ -45,8 +45,12 @@ def main() -> int:
                 for key in ("exit_code", "exitCode", "returncode", "return_code")
             )
         )
+        host = (
+            sys.argv[2] if len(sys.argv) == 3 and sys.argv[1] == "--host"
+            and sys.argv[2] in ("claude", "codex", "omp") else None
+        )
         project_root, recorder = load_recorder(Path(__file__).resolve().parent)
-        recorder(payload, project_root, successful_tool_event=successful_tool_event)
+        recorder(payload, project_root, successful_tool_event=successful_tool_event, host=host)
     except Exception as exc:
         print(f"host worktree binding failed: {exc}", file=sys.stderr)
         return 2

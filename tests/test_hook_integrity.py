@@ -32,6 +32,7 @@ from agent_flow.core.hook_integrity import (
     assert_managed_hooks_registered,
     describe_managed_hooks,
     find_install_root,
+    managed_path_hook_name,
     verify_managed_hooks,
 )
 
@@ -45,6 +46,18 @@ def _hook_command(root: Path, name: str) -> str:
     launcher = shlex.quote(str(root / HOOK_LAUNCHER_RELATIVE))
     path = shlex.quote(str(root / HOOK_DIR / name))
     return f"{launcher} {path}"
+
+
+def test_recorder_host_arguments_preserve_exact_invocation(tmp_path: Path):
+    for script in ("record-command-run.py", "bind-host-worktree.py"):
+        command = _hook_command(tmp_path, script)
+        for host in ("claude", "codex", "omp"):
+            assert managed_path_hook_name(tmp_path, f"{command} --host {host}") == script
+        assert managed_path_hook_name(tmp_path, command) == script
+        for suffix in ("--host unknown", "--host", "--host omp extra", "--host omp ; true"):
+            assert managed_path_hook_name(tmp_path, f"{command} {suffix}") is None
+    guard = _hook_command(tmp_path, "guard-host-worktree.sh")
+    assert managed_path_hook_name(tmp_path, f"{guard} --host omp") is None
 
 
 def _host_settings(root: Path) -> dict:

@@ -9,19 +9,24 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from agent_flow.artifact import create_run, read_meta
+from agent_flow.artifact import create_run, find_active_run, read_meta
 from agent_flow.cli import main
-from agent_flow.core.host_connection import support_level
+from agent_flow.core.host_connection import (
+    collect_host_connection,
+    render_host_connection,
+    support_level,
+)
 from agent_flow.core.host_trust import read_host_trust
 
 _HOST_HINT_ENV = ("OMP_PROFILE", "CLAUDECODE", "CLAUDE_CLI", "CODEX_CLI", "CODEX_HOME")
 
 
-def _project_with_run(tmp_path: Path) -> Path:
+def _project_with_run(tmp_path: Path, *, install: bool = False) -> Path:
     project = tmp_path / "project"
     project.mkdir()
     for args in (
@@ -29,8 +34,16 @@ def _project_with_run(tmp_path: Path) -> Path:
         ("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "i"),
     ):
         subprocess.run(("git", *args), cwd=project, check=True, capture_output=True)
-    (project / ".agent-flow").mkdir()
-    (project / ".agent-flow" / "kit.json").write_text('{"hooks": true}', encoding="utf-8")
+    if install:
+        installer = Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"
+        installed = subprocess.run(
+            ("node", str(installer), "install", "--root", str(project), "--profile", "python"),
+            capture_output=True, text=True, timeout=120,
+        )
+        assert installed.returncode == 0, installed.stderr
+    else:
+        (project / ".agent-flow").mkdir()
+        (project / ".agent-flow" / "kit.json").write_text('{"hooks": true}', encoding="utf-8")
     run_dir = create_run(project, "default", "Check the host connection.")
     assert read_meta(run_dir)["started_at"]
     return project
@@ -47,6 +60,56 @@ def _as_claude_session(tmp_path: Path, monkeypatch) -> None:
     for name in _HOST_HINT_ENV:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("CLAUDECODE", "1")
+
+
+def test_explicit_execution_is_attributed_only_to_its_host(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    project = _project_with_run(tmp_path, install=True)
+    home.mkdir(exist_ok=True)
+    (home / ".claude.json").write_text(
+        json.dumps({"projects": {str(project): {"hasTrustDialogAccepted": True}}}),
+        encoding="utf-8",
+    )
+    active = find_active_run(project)
+    assert active is not None
+    run_dir = active.path
+    started_at = datetime.fromisoformat(read_meta(run_dir)["started_at"]).timestamp()
+
+    for recorded_host in ("omp", None, "unknown", ["omp"], "claude"):
+        _record_commands(
+            project,
+            {"command": "pytest -q", "host": recorded_host, "exit_code": 0,
+             "cwd": str(project), "at": started_at + 1},
+            {"command": "pytest -q", "host": "claude", "exit_code": 0,
+             "cwd": str(project), "at": started_at - 1},
+            {"command": "pytest -q", "host": "claude", "exit_code": 0,
+             "cwd": str(tmp_path / "sibling"), "at": started_at + 1},
+        )
+        report = collect_host_connection(
+            project_root=project, checkout=project, run_id=run_dir.name,
+            run_started_at=started_at, active=("claude", "env:CLAUDECODE"),
+            home=home, env={"CODEX_HOME": str(home / ".codex"), "CLAUDECODE": "1"},
+        )
+        expected = "hook_enforced" if recorded_host == "claude" else "hook_unproven"
+        assert report.active_level == expected, recorded_host
+        payload = json.loads(render_host_connection(report)[-1].split(": ", 1)[1])
+        assert payload["execution"]["commands"] == 1
+        assert payload["hosts"]["claude"]["execution"]["commands"] == int(
+            recorded_host == "claude"
+        )
+        assert payload["hosts"]["omp"]["execution"]["commands"] == int(
+            recorded_host == "omp"
+        )
+        assert payload["hosts"]["codex"]["execution"]["commands"] == 0
+
+        codex_report = collect_host_connection(
+            project_root=project, checkout=project, run_id=run_dir.name,
+            run_started_at=started_at, active=("codex", "env:CODEX_HOME"),
+            home=home, env={"CODEX_HOME": str(home / ".codex")},
+        )
+        codex_payload = json.loads(render_host_connection(codex_report)[-1].split(": ", 1)[1])
+        assert codex_payload["hosts"]["codex"]["execution"]["observed"] is False
 
 
 def test_status_prints_the_host_connection_card_after_status_json(
