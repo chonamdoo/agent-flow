@@ -741,3 +741,55 @@ def test_architecture_lint_pass_rate_counts_only_rows_where_the_gate_applied(gat
     assert gate.kit_metrics(rows, "before")["author_architecture_lint_pass_rate"] is None
     record = gate._record_row(authors[1])
     assert record["architecture_lint"] == {"status": "fail"}
+
+
+@pytest.mark.parametrize("lint", [
+    None, "pass", [], {}, {"status": None}, {"status": ["pass"]}, {"status": "failed"}, {"status": "pass,pass,failed"},
+], ids=["null", "string", "list", "missing-status", "null-status", "list-status", "unsupported", "combined"])
+def test_malformed_author_lint_is_invalid_and_blocks_export(gate, tmp_path, lint):
+    rows = rows_for("before") + rows_for("after")
+    authors = [row for row in rows if row["kit"] == "after" and row["scenario"] == "author"]
+    for row in authors:
+        row["architecture_lint"] = {"status": "pass"}
+    authors[-1]["architecture_lint"] = lint
+    thresholds = copy.deepcopy(THRESHOLDS)
+    thresholds["floors"]["author_architecture_lint_pass_rate"] = 1.0
+    run = write_run(tmp_path / "run", rows)
+    destination = tmp_path / "record"
+
+    _, failures = gate.compare([run], "before", "after", thresholds, export=destination)
+
+    assert gate.kit_metrics(rows, "after")["invalid_rate"] == 1 / 9
+    assert gate.malformed_fields(authors[-1]) == ["architecture_lint.status"]
+    assert any("architecture_lint.status" in failure for failure in failures)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("status", [None, "pass", "fail", "n/a", "error"],
+                         ids=["legacy-missing", "pass", "fail", "not-applicable", "error"])
+def test_valid_compact_author_lint_and_legacy_rows_recompute(gate, tmp_path, status):
+    rows = rows_for("before") + rows_for("after")
+    for row in rows:
+        if row["scenario"] == "author" and status is not None:
+            row["architecture_lint"] = {"status": status}
+    run = write_run(tmp_path / "run", rows)
+    destination = tmp_path / "record"
+
+    _, failures = gate.compare([run], "before", "after", THRESHOLDS, export=destination)
+
+    assert failures == []
+    exported, load_failures, _, _ = gate.load([destination])
+    assert load_failures == []
+    for kit in ("before", "after"):
+        metrics = gate.kit_metrics(exported, kit)
+        assert metrics["invalid_rate"] == 0
+        expected = 1.0 if status == "pass" else 0.0 if status == "fail" else None
+        assert metrics["author_architecture_lint_pass_rate"] == expected
+    authors = [row for row in exported if row["scenario"] == "author"]
+    assert all(not gate.malformed_fields(row) for row in authors)
+    if status is None:
+        assert all("architecture_lint" not in row for row in authors)
+    else:
+        assert all(row["architecture_lint"] == {"status": status} for row in authors)
+    _, recompute_failures = gate.compare([destination], "before", "after", THRESHOLDS)
+    assert recompute_failures == []

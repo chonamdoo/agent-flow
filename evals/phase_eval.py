@@ -589,8 +589,11 @@ def _architecture_lint(project: Path, profile: str) -> dict:
     launcher = project / ".agent-flow" / "bin" / "agent-flow"
     if not launcher.is_file():
         return {"status": "error", "rc": None, "output": "installed launcher missing"}
-    process = _run_group([str(launcher), "architecture-lint", "--root", str(project), "--profile", profile],
-                         timeout=300)
+    try:
+        process = _run_group([str(launcher), "architecture-lint", "--root", str(project), "--profile", profile],
+                             timeout=300)
+    except OSError as exc:
+        return {"status": "error", "rc": None, "output": f"installed launcher failed to start: {exc}"[-4000:]}
     output = f"{process.stdout}\n{process.stderr}".strip()
     statuses = set(LINT_STATUS_RE.findall(output))
     if process.returncode == 0 and "passed" in statuses:

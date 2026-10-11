@@ -100,6 +100,10 @@ def malformed_fields(row: dict) -> list[str]:
             names = [name for group in groups.values() for name in group]
             if len(names) != len(set(names)):
                 problems.append("required_read/required_unread/required_unobserved overlap")
+        if "architecture_lint" in row:
+            lint = row["architecture_lint"]
+            if not isinstance(lint, dict) or lint.get("status") not in ("pass", "fail", "n/a", "error"):
+                problems.append("architecture_lint.status")
         return problems
     if "expected" not in row:
         problems.append("expected")

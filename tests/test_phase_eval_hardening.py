@@ -570,20 +570,47 @@ def test_author_gate_result_keeps_not_applicable_apart_from_pass(evaluator, tmp_
     assert (result["status"], result["rc"]) == (status, rc)
 
 
-def test_author_row_records_the_gate_without_changing_oracle_axes(evaluator, monkeypatch, tmp_path):
+@pytest.mark.parametrize("launcher_kind", ["missing", "non-executable", "invalid-interpreter", "bad-shebang"])
+def test_author_launcher_start_failure_preserves_completed_evaluation(evaluator, monkeypatch, tmp_path, launcher_kind):
     case = tmp_path / "case"
     case.mkdir()
-    monkeypatch.setattr(evaluator, "_prepare_subprocess",
-                        lambda *args: {"prompt": "p", "required": [], "profile": "python"})
-    monkeypatch.setattr(evaluator, "_claude", lambda *args, **kwargs: {"reads": [], "usage": {}})
-    oracle = {"behavior": True, "plan": True, "norm": True}
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("required skill", encoding="utf-8")
+    documents = [{"path": str(skill), "read_path_observed": True}]
+
+    def prepare(kit, case_dir, mode, scenario, variant, project):
+        launcher = project / ".agent-flow/bin/agent-flow"
+        launcher.parent.mkdir(parents=True)
+        if launcher_kind != "missing":
+            script = "#!/bin/sh\nexit 0\n"
+            if launcher_kind == "invalid-interpreter":
+                script = f"#!{tmp_path / 'absent-interpreter'}\n"
+            elif launcher_kind == "bad-shebang":
+                script = "not an executable script\n"
+            launcher.write_text(script, encoding="utf-8")
+            launcher.chmod(0o644 if launcher_kind == "non-executable" else 0o755)
+        return {"prompt": "p", "required": [{"name": "required", "path": str(skill)}],
+                "profile": "python", "documents": documents}
+
+    usage = {"input": 100, "uncached_input": 20, "cached_input": 80, "output": 10}
+    oracle = {"behavior": True, "plan": False, "norm": True}
+    monkeypatch.setattr(evaluator, "_prepare_subprocess", prepare)
+    monkeypatch.setitem(evaluator.REQUESTED_PROVIDERS, "author", "claude")
+    monkeypatch.setattr(evaluator, "_claude", lambda *args, **kwargs: {
+        "reads": [str(skill)], "usage": usage, "rc": 0, "turns": 2, "seconds": 3,
+    })
     monkeypatch.setattr(evaluator, "_oracle", lambda *args: dict(oracle))
-    linted = []
-    monkeypatch.setattr(evaluator, "_architecture_lint",
-                        lambda project, profile: linted.append(profile) or {"status": "fail", "rc": 1, "output": ""})
 
     row = evaluator.run_author("after", ROOT, case, "clean", 1, tmp_path, 10)
 
-    assert linted == ["python"]
+    assert row["usage"] == usage
+    assert row["required_read"] == ["required"]
+    assert row["required_unread"] == []
+    assert row["required_unobserved"] == []
+    assert row["required_read_rate"] == 1.0
     assert row["oracle"] == oracle
-    assert row["architecture_lint"]["status"] == "fail"
+    assert row["documents"] == documents
+    assert (row["rc"], row["turns"], row["seconds"], row["error"]) == (0, 2, 3, None)
+    lint = row["architecture_lint"]
+    assert (lint["status"], lint["rc"]) == ("error", None)
+    assert 0 < len(lint["output"]) <= 4000

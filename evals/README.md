@@ -239,6 +239,10 @@ author의 `setup/`은 설치 전에, red 테스트인 `pre/`는 설치 커밋 �
   성공한 shell 읽기 명령의 경로와 실제 문서 내용 출력을 확인한다. 전체 본문·reference 읽음이나
   실제 규칙 준수의 증거로 해석하지 않는다. norm은 case의 fixture 계약 검사이며
   일반적인 Clean Architecture 인증이 아니다.
+  생성물은 같은 프로젝트의 설치 launcher와 case profile로 `architecture-lint`도 실행한다.
+  결과는 `architecture_lint.status`(`pass`, `fail`, `n/a`, `error`)로 별도 기록하며 oracle 세 축을
+  덮지 않는다. launcher 시작의 `OSError`도 `error`, `rc: null`, 최대 4000자 진단으로 남기고,
+  이미 완료된 author의 usage·읽음·oracle 결과를 보존한다.
 - review: 실제 multi-review 리뷰어 job에서 `--review-providers`가 선택한 provider를
   모든 관점에 적용해 결함 diff와 정상 diff를 검토한다(기본값 `claude,codex`).
   run 폴더에는 공유 prd·ddd-design·slice-plan 위에 review 전용 계획이 있으면 덮어쓰고,
@@ -337,6 +341,12 @@ python evals/phase_eval_compare.py <new dir> --summary <new dir>/gate.md \
 한다. 리뷰 행의 `expected`와 결함 ID는 `case_files`의 해시가 일치하는 `case.json`과 대조한다.
 행에서 기대 판정이나 결함을 지워 분모를 줄일 수 없다. case가 명시한 `expect: null`은 그대로
 허용한다. 무효 시행은 각 kit의 무효율에 포함하고, 양쪽 모두 유효한 unit만 토큰 비교에 사용한다.
+
+author 행에 `architecture_lint`가 있으면 객체와 위의 네 status 중 하나여야 한다.
+잘못된 shape·미지원 status는 malformed scoring field와 무효 시행으로 기록하고 export를 거부한다.
+필드 없는 legacy 행과 `status`만 있는 compact record는 지원한다.
+`author_architecture_lint_pass_rate`는 `pass`·`fail`이 적용된 행만 분모로 삼으며,
+`n/a`·`error`·필드 부재를 PASS로 가산하지 않는다.
 
 평가 방식 변경: Codex 문서 읽음도 관측된 성공 경로로 집계하고 provider 역할과 영어 보고서
 조건을 비교에 추가했다. 이전 기록에 역할·언어 조건이 없으면 조건 미상으로 거부한다.
