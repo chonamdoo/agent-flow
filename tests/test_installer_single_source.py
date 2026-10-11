@@ -655,6 +655,7 @@ def test_omp_recorder_cwd_does_not_change_guard_context(tmp_path: Path):
             "bind-host-worktree.py", "worktree-tripwire.py"
         ]
         assert [entry.pop("_spawn_cwd") for entry in received] == [str(session)] * 2
+        assert [entry.pop("_argv") for entry in received] == [["--host", "omp"], []]
         assert received[0] == received[1]
         assert received[0]["cwd"] == str(session)
         assert received[0]["tool_input"] == event["input"]

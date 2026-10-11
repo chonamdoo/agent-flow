@@ -64,8 +64,8 @@ def test_recorder_host_arguments_preserve_exact_invocation(tmp_path: Path):
 
 
 def test_recorder_registered_under_another_host_is_not_a_managed_hook(tmp_path: Path):
-    """반증: `.claude/settings.json`이 `--host codex`로 기록 hook을 부르면 Claude 실행이
-    Codex 실행 증거로 남는데도 Claude 등록이 정상으로 읽힌다."""
+    """반증: `.claude/settings.json`이 `--host codex`나 `--host omp`로 기록 hook을 부르면
+    Claude 실행이 다른 host의 실행 증거로 남는데도 Claude 등록이 정상으로 읽힌다."""
     def install(root: Path, claude_host: str) -> tuple[str, ...]:
         _install(root)
         for relative, host in (
@@ -88,13 +88,14 @@ def test_recorder_registered_under_another_host_is_not_a_managed_hook(tmp_path: 
         return _violations(root)
 
     assert install(tmp_path / "matched", "claude") == ()
-    violations = install(tmp_path / "mismatched", "codex")
-    for script in ("record-command-run.py", "bind-host-worktree.py"):
-        assert any(
-            str(CLAUDE_SETTINGS) in v and f"does not register {script}" in v
-            for v in violations
-        ), violations
-    assert not any(".codex" in v.lower() for v in violations), violations
+    for wrong_host in ("codex", "omp"):
+        violations = install(tmp_path / f"mismatched-{wrong_host}", wrong_host)
+        for script in ("record-command-run.py", "bind-host-worktree.py"):
+            assert any(
+                str(CLAUDE_SETTINGS) in v and f"does not register {script}" in v
+                for v in violations
+            ), violations
+        assert not any(".codex" in v.lower() for v in violations), violations
 
 
 def _host_settings(root: Path) -> dict:

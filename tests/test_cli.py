@@ -2405,8 +2405,8 @@ class CliTest(unittest.TestCase):
                 f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'",
                 f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-host-worktree.sh'}'",
                 f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-skill-read.py'}'",
-                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-command-run.py'}'",
-                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'bind-host-worktree.py'}'",
+                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-command-run.py'}' --host 'claude'",
+                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'bind-host-worktree.py'}' --host 'claude'",
                 f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'worktree-tripwire.py'}'",
                 f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
             ]
