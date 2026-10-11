@@ -1486,3 +1486,129 @@ def test_retired_managed_script_backup_lands_before_removal(tmp_path: Path) -> N
 
     _assert_backup_precedes_destruction(trace, destroys=f"rmSync:{target}")
     assert Path(f"{target}.removed").read_text(encoding="utf-8") == "mine\n"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("state", [
+    "owned", "edited", "unrecorded", "tracked", "backup-fails", "unreadable-record", "symlink",
+])
+def test_reinstall_retires_eager_concise_rule_without_losing_user_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, binary: str, state: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    _install(KIT_ROOT, project, binary)
+    rubric = project / ".Codex/rules/codebase-rubric.md"
+    rubric_before = rubric.read_bytes()
+    label = ".Codex/rules/concise-output.md"
+    target = project / label
+    assert not target.exists()
+    shipped = (KIT_ROOT / "skills/agent-flow-concise-output/concise-output.md").read_bytes()
+    digest = hashlib.sha256(shipped).hexdigest()
+    target.write_bytes(shipped)
+    record = project / ".agent-flow/kit-assets.json"
+    payload = json.loads(record.read_text())
+    if state != "unrecorded":
+        payload["files"][label] = digest
+    record.write_text(json.dumps(payload), encoding="utf-8")
+    edited = b"My concise rule\xff\x80\x00\r\n"
+    if state in {"edited", "backup-fails"}:
+        target.write_bytes(edited)
+    if state == "symlink":
+        outside = tmp_path / "outside-concise.md"
+        outside.write_bytes(edited)
+        target.unlink()
+        target.symlink_to(outside)
+    if state == "unreadable-record":
+        record.write_bytes(b'{"files":')
+    if state == "tracked":
+        subprocess.run(("git", "init", "-q"), cwd=project, check=True, capture_output=True, timeout=30)
+        subprocess.run(("git", "add", "-f", "--", label), cwd=project, check=True, capture_output=True, timeout=30)
+    backup = project / ".agent-flow/backups" / label
+    if state == "backup-fails":
+        probe = tmp_path / "fail-concise-backup.cjs"
+        probe.write_text(
+            "const fs = require('node:fs');\n"
+            "const opened = new Map();\n"
+            "const open = fs.openSync;\n"
+            "fs.openSync = (name, ...args) => {\n"
+            "  const fd = open(name, ...args); opened.set(fd, String(name)); return fd;\n"
+            "};\n"
+            "const fsync = fs.fsyncSync;\n"
+            "fs.fsyncSync = fd => {\n"
+            "  if (opened.get(fd)?.startsWith(process.env.CONCISE_BACKUP_PARENT + '/')) {\n"
+            "    throw Object.assign(new Error('injected concise backup fsync failure'), {code: 'EIO'});\n"
+            "  }\n"
+            "  return fsync(fd);\n"
+            "};\n"
+            "require('node:module').syncBuiltinESMExports();\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("NODE_OPTIONS", f"--require={probe}")
+        monkeypatch.setenv("CONCISE_BACKUP_PARENT", str(backup.parent))
+    output = _install(KIT_ROOT, project, binary)
+    if state in {"owned", "edited"}:
+        assert not target.exists()
+        assert label not in _recorded(project)
+        if state == "edited":
+            assert backup.read_bytes() == edited
+        else:
+            assert not backup.exists()
+    else:
+        assert target.read_bytes() == (edited if state in {"backup-fails", "symlink"} else shipped)
+        assert not backup.exists()
+        if state == "backup-fails":
+            assert f"{PRUNE_BACKUP_FAILED_NOTICE_PREFIX}{label}" in output
+            assert _recorded(project)[label] == digest
+        elif state == "symlink":
+            assert target.is_symlink()
+            assert target.resolve() == outside
+            assert outside.read_bytes() == edited
+            assert _recorded(project)[label] == digest
+        elif state == "unreadable-record":
+            assert record.read_bytes() == b'{"files":'
+        else:
+            assert label not in _recorded(project)
+    assert rubric.read_bytes() == rubric_before
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_failed_install_restores_a_retired_concise_rule(tmp_path: Path, binary: str) -> None:
+    """반증: 은퇴 대상 파일이 recovery snapshot에 없으면, 설치 정책이 바뀌는 재설치가 그 파일을
+    지운 뒤 실패했을 때 그 파일만 사라진 채 남는다. 나머지 정책 자산은 실패 전으로 돌아간다.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    _install(KIT_ROOT, project, binary)
+    label = ".Codex/rules/concise-output.md"
+    target = project / label
+    shipped = (KIT_ROOT / "skills/agent-flow-concise-output/concise-output.md").read_bytes()
+    target.write_bytes(shipped)
+    record = project / ".agent-flow/kit-assets.json"
+    payload = json.loads(record.read_text())
+    payload["files"][label] = hashlib.sha256(shipped).hexdigest()
+    record.write_text(json.dumps(payload), encoding="utf-8")
+    preload = tmp_path / "fail-publish.cjs"
+    preload.write_text(
+        "const fs = require('node:fs');\n"
+        "const rename = fs.renameSync;\n"
+        "fs.renameSync = (source, target) => {\n"
+        "  if (String(target).endsWith('/.agent-flow/kit.json')) throw new Error('injected install publication failure');\n"
+        "  return rename(source, target);\n"
+        "};\n"
+        "require('node:module').syncBuiltinESMExports();\n",
+        encoding="utf-8",
+    )
+
+    # architecture 선택이 바뀌면 installer가 정책 자산 snapshot을 잡는다.
+    failed = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install", "--architecture-mode", "clean"),
+        cwd=project, env={**os.environ, "NODE_OPTIONS": f"--require={preload}"},
+        text=True, capture_output=True, check=False, timeout=900,
+    )
+
+    assert failed.returncode != 0
+    assert target.read_bytes() == shipped
+    assert _recorded(project)[label] == hashlib.sha256(shipped).hexdigest()
+    _install(KIT_ROOT, project, binary)
+    assert not target.exists()
