@@ -161,11 +161,19 @@ def test_red_with_only_passing_test_runs_is_blocked(tmp_path):
     assert any(item.startswith("red-observed:") for item in missing)
 
 
-def test_red_passes_when_the_host_reports_no_exit_codes(tmp_path):
-    """반증: exit code를 안 실어 보내는 host를 위반으로 들면 red가 통째로 막힌다."""
+@pytest.mark.parametrize("phase_id", ("red", "implement-fix", "implement", "fix-loop"))
+@pytest.mark.parametrize("self_report", ("verified", "unavailable"))
+def test_red_requires_a_reported_exit_code(tmp_path, phase_id, self_report):
     root = _project(tmp_path)
     _observe(root, "pytest -q")
-    assert missing_test_evidence_markers(root, "red", GATE, profile=PYTHON_PROFILE) == []
+    missing = missing_test_evidence_markers(
+        root,
+        phase_id,
+        GATE + f"test-run-evidence: {self_report}\n",
+        profile=PYTHON_PROFILE,
+    )
+    assert any(item.startswith("red-observed:") for item in missing)
+    assert any("run-command" in item for item in missing)
 
 
 def test_implement_fix_with_only_passing_test_runs_is_blocked(tmp_path):

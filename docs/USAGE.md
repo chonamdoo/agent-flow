@@ -456,8 +456,30 @@ hash is Codex's internal serialization and is not checked, so Codex shows at mos
 
 The execution line also counts recorded commands that carry no exit code. As of Claude Code
 2.1.296 and Codex CLI 0.162.1, neither passes an exit code to PostToolUse hooks, and Claude does not
-run PostToolUse hooks for a failed command. On those hosts a failing test cannot be observed, so
-the red-phase check cannot require one. OMP passes exit codes.
+run PostToolUse hooks for a failed command. OMP passes exit codes. For tests and feedback commands
+whose results the hook cannot observe, run the authorized command through the execution wrapper
+from the bound checkout. After a successful explicit `agent-flow continue`, the host guidance
+prints `run_command_prefix` with that payload's actual session ID. Append the test argv to that
+prefix:
+
+```bash
+agent-flow run-command --host-session-id <actual-session-id> -- pytest tests/test_example.py::test_regression
+```
+
+The ID must match this checkout's current active run. An unknown, stale, or sibling session is
+refused. The CLI does not infer the ID from environment variables or select another session's
+binding. Without an ID it keeps the existing unbound boundary; standalone commands can use
+`agent-flow run-command -- <argv>` when no active run protects that checkout.
+
+The wrapper executes argv directly, passes through the command's output and normal exit code,
+and records the inner command with its actual result, run, phase, and pre-execution code baseline.
+It records the result even when a failed command has no PostToolUse event. Run the regression
+before the fix and after it; this command does not change a CI-only gate's execution policy.
+Use the recorded inner command for `feedback-command`. Wrapper evidence proves a command result,
+not that a host hook ran. A signal termination keeps its raw returncode and signal but has no
+exit code eligible as RED; an interrupted or unstarted command leaves no completed-run evidence.
+When all observed test or feedback results have unknown exit codes, the evidence check requires
+an actual wrapper result. A self-reported failing exit does not resolve that missing observation.
 
 A machine-readable copy follows on one `host_connection_json:` line.
 

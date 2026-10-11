@@ -2221,10 +2221,14 @@ def host_session_guidance(payload: object, project_root: Path) -> str | None:
         status_command = shlex.join(
             ["agent-flow", "status", "--root", str(root), "--worktree", context.name]
         )
+        run_command_prefix = shlex.join(
+            ["agent-flow", "run-command", "--host-session-id", session_id, "--"]
+        )
         return (
             f"[agent-flow] run: {status_value(workflow)}/{status_value(context.run_id)}\n"
             f"current_phase: {status_value(phase)}\n"
-            f"status_command: {status_value(status_command)}"
+            f"status_command: {status_value(status_command)}\n"
+            f"run_command_prefix: {status_value(run_command_prefix)}"
         )
     except (HostWriteBoundaryError, WorktreeIsolationError, OSError, ValueError):
         return None
