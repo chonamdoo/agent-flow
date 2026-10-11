@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -419,12 +420,394 @@ def test_omp_extension_prefers_the_leader_install_over_a_worktree_copy(
     assert find_install_root(session_root) == leader
 
 
-def _omp_install_root(start: Path, source: str, *, home: Path) -> Path | None:
-    """OMP가 실행할 hook의 설치본. 못 찾으면 OMP는 시작점을 돌려주므로 `kit.json`이
-    없는 결과를 Python `find_install_root`의 `None`과 맞춘다.
+def _omp_install_root(
+    start: Path, source: str, *, home: Path, preload: Path | None = None
+) -> Path | None:
+    """실제로 선택된 설치본. 진단 메시지용 HOOK_DIR fallback과 구분한다."""
+    target = _install_extension(
+        start,
+        source,
+        "\nexport const __INSTALL_ROOT = INSTALL_ROOT_REASON ? null : INSTALL_ROOT;\n",
+    )
+    node_args = (_node(),) if preload is None else (_node(), "--require", str(preload))
+    result = subprocess.run(
+        (
+            *node_args,
+            "--input-type=module",
+            "-e",
+            f"import({json.dumps(str(target))})"
+            ".then((m) => process.stdout.write(JSON.stringify(m.__INSTALL_ROOT)));",
+        ),
+        cwd=start,
+        env={**os.environ, "HOME": str(home)},
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    chosen = json.loads(result.stdout)
+    return Path(chosen) if chosen is not None else None
+
+
+def _observation_hook_roots(start: Path) -> dict[str, Path | None]:
+    return {
+        name: runpy.run_path(str(KIT_ROOT / "scripts" / "hooks" / name))[
+            "find_project_root"
+        ](start)
+        for name in ("record-command-run.py", "record-skill-read.py")
+    }
+
+
+def _seed_cli_runtime(root: Path) -> None:
+    """CLI가 선택한 runtime package가 자기 프로젝트 루트를 출력하게 한다."""
+    package = root / ".agent-flow" / "runtime" / "python" / "agent_flow"
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "cli.py").write_text(
+        "from pathlib import Path\nprint(Path(__file__).resolve().parents[4])\n",
+        encoding="utf-8",
+    )
+
+
+def _node_project_root(
+    start: Path, *, home: Path, preload: Path | None = None
+) -> Path:
+    node_args = (_node(),) if preload is None else (_node(), "--require", str(preload))
+    result = subprocess.run(
+        (*node_args, str(BIN / "agent-flow-kit.mjs"), "discovery-probe"),
+        cwd=start,
+        env={**os.environ, "HOME": str(home), "PYTHON": sys.executable},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return Path(result.stdout.strip())
+
+
+def test_node_project_root_discovery_stops_at_home_or_start(tmp_path: Path):
+    """public CLI는 git common root를 유지하고 git 밖 설치 탐색에는 경계를 둔다."""
+    root = tmp_path.resolve()
+    home = root / "home"
+    _seed_install(home)
+    loose = home / "loose"
+    loose.mkdir()
+    nearby = home / "projects"
+    _seed_install(nearby)
+    nearby_start = nearby / "app"
+    nearby_start.mkdir()
+    foreign = root / "foreign"
+    _seed_install(foreign)
+    foreign_start = foreign / "child"
+    foreign_start.mkdir()
+    marker_start = foreign / ".agent-flow" / "scratch"
+    marker_start.mkdir()
+    home_marker_start = home / ".agent-flow" / "scratch"
+    home_marker_start.mkdir()
+
+    repository = root / "repo"
+    repository.mkdir()
+    _git(repository, "init", "-q")
+    _git(
+        repository,
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "init",
+    )
+    nested_install = repository / "pkg"
+    _seed_install(nested_install)
+    repository_start = nested_install / "app"
+    repository_start.mkdir()
+    linked = root / "manual-wt"
+    _git(repository, "worktree", "add", "-q", "-b", "w1", str(linked))
+    _seed_install(linked)
+
+    cases = (
+        ("HOME 설치는 하위 프로젝트의 runtime이 아니다", loose, loose),
+        ("HOME 안 가까운 설치", nearby_start, nearby),
+        ("HOME 밖 시작점 fallback", foreign_start, foreign_start),
+        ("HOME 밖 marker에도 같은 경계", marker_start, marker_start),
+        ("HOME marker도 HOME 설치를 선택하지 않는다", home_marker_start, home_marker_start),
+        ("HOME에서 직접 시작", home, home),
+        ("git 안은 가까운 kit보다 common root", repository_start, repository),
+        ("linked는 kit가 없는 common root도 유지", linked, repository),
+    )
+    for candidate in {home, nearby, foreign, nested_install, linked, repository}:
+        _seed_cli_runtime(candidate)
+    for _, start, _ in cases:
+        _seed_cli_runtime(start)
+    for label, start, expected in cases:
+        assert _node_project_root(start, home=home) == expected, label
+
+
+@pytest.mark.parametrize("layout", ("managed", "legacy", "manual", "home-leader"))
+def test_linked_worktree_without_leader_install_ignores_all_local_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layout: str
+):
+    """leader가 설치되지 않은 linked checkout은 worker/container 사본을 실행하지 않는다.
+
+    HOME인 leader도 설치 후보가 아니다. 정상 HOME 시작점 예외가 linked checkout의
+    worker 사본까지 허용하는 것으로 확대되면 안 된다.
     """
-    chosen = _resolved_hook_dir(start, source, home=home).parents[2]
-    return chosen if (chosen / ".agent-flow" / "kit.json").is_file() else None
+    from agent_flow.core.hook_integrity import find_install_root
+
+    root = tmp_path.resolve()
+    home = root / "home"
+    home.mkdir()
+    leader = home if layout == "home-leader" else root / "leader"
+    leader.mkdir(exist_ok=True)
+    _git(leader, "init", "-q")
+    _git(
+        leader,
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "init",
+    )
+    checkout = {
+        "managed": home / ".agent-flow" / "worktrees" / "repo-id" / "w1",
+        "legacy": leader / ".agent-flow" / "worktrees" / "w1",
+        "manual": root / "manual-wt",
+        "home-leader": root / "home-worktrees" / "w1",
+    }[layout]
+    _git(leader, "worktree", "add", "-q", "-b", "w1", str(checkout))
+    for planted in (checkout.parent, checkout, checkout / "pkg"):
+        hooks = _seed_install(planted)
+        for name in ("guard-protected-branch.sh", "guard-host-worktree.sh"):
+            (hooks / name).write_text('echo "worker copy ran" >&2\nexit 1\n', encoding="utf-8")
+            (hooks / name).chmod(0o755)
+    if layout == "home-leader":
+        _seed_install(home)
+    nested = checkout / "pkg" / "app"
+    nested.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    source = _extension_source()
+
+    for start in (checkout, nested):
+        assert find_install_root(start) is None, f"{layout}: Python chose a worker copy"
+        assert _omp_install_root(start, source, home=home) is None, (
+            f"{layout}: OMP chose a worker copy"
+        )
+        for hook, chosen in _observation_hook_roots(start).items():
+            assert chosen is None, f"{layout}: {hook} chose a worker copy"
+        stdout, _ = _run_bash_tool_call(start, source)
+        assert json.loads(stdout) is None, f"{layout}: OMP ran a worker hook"
+
+
+@pytest.mark.parametrize("layout", ("managed", "legacy", "manual"))
+def test_submodule_inside_a_linked_checkout_resolves_the_leader_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layout: str
+):
+    """반증: submodule의 common dir은 `.git/modules/...`라 git 판정이 linked checkout을
+    보지 못한다. HOME 밖 leader면 submodule 자신이 경계가 되어 leader 설치본을 잃고,
+    submodule에 심은 사본이 기준선이 된다.
+    """
+    from agent_flow.core.hook_integrity import find_install_root
+
+    root = tmp_path.resolve()
+    home = root / "home"
+    home.mkdir()
+    commit = ("-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+              "commit", "-q", "--allow-empty", "-m", "init")
+    library = root / "library"
+    library.mkdir()
+    _git(library, "init", "-q")
+    _git(library, *commit)
+    leader = root / "leader"
+    leader.mkdir()
+    _git(leader, "init", "-q")
+    _git(leader, *commit)
+    _seed_install(leader)
+    _seed_cli_runtime(leader)
+    checkout = {
+        "managed": home / ".agent-flow" / "worktrees" / "repo-id" / "w1",
+        "legacy": leader / ".agent-flow" / "worktrees" / "w1",
+        "manual": root / "manual-wt",
+    }[layout]
+    _git(leader, "worktree", "add", "-q", "-b", "w1", str(checkout))
+    _git(checkout, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(library), "sub")
+    submodule = checkout / "sub"
+    _seed_install(submodule)
+    _seed_cli_runtime(submodule)
+    monkeypatch.setenv("HOME", str(home))
+    source = _extension_source()
+
+    assert find_install_root(submodule) == leader, f"{layout}: Python"
+    assert _omp_install_root(submodule, source, home=home) == leader, f"{layout}: OMP"
+    for hook, chosen in _observation_hook_roots(submodule).items():
+        assert chosen == leader, f"{layout}: {hook}"
+    assert _node_project_root(submodule, home=home) == leader, f"{layout}: JS CLI"
+
+
+def test_install_resolvers_compare_directory_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """casing을 보존하는 filesystem에서 stat 동일성으로 HOME/git 경계를 지킨다.
+
+    Linux에서는 filesystem seam만 모사한다. git은 실제 저장소를 조회하고 common-dir의
+    표기만 바꿔 반환한다. 이 결과를 실제 macOS filesystem 실행으로 보고하지 않는다.
+    """
+    from agent_flow.core.hook_integrity import find_install_root
+
+    root = tmp_path.resolve()
+    home = root / "home"
+    _seed_install(home)
+    projects = home / "projects"
+    _seed_install(projects)
+    app = projects / "app"
+    app.mkdir()
+    for candidate in (home, projects, app):
+        _seed_cli_runtime(candidate)
+
+    def repository(name: str) -> Path:
+        candidate = root / name
+        candidate.mkdir()
+        _git(candidate, "init", "-q")
+        _git(
+            candidate,
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        )
+        _seed_install(candidate)
+        return candidate
+
+    repo = repository("repo")
+    _seed_install(repo / "pkg")
+    repo_app = repo / "pkg" / "app"
+    repo_app.mkdir()
+    repo_home = repository("repo-home")
+    repo_home_src = repo_home / "src"
+    repo_home_src.mkdir()
+    home_checkout = root / "home-worktree"
+    _git(repo_home, "worktree", "add", "-q", "-b", "w1", str(home_checkout))
+    _seed_install(home_checkout)
+    source = _extension_source()
+    aliases = {
+        str(root / "HOME"): str(home),
+        str(root / "REPO"): str(repo),
+        str(root / "REPO-HOME"): str(repo_home),
+    }
+
+    def disk_path(value):
+        if isinstance(value, int):
+            return value
+        raw = os.fspath(value)
+        for alias, disk in aliases.items():
+            if raw == alias or raw.startswith(alias + os.sep):
+                return disk + raw[len(alias):]
+        return value
+
+    real_stat = os.stat
+    real_realpath = os.path.realpath
+
+    def alias_stat(value, *args, **kwargs):
+        return real_stat(disk_path(value), *args, **kwargs)
+
+    def alias_realpath(value, *args, **kwargs):
+        raw = os.fspath(value)
+        resolved = real_realpath(disk_path(value), *args, **kwargs)
+        for alias, disk in aliases.items():
+            if raw == alias or raw.startswith(alias + os.sep):
+                return alias + resolved[len(disk):]
+        return resolved
+
+    preload = root / "case-preserving-filesystem.cjs"
+    preload.write_text(
+        'const fs = require("node:fs");\n'
+        f"const aliases = {json.dumps(aliases)};\n"
+        "function diskPath(value) {\n"
+        "  if (typeof value !== 'string') return value;\n"
+        "  for (const [alias, disk] of Object.entries(aliases)) {\n"
+        "    if (value === alias || value.startsWith(alias + '/')) return disk + value.slice(alias.length);\n"
+        "  }\n"
+        "  return value;\n"
+        "}\n"
+        "const stat = fs.statSync, exists = fs.existsSync, realpath = fs.realpathSync;\n"
+        "fs.statSync = (value, ...args) => stat(diskPath(value), ...args);\n"
+        "fs.existsSync = (value) => exists(diskPath(value));\n"
+        "fs.realpathSync = (value, ...args) => {\n"
+        "  const resolved = realpath(diskPath(value), ...args);\n"
+        "  for (const [alias, disk] of Object.entries(aliases)) {\n"
+        "    if (value === alias || value.startsWith(alias + '/')) return alias + resolved.slice(disk.length);\n"
+        "  }\n"
+        "  return resolved;\n"
+        "};\n"
+        "fs.realpathSync.native = fs.realpathSync;\n",
+        encoding="utf-8",
+    )
+    git = shutil.which("git")
+    assert git is not None
+    tools_dir = root / "tools"
+    tools_dir.mkdir()
+    git_wrapper = tools_dir / "git"
+    git_wrapper.write_text(
+        f"#!{sys.executable}\n"
+        "import subprocess, sys\nfrom pathlib import Path\n"
+        f"aliases = {aliases!r}\n"
+        f"result = subprocess.run([{git!r}, *sys.argv[1:]], capture_output=True)\n"
+        "output = result.stdout\n"
+        "if result.returncode == 0 and '--git-common-dir' in sys.argv:\n"
+        "    lines = output.decode().splitlines()\n"
+        "    if lines:\n"
+        "        common = (Path.cwd() / lines[0]).resolve()\n"
+        "        for alias, disk in aliases.items():\n"
+        "            if common == Path(disk) / '.git':\n"
+        "                lines[0] = str(Path(alias) / '.git')\n"
+        "        output = ('\\n'.join(lines) + '\\n').encode()\n"
+        "sys.stdout.buffer.write(output)\nsys.stderr.buffer.write(result.stderr)\n"
+        "sys.exit(result.returncode)\n",
+        encoding="utf-8",
+    )
+    git_wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools_dir) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(os, "stat", alias_stat)
+    monkeypatch.setattr(os.path, "realpath", alias_realpath)
+
+    cases = (
+        ("HOME 별칭 아래 가까운 설치", app, root / "HOME", projects),
+        ("정상 checkout을 linked로 오인하지 않는다", repo_app, home, repo / "pkg"),
+        ("git common-root 별칭도 HOME 제외", repo_home_src, repo_home, None),
+        ("linked leader의 HOME 별칭도 제외", home_checkout, repo_home, None),
+    )
+    for label, start, case_home, expected in cases:
+        monkeypatch.setenv("HOME", str(case_home))
+        choices = {
+            "Python": find_install_root(start),
+            "OMP": _omp_install_root(start, source, home=case_home, preload=preload),
+            **_observation_hook_roots(start),
+        }
+        for resolver, chosen in choices.items():
+            if expected is None:
+                assert chosen is None, f"{label}: {resolver}"
+            else:
+                assert chosen is not None and os.path.samefile(chosen, expected), (
+                    f"{label}: {resolver} chose {chosen}, expected {expected}"
+                )
+    assert _node_project_root(app, home=root / "HOME", preload=preload) == projects
 
 
 def test_python_install_root_matches_the_omp_resolver_boundary(
@@ -490,6 +873,12 @@ def test_python_install_root_matches_the_omp_resolver_boundary(
     repo_home_src = repo_home / "src"
     repo_home_src.mkdir()
 
+    superproject = repository(home / "projects" / "super")
+    _seed_install(superproject)
+    library = repository(root / "library")
+    _git(superproject, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(library), "sub")
+    submodule = superproject / "sub"
+
     cases = (
         ("git 밖, HOME 아래: HOME 설치는 후보가 아니다", loose, home, None),
         ("HOME에서 바로 시작", home, home, home),
@@ -499,11 +888,14 @@ def test_python_install_root_matches_the_omp_resolver_boundary(
         ("leader 밖 수동 worktree", manual, home, leader),
         ("저장소가 HOME: 하위 폴더", repo_home_src, repo_home, None),
         ("저장소가 HOME: HOME에서 바로 시작", repo_home, repo_home, repo_home),
+        ("HOME 아래 submodule은 상위 저장소 설치", submodule, home, superproject),
     )
     for label, start, case_home, expected in cases:
         monkeypatch.setenv("HOME", str(case_home))
         assert _omp_install_root(start, source, home=case_home) == expected, label
         assert find_install_root(start) == expected, label
+        for hook, chosen in _observation_hook_roots(start).items():
+            assert chosen == expected, f"{label}: {hook}"
 
 
 def test_python_and_omp_agree_when_home_is_a_symlink(
@@ -542,6 +934,60 @@ def test_python_and_omp_agree_when_home_is_a_symlink(
         monkeypatch.setenv("HOME", str(case_home))
         assert _omp_install_root(start, source, home=case_home) == expected, label
         assert find_install_root(start) == expected, label
+        for hook, chosen in _observation_hook_roots(start).items():
+            assert chosen == expected, f"{label}: {hook}"
+
+
+def test_observation_hooks_ignore_poisoned_git_discovery_env(tmp_path: Path):
+    """ambient GIT_*가 관측 증거를 decoy 저장소에 쓰게 만들지 못한다."""
+    root = tmp_path.resolve()
+    home = root / "home"
+    home.mkdir()
+    actual = root / "actual"
+    decoy = root / "decoy"
+    for repository in (actual, decoy):
+        repository.mkdir()
+        _git(repository, "init", "-q")
+        _seed_install(repository)
+    start = actual / "src"
+    start.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "GIT_DIR": str(decoy / ".git"),
+        "GIT_WORK_TREE": str(decoy),
+        "GIT_COMMON_DIR": str(decoy / ".git"),
+    }
+    cases = (
+        (
+            "record-command-run.py",
+            "commands-run.jsonl",
+            {"tool_name": "Bash", "tool_input": {"command": "echo boundary"}, "exit_code": 0},
+            "command",
+            "echo boundary",
+        ),
+        (
+            "record-skill-read.py",
+            "skills-read.jsonl",
+            {"tool_name": "Skill", "tool_input": {"skill": "tdd"}},
+            "skill",
+            "tdd",
+        ),
+    )
+    for hook, log, payload, key, expected in cases:
+        result = subprocess.run(
+            (sys.executable, str(KIT_ROOT / "scripts" / "hooks" / hook)),
+            cwd=start,
+            env=env,
+            input=json.dumps({**payload, "cwd": str(start)}),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        records = (actual / ".agent-flow" / log).read_text(encoding="utf-8").splitlines()
+        assert [json.loads(record)[key] for record in records] == [expected]
+        assert not (decoy / ".agent-flow" / log).exists()
 
 
 def test_omp_extension_separates_no_install_from_a_deleted_guard(tmp_path: Path):
@@ -614,6 +1060,9 @@ def test_omp_extension_normalizes_v17_bash_result_exit_codes(tmp_path: Path):
 
 def test_omp_recorder_cwd_does_not_change_guard_context(tmp_path: Path):
     root = tmp_path
+    # recorder 설치 탐색은 git root에서 멈춘다. HOME 밖 비git 폴더면 시작점만 보므로
+    # 하위 cwd의 기록이 이 설치본에 닿도록 저장소 경계를 둔다.
+    _git(root, "init", "-q")
     session = root / "session"
     session.mkdir()
     bound = session / "bound directory"
