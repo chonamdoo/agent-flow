@@ -765,30 +765,45 @@ function normalizeExportedRoutes(value, name, index) {
 
 
 
-function resolveAgentFlowRoot(start) {
-  const worktreeRoot = resolveManagedWorktreeRoot(start);
-  if (worktreeRoot && fs.existsSync(path.join(worktreeRoot, ".agent-flow", "kit.json"))) {
-    return worktreeRoot;
+function sameDiscoveryDirectory(left, right) {
+  try {
+    const a = fs.statSync(left, { bigint: true });
+    const b = fs.statSync(right, { bigint: true });
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return path.resolve(left) === path.resolve(right);
   }
+}
+
+function isDiscoveryAncestor(ancestor, descendant) {
+  let current = descendant;
+  for (;;) {
+    if (sameDiscoveryDirectory(ancestor, current)) {
+      return true;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return false;
+    }
+    current = parent;
+  }
+}
+
+function resolveAgentFlowRoot(start) {
+  start = canonicalPath(start);
   const gitCommonRoot = resolveGitCommonWorktreeRoot(start);
   if (gitCommonRoot) {
     return gitCommonRoot;
   }
-  const parts = start.split(path.sep);
-  const markerIndex = parts.lastIndexOf(".agent-flow");
-  if (markerIndex !== -1) {
-    const root = parts.slice(0, markerIndex).join(path.sep) || path.sep;
-    if (fs.existsSync(path.join(root, ".agent-flow", "kit.json"))) {
-      return root;
-    }
-  }
+  const home = canonicalPath(os.homedir());
+  const boundary = isDiscoveryAncestor(home, start) ? home : start;
   let current = start;
   while (true) {
-    if (fs.existsSync(path.join(current, ".agent-flow", "kit.json"))) {
+    if (!sameDiscoveryDirectory(current, home) && fs.existsSync(path.join(current, ".agent-flow", "kit.json"))) {
       return current;
     }
     const parent = path.dirname(current);
-    if (parent === current) {
+    if (sameDiscoveryDirectory(current, boundary) || parent === current) {
       return start;
     }
     current = parent;
