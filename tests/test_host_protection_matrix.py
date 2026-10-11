@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -269,3 +270,55 @@ def test_explicit_resume_grants_guidance_only_on_continue_for_every_host(
     assert after_status is not None and after_status.guidance_eligible is False
     assert after_continue is not None
     assert after_continue.guidance_eligible is continue_grants_guidance
+
+
+def _model_context(host: str, result: Any) -> str:
+    """host가 모델 컨텍스트에 넣는 PostToolUse 출력. systemMessage는 사용자에게만 간다."""
+    if host == "omp":
+        return (result or {}).get("additionalContext", "")
+    bound = result[1]
+    assert bound.returncode == 0, bound.stderr
+    if not bound.stdout.strip():
+        return ""
+    output = json.loads(bound.stdout)
+    assert "systemMessage" not in output
+    assert output["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+    return output["hookSpecificOutput"]["additionalContext"]
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_explicit_resume_hands_the_run_command_prefix_to_the_model_for_every_host(
+    tmp_path: Path, host: str
+):
+    """반증: session ID가 Stop systemMessage로만 나가면 세 host 모두 사용자에게만 보여
+    모델은 bound worktree에서 run-command를 쓸 수 없다. 모델 채널로 받은 prefix를 그대로
+    실행하면 실제 종료 결과가 이 run의 증거로 남아야 한다.
+    """
+    root, checkout, run_dir = _project(tmp_path)
+    output = _status_output(root, checkout, run_dir)
+
+    status = _post(host, root, checkout, _status(root, checkout), output)
+    resumed = _post(host, root, checkout, _status(root, checkout, "continue"), output)
+
+    assert _model_context(host, status) == ""
+    marker = "[agent-flow] run_command_prefix: "
+    lines = [line for line in _model_context(host, resumed).splitlines() if line.startswith(marker)]
+    assert len(lines) == 1
+    prefix = shlex.split(lines[0].removeprefix(marker))
+    assert prefix == ["agent-flow", "run-command", "--host-session-id", SESSION, "--"]
+    env = {**_hook_env(), "PYTHONPATH": str(KIT / "src")}
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"):
+        env.pop(key, None)
+    executed = subprocess.run(
+        (sys.executable, "-m", "agent_flow.cli", *prefix[1:],
+         sys.executable, "-c", "raise SystemExit(3)"),
+        cwd=checkout, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert executed.returncode == 3, executed.stderr
+    entries = [
+        json.loads(line)
+        for line in (root / ".agent-flow" / "commands-run.jsonl").read_text().splitlines()
+    ]
+    observed = [entry for entry in entries if entry.get("source") == "runner"]
+    assert len(observed) == 1
+    assert observed[0]["exit_code"] == 3 and observed[0]["run_id"] == run_dir.name

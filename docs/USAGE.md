@@ -458,9 +458,10 @@ The execution line also counts recorded commands that carry no exit code. As of 
 2.1.296 and Codex CLI 0.162.1, neither passes an exit code to PostToolUse hooks, and Claude does not
 run PostToolUse hooks for a failed command. OMP passes exit codes. For tests and feedback commands
 whose results the hook cannot observe, run the authorized command through the execution wrapper
-from the bound checkout. After a successful explicit `agent-flow continue`, the host guidance
-prints `run_command_prefix` with that payload's actual session ID. Append the test argv to that
-prefix:
+from the bound checkout. After an explicit `agent-flow run`/`start`/`continue` binds the session,
+the PostToolUse binding hook passes `run_command_prefix` with that payload's actual session ID to
+the model as `additionalContext` (the Stop guidance repeats it, but its `systemMessage` is shown
+only to the user). Append the test argv to that prefix:
 
 ```bash
 agent-flow run-command --host-session-id <actual-session-id> -- pytest tests/test_example.py::test_regression

@@ -451,10 +451,20 @@ def missing_test_evidence_markers(
         ]
     reported = [run.exit_code for run in observed if run.exit_code is not None]
     if not reported:
+        bound_hint = (
+            "in a bound active checkout use the run_command_prefix reported after "
+            "agent-flow continue"
+        )
+        if values.get("red-reference"):
+            return [
+                "test-run-evidence: verified (no test exit code was observed; rerun the "
+                "referenced regression with agent-flow run-command -- <test argv> so it is "
+                f"observed ending green; {bound_hint})"
+            ]
         return [
             "red-observed: <observed failing exit code> (no test exit code was observed; "
             "use agent-flow run-command -- <test argv> to record the actual result; "
-            "in a bound active checkout use the host guidance's run_command_prefix)"
+            f"{bound_hint})"
         ]
     if reported and all(code == 0 for code in reported) and values.get("red-reference"):
         relevant = _selected_test_runs(evidence, profile, values.get("regression-test", "").strip())
@@ -641,7 +651,8 @@ def missing_feedback_evidence_markers(
         return [
             "feedback-run-evidence: verified (no exit code was observed; "
             "use agent-flow run-command -- <feedback argv> to record the actual result; "
-            "in a bound active checkout use the host guidance's run_command_prefix)"
+            "in a bound active checkout use the run_command_prefix reported after "
+            "agent-flow continue)"
         ]
 
     if red_exit is not None and red_exit not in observed_codes:
