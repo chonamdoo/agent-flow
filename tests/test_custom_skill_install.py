@@ -3343,6 +3343,35 @@ def _kit_json(project: Path) -> dict:
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_leaves_legacy_memory_untouched(tmp_path: Path, binary: str) -> None:
+    fresh = tmp_path / f"fresh-{binary}"
+    fresh.mkdir()
+    result = _install_with(binary, fresh)
+    assert result.returncode == 0, result.stderr
+    assert not (fresh / ".agent-flow" / "memory").exists()
+
+    project = tmp_path / f"existing-{binary}"
+    memory = project / ".agent-flow" / "memory"
+    seeded = {
+        "entities/custom.md": b"user-owned entity\r\n\xff\n",
+        "lore/archive/custom.md": b"user-owned archive\n",
+    }
+    for name, body in seeded.items():
+        target = memory / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(body)
+
+    for flags in ((), ("--force-managed",)):
+        result = _install_with(binary, project, *flags)
+        assert result.returncode == 0, result.stderr
+        assert {
+            path.relative_to(memory).as_posix(): path.read_bytes()
+            for path in memory.rglob("*")
+            if path.is_file()
+        } == seeded
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_install_leaves_project_workflows_untouched(tmp_path: Path, binary: str) -> None:
     """반증: runner는 runtime 사본만 읽는데 install이 `.agent-flow/workflows`를 만들고 prune했다.
 

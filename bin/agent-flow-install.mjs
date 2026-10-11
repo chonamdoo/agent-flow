@@ -917,7 +917,6 @@ function install() {
   }
   const rootContext = rootContextPolicy(PROJECT);
   ensureDir(path.join(AF_DIR, "runs"));
-  ensureDir(path.join(AF_DIR, "memory"));
   ensureDir(path.join(AF_DIR, "local-skills"));
 
   const profile = installProfile(PROJECT, INSTALL_ARGS, previousSkillIndex);

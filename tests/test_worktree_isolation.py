@@ -2380,8 +2380,9 @@ def test_state_dirs_match_artifacts_init(tmp_path):
 
     artifacts.init_project(tmp_path)
     created = {p.name for p in (tmp_path / ".agent-flow").iterdir() if p.is_dir()}
-    assert expected - {"worktrees"} <= created
-    assert "worktrees" not in created
+    legacy = {"memory", "worktrees"}
+    assert expected - legacy <= created
+    assert legacy.isdisjoint(created)
 
 
 def test_tripwire_sees_inside_gitignored_agent_flow(tmp_path):

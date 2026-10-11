@@ -211,7 +211,6 @@ from agent_flow.core.worktree_isolation import (
     worktree_path_key,
 )
 from agent_flow.eval import run_eval
-from agent_flow.memory.entities import EntityMemoryIndex
 from agent_flow.artifact import (
     ActiveRun,
     approve_phase_artifact,
@@ -561,12 +560,6 @@ def main(argv: list[str] | None = None) -> int:
     context_invariants.add_argument("--run-dir")
     context_write_invariants = context_subparsers.add_parser("write-invariants")
     context_write_invariants.add_argument("--root", default=".")
-
-    memory_parser = subparsers.add_parser("memory")
-    memory_subparsers = memory_parser.add_subparsers(dest="memory_command", required=True)
-    memory_entities = memory_subparsers.add_parser("entities")
-    memory_entities.add_argument("--root", default=".")
-    memory_entities.add_argument("--dir")
 
     handoff_parser = subparsers.add_parser("handoff")
     handoff_parser.add_argument("--root", default=".")
@@ -1649,21 +1642,6 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 0
-
-    if args.command == "memory":
-        if args.memory_command == "entities":
-            memory_dir = _resolve_project_path(root, args.dir) if args.dir else root / ".agent-flow" / "memory" / "entities"
-            index = EntityMemoryIndex.load(memory_dir)
-            print(
-                f"entities: {len(index.entries)} entries "
-                f"stale={len(index.stale)} conflicts={len(index.conflicts)} skipped={len(index.skipped)}"
-            )
-            for entity, entries in index.conflicts:
-                sources = ", ".join(str(entry.path) for entry in entries)
-                print(f"conflict: {entity}: {sources}")
-            for path, reason in index.skipped:
-                print(f"skipped: {path}: {reason}")
-            return 1 if index.conflicts or index.skipped else 0
 
     if args.command == "handoff":
         path = write_handoff(

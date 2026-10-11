@@ -20,9 +20,9 @@ GATE_RESULTS_MAX_BYTES = 32 * 1024 * 1024
 
 
 def init_project(root: Path) -> None:
-    # Legacy worktrees remain excluded by the tripwire, but are created only on demand.
+    # Legacy state remains excluded by the tripwire without being created eagerly.
     for name in AGENT_FLOW_STATE_DIRS:
-        if name != "worktrees":
+        if name not in {"memory", "worktrees"}:
             (root / ".agent-flow" / name).mkdir(parents=True, exist_ok=True)
 
 
