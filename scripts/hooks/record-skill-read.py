@@ -165,13 +165,12 @@ def append_record(log_path: Path, record: dict) -> None:
         return
 
 
-def git_checkout_roots(start: Path) -> tuple[Path, Path] | None:
-    """sanitize한 git으로 common root와 checkout root를 얻는다."""
+def _git_rev_parse(cwd: Path, *args: str) -> list[str] | None:
     env = {name: value for name, value in os.environ.items() if name not in LEAKY_GIT_ENV_VARS}
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir", "--show-toplevel"],
-            cwd=str(start),
+            ["git", "rev-parse", *args],
+            cwd=str(cwd),
             env=env,
             capture_output=True,
             text=True,
@@ -182,13 +181,24 @@ def git_checkout_roots(start: Path) -> tuple[Path, Path] | None:
         return None
     if result.returncode != 0:
         return None
-    lines = result.stdout.strip().splitlines()
-    if len(lines) != 2 or not all(lines):
+    return result.stdout.strip().splitlines()
+
+
+def git_checkout_roots(start: Path) -> tuple[Path, Path] | None:
+    """sanitize한 git으로 common root와 checkout root를 얻는다.
+
+    submodule은 자기 common dir로 checkout 종류를 알 수 없어 가장 바깥 superproject에서 묻는다.
+    """
+    anchor = start
+    while superproject := _git_rev_parse(anchor, "--show-superproject-working-tree"):
+        anchor = Path(superproject[0])
+    lines = _git_rev_parse(anchor, "--git-common-dir", "--show-toplevel")
+    if lines is None or len(lines) != 2 or not all(lines):
         return None
     common = Path(lines[0])
     if not common.is_absolute():
-        # leader 자신에서는 `.git`처럼 상대경로가 나온다. 기준은 실행 cwd인 `start`다.
-        common = start / common
+        # leader 자신에서는 `.git`처럼 상대경로가 나온다. 기준은 실행 cwd인 `anchor`다.
+        common = anchor / common
     if common.name != ".git":
         return None
     try:

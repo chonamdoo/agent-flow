@@ -791,11 +791,29 @@ function isDiscoveryAncestor(ancestor, descendant) {
 
 function resolveAgentFlowRoot(start) {
   start = canonicalPath(start);
-  const gitCommonRoot = resolveGitCommonWorktreeRoot(start);
+  const home = canonicalPath(os.homedir());
+  // `<leader>/.agent-flow/worktrees/<name>` 같은 관리 경로는 git 판정보다 먼저 본다.
+  // 그 안의 submodule은 common dir이 `.git/modules/...`라 git으로는 leader에 닿지 못한다.
+  const worktreeRoot = resolveManagedWorktreeRoot(start);
+  if (
+    worktreeRoot
+    && !sameDiscoveryDirectory(worktreeRoot, home)
+    && fs.existsSync(path.join(worktreeRoot, ".agent-flow", "kit.json"))
+  ) {
+    return worktreeRoot;
+  }
+  let anchor = start;
+  for (
+    let superproject = gitOutput(anchor, ["rev-parse", "--show-superproject-working-tree"]);
+    superproject;
+    superproject = gitOutput(anchor, ["rev-parse", "--show-superproject-working-tree"])
+  ) {
+    anchor = superproject;
+  }
+  const gitCommonRoot = resolveGitCommonWorktreeRoot(anchor);
   if (gitCommonRoot) {
     return gitCommonRoot;
   }
-  const home = canonicalPath(os.homedir());
   const boundary = isDiscoveryAncestor(home, start) ? home : start;
   let current = start;
   while (true) {

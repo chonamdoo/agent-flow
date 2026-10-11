@@ -609,6 +609,51 @@ def test_linked_worktree_without_leader_install_ignores_all_local_copies(
         assert json.loads(stdout) is None, f"{layout}: OMP ran a worker hook"
 
 
+@pytest.mark.parametrize("layout", ("managed", "legacy", "manual"))
+def test_submodule_inside_a_linked_checkout_resolves_the_leader_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layout: str
+):
+    """반증: submodule의 common dir은 `.git/modules/...`라 git 판정이 linked checkout을
+    보지 못한다. HOME 밖 leader면 submodule 자신이 경계가 되어 leader 설치본을 잃고,
+    submodule에 심은 사본이 기준선이 된다.
+    """
+    from agent_flow.core.hook_integrity import find_install_root
+
+    root = tmp_path.resolve()
+    home = root / "home"
+    home.mkdir()
+    commit = ("-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+              "commit", "-q", "--allow-empty", "-m", "init")
+    library = root / "library"
+    library.mkdir()
+    _git(library, "init", "-q")
+    _git(library, *commit)
+    leader = root / "leader"
+    leader.mkdir()
+    _git(leader, "init", "-q")
+    _git(leader, *commit)
+    _seed_install(leader)
+    _seed_cli_runtime(leader)
+    checkout = {
+        "managed": home / ".agent-flow" / "worktrees" / "repo-id" / "w1",
+        "legacy": leader / ".agent-flow" / "worktrees" / "w1",
+        "manual": root / "manual-wt",
+    }[layout]
+    _git(leader, "worktree", "add", "-q", "-b", "w1", str(checkout))
+    _git(checkout, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(library), "sub")
+    submodule = checkout / "sub"
+    _seed_install(submodule)
+    _seed_cli_runtime(submodule)
+    monkeypatch.setenv("HOME", str(home))
+    source = _extension_source()
+
+    assert find_install_root(submodule) == leader, f"{layout}: Python"
+    assert _omp_install_root(submodule, source, home=home) == leader, f"{layout}: OMP"
+    for hook, chosen in _observation_hook_roots(submodule).items():
+        assert chosen == leader, f"{layout}: {hook}"
+    assert _node_project_root(submodule, home=home) == leader, f"{layout}: JS CLI"
+
+
 def test_install_resolvers_compare_directory_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1015,6 +1060,9 @@ def test_omp_extension_normalizes_v17_bash_result_exit_codes(tmp_path: Path):
 
 def test_omp_recorder_cwd_does_not_change_guard_context(tmp_path: Path):
     root = tmp_path
+    # recorder 설치 탐색은 git root에서 멈춘다. HOME 밖 비git 폴더면 시작점만 보므로
+    # 하위 cwd의 기록이 이 설치본에 닿도록 저장소 경계를 둔다.
+    _git(root, "init", "-q")
     session = root / "session"
     session.mkdir()
     bound = session / "bound directory"
