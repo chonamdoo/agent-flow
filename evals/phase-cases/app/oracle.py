@@ -324,14 +324,18 @@ def main(argv=None):
     parser.add_argument("--project", required=True, type=Path)
     parser.add_argument("--mode", required=True, choices=MODES)
     args = parser.parse_args(argv)
+    config = CASE["modes"][args.mode]
+    if args.command == "author" and config.get("review_only"):
+        parser.error(f"{args.mode} is review-only")
+    mode = config.get("fixture_mode", args.mode)
     project = args.project.resolve()
 
     checks = []
     result = {"behavior": None, "plan": None, "norm": None, "checks": checks}
     if args.command == "author":
-        result["behavior"] = behavior(project, args.mode, checks)
-        result["plan"] = plan(project, args.mode, checks)
-    norm_checks = NORMS[args.mode](project)
+        result["behavior"] = behavior(project, mode, checks)
+        result["plan"] = plan(project, mode, checks)
+    norm_checks = NORMS[mode](project)
     checks.extend(norm_checks)
     result["norm"] = all(item["ok"] for item in norm_checks)
     print(json.dumps(result, indent=2))

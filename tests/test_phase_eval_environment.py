@@ -528,3 +528,55 @@ def test_process_worker_runs_without_installing_signal_handlers(environment, mon
             assert result.returncode == 0
             assert result.stdout.strip() == "worker evidence"
     assert {signum: signal.getsignal(signum) for signum in handlers} == handlers
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+def test_signal_during_handler_restoration_is_delivered(environment, monkeypatch, signum):
+    original_signal = signal.signal
+    handlers = {value: signal.getsignal(value) for value in (signal.SIGTERM, signal.SIGINT)}
+    injected = False
+
+    def restore_with_pending_signal(value, handler):
+        nonlocal injected
+        if value == signal.SIGTERM and handler == handlers[value] and not injected:
+            injected = True
+            os.kill(os.getpid(), signum)
+        return original_signal(value, handler)
+
+    monkeypatch.setattr(environment.signal, "signal", restore_with_pending_signal)
+    with pytest.raises(SystemExit if signum == signal.SIGTERM else KeyboardInterrupt) as interruption:
+        with environment._cancellation_scope():
+            pass
+    if signum == signal.SIGTERM:
+        assert interruption.value.code == 128 + signum
+    assert {value: signal.getsignal(value) for value in handlers} == handlers
+    assert not environment._CANCELLED.is_set()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS zombie-group signaling semantics")
+def test_exited_owned_leader_does_not_prevent_signaling_live_group(environment):
+    args = [sys.executable, "-c", "import sys;sys.stdin.read(1)"]
+    exited = subprocess.Popen(args, stdin=subprocess.PIPE, start_new_session=True)
+    live = subprocess.Popen(args, stdin=subprocess.PIPE, start_new_session=True)
+    queue = select.kqueue()
+    try:
+        queue.control([select.kevent(
+            exited.pid, filter=select.KQ_FILTER_PROC,
+            flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT, fflags=select.KQ_NOTE_EXIT,
+        )], 0)
+        exited.stdin.write(b"x")
+        exited.stdin.flush()
+        assert queue.control(None, 1, 5)
+        environment._OWNED_PROCESSES[exited] = 1
+        environment._OWNED_PROCESSES[live] = 1
+        environment._signal_owned(signal.SIGTERM)
+        assert exited.returncode == 0
+        assert live.wait(timeout=5) == -signal.SIGTERM
+    finally:
+        queue.close()
+        for process in (exited, live):
+            environment._OWNED_PROCESSES.pop(process, None)
+            process.stdin.close()
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
