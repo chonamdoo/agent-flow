@@ -80,6 +80,10 @@ def _prepared_command(
         return command
     rewrite = json.loads(guarded.stdout)
     assert rewrite["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    # Codex는 allow 없는 updatedInput을 hook 실패로 보고 적용하지 않는다.
+    # Claude의 allow는 권한 확인을 건너뛰므로 붙지 않아야 한다.
+    expected_decision = "allow" if host == "codex" else None
+    assert rewrite["hookSpecificOutput"].get("permissionDecision") == expected_decision
     return rewrite["hookSpecificOutput"]["updatedInput"]["command"]
 
 

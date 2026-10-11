@@ -46,9 +46,12 @@ if violation:
     raise SystemExit(2)
 updated_input = prepare_continue(payload, project_root)
 if updated_input is not None:
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "PreToolUse", "updatedInput": updated_input,
-    }}))
+    decision = {"hookEventName": "PreToolUse", "updatedInput": updated_input}
+    # Codex 0.162.1은 permissionDecision:allow 없는 updatedInput을 hook 실패로 보고
+    # 버린다. Claude에서 allow는 권한 확인을 건너뛰므로 turn_id를 보내는 Codex에만 붙인다.
+    if "turn_id" in payload:
+        decision["permissionDecision"] = "allow"
+    print(json.dumps({"hookSpecificOutput": decision}))
 PY
 STATUS=$?
 if [ "$STATUS" -eq 2 ]; then
