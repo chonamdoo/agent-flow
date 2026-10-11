@@ -213,7 +213,9 @@ def test_installed_codex_links_keep_kit_skills_out_of_the_implicit_catalog(
     codex_links = {
         link["name"]: project / link["path"]
         for link in index["links"]
-        if link["host"] == "codex" and link.get("status") in {"linked", "copied"}
+        # copy fallback은 `copied`(kit)나 `copied:<written>:<skipped>`(install)로 남는다.
+        if link["host"] == "codex"
+        and (link.get("status") == "linked" or str(link.get("status")).startswith("copied"))
     }
     bundled = {name: entry for name, entry in codex_links.items() if sources[name] == "bundled"}
 
