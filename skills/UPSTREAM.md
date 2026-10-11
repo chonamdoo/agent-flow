@@ -134,9 +134,15 @@ Upstream includes this file with each skill for Codex picker
 that the host picker does not expose.
 
 `agent-flow-diagnosing-bugs` is an exception: it is a user-invoked lifecycle wrapper
-in `BUNDLED_HOST_SKILL_NAMES`, linked into `.claude/skills`, `.Codex/skills`, and
+in `BUNDLED_HOST_SKILL_NAMES`, linked into `.claude/skills`, `.agents/skills`, and
 `.omp/skills`. It carries both Claude's `disable-model-invocation: true` and Codex's
 `policy.allow_implicit_invocation: false` to preserve the invocation policy.
+
+Every other skill in `BUNDLED_HOST_SKILL_NAMES`, vendored `security-audit` included,
+carries a policy-only file with `policy.allow_implicit_invocation: false`. Codex lists
+`.agents/skills` entries without that policy in the model's skill catalog and requires
+their use whenever a task matches the description, which bypasses the runner's
+per-phase delivery (#346). Explicit `$name` invocation still works.
 
 Other vendored content skills are exposed through `.agent-flow/skills/`,
 the AGENTS.md index, and phase prompts. Adding an unconsumed `agents/openai.yaml`
