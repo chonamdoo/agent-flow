@@ -2064,7 +2064,6 @@ function preferredPython() {
     leaderVenvPython && fs.existsSync(leaderVenvPython) ? leaderVenvPython : null,
     "python3.12",
     "python3.11",
-    "python3.10",
     "python3",
     "python",
   ].filter(Boolean);
@@ -2078,13 +2077,18 @@ function preferredPython() {
   // 없는지와 무엇을 하면 되는지를 같이 적지 않으면 사용자는 인터프리터를 손으로
   // 찾아 헤매다 PyYAML 없는 python을 타고 ModuleNotFoundError를 본다.
   throw new Error(
-    "no Python with PyYAML found. Install it (pip install pyyaml) or point PYTHON at an interpreter that has it. "
+    "no Python >=3.11 with PyYAML found. Install Python >=3.11 and PyYAML (pip install pyyaml) or point PYTHON at an interpreter that has them. "
     + `Tried: ${candidates.join(", ")}`,
   );
 }
 
 function pythonSupportsWorkflowExport(candidate) {
-  const result = safeSpawnSync(candidate, ["-c", "import yaml"], {
+  const probe = [
+    "import sys",
+    "if sys.version_info < (3, 11): raise SystemExit(1)",
+    "import yaml",
+  ].join("\n");
+  const result = safeSpawnSync(candidate, ["-c", probe], {
     stdio: "ignore",
     timeout: 5_000,
   });
