@@ -1,0 +1,35 @@
+{
+  "command": [
+    "/Users/namdoo/.nvm/versions/node/v24.14.1/bin/codex",
+    "exec",
+    "-m",
+    "gpt-6-astra",
+    "-c",
+    "model_reasoning_effort=\"xhigh\"",
+    "--sandbox",
+    "read-only",
+    "--skip-git-repo-check",
+    "--ephemeral",
+    "--json",
+    "-C",
+    "/tmp/agent-flow-plugin-proposals-jgp5QY",
+    "-"
+  ],
+  "cwd": "/tmp/agent-flow-plugin-proposals-jgp5QY",
+  "requested_model": "gpt-6-astra",
+  "requested_effort": "xhigh",
+  "timeout_seconds": 1700,
+  "started_unix": 1791502140.780593,
+  "returncode": 0,
+  "elapsed_seconds": 200.446,
+  "event_types": [
+    "thread.started",
+    "turn.started",
+    "item.completed",
+    "turn.completed"
+  ],
+  "error_events": [],
+  "parse_errors": [],
+  "completed_assistant_message_count": 1,
+  "turn_completed": true
+}
