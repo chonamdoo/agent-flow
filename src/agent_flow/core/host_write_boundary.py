@@ -99,7 +99,13 @@ _STATUS_NEXT_COMMAND = re.compile(r"(?:^|\n)next_command:\s*([^\r\n]+)", re.MULT
 _CONTINUE_RECEIPT = re.compile(
     r"^continue_receipt: ([0-9a-f]{64}):([0-9a-f]{64})\r?$", re.MULTILINE,
 )
-_CONTINUE_NONCE_FLAG = "--host-continue-nonce"
+# nonce는 인자가 아니라 환경 변수로 넘긴다. PATH의 `agent-flow`가 이 kit보다 오래된 설치본이면
+# 모르는 인자에 argparse가 exit 2로 멈춘다. 환경 변수는 그런 CLI가 무시하고, receipt 없이
+# 예전처럼 continue만 돈다.
+HOST_CONTINUE_NONCE_ENV = "AGENT_FLOW_HOST_CONTINUE_NONCE"
+_CONTINUE_NONCE_PREFIX = re.compile(
+    rf"{HOST_CONTINUE_NONCE_ENV}=([0-9a-f]{{64}}) (\S.*)", re.DOTALL,
+)
 # 결과 token은 Runner가 정상 반환한 직후 쓰이고 같은 호출의 PostToolUse가 곧바로 소모한다.
 _CONTINUE_RESULT_TTL = 300
 # 요청은 PreToolUse에서 쓰이지만 CLI는 host 승인 프롬프트가 끝난 뒤에야 소모한다. 승인
@@ -161,9 +167,7 @@ def prepare_host_continue_input(payload: object, project_root: Path) -> dict[str
     command = _first_string(tool_input, _COMMAND_KEYS)
     root = _validated_project_root(project_root)
     arguments = _agent_flow_arguments(command, root=root, cwd=_session_cwd(payload, command))
-    if not arguments or arguments[0] != "continue" or any(
-        argument.split("=", 1)[0] == _CONTINUE_NONCE_FLAG for argument in arguments
-    ):
+    if not arguments or arguments[0] != "continue":
         return None
     directory = _continue_state_dir(root)
     _sweep_expired_continue_states(directory)
@@ -174,7 +178,7 @@ def prepare_host_continue_input(payload: object, project_root: Path) -> dict[str
          "arguments": list(arguments), "recorded_at": time.time()},
     )
     updated = dict(tool_input)
-    updated["command"] = command + f" {_CONTINUE_NONCE_FLAG} {nonce}"
+    updated["command"] = f"{HOST_CONTINUE_NONCE_ENV}={nonce} {command}"
     return updated
 
 
@@ -194,21 +198,18 @@ def begin_host_continue(
         return None
     _sweep_expired_continue_states(_continue_state_dir(root))
     request = _claim_continue_state(root, nonce, "request")
-    original = _continue_arguments(arguments, nonce)
-    if original is None:
-        raise HostWriteBoundaryError("continue nonce does not identify this trusted hook request")
     if request is None or not _continue_state_is_current(request, _CONTINUE_REQUEST_TTL):
         return None
     if (
         request.get("project_root") != str(root)
-        or request.get("arguments") != list(original)
+        or request.get("arguments") != list(arguments)
         or not isinstance(request.get("session_id"), str) or not request["session_id"]
         or not isinstance(request.get("tool_use_id"), str) or not request["tool_use_id"]
     ):
         raise HostWriteBoundaryError("continue nonce does not identify this trusted hook request")
     return HostContinueRequest(
         nonce=nonce, project_root=root, session_id=request["session_id"],
-        tool_use_id=request["tool_use_id"], arguments=original,
+        tool_use_id=request["tool_use_id"], arguments=tuple(arguments),
     )
 
 
@@ -230,30 +231,16 @@ def complete_host_continue(
     return f"{request.nonce}:{token}"
 
 
-def _continue_arguments(arguments: tuple[str, ...], nonce: str) -> tuple[str, ...] | None:
-    stripped: list[str] = []
-    index = 0
-    seen = False
-    while index < len(arguments):
-        argument = arguments[index]
-        if argument.split("=", 1)[0] == _CONTINUE_NONCE_FLAG:
-            if seen:
-                return None
-            seen = True
-            if argument == _CONTINUE_NONCE_FLAG:
-                index += 1
-                if index >= len(arguments) or arguments[index] != nonce:
-                    return None
-            elif argument != f"{_CONTINUE_NONCE_FLAG}={nonce}":
-                return None
-        else:
-            stripped.append(argument)
-        index += 1
-    return tuple(stripped)
+def _split_continue_nonce(command: str) -> tuple[str, str | None]:
+    """hook이 앞에 붙인 nonce 할당을 떼어 낸다. host는 PostToolUse에 바뀐 명령을 싣는다."""
+    prefixed = _CONTINUE_NONCE_PREFIX.fullmatch(command)
+    if prefixed is None:
+        return command, None
+    return prefixed.group(2), prefixed.group(1)
 
 
 def _consume_host_continue_receipt(
-    payload: object, root: Path, context: ActiveCheckout, command: str,
+    payload: object, root: Path, context: ActiveCheckout, command: str, command_nonce: str | None,
 ) -> bool:
     matches = [match for output in _output_strings(payload) for match in _CONTINUE_RECEIPT.finditer(output)]
     if (
@@ -263,16 +250,16 @@ def _consume_host_continue_receipt(
         return False
     nonce, token = matches[0].groups()
     arguments = _agent_flow_arguments(command, root=root, cwd=_session_cwd(payload, command))
-    original = _continue_arguments(arguments or (), nonce)
     receipt = _claim_continue_state(root, nonce, "result")
     run_dir = context.runtime_root / ".agent-flow" / "runs" / context.run_id
     return bool(
         receipt is not None and _continue_state_is_current(receipt, _CONTINUE_RESULT_TTL)
+        and command_nonce in (None, nonce)
         and receipt.get("token") == token
         and receipt.get("project_root") == str(root)
         and receipt.get("session_id") == payload.get("session_id")
         and receipt.get("tool_use_id") == payload.get("tool_use_id")
-        and receipt.get("arguments") == list(original or ())
+        and receipt.get("arguments") == list(arguments or ())
         and receipt.get("checkout") == str(context.checkout)
         and receipt.get("run_dir") == str(run_dir)
         and receipt.get("run_id") == context.run_id
@@ -506,7 +493,8 @@ def record_host_checkout_binding(
     session_id = _first_string(payload, ("session_id", "sessionId"))
     if not session_id:
         return None
-    command = _first_string(payload, _COMMAND_KEYS)
+    raw_command = _first_string(payload, _COMMAND_KEYS)
+    command, command_nonce = _split_continue_nonce(raw_command)
     # 이름으로 고르지 않는다. binding에 필요한 근거는 아래에서 전부 확인한다 —
     # 신뢰된 설치 산출물의 호출인가, exit 0인가, 출력에 실제 status payload가
     # 있는가. status를 내지 않는 명령은 그 셋에서 자동으로 탈락한다.
@@ -552,7 +540,7 @@ def record_host_checkout_binding(
     operation = _lifecycle_operation(command, root=root, cwd=_session_cwd(payload, command))
     successful_continue = (
         result_exit_code in (None, 0) and operation == "continue"
-        and _consume_host_continue_receipt(payload, root, context, command)
+        and _consume_host_continue_receipt(payload, root, context, command, command_nonce)
     )
     guidance_eligible = (
         isinstance(payload, dict)
@@ -560,7 +548,7 @@ def record_host_checkout_binding(
         and str(
             payload.get("tool_name", payload.get("toolName", payload.get("tool", "")))
         ).lower() in _COMMAND_TOOLS
-        and _first_string(_tool_input(payload), _COMMAND_KEYS) == command
+        and _first_string(_tool_input(payload), _COMMAND_KEYS) == raw_command
         and (result_exit_code == 0 or successful_continue)
         and operation in {"run", "start", "continue"}
     )

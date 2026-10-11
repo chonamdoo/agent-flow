@@ -70,6 +70,20 @@ def _hook(
     )
 
 
+def _shell(command: str, checkout: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """host처럼 셸로 실행한다. hook이 앞에 붙인 환경 변수 할당은 셸만 해석한다."""
+    return subprocess.run(
+        ("/bin/sh", "-c", command), cwd=checkout, env=env, capture_output=True, text=True,
+    )
+
+
+def _nonce(prepared: str) -> str:
+    name, value = shlex.split(prepared)[0].split("=", 1)
+    assert name == "AGENT_FLOW_HOST_CONTINUE_NONCE"
+    return value
+
+
+
 def _prepared_command(
     root: Path, checkout: Path, env: dict[str, str], command: str, *, host: str = "codex",
 ) -> str:
@@ -92,9 +106,7 @@ def test_codex_continue_runner_receipt_grants_guidance(tmp_path: Path, post_inpu
     root, checkout, run_dir, env = _installed_project(tmp_path)
     command = f"agent-flow continue --root {shlex.quote(str(root))} --worktree first"
     prepared = _prepared_command(root, checkout, env, command)
-    continued = subprocess.run(
-        shlex.split(prepared), cwd=checkout, env=env, capture_output=True, text=True,
-    )
+    continued = _shell(prepared, checkout, env)
     assert continued.returncode == 0, continued.stderr
     status_lines = [
         line.removeprefix("status_json:")
@@ -123,9 +135,7 @@ def _completed_continue(
 ) -> tuple[str, str, str, Path]:
     command = f"agent-flow continue --root {shlex.quote(str(root))} --worktree first"
     prepared = _prepared_command(root, checkout, env, command, host=host)
-    continued = subprocess.run(
-        shlex.split(prepared), cwd=checkout, env=env, capture_output=True, text=True,
-    )
+    continued = _shell(prepared, checkout, env)
     assert continued.returncode == 0, continued.stderr
     receipt_lines = [line for line in continued.stdout.splitlines() if line.startswith("continue_receipt:")]
     assert len(receipt_lines) == 1
@@ -174,7 +184,7 @@ def test_continue_receipt_rejects_unproven_results(tmp_path: Path, case: str):
     elif case == "returncode-failure":
         post["returncode"] = 1
     elif case == "rewritten-nonce":
-        post["tool_input"]["command"] = prepared.rsplit(" ", 1)[0] + " " + "0" * 64
+        post["tool_input"]["command"] = f"AGENT_FLOW_HOST_CONTINUE_NONCE={'0' * 64} {command}"
     elif case == "replay":
         first = _hook(root, checkout, env, "bind-host-worktree.py", post)
         assert first.returncode == 0, first.stderr
@@ -220,21 +230,17 @@ def test_continue_request_requires_private_single_use_runner_success(tmp_path: P
         command += " --approve invalid-approval-token"
     prepared = _prepared_command(root, checkout, env, command)
     assert prepared != command
-    nonce = shlex.split(prepared)[-1]
+    nonce = _nonce(prepared)
     request = root / ".git" / "agent-flow" / "host-sessions" / "continue-receipts" / f"{nonce}.request.json"
     assert request.is_file()
     if case == "public-request":
         request.chmod(0o666)
     elif case == "reused-request":
-        first = subprocess.run(
-            shlex.split(prepared), cwd=checkout, env=env, capture_output=True, text=True,
-        )
+        first = _shell(prepared, checkout, env)
         assert first.returncode == 0, first.stderr
         assert "continue_receipt:" in first.stdout
 
-    second = subprocess.run(
-        shlex.split(prepared), cwd=checkout, env=env, capture_output=True, text=True,
-    )
+    second = _shell(prepared, checkout, env)
     if case == "reused-request":
         # 이미 소모된 nonce는 다른 root의 요청과 구별되지 않는다. continue는 돌되 증거는 없다.
         assert second.returncode == 0, second.stderr
@@ -308,8 +314,7 @@ def test_continue_without_current_hook_request_runs_without_receipt(tmp_path: Pa
     root, checkout, run_dir, env = _installed_project(tmp_path)
     command = f"agent-flow continue --root {shlex.quote(str(root))} --worktree first"
     prepared = _prepared_command(root, checkout, env, command)
-    arguments = shlex.split(prepared)
-    nonce = arguments[-1]
+    nonce = _nonce(prepared)
     request = root / ".git" / "agent-flow" / "host-sessions" / "continue-receipts" / f"{nonce}.request.json"
     if case == "missing-request":
         request.unlink()
@@ -317,9 +322,7 @@ def test_continue_without_current_hook_request_runs_without_receipt(tmp_path: Pa
         state = json.loads(request.read_text(encoding="utf-8"))
         state["recorded_at"] = time.time() - 24 * 60 * 60 - 1
         request.write_text(json.dumps(state), encoding="utf-8")
-    continued = subprocess.run(
-        arguments, cwd=checkout, env=env, capture_output=True, text=True,
-    )
+    continued = _shell(prepared, checkout, env)
     assert continued.returncode == 0, continued.stderr
     assert f"default/{run_dir.name}" in continued.stdout
     assert "continue_receipt:" not in continued.stdout
@@ -335,16 +338,13 @@ def test_continue_rejects_tampered_hook_request(tmp_path: Path, case: str):
     root, checkout, _, env = _installed_project(tmp_path)
     command = f"agent-flow continue --root {shlex.quote(str(root))} --worktree first"
     prepared = _prepared_command(root, checkout, env, command)
-    arguments = shlex.split(prepared)
-    nonce = arguments[-1]
+    nonce = _nonce(prepared)
     request = root / ".git" / "agent-flow" / "host-sessions" / "continue-receipts" / f"{nonce}.request.json"
     if case == "malformed-request":
         request.write_text("not JSON", encoding="utf-8")
     else:
-        arguments.append("--accept-leader-drift")
-    rejected = subprocess.run(
-        arguments, cwd=checkout, env=env, capture_output=True, text=True,
-    )
+        prepared += " --accept-leader-drift"
+    rejected = _shell(prepared, checkout, env)
     assert rejected.returncode != 0
     assert "continue_receipt:" not in rejected.stdout
     assert not request.exists()
@@ -355,16 +355,14 @@ def test_continue_receipt_survives_a_long_approval_wait(tmp_path: Path):
     root, checkout, run_dir, env = _installed_project(tmp_path)
     command = f"agent-flow continue --root {shlex.quote(str(root))} --worktree first"
     prepared = _prepared_command(root, checkout, env, command)
-    nonce = shlex.split(prepared)[-1]
+    nonce = _nonce(prepared)
     request = root / ".git" / "agent-flow" / "host-sessions" / "continue-receipts" / f"{nonce}.request.json"
     approved_at = time.time() - 60 * 60
     state = json.loads(request.read_text(encoding="utf-8"))
     state["recorded_at"] = approved_at
     request.write_text(json.dumps(state), encoding="utf-8")
     os.utime(request, (approved_at, approved_at))
-    continued = subprocess.run(
-        shlex.split(prepared), cwd=checkout, env=env, capture_output=True, text=True,
-    )
+    continued = _shell(prepared, checkout, env)
     assert continued.returncode == 0, continued.stderr
     assert f"continue_receipt: {nonce}:" in continued.stdout
     post = _payload("codex", "post_tool_use", root, checkout, prepared, continued.stdout)
@@ -384,9 +382,7 @@ def test_unbound_continue_for_another_project_root_runs_without_receipt(tmp_path
     command = f"agent-flow continue --root {shlex.quote(str(other_root))} --worktree first"
     prepared = _prepared_command(root, checkout, env, command)
     assert prepared != command
-    continued = subprocess.run(
-        shlex.split(prepared), cwd=checkout, env=env, capture_output=True, text=True,
-    )
+    continued = _shell(prepared, checkout, env)
     assert continued.returncode == 0, continued.stderr
     assert f"default/{other_run.name}" in continued.stdout
     assert "continue_receipt:" not in continued.stdout
@@ -398,8 +394,8 @@ def test_unconsumed_continue_states_are_swept_after_their_deadline(tmp_path: Pat
     root, checkout, _, env = _installed_project(tmp_path)
     command = f"agent-flow continue --root {shlex.quote(str(root))} --worktree first"
     receipt_dir = root / ".git" / "agent-flow" / "host-sessions" / "continue-receipts"
-    abandoned = receipt_dir / f"{shlex.split(_prepared_command(root, checkout, env, command))[-1]}.request.json"
-    waiting = receipt_dir / f"{shlex.split(_prepared_command(root, checkout, env, command))[-1]}.request.json"
+    abandoned = receipt_dir / f"{_nonce(_prepared_command(root, checkout, env, command))}.request.json"
+    waiting = receipt_dir / f"{_nonce(_prepared_command(root, checkout, env, command))}.request.json"
     unclaimed_result = receipt_dir / f"{'a' * 64}.result.json"
     fresh_result = receipt_dir / f"{'b' * 64}.result.json"
     for path in (unclaimed_result, fresh_result):
@@ -410,7 +406,7 @@ def test_unconsumed_continue_states_are_swept_after_their_deadline(tmp_path: Pat
     os.utime(waiting, (now - 60 * 60,) * 2)
     os.utime(unclaimed_result, (now - 301,) * 2)
 
-    latest = receipt_dir / f"{shlex.split(_prepared_command(root, checkout, env, command))[-1]}.request.json"
+    latest = receipt_dir / f"{_nonce(_prepared_command(root, checkout, env, command))}.request.json"
 
     assert not abandoned.exists()
     assert not unclaimed_result.exists()
@@ -424,13 +420,11 @@ def test_receipt_write_failure_keeps_continue_result(tmp_path: Path):
     root, checkout, run_dir, env = _installed_project(tmp_path)
     command = f"agent-flow continue --root {shlex.quote(str(root))} --worktree first"
     prepared = _prepared_command(root, checkout, env, command)
-    nonce = shlex.split(prepared)[-1]
+    nonce = _nonce(prepared)
     blocker = root / ".git" / "agent-flow" / "host-sessions" / "continue-receipts" / f"{nonce}.result.json"
     blocker.mkdir()
     (blocker / "occupied").write_text("", encoding="utf-8")
-    continued = subprocess.run(
-        shlex.split(prepared), cwd=checkout, env=env, capture_output=True, text=True,
-    )
+    continued = _shell(prepared, checkout, env)
     assert continued.returncode == 0, continued.stderr
     assert f"default/{run_dir.name}" in continued.stdout
     assert "continue_receipt:" not in continued.stdout
@@ -439,6 +433,24 @@ def test_receipt_write_failure_keeps_continue_result(tmp_path: Path):
     bound = _hook(root, checkout, env, "bind-host-worktree.py", post)
     assert bound.returncode == 0, bound.stderr
     assert bound_worktree_for_session(SESSION, root).guidance_eligible is False
+
+
+def test_rewritten_continue_passes_unchanged_arguments_to_the_cli_on_path(tmp_path: Path):
+    """반증: PATH의 `agent-flow`가 이 kit보다 오래되면 hook이 붙인 인자를 몰라 continue가 exit 2로 멈춘다.
+
+    실제 Codex smoke에서 Homebrew 설치본이 `unrecognized arguments`로 거부했다.
+    """
+    root, checkout, _, env = _installed_project(tmp_path)
+    command = f"agent-flow continue --root {shlex.quote(str(root))} --worktree first"
+    prepared = _prepared_command(root, checkout, env, command)
+    older = tmp_path / "older-cli"
+    older.mkdir()
+    (older / "agent-flow").write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n', encoding="utf-8")
+    (older / "agent-flow").chmod(0o755)
+    continued = _shell(prepared, checkout, {**env, "PATH": f"{older}{os.pathsep}{env['PATH']}"})
+    assert continued.returncode == 0, continued.stderr
+    assert continued.stdout.splitlines() == shlex.split(command)[1:]
+
 
 
 @pytest.mark.parametrize("output", ("status-only", "request-nonce"))
@@ -454,7 +466,7 @@ def test_codex_continue_without_runner_receipt_stays_ineligible(tmp_path: Path, 
     assert "continue_receipt:" not in continued.stdout
     status = continued.stdout
     if output == "request-nonce":
-        nonce = shlex.split(prepared)[-1]
+        nonce = _nonce(prepared)
         status += f"continue_receipt: {nonce}:{nonce}\n"
     post = _payload("codex", "post_tool_use", root, checkout, command, status)
     bound = _hook(root, checkout, env, "bind-host-worktree.py", post)
@@ -475,14 +487,12 @@ def test_parallel_continue_nonces_keep_call_identity(tmp_path: Path):
         assert guarded.returncode == 0, guarded.stderr
         prepared = json.loads(guarded.stdout)["hookSpecificOutput"]["updatedInput"]["command"]
         calls.append((tool_id, prepared))
-    assert shlex.split(calls[0][1])[-1] != shlex.split(calls[1][1])[-1]
+    assert _nonce(calls[0][1]) != _nonce(calls[1][1])
 
     for tool_id, prepared in reversed(calls):
-        continued = subprocess.run(
-            shlex.split(prepared), cwd=checkout, env=env, capture_output=True, text=True,
-        )
+        continued = _shell(prepared, checkout, env)
         assert continued.returncode == 0, continued.stderr
-        nonce = shlex.split(prepared)[-1]
+        nonce = _nonce(prepared)
         assert f"continue_receipt: {nonce}:" in continued.stdout
         post = _payload("codex", "post_tool_use", root, checkout, command, continued.stdout)
         post["tool_use_id"] = tool_id
