@@ -1,0 +1,33 @@
+{
+  "thread_id": "01a11dd9-46b4-70d1-962e-60b8f0d8fd47",
+  "execution": "Actual Codex executable invoked exactly once; no fallback or additional model invocation.",
+  "requested_model": "gpt-6-astra",
+  "requested_reasoning_effort": "xhigh",
+  "model_argument": "-m gpt-6-astra",
+  "effort_argument": "-c model_reasoning_effort=\"xhigh\"",
+  "process_returncode": 0,
+  "turn_completed": true,
+  "completed_assistant_message_count": 1,
+  "error_events": [],
+  "stderr_empty": true,
+  "model_and_effort_attested_by_runtime_metadata": false,
+  "provenance_limitation": "JSON events contain thread/turn completion and usage but no resolved model or reasoning-effort fields; stderr contains no startup banner. Existing Codex logs database has no rows for this thread and no matching gpt-6-astra/xhigh entries in the execution interval. Requested settings are evidenced by actual argv, but resolved backend identity and effort are not independently attested.",
+  "usage_event": {
+    "type": "turn.completed",
+    "usage": {
+      "input_tokens": 25069,
+      "cached_input_tokens": 13184,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 8729,
+      "reasoning_output_tokens": 3400
+    }
+  },
+  "tool_events": [],
+  "late_parent_evidence_not_in_model_prompt": {
+    "plugin_pack_path_portability": "Parent reports canonical /private/tmp output pack succeeded while /tmp spelling failed EEXIST mkdir /tmp; no rerun by this worker.",
+    "existing_host_adapters": "Parent reports adapters/auto.py already shares HostedAdapter for claude/codex/omp; no source re-read by this worker.",
+    "current_os_boundary": "Parent reports docs/USAGE.md distinguishes hook registration from execution proof and currently verifies reviewer confinement only via macOS sandbox-exec; other OS fail closed. Multi-host is not proof of multi-OS support."
+  },
+  "advisory_only": true,
+  "repository_edited": false
+}

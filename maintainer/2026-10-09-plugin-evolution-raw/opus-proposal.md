@@ -1,0 +1,206 @@
+# Agent Flow 플러그인 진화 제안 (자문)
+
+이 문서는 자문이에요. architecture-review phase 결과도, 승인 증거도 아니에요. 저장소는 읽기만 했고 아무것도 바꾸지 않았어요.
+
+표기: **[사실]** 소스로 확인함 · **[권고]** 제안 · **[미검증]** host 동작을 아직 실측하지 못함 · **[선행]** 먼저 확인해야 할 조건
+
+## 1. 결론
+
+- 권고하는 구조는 **"core 하나 + host별 adapter + 선택형 native plugin + 프로젝트에 고정된 runtime"**이에요. 지금 코드가 이미 이 모양이에요. 새로 짓지 말고 빈틈만 메우면 돼요.
+- 전역 공유 runtime을 lifecycle 권한으로 올리자는 이전 controller 안에는 **반대**해요. 설치는 쉬워지지만 강제가 약해져요. 이유는 3절에 있어요.
+- plugin은 **배달 수단**이에요. 강제의 주인은 계속 프로젝트 설치본이에요.
+
+## 2. 새로 확인한 사실
+
+- [사실] Claude·Codex·OMP 세 host가 같은 core를 써요: `src/agent_flow/adapters/auto.py:25`. reviewer는 Claude·Codex 둘뿐이에요: `src/agent_flow/core/reviewer_launch.py:20`. controller 세션은 reviewer로 세지 않고, reviewer가 모자라면 막아요: `src/agent_flow/adapters/hosted.py:197-219`.
+- [사실] hook 등록 파일은 4개예요: `src/agent_flow/core/hook_integrity.py:112-117`.
+  - Claude와 Codex는 같은 JSON 이벤트 세트를 써요: `lib/installer-shared.mjs:3504-3598`.
+  - OMP는 project extension이 `tool_call`, `tool_result`, `session_shutdown` 이벤트에서 같은 스크립트를 불러요: `lib/omp-hooks-extension.mjs:148-240`.
+- [사실] **설치 위치(install root)를 찾는 규칙이 host마다 달라요.**
+  - Python은 leader를 먼저 봐요: `src/agent_flow/core/hook_integrity.py:159-176`. 그 docstring은 상위 폴더부터 찾으면 worker가 만든 `kit.json`이 기준이 될 수 있다고 경고해요.
+  - OMP extension은 상위 폴더를 먼저 훑어요: `lib/omp-hooks-extension.mjs:85-110`.
+  - Claude/Codex hook 명령은 install할 때 절대경로로 박혀요: `lib/installer-shared.mjs:3180-3184`.
+  - 실제로 우회가 되는지는 **확실하지 않아요.** worker가 managed checkout 안에 `.agent-flow/`를 쓸 수 있느냐에 달려 있어요.
+- [사실] **이미 전역으로 공유되는 조각이 하나 있어요: Python 인터프리터.**
+  - launcher는 Homebrew venv의 `opt` 경로에 고정돼요: `lib/installer-shared.mjs:1802-1818`. 이 경로는 `brew upgrade`를 하면 새 버전을 따라가요.
+  - 코드는 프로젝트 쪽 `.agent-flow/runtime/python`에 있어요: `lib/installer-shared.mjs:2957-2982`.
+  - 인터프리터 경로와 sha256은 `kit.json`에 기록돼요: `lib/installer-shared.mjs:2998-3018`. run 도중 이 값을 다시 비교하는지는 **확실하지 않아요.**
+- [사실] 프로젝트 runtime이 없으면:
+  - lifecycle 명령은 막혀요: `bin/agent-flow-kit.mjs:438-441`.
+  - 다른 Python 서브커맨드는 kit 쪽 `src`로 넘어가서 돌아요: `bin/agent-flow-kit.mjs:2580-2591`.
+  - kit 버전이 달라도 경고만 해요: `bin/agent-flow-kit.mjs:1265-1280`.
+- [사실] plugin 진입점(entry) 문서는 "OMP는 기존 project adapter를 쓰고, Codex IDE plugin 지원은 주장하지 않는다"고 적고 있어요: `lib/plugin-bundle.mjs:86`.
+- [사실] live eval harness의 host는 Claude·Codex 둘뿐이고 OMP 경로가 없어요: `evals/run.py:34-38`.
+
+## 3. 핵심 이견: 전역 runtime을 권한으로 쓰면 안 되는 이유
+
+1. **권한 기준이 저장소 밖으로 나가요.** 지금 기준은 "leader 설치본 + 그 안의 digest"예요. 이걸 HOME이나 공용 store로 옮기면 `hook_integrity.py:162-165`가 막아 둔 문제가 다시 열려요. HOME 설치본 하나가 모든 저장소를 가리는 문제예요.
+2. **업데이트 한 번이 모든 active run의 중간 업그레이드가 돼요.** 지금 계약은 run 도중 업그레이드를 금지해요. 전역 runtime이면 `brew upgrade` 한 번이 모든 프로젝트에서 이 금지를 깨요. 인터프리터라는 작은 조각에서도 이미 이 문제를 피해 가야 했어요: `lib/installer-shared.mjs:1802-1804`.
+3. **불변 store(안 B)는 오래된 버전을 치우려면(GC) "누가 어느 버전을 쓰나" 목록이 필요해요.** 그건 프로젝트를 가로지르는 registry, 곧 새 orchestration 계층이에요.
+4. **얻는 이득은 강제가 아니에요.** 디스크 중복 제거와 "한 번에 업데이트" 정도예요. 그런데 뒤쪽 이득은 2번의 위험 그 자체예요.
+5. 전역 CLI를 **설치 입구**로 쓰는 건 괜찮아요. 이미 brew, `npx`, plugin의 `kit/`가 그렇게 해요. 입구는 프로젝트를 준비만 하고, 판정은 하지 않아요.
+
+## 4. 대안 비교
+
+| 안 | 강제 보존 | Claude·Codex·OMP | 업데이트·롤백 | 원격·컨테이너·오프라인 | 새 계층 | 판정 |
+|---|---|---|---|---|---|---|
+| A 현재 구조 개선 | 유지 | 동작 (adapter 3종) | 프로젝트 단위 | 프로젝트마다 install | 없음 | E로 정리해 채택 |
+| B 공유 불변 store + lock | 약해질 위험 (기준이 저장소 밖) | 동작 | GC·전역 갱신 위험 | "store가 있어야 함" 전제가 하나 더 | registry 필요 | 보류 |
+| C plugin cache에서 실행 | 깨짐 (plugin을 끄면 보호도 사라짐) | OMP native plugin 근거 없음 | host cache 수명에 묶임 | host마다 다름 | 없음 | 거부 |
+| D skills-only | 깨짐 (preblock·tripwire·증거 바인딩 없음) | 문서만 같음 | - | 동작 | 없음 | 거부 |
+| **E core + adapter + 선택 plugin + 프로젝트 고정 runtime** | 유지 | 같은 core, 통합 방식만 다름 | 프로젝트·run 단위 | install 1회 | 없음 | **권고** |
+
+E에서 host별 통합은 이렇게 나뉘어요.
+- Claude: JSON hook + (선택) native plugin
+- Codex: JSON hook + (선택) plugin. [미검증] Codex의 plugin 로딩, IDE 환경
+- OMP: 기존 `.omp/extensions` adapter. native plugin은 주장하지 않음
+- 직접 CLI: 어떤 셸이든 가능. 단, hook이 증명돼야 run을 시작할 수 있음
+
+여기서 "host 동등"은 manifest, UI, tool 이름이 같다는 뜻이 아니에요. 지원하는 동작에서 **lifecycle, 승인, 증거, 보호의 결과가 같다**는 뜻이에요.
+
+## 5. 제안 (우선순위 순)
+
+### P1. OMP adapter의 install root 규칙을 Python과 같게 [권고]
+- 목적: OMP 세션도 leader 설치본의 스크립트만 실행하게 해요. worker가 판정자를 바꿀 수 없게요.
+- 소유 경계: 규칙의 주인은 `hook_integrity.find_install_root`이고, adapter는 따르기만 해요.
+- 영향: `lib/omp-hooks-extension.mjs`의 `resolveInstallRoot`
+- 장점: host 간 권한 경로가 하나로 통일돼요.
+- 단점: 생성되는 extension이 바뀌어서 기존 프로젝트는 재설치가 필요해요.
+- 위험: leader가 상위 폴더에 없는 수동 worktree를 "설치 없음"으로 읽어서 막지 않을 수 있어요. 이 경우는 막는 쪽(fail-closed)으로 남겨야 해요.
+- 보존: 설치가 없는 프로젝트는 계속 막지 않아요. 설치는 있는데 스크립트가 없으면 계속 막아요: `lib/omp-hooks-extension.mjs:392-404`.
+- 수용 증거: worker checkout에 가짜 `kit.json`과 "전부 허용" hook을 심은 fixture에서, 세 host 모두 leader 스크립트로 판정하고 차단 결과가 같아야 해요.
+- [선행] worker가 managed checkout에 `.agent-flow/`를 쓸 수 있는지 먼저 확인해요. 쓸 수 없더라도 규칙 통일은 그대로 권고해요.
+
+### P2. 세 host 공통 수용 매트릭스 [권고]
+- 목적: "세 host에서 결과가 같다"를 말이 아니라 표로 증명해요.
+- 소유 경계: 판정은 기존 Python hook 스크립트가 해요. 매트릭스는 host별 입력 모양만 바꿔요.
+- 세 층으로 나누고 서로 섞지 않아요.
+  1. **payload replay** (CI, 모델 없음): 같은 시나리오를 Claude/Codex JSON payload와 OMP 이벤트 모양으로 넣고 block/allow/record 결과를 비교해요.
+  2. **native smoke** (실제 host 바이너리, 수동으로 켜서 실행): 등록된 hook이 실제로 도는지 봐요.
+  3. **live eval**: `evals/run.py`에 OMP 경로를 추가하거나 "n/a"라고 명시해요.
+- 단점: fixture 유지 비용이 들어요.
+- 위험: smoke 결과를 reviewer 증거로 잘못 쓸 수 있어요. 산출물 위치와 이름을 분리해서 막아요.
+- 수용 증거: 지원하는 칸은 전부 결과가 같아야 해요. 지원하지 않는 칸은 "진단된 미지원"으로 표시해요. "pass"로 표시하면 안 돼요.
+
+### P3. runtime 정체성을 run에 묶기 (인터프리터 포함) [권고]
+- 목적: workflow YAML pin만으로는 Python 코드, 인터프리터, hook 버전이 고정되지 않아요. 이 빈틈을 닫아요.
+- 영향: `src/agent_flow/runner.py:437-487`(시작 게이트), `src/agent_flow/core/hook_integrity.py`, `bin/agent-flow-kit.mjs:2580-2591`
+- 내용:
+  - run을 시작할 때 runtime digest, 인터프리터 realpath·sha256, kit source digest를 run meta에 기록해요.
+  - advance나 승인 때 다시 비교해요. 다르면 advance를 거부해요. status, abort, recovery는 항상 허용해요(deadlock 방지).
+  - 프로젝트 설치가 있는데 runtime이 빠졌다면, 증거를 만드는 서브커맨드는 kit `src`로 넘어가지 말고 선행조건 오류로 멈춰요.
+- 장점: `brew upgrade`가 run 도중에 판정 코드를 몰래 바꾸지 못해요.
+- 단점: 인터프리터 패치 업데이트만 있어도 active run이 멈춰요.
+- 위험: 사용자가 멈춘 run을 풀려고 repin을 시도할 수 있어요. repin 금지는 유지하고, 해결책은 "원래 인터프리터 복구" 또는 "abort 후 새 run" 두 가지로 안내해요.
+- 수용 증거: 인터프리터를 바꾼 fixture에서 advance가 거부되고 status·abort는 동작해야 해요. 원래대로 돌리면 이어서 진행돼요. 예전 증거는 그대로 유효하고, 바뀐 코드에는 새 증거가 필요해요.
+- [선행] 지금 `kit.json`의 python 기록을 어디서 비교하는지 확인해요.
+
+### P4. "설치됨 ≠ 신뢰됨 ≠ 실행됨" 진단 [권고]
+- 목적: 등록 파일이 있다고 host가 hook을 실제로 돌린다는 보장은 없어요. trust 거부, safe/bare 모드, IDE나 cloud가 project hook을 무시하는 경우가 있어요. 이걸 숨기지 않고 보여 줘요.
+- 소유 경계: 읽기 전용 `status` 출력만 바꿔요. 새 서비스는 없고, 기존 `record-command-run.py` 기록을 재사용해요.
+- host마다 세 칸을 보여 줘요.
+  - 등록: 증명됨 / 실패
+  - 신뢰: host가 알려 주지 않으면 "미확인"
+  - 실행 관측: 이 세션의 lifecycle 명령이 hook에 기록됐는지
+- 단계:
+  - 1단계: 진단만 해요.
+  - 2단계(선택): P2에서 session id가 안정적이라고 증명된 host에만 "실행이 관측되지 않으면 advance 거부"를 켜요. 이건 강화이지 완화가 아니에요.
+- 위험: 2단계에서 정상 세션을 잘못 막을 수 있어요. 그래서 status와 abort는 이 게이트 밖에 둬요.
+- [미검증] Codex hook payload에 session id가 오는지, Codex project trust가 정확히 무슨 뜻인지(`lib/installer-shared.mjs:3319`가 `~/.codex/config.toml`의 trust를 다뤄요).
+- [선행] `record-command-run.py`가 session id를 기록하는지 확인해요.
+
+### P5. host 전환과 세션 참여 계약 테스트 [권고]
+- 목적: Claude↔Codex↔OMP를 오갈 때 run이 몰래 다른 세션으로 넘어가지 않게 해요.
+- 계약:
+  - 다른 host에서는 **명시적 resume**으로만 run에 참여해요.
+  - 참여 단위는 (host, session id)예요. session id가 비어 있으면 참여자가 아니에요.
+  - 이전 세션은 비참여자가 돼요. Stop 알림은 안 받지만 preblock 보호는 계속 받아요.
+- [사실] OMP subagent는 부모와 다른 session id를 받아요: `lib/omp-hooks-extension.mjs:331-333`. 제 권고는 subagent를 비참여자로 보는 거예요. 자동 참여 금지 원칙과 같은 방향이에요.
+- 영향: 대부분 테스트 추가예요. 빈틈이 나오면 `src/agent_flow/core/host_write_boundary.py`의 세션 키 처리만 고쳐요.
+- 수용 증거: "Claude에서 시작 → Codex에서 resume → OMP에서 resume" 시나리오의 승인·증거·보호 결과가 같아야 해요. resume 없이 연 세션은 run을 진행할 수 없어야 해요.
+
+### P6. plugin은 배달만, 버전 차이는 알림만 [권고]
+- 목적: 기존 `packPlugin`과 `generatedEntry`를 그대로 쓰면서, 운영할 때 헷갈리는 부분만 줄여요.
+- 소유 경계:
+  - plugin: 진입점(entry)과 installer 사본
+  - 프로젝트: runtime, hook, state, pin, 증거
+- 내용:
+  - plugin 버전과 프로젝트 설치 버전이 다르면 알림만 줘요. 자동 업그레이드나 자동 install은 없어요.
+  - run 도중 업그레이드는 기존 installer 규칙대로 거부해요.
+  - "plugin은 hook을 등록하지 않으니 project hook과 중복 등록이 생기지 않는다"는 점을 매트릭스에 한 줄로 고정해요.
+- 영향: `lib/plugin-bundle.mjs:71-92`
+- [미검증] Claude·Codex에서 실제 native 설치가 되는지. `pack`은 이걸 증명하지 않아요. 배포 여부는 native smoke 통과 후 사용자가 정해요.
+
+## 6. 시나리오 커버리지
+
+| 시나리오 | 실패 모양 | 유지할 반응 | 제안 |
+|---|---|---|---|
+| user/project/local 범위, 새 repo | plugin만 켜고 강제된다고 착각 | 준비 전 start는 install-complete로 거부 | P4, P6 |
+| 기존 AGENTS/CLAUDE·import·상위 규칙 | 루트 문서를 덮어씀 | 새 opt-in은 안 건드림, legacy는 `--migrate-root-context` + receipt | 변경 없음 |
+| node/python/reviewer 없음 | 반쯤 설치, reviewer 1명으로 통과 | 선행조건 오류, reviewer 부족은 차단 | P3 |
+| native plugin 미지원 (OMP, IDE, cloud, container, CI, offline) | 강제 없이 run 진행 | 직접 CLI + adapter 사용, hook 미증명이면 start 거부 | P2, P4 |
+| 일반 세션·status·의도치 않은 skill 호출 | 자동 start/adopt | 명시 호출만 허용, status는 읽기 전용 | 변경 없음 |
+| 여러 worktree·세션·사용자, 다른 곳의 active run | 남의 run을 자동으로 이어받음 | 명시 resume만, leader lease | P5 |
+| host 전환 | 세션 정체성이 섞임 | (host, session) 단위로 참여 | P5 |
+| 등록됐지만 실제로 안 돎, safe/bare, 미지원 이벤트 | 파일만 있고 hook이 안 돎 | 등록 증명 유지 + 실행 관측 진단 | P4 |
+| plugin 끄기·삭제·cache 삭제·runtime 없음 | 보호가 사라짐 | project hook 유지, 스크립트 없으면 막음 | P1, P6 |
+| project + plugin 중복 등록 | 같은 hook이 두 번 돎 | plugin은 hook을 등록하지 않음 | P6 |
+| 개인 plugin vs 팀 정책 | 개인 설정을 팀 강제로 오해 | 팀 강제는 프로젝트 설치본 | P6 |
+| run 중·phase 사이 업데이트·롤백 | 판정 코드가 몰래 바뀜 | 업그레이드 금지 + runtime 정체성 비교 | P3 |
+| supply chain·symlink·잘못된 root | 남의 스크립트를 실행 | symlink 거부, leader 우선 | P1 |
+| crash·부분 설치·동시 install | 반쯤 된 설치로 실행 | lease·recovery, 복구 전에는 runtime 차단 | 변경 없음 |
+| 위조 artifact·429·직접 CLI 호출 | 실패를 승인으로 셈 | nonce·run·phase 바인딩, 실패는 승인이 아님 | P2로 회귀 확인 |
+| leader/sibling, 두 preblock, tripwire, FF, drift | 우회되거나 deadlock | 현재 규칙 그대로, 복구 경로 유지 | P1, P2 |
+| profile·아키텍처 모드·DDD·scoped 규범 | 관계없는 plugin이 규범을 켬 | plugin은 진입점 하나만 노출, run 스냅샷 | 변경 없음 |
+| local handoff vs PR·merge·release·cleanup·uninstall | uninstall이 보호를 지움 | 남은 hook은 의도된 보호, 명시적으로만 제거 | 변경 없음 |
+| 새 머신·clone·재생성 worktree·경로 이동 | 절대경로 hook이 옛 경로를 가리킴 | 재설치 안내, 미증명이면 start 거부 | P4 |
+| CI vs native smoke vs live eval | 증거가 섞임 | 세 층 분리 | P2 |
+| Windows | 근거 없는 지원 주장 | launcher가 `/bin/sh`라서 지원 주장 안 함, 능력 증거 필요 | - |
+
+**보장 경계**는 문서와 UX에 명시해요. 지키는 대상은 협조적인 AI, host를 거치는 쓰기, lifecycle이에요. 악의적인 사용자, root 권한 조작, host 밖 OS 쓰기까지 모두 막는다고 약속하지 않아요.
+
+## 7. 영향 맵
+
+| 영역 | 파일 | 제안 | 변경 성격 |
+|---|---|---|---|
+| OMP adapter | `lib/omp-hooks-extension.mjs` | P1, P2, P5 | 규칙 정렬 |
+| hook 무결성 | `src/agent_flow/core/hook_integrity.py` | P3, P4 | 검사·진단 추가 |
+| launcher·인터프리터 | `lib/installer-shared.mjs` | P3 | 기록 범위 확장 |
+| Node 진입점 | `bin/agent-flow-kit.mjs` | P3, P6 | fallback 제한, 알림 |
+| runner 시작 게이트 | `src/agent_flow/runner.py:437-487` | P3 | 기록만 추가 |
+| 세션 경계 | `src/agent_flow/core/host_write_boundary.py` | P5 | 빈틈이 있을 때만 |
+| plugin | `lib/plugin-bundle.mjs` | P6 | 문구, 알림 |
+| 테스트·eval | `tests/`, `evals/run.py` | P2, P5 | 추가 |
+| workflow·phase·routing | `src/agent_flow/workflows/*.yaml` | 없음 | 변경 금지 |
+
+## 8. 하지 말 것
+
+- 전역 runtime이나 공용 store를 lifecycle·판정 권한으로 쓰기
+- plugin cache 경로에서 runtime이나 hook 실행하기
+- skills-only로 전환하기
+- plugin enable, SessionStart, 문서 열기만으로 install·start·resume하기
+- host별 workflow core나 정책 사본 만들기, OMP 전용 정책 만들기
+- OMP나 controller 세션을 reviewer로 세기, 실패한 reviewer를 controller 작업으로 대신하기
+- write-target whitelist 추가, 두 preblock 완화나 확대, lifecycle 예외 확대
+- 업그레이드나 마이그레이션을 통과시키려고 repin·rebaseline하기
+- plugin을 지울 때 project hook까지 자동으로 지우기
+- 근거 없는 지원 주장 (OMP native plugin, Codex IDE, Windows, cloud)
+- native smoke나 과거 API 실패를 reviewer 증거로 쓰기, 관측 안 된 것을 pass로 표시하기
+
+## 9. 단계별 수용·전환 순서
+
+1. **0단계 — 사실 확인 (코드 변경 없음)**: [선행] 4개를 확인해요.
+   - worker가 managed checkout에 `.agent-flow/`를 쓸 수 있는지
+   - `kit.json`의 python 기록을 어디서 비교하는지
+   - `record-command-run.py`가 session id를 기록하는지
+   - Codex trust가 정확히 무슨 뜻인지
+2. **1단계 — P1 + P2 replay 층**: 기존 테스트 회귀 0, 세 host replay 결과 일치, 새로 생긴 허용 경로 0이어야 통과예요.
+3. **2단계 — P3 + P4 진단**: 인터프리터 교체 fixture에서 advance가 거부되고, status·abort·recovery가 동작하고, 기존 증거가 보존돼야 통과예요.
+4. **3단계 — P5 + native smoke**: host 전환 시나리오 결과가 같아야 해요. smoke 결과는 별도 위치에 기록해요.
+5. **4단계 — P6 + P4의 2단계(선택)**: host별 native smoke를 통과한 뒤에만 진행해요. plugin 배포 여부는 사용자가 정해요.
+
+각 단계는 앞 단계를 통과해야 시작해요. 실패하면 그 단계의 변경만 되돌리고, 강제 수준은 앞 단계 그대로 둬요.
+
+---
+
+다음에 할 일은 0단계의 [선행] 4개 확인이에요. 그 결과로 P1이 얼마나 위험한지, P3를 어디까지 해야 하는지가 정해져요.

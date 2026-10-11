@@ -3321,8 +3321,8 @@ def test_reinstall_does_not_inject_external_document_paths(tmp_path: Path, binar
 def test_root_claude_md_is_a_pointer_to_agents_md(tmp_path: Path, binary: str) -> None:
     """반증 1: 블록만 두면 블록 **밖** 프로젝트 규칙이 Claude에게만 사라진다.
 
-    Claude CLI는 루트 `CLAUDE.md`만 자동 로드한다. 프로젝트가 블록 밖에 적은 규칙이
-    Claude와 `multi-review`의 Claude reviewer에게 닿는 경로는 이 import 한 줄뿐이다.
+    author용 `CLAUDE.md`의 import가 계약과 블록 밖 프로젝트 규칙을 함께 가리킨다.
+    격리된 Claude reviewer의 전달 여부는 이 설치 회귀가 검증하지 않는다.
     `AGENTS.md`에는 없어야 한다 — 자기 자신을 import하는 줄이다.
 
     반증 2: 계약 본문까지 함께 심으면 Claude가 같은 규칙을 두 번 받는다. `@path`는
