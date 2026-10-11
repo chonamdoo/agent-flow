@@ -166,6 +166,7 @@ from agent_flow.core.worktrees import (
     managed_worktrees_root,
     plan_worktree,
     provision_host_hook_registrations,
+    provision_native_skill_entry,
     provision_registered_worktree_host_hooks,
     remove_worktree_metadata,
     worktree_metadata_is_unreachable,
@@ -2725,10 +2726,12 @@ def _worktree_context(
         return checkout_root, cleanup_state_root(pending)
     if _worktree_checkout_exists(status):
         if provision:
-            # 업그레이드 전에 만들어진 checkout도 여기서 등록 파일을 얻는다. host
+            # 업그레이드 전에 만들어진 checkout도 여기서 등록 파일과 native entry를 얻는다.
+            # 정리가 거부된 checkout은 둘 다 이미 걷어낸 상태라 여기서 되살린다. host
             # 세션이 실제로 그 checkout에서 일하는 지점(`continue`/`status`)만
             # 부른다 — `abort`는 걷어낼 checkout이라 등록을 깔 이유가 없다.
             _provision_host_hooks(root=root, checkout=status.path)
+            _provision_native_entry(root=root, checkout=status.path)
         return status.path, worktree_runtime_root(root=root, name=status.name)
     runtime_root = worktree_runtime_root(root=root, name=status.name)
     if not require_checkout and (runtime_root / ".agent-flow" / "runs").is_dir():
@@ -3153,14 +3156,31 @@ def _provision_host_hooks(*, root: Path, checkout: Path) -> None:
         )
 
 
+def _provision_native_entry(*, root: Path, checkout: Path) -> None:
+    try:
+        written = provision_native_skill_entry(leader=root, checkout=checkout)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(
+            f"warning: native agent-flow skill entry skipped: {_format_cli_error(exc)}",
+            file=sys.stderr,
+        )
+        return
+    if written:
+        print(
+            f"native agent-flow skill instructions provisioned: {', '.join(written)} — "
+            "discovery와 현재 세션의 skill/hook 로드·trust·실행은 별개입니다.",
+            file=sys.stderr,
+        )
+
+
 def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
-    """새 checkout을 쓸 수 있게 만든다: host hook 등록 표면 + 루트 컨텍스트 파일 +
-    profile 선언 설정.
+    """새 checkout에 host hook 등록, native entry, 프로젝트·profile 설정을 전달한다.
 
     실패해도 worktree 생성을 되돌리지 않는다. 설정이 없어서 빌드가 한 번 실패하는 것과
     방금 만든 checkout이 통째로 사라지는 것은 무게가 다르다. 대신 무엇이 빠졌는지 알린다.
     """
     _provision_host_hooks(root=root, checkout=checkout)
+    _provision_native_entry(root=root, checkout=checkout)
     # 루트 컨텍스트 파일은 profile 해석 **앞**에 옮긴다. profile이 깨졌다는 이유로 이
     # 복사까지 건너뛰면, 계약을 못 받는 checkout이 만들어진 뒤 그 안에서 일하게 된다.
     copied = list(_copy_worktree_files(root=root, checkout=checkout, names=ROOT_CONTEXT_FILES))
@@ -3225,6 +3245,8 @@ def _sync_declared_worktree_files(
     """
     if not checkouts:
         return
+    for checkout in checkouts:
+        _provision_native_entry(root=root, checkout=checkout)
     try:
         _profile_id, profile = resolve_profile(_find_kit_root(), root)
         declared = [str(name) for name in declared_worktree_copies(profile)]

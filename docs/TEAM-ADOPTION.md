@@ -100,28 +100,23 @@ ids. What it does not get: the environment override sits above the committed val
 deliberately lenient, so a member exporting `AGENT_FLOW_PROFILE` runs a different rule set and
 nothing reports that to the team.
 
-### The installed `AGENTS.md` contract block
+### Native entry and legacy root context
 
-Install writes the contract into the project's root `AGENTS.md` between
-`<!-- agent-flow:start -->` and `<!-- agent-flow:end -->`, from `bootstrap/AGENTS.md.template`.
-`CLAUDE.md` receives a pointer block instead, because the Claude CLI auto-loads only root
-`CLAUDE.md`; that `@AGENTS.md` import line is the only path by which project prose outside the
-block reaches Claude and the Claude reviewer.
+Fresh installs do not write Agent Flow instructions or indexes into root `AGENTS.md` or
+`CLAUDE.md`. Use the explicitly invoked native skill instead; [Running](USAGE.md#running)
+lists the host spellings and entry paths. Private bootstrap references and runtime contracts
+remain installed, but are not eager root guidance.
 
-Two sub-blocks inside it are filled by the installer:
+Ordinary reinstallation retires each unchanged legacy block only when its full bytes match
+the receipt in `.agent-flow/bootstrap/blocks.json`. It removes Agent Flow lifecycle and index
+content, preserves generic Context Economy text, normal Claude project imports and every
+outside byte, and keeps a durable backup. Edited, unproven, ambiguous or symlink roots are
+preserved and reported. Explicit `install --migrate-root-context` refuses those unsafe cases
+even with `--force-managed`; it is not permission to rewrite team prose.
 
-- `<!-- agent-flow:skills:start -->` / `<!-- agent-flow:skills:end -->` — the skill index.
-- `<!-- agent-flow:docs:start -->` / `<!-- agent-flow:docs:end -->` — the docs index.
-  `docsIndexBlock` in `lib/installer-shared.mjs` walks `DOCS_INDEX_ROOT`, which is `docs`, and
-  emits paths only. It carries a size ceiling and reports how many entries it truncated,
-  because a silently cut list turns a missing entry into a missing file.
-
-So a team that drops its own markdown into `docs/` gets those paths named in the contract every
-agent loads. What it does not get: the index carries paths, not content, and it is refreshed
-when the installer runs — not when a file is added. Team prose has to live outside the managed
-block: install rewrites what is inside it. Ownership is decided against a hash recorded in
-`.agent-flow/bootstrap/blocks.json`, and a block the installer did not write is kept and
-reported as user-edited rather than overwritten.
+Team documents in `docs/` are no longer an automatically injected root index. Keep project
+instructions and imports under project ownership, and name required documents through the
+existing profile, architecture or scoped skill contracts.
 
 ### Project-local skills
 

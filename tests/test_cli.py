@@ -2058,8 +2058,6 @@ class CliTest(unittest.TestCase):
             self.assertNotIn("modelSpecificProjectContext", omp_extension_text)
             self.assertNotIn("contextMessage(", omp_extension_text)
             self.assertNotIn("content.trimEnd()", omp_extension_text)
-            # 루트 두 파일의 블록은 install이 같은 템플릿으로 관리하고 블록 밖은
-            # 프로젝트 소유 산문이다. 전체 파일 미러는 그 산문까지 덮어쓴다.
             self.assertNotIn("syncRootContextFiles", omp_extension_text)
             self.assertNotIn("CLAUDE.md", omp_extension_text)
             self.assertNotIn(str(Path(__file__).resolve().parents[1]), omp_extension_text)
@@ -2083,11 +2081,7 @@ class CliTest(unittest.TestCase):
             self.assertTrue(
                 (project_root / ".agent-flow" / "skills" / "agent-flow-concise-output" / "SKILL.md").is_file()
             )
-            concise_rule = project_root / ".Codex" / "rules" / "concise-output.md"
-            self.assertTrue(concise_rule.is_file())
-            self.assertIn("verdict: approve", concise_rule.read_text(encoding="utf-8"))
-            self.assertIn("verdict: request-changes", concise_rule.read_text(encoding="utf-8"))
-            self.assertIn("next_command", concise_rule.read_text(encoding="utf-8"))
+            self.assertFalse((project_root / ".Codex" / "rules" / "concise-output.md").exists())
             self.assertTrue(
                 (project_root / ".agent-flow" / "skills" / "react-development-guide" / "SKILL.md").is_file()
             )
@@ -3948,10 +3942,8 @@ design-values-confirmed: n/a
                 # 왜 안 쓰이는지 알 수 없다. 색인하고 `skills doctor`가 충돌을 보고한다.
                 self.assertIn("compose-state-authoring", skill_names)
                 self.assertIn("edge-to-edge", skill_names)
-                # frontmatter가 `hosts: [codex]`라 codex 경로에만 링크된다. codex link는
-                # `hostSkillRoot`가 `.Codex`로 고정한다 - case-insensitive FS에서 두
-                # 이름이 같은 디렉터리라 `.codex`까지 단언하면 그 FS에서만 통과한다.
-                codex_root = project_root / ".Codex" / "skills"
+                # `hosts: [codex]`는 다른 host에 같은 skill을 노출하지 않는다.
+                codex_root = project_root / ".agents" / "skills"
                 self.assertTrue((codex_root / "compose-state-authoring").exists())
                 self.assertTrue((codex_root / "edge-to-edge").exists())
                 for host_root in (project_root / ".omp" / "skills", project_root / ".claude" / "skills"):
@@ -4156,7 +4148,7 @@ if (codexContext !== undefined) {
 
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertTrue((project_root / ".claude" / "skills" / "default-host-skill" / "SKILL.md").exists())
-                    self.assertTrue((project_root / ".Codex" / "skills" / "default-host-skill" / "SKILL.md").exists())
+                    self.assertTrue((project_root / ".agents" / "skills" / "default-host-skill" / "SKILL.md").exists())
                     self.assertTrue((project_root / ".omp" / "skills" / "default-host-skill" / "SKILL.md").exists())
                     index = json.loads(
                         (project_root / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")

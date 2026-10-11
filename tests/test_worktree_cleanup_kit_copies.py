@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +14,12 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from agent_flow.core import worktrees as W
+from agent_flow.artifact import create_run
+from agent_flow.core.design_ledger import (
+    confirm_current_spec_changes,
+    manual_spec_approval_statement,
+    record_manual_spec_approval,
+)
 
 
 def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -41,6 +48,26 @@ def _checkout_with_kit_copies(root: Path, *, names: tuple[str, ...]) -> Path:
     return status.path
 
 
+def _cleanup_run(root: Path, status: W.WorktreeStatus) -> Path:
+    run_dir = create_run(
+        W.worktree_runtime_root(root=root, name=status.name),
+        "default",
+        "cleanup copied instructions",
+        run_id="run-copy-cleanup",
+        checkout_identity=f"worktree:{status.name}",
+        checkout_registration_identity=status.registration_identity,
+    )
+    (run_dir / "design.md").write_text(
+        "## Spec Items\n\nSPEC-1: Preserve user-edited instructions during cleanup.\nverify: manual\n",
+        encoding="utf-8",
+    )
+    confirm_current_spec_changes(run_dir)
+    record_manual_spec_approval(
+        run_dir, "SPEC-1", manual_spec_approval_statement(run_dir, "SPEC-1")
+    )
+    return run_dir
+
+
 def test_identical_kit_copy_does_not_block_cleanup(tmp_path: Path) -> None:
     """반증: 하네스가 스스로 심은 `CLAUDE.md` 때문에 모든 worktree가 정리 불가였다.
 
@@ -56,7 +83,19 @@ def test_identical_kit_copy_does_not_block_cleanup(tmp_path: Path) -> None:
     W._assert_cleanup_checkout_clean(root=root, path=checkout)
 
 
-def test_edited_kit_copy_still_blocks_cleanup(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "CLAUDE.md",
+        ".claude/skills/agent-flow/SKILL.md",
+        ".claude/skills/agent-flow/agents/openai.yaml",
+        ".agents/skills/agent-flow/SKILL.md",
+        ".agents/skills/agent-flow/agents/openai.yaml",
+        ".omp/skills/agent-flow/SKILL.md",
+        ".omp/skills/agent-flow/agents/openai.yaml",
+    ],
+)
+def test_edited_kit_copy_still_blocks_cleanup(tmp_path: Path, rel: str) -> None:
     """불변: 이름이 아니라 내용으로 판정한다.
 
     예외를 받은 경로는 checkout과 함께 지워진다. 이름만 보고 통과시키면 사용자가
@@ -64,13 +103,33 @@ def test_edited_kit_copy_still_blocks_cleanup(tmp_path: Path) -> None:
     """
     root = tmp_path / "repo"
     _init_repo(root)
+    team = root / ".claude" / "skills" / "team-review" / "SKILL.md"
+    team.parent.mkdir(parents=True)
+    team.write_text("---\nname: team-review\n---\n", encoding="utf-8")
+    _git("add", ".", cwd=root)
+    _git("commit", "-m", "track team skill", cwd=root)
     (root / "CLAUDE.md").write_text("leader contract\n", encoding="utf-8")
-    checkout = _checkout_with_kit_copies(root, names=("CLAUDE.md",))
-    (checkout / "CLAUDE.md").write_text("leader contract\nedited by the user\n", encoding="utf-8")
+    canonical = root / ".agent-flow" / "skills" / "agent-flow"
+    shutil.copytree(KIT_ROOT / "skills" / "agent-flow", canonical)
+    status = W.create_worktree(root=root, plan=W.plan_worktree(root=root, name="edited-copy"))
+    W.copy_declared_worktree_files(leader=root, checkout=status.path, names=("CLAUDE.md",))
+    W.provision_native_skill_entry(leader=root, checkout=status.path)
+    run_dir = _cleanup_run(root, status)
+    target = status.path / rel
+    edited = target.read_bytes() + b"\nedited by the user\n"
+    target.write_bytes(edited)
 
-    with pytest.raises(W.CleanupBlockedError) as excinfo:
-        W._assert_cleanup_checkout_clean(root=root, path=checkout)
-    assert "CLAUDE.md" in str(excinfo.value)
+    with pytest.raises(W.CleanupBlockedError):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+    assert target.read_bytes() == edited
+    assert status.path.exists()
+    assert W.worktree_branch_exists(root=root, branch=status.branch)
 
 
 def test_unrelated_ignored_file_still_blocks_cleanup(tmp_path: Path) -> None:

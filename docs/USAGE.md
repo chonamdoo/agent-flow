@@ -389,17 +389,37 @@ It never renames files. Runs pinned before the upgrade keep their original desig
 
 ## Running
 
-Use it inside a Claude or Codex session.
+Invoke the installed skill explicitly in the host session:
 
-```text
-/agent-flow add a user profile page       # start
-/agent-flow                               # continue in the selected worktree
-/agent-flow status                        # progress
-/agent-flow abort                         # cancel
-```
+| Host | Native invocation | Project entry |
+| --- | --- | --- |
+| Claude Code | `/agent-flow <task>` | `.claude/skills/agent-flow/` |
+| Codex | `$agent-flow <task>` or select it through `/skills` | `.agents/skills/agent-flow/` |
+| OMP | `/skill:agent-flow <task>` | `.omp/skills/agent-flow/` |
 
-The slash form takes no workflow, so it starts the compatibility `default`. To run a smaller
-workflow, start from the CLI with `--workflow`.
+Ask that entry to resume the selected run or report status. It selects an existing workflow by
+the task and requested completion scope; invocation without a task asks for one. Installation,
+discovery and opening a session do not start a workflow. Codex uses the shared `.agents/skills`
+root, so an install keeps a same-name entry it did not create there, even with `--force-managed`.
+
+Fresh installs leave root `AGENTS.md` and `CLAUDE.md` alone. Reinstallation retires only unchanged,
+full receipt-owned legacy Agent Flow blocks, including their skill and docs indexes. It retains
+outside bytes, generic Context Economy text and normal Claude project imports. Edited, unproven,
+ambiguous or symlink roots are preserved and reported. After such a refusal, ordinary reinstalls
+leave the root documents alone; only an explicit `install --migrate-root-context` retries, and it
+refuses unsafe ownership even with `--force-managed`.
+
+A verified managed checkout receives instruction-only copies of the leader's canonical entry.
+Claude Code reads the leader's `.claude/skills` from a linked checkout that has none, so the Claude
+copy is added only when the checkout already has its own `.claude/skills`. After a kit upgrade,
+`status` and `continue` replace only copies that still match the bytes agent-flow wrote there; an
+edited copy is kept and blocks cleanup. Replaced and cleaned-up copies stay recoverable under the
+leader's `.git/agent-flow/retired-native-entries/`. Interrupted replacements keep a durable intent
+in the checkout's Git administration directory; the next sync, status or cleanup replays it without
+overwriting a new user entry. A preexisting Git `index.lock` is never removed automatically: resolve
+it only after confirming its owner has stopped, then retry the same command.
+Use the confirmed leader's installed `.agent-flow/bin` for the CLI, but keep the requested checkout
+as the status and lifecycle target. Do not install again in a linked worktree.
 
 The same thing straight from the CLI:
 

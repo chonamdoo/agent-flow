@@ -93,26 +93,22 @@
 것: 환경 변수 override가 커밋된 값 위에 있고 의도적으로 관대하다. 그래서 `AGENT_FLOW_PROFILE`을
 export한 구성원은 다른 규칙 집합으로 돌고, 그 사실은 팀에 보고되지 않는다.
 
-### 설치된 `AGENTS.md` 계약 블록
+### native entry와 기존 루트 컨텍스트
 
-install은 `bootstrap/AGENTS.md.template`에서 계약을 가져와 프로젝트 루트 `AGENTS.md`의
-`<!-- agent-flow:start -->`와 `<!-- agent-flow:end -->` 사이에 쓴다. `CLAUDE.md`는 대신 포인터
-블록을 받는다. Claude CLI가 루트 `CLAUDE.md`만 자동 로드하기 때문이다. 그 `@AGENTS.md` import
-한 줄이 블록 **밖**의 프로젝트 산문이 Claude와 Claude reviewer에 닿는 유일한 경로다.
+신규 설치는 루트 `AGENTS.md`나 `CLAUDE.md`에 Agent Flow 안내·인덱스를 쓰지 않는다.
+명시적으로 호출하는 native skill을 쓴다. host별 호출법과 경로는
+[Running](../USAGE.md#running)에 있다. 비공개 bootstrap 참조와 runtime 계약은 설치에
+남지만 루트에 상시 주입하지 않는다.
 
-블록 안의 두 하위 블록은 installer가 채운다.
+일반 재설치는 `.agent-flow/bootstrap/blocks.json`의 receipt와 블록 전체 바이트가 일치하는
+기존 블록만 파일별로 정리한다. Agent Flow lifecycle·인덱스는 제거하고, generic Context
+Economy 문구·일반 Claude 프로젝트 import·블록 밖 바이트는 보존하며 내구성 있는 백업을 남긴다.
+사용자 편집·소유 불명·모호한 블록이나 symlink 루트는 보존하고 알린다.
+명시적 `install --migrate-root-context`도 이런 경우에는 `--force-managed`와 무관하게 거부한다.
+팀 산문을 다시 쓰는 권한이 아니다.
 
-- `<!-- agent-flow:skills:start -->` / `<!-- agent-flow:skills:end -->` — skill 인덱스.
-- `<!-- agent-flow:docs:start -->` / `<!-- agent-flow:docs:end -->` — 문서 인덱스.
-  `lib/installer-shared.mjs`의 `docsIndexBlock`이 `DOCS_INDEX_ROOT`(값은 `docs`)를 훑고 경로만
-  싣는다. 크기 상한이 있고 잘라낸 개수를 함께 알린다. 조용히 자르면 목록에 없는 파일이 "없는
-  파일"이 되기 때문이다.
-
-그래서 팀이 `docs/`에 자기 마크다운을 두면 모든 에이전트가 로드하는 계약에 그 경로가 이름으로
-올라간다. 얻지 못하는 것: 인덱스는 본문이 아니라 경로만 담고, 파일이 추가될 때가 아니라 installer가
-돌 때 갱신된다. 팀 산문은 관리 블록 밖에 있어야 한다 — 블록 안은 install이 다시 쓴다. 소유 판정은
-`.agent-flow/bootstrap/blocks.json`에 기록된 해시로 하고, installer가 쓰지 않은 블록은 덮지 않고
-사용자 편집으로 지켜 보고한다.
+`docs/`의 팀 문서는 더 이상 자동 주입되는 루트 인덱스가 아니다. 프로젝트 안내와 import는
+프로젝트가 소유하고, 필수 문서는 기존 profile·architecture·범위 지정 skill 계약에서 선언한다.
 
 ### 프로젝트 로컬 skill
 
