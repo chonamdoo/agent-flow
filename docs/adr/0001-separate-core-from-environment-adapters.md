@@ -4,6 +4,8 @@
 
 Accepted
 
+2026-10-11 update: Gemini and antigravity host support was removed in [`d69e4f4`](https://github.com/chonamdoo/agent-flow/commit/d69e4f49ff655938ca5e2fc5eed560be1850b2fe) on 2026-06-10. Current hosted adapters are `claude`, `codex`, and `omp`; manual execution uses the `generic` adapter. The body below preserves the original decision and its historical host examples.
+
 ## Context
 
 Agent Flow should work across different agent environments, including Codex, Claude, Gemini, and manual prompt execution. Each environment has different mechanics for spawning agents, passing prompts, resuming work, and parsing output.
