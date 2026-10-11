@@ -90,6 +90,7 @@ class CommandRun:
     at: float
     cwd: str = ""
     code_baseline: str = ""
+    host: str | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +171,7 @@ def read_command_evidence(
                 code_baseline=(
                     entry["code_baseline"] if isinstance(entry.get("code_baseline"), str) else ""
                 ),
+                host=entry.get("host") if entry.get("host") in ("claude", "codex", "omp") else None,
             )
         )
     return CommandRunEvidence(available=True, runs=tuple(runs))

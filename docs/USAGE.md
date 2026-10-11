@@ -446,7 +446,7 @@ blocks a run and never changes the status exit code; the run-start hook check st
 
 | Level | Meaning |
 |---|---|
-| `hook_enforced` | Registered, trusted (`yes`, or `n/a` for OMP, which has no per-project hook trust), and a session binding or a recorded command was seen in this checkout since the run started. Only the active host detected from its environment variable can reach this level, because the records do not name a host. |
+| `hook_enforced` | Registered, trusted (`yes`, or `n/a` for OMP, which has no per-project hook trust), and a session binding or a recorded command was seen in this checkout since the run started. Only records tagged with this host by its own hooks count, and only the active host detected from its environment variable can reach this level. Records from an install made before the hooks tagged their host name no host and count for none; reinstall to tag new records. |
 | `hook_unproven` | Registered and not distrusted, but trust is `unknown` or no execution can be attributed to this host. The records do not say which hooks ran, so with unconfirmed trust an observed execution does not rule out a skipped guard. |
 | `runner_only` | Not installed, not registered, distrusted, or hooks disabled. Required markers, pause approval tokens, independent reviewers, runner gates, route invariants, and the run-start check still apply. The two pre-block rules, the tripwire, session binding, and command recording are not proven. |
 

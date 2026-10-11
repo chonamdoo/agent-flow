@@ -140,6 +140,7 @@ class HostCheckoutBinding:
     checkout: ActiveCheckout
     leader_snapshot: LeaderSnapshot
     guidance_eligible: bool = False
+    host: str | None = None
 
 
 @dataclass(frozen=True)
@@ -513,8 +514,10 @@ def assert_adoption_allowed(*, root: Path) -> None:
 
 
 def record_host_checkout_binding(
-    payload: object, project_root: Path, *, successful_tool_event: bool = False
+    payload: object, project_root: Path, *, successful_tool_event: bool = False,
+    host: str | None = None,
 ) -> Path | None:
+    host = host if host in ("claude", "codex", "omp") else None
     root = _validated_project_root(project_root)
     session_id = _first_string(payload, ("session_id", "sessionId"))
     if not session_id:
@@ -593,7 +596,9 @@ def record_host_checkout_binding(
             worker_root=existing.checkout.checkout,
             include_ignored=False,
         )
-        if existing.guidance_eligible or not guidance_eligible:
+        guidance_eligible = existing.guidance_eligible or guidance_eligible
+        host = existing.host or host
+        if existing.guidance_eligible == guidance_eligible and existing.host == host:
             return _binding_path(root, session_id)
         leader_snapshot = existing.leader_snapshot
     else:
@@ -611,6 +616,7 @@ def record_host_checkout_binding(
             "recorded_at": time.time(),
             "leader_snapshot": leader_snapshot_payload(leader_snapshot),
             "guidance_eligible": guidance_eligible,
+            "host": host,
         },
     )
     return binding_path
@@ -1301,6 +1307,7 @@ def _load_binding_file(
                 checkout=context,
                 leader_snapshot=leader_snapshot,
                 guidance_eligible=payload.get("guidance_eligible") is True,
+                host=payload.get("host") if payload.get("host") in ("claude", "codex", "omp") else None,
             )
     return None
 

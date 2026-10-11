@@ -12,6 +12,7 @@ import json
 import os
 import re
 import runpy
+import shlex
 import shutil
 import subprocess
 import sys
@@ -169,7 +170,8 @@ def _run_command_result_handler(
         "import json, sys\n"
         "from pathlib import Path\n"
         "payload = json.load(sys.stdin)\n"
-        "payload['_hook'] = sys.argv[1] if len(sys.argv) > 1 else Path(__file__).name\n"
+        "payload['_hook'] = Path(__file__).name\n"
+        "payload['_argv'] = sys.argv[1:]\n"
         "payload['_spawn_cwd'] = str(Path.cwd())\n"
         f"with Path({str(binding_log)!r}).open('a', encoding='utf-8') as stream:\n"
         "    stream.write(json.dumps(payload) + '\\n')\n"
@@ -1102,6 +1104,7 @@ def test_omp_recorder_cwd_does_not_change_guard_context(tmp_path: Path):
             "bind-host-worktree.py", "worktree-tripwire.py"
         ]
         assert [entry.pop("_spawn_cwd") for entry in received] == [str(session)] * 2
+        assert [entry.pop("_argv") for entry in received] == [["--host", "omp"], []]
         assert received[0] == received[1]
         assert received[0]["cwd"] == str(session)
         assert received[0]["tool_input"] == event["input"]
@@ -1292,6 +1295,50 @@ def test_agent_flow_install_entry_point_still_installs(tmp_path: Path):
     )
     assert result.returncode == 0, result.stderr
     assert (project / ".agent-flow" / "kit.json").is_file()
+
+
+@pytest.mark.parametrize("entry", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_installed_recorders_receive_the_registration_host(tmp_path: Path, monkeypatch, entry):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    def install(*args: str) -> None:
+        result = subprocess.run(
+            (_node(), str(BIN / entry), "install", "--root", str(project), *args),
+            capture_output=True, text=True, timeout=120,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def assert_registration_hosts() -> None:
+        for relative, host in ((".claude/settings.json", "claude"), (".Codex/hooks.json", "codex"),
+                               (".codex/hooks.json", "codex")):
+            settings = json.loads((project / relative).read_text())
+            recorders = {}
+            for entries in settings["hooks"].values():
+                for block in entries:
+                    for hook in block["hooks"]:
+                        argv = shlex.split(hook["command"])
+                        script = Path(argv[1]).name
+                        if script in ("record-command-run.py", "bind-host-worktree.py"):
+                            recorders[script] = argv[2:]
+            assert recorders == {
+                "record-command-run.py": ["--host", host],
+                "bind-host-worktree.py": ["--host", host],
+            }
+
+    install()
+    assert_registration_hosts()
+    for args in (("--no-hooks",), ()):
+        install(*args)
+        for relative in (".claude/settings.json", ".Codex/hooks.json", ".codex/hooks.json"):
+            assert "/scripts/hooks/" not in (project / relative).read_text()
+        assert not (project / ".omp/extensions/agent-flow-hooks.ts").exists()
+    install("--hooks")
+    assert_registration_hosts()
+
+    commands, bindings = _run_command_result_handler(tmp_path / "omp", _extension_source())
+    assert commands and all(command.get("host") == "omp" for command in commands)
+    assert bindings and all(binding["_argv"] == ["--host", "omp"] for binding in bindings)
 
 
 @pytest.mark.parametrize(

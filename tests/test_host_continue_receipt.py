@@ -493,5 +493,11 @@ def test_omp_actual_continue_preserves_explicit_success_guidance(tmp_path: Path)
     assert continued.returncode == 0, continued.stderr
     assert "continue_receipt:" not in continued.stdout
     result = _omp(checkout, "tool_result", _payload("omp", "tool_result", root, checkout, command, continued.stdout))
-    assert result is None
+    # OMP는 explicit continue 뒤 이 세션의 run-command prefix를 모델 채널로 넘긴다.
+    marker = "[agent-flow] run_command_prefix: "
+    lines = [line for line in result["additionalContext"].splitlines() if line.startswith(marker)]
+    assert len(lines) == 1
+    assert shlex.split(lines[0].removeprefix(marker)) == [
+        "agent-flow", "run-command", "--host-session-id", SESSION, "--",
+    ]
     assert bound_worktree_for_session(SESSION, root).guidance_eligible is True

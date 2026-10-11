@@ -18,12 +18,14 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from agent_flow.artifact import create_run
+from agent_flow.core.host_connection import collect_host_connection, render_host_connection
 from agent_flow.core.host_write_boundary import (
     HostWriteBoundaryError,
     assert_adoption_allowed,
     host_session_guidance,
     host_write_boundary_violation,
     record_host_checkout_binding,
+    run_session_bindings,
 )
 from agent_flow.core.worktree_isolation import (
     LEADER_SNAPSHOT_VERSION,
@@ -243,6 +245,43 @@ def test_status_binding_protects_without_granting_guidance(tmp_path: Path):
     for target in (root / "README.md", second.path / "file.py", runs[1] / "meta.json"):
         assert host_write_boundary_violation(_write_payload(target), root) is not None
     assert host_write_boundary_violation(_write_payload(first.path / "file.py"), root) is None
+
+
+def test_binding_host_upgrade_preserves_guidance_and_scope(tmp_path: Path):
+    root, statuses, runs = _setup(tmp_path)
+    first, second = statuses
+    path = record_host_checkout_binding(_participation_payload(root, first, runs[0]), root)
+    assert path is not None
+    stored = json.loads(path.read_text())
+    snapshot = stored["leader_snapshot"]
+    stored["host"] = "omp"
+    path.write_text(json.dumps(stored), encoding="utf-8")
+    assert getattr(run_session_bindings(root, runs[0].name)[0], "host", None) == "omp"
+
+    for invalid_host in (None, "unknown", ["omp"]):
+        stored["host"] = invalid_host
+        path.write_text(json.dumps(stored), encoding="utf-8")
+        assert run_session_bindings(root, runs[0].name)[0].host is None
+    stored.pop("host")
+    path.write_text(json.dumps(stored), encoding="utf-8")
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root, host="omp")
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root, host="claude")
+    updated = run_session_bindings(root, runs[0].name)[0]
+    assert updated.host == "omp"
+    assert updated.guidance_eligible is True
+    assert json.loads(path.read_text())["leader_snapshot"] == snapshot
+    assert host_session_guidance({"session_id": "session-1", "cwd": str(first.path)}, root)
+    assert host_write_boundary_violation(_write_payload(first.path / "file.py"), root) is None
+    assert host_write_boundary_violation(_write_payload(second.path / "file.py"), root)
+    report = collect_host_connection(
+        project_root=root, checkout=first.path, run_id=runs[0].name,
+        run_started_at=None, active=("codex", "env:CODEX_HOME"), home=tmp_path, env={},
+    )
+    payload = json.loads(render_host_connection(report)[-1].split(": ", 1)[1])
+    assert payload["execution"]["bindings"] == 1
+    assert payload["hosts"]["omp"]["execution"]["bindings"] == 1
+    assert payload["hosts"]["codex"]["execution"]["bindings"] == 0
 
 
 @pytest.mark.parametrize("operation", ["run task", "run start", "start task", "continue"])

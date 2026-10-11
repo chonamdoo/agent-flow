@@ -75,7 +75,11 @@ def main() -> int:
     if project_root is None:
         return 0
 
-    append_entry(project_root / LOG_RELATIVE, command, exit_code(payload), cwd)
+    host = (
+        sys.argv[2] if len(sys.argv) == 3 and sys.argv[1] == "--host"
+        and sys.argv[2] in ("claude", "codex", "omp") else None
+    )
+    append_entry(project_root / LOG_RELATIVE, command, exit_code(payload), cwd, host=host)
     return 0
 
 
@@ -87,7 +91,9 @@ def exit_code(payload: object) -> int | None:
     return value if isinstance(value, int) else None
 
 
-def append_entry(log_path: Path, command: str, code: int | None, cwd: str) -> None:
+def append_entry(
+    log_path: Path, command: str, code: int | None, cwd: str, *, host: str | None = None
+) -> None:
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         baseline = observed_code_baseline(Path(cwd), command, code) if code not in (None, 0) else ""
@@ -95,6 +101,7 @@ def append_entry(log_path: Path, command: str, code: int | None, cwd: str) -> No
             {
                 "command": command, "exit_code": code, "cwd": cwd,
                 "at": time.time(), "code_baseline": baseline,
+                "host": host,
             },
             ensure_ascii=False,
             sort_keys=True,

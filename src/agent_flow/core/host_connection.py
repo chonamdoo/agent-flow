@@ -8,20 +8,21 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final, Literal
 
-from agent_flow.core.command_evidence import read_command_evidence
+from agent_flow.core.command_evidence import CommandRun, read_command_evidence
 from agent_flow.core.hook_integrity import (
     HookInstallDescription,
     describe_managed_hooks,
     find_install_root,
+    registration_host,
 )
 from agent_flow.core.host_trust import HostTrust, TrustState, read_host_trust
-from agent_flow.core.host_write_boundary import run_session_bindings
+from agent_flow.core.host_write_boundary import HostCheckoutBinding, run_session_bindings
 
 SupportLevel = Literal["hook_enforced", "hook_unproven", "runner_only"]
 RegistrationState = Literal["ok", "missing", "unreadable", "incomplete"]
@@ -32,8 +33,6 @@ HOOK_UNPROVEN: Final = "hook_unproven"
 RUNNER_ONLY: Final = "runner_only"
 
 HOSTS = ("claude", "codex", "omp")
-# 등록 파일의 첫 경로 요소 → host. `.Codex`와 `.codex`는 같은 host다.
-_SURFACE_HOSTS = {".claude": "claude", ".codex": "codex", ".omp": "omp"}
 
 RUNNER_PROTECTIONS = (
     "필수 marker",
@@ -53,6 +52,7 @@ class HostRow:
     registration_violations: tuple[str, ...]
     trust: HostTrust
     level: SupportLevel
+    execution: ExecutionObservation
 
 
 @dataclass(frozen=True)
@@ -90,10 +90,10 @@ def support_level(
 ) -> SupportLevel:
     """`detected_by`는 이 host가 active host일 때만 값이 있다(`env:<NAME>` 또는 `path`).
 
-    관측된 실행에는 host 표시가 없다. 그래서 env로 확인된 active host에만 귀속한다 —
-    PATH에 있다는 것은 그 CLI가 이 세션의 host라는 증거가 아니다. 실행 기록도 hook마다
-    남지 않는다. 신뢰를 확인하지 못하면 기록을 남긴 hook 옆에서 guard가 건너뛰어졌을 수
-    있으므로, 신뢰가 `yes`이거나 신뢰 개념이 없는(`n/a`) host만 `hook_enforced`가 된다.
+    `executed`는 이 host로 표시된 기록만 센다. env로 확인된 active host에만 등급을
+    높인다. PATH에 있다는 것은 그 CLI가 이 세션의 host라는 증거가 아니다. 신뢰를
+    확인하지 못하면 기록을 남긴 hook 옆에서 guard가 건너뛰어졌을 수 있으므로, 신뢰가
+    `yes`이거나 신뢰 개념이 없는(`n/a`) host만 `hook_enforced`가 된다.
     """
     if not installed or not registered or trust == "no":
         return RUNNER_ONLY
@@ -124,7 +124,9 @@ def collect_host_connection(
         describe_managed_hooks(install_root, checkout) if install_root is not None else None
     )
     install_state = _install_state(description)
-    execution = _execution(project_root, install_root, checkout, run_id, run_started_at)
+    execution, host_executions = _execution(
+        project_root, install_root, checkout, run_id, run_started_at
+    )
     rows = []
     for host in HOSTS:
         registered, violations = _registration(host, description)
@@ -137,12 +139,13 @@ def collect_host_connection(
                 registered=registered,
                 registration_violations=violations,
                 trust=trust,
+                execution=host_executions[host],
                 level=support_level(
                     installed=install_state == "ok",
                     registered=registered == "ok",
                     trust=trust.state,
                     detected_by=detected_by if host == active_host else None,
-                    executed=execution.observed,
+                    executed=host_executions[host].observed,
                 ),
             )
         )
@@ -175,7 +178,8 @@ def render_host_connection(report: HostConnectionReport) -> list[str]:
     for row in report.hosts:
         lines.append(
             f"  {row.host}: registered={row.registered} trusted={row.trust.state} "
-            f"level={row.level}"
+            f"level={row.level} "
+            f"execution=(bindings={row.execution.bindings}, commands={row.execution.commands})"
         )
         if row.trust.hint:
             lines.append(f"    hint: {row.trust.hint}")
@@ -220,7 +224,7 @@ def _registration(
     surfaces = [
         surface
         for surface in description.surfaces
-        if _SURFACE_HOSTS.get(Path(surface.name).parts[0].lower()) == host
+        if registration_host(surface.name) == host
     ]
     violations = tuple(
         dict.fromkeys(violation for surface in surfaces for violation in surface.violations)
@@ -238,7 +242,7 @@ def _execution(
     checkout: Path,
     run_id: str,
     since: float | None,
-) -> ExecutionObservation:
+) -> tuple[ExecutionObservation, dict[str, ExecutionObservation]]:
     checkout_real = Path(os.path.realpath(checkout))
     bindings = [
         binding
@@ -250,6 +254,18 @@ def _execution(
         if install_root is not None and since is not None
         else ()
     )
+    return _observation(bindings, runs), {
+        host: _observation(
+            [binding for binding in bindings if binding.host == host],
+            [run for run in runs if run.host == host],
+        )
+        for host in HOSTS
+    }
+
+
+def _observation(
+    bindings: Sequence[HostCheckoutBinding], runs: Sequence[CommandRun]
+) -> ExecutionObservation:
     return ExecutionObservation(
         bindings=len(bindings),
         guidance_eligible=any(binding.guidance_eligible for binding in bindings),
@@ -275,7 +291,6 @@ def _utc_iso(timestamp: float | None) -> str | None:
 
 
 def _payload(report: HostConnectionReport) -> dict:
-    execution = report.execution
     return {
         "blocks_run": False,
         "install": {
@@ -297,15 +312,20 @@ def _payload(report: HostConnectionReport) -> dict:
                 "trust_detail": row.trust.detail,
                 "hint": row.trust.hint,
                 "level": row.level,
+                "execution": _execution_payload(row.execution),
             }
             for row in report.hosts
         },
-        "execution": {
-            "observed": execution.observed,
-            "bindings": execution.bindings,
-            "guidance_eligible": execution.guidance_eligible,
-            "commands": execution.commands,
-            "exit_codes_missing": execution.exit_codes_missing,
-            "last_command_at": _utc_iso(execution.last_command_at),
-        },
+        "execution": _execution_payload(report.execution),
+    }
+
+
+def _execution_payload(execution: ExecutionObservation) -> dict:
+    return {
+        "observed": execution.observed,
+        "bindings": execution.bindings,
+        "guidance_eligible": execution.guidance_eligible,
+        "commands": execution.commands,
+        "exit_codes_missing": execution.exit_codes_missing,
+        "last_command_at": _utc_iso(execution.last_command_at),
     }

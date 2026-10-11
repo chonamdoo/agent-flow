@@ -31,9 +31,9 @@ def _project(tmp_path: Path) -> Path:
     return root
 
 
-def _invoke(root: Path, payload: dict) -> subprocess.CompletedProcess:
+def _invoke(root: Path, payload: dict, args: tuple[str, ...] = ()) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, str(HOOK)],
+        [sys.executable, str(HOOK), *args],
         input=json.dumps(payload),
         capture_output=True,
         text=True,
@@ -61,6 +61,40 @@ def test_hook_records_a_command(tmp_path):
     result = _bash(root, "pytest -q tests")
     assert result.returncode == 0, result.stderr
     assert [entry["command"] for entry in _log(root)] == ["pytest -q tests"]
+
+
+def test_hook_records_only_its_explicit_host(tmp_path: Path, monkeypatch):
+    root = _project(tmp_path)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    payload = {
+        "tool_name": "Bash", "cwd": str(root), "host": "codex",
+        "tool_input": {"command": "pytest -q", "host": "codex"},
+    }
+    for args, expected in (
+        (("--host", "omp"), "omp"),
+        (("--host", "claude"), "claude"),
+        (("--host", "codex"), "codex"),
+        ((), None),
+        (("--host", "unknown"), None),
+        (("--host", "omp", "extra"), None),
+    ):
+        result = _invoke(root, payload, args)
+        assert result.returncode == 0, result.stderr
+        assert _log(root)[-1].get("host") == expected
+
+
+def test_evidence_reader_preserves_only_canonical_hosts(tmp_path: Path):
+    root = _project(tmp_path)
+    hosts = ("claude", "codex", "omp", None, "unknown", ["omp"], {"host": "omp"})
+    (root / ".agent-flow" / "commands-run.jsonl").write_text(
+        "".join(json.dumps({"command": "pytest -q", "host": host, "at": 1}) + "\n"
+                for host in hosts)
+        + json.dumps({"command": "pytest -q", "source": "runner", "at": 1}) + "\n",
+        encoding="utf-8",
+    )
+    assert tuple(run.host for run in read_command_evidence(root).runs) == (
+        "claude", "codex", "omp", None, None, None, None, None,
+    )
 
 
 def test_hook_records_the_exit_code_when_the_host_reports_one(tmp_path):

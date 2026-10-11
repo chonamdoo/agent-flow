@@ -48,10 +48,16 @@ def main() -> int:
                 for key in ("exit_code", "exitCode", "returncode", "return_code")
             )
         )
+        host = (
+            sys.argv[2] if len(sys.argv) == 3 and sys.argv[1] == "--host"
+            and sys.argv[2] in ("claude", "codex", "omp") else None
+        )
         project_root, recorder, run_command_context = load_recorder(
             Path(__file__).resolve().parent
         )
-        if recorder(payload, project_root, successful_tool_event=successful_tool_event) is None:
+        if recorder(
+            payload, project_root, successful_tool_event=successful_tool_event, host=host
+        ) is None:
             return 0
         context = run_command_context(payload, project_root)
         if context:

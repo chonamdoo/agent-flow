@@ -112,16 +112,21 @@ def _hook_env() -> dict[str, str]:
     return {**os.environ, "AGENT_FLOW_HOOK_PYTHON": sys.executable}
 
 
-def _run_hook(root: Path, checkout: Path, script: str, payload: dict) -> subprocess.CompletedProcess:
+def _run_hook(
+    root: Path, checkout: Path, script: str, payload: dict, *, host: str | None = None
+) -> subprocess.CompletedProcess:
     """host가 등록 명령(`<launcher> <script>`)을 실행하는 것과 같은 모양으로 돌린다."""
     event, matcher = MANAGED_HOOK_PLACEMENT[script]
     assert payload["hook_event_name"] == event
     assert re.fullmatch(matcher, payload["tool_name"]), (
         f"{payload['tool_name']!r} does not match the registered {script} matcher {matcher!r}"
     )
+    host_args = ("--host", host) if host and script in (
+        "record-command-run.py", "bind-host-worktree.py"
+    ) else ()
     return subprocess.run(
         (str(root / ".agent-flow" / "bin" / "agent-flow-hook"),
-         str(root / ".agent-flow" / "scripts" / "hooks" / script)),
+         str(root / ".agent-flow" / "scripts" / "hooks" / script), *host_args),
         input=json.dumps(payload),
         cwd=checkout,
         env=_hook_env(),
@@ -169,7 +174,7 @@ def _post(host: str, root: Path, checkout: Path, command: str, output: str) -> A
                     _payload(host, "tool_result", root, checkout, command, output))
     payload = _payload(host, "post_tool_use", root, checkout, command, output)
     results = [
-        _run_hook(root, checkout, script, payload)
+        _run_hook(root, checkout, script, payload, host=host)
         for script in ("record-command-run.py", "bind-host-worktree.py", "worktree-tripwire.py")
     ]
     return results
@@ -244,6 +249,7 @@ def test_binding_records_the_session_for_every_host(tmp_path: Path, host: str):
     assert binding.checkout.checkout == Path(os.path.realpath(checkout))
     assert binding.checkout.run_id == run_dir.name
     assert binding.guidance_eligible is False
+    assert getattr(binding, "host", None) == host
 
 
 @pytest.mark.parametrize(
