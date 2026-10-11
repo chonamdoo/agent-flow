@@ -19,6 +19,7 @@ from agent_flow.core.hook_integrity import (
     HookInstallDescription,
     describe_managed_hooks,
     find_install_root,
+    registration_host,
 )
 from agent_flow.core.host_trust import HostTrust, TrustState, read_host_trust
 from agent_flow.core.host_write_boundary import HostCheckoutBinding, run_session_bindings
@@ -32,8 +33,6 @@ HOOK_UNPROVEN: Final = "hook_unproven"
 RUNNER_ONLY: Final = "runner_only"
 
 HOSTS = ("claude", "codex", "omp")
-# 등록 파일의 첫 경로 요소 → host. `.Codex`와 `.codex`는 같은 host다.
-_SURFACE_HOSTS = {".claude": "claude", ".codex": "codex", ".omp": "omp"}
 
 RUNNER_PROTECTIONS = (
     "필수 marker",
@@ -224,7 +223,7 @@ def _registration(
     surfaces = [
         surface
         for surface in description.surfaces
-        if _SURFACE_HOSTS.get(Path(surface.name).parts[0].lower()) == host
+        if registration_host(surface.name) == host
     ]
     violations = tuple(
         dict.fromkeys(violation for surface in surfaces for violation in surface.violations)

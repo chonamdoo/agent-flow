@@ -52,12 +52,49 @@ def test_recorder_host_arguments_preserve_exact_invocation(tmp_path: Path):
     for script in ("record-command-run.py", "bind-host-worktree.py"):
         command = _hook_command(tmp_path, script)
         for host in ("claude", "codex", "omp"):
-            assert managed_path_hook_name(tmp_path, f"{command} --host {host}") == script
-        assert managed_path_hook_name(tmp_path, command) == script
+            assert managed_path_hook_name(
+                tmp_path, f"{command} --host {host}", host=host
+            ) == script
+            assert managed_path_hook_name(tmp_path, command, host=host) == script
         for suffix in ("--host unknown", "--host", "--host omp extra", "--host omp ; true"):
-            assert managed_path_hook_name(tmp_path, f"{command} {suffix}") is None
+            assert managed_path_hook_name(tmp_path, f"{command} {suffix}", host="omp") is None
+        assert managed_path_hook_name(tmp_path, f"{command} --host omp", host=None) is None
     guard = _hook_command(tmp_path, "guard-host-worktree.sh")
-    assert managed_path_hook_name(tmp_path, f"{guard} --host omp") is None
+    assert managed_path_hook_name(tmp_path, f"{guard} --host omp", host="omp") is None
+
+
+def test_recorder_registered_under_another_host_is_not_a_managed_hook(tmp_path: Path):
+    """반증: `.claude/settings.json`이 `--host codex`로 기록 hook을 부르면 Claude 실행이
+    Codex 실행 증거로 남는데도 Claude 등록이 정상으로 읽힌다."""
+    def install(root: Path, claude_host: str) -> tuple[str, ...]:
+        _install(root)
+        for relative, host in (
+            (CLAUDE_SETTINGS, claude_host),
+            (CODEX_SETTINGS, "codex"),
+            (Path(".codex") / "hooks.json", "codex"),
+        ):
+            path = root / relative
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            for blocks in payload["hooks"].values():
+                for block in blocks:
+                    for hook in block["hooks"]:
+                        # 대소문자를 구분하지 않는 파일 시스템에서는 `.Codex`와 `.codex`가 같은 파일이다.
+                        if "--host" not in hook["command"] and any(
+                            name in hook["command"]
+                            for name in ("record-command-run.py", "bind-host-worktree.py")
+                        ):
+                            hook["command"] += f" --host {host}"
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return _violations(root)
+
+    assert install(tmp_path / "matched", "claude") == ()
+    violations = install(tmp_path / "mismatched", "codex")
+    for script in ("record-command-run.py", "bind-host-worktree.py"):
+        assert any(
+            str(CLAUDE_SETTINGS) in v and f"does not register {script}" in v
+            for v in violations
+        ), violations
+    assert not any(".codex" in v.lower() for v in violations), violations
 
 
 def _host_settings(root: Path) -> dict:

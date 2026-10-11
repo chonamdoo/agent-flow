@@ -116,6 +116,8 @@ JSON_REGISTRATION_FILES = (
     Path(".codex") / "hooks.json",
 )
 OMP_REGISTRATION_FILE = Path(".omp") / "extensions" / "agent-flow-hooks.ts"
+# 등록 파일의 첫 경로 요소 → host. `.Codex`와 `.codex`는 같은 host다.
+_REGISTRATION_HOSTS = {".claude": "claude", ".codex": "codex", ".omp": "omp"}
 # 등록 파일은 사용자 설정과 함께 있어도 수 KB 수준이다. 이보다 크면 읽지 못한 것으로 본다.
 _REGISTRATION_MAX_BYTES = 8 * 1024 * 1024
 
@@ -705,7 +707,9 @@ def _read_surfaces(root: Path, *, surface_root: Path | None = None) -> Iterator[
             # 것만으로 검증이 사라진다. 읽기 실패 자체를 위반으로 든다.
             yield _Surface(str(relative), present=True, readable=False, entries=())
             continue
-        entries, malformed = _json_registrations(root, payload)
+        entries, malformed = _json_registrations(
+            root, payload, host=registration_host(relative)
+        )
         yield _Surface(
             str(relative),
             present=True,
@@ -746,8 +750,13 @@ def _read_registration_text(path: Path) -> str:
     return raw.decode("utf-8")
 
 
+def registration_host(relative: Path | str) -> str | None:
+    """등록 파일이 속한 host. 기록 hook은 이 host 이름만 `--host`로 받는다."""
+    return _REGISTRATION_HOSTS.get(Path(relative).parts[0].lower())
+
+
 def _json_registrations(
-    root: Path, payload: object
+    root: Path, payload: object, *, host: str | None
 ) -> tuple[tuple[tuple[str, str, str], ...], tuple[str, ...]]:
     hooks = payload.get("hooks") if isinstance(payload, dict) else None
     if not isinstance(hooks, dict):
@@ -760,7 +769,7 @@ def _json_registrations(
         for block in blocks:
             matcher = block.get("matcher", "") if isinstance(block, dict) else ""
             for command in _entry_commands(block):
-                script = managed_path_hook_name(root, command)
+                script = managed_path_hook_name(root, command, host=host)
                 if script is not None:
                     entries.append((str(event), str(matcher or ""), script))
                 elif mentions_managed_hook_dir(root, command):
@@ -779,14 +788,15 @@ def _entry_commands(entry: object) -> Iterator[str]:
             yield hook["command"]
 
 
-def managed_path_hook_name(root: Path, command: str) -> str | None:
+def managed_path_hook_name(root: Path, command: str, *, host: str | None) -> str | None:
     """Return the script name only for one exact trusted hook invocation.
 
     관리 hook은 오직 managed hook launcher로만 실행된다:
     `<root>/.agent-flow/bin/agent-flow-hook <root>/.agent-flow/scripts/hooks/<name>`.
     하드코딩 인터프리터(`/usr/bin/python3`·`/bin/bash`)는 더는 인정하지 않는다 —
     그 경로가 없거나 host가 직접 execve하지 못하는 자리에서 hook exec가 EPERM으로
-    죽던 자리다.
+    죽던 자리다. 기록 hook의 `--host` 값은 등록 파일의 `host`와 같아야 한다. 다른
+    host 이름을 박은 등록은 그 host의 실행 증거를 만든다.
     """
     try:
         tokens = shlex.split(command, posix=True)
@@ -812,7 +822,8 @@ def managed_path_hook_name(root: Path, command: str) -> str | None:
     if len(tokens) == 4 and (
         name not in ("record-command-run.py", "bind-host-worktree.py")
         or tokens[2] != "--host"
-        or tokens[3] not in ("claude", "codex", "omp")
+        or host is None
+        or tokens[3] != host
     ):
         return None
     try:
