@@ -90,7 +90,8 @@ def test_status_prints_the_host_connection_card_after_status_json(
     assert card["execution"]["commands"] == 2
     assert card["execution"]["exit_codes_missing"] == 1
     assert card["execution"]["observed"] is True
-    assert any("RED 관측" in line for line in lines[status_at[0] : card_at[0]])
+    hint = [line for line in lines[status_at[0] : card_at[0]] if "RED 관측" in line]
+    assert len(hint) == 1 and "agent-flow run-command --" in hint[0]
 
 
 @pytest.mark.parametrize("hostile", ("timestamp-out-of-range", "newline-in-filename"))

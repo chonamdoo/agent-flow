@@ -188,8 +188,9 @@ def render_host_connection(report: HostConnectionReport) -> list[str]:
     )
     if execution.exit_codes_missing:
         lines.append(
-            "    hint: exit code를 주지 않는 host에서는 실패한 명령을 볼 수 없어 "
-            "RED 관측을 요구하지 못합니다"
+            "    hint: exit code를 주지 않는 host에서는 실패한 명령이 RED 관측으로 남지 않습니다. "
+            "테스트·feedback 명령은 `agent-flow run-command -- <argv>`로 실행하세요"
+            "(bound worktree에서는 host guidance의 run_command_prefix)"
         )
     if report.active_level == RUNNER_ONLY or any(row.level == RUNNER_ONLY for row in report.hosts):
         lines.append("  runner_only에서도 남는 보호: " + ", ".join(RUNNER_PROTECTIONS))
