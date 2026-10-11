@@ -68,7 +68,7 @@ skills:
       # 배선 자리처럼 경로로 드러나지 않는 계층 검토를 지목하는 유일한 통로다.
       # 주석이 `--concern`을 가리키므로 id가 여기 선언돼 있어야 오타로 거부되지 않는다.
       concerns: [architecture]
-      path_globs: ["**/src/core/domain/**", "**/src/domain/**", "**/src/core/data/**", "**/src/data/**", "**/src/features/**", "**/src/core/ui/**", "**/src/core/resources/**", "**/src/core/network/**", "**/src/core/platform/**", "**/src/core/permission/**", "**/src/core/navigation/api/**", "**/src/core/navigation/impl/**"]
+      path_globs: ["**/src/api/**", "**/src/core/domain/**", "**/src/domain/**", "**/src/core/data/**", "**/src/data/**", "**/src/features/**", "**/src/core/ui/**", "**/src/core/resources/**", "**/src/core/network/**", "**/src/core/platform/**", "**/src/core/permission/**", "**/src/core/navigation/api/**", "**/src/core/navigation/impl/**"]
     - group: llm-tool-development
       skills: [llm-tool-development]
       task_terms: ["tool calling", "function calling", "mcp server", "mcp adapter", "툴콜", "mcp 서버", "툴콜 개발", "툴콜 리뷰", "도구 호출 구현", "도구 호출 리뷰", "MCP 서버 개발", "MCP 어댑터 개발", "MCP 서버 리뷰"]
@@ -134,6 +134,11 @@ architecture:
   roles:
     - id: app-shell
       paths: ["src/app", "app"]
+    # API 서비스의 HTTP handler 자리다. core 계약의 `inbound-adapter`가 소유하고
+    # spring·ktor도 같은 role을 둔다. 빠져 있으면 승인된 slice-plan의 handler가
+    # 필수 gate에서 `outside profile architecture role mapping`으로 막힌다(#347).
+    - id: inbound-adapter
+      paths: ["src/api"]
     - id: core-domain
       paths: ["src/core/domain/<context>", "src/domain/<context>"]
       pair_with: core-data

@@ -18,6 +18,9 @@ Failure conditions come from the thresholds file:
 - a metric or token sum cannot be measured, including a valid unit without usage;
 - the thresholds file names an unknown metric or token axis.
 
+`author_architecture_lint_pass_rate` counts only author rows where the installed architecture-lint
+gate applied (pass or fail); n/a, error and rows without the field are left out of its denominator.
+
 `--export DIR` writes a passing result as a release record: the condition keys, `units`,
 `kit_digests` and only the row fields the metrics read (no paths, argv or reviewer text).
 `--require-kit` / `--require-before-kit` fail unless the recorded kit digests equal the given
@@ -56,7 +59,7 @@ AXES = ("behavior", "plan", "norm")
 TOKEN_AXES = ("uncached_input", "output")
 METRICS = (
     "author_required_read_rate", "author_pass_rate", "review_correct_rate", "defect_detection_rate",
-    "false_request_changes_rate", "reviewer_read_rate", "invalid_rate",
+    "false_request_changes_rate", "reviewer_read_rate", "invalid_rate", "author_architecture_lint_pass_rate",
 )
 ROW_FIELDS = (
     "scenario", "stack", "mode", "variant", "kit", "trial", "provider", "valid", "expected", "correct", "defects",
@@ -83,10 +86,18 @@ def _count(value: object, minimum: int = 0) -> bool:
 
 
 def malformed_fields(row: dict) -> list[str]:
-    """Scoring fields of a scored row that are missing or of the wrong type or range."""
+    """Malformed supplied author lint, or missing/invalid scoring fields on eligible rows."""
+    problems = []
+    if row["scenario"] == "author" and "architecture_lint" in row:
+        lint = row["architecture_lint"]
+        if not isinstance(lint, dict) or lint.get("status") not in ("pass", "fail", "n/a", "error"):
+            problems.append("architecture_lint.status")
+    if _unscored(row):
+        return problems
     usage = row.get("usage")
     # A scored unit without complete usage cannot be checked for token efficiency, so it is malformed.
-    problems = [f"usage.{axis}" for axis in TOKEN_AXES if not (isinstance(usage, dict) and _count(usage.get(axis)))]
+    problems.extend(f"usage.{axis}" for axis in TOKEN_AXES
+                    if not (isinstance(usage, dict) and _count(usage.get(axis))))
     if row["scenario"] == "author":
         groups = {key: row.get(key) for key in ("required_read", "required_unread")}
         groups["required_unobserved"] = row.get("required_unobserved", [])
@@ -320,6 +331,9 @@ def _record_row(row: dict) -> dict:
         record["oracle"] = {axis: oracle.get(axis) for axis in AXES} | ({"error": True} if "error" in oracle else {})
     elif "oracle" in row:
         record["oracle"] = None
+    lint = row.get("architecture_lint")
+    if isinstance(lint, dict):
+        record["architecture_lint"] = {"status": lint.get("status")}
     if "angles" in row:
         record["angles"] = [
             {"provider": angle.get("provider"), "documents": [
@@ -358,6 +372,9 @@ def kit_metrics(rows: list[dict], kit: str) -> dict[str, float | None]:
     unread = sum(len(row["required_unread"] or []) for row in authors)
     unobserved = sum(len(row.get("required_unobserved", [])) for row in authors)
     scored = [row["oracle"] for row in authors]
+    # 실제 gate가 적용된 행만 센다. n/a·error·기록 없음은 분모에서 빠진다.
+    linted = [lint["status"] for row in authors for lint in [row.get("architecture_lint")]
+              if isinstance(lint, dict) and lint.get("status") in ("pass", "fail")]
     judged = [row["correct"] for row in reviews if row.get("expected") is not None]
     seeded = [found for row in reviews if row.get("expected") == "request-changes" for found in row["defects"].values()]
     approve_rows = [row for row in reviews if row.get("expected") == "approve"]
@@ -378,6 +395,7 @@ def kit_metrics(rows: list[dict], kit: str) -> dict[str, float | None]:
         ),
         "reviewer_read_rate": _rate(sum(observed), len(observed)),
         "invalid_rate": _rate(sum(_invalid(row) for row in own), len(own)),
+        "author_architecture_lint_pass_rate": _rate(linted.count("pass"), len(linted)),
     }
 
 
@@ -586,7 +604,7 @@ def compare(directories: list[Path], before: str, after: str, thresholds: dict, 
     failures.extend(_review_case_failures(rows, condition, cases))
     failures.extend(
         f"malformed scoring fields in {row.get('kit')} {'/'.join(map(str, _unit_key(row)))}: {', '.join(problems)}"
-        for row in rows if not _unscored(row) for problems in [malformed_fields(row)] if problems
+        for row in rows for problems in [malformed_fields(row)] if problems
     )
     metrics = {kit: kit_metrics(rows, kit) for kit in (before, after)}
     failures.extend(_coverage_failures(rows, before, after, thresholds))

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 from pathlib import Path, PurePosixPath
 import subprocess
 from types import SimpleNamespace
@@ -570,3 +571,98 @@ def test_error_defect_detection_is_independent_of_inline_code_not_finding_scope(
         "after", ROOT, ROOT / "evals/phase-cases/rn", "local", "defect", 1, tmp_path, 10,
     )
     assert row["defects"]["bug"] is detected
+
+
+CLEAN_CASE_PROFILES = {"web": "nextjs", "rn": "react-native", "app": "flutter", "backend": "python"}
+
+
+@pytest.mark.parametrize("tree", ["reference/clean", "review/clean/clean"])
+@pytest.mark.parametrize("stack", sorted(CLEAN_CASE_PROFILES))
+def test_clean_phase_case_trees_pass_their_profile_architecture_lint(stack, tree, tmp_path, capsys, monkeypatch):
+    """반증 #347: 승인된 slice-plan대로 만든 Clean 정답과 approve 기대 리뷰 fixture가 같은 stack
+    profile의 필수 architecture-lint gate에서 막히면 oracle 통과와 실제 gate가 갈라진다."""
+    monkeypatch.syspath_prepend(str(ROOT / "src"))
+    from agent_flow.core.architecture_lint import main
+
+    case = ROOT / "evals/phase-cases" / stack
+    source = case / tree
+    for part in (case / "seed", source):
+        shutil.copytree(part, tmp_path, dirs_exist_ok=True)
+    files = sorted(path.relative_to(source).as_posix() for path in source.rglob("*") if path.is_file())
+
+    rc = main(["--root", str(tmp_path), "--profile", CLEAN_CASE_PROFILES[stack], "--files", *files])
+    output = capsys.readouterr()
+
+    assert json.loads((case / "case.json").read_text(encoding="utf-8"))["profile"] == CLEAN_CASE_PROFILES[stack]
+    assert rc == 0, output.err
+    assert "architecture lint passed" in output.out, output.out
+
+
+@pytest.mark.parametrize(("printed", "rc", "status"), [
+    ("python: architecture lint passed; source candidates=3, role-matched=3, findings=0", 0, "pass"),
+    ("python: architecture lint n/a (architecture selection: local)", 0, "n/a"),
+    ("react-native: architecture lint passed; source candidates=2, role-matched=2, findings=0\n"
+     "android: architecture lint n/a (activation_roots absent); source candidates=0, role-matched=0, findings=0", 0, "pass"),
+    ("python: architecture lint failed; source candidates=3, role-matched=0, findings=3", 1, "fail"),
+    ("python: architecture lint failed; source candidates=3, role-matched=0, findings=3\n>&2", 1, "fail"),
+    ("git diff failed while discovering architecture lint candidates", 1, "error"),
+    ("agent-flow: managed python runtime is missing", 127, "error"),
+    ("", 0, "error"),
+])
+def test_author_gate_result_keeps_not_applicable_apart_from_pass(evaluator, tmp_path, printed, rc, status):
+    """반증 #347: exit 0만 보고 n/a를 PASS로 세거나, 실행 실패를 lint 실패로 세면 안 된다."""
+    launcher = tmp_path / ".agent-flow/bin/agent-flow"
+    launcher.parent.mkdir(parents=True)
+    text, redirect = (printed[:-4], " >&2") if printed.endswith("\n>&2") else (printed, "")
+    launcher.write_text(f"#!/bin/sh\nprintf '%s' {shlex.quote(text)}{redirect}\nexit {rc}\n", encoding="utf-8")
+    launcher.chmod(0o755)
+
+    result = evaluator._architecture_lint(tmp_path, "python")
+
+    assert (result["status"], result["rc"]) == (status, rc)
+
+
+@pytest.mark.parametrize("launcher_kind", ["missing", "non-executable", "invalid-interpreter", "bad-shebang"])
+def test_author_launcher_start_failure_preserves_completed_evaluation(evaluator, monkeypatch, tmp_path, launcher_kind):
+    case = tmp_path / "case"
+    case.mkdir()
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("required skill", encoding="utf-8")
+    documents = [{"path": str(skill), "read_path_observed": True}]
+
+    def prepare(kit, case_dir, mode, scenario, variant, project):
+        launcher = project / ".agent-flow/bin/agent-flow"
+        launcher.parent.mkdir(parents=True)
+        if launcher_kind != "missing":
+            script = "#!/bin/sh\nexit 0\n"
+            if launcher_kind == "invalid-interpreter":
+                script = f"#!{tmp_path / 'absent-interpreter'}\n"
+            elif launcher_kind == "bad-shebang":
+                script = "not an executable script\n"
+            launcher.write_text(script, encoding="utf-8")
+            launcher.chmod(0o644 if launcher_kind == "non-executable" else 0o755)
+        return {"prompt": "p", "required": [{"name": "required", "path": str(skill)}],
+                "profile": "python", "documents": documents}
+
+    usage = {"input": 100, "uncached_input": 20, "cached_input": 80, "output": 10}
+    oracle = {"behavior": True, "plan": False, "norm": True}
+    monkeypatch.setattr(evaluator, "_prepare_subprocess", prepare)
+    monkeypatch.setitem(evaluator.REQUESTED_PROVIDERS, "author", "claude")
+    monkeypatch.setattr(evaluator, "_claude", lambda *args, **kwargs: {
+        "reads": [str(skill)], "usage": usage, "rc": 0, "turns": 2, "seconds": 3,
+    })
+    monkeypatch.setattr(evaluator, "_oracle", lambda *args: dict(oracle))
+
+    row = evaluator.run_author("after", ROOT, case, "clean", 1, tmp_path, 10)
+
+    assert row["usage"] == usage
+    assert row["required_read"] == ["required"]
+    assert row["required_unread"] == []
+    assert row["required_unobserved"] == []
+    assert row["required_read_rate"] == 1.0
+    assert row["oracle"] == oracle
+    assert row["documents"] == documents
+    assert (row["rc"], row["turns"], row["seconds"], row["error"]) == (0, 2, 3, None)
+    lint = row["architecture_lint"]
+    assert (lint["status"], lint["rc"]) == ("error", None)
+    assert 0 < len(lint["output"]) <= 4000

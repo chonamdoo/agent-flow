@@ -721,3 +721,83 @@ def test_unknown_author_reads_keep_floor_and_failed_behavior_scored(gate, tmp_pa
     assert any("author_required_read_rate" in failure for failure in failures)
     assert any("author_pass_rate" in failure for failure in failures)
     assert not destination.exists()
+
+
+def test_architecture_lint_pass_rate_counts_only_rows_where_the_gate_applied(gate, tmp_path):
+    """반증 #347: oracle 세 축이 모두 true여도 실제 gate가 실패한 생성물은 따로 보여야 하고,
+    Clean이 아니라 검사하지 않은 n/a 행을 PASS로 세면 안 된다."""
+    before, after = rows_for("before", mode="local"), rows_for("after")
+    for row in before:
+        if row["scenario"] == "author":
+            row["architecture_lint"] = {"status": "n/a", "rc": 0, "output": "/Users/someone/project"}
+    authors = [row for row in after if row["scenario"] == "author"]
+    for row, status in zip(authors, ("pass", "fail", "error")):
+        row["architecture_lint"] = {"status": status, "rc": 0, "output": "/Users/someone/project"}
+    assert all(all(row["oracle"].values()) for row in authors)
+    rows = before + after
+
+    assert gate.kit_metrics(rows, "after")["author_architecture_lint_pass_rate"] == 0.5
+    assert gate.kit_metrics(rows, "after")["author_pass_rate"] == 1.0
+    assert gate.kit_metrics(rows, "before")["author_architecture_lint_pass_rate"] is None
+    record = gate._record_row(authors[1])
+    assert record["architecture_lint"] == {"status": "fail"}
+
+
+@pytest.mark.parametrize("state", ["scored", "provider-error", "oracle-error", "missing-axis"])
+@pytest.mark.parametrize("lint", [
+    None, "pass", [], {}, {"status": None}, {"status": ["pass"]}, {"status": "failed"}, {"status": "pass,pass,failed"},
+], ids=["null", "string", "list", "missing-status", "null-status", "list-status", "unsupported", "combined"])
+def test_malformed_author_lint_is_invalid_and_blocks_export(gate, tmp_path, lint, state):
+    rows = rows_for("before") + rows_for("after")
+    authors = [row for row in rows if row["kit"] == "after" and row["scenario"] == "author"]
+    for row in authors:
+        row["architecture_lint"] = {"status": "pass"}
+    authors[-1]["architecture_lint"] = lint
+    if state == "provider-error":
+        authors[-1]["error"] = "provider failed"
+    elif state == "oracle-error":
+        authors[-1]["oracle"] = {"error": "oracle failed"}
+    elif state == "missing-axis":
+        authors[-1]["oracle"].pop("norm")
+    thresholds = copy.deepcopy(THRESHOLDS)
+    thresholds["ceilings"]["invalid_rate"] = 1.0
+    thresholds["floors"]["author_architecture_lint_pass_rate"] = 1.0
+    run = write_run(tmp_path / "run", rows)
+    destination = tmp_path / "record"
+
+    _, failures = gate.compare([run], "before", "after", thresholds, export=destination)
+
+    assert gate.kit_metrics(rows, "after")["invalid_rate"] == 1 / 9
+    assert gate.malformed_fields(authors[-1]) == ["architecture_lint.status"]
+    assert any("architecture_lint.status" in failure for failure in failures)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("status", [None, "pass", "fail", "n/a", "error"],
+                         ids=["legacy-missing", "pass", "fail", "not-applicable", "error"])
+def test_valid_compact_author_lint_and_legacy_rows_recompute(gate, tmp_path, status):
+    rows = rows_for("before") + rows_for("after")
+    for row in rows:
+        if row["scenario"] == "author" and status is not None:
+            row["architecture_lint"] = {"status": status}
+    run = write_run(tmp_path / "run", rows)
+    destination = tmp_path / "record"
+
+    _, failures = gate.compare([run], "before", "after", THRESHOLDS, export=destination)
+
+    assert failures == []
+    exported, load_failures, _, _ = gate.load([destination])
+    assert load_failures == []
+    for kit in ("before", "after"):
+        metrics = gate.kit_metrics(exported, kit)
+        assert metrics["invalid_rate"] == 0
+        expected = 1.0 if status == "pass" else 0.0 if status == "fail" else None
+        assert metrics["author_architecture_lint_pass_rate"] == expected
+    authors = [row for row in exported if row["scenario"] == "author"]
+    assert all(not gate.malformed_fields(row) for row in authors)
+    if status is None:
+        assert all("architecture_lint" not in row for row in authors)
+    else:
+        assert all(row["architecture_lint"] == {"status": status} for row in authors)
+    _, recompute_failures = gate.compare([destination], "before", "after", THRESHOLDS)
+    assert recompute_failures == []

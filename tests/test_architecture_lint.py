@@ -1057,3 +1057,45 @@ def test_server_inbound_rejects_framework_repository_but_allows_ports(
     source.write_text(f"import {repository}\n" + valid, encoding="utf-8")
     findings = lint_project(tmp_path, profile_id, files=[relative])
     assert {finding.path for finding in findings} == {relative}
+
+
+def _write(root: Path, rel_path: str, text: str = "value = 1\n") -> str:
+    path = root / rel_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return rel_path
+
+
+def test_python_api_handler_is_the_inbound_adapter_role(tmp_path):
+    """반증 #347: core 계약의 inbound-adapter인 `src/api` handler가 role mapping 밖으로
+    막히면 승인된 Clean slice-plan을 따른 생성물이 필수 gate에서 실패한다."""
+    from agent_flow.core.architecture_lint import lint_project
+
+    _write(tmp_path, "src/domain/orders/order.py")
+    _write(tmp_path, "src/data/orders/repository.py")
+    handler = _write(tmp_path, "src/api/orders/list_orders_handler.py", "def handler(query): pass\n")
+    stray = _write(tmp_path, "src/core/wrong/thing.py")
+
+    assert lint_project(tmp_path, "python", files=[handler]) == []
+    assert [finding.message for finding in lint_project(tmp_path, "python", files=[stray])] == [
+        "path is outside profile architecture role mapping"
+    ]
+
+
+def test_nextjs_route_owned_presentation_needs_no_empty_feature_api(tmp_path):
+    """반증 #347: App Router route가 진입점인 feature에 빈 `api` 파일을 강제하면 안 된다.
+    feature-api → feature-presentation 쌍과 다른 UI profile의 쌍 요구는 그대로다."""
+    from agent_flow.core.architecture_lint import lint_project
+
+    _write(tmp_path, "src/core/domain/orders/order.ts", "export type Order = {}\n")
+    _write(tmp_path, "src/core/data/orders/HttpOrderRepository.ts", "export class HttpOrderRepository {}\n")
+    screen = _write(tmp_path, "src/features/orders/presentation/OrdersScreen.tsx", "export const s = 1\n")
+    entry = _write(tmp_path, "src/features/billing/api/BillingEntry.ts", "export const e = 1\n")
+
+    assert lint_project(tmp_path, "nextjs", files=[screen]) == []
+    assert [finding.message for finding in lint_project(tmp_path, "nextjs", files=[entry])] == [
+        "feature-api requires paired role feature-presentation"
+    ]
+    assert [finding.message for finding in lint_project(tmp_path, "react-native", files=[screen])] == [
+        "feature-presentation requires paired role feature-api"
+    ]
