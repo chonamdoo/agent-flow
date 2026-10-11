@@ -233,6 +233,8 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
     _overlay(artifacts, run_dir)
     if scenario == "review":
         _overlay(case_dir / "review" / fixture_mode / "artifacts", run_dir)
+        if mode_config.get("review_artifacts"):
+            _overlay(case_dir / mode_config["review_artifacts"], run_dir)
         if fixture_mode != mode:
             _overlay(case_dir / "review" / mode / "artifacts", run_dir)
     prd = run_dir / "prd.md"

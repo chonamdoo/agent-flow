@@ -21,6 +21,7 @@ def test_approved_review_counterpart_preserves_pending_and_default_matrix(evalua
     assert config["review_only"] is True
     assert config["fixture_mode"] == "team"
     assert config["review_setup"] == "author/team/setup"
+    assert config["review_artifacts"] == "author/team/artifacts"
     assert config["install"] == case["modes"]["team"]["author_install"]
     spec = case["review"]["team-approved"]
     assert spec["clean"]["expect"] == "approve"
@@ -41,11 +42,25 @@ def test_review_preparation_keeps_pending_separate_from_approved_contract(evalua
     prepared = evaluator._prepare_subprocess(ROOT, case_dir, mode, "review", "clean", project)
     architecture = yaml.safe_load((project / ".agent-flow/project.yaml").read_text())["architecture"]
     assert architecture["mode"] == expected
+    from agent_flow.artifact import find_active_run
+
+    active = find_active_run(project)
+    assert active is not None
+    plan = (active.path / "slice-plan.md").read_text()
     if expected == "local":
         assert architecture["skill"] == "skills/architecture/SKILL.md"
         assert (project / architecture["skill"]).read_bytes() == (
             case_dir / "author/team/setup/skills/architecture/SKILL.md"
         ).read_bytes()
+        assert plan == (case_dir / "author/team/artifacts/slice-plan.md").read_text()
+        if stack == "backend":
+            contract = plan.split("## Architecture Contract", 1)[1].split("## Slices", 1)[0]
+        else:
+            contract = plan.split("## Slice 1", 1)[0]
+        assert "selects `local`" in contract and "skills/architecture/SKILL.md" in contract
+        assert "pending" not in contract.lower() and "not selected" not in contract.lower()
+    else:
+        assert plan == (case_dir / "review/team/artifacts/slice-plan.md").read_text()
     source = "lib/features/orders/orders_repository.dart" if stack == "app" else "src/domain/orders/listing.py"
     assert (project / source).read_bytes() == (case_dir / "review/team/clean" / source).read_bytes()
     assert prepared["jobs"]

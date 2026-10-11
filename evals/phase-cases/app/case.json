@@ -41,6 +41,7 @@
       "fixture_mode": "team",
       "review_only": true,
       "review_setup": "author/team/setup",
+      "review_artifacts": "author/team/artifacts",
       "install": [
         "--architecture-mode",
         "local",
