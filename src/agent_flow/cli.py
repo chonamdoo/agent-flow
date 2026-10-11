@@ -181,7 +181,7 @@ from agent_flow.core.hook_integrity import (
     assert_managed_hooks_registered,
 )
 from agent_flow.core.host_write_boundary import (
-    HOST_CONTINUE_NONCE_ENV,
+    HOST_CONTINUE_THREAD_ENV,
     assert_adoption_allowed,
     begin_host_continue,
     complete_host_continue,
@@ -959,9 +959,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "continue":
         try:
-            # Runner가 띄우는 provider가 같은 nonce를 물려받지 않게 꺼내 둔다.
             host_continue = begin_host_continue(
-                root, invocation_arguments, os.environ.pop(HOST_CONTINUE_NONCE_ENV, None),
+                root, invocation_arguments, os.environ.get(HOST_CONTINUE_THREAD_ENV),
             )
             _assert_relay_checkout_identity(
                 root,

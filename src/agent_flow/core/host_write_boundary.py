@@ -99,13 +99,11 @@ _STATUS_NEXT_COMMAND = re.compile(r"(?:^|\n)next_command:\s*([^\r\n]+)", re.MULT
 _CONTINUE_RECEIPT = re.compile(
     r"^continue_receipt: ([0-9a-f]{64}):([0-9a-f]{64})\r?$", re.MULTILINE,
 )
-# nonce는 인자가 아니라 환경 변수로 넘긴다. PATH의 `agent-flow`가 이 kit보다 오래된 설치본이면
-# 모르는 인자에 argparse가 exit 2로 멈춘다. 환경 변수는 그런 CLI가 무시하고, receipt 없이
-# 예전처럼 continue만 돈다.
-HOST_CONTINUE_NONCE_ENV = "AGENT_FLOW_HOST_CONTINUE_NONCE"
-_CONTINUE_NONCE_PREFIX = re.compile(
-    rf"{HOST_CONTINUE_NONCE_ENV}=([0-9a-f]{{64}}) (\S.*)", re.DOTALL,
-)
+# hook은 명령을 고쳐 쓰지 않는다. 고친 명령은 host의 승인 규칙 매칭(Codex execpolicy의
+# prefix_rule)을 바꾸고, PATH의 오래된 `agent-flow`는 모르는 인자에 exit 2로 멈춘다.
+# 대신 Codex가 명령 환경에 넣는 thread id(= hook payload의 session_id)와 인자로 요청을 찾는다.
+HOST_CONTINUE_THREAD_ENV = "CODEX_THREAD_ID"
+_CONTINUE_REQUEST_NAME = re.compile(r"([0-9a-f]{64})\.request\.json")
 # 결과 token은 Runner가 정상 반환한 직후 쓰이고 같은 호출의 PostToolUse가 곧바로 소모한다.
 _CONTINUE_RESULT_TTL = 300
 # 요청은 PreToolUse에서 쓰이지만 CLI는 host 승인 프롬프트가 끝난 뒤에야 소모한다. 승인
@@ -146,69 +144,80 @@ class HostCheckoutBinding:
 
 @dataclass(frozen=True)
 class HostContinueRequest:
-    nonce: str
+    request_id: str
     project_root: Path
     session_id: str
     tool_use_id: str
     arguments: tuple[str, ...]
 
 
-def prepare_host_continue_input(payload: object, project_root: Path) -> dict[str, Any] | None:
-    """허용된 PreToolUse 호출에만 runner가 받을 nonce를 연결한다."""
-    if not isinstance(payload, dict) or payload.get("hook_event_name") != "PreToolUse":
-        return None
+def record_host_continue_request(payload: object, project_root: Path) -> None:
+    """허용된 Codex PreToolUse의 direct continue를 runner가 찾을 요청으로 남긴다.
+
+    Claude·OMP는 결과 exit code로 성공을 알려 이 경로가 필요 없다. 요청을 남기면
+    소모되지 않은 채 하루 동안 쌓이기만 하므로 Codex payload(`turn_id`)에만 남긴다.
+    """
+    if (
+        not isinstance(payload, dict) or payload.get("hook_event_name") != "PreToolUse"
+        or "turn_id" not in payload
+    ):
+        return
     session_id = payload.get("session_id")
     tool_use_id = payload.get("tool_use_id")
-    tool_input = _tool_input(payload)
     if not isinstance(session_id, str) or not session_id or not isinstance(tool_use_id, str) or not tool_use_id:
-        return None
-    if not isinstance(tool_input, dict):
-        return None
-    command = _first_string(tool_input, _COMMAND_KEYS)
+        return
+    command = _first_string(_tool_input(payload), _COMMAND_KEYS)
     root = _validated_project_root(project_root)
     arguments = _agent_flow_arguments(command, root=root, cwd=_session_cwd(payload, command))
     if not arguments or arguments[0] != "continue":
-        return None
+        return
     directory = _continue_state_dir(root)
     _sweep_expired_continue_states(directory)
-    nonce = secrets.token_hex(32)
     _write_json_atomic(
-        _continue_state_path(root, nonce, "request"),
+        _continue_state_path(root, secrets.token_hex(32), "request"),
         {"project_root": str(root), "session_id": session_id, "tool_use_id": tool_use_id,
          "arguments": list(arguments), "recorded_at": time.time()},
     )
-    updated = dict(tool_input)
-    updated["command"] = f"{HOST_CONTINUE_NONCE_ENV}={nonce} {command}"
-    return updated
 
 
 def begin_host_continue(
-    project_root: Path, arguments: tuple[str, ...], nonce: str | None,
+    project_root: Path, arguments: tuple[str, ...], thread_id: str | None,
 ) -> HostContinueRequest | None:
-    """요청을 한 번 소모하고 실제 CLI 인자가 hook 요청과 일치하는지 확인한다.
+    """이 호출을 기록한 hook 요청을 찾아 한 번 소모한다.
 
-    이 root에 요청이 없거나 기한이 지났으면 receipt 없이 일반 continue로 돈다. 다른 프로젝트
-    root를 가리킨 continue에도 hook은 nonce를 붙이고, 그 요청은 hook 쪽 root에 남는다.
-    lifecycle 명령을 여기서 실패시키면 PR 전에 돌던 continue가 막힌다.
+    찾지 못하거나 증명할 수 없으면 receipt 없이 일반 continue로 돈다. lifecycle 명령을
+    여기서 실패시키면 PR 전에 돌던 continue가 막힌다. 같은 세션·같은 인자의 요청이 둘
+    이상이면 어느 호출인지 모르므로 어느 것도 소모하지 않는다.
     """
-    if nonce is None:
+    if not thread_id:
         return None
     root = _validated_project_root(project_root)
     if not _continue_state_dir_exists(root):
         return None
-    _sweep_expired_continue_states(_continue_state_dir(root))
-    request = _claim_continue_state(root, nonce, "request")
-    if request is None or not _continue_state_is_current(request, _CONTINUE_REQUEST_TTL):
+    directory = _continue_state_dir(root)
+    _sweep_expired_continue_states(directory)
+    try:
+        names = tuple(os.listdir(directory))
+    except OSError:
         return None
-    if (
-        request.get("project_root") != str(root)
-        or request.get("arguments") != list(arguments)
-        or not isinstance(request.get("session_id"), str) or not request["session_id"]
-        or not isinstance(request.get("tool_use_id"), str) or not request["tool_use_id"]
-    ):
-        raise HostWriteBoundaryError("continue nonce does not identify this trusted hook request")
+    candidates = [
+        named.group(1)
+        for named in map(_CONTINUE_REQUEST_NAME.fullmatch, names)
+        if named is not None
+        and _continue_request_matches(
+            _read_continue_state(directory, named.group(0)), root, thread_id, arguments,
+        )
+    ]
+    if len(candidates) != 1:
+        return None
+    try:
+        request = _claim_continue_state(root, candidates[0], "request")
+    except HostWriteBoundaryError:
+        return None
+    if request is None or not _continue_request_matches(request, root, thread_id, arguments):
+        return None
     return HostContinueRequest(
-        nonce=nonce, project_root=root, session_id=request["session_id"],
+        request_id=candidates[0], project_root=root, session_id=thread_id,
         tool_use_id=request["tool_use_id"], arguments=tuple(arguments),
     )
 
@@ -216,31 +225,35 @@ def begin_host_continue(
 def complete_host_continue(
     request: HostContinueRequest | None, *, checkout: Path, run_dir: Path,
 ) -> str | None:
-    """Runner가 정상 종료한 뒤에만 호출한다. 요청 nonce 자체는 성공 증거가 아니다."""
+    """Runner가 정상 종료한 뒤에만 호출한다. 요청 자체는 성공 증거가 아니다."""
     if request is None or not (run_dir / "active").is_file():
         return None
     token = secrets.token_hex(32)
     _write_json_atomic(
-        _continue_state_path(request.project_root, request.nonce, "result"),
+        _continue_state_path(request.project_root, request.request_id, "result"),
         {"project_root": str(request.project_root), "session_id": request.session_id,
          "tool_use_id": request.tool_use_id, "arguments": list(request.arguments),
          "checkout": str(real_path(checkout)), "run_dir": str(real_path(run_dir)),
          "run_id": run_dir.name, "meta_digest": _continue_meta_digest(run_dir),
          "token": token, "recorded_at": time.time()},
     )
-    return f"{request.nonce}:{token}"
+    return f"{request.request_id}:{token}"
 
 
-def _split_continue_nonce(command: str) -> tuple[str, str | None]:
-    """hook이 앞에 붙인 nonce 할당을 떼어 낸다. host는 PostToolUse에 바뀐 명령을 싣는다."""
-    prefixed = _CONTINUE_NONCE_PREFIX.fullmatch(command)
-    if prefixed is None:
-        return command, None
-    return prefixed.group(2), prefixed.group(1)
+def _continue_request_matches(
+    state: dict[str, Any] | None, root: Path, thread_id: str, arguments: tuple[str, ...],
+) -> bool:
+    return (
+        state is not None and _continue_state_is_current(state, _CONTINUE_REQUEST_TTL)
+        and state.get("project_root") == str(root)
+        and state.get("session_id") == thread_id
+        and state.get("arguments") == list(arguments)
+        and isinstance(state.get("tool_use_id"), str) and bool(state["tool_use_id"])
+    )
 
 
 def _consume_host_continue_receipt(
-    payload: object, root: Path, context: ActiveCheckout, command: str, command_nonce: str | None,
+    payload: object, root: Path, context: ActiveCheckout, command: str,
 ) -> bool:
     matches = [match for output in _output_strings(payload) for match in _CONTINUE_RECEIPT.finditer(output)]
     if (
@@ -248,13 +261,12 @@ def _consume_host_continue_receipt(
         or payload.get("hook_event_name") != "PostToolUse"
     ):
         return False
-    nonce, token = matches[0].groups()
+    request_id, token = matches[0].groups()
     arguments = _agent_flow_arguments(command, root=root, cwd=_session_cwd(payload, command))
-    receipt = _claim_continue_state(root, nonce, "result")
+    receipt = _claim_continue_state(root, request_id, "result")
     run_dir = context.runtime_root / ".agent-flow" / "runs" / context.run_id
     return bool(
         receipt is not None and _continue_state_is_current(receipt, _CONTINUE_RESULT_TTL)
-        and command_nonce in (None, nonce)
         and receipt.get("token") == token
         and receipt.get("project_root") == str(root)
         and receipt.get("session_id") == payload.get("session_id")
@@ -299,14 +311,14 @@ def _continue_state_dir(root: Path) -> Path:
     return directory
 
 
-def _continue_state_path(root: Path, nonce: str, kind: str) -> Path:
-    if not re.fullmatch(r"[0-9a-f]{64}", nonce):
-        raise HostWriteBoundaryError("invalid continue nonce")
-    return _continue_state_dir(root) / f"{nonce}.{kind}.json"
+def _continue_state_path(root: Path, request_id: str, kind: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{64}", request_id):
+        raise HostWriteBoundaryError("invalid continue request id")
+    return _continue_state_dir(root) / f"{request_id}.{kind}.json"
 
 
 def _sweep_expired_continue_states(directory: Path) -> None:
-    """승인 거부, PostToolUse 누락, 셸 주석에 묻힌 nonce로 소모되지 못한 파일을 치운다.
+    """승인 거부, PostToolUse 누락, 짝을 못 찾은 호출로 소모되지 못한 파일을 치운다.
 
     기한은 수정 시각으로 본다. 내용을 읽지 않으므로 위조된 기록 시각에 속지 않는다.
     청소는 부수 작업이라 실패해도 continue를 막지 않는다.
@@ -332,35 +344,49 @@ def _sweep_expired_continue_states(directory: Path) -> None:
             continue
 
 
-def _claim_continue_state(root: Path, nonce: str, kind: str) -> dict[str, Any] | None:
-    path = _continue_state_path(root, nonce, kind)
-    directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    claimed = f".{path.name}.{secrets.token_hex(16)}.claim"
-    descriptor = -1
+def _read_continue_state(directory: Path, name: str) -> dict[str, Any] | None:
+    """소모하지 않고 읽는다. 신뢰할 수 없는 파일은 요청 후보가 아니다."""
     try:
-        try:
-            os.rename(path.name, claimed, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
-        except FileNotFoundError:
-            return None
-        descriptor = os.open(claimed, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
-        identity = os.fstat(descriptor)
+        descriptor = os.open(directory / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        return _trusted_continue_state(descriptor)
+    except (HostWriteBoundaryError, OSError, UnicodeError, json.JSONDecodeError):
+        return None
+
+
+def _trusted_continue_state(descriptor: int) -> dict[str, Any]:
+    """descriptor를 닫으며 읽는다."""
+    with os.fdopen(descriptor, encoding="utf-8") as stream:
+        identity = os.fstat(stream.fileno())
         if (
             not stat.S_ISREG(identity.st_mode) or identity.st_nlink != 1
             or identity.st_size > 64 * 1024 or identity.st_uid != os.getuid()
             or stat.S_IMODE(identity.st_mode) & 0o077
         ):
             raise HostWriteBoundaryError("continue receipt is not a trusted regular file")
-        with os.fdopen(descriptor, encoding="utf-8") as stream:
-            descriptor = -1
-            state = json.loads(stream.read(64 * 1024 + 1))
-        if not isinstance(state, dict):
-            raise HostWriteBoundaryError("continue receipt is not an object")
-        return state
+        state = json.loads(stream.read(64 * 1024 + 1))
+    if not isinstance(state, dict):
+        raise HostWriteBoundaryError("continue receipt is not an object")
+    return state
+
+
+def _claim_continue_state(root: Path, request_id: str, kind: str) -> dict[str, Any] | None:
+    path = _continue_state_path(root, request_id, kind)
+    directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    claimed = f".{path.name}.{secrets.token_hex(16)}.claim"
+    try:
+        try:
+            os.rename(path.name, claimed, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        except FileNotFoundError:
+            return None
+        return _trusted_continue_state(
+            os.open(claimed, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise HostWriteBoundaryError("cannot claim trusted continue receipt") from exc
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
         try:
             os.unlink(claimed, dir_fd=directory_fd)
             os.fsync(directory_fd)
@@ -493,8 +519,7 @@ def record_host_checkout_binding(
     session_id = _first_string(payload, ("session_id", "sessionId"))
     if not session_id:
         return None
-    raw_command = _first_string(payload, _COMMAND_KEYS)
-    command, command_nonce = _split_continue_nonce(raw_command)
+    command = _first_string(payload, _COMMAND_KEYS)
     # 이름으로 고르지 않는다. binding에 필요한 근거는 아래에서 전부 확인한다 —
     # 신뢰된 설치 산출물의 호출인가, exit 0인가, 출력에 실제 status payload가
     # 있는가. status를 내지 않는 명령은 그 셋에서 자동으로 탈락한다.
@@ -540,7 +565,7 @@ def record_host_checkout_binding(
     operation = _lifecycle_operation(command, root=root, cwd=_session_cwd(payload, command))
     successful_continue = (
         result_exit_code in (None, 0) and operation == "continue"
-        and _consume_host_continue_receipt(payload, root, context, command, command_nonce)
+        and _consume_host_continue_receipt(payload, root, context, command)
     )
     guidance_eligible = (
         isinstance(payload, dict)
@@ -548,7 +573,7 @@ def record_host_checkout_binding(
         and str(
             payload.get("tool_name", payload.get("toolName", payload.get("tool", "")))
         ).lower() in _COMMAND_TOOLS
-        and _first_string(_tool_input(payload), _COMMAND_KEYS) == raw_command
+        and _first_string(_tool_input(payload), _COMMAND_KEYS) == command
         and (result_exit_code == 0 or successful_continue)
         and operation in {"run", "start", "continue"}
     )

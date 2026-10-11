@@ -416,13 +416,15 @@ agent-flow continue --worktree "feat-user-profile"
 ```
 
 Codex CLI 0.162.1 can bind a session after `status`, but phase guidance requires a successful
-`continue`. Managed PreToolUse and PostToolUse hooks connect that call to a one-use success
-receipt issued by the runner. The hooks check the session, tool call, arguments, and current run;
-a `status_json:` line alone does not grant guidance. If Codex skips the hooks or their input
-rewrite, guidance stays unavailable. The same happens when the `agent-flow` on `PATH` is older
-than the installed kit: `continue` still runs, but it issues no receipt. Confirm folder trust and
-hook approval in `/hooks`, then run `continue` again with the updated kit installed, or call the
-project launcher `.agent-flow/bin/agent-flow` directly.
+`continue`. The managed PreToolUse hook records the call without changing the command, the runner
+finds that record through the `CODEX_THREAD_ID` Codex sets for the command and issues a one-use
+success receipt, and the PostToolUse hook checks the session, tool call, arguments, and current
+run before granting guidance. A `status_json:` line alone does not grant guidance. If Codex skips
+the hooks, guidance stays unavailable. The same happens when the `agent-flow` on `PATH` is older
+than the installed kit, or when one session runs the same `continue` twice in parallel:
+`continue` still runs, but it issues no receipt. Confirm folder trust and hook approval in
+`/hooks`, then run `continue` again with the updated kit installed, or call the project launcher
+`.agent-flow/bin/agent-flow` directly.
 
 Add `--workflow` to pick the smallest workflow that fits. Omitted, the CLI falls back to `default`
 for compatibility, but policy-compliant starts name the workflow explicitly.
