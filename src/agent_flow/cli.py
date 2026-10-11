@@ -180,7 +180,11 @@ from agent_flow.core.hook_integrity import (
     HookIntegrityError,
     assert_managed_hooks_registered,
 )
-from agent_flow.core.host_write_boundary import assert_adoption_allowed
+from agent_flow.core.host_write_boundary import (
+    assert_adoption_allowed,
+    begin_host_continue,
+    complete_host_continue,
+)
 from agent_flow.cli_detect import detect_host_cli_source
 from agent_flow.core.host_connection import collect_host_connection, render_host_connection
 from agent_flow.core.leader_tripwire import leader_sweep_include_ignored_for
@@ -329,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
     continue_parser.add_argument("--root", default=".")
     continue_parser.add_argument("--worktree")
     continue_parser.add_argument("--checkout-identity", help=argparse.SUPPRESS)
+    continue_parser.add_argument("--host-continue-nonce", help=argparse.SUPPRESS)
     continue_parser.add_argument(
         "--approve",
         metavar="TOKEN",
@@ -762,9 +767,10 @@ def main(argv: list[str] | None = None) -> int:
     team_import_apply.add_argument("--file", required=True)
     team_import_apply.add_argument("--report")
 
+    invocation_arguments = tuple(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(
         _with_install_shorthand(
-            sys.argv[1:] if argv is None else argv, set(subparsers.choices)
+            list(invocation_arguments), set(subparsers.choices)
         )
     )
 
@@ -953,6 +959,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "continue":
         try:
+            host_continue = begin_host_continue(root, invocation_arguments, args.host_continue_nonce)
             _assert_relay_checkout_identity(
                 root,
                 args.worktree,
@@ -1042,6 +1049,11 @@ def main(argv: list[str] | None = None) -> int:
                 accept_leader_drift=args.accept_leader_drift,
                 concerns=tuple(args.concerns),
             ).run(mode=ResumeMode.RESUME)
+            receipt = complete_host_continue(
+                host_continue, checkout=run_root, run_dir=resume_run_dir,
+            )
+            if receipt is not None:
+                print(f"continue_receipt: {receipt}")
         except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
             # 보여야 사용자가 다음 수를 안다.
             print(_format_cli_error(exc), file=sys.stderr)

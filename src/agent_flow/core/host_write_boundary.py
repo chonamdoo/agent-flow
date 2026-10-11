@@ -96,6 +96,11 @@ _PATCH_PATH = re.compile(
 _STATUS_JSON = re.compile(r"(?:^|\n)status_json:\s*", re.MULTILINE)
 _STATUS_RUN = re.compile(r"(?:^|\n)run:\s*([^\r\n]+)", re.MULTILINE)
 _STATUS_NEXT_COMMAND = re.compile(r"(?:^|\n)next_command:\s*([^\r\n]+)", re.MULTILINE)
+_CONTINUE_RECEIPT = re.compile(
+    r"^continue_receipt: ([0-9a-f]{64}):([0-9a-f]{64})\r?$", re.MULTILINE,
+)
+_CONTINUE_NONCE_FLAG = "--host-continue-nonce"
+_CONTINUE_STATE_TTL = 300
 # binding **파일 스키마** 버전. 스냅샷 형식은 별개 축이고
 # `LeaderSnapshot.version`이 들고 있다 — 스냅샷 형식이 바뀌었다고 이걸 올리면
 # 낡은 스냅샷 하나 때문에 binding 파일 전체를 못 읽는 것으로 처리된다.
@@ -125,6 +130,198 @@ class HostCheckoutBinding:
     checkout: ActiveCheckout
     leader_snapshot: LeaderSnapshot
     guidance_eligible: bool = False
+
+
+@dataclass(frozen=True)
+class HostContinueRequest:
+    nonce: str
+    project_root: Path
+    session_id: str
+    tool_use_id: str
+    arguments: tuple[str, ...]
+
+
+def prepare_host_continue_input(payload: object, project_root: Path) -> dict[str, Any] | None:
+    """허용된 PreToolUse 호출에만 runner가 받을 nonce를 연결한다."""
+    if not isinstance(payload, dict) or payload.get("hook_event_name") != "PreToolUse":
+        return None
+    session_id = payload.get("session_id")
+    tool_use_id = payload.get("tool_use_id")
+    tool_input = _tool_input(payload)
+    if not isinstance(session_id, str) or not session_id or not isinstance(tool_use_id, str) or not tool_use_id:
+        return None
+    if not isinstance(tool_input, dict):
+        return None
+    command = _first_string(tool_input, _COMMAND_KEYS)
+    root = _validated_project_root(project_root)
+    arguments = _agent_flow_arguments(command, root=root, cwd=_session_cwd(payload, command))
+    if not arguments or arguments[0] != "continue" or any(
+        argument.split("=", 1)[0] == _CONTINUE_NONCE_FLAG for argument in arguments
+    ):
+        return None
+    nonce = secrets.token_hex(32)
+    _write_json_atomic(
+        _continue_state_path(root, nonce, "request"),
+        {"project_root": str(root), "session_id": session_id, "tool_use_id": tool_use_id,
+         "arguments": list(arguments), "recorded_at": time.time()},
+    )
+    updated = dict(tool_input)
+    updated["command"] = command + f" {_CONTINUE_NONCE_FLAG} {nonce}"
+    return updated
+
+
+def begin_host_continue(
+    project_root: Path, arguments: tuple[str, ...], nonce: str | None,
+) -> HostContinueRequest | None:
+    """요청을 한 번 소모하고 실제 CLI 인자가 hook 요청과 일치하는지 확인한다."""
+    if nonce is None:
+        return None
+    root = _validated_project_root(project_root)
+    request = _claim_continue_state(root, nonce, "request")
+    original = _continue_arguments(arguments, nonce)
+    if (
+        original is None or request is None or not _continue_state_is_current(request)
+        or request.get("project_root") != str(root)
+        or request.get("arguments") != list(original)
+        or not isinstance(request.get("session_id"), str) or not request["session_id"]
+        or not isinstance(request.get("tool_use_id"), str) or not request["tool_use_id"]
+    ):
+        raise HostWriteBoundaryError("continue nonce does not identify this trusted hook request")
+    return HostContinueRequest(
+        nonce=nonce, project_root=root, session_id=request["session_id"],
+        tool_use_id=request["tool_use_id"], arguments=original,
+    )
+
+
+def complete_host_continue(
+    request: HostContinueRequest | None, *, checkout: Path, run_dir: Path,
+) -> str | None:
+    """Runner가 정상 종료한 뒤에만 호출한다. 요청 nonce 자체는 성공 증거가 아니다."""
+    if request is None or not (run_dir / "active").is_file():
+        return None
+    token = secrets.token_hex(32)
+    _write_json_atomic(
+        _continue_state_path(request.project_root, request.nonce, "result"),
+        {"project_root": str(request.project_root), "session_id": request.session_id,
+         "tool_use_id": request.tool_use_id, "arguments": list(request.arguments),
+         "checkout": str(real_path(checkout)), "run_dir": str(real_path(run_dir)),
+         "run_id": run_dir.name, "meta_digest": _continue_meta_digest(run_dir),
+         "token": token, "recorded_at": time.time()},
+    )
+    return f"{request.nonce}:{token}"
+
+
+def _continue_arguments(arguments: tuple[str, ...], nonce: str) -> tuple[str, ...] | None:
+    stripped: list[str] = []
+    index = 0
+    seen = False
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument.split("=", 1)[0] == _CONTINUE_NONCE_FLAG:
+            if seen:
+                return None
+            seen = True
+            if argument == _CONTINUE_NONCE_FLAG:
+                index += 1
+                if index >= len(arguments) or arguments[index] != nonce:
+                    return None
+            elif argument != f"{_CONTINUE_NONCE_FLAG}={nonce}":
+                return None
+        else:
+            stripped.append(argument)
+        index += 1
+    return tuple(stripped)
+
+
+def _consume_host_continue_receipt(
+    payload: object, root: Path, context: ActiveCheckout, command: str,
+) -> bool:
+    matches = [match for output in _output_strings(payload) for match in _CONTINUE_RECEIPT.finditer(output)]
+    if (
+        len(matches) != 1 or not isinstance(payload, dict)
+        or payload.get("hook_event_name") != "PostToolUse"
+    ):
+        return False
+    nonce, token = matches[0].groups()
+    arguments = _agent_flow_arguments(command, root=root, cwd=_session_cwd(payload, command))
+    original = _continue_arguments(arguments or (), nonce)
+    receipt = _claim_continue_state(root, nonce, "result")
+    run_dir = context.runtime_root / ".agent-flow" / "runs" / context.run_id
+    return bool(
+        receipt is not None and _continue_state_is_current(receipt)
+        and receipt.get("token") == token
+        and receipt.get("project_root") == str(root)
+        and receipt.get("session_id") == payload.get("session_id")
+        and receipt.get("tool_use_id") == payload.get("tool_use_id")
+        and receipt.get("arguments") == list(original or ())
+        and receipt.get("checkout") == str(context.checkout)
+        and receipt.get("run_dir") == str(run_dir)
+        and receipt.get("run_id") == context.run_id
+        and receipt.get("meta_digest") == _continue_meta_digest(run_dir)
+    )
+
+
+def _continue_state_is_current(state: dict[str, Any]) -> bool:
+    recorded_at = state.get("recorded_at")
+    return (
+        isinstance(recorded_at, (int, float)) and not isinstance(recorded_at, bool)
+        and 0 <= time.time() - recorded_at <= _CONTINUE_STATE_TTL
+    )
+
+
+def _continue_meta_digest(run_dir: Path) -> str:
+    _require_regular_file(run_dir / "meta.json", label="continue run metadata")
+    return hashlib.sha256((run_dir / "meta.json").read_bytes()).hexdigest()
+
+
+def _continue_state_path(root: Path, nonce: str, kind: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{64}", nonce):
+        raise HostWriteBoundaryError("invalid continue nonce")
+    directory = _binding_dir(root) / "continue-receipts"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    _require_directory(directory, label="trusted continue receipt directory")
+    identity = directory.lstat()
+    if identity.st_uid != os.getuid() or stat.S_IMODE(identity.st_mode) & 0o077:
+        raise HostWriteBoundaryError("continue receipt directory is not private to its owner")
+    return directory / f"{nonce}.{kind}.json"
+
+
+def _claim_continue_state(root: Path, nonce: str, kind: str) -> dict[str, Any] | None:
+    path = _continue_state_path(root, nonce, kind)
+    directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    claimed = f".{path.name}.{secrets.token_hex(16)}.claim"
+    descriptor = -1
+    try:
+        try:
+            os.rename(path.name, claimed, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        except FileNotFoundError:
+            return None
+        descriptor = os.open(claimed, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+        identity = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(identity.st_mode) or identity.st_nlink != 1
+            or identity.st_size > 64 * 1024 or identity.st_uid != os.getuid()
+            or stat.S_IMODE(identity.st_mode) & 0o077
+        ):
+            raise HostWriteBoundaryError("continue receipt is not a trusted regular file")
+        with os.fdopen(descriptor, encoding="utf-8") as stream:
+            descriptor = -1
+            state = json.loads(stream.read(64 * 1024 + 1))
+        if not isinstance(state, dict):
+            raise HostWriteBoundaryError("continue receipt is not an object")
+        return state
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise HostWriteBoundaryError("cannot claim trusted continue receipt") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(claimed, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        except FileNotFoundError:
+            pass
+        finally:
+            os.close(directory_fd)
 
 
 @dataclass(frozen=True)
@@ -260,6 +457,9 @@ def record_host_checkout_binding(
         return None
     exit_code = _first_number(payload, ("exit_code", "exitCode", "returncode", "return_code"))
     if exit_code not in (None, 0):
+        for output in _output_strings(payload):
+            for receipt in _CONTINUE_RECEIPT.finditer(output):
+                _claim_continue_state(root, receipt.group(1), "result")
         return None
     status = _last_status_payload(payload)
     if status is None:
@@ -290,6 +490,11 @@ def record_host_checkout_binding(
     )
     if result_exit_code is None and successful_tool_event is True:
         result_exit_code = 0
+    operation = _lifecycle_operation(command, root=root, cwd=_session_cwd(payload, command))
+    successful_continue = (
+        result_exit_code in (None, 0) and operation == "continue"
+        and _consume_host_continue_receipt(payload, root, context, command)
+    )
     guidance_eligible = (
         isinstance(payload, dict)
         and payload.get("session_id", payload.get("sessionId")) == session_id
@@ -297,10 +502,8 @@ def record_host_checkout_binding(
             payload.get("tool_name", payload.get("toolName", payload.get("tool", "")))
         ).lower() in _COMMAND_TOOLS
         and _first_string(_tool_input(payload), _COMMAND_KEYS) == command
-        and result_exit_code == 0
-        and _lifecycle_operation(
-            command, root=root, cwd=_session_cwd(payload, command)
-        ) in {"run", "start", "continue"}
+        and (result_exit_code == 0 or successful_continue)
+        and operation in {"run", "start", "continue"}
     )
     existing = _load_binding(root, session_id, active)
     if existing is not None:
