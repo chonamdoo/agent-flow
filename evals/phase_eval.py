@@ -283,7 +283,7 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
     command = tooling["test_command"]
     with tempfile.TemporaryDirectory(prefix="af-phase-eval-tests-") as scratch:
         copy = Path(scratch) / "project"
-        shutil.copytree(project, copy, ignore=shutil.ignore_patterns(".git"))
+        shutil.copytree(project, copy, symlinks=True, ignore=shutil.ignore_patterns(".git"))
         tests = _run_group(command, cwd=copy, timeout=600)
         review_verification = verify_web_review(copy) if case["stack"] == "web" and mode == "team" else []
     (run_dir / "test-evidence.md").write_text(
