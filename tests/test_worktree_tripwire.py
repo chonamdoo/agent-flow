@@ -214,7 +214,7 @@ def test_tripwire_fires_on_leader_write(tmp_path: Path):
 
     # binding 수립
     subprocess.run(
-        ("/usr/bin/python3", "-I", str(hooks / "bind-host-worktree.py")),
+        (sys.executable, "-I", str(hooks / "bind-host-worktree.py")),
         cwd=root,
         input=json.dumps(_status_payload(root, statuses[0], runs[0])),
         text=True,
@@ -226,7 +226,7 @@ def test_tripwire_fires_on_leader_write(tmp_path: Path):
     (root / "leaked.py").write_text("leaked\n", encoding="utf-8")
 
     result = subprocess.run(
-        ("/usr/bin/python3", "-I", str(hooks / "worktree-tripwire.py")),
+        (sys.executable, "-I", str(hooks / "worktree-tripwire.py")),
         cwd=root,
         input=json.dumps(
             _command_payload("echo $HOME", cwd=statuses[0].path)
@@ -246,7 +246,7 @@ def test_tripwire_silent_on_worktree_write(tmp_path: Path):
     hooks = _install_tripwire_hook(root)
 
     subprocess.run(
-        ("/usr/bin/python3", "-I", str(hooks / "bind-host-worktree.py")),
+        (sys.executable, "-I", str(hooks / "bind-host-worktree.py")),
         cwd=root,
         input=json.dumps(_status_payload(root, statuses[0], runs[0])),
         text=True,
@@ -258,7 +258,7 @@ def test_tripwire_silent_on_worktree_write(tmp_path: Path):
     (statuses[0].path / "feature.py").write_text("ok\n", encoding="utf-8")
 
     result = subprocess.run(
-        ("/usr/bin/python3", "-I", str(hooks / "worktree-tripwire.py")),
+        (sys.executable, "-I", str(hooks / "worktree-tripwire.py")),
         cwd=root,
         input=json.dumps(
             _command_payload("echo $HOME", cwd=statuses[0].path)
@@ -277,7 +277,7 @@ def test_tripwire_silent_when_no_binding(tmp_path: Path):
     hooks = _install_tripwire_hook(root)
 
     result = subprocess.run(
-        ("/usr/bin/python3", "-I", str(hooks / "worktree-tripwire.py")),
+        (sys.executable, "-I", str(hooks / "worktree-tripwire.py")),
         cwd=root,
         input=json.dumps(
             _command_payload("echo hello", cwd=root, session="unbound-session")
@@ -363,7 +363,7 @@ def test_tripwire_ignores_work_that_was_already_in_a_sibling(tmp_path: Path):
     (statuses[1].path / "in-progress.py").write_text("wip\n", encoding="utf-8")
 
     subprocess.run(
-        ("/usr/bin/python3", "-I", str(hooks / "bind-host-worktree.py")),
+        (sys.executable, "-I", str(hooks / "bind-host-worktree.py")),
         cwd=root,
         input=json.dumps(_status_payload(root, statuses[0], runs[0])),
         text=True,
@@ -372,7 +372,7 @@ def test_tripwire_ignores_work_that_was_already_in_a_sibling(tmp_path: Path):
     )
 
     result = subprocess.run(
-        ("/usr/bin/python3", "-I", str(hooks / "worktree-tripwire.py")),
+        (sys.executable, "-I", str(hooks / "worktree-tripwire.py")),
         cwd=root,
         input=json.dumps(_command_payload("echo $HOME", cwd=statuses[0].path)),
         text=True,

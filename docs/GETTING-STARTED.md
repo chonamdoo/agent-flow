@@ -181,6 +181,17 @@ Check where you are at any point without advancing anything:
 agent-flow status --root /path/to/project --worktree fix-login-timeout
 ```
 
+While a run is active, that output ends with a host connection card. For Claude, Codex, and OMP it
+says separately whether the hooks are installed, registered in that host's settings, trusted by
+the host, and seen running in this checkout, and it gives each host a level: `hook_enforced`,
+`hook_unproven`, or `runner_only`. The card never blocks the run.
+
+The installer removes Codex project trust on purpose, and Codex does not run untrusted project
+hooks. If Codex shows `trusted=no`, follow its hint: trust the folder in Codex, approve the
+agent-flow hooks or turn them back on with `/hooks`, and restart the session. Even after approval
+Codex shows `trusted=unknown`, because the card cannot check Codex's hook hash; confirm in
+`/hooks` that every agent-flow hook is trusted. See [Host connection](USAGE.md#host-connection).
+
 Walk that loop five times and `bugfix` is done. The last output looks like this:
 
 ```text
@@ -207,11 +218,11 @@ Pick by the size of the work. The source of truth is `src/agent_flow/workflows/<
 | `bugfix` | 5 | one reproducible bug, with a regression test that failed first |
 | `diagnosing-bugs` | 9 | a hard, intermittent, production-only, or performance bug |
 | `development` | 6 | one concern, where you already know the implementation path |
-| `default` | 15 | a change that goes through PR and merge |
+| `default` | 16 | a change that goes through PR and merge |
 | `full-feature` | 24 | a feature that starts from requirements, PRD, and DDD modeling |
 
 Say it plainly: `default` on a small change costs more in phase waiting than the change itself.
-Fifteen phases each want an artifact, and a two-line fix does not have fifteen phases' worth of
+Sixteen phases each want an artifact, and a two-line fix does not have sixteen phases' worth of
 decisions to record. Reach for `bugfix` or `development` and move up only when the change really
 has a PR, a review, and a merge in it.
 

@@ -214,8 +214,9 @@ PYTHONDONTWRITEBYTECODE=1 python evals/phase_budget.py --kit <kit> --output budg
 bytes/4 추정이다.
 
 두 결과를 비교하려면 `python evals/phase_budget_compare.py before.json after.json`을 쓴다.
-어느 변경 조건에서든 필수 skill이 빠졌거나, Clean이 아닌 mode의 envelope에 `roles`가
-들어갔거나, 합계 바이트가 늘었거나, 전에 재던 phase를 못 재면 실패한다. PR에서는
+base에서 측정에 성공한 profile·mode 조합이 하나도 없거나, 어느 변경 조건에서든 필수 skill이
+빠졌거나, Clean이 아닌 mode의 envelope에 `roles`가 들어갔거나, 합계 바이트가 늘었거나,
+전에 재던 phase를 못 재면 실패한다. PR에서는
 `.github/workflows/tests.yml`의 `phase-budget` job이 base와 head를 병렬로 재고 이 비교를 돌린다.
 
 ### `phase_eval.py` — 실제 모델, 수동·비차단

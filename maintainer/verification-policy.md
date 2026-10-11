@@ -33,22 +33,47 @@ Clean/local/pending 사례를 재사용 가능한 작은 회귀 fixture로 유�
 phase가 필요한 skill을 정확히 받는지, 그러면서 쓰지 않는 텍스트에 토큰을 쓰지 않는지를 두 도구로 확인한다. 실행법과 해석 주의점은 `evals/README.md`의 "phase skill 전달 평가"를 따른다.
 
 - `evals/phase_budget.py` — 모델을 쓰지 않는 결정적 측정이다. prompt, skill 본문·frontmatter, workflow YAML, resolver·routing 코드를 바꾸는 PR마다 변경 전 kit과 변경 후 kit으로 돌려 차이를 PR에 기록한다. 다음이 나오면 PR에 원인을 적는다.
+  - base에서 측정에 성공한 profile·mode 조합이 하나도 없다. 비교 기준이 없으므로 실패로 판정한다. 일부 base 조합만 실패하면 기존대로 보고만 남긴다.
   - 변경 전에 필수였던 skill이 어떤 profile·mode·변경 조건에서 빠졌다.
   - Clean이 아닌 mode의 envelope에 Clean `roles`가 들어갔다.
   - phase envelope, 조율 세션, 리뷰어 subprocess의 합계 바이트가 늘었다.
+  - 변경 전에 측정한 조합·변경 조건·phase를 head에서 측정하지 못했거나 phase에 오류가 있다. 깨진 측정이 0바이트 절감으로 보이면 안 된다.
 - `evals/phase_eval.py` — 실제 모델 평가다. 수동으로 돌리고 CI를 막지 않는다. 판단 기준이 바뀌는 변경을 할 때와 릴리스 전에 돌린다. 기록 항목은 정확도(author의 behavior/plan/norm, 리뷰의 판정 정확도·결함 탐지·오탐), 필수 skill의 실제 읽음률, 토큰, 무효 시행 수다.
 - 릴리스 전에는 이전 릴리스 kit과 새 kit을 같은 실행에서 author 조합당 3회, review 조합당 2회 이상 돌리고 `evals/phase_eval_compare.py`로 판정한다. 통과하면 `--export evals/release-gates/v<버전>`으로 남긴 기록을 릴리스 PR에 커밋한다. 판정이 실패하면 같은 조건으로 다시 돌리지 않고, 원인이 된 kit이나 평가기를 고친 뒤 새로 측정한다. `release.yml`은 그 기록을 다시 판정하고, 기록의 kit 지문이 태그와 이전 태그의 kit과 같은지 확인한다. 기록이 없거나 판정이 실패하면 태그를 거부한다. 기준값은 `evals/phase-eval-thresholds.json`이고, 바꿀 때는 PR에 이유와 근거가 된 측정 결과를 적는다.
 - 결과는 `evals/results/phase-<kit 버전>-<YYYYMMDD>/`에 남겨 다음 변경이 이전 결과와 비교되게 한다.
 - 평가에서 새로 나온 실패 사례는 `evals/phase-cases/`에 기준 사례로 추가한다.
-- `phase_budget.py`는 PR CI에서 돈다. `.github/workflows/tests.yml`의 `phase-budget` job이 테스트 스위트와 병렬로 PR의 base kit과 head kit을 측정하고, `phase-budget-compare` job이 `evals/phase_budget_compare.py`로 위 세 조건을 모든 변경 조건에서 판정한다. 의도한 변화면 PR 본문에 이유를 적고 `phase-budget-accepted` 라벨을 붙인 뒤 비교 job을 다시 돌린다. 보고는 그대로 남고 실패만 면한다.
+- `phase_budget.py`는 PR CI에서 돈다. `.github/workflows/tests.yml`의 `phase-budget` job이 테스트 스위트와 병렬로 PR의 base kit과 head kit을 측정하고, `phase-budget-compare` job이 `evals/phase_budget_compare.py`로 위 실패 조건을 모든 변경 조건에서 판정한다. 의도한 변화면 PR 본문에 이유를 적고 `phase-budget-accepted` 라벨을 붙인 뒤 비교 job을 다시 돌린다. 보고는 그대로 남고 실패만 면한다.
 
 ## 실행과 기록
 
 - 검증 계획에 변경 유형, 영향 범위, 필요한 검증 층과 선택 이유를 기록한다.
 - 실행 명령과 실행 위치는 활성 profile의 `gates` 및 기존 검증 정책을 따른다. CI-only 검증을 로컬에서 임의로 실행하지 않는다.
+- CI-only는 그 gate 명령(예: `pytest -q` 전체) 자체를 로컬에서 돌리지 않는다는 뜻이다. 로컬 focused 실행은 feature/bugfix의 RED/GREEN 회귀 테스트, fix-loop의 관련 테스트, SPEC `test:` verifier 테스트, 아래 회귀 대조 절차에서 design에 기록한 guard의 명시적 node id 실행에 한정한다. node id가 여러 파일에 있어도 선택한 회귀 조건에 필요한 테스트만 단일 명령으로 직렬 실행한다. 파일·디렉터리 전체를 선택한 묶음 회귀와 전체 suite는 CI에 맡긴다. runner가 관측한 focused 실행은 해당 테스트의 실행 증거가 된다. 결과를 자가 보고하는 것만으로는 관측 증거가 되지 않으며, focused 결과는 CI gate 결과를 대신하지 않는다(2026-10-09 사용자 결정, 2026-10-10 회귀 대조 설계 승인).
 - CI에 넣을 범위와 실제 모델 평가의 실행 조건을 구분한다. 실제 모델 평가는 CI를 막지 않고, 릴리스는 위 판정을 통과해야 한다.
 - 큰 검증 기록은 매번 되풀이할 절차가 아니라 작은 회귀 fixture와 기준 사례로 전환할 자산으로 다룬다. 아직 자동화하지 않은 검증을 자동화된 것으로 보고하지 않는다.
 - 결과에는 실행한 범위와 관찰한 결과, 실행하지 않은 범위와 이유를 구분해 남긴다.
+
+## 회귀 대조
+
+모든 개발 작업은 [회귀 원장](regression-ledger/ledger.md)을 기준으로 대조한다. 원장 전수 대조는 변경 영역과 관련된 항목을 빠짐없이 고르는 절차이며, 모든 guard를 매번 실행한다는 뜻이 아니다. 원장은 MD가 갱신 정본이고 JSON은 초기 조사 시점의 고정 원자료다. 이 절차는 개발 운영 기준이며 runner가 자동으로 수행하거나 강제한다는 뜻이 아니다.
+
+### design
+
+1. 원장 전체를 살펴 변경 영역의 topic·파일·함수를 다룬 항목을 모두 고른다. 선택 항목과 각 회귀 금지 조건을 design에 적는다. 대체·역전된 계약과 알려진 빈틈도 함께 확인한다.
+2. 바꿀 함수마다 `git log -L :<function>:<file>`로 수정 계보를 조사한다. 그 계보에 원장에 없는 관련 PR이 있으면 회귀 금지 조건과 guard를 보충한다. 함수가 없는 문서·설정 변경은 `git log -- <file>`로 파일 계보를 확인하고 함수 조사 미적용 사유를 기록한다.
+3. 초기 원장 작성 이후 merge된 PR 중 아직 정본에 없는 항목을 확인한다. 버그 분류 여부와 관계없이 모두 다음 작업의 design에서 보충하고 그 작업 PR에 포함한다. 항목에는 회귀 금지 조건과 guard를 적는다. guard가 없으면 `guard: 없음`과 이유를 적는다. merge 뒤 leader에 직접 커밋하지 않는다.
+
+### PR 전
+
+1. 선택 항목의 회귀 조건을 검증하는 guard를 명시적 pytest node id로 실행한다. 오래되거나 존재하지 않는 node id, 선택 조건을 충분히 덮지 못하는 guard는 검증 공백으로 기록한다.
+2. guard가 없거나 조건을 다 덮지 못하면 같은 입력·환경·배치로 base와 head를 실행해 대조한다. base/head revision, 실행 명령, 관찰 결과와 남은 공백을 기록한다. 실행 동작이 없는 문서 변경은 해당 문서와 패키지·설치 산출물 등 변경 경계의 base/head 차이를 확인하고 실행 검증 미적용 사유를 적는다.
+3. 원장 항목의 계약을 의도적으로 바꾸면 기존 조건과 바뀐 동작을 따로 적는다. 같은 불변식을 지키는 검증을 제시한다. guard 단정을 약하게 바꾸거나 실패를 숨기는 것으로 회귀 없음이라고 판단하지 않는다.
+
+### PR 본문과 merge 뒤
+
+PR 본문에 `회귀 대조` 절을 둔다. 선택 항목 수와 목록, guard 실행 결과, guard 공백의 판단과 base/head 근거, 이전 PR이 다루지 않은 동작 변화를 적는다. 실행하지 않은 범위와 이유도 구분한다.
+
+merge된 PR의 원장 반영은 다음 작업의 design에서 누락 merged PR을 보충하는 방식으로 진행한다. 따라서 정본은 다음 작업까지 한 작업 늦게 갱신된다. 보존한 raw 사본과 고정 JSON은 갱신하지 않는다.
 
 ## 개발 전용 보관 경계
 

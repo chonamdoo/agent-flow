@@ -1,0 +1,22 @@
+{
+  "host": "claude",
+  "event": "PreToolUse",
+  "host_version": "2.1.296 (Claude Code)",
+  "payload": {
+    "session_id": "${SESSION}",
+    "transcript_path": "${TRANSCRIPT}",
+    "cwd": "${CHECKOUT}",
+    "prompt_id": "${ID}",
+    "permission_mode": "bypassPermissions",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "${COMMAND}",
+      "description": "Run agent-flow status for the feat-host-smoke worktree"
+    },
+    "tool_use_id": "${ID}"
+  }
+}

@@ -6,6 +6,7 @@ dead assertion cannot pass silently.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -854,6 +855,61 @@ def test_real_provider_process_is_confined_to_attested_checkout(tmp_path):
     sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
     reason="macOS sandbox-exec confinement is required",
 )
+def test_real_provider_cannot_plant_an_install_in_its_checkout(tmp_path):
+    """반증: worker가 자기 checkout에 `.agent-flow/kit.json`을 쓰면 그 사본이 이
+    checkout의 설치본 행세를 한다. 같은 provider가 checkout의 다른 파일은 써야
+    거부가 workspace 전체 잠금이 아니라는 것이 드러난다.
+    """
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+    _git("add", ".gitignore", cwd=tmp_path)
+    _git("commit", "-m", "ignore runtime", cwd=tmp_path)
+    worker = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="worker"),
+    )
+    install = worker.path / ".agent-flow"
+    program = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "action, report = sys.argv[1], Path(sys.argv[2])\n"
+        "install = Path('.agent-flow')\n"
+        "try:\n"
+        "    if action == 'mkdir':\n"
+        "        install.mkdir()\n"
+        "    else:\n"
+        "        (install / 'kit.json').write_text('{\"hooks\": false}', encoding='utf-8')\n"
+        "    outcome = 'written'\n"
+        "except PermissionError:\n"
+        "    outcome = 'denied'\n"
+        "report.write_text(outcome, encoding='utf-8')\n"
+    )
+
+    def plant(action: str) -> str:
+        report = f"plant-{action}.txt"
+        result = run_provider(
+            ProviderCommand(
+                name="install-plant-probe",
+                argv=(sys.executable, "-c", program, action, report),
+            ),
+            prompt="",
+            cwd=worker.path,
+        )
+        assert result.failed is False, result.stderr
+        return (worker.path / report).read_text(encoding="utf-8")
+
+    assert plant("mkdir") == "denied"
+    assert not install.exists()
+
+    install.mkdir()
+    assert plant("kit") == "denied"
+    assert not (install / "kit.json").exists()
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec confinement is required",
+)
 def test_provider_commits_from_its_worktree_without_reaching_git_control_files(tmp_path):
     """반증: 공유 gitdir를 통째로 막으면 worker는 자기 작업을 커밋조차 못 한다.
 
@@ -967,6 +1023,102 @@ def test_provider_revalidates_worktree_identity_after_spawn(tmp_path, monkeypatc
     assert result.failed is True
     assert "worktree" in result.stderr
     assert not marker.exists()
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec confinement is required",
+)
+@pytest.mark.parametrize("name", (".claude", ".Codex", ".codex", ".omp", ".agents"))
+@pytest.mark.parametrize(
+    "attack,target_exists",
+    (
+        ("unlink", True), ("unlink", False),
+        ("rename", True), ("rename", False),
+        ("repoint", True), ("repoint", False),
+        ("plant", True), ("plant", False),
+        ("write-through", True), ("create-through", False),
+    ),
+)
+def test_real_provider_cannot_replace_host_state_symlinks(
+    tmp_path, monkeypatch, name, attack, target_exists
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    leader = tmp_path / "leader"
+    leader.mkdir()
+    _init_repo(leader)
+    worker = W.create_worktree(
+        root=leader,
+        plan=W.plan_worktree(root=leader, name="host-state-worker"),
+    )
+    checkout = real_path(worker.path)
+    assert verify_linked_worktree(root=leader, path=checkout) == checkout
+    target = checkout / "host-state-target"
+    sentinel = b"host state sentinel\n"
+    if target_exists:
+        target.write_bytes(sentinel)
+    link = checkout / name
+    link.symlink_to(target)
+    original_link = os.readlink(link)
+    ordinary = checkout / "ordinary.txt"
+    ordinary.write_bytes(b"ordinary sentinel\n")
+    replacement_target = checkout / "replacement-target"
+    replacement_target.mkdir()
+    replacement = checkout / "replacement-link"
+    replacement.symlink_to(replacement_target, target_is_directory=True)
+    moved = checkout / "moved-link"
+    program = (
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "link, replacement, moved = map(Path, sys.argv[1:4])\n"
+        "attack = sys.argv[4]\n"
+        "Path('ordinary-write.txt').write_bytes(b'allowed\\n')\n"
+        "try:\n"
+        "    if attack == 'unlink':\n"
+        "        link.unlink()\n"
+        "    elif attack == 'rename':\n"
+        "        link.rename(moved)\n"
+        "    elif attack == 'repoint':\n"
+        "        replacement.replace(link)\n"
+        "    elif attack == 'plant':\n"
+        "        link.unlink()\n"
+        "        link.mkdir()\n"
+        "        (link / 'settings.json').write_bytes(b'planted')\n"
+        "    elif attack in ('write-through', 'create-through'):\n"
+        "        link.write_bytes(b'changed')\n"
+        "    else:\n"
+        "        raise ValueError(attack)\n"
+        "except OSError as exc:\n"
+        "    print(json.dumps({'errno': exc.errno}))\n"
+        "else:\n"
+        "    print(json.dumps({'errno': None}))\n"
+    )
+    result = run_provider(
+        ProviderCommand(
+            name="host-state-symlink-probe",
+            argv=(sys.executable, "-c", program, str(link), str(replacement), str(moved), attack),
+        ),
+        prompt="",
+        cwd=checkout,
+    )
+
+    assert result.failed is False, result.stderr
+    observed = json.loads(result.stdout)
+    assert link.is_symlink(), (attack, observed)
+    assert os.readlink(link) == original_link, (attack, observed)
+    if target_exists:
+        assert target.read_bytes() == sentinel, (attack, observed)
+    else:
+        assert not target.exists(), (attack, observed)
+    assert not (replacement_target / "settings.json").exists()
+    assert not (link / "settings.json").exists()
+    assert not moved.is_symlink()
+    assert not moved.exists()
+    assert ordinary.read_bytes() == b"ordinary sentinel\n"
+    assert (checkout / "ordinary-write.txt").read_bytes() == b"allowed\n"
+    assert observed["errno"] in (errno.EACCES, errno.EPERM), (attack, observed)
 
 
 @pytest.mark.skipif(
@@ -2172,7 +2324,7 @@ def test_state_root_refuses_to_fall_back_into_the_leader(tmp_path, monkeypatch):
 
 
 def test_tripwire_watches_installed_runtime_code(tmp_path):
-    """불변: `.agent-flow/runtime/`은 gate가 PYTHONPATH 최우선으로 실행하는 코드다.
+    """불변: gate는 find_install_root가 선택한 가용 설치 runtime을 PYTHONPATH 맨 앞에 둔다.
 
     상태 디렉터리라고 통째로 빼면 tripwire 자기 자신을 포함한 런타임 전체가
     사각지대가 된다. 정당하게 생기는 것은 bytecode뿐이다.

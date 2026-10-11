@@ -1,0 +1,19 @@
+{
+  "host": "omp",
+  "event": "tool_call",
+  "host_version": "omp/18.8.7",
+  "payload": {
+    "event": {
+      "type": "tool_call",
+      "toolName": "bash",
+      "toolCallId": "${ID}",
+      "input": {
+        "command": "${COMMAND}"
+      }
+    },
+    "ctx": {
+      "cwd": "${CHECKOUT}",
+      "sessionId": "${SESSION}"
+    }
+  }
+}

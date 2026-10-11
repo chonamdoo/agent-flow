@@ -600,6 +600,91 @@ def test_provider_sandbox_writes_only_to_the_verified_worktree(tmp_path):
     )
 
 
+@pytest.mark.parametrize("name", (".claude", ".Codex", ".codex", ".omp", ".agents"))
+@pytest.mark.parametrize("target_exists", (True, False), ids=("existing", "dangling"))
+@pytest.mark.parametrize("allow_workspace_writes", (True, False), ids=("writable", "readonly"))
+def test_provider_sandbox_denies_host_state_symlink_names_and_targets(
+    tmp_path, monkeypatch, name, target_exists, allow_workspace_writes
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    leader = tmp_path / "leader"
+    leader.mkdir()
+    linked = _repo_with_linked(leader).resolve()
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    scratch = linked / "scratch"
+    scratch.mkdir()
+    paths = []
+    for index, parent in enumerate((home.resolve(), leader.resolve(), linked, host_home.resolve())):
+        target = scratch / f"host-state-{index}"
+        if target_exists:
+            target.mkdir()
+        link = parent / name
+        link.symlink_to(target, target_is_directory=True)
+        paths.extend((link, target))
+
+    profile = PROVIDER_PROCESS._macos_sandbox_profile(
+        linked,
+        allow_workspace_writes=allow_workspace_writes,
+        scratch=scratch,
+        host_home=host_home,
+    )
+    allowances = [f'(allow file-write* (subpath "{scratch}"))']
+    if allow_workspace_writes:
+        allowances.append(f'(allow file-write* (subpath "{linked}"))')
+    else:
+        assert f'(allow file-write* (subpath "{linked}"))' not in profile
+    for allowance in allowances:
+        assert allowance in profile
+    for path in paths:
+        deny = f'(deny file-write* (subpath "{path}"))'
+        assert deny in profile, path
+        for allowance in allowances:
+            assert profile.index(allowance) < profile.index(deny), path
+
+
+def test_provider_sandbox_denies_the_checkout_agent_flow_dir(tmp_path):
+    """반증: workspace 쓰기가 열린 provider가 자기 checkout에 `.agent-flow`를 만들면
+    그 안의 `kit.json`·hook·`project.yaml`이 이 checkout의 설치본과 설정 행세를 한다.
+    """
+    linked = _repo_with_linked(tmp_path).resolve()
+    leader = linked.parents[2]
+    install_deny = f'(deny file-write* (subpath "{linked / ".agent-flow"}"))'
+    scratch = tmp_path / "provider-scratch"
+    scratch.mkdir()
+
+    writable = PROVIDER_PROCESS._macos_sandbox_profile(linked)
+    read_only = PROVIDER_PROCESS._macos_sandbox_profile(
+        linked,
+        allow_workspace_writes=False,
+        scratch=scratch,
+    )
+
+    assert install_deny in writable
+    assert install_deny in read_only
+    # sandbox 규칙은 마지막에 일치한 것이 이긴다. deny가 allow보다 앞에 있으면 효력이 없다.
+    workspace_allow = f'(allow file-write* (subpath "{linked}"))'
+    assert writable.index(workspace_allow) < writable.index(install_deny)
+    # 이 테스트의 checkout은 legacy 자리(`<leader>/.agent-flow/worktrees/`)에 있고,
+    # 관리형 checkout은 `~/.agent-flow/worktrees/` 아래 있다. 두 `.agent-flow`를
+    # 막으면 checkout 자체가 잠긴다.
+    for parent in (Path.home().resolve(), leader):
+        assert (
+            f'(deny file-write* (subpath "{parent / ".agent-flow"}"))'
+            not in writable
+        ), parent
+
+    # checkout이 `.agent-flow`를 symlink로 들고 있으면 쓰기는 대상 경로로 간다.
+    target = linked / "planted"
+    target.mkdir()
+    (linked / ".agent-flow").symlink_to(target, target_is_directory=True)
+    linked_install = PROVIDER_PROCESS._macos_sandbox_profile(linked)
+    assert install_deny in linked_install
+    assert f'(deny file-write* (subpath "{target}"))' in linked_install
+
+
 def test_confined_provider_launch_pins_claude_temp_to_private_scratch(
     tmp_path, monkeypatch
 ):

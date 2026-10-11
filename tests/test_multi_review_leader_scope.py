@@ -131,3 +131,40 @@ def test_multi_review_ignores_a_narrowing_the_narrowed_sweep_cannot_see(
         "branching:\n  leader_tripwire: all\n", encoding="utf-8"
     )
     assert multi_review.leader_sweep_include_ignored_for(project) is True
+
+
+@pytest.mark.parametrize("name", ["generic.local.yaml", "generic.yaml"])
+def test_leader_tripwire_declaration_with_a_duplicate_key_is_a_declaration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+):
+    """불변: 같은 선언이 두 번 나오면 잘못된 선언으로 막는다. 전수 sweep으로 접지 않는다.
+
+    반증: 뒤엣것이 이기면 사람은 위쪽의 `tracked-only`를 보고 좁혔다고 믿는데 run은
+    `all`로 돈다. 순서가 반대면 아래쪽 한 줄이 감시를 좁힌다. 문법 오류는 지금처럼
+    읽기 실패라 전수 sweep으로 접힌다 — 그 짝을 함께 확인한다.
+    """
+    from agent_flow.core.leader_tripwire import (
+        LeaderTripwireDeclarationError,
+        leader_sweep_include_ignored_for,
+    )
+
+    monkeypatch.delenv("AGENT_FLOW_PROFILE", raising=False)
+    profiles = tmp_path / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    (tmp_path / ".agent-flow" / "kit.json").write_text(
+        '{"profile": "generic"}', encoding="utf-8"
+    )
+    declaration = profiles / name
+    declaration.write_text(
+        "branching:\n  leader_tripwire: tracked-only\n  leader_tripwire: all\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LeaderTripwireDeclarationError) as excinfo:
+        leader_sweep_include_ignored_for(tmp_path)
+    assert str(excinfo.value) == (
+        f"{declaration}:3: duplicate key 'leader_tripwire' (first at line 2)"
+    )
+
+    declaration.write_text("branching: [unclosed\n", encoding="utf-8")
+    assert leader_sweep_include_ignored_for(tmp_path) is True

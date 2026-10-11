@@ -21,6 +21,9 @@ class WorkflowStatusPayload(TypedDict):
     # 싣으면, 아직 아무 marker도 요구하지 않은 blocker(skill_scope_grew 등)의
     # 출력에까지 이 이름이 섞여 사용자는 요구받지 않은 것을 요구받았다고 읽는다.
     missing_completion_markers: NotRequired[list[str]]
+    # pause 승인 명령은 `next_command`와 따로 싣는다. `next_command`는 에이전트가
+    # 그대로 실행하는 값이라, 토큰이 거기 있으면 사용자 답 없이 승인된다.
+    approval_command: NotRequired[str]
 
 
 def workflow_status_payload(
@@ -35,6 +38,7 @@ def workflow_status_payload(
     report: str | Path | None = None,
     detail: str | None = None,
     missing_completion_markers: Sequence[str] = (),
+    approval_command: str | None = None,
 ) -> WorkflowStatusPayload:
     payload: WorkflowStatusPayload = {
         "status": status,
@@ -51,6 +55,8 @@ def workflow_status_payload(
     }
     if missing_completion_markers:
         payload["missing_completion_markers"] = list(missing_completion_markers)
+    if approval_command is not None:
+        payload["approval_command"] = approval_command
     return payload
 
 
@@ -75,6 +81,9 @@ def print_structured_status(payload: WorkflowStatusPayload) -> None:
             "missing_completion_markers: "
             f"{json.dumps(markers, ensure_ascii=False)}"
         )
+    approval_command = payload.get("approval_command")
+    if approval_command is not None:
+        print(f"approval_command: {status_value(approval_command)}")
     print(f"next_command: {status_value(payload['next_command'])}")
     print(f"status_json: {json.dumps(payload, sort_keys=True)}")
 

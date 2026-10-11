@@ -131,6 +131,17 @@ agent-flow continue --root /path/to/project --worktree fix-login-timeout
 agent-flow status --root /path/to/project --worktree fix-login-timeout
 ```
 
+run이 진행 중이면 이 출력 끝에 host 연결 카드가 붙는다. Claude, Codex, OMP마다 hook이 설치됐는지,
+그 host 설정에 등록됐는지, host가 신뢰하는지, 이 checkout에서 실제로 돌았는지를 따로 보여 주고,
+보호 수준을 `hook_enforced`, `hook_unproven`, `runner_only` 중 하나로 붙인다. 카드는 run을 막지
+않는다.
+
+installer는 Codex project 신뢰를 일부러 지우고, Codex는 신뢰하지 않은 project hook을 실행하지
+않는다. Codex가 `trusted=no`이면 힌트를 따른다. Codex에서 이 폴더를 신뢰하고, `/hooks`에서
+agent-flow 훅을 승인하거나 다시 켠 뒤 세션을 다시 시작한다. 승인한 뒤에도 카드는 Codex의 hook
+hash를 확인할 수 없어 `trusted=unknown`을 보인다. `/hooks`에서 agent-flow 훅이 모두 trusted인지
+확인한다. 자세한 내용은 [Host connection](../USAGE.md#host-connection)에 있다.
+
 이 반복을 다섯 번 돌면 `bugfix`가 끝난다. 마지막 출력은 이렇다.
 
 ```text
@@ -158,11 +169,11 @@ agent-flow abort --root /path/to/project --worktree fix-login-timeout --yes
 | `bugfix` | 5 | 재현되는 버그 하나. 먼저 실패한 회귀 테스트를 동반한다 |
 | `diagnosing-bugs` | 9 | 원인이 불분명하거나 간헐적이거나 성능이 떨어진 어려운 버그 하나 |
 | `development` | 6 | 관심사 하나. 구현 경로를 이미 알고 있다 |
-| `default` | 15 | PR과 merge까지 가는 변경 |
+| `default` | 16 | PR과 merge까지 가는 변경 |
 | `full-feature` | 24 | 요구사항, PRD, DDD 모델링에서 시작하는 기능 |
 
-분명히 말한다. 작은 변경에 `default`를 쓰면 phase를 기다리는 비용이 변경 자체보다 크다. 15개
-phase가 각각 artifact를 요구하는데, 두 줄 수정에는 15개 phase 몫의 결정이 없다. `bugfix`나
+분명히 말한다. 작은 변경에 `default`를 쓰면 phase를 기다리는 비용이 변경 자체보다 크다. 16개
+phase가 각각 artifact를 요구하는데, 두 줄 수정에는 16개 phase 몫의 결정이 없다. `bugfix`나
 `development`를 먼저 잡고, 변경 안에 PR과 review와 merge가 실제로 들어 있을 때만 올린다.
 
 작은 workflow가 주지 않는 것이 하나 있다. `review`, `bugfix`, `diagnosing-bugs`,

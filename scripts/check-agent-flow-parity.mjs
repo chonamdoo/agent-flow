@@ -317,6 +317,10 @@ if (exportedWorkflow) {
   if (exportedPhases["merge-approval"]?.routes?.default !== "block") {
     failures.push("workflow export merge-approval default route mismatch");
   }
+  // merge 직전 승인은 에이전트가 쓴 verdict가 아니라 runner pause가 막는다(#290).
+  if (exportedPhases["merge-approval"]?.pause_after !== true) {
+    failures.push("workflow export merge-approval pause_after mismatch");
+  }
   if (exportedPhases["fix-loop"]?.routes?.default !== "comment-authoring") {
     failures.push("workflow export fix-loop route mismatch");
   }
@@ -370,6 +374,18 @@ if (exportedDefaultWorkflow) {
   }
   if (exportedPhases["pr-watch"]?.routes?.skipped !== "cleanup") {
     failures.push("workflow export default pr-watch skipped route mismatch");
+  }
+  if (exportedPhases["pr-watch"]?.routes?.green !== "merge-approval") {
+    failures.push("workflow export default pr-watch green route mismatch");
+  }
+  if (exportedPhases["merge-approval"]?.routes?.approve !== "merge") {
+    failures.push("workflow export default merge-approval approve route mismatch");
+  }
+  if (exportedPhases["merge-approval"]?.routes?.default !== "block") {
+    failures.push("workflow export default merge-approval default route mismatch");
+  }
+  if (exportedPhases["merge-approval"]?.pause_after !== true) {
+    failures.push("workflow export default merge-approval pause_after mismatch");
   }
 }
 
@@ -2000,7 +2016,6 @@ function preferredPython() {
     fs.existsSync(kitVenvPython) ? kitVenvPython : null,
     "python3.12",
     "python3.11",
-    "python3.10",
     "python3",
     "python",
   ].filter(Boolean);
@@ -2017,7 +2032,12 @@ function preferredPython() {
 }
 
 function pythonSupportsWorkflowExport(candidate) {
-  const result = spawnSync(candidate, ["-c", "import yaml"], {
+  const probe = [
+    "import sys",
+    "if sys.version_info < (3, 11): raise SystemExit(1)",
+    "import yaml",
+  ].join("\n");
+  const result = spawnSync(candidate, ["-c", probe], {
     stdio: "ignore",
     timeout: 5_000,
   });

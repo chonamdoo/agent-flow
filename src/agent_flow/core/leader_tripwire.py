@@ -19,10 +19,10 @@ from __future__ import annotations
 import os
 import sys
 
-import yaml
-
 from agent_flow.core.profiles import (
+    ProfileYamlError,
     active_profile_ids,
+    load_profile_yaml,
     project_profile_override_path,
     project_profile_path,
 )
@@ -141,7 +141,12 @@ def _requested_profiles() -> str:
 def _declared_in_file(path: Path) -> object | None:
     if not path.is_file():
         return None
-    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    try:
+        payload = load_profile_yaml(path.read_text(encoding="utf-8"), source=path)
+    except ProfileYamlError as exc:
+        # 같은 키가 두 번이면 어느 선언이 이긴 것인지 사람이 볼 수 없다. 읽기 실패가 아니라
+        # 잘못된 선언이므로 전수 sweep으로 접지 않고 올린다.
+        raise LeaderTripwireDeclarationError(str(exc)) from exc
     if not isinstance(payload, dict):
         return None
     branching = payload.get("branching")

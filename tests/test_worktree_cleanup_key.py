@@ -20,6 +20,7 @@ SRC = str(KIT_ROOT / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
+from agent_flow.artifact import create_run, mark_inactive
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
     list_registered_worktrees,
@@ -388,6 +389,15 @@ def test_removal_clears_runtime_state_when_a_sibling_owns_the_normalized_manifes
     sibling = W.create_worktree(root=root, plan=W.plan_worktree(root=root, name="issue-110"))
     sibling_manifest = W.worktree_runtime_root(root=root, name=sibling.name) / "manifest.json"
     assert sibling_manifest.is_file()
+    sibling_run = create_run(
+        W.worktree_runtime_root(root=root, name=sibling.name),
+        "default",
+        "sibling run",
+        run_id="run-sibling",
+        checkout_identity=f"worktree:{sibling.name}",
+        checkout_registration_identity=sibling.registration_identity,
+    )
+    mark_inactive(sibling_run)
 
     checkout = root / ".agent-flow" / "worktrees" / "feat-issue#110"
     _add_raw_worktree(root, "feat/issue#110", checkout)
@@ -418,3 +428,8 @@ def test_removal_clears_runtime_state_when_a_sibling_owns_the_normalized_manifes
     # 반증 짝: 형제의 상태와 checkout은 그대로다.
     assert sibling_manifest.is_file()
     assert sibling.path.exists()
+    # 지우지 않는 형제 기록은 보관하지도 않는다. 대상 자신의 run만 보관 자리에 간다.
+    assert sibling_run.is_dir()
+    archive = root / ".git" / "agent-flow" / "archive"
+    archived = sorted(path.name for path in archive.glob("worktrees/*/.agent-flow/runs/*"))
+    assert archived and "run-sibling" not in archived

@@ -651,6 +651,185 @@ def test_premerge_publication_honors_acknowledged_feedback(project, run_dir, mon
     assert requeued.missing == ("pre-merge SPEC: expected green publication (has_comments)",)
 
 
+def test_premerge_manual_approval_does_not_wait_for_review_but_merge_entry_does(
+    project, run_dir, monkeypatch,
+):
+    """반증: review 규칙이 없는 저장소는 `reviewDecision`이 비고 작성자는 자기 PR을 승인할 수 없어,
+    green 게시 HEAD에서도 pre-merge 수동 승인을 영영 기록하지 못하고 run이 abort로만 끝났다.
+
+    승인 기록은 게시 HEAD와 필수 CI만 본다. merge 진입은 여전히 GitHub 승인을 기다린다.
+    """
+    import agent_flow.pr_watch as pr_watch
+    import agent_flow.spec_publication as publication_module
+
+    _capture_spec_ledger(run_dir, "manual", due="pre-merge")
+    head = _git("rev-parse", "HEAD", cwd=project).stdout.strip()
+    (run_dir / "push-pr.md").write_text(
+        f"remote-oid: {head}\npr-url: https://github.com/example/repo/pull/1\n",
+    )
+    gates = run_dir / "artifacts" / "gate-results.json"
+    gates.parent.mkdir(exist_ok=True)
+    gates.write_text(json.dumps({"produced_by": {"gate_phase": "all", "gate_execution": "local"}}))
+    payload = {
+        "url": "https://github.com/example/repo/pull/1", "state": "OPEN",
+        "headRefOid": head, "reviewDecision": "CHANGES_REQUESTED",
+        "statusCheckRollup": [{"name": "pytest", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+    }
+    monkeypatch.setattr(publication_module, "missing_delivery_evidence", lambda *a, **k: [])
+    monkeypatch.setattr(pr_watch, "_fetch_pr_data", lambda *a, **k: payload)
+    monkeypatch.setattr(pr_watch, "_fetch_review_threads", lambda *a, **k: [])
+    statement = manual_spec_approval_statement(run_dir, "SPEC-1", project_root=project)
+
+    with pytest.raises(ValueError, match=r"expected green publication \(has_comments\)"):
+        record_manual_spec_approval(
+            run_dir, "SPEC-1", statement, project_root=project,
+            publication_observer=observe_spec_publication,
+        )
+    assert read_manual_spec_approvals(run_dir, project_root=project) == set()
+
+    payload["reviewDecision"] = ""
+    record_manual_spec_approval(
+        run_dir, "SPEC-1", statement, project_root=project,
+        publication_observer=observe_spec_publication,
+    )
+    assert read_manual_spec_approvals(run_dir, project_root=project) == {"SPEC-1"}
+    assert missing_spec_item_evidence(
+        project, run_dir, "merge", GATE, publication_observer=observe_spec_publication,
+    ) == ["pre-merge SPEC: expected green publication (pending)"]
+
+
+@pytest.mark.parametrize("case", [
+    "merged", "open", "closed", "wrong-url", "wrong-base", "wrong-branch", "wrong-head",
+    "ci-failed", "ci-pending", "ci-missing", "ci-malformed", "deferred-ci-missing",
+    "unpublished-head", "head-race", "ci-other-pr",
+])
+def test_postmerge_manual_approval_requires_live_matching_publication(
+    project, run_dir, tmp_path, monkeypatch, case,
+):
+    """이미 merge되어 원격 branch가 삭제되어도 같은 게시 HEAD의 사용자 승인을 기록한다.
+
+    merge 자체는 SPEC 승인이 아니다. 승인 전 cleanup은 막히며 승인 HEAD가 바뀌면 다시 막힌다.
+    """
+    import agent_flow.pr_watch as pr_watch
+    from agent_flow.core.commands import SafeCommandResult
+
+    branch = "feat/late-spec-approval"
+    _git("switch", "-c", branch, cwd=project)
+    remote = tmp_path / "remote.git"
+    _git("init", "--bare", str(remote), cwd=tmp_path)
+    _git("remote", "add", "origin", str(remote), cwd=project)
+    _git("push", "origin", "HEAD", cwd=project)
+    head = _git("rev-parse", "HEAD", cwd=project).stdout.strip()
+    url = "https://github.com/example/repo/pull/1"
+    (run_dir / "push-pr.md").write_text(
+        f"remote: origin\nbranch: {branch}\nremote-oid: {head}\npr-url: {url}\npr-base: main\n",
+    )
+    profile = {
+        "pr": {"target_branch": "main"},
+        "gates": [{
+            "id": "test", "command": ["pytest", "-q"], "required": True,
+            "phase": "pre-push", "execution": "ci", "ci_check": "pytest",
+        }],
+    }
+    artifacts = run_dir / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "gate-results.json").write_text(json.dumps({
+        "produced_by": {"gate_phase": "all", "gate_execution": "local"},
+        "deferred_ci_checks": ["other-ci"] if case == "deferred-ci-missing" else [],
+    }))
+    pr = {
+        "url": url, "state": "MERGED", "baseRefName": "main", "headRefName": branch,
+        "headRefOid": head, "reviewDecision": "",
+        "statusCheckRollup": [{"name": "pytest", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+    }
+    if case in {"open", "closed"}:
+        pr["state"] = case.upper()
+    elif case == "wrong-url":
+        pr["url"] = "https://github.com/example/repo/pull/2"
+    elif case == "wrong-base":
+        pr["baseRefName"] = "release/other"
+    elif case == "wrong-branch":
+        pr["headRefName"] = "feat/other"
+    elif case == "wrong-head":
+        pr["headRefOid"] = "b" * 40
+    elif case == "ci-failed":
+        pr["statusCheckRollup"][0]["conclusion"] = "FAILURE"
+    elif case == "ci-pending":
+        pr["statusCheckRollup"][0].update(status="IN_PROGRESS", conclusion="")
+    elif case == "ci-missing":
+        pr["statusCheckRollup"] = []
+    elif case == "ci-malformed":
+        pr["statusCheckRollup"] = {"pytest": "SUCCESS"}
+    monkeypatch.setattr(
+        "agent_flow.core.delivery_evidence.run_safe_command",
+        lambda command, **_: SafeCommandResult(
+            args=tuple(command), returncode=0, stdout=json.dumps(pr), stderr="",
+        ),
+    )
+    monkeypatch.setattr(pr_watch, "_fetch_pr_data", lambda *a, **k: pr)
+    monkeypatch.setattr(pr_watch, "_fetch_review_threads", lambda *a, **k: [])
+    if case == "ci-other-pr":
+        pr["statusCheckRollup"][0]["conclusion"] = "FAILURE"
+        other_pr = dict(
+            pr, url="https://github.com/different/repo/pull/1",
+            statusCheckRollup=[{"name": "pytest", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        )
+        monkeypatch.setattr(pr_watch, "_fetch_pr_data", lambda *a, **k: other_pr)
+    _capture_spec_ledger(run_dir, "manual", due="pre-merge")
+    _git("push", "origin", "--delete", branch, cwd=project)
+    assert _git("ls-remote", "--heads", "origin", f"refs/heads/{branch}", cwd=project).stdout == ""
+    before = missing_spec_item_evidence(
+        project, run_dir, "cleanup", GATE, profile=profile,
+        publication_observer=observe_spec_publication,
+    )
+    assert "SPEC-1: manual (no user approval record)" in before
+    statement = manual_spec_approval_statement(run_dir, "SPEC-1", project_root=project)
+    if case in {"unpublished-head", "head-race"}:
+        def change_head():
+            _git("commit", "--allow-empty", "-m", "feat: unpublished HEAD", cwd=project)
+
+        if case == "unpublished-head":
+            change_head()
+        else:
+            def fetch_then_change_head(*args, **kwargs):
+                change_head()
+                return pr
+
+            monkeypatch.setattr(pr_watch, "_fetch_pr_data", fetch_then_change_head)
+
+    failure = None
+    try:
+        record_manual_spec_approval(
+            run_dir, "SPEC-1", statement,
+            project_root=project, profile=profile, publication_observer=observe_spec_publication,
+        )
+    except ValueError as exc:
+        failure = str(exc)
+    if case != "merged":
+        assert failure is not None, f"{case} accepted an unproved publication"
+        assert read_manual_spec_approvals(run_dir, project_root=project) == set()
+        assert "SPEC-1: manual (no user approval record)" in missing_spec_item_evidence(
+            project, run_dir, "cleanup", GATE, profile=profile,
+            publication_observer=observe_spec_publication,
+        )
+        return
+    assert failure is None, failure
+    assert read_manual_spec_approvals(run_dir, project_root=project) == {"SPEC-1"}
+    assert missing_spec_item_evidence(
+        project, run_dir, "cleanup", GATE, profile=profile,
+        publication_observer=observe_spec_publication,
+    ) == []
+
+    (project / "README.md").write_text("next unpublished HEAD\n", encoding="utf-8")
+    _git("add", "README.md", cwd=project)
+    _git("commit", "-m", "feat: next unpublished HEAD", cwd=project)
+    assert read_manual_spec_approvals(run_dir, project_root=project) == set()
+    assert "SPEC-1: manual (no user approval record)" in missing_spec_item_evidence(
+        project, run_dir, "cleanup", GATE, profile=profile,
+        publication_observer=observe_spec_publication,
+    )
+
+
 @pytest.mark.parametrize("surface", ["status", "spec-markers"])
 def test_publication_checkpoint_uses_selected_merge_markers(project, monkeypatch, capsys, surface):
     import agent_flow.pr_watch as pr_watch
@@ -1023,6 +1202,71 @@ def test_pr_watch_merged_route_proves_the_live_merge_after_the_head_branch_is_de
         advance()
     assert read_meta(run_dir)["phase_index"] == 1
     assert not (run_dir / "cleanup.md").exists()
+
+
+def test_default_merge_approval_entry_still_requires_review_approval(
+    project, run_dir, tmp_path, monkeypatch,
+):
+    """반증: default가 green PR을 곧장 `merge`로 보내면 merge 직전 사용자 승인 pause가 없다.
+    새 `merge-approval` 진입도 merge와 같은 pre-merge gate(GitHub 승인)를 거쳐야 한다."""
+    import agent_flow.pr_watch as pr_watch
+    from agent_flow.core.commands import SafeCommandResult
+    from agent_flow.core.phase_workflow import find_kit_root
+    from agent_flow.core.worktree_isolation import WorktreeIsolationError
+
+    branch = "feat/merge-approval"
+    _git("switch", "-c", branch, cwd=project)
+    (project / "feature.txt").write_text("feature\n", encoding="utf-8")
+    _git("add", "feature.txt", cwd=project)
+    _git("commit", "-m", "feat: merge approval", cwd=project)
+    remote = tmp_path / "remote.git"
+    _git("init", "--bare", str(remote), cwd=tmp_path)
+    _git("remote", "add", "origin", str(remote), cwd=project)
+    _git("push", "origin", "HEAD", cwd=project)
+    head = _git("rev-parse", "HEAD", cwd=project).stdout.strip()
+    url = "https://github.com/example/repo/pull/1"
+    (run_dir / "push-pr.md").write_text(
+        f"remote: origin\nbranch: {branch}\nremote-oid: {head}\npr-url: {url}\npr-base: main\n",
+    )
+    gates = run_dir / "artifacts" / "gate-results.json"
+    gates.parent.mkdir(exist_ok=True)
+    gates.write_text(json.dumps({"produced_by": {"gate_phase": "all", "gate_execution": "local"}}))
+    pr = {
+        "url": url, "state": "OPEN", "baseRefName": "main", "headRefName": branch, "headRefOid": head,
+        "reviewDecision": "",
+        "statusCheckRollup": [{"name": "pytest", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+    }
+    monkeypatch.setattr(
+        "agent_flow.core.delivery_evidence.run_safe_command",
+        lambda command, **_: SafeCommandResult(
+            args=tuple(command), returncode=0, stdout=json.dumps(pr), stderr="",
+        ),
+    )
+    monkeypatch.setattr(pr_watch, "_fetch_pr_data", lambda *a, **k: pr)
+    monkeypatch.setattr(pr_watch, "_fetch_review_threads", lambda *a, **k: [])
+    _capture_spec_ledger(run_dir, "manual", due="pre-merge")
+    definition = load_phase_workflow_definition(find_kit_root(), "default")
+    watch = [phase.id for phase in definition.phases].index("pr-watch")
+    write_meta(run_dir, {
+        "run_id": "merge-approval-entry", "workflow": "default", "task": "",
+        **workflow_pin_metadata(definition, workflow="default"),
+        "phase_index": watch, "current_phase": "pr-watch",
+        "phase_entered_at": "2026-10-09T00:00:00+00:00",
+    })
+    runner = Runner(project, run_dir=run_dir)
+    record_manual_spec_approval(
+        run_dir, "SPEC-1", manual_spec_approval_statement(run_dir, "SPEC-1", project_root=project),
+        project_root=project, profile=runner.profile, publication_observer=observe_spec_publication,
+    )
+    (run_dir / "pr-watch.md").write_text("status: green\n", encoding="utf-8")
+
+    with pytest.raises(WorktreeIsolationError, match=r"expected green publication \(pending\)"):
+        runner._commit_transition(runner._plan_transition(watch, runner.phases[watch]))
+    assert read_meta(run_dir)["current_phase"] == "pr-watch"
+
+    pr["reviewDecision"] = "APPROVED"
+    runner._commit_transition(runner._plan_transition(watch, runner.phases[watch]))
+    assert read_meta(run_dir)["current_phase"] == "merge-approval"
 
 
 @pytest.mark.parametrize("phase_id", ["final-review", "merge"])

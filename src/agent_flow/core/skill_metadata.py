@@ -35,8 +35,12 @@ def split_frontmatter(text: str, *, source: str) -> tuple[str | None, str]:
     raise InvalidSkillFrontmatter(f"{source}: unterminated frontmatter")
 
 
-def reject_duplicate_keys(node: Node, *, source: str) -> None:
-    """Reject duplicate YAML keys in a skill metadata document."""
+def reject_duplicate_keys(node: Node, *, source: str, line_offset: int = 0) -> None:
+    """Reject duplicate keys, non-string keys and recursive aliases in a YAML node tree.
+
+    `line_offset` is the number of file lines before the parsed text, so errors name
+    the line a reader finds in the file.
+    """
     active: set[int] = set()
     visited: set[int] = set()
     pending = [(node, False)]
@@ -54,15 +58,19 @@ def reject_duplicate_keys(node: Node, *, source: str) -> None:
         active.add(identity)
         pending.append((current, True))
         if isinstance(current, MappingNode):
-            seen: set[str] = set()
+            seen: dict[str, int] = {}
             for key, value in current.value:
+                line = key.start_mark.line + 1 + line_offset
                 if not isinstance(key, ScalarNode) or key.tag != "tag:yaml.org,2002:str":
                     raise SkillMetadataError(
-                        f"{source}: YAML mapping keys must be strings; merges are unsupported"
+                        f"{source}:{line}: YAML mapping keys must be strings; merges are unsupported"
                     )
                 if key.value in seen:
-                    raise SkillMetadataError(f"{source}: duplicate key {key.value!r}")
-                seen.add(key.value)
+                    raise SkillMetadataError(
+                        f"{source}:{line}: duplicate key {key.value!r} "
+                        f"(first at line {seen[key.value]})"
+                    )
+                seen[key.value] = line
                 pending.append((value, False))
         elif isinstance(current, SequenceNode):
             pending.extend((child, False) for child in current.value)
@@ -109,7 +117,8 @@ def parse_skill_metadata(
                 if isinstance(key, ScalarNode) and key.value in _NORMATIVE_KEYS
             ],
         )
-        reject_duplicate_keys(normative, source=source)
+        # frontmatter는 파일의 `---` 다음 줄에서 시작한다.
+        reject_duplicate_keys(normative, source=source, line_offset=1)
         parsed = loader.construct_document(document)
     except (yaml.YAMLError, RecursionError) as exc:
         raise InvalidSkillFrontmatter(f"{source}: invalid frontmatter: {exc}") from exc

@@ -117,6 +117,8 @@ def fetch_pr(
     *,
     required_checks: tuple[str, ...] = (),
     require_ready: bool = False,
+    require_review_approval: bool = True,
+    require_merged_ci: bool = False,
     run_dir: Path | None = None,
     record_feedback: bool = True,
 ) -> PRSnapshot:
@@ -127,6 +129,8 @@ def fetch_pr(
     that already hold the lease can observe without deadlocking.
     Query or feedback-storage failures return an explicit error snapshot.
     Publishing waits for the run lease; success is never returned before storage.
+    `require_merged_ci=True` also checks CI on a completed merge, for late SPEC
+    approval; normal PR watching still reports completed merges immediately.
     """
     repository = repo or ""
     try:
@@ -140,6 +144,8 @@ def fetch_pr(
         ):
             raise ValueError("cannot resolve PR repository identity")
         repository = _normalize_repository(f"{url.netloc}/{match.group(1)}")
+        if require_merged_ci and repo is not None and repository != _normalize_repository(repo):
+            raise ValueError("CI observation does not match the requested PR repository")
         if data.get("state") not in {"MERGED", "CLOSED"}:
             data["reviewThreads"] = _fetch_review_threads(number, repository)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -150,7 +156,9 @@ def fetch_pr(
         handled = _read_feedback_state(run_dir, repository, number).get("handled", [])
         snapshot = _classify(
             number, data, required_checks=required_checks, repo=repository,
-            require_ready=require_ready, handled_ids=handled,
+            require_ready=require_ready, require_review_approval=require_review_approval,
+            require_merged_ci=require_merged_ci,
+            handled_ids=handled,
         )
         if run_dir is not None and record_feedback and snapshot.status != "error":
             _record_feedback_observation(run_dir, snapshot)
@@ -232,6 +240,8 @@ def _classify(
     *,
     required_checks: tuple[str, ...] = (),
     require_ready: bool = False,
+    require_review_approval: bool = True,
+    require_merged_ci: bool = False,
     repo: str = "",
     handled_ids: list[str] | tuple[str, ...] = (),
 ) -> PRSnapshot:
@@ -247,7 +257,7 @@ def _classify(
     title = str(data.get("title", ""))
     identity: dict[str, Any] = {"repo": repo, "head": str(data.get("headRefOid", ""))}
 
-    if state == "MERGED":
+    if state == "MERGED" and not require_merged_ci:
         return PRSnapshot(
             number=number, title=title, state=state, status="merged", **identity,
         )
@@ -358,6 +368,12 @@ def _classify(
         }
     identity["ci_checks"] = ci_checks if observed_checks else None
     identity["ci_revisions"] = ci_revisions
+    if state == "MERGED":
+        status = "ci_failed" if failed else "pending" if pending or not rollup else "merged"
+        return PRSnapshot(
+            number=number, title=title, state=state, status=status, **identity,
+            failed_checks=failed, pending_checks=pending,
+        )
 
     reviews = data.get("reviews") or []
     decisions: dict[str, dict[str, Any]] = {}
@@ -433,7 +449,8 @@ def _classify(
             pending_checks=pending,
             issue_comments=issue_comments,
         )
-    if pending or (require_ready and (not rollup or data.get("reviewDecision") != "APPROVED")):
+    awaiting_review = require_review_approval and data.get("reviewDecision") != "APPROVED"
+    if pending or (require_ready and (not rollup or awaiting_review)):
         return PRSnapshot(
             number=number,
             title=title,

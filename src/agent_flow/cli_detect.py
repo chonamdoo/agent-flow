@@ -62,19 +62,26 @@ def detect_host_cli() -> str | None:
     이 함수가 host 판정의 정본이다. `adapters/auto.detect_adapter`는 여기 결과를
     adapter로 옮겨 쓴다. 우선순위를 다른 자리에 한 벌 더 적으면 두 판정이 갈린다.
     """
-    if os.environ.get("OMP_PROFILE"):
-        return "omp"
-    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CLI"):
-        return "claude"
-    if os.environ.get("CODEX_CLI") or os.environ.get("CODEX_HOME"):
-        return "codex"
+    return detect_host_cli_source()[0]
+
+
+def detect_host_cli_source() -> tuple[str | None, str]:
+    """`detect_host_cli`와 같은 판정에 근거를 붙인다: `env:<NAME>`, `path`, `none`."""
+    for host, names in (
+        ("omp", ("OMP_PROFILE",)),
+        ("claude", ("CLAUDECODE", "CLAUDE_CLI")),
+        ("codex", ("CODEX_CLI", "CODEX_HOME")),
+    ):
+        for name in names:
+            if os.environ.get(name):
+                return host, f"env:{name}"
     # OMP/Codex CLI는 호스트 env 힌트를 export하지 않는 버전이 있어 PATH로 보강한다.
     # Codex fallback을 먼저 유지해야 Codex+OMP 둘 다 설치된 기존 환경이 OMP로 오인되지 않는다.
     if shutil.which("codex"):
-        return "codex"
+        return "codex", "path"
     if shutil.which("omp"):
-        return "omp"
-    return None
+        return "omp", "path"
+    return None, "none"
 
 
 def cli_by_name(name: str) -> CliInfo | None:

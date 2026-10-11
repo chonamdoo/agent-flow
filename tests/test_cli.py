@@ -254,6 +254,12 @@ class CliTest(unittest.TestCase):
         self.assertEqual(phases["pr-comment-fix"]["routes"]["default"], "pr-watch")
         self.assertEqual(phases["pr-ci-fix"]["routes"]["default"], "pr-watch")
         self.assertEqual(phases["merge-approval"]["routes"]["default"], "block")
+        self.assertEqual(phases["pr-watch"]["routes"]["green"], "merge-approval")
+        self.assertEqual(phases["pr-watch"]["routes"]["merged"], "handoff")
+        self.assertEqual(
+            phases["merge-approval"]["routes"], {"approve": "merge", "default": "block"}
+        )
+        self.assertIs(phases["merge-approval"].get("pause_after"), True)
 
         default_path = (
             Path(__file__).resolve().parents[1]
@@ -270,7 +276,12 @@ class CliTest(unittest.TestCase):
         self.assertEqual(default_phases["gates"]["routes"]["request-changes"], "fix-loop")
         self.assertEqual(default_phases["fix-loop"]["routes"]["default"], "comment-authoring")
         self.assertEqual(default_phases["comment-authoring"]["routes"]["default"], "final-review")
-        self.assertEqual(default_phases["pr-watch"]["routes"]["green"], "merge")
+        self.assertEqual(default_phases["pr-watch"]["routes"]["green"], "merge-approval")
+        self.assertEqual(default_phases["pr-watch"]["routes"]["merged"], "cleanup")
+        self.assertEqual(
+            default_phases["merge-approval"]["routes"], {"approve": "merge", "default": "block"}
+        )
+        self.assertIs(default_phases["merge-approval"].get("pause_after"), True)
         self.assertEqual(default_phases["pr-watch"]["routes"]["has_comments"], "pr-comment-fix")
         self.assertEqual(default_phases["pr-watch"]["routes"]["ci_failed"], "pr-ci-fix")
         self.assertEqual(default_phases["pr-watch"]["routes"]["pending"], "block")
@@ -2394,8 +2405,8 @@ class CliTest(unittest.TestCase):
                 f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'",
                 f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-host-worktree.sh'}'",
                 f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-skill-read.py'}'",
-                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-command-run.py'}'",
-                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'bind-host-worktree.py'}'",
+                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-command-run.py'}' --host 'claude'",
+                f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'bind-host-worktree.py'}' --host 'claude'",
                 f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'worktree-tripwire.py'}'",
                 f"'{hook_launcher}' '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
             ]
@@ -5115,11 +5126,58 @@ if (codexContext !== undefined) {
             self.assertIn("context_docs_updated: true|not_needed", bad_value.stdout)
 
             artifact.write_text(
+                "## Decision Sources\n"
+                "- scope: task\n"
+                "\n"
+                "## Completion Gate\n"
+                "domain-grill: <complete>\n"
+                "shared_understanding: <reached>\n"
+                "context_docs_checked: <true>\n"
+                "context_docs_updated: <true|not_needed>\n",
+                encoding="utf-8",
+            )
+            copied_placeholders = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=plan.path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(copied_placeholders.returncode, 0, copied_placeholders.stderr)
+            self.assertIn("missing completion markers", copied_placeholders.stdout)
+            self.assertIn("domain-grill: complete", copied_placeholders.stdout)
+
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
+            list_prefixed_gate = (
                 "## Completion Gate\n"
                 "- [x] domain-grill: complete\n"
                 "* shared_understanding: reached\n"
                 "+ context_docs_checked: true\n"
-                "- context_docs_updated: not_needed\n",
+                "- context_docs_updated: not_needed\n"
+            )
+            artifact.write_text(list_prefixed_gate, encoding="utf-8")
+            no_sources = subprocess.run(
+                (node, cli, "run", "status"),
+                cwd=plan.path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(no_sources.returncode, 0, no_sources.stderr)
+            no_sources_payload = json.loads(next(
+                line.removeprefix("status_json: ")
+                for line in no_sources.stdout.splitlines()
+                if line.startswith("status_json: ")
+            ))
+            self.assertEqual(
+                no_sources_payload.get("missing_completion_markers"), ["## Decision Sources"],
+            )
+            self.assertEqual(_read_node_phase(run_dir)["current_phase"], "domain-grill")
+
+            artifact.write_text(
+                "## Decision Sources\n"
+                "- scope: task\n"
+                "\n" + list_prefixed_gate,
                 encoding="utf-8",
             )
             status = subprocess.run(
@@ -5134,6 +5192,42 @@ if (codexContext !== undefined) {
             self.assertIn("reason: phase_artifact_written_continue_required", status.stdout)
             self.assertIn("status_json:", status.stdout)
 
+            def last_status_payload(output: str) -> dict:
+                return json.loads([
+                    line.removeprefix("status_json: ")
+                    for line in output.splitlines()
+                    if line.startswith("status_json: ")
+                ][-1])
+
+            paused = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=plan.path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(paused.returncode, 0, paused.stderr)
+            paused_payload = last_status_payload(paused.stdout)
+            self.assertEqual(paused_payload["reason"], "phase_approval_required")
+            self.assertNotIn("--approve", shlex.split(paused_payload["next_command"]))
+            approval = shlex.split(paused_payload["approval_command"])
+            self.assertEqual(approval[-2], "--approve")
+            self.assertEqual(_read_node_phase(run_dir)["current_phase"], "domain-grill")
+
+            unapproved = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=plan.path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(unapproved.returncode, 0, unapproved.stderr)
+            self.assertEqual(last_status_payload(unapproved.stdout)["reason"], "phase_approval_required")
+            self.assertEqual(_read_node_phase(run_dir)["current_phase"], "domain-grill")
+
+            from agent_flow.artifact import approve_phase_artifact
+
+            approve_phase_artifact(run_dir, token=approval[-1])
             advanced = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -5143,7 +5237,7 @@ if (codexContext !== undefined) {
             )
             self.assertEqual(advanced.returncode, 0, advanced.stderr)
             self.assertIn("current_phase: product-brief", advanced.stdout)
-            state = _read_node_phase(_node_phase_run_dir(project_root, worktree=plan.name))
+            state = _read_node_phase(run_dir)
             self.assertEqual(state["current_phase"], "product-brief")
 
     def test_node_heading_required_markers_ignore_fenced_examples(self) -> None:
@@ -8127,6 +8221,7 @@ if (codexContext !== undefined) {
             commands = [command.command for command in captured]
             architecture_command = (
                 sys.executable,
+                "-P",
                 "-m",
                 "agent_flow.core.architecture_lint",
                 "--profile",
@@ -8135,8 +8230,8 @@ if (codexContext !== undefined) {
                 str(root.resolve()),
             )
             self.assertIn(architecture_command, commands)
-            self.assertNotIn((sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "android"), commands)
-            self.assertNotIn((sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "react-native"), commands)
+            self.assertNotIn((sys.executable, "-P", "-m", "agent_flow.core.architecture_lint", "--profile", "android"), commands)
+            self.assertNotIn((sys.executable, "-P", "-m", "agent_flow.core.architecture_lint", "--profile", "react-native"), commands)
             gate_ids = [command.gate_id for command in captured]
             self.assertLess(gate_ids.index("android:build"), gate_ids.index("architecture-lint"))
             self.assertLess(gate_ids.index("react-native:android-build"), gate_ids.index("react-native:lint"))
@@ -8224,6 +8319,7 @@ if (codexContext !== undefined) {
             self.assertIn(
                 (
                     sys.executable,
+                    "-P",
                     "-m",
                     "agent_flow.core.architecture_lint",
                     "--profile",
@@ -8578,6 +8674,111 @@ if (codexContext !== undefined) {
             )
 
             self.assertEqual(runner._next_index(0, phase)[:2], (0, True))
+
+    def test_rate_limit_classifier_requires_diagnostic_context(self) -> None:
+        from agent_flow.multi_review import (
+            ResolvedLaunch,
+            _render_angle_result,
+            reviewer_result_error,
+        )
+        from agent_flow.subprocess_pool import SubprocessResult
+
+        now = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
+        cases = [
+            ("codex", "429 too many requests; rate limit resets in 5 minutes", 5),
+            ("codex", "HTTP 429 Too Many Requests", 60),
+            ("codex", "HTTP 429", 60),
+            ("codex", "HTTP/1.1 429", 60),
+            ("codex", "status code: 429", 60),
+            ("codex", "last status: 429 Too Many Requests", 60),
+            (
+                "claude",
+                'API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}',
+                60,
+            ),
+            ("claude", "API Error: 429", 60),
+            ("claude", "You've hit your limit. Usage limit resets in 5 minutes.", 5),
+            ("claude", "Usage limit", 60),
+            ("claude", "Limit reached", 60),
+            ("codex", 'Traceback ...\n  File "x.py", line 429, in main\nValueError: bad', None),
+            ("codex", "ENOENT: /tmp/case-4291/missing.py", None),
+            ("codex", "/tmp/error/429/failed.py", None),
+            ("codex", "unexpected status 429 of 500 cases", None),
+            ("claude", "Traceback: rate_limit_fixture failed", None),
+            ("codex", "429", None),
+            ("codex", "HTTP 4291", None),
+            ("claude", "API Error: 4291", None),
+        ]
+        with mock.patch("agent_flow.multi_review.datetime", wraps=datetime) as clock:
+            clock.now.return_value = now
+            for provider, diagnostic, retry_minutes in cases:
+                with self.subTest(provider=provider, diagnostic=diagnostic):
+                    result = SubprocessResult(
+                        job_id=f"{provider}-generalist",
+                        returncode=1,
+                        stderr=diagnostic,
+                    )
+                    artifact = _render_angle_result(
+                        result,
+                        launch=ResolvedLaunch(provider, None, None, (), "test"),
+                    )
+                    if retry_minutes is None:
+                        self.assertEqual(reviewer_result_error(result), "exit 1")
+                        self.assertIn("- status: ERROR", artifact.splitlines())
+                        self.assertNotIn("reason: reviewer_rate_limited", artifact.splitlines())
+                        self.assertNotIn("retry_after:", artifact)
+                    else:
+                        retry_after = (now + timedelta(minutes=retry_minutes)).isoformat()
+                        self.assertEqual(
+                            reviewer_result_error(result),
+                            f"rate limited until {retry_after}",
+                        )
+                        self.assertIn("status: blocked", artifact.splitlines())
+                        self.assertIn("reason: reviewer_rate_limited", artifact.splitlines())
+                        self.assertIn(f"retry_after: {retry_after}", artifact.splitlines())
+
+    def test_rate_limit_classifier_preserves_provenance_exception(self) -> None:
+        from agent_flow.multi_review import (
+            ResolvedLaunch,
+            _render_angle_result,
+            reviewer_result_error,
+        )
+        from agent_flow.subprocess_pool import SubprocessResult
+
+        now = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
+        with mock.patch("agent_flow.multi_review.datetime", wraps=datetime) as clock:
+            clock.now.return_value = now
+            for provider in ("claude", "codex"):
+                for returncode, provenance in ((0, True), (0, False), (1, True)):
+                    with self.subTest(
+                        provider=provider, returncode=returncode, provenance=provenance,
+                    ):
+                        output = (
+                            "HTTP 429 Too Many Requests is handled correctly.\n"
+                            "verdict: approve\n"
+                        )
+                        if provenance:
+                            output = "reviewer-source: sub-agent\n" + output
+                        result = SubprocessResult(
+                            job_id=f"{provider}-generalist",
+                            returncode=returncode,
+                            stdout=output,
+                        )
+                        artifact = _render_angle_result(
+                            result,
+                            launch=ResolvedLaunch(provider, None, None, (), "test"),
+                        )
+                        if returncode == 0 and provenance:
+                            self.assertIsNone(reviewer_result_error(result))
+                            self.assertIn("- status: OK", artifact.splitlines())
+                            self.assertNotIn("retry_after:", artifact)
+                        else:
+                            self.assertEqual(
+                                reviewer_result_error(result),
+                                "rate limited until 2026-10-10T13:00:00+00:00",
+                            )
+                            self.assertIn("status: blocked", artifact.splitlines())
+                            self.assertNotIn("## Reviewer verdict", artifact)
 
     def test_provider_rate_limits_render_retry_status(self) -> None:
         from agent_flow.multi_review import (
@@ -12453,6 +12654,8 @@ def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
     if phase == "domain-grill":
         return (
             content
+            + "## Decision Sources\n"
+            + "- scope: task\n\n"
             + "## Completion Gate\n"
             + "domain-grill: complete\n"
             + "shared_understanding: reached\n"

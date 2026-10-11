@@ -38,7 +38,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from agent_flow.core.worktree_isolation import leader_root_for
+from agent_flow.core.atomic_io import read_bounded_regular_file
+from agent_flow.core.worktree_isolation import (
+    git_common_dir,
+    git_superproject_root,
+    git_toplevel,
+    real_path,
+)
 
 # install이 심는 정확히 그 스크립트들. JS 쪽 등록 지점 3곳
 # (`bin/agent-flow-install.mjs`, `bin/agent-flow-kit.mjs`,
@@ -115,6 +121,10 @@ JSON_REGISTRATION_FILES = (
     Path(".codex") / "hooks.json",
 )
 OMP_REGISTRATION_FILE = Path(".omp") / "extensions" / "agent-flow-hooks.ts"
+# 등록 파일의 첫 경로 요소 → host. `.Codex`와 `.codex`는 같은 host다.
+_REGISTRATION_HOSTS = {".claude": "claude", ".codex": "codex", ".omp": "omp"}
+# 등록 파일은 사용자 설정과 함께 있어도 수 KB 수준이다. 이보다 크면 읽지 못한 것으로 본다.
+_REGISTRATION_MAX_BYTES = 8 * 1024 * 1024
 
 # 관리 디렉터리 안에서 hook이 아닌 것으로 인정하는 이름. `--no-hooks`가 남기는
 # 은퇴 사본과 실행으로 생기는 bytecode다.
@@ -157,27 +167,90 @@ class _Surface:
 
 
 def find_install_root(start) -> Path | None:
-    """이 checkout이 딛고 있는 설치본. leader를 먼저 묻고, 그다음 조상 탐색이다.
+    """이 경로를 지탱하는 설치본. OMP extension의 `resolveInstallRoot`와 같은 규칙이어야
+    run 시작 검사가 증명한 hook과 OMP가 실행하는 hook이 같은 설치본의 것이다.
 
-    순서가 중요하다. 조상 탐색을 먼저 하면 (1) `$HOME/.agent-flow/kit.json`이 있는
-    사용자에게는 홈이 모든 저장소의 설치본을 가려 버리고, (2) 워커가 자기 checkout에
-    `.agent-flow/kit.json`을 쓰면 그 파일이 자기 무결성 기준선이 된다. leader를 먼저
-    확정하면 두 경로 모두 닫힌다 — leader의 git dir은 워커가 쓸 수 없다.
+    1. linked worktree면 leader 설치본만 고른다. 워커가 자기 checkout에 쓴
+       `.agent-flow/kit.json`이 자기 무결성 기준선이 되지 않는다. leader의 git dir은
+       워커가 쓸 수 없다. submodule은 자기 common dir로 checkout 종류를 알 수 없어
+       가장 바깥 superproject checkout으로 판정한다.
+    2. 조상 탐색은 git common root에서 멈춘다. 저장소 밖이면 HOME에서, HOME 밖이면
+       시작점에서 멈춘다. HOME 자신은 후보가 아니다. `$HOME/.agent-flow/kit.json`
+       하나가 그 아래 모든 프로젝트의 설치본이 되지 않게 한다.
+    3. 그다음 git common root를 본다. HOME이 아니면 같은 저장소의 설치본이라 남의 것이 아니다.
+    4. 그래도 없으면 시작점 자신의 설치본만 인정한다. HOME에서 바로 시작한 경우다.
+
+    HOME을 정할 수 없으면 `None`이다. OMP extension은 그 환경에서 로드되지 않아 어느
+    설치본의 hook도 실행하지 않는다.
     """
     if start is None:
         return None
-    current = Path(start)
-    leader = leader_root_for(current)
-    if leader is not None and _is_file(leader / KIT_JSON_RELATIVE):
-        return leader
-    for candidate in [current, *current.parents]:
-        if _is_file(candidate / KIT_JSON_RELATIVE):
+    home = _real_home()
+    if home is None:
+        return None
+    current = real_path(start)
+    anchor = current
+    while (superproject := git_superproject_root(anchor)) is not None:
+        anchor = superproject
+    common = git_common_dir(anchor)
+    git_root = common.parent if common is not None else None
+    # common dir이 `.git`이 아니면 그 부모를 leader checkout으로 볼 수 없다.
+    linked_candidate = common is not None and common.name == ".git"
+    checkout_root = git_toplevel(anchor) if linked_candidate else None
+    if git_root is not None and checkout_root is not None and not _same_directory(git_root, checkout_root):
+        return git_root if not _same_directory(git_root, home) and _has_install(git_root) else None
+    if _is_directory_ancestor(git_root, current):
+        boundary = git_root
+    elif _is_directory_ancestor(home, current):
+        boundary = home
+    else:
+        boundary = current
+    for candidate in (current, *current.parents):
+        if not _same_directory(candidate, home) and _has_install(candidate):
             return candidate
-    return None
+        if _same_directory(candidate, boundary):
+            break
+    if git_root is not None and not _same_directory(git_root, home) and _has_install(git_root):
+        return git_root
+    return current if _has_install(current) else None
+
+
+def _same_directory(left: Path | None, right: Path | None) -> bool:
+    if left is None or right is None:
+        return False
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return left == right
+
+
+def _is_directory_ancestor(ancestor: Path | None, descendant: Path) -> bool:
+    return ancestor is not None and any(
+        _same_directory(ancestor, candidate) for candidate in (descendant, *descendant.parents)
+    )
+
+
+def _has_install(root: Path) -> bool:
+    return _is_file(root / KIT_JSON_RELATIVE)
+
+
+def _real_home() -> Path | None:
+    # HOME 환경변수도 passwd 항목도 없으면 `Path.home()`이 RuntimeError를 낸다.
+    try:
+        return real_path(Path.home())
+    except RuntimeError:
+        return None
 
 
 def assert_managed_hooks_registered(*roots) -> tuple[HookIntegrityReport, ...]:
     """런 시작 게이트. 강제 hook을 증명하지 못하면 시작 전에 멈춘다."""
+    if _real_home() is None:
+        raise HookIntegrityError(
+            "the home directory could not be determined: HOME is unset and the "
+            "current user has no passwd entry. The OMP hook extension cannot load "
+            "without it, so the enforcement hooks this run depends on cannot be "
+            "proven active. Nothing was changed. Set HOME before starting a run."
+        )
     reports = verify_managed_hooks(*roots)
     if not reports:
         raise HookIntegrityError(
@@ -253,6 +326,59 @@ def _verify_root(root: Path) -> HookIntegrityReport:
     )
 
 
+@dataclass(frozen=True)
+class HookSurfaceState:
+    name: str
+    present: bool
+    readable: bool
+    violations: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class HookInstallDescription:
+    """status 진단용 서술. run 허용은 `assert_managed_hooks_registered`만 정한다."""
+
+    root: Path
+    enabled: bool | None  # kit.json `hooks`. 기록이 없으면 None
+    install_violations: tuple[str, ...]
+    surfaces: tuple[HookSurfaceState, ...]
+
+
+def describe_managed_hooks(install_root: Path, surface_root: Path) -> HookInstallDescription:
+    """설치 무결성과 등록 파일별 상태를 따로 돌려준다.
+
+    worktree에는 leader 등록 파일의 사본이 깔린다(`provision_host_hook_registrations`).
+    host 세션은 그 checkout의 사본을 읽으므로 등록은 `surface_root`에서, 명령이
+    가리키는 관리 경로는 `install_root` 기준으로 판정한다.
+    """
+    kit = _read_kit_json(install_root)
+    recorded = kit.get("hooks")
+    enabled = recorded if isinstance(recorded, bool) else None
+    install: list[str] = list(_unapproved_scripts_on_disk(install_root))
+    if enabled:
+        install.extend(_missing_scripts_on_disk(install_root))
+        install.extend(_managed_hook_digest_violations(install_root, kit))
+        install.extend(_project_launcher_violations(install_root, kit))
+        install.extend(_hook_launcher_violations(install_root, kit))
+    states: list[HookSurfaceState] = []
+    for surface in _read_surfaces(install_root, surface_root=surface_root):
+        single = (surface,)
+        violations: list[str] = []
+        if surface.present and not surface.readable:
+            violations.append(f"cannot read the hook registration file: {surface.name}")
+        if enabled:
+            violations.extend(_unregistered_scripts(single))
+            violations.extend(_misplaced_managed_hooks(single))
+        else:
+            violations.extend(_unexpected_registrations(single))
+        violations.extend(_unapproved_registrations(single))
+        violations.extend(_malformed_registrations(single))
+        states.append(
+            HookSurfaceState(surface.name, surface.present, surface.readable, tuple(violations))
+        )
+    return HookInstallDescription(install_root, enabled, tuple(install), tuple(states))
+
+
 def _unapproved_scripts_on_disk(root: Path) -> Iterator[str]:
     """관리 디렉터리에 관리 대상이 아닌 실행 파일이 있는가.
 
@@ -282,10 +408,18 @@ def _unapproved_scripts_on_disk(root: Path) -> Iterator[str]:
 
 
 def _missing_registrations(root: Path, surfaces: tuple[_Surface, ...]) -> Iterator[str]:
+    yield from _missing_scripts_on_disk(root)
+    yield from _unregistered_scripts(surfaces)
+
+
+def _missing_scripts_on_disk(root: Path) -> Iterator[str]:
     hook_dir = root / HOOK_DIR_RELATIVE
     for script in MANAGED_HOOK_SCRIPTS:
         if not _is_file(hook_dir / script):
             yield f"managed hook script is missing from disk: {script}"
+
+
+def _unregistered_scripts(surfaces: tuple[_Surface, ...]) -> Iterator[str]:
     for surface in surfaces:
         if not surface.present:
             yield f"{surface.name} is missing, so no managed hook is registered there"
@@ -579,25 +713,29 @@ def _malformed_registrations(surfaces: tuple[_Surface, ...]) -> Iterator[str]:
             )
 
 
-def _read_surfaces(root: Path) -> Iterator[_Surface]:
+def _read_surfaces(root: Path, *, surface_root: Path | None = None) -> Iterator[_Surface]:
     """install이 쓰는 등록 파일마다 `(event, script)` 목록을 만든다.
 
     존재하지 않는 파일도 레코드를 남긴다. 없는 것을 건너뛰면 등록 파일을
-    통째로 지우는 것이 가장 싼 우회가 된다.
+    통째로 지우는 것이 가장 싼 우회가 된다. 등록 파일은 `surface_root`(기본은
+    `root`)에서 읽고, 명령이 가리키는 관리 경로는 `root` 기준으로 판정한다.
     """
+    files_root = root if surface_root is None else surface_root
     for relative in JSON_REGISTRATION_FILES:
-        path = root / relative
+        path = files_root / relative
         if not _is_file(path):
             yield _Surface(str(relative), present=False, readable=False, entries=())
             continue
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(_read_registration_text(path))
         except (OSError, ValueError):
             # 읽지 못하는 등록 파일을 "등록 없음"으로 접으면, 파일을 깨뜨리는
             # 것만으로 검증이 사라진다. 읽기 실패 자체를 위반으로 든다.
             yield _Surface(str(relative), present=True, readable=False, entries=())
             continue
-        entries, malformed = _json_registrations(root, payload)
+        entries, malformed = _json_registrations(
+            root, payload, host=registration_host(relative)
+        )
         yield _Surface(
             str(relative),
             present=True,
@@ -605,13 +743,13 @@ def _read_surfaces(root: Path) -> Iterator[_Surface]:
             entries=entries,
             malformed=malformed,
         )
-    omp = root / OMP_REGISTRATION_FILE
+    omp = files_root / OMP_REGISTRATION_FILE
     if not _is_file(omp):
         yield _Surface(str(OMP_REGISTRATION_FILE), present=False, readable=False, entries=())
         return
     try:
-        text = omp.read_text(encoding="utf-8")
-    except OSError:
+        text = _read_registration_text(omp)
+    except (OSError, ValueError):
         yield _Surface(str(OMP_REGISTRATION_FILE), present=True, readable=False, entries=())
         return
     # OMP 확장은 kit이 통째로 생성하는 소스다. 이벤트 자리는 소스 안의
@@ -625,8 +763,26 @@ def _read_surfaces(root: Path) -> Iterator[_Surface]:
     )
 
 
+def _read_registration_text(path: Path) -> str:
+    """등록 파일 본문. 일반 파일이 아니면 OSError다.
+
+    status는 매번 checkout의 등록 사본을 읽고, 그 사본은 agent가 바꿀 수 있다. `_is_file`로
+    확인한 뒤 이름으로 다시 열면 그 사이에 FIFO로 바뀐 파일에서 멈춘다. 비차단으로 연
+    descriptor의 종류를 본다. host는 등록 파일 symlink를 따라가므로 여기서도 따라간다.
+    """
+    raw, _ = read_bounded_regular_file(
+        path, max_bytes=_REGISTRATION_MAX_BYTES, follow_symlinks=True
+    )
+    return raw.decode("utf-8")
+
+
+def registration_host(relative: Path | str) -> str | None:
+    """등록 파일이 속한 host. 기록 hook은 이 host 이름만 `--host`로 받는다."""
+    return _REGISTRATION_HOSTS.get(Path(relative).parts[0].lower())
+
+
 def _json_registrations(
-    root: Path, payload: object
+    root: Path, payload: object, *, host: str | None
 ) -> tuple[tuple[tuple[str, str, str], ...], tuple[str, ...]]:
     hooks = payload.get("hooks") if isinstance(payload, dict) else None
     if not isinstance(hooks, dict):
@@ -639,7 +795,7 @@ def _json_registrations(
         for block in blocks:
             matcher = block.get("matcher", "") if isinstance(block, dict) else ""
             for command in _entry_commands(block):
-                script = managed_path_hook_name(root, command)
+                script = managed_path_hook_name(root, command, host=host)
                 if script is not None:
                     entries.append((str(event), str(matcher or ""), script))
                 elif mentions_managed_hook_dir(root, command):
@@ -658,22 +814,23 @@ def _entry_commands(entry: object) -> Iterator[str]:
             yield hook["command"]
 
 
-def managed_path_hook_name(root: Path, command: str) -> str | None:
+def managed_path_hook_name(root: Path, command: str, *, host: str | None) -> str | None:
     """Return the script name only for one exact trusted hook invocation.
 
     관리 hook은 오직 managed hook launcher로만 실행된다:
     `<root>/.agent-flow/bin/agent-flow-hook <root>/.agent-flow/scripts/hooks/<name>`.
     하드코딩 인터프리터(`/usr/bin/python3`·`/bin/bash`)는 더는 인정하지 않는다 —
     그 경로가 없거나 host가 직접 execve하지 못하는 자리에서 hook exec가 EPERM으로
-    죽던 자리다.
+    죽던 자리다. 기록 hook의 `--host` 값은 등록 파일의 `host`와 같아야 한다. 다른
+    host 이름을 박은 등록은 그 host의 실행 증거를 만든다.
     """
     try:
         tokens = shlex.split(command, posix=True)
     except ValueError:
         return None
-    if len(tokens) != 2:
+    if len(tokens) not in (2, 4):
         return None
-    launcher, candidate = tokens
+    launcher, candidate = tokens[:2]
     try:
         launcher_real = os.path.realpath(launcher.replace("\\", "/"))
         expected_launcher = os.path.realpath(Path(root) / HOOK_LAUNCHER_RELATIVE)
@@ -686,6 +843,13 @@ def managed_path_hook_name(root: Path, command: str) -> str | None:
     if (
         not (name.endswith(".py") or name.endswith(".sh"))
         or not _SAFE_HOOK_NAME.fullmatch(name)
+    ):
+        return None
+    if len(tokens) == 4 and (
+        name not in ("record-command-run.py", "bind-host-worktree.py")
+        or tokens[2] != "--host"
+        or host is None
+        or tokens[3] != host
     ):
         return None
     try:

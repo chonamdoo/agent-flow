@@ -30,7 +30,9 @@ from agent_flow.core.hook_integrity import (
     RUNTIME_CLI_RELATIVE,
     HookIntegrityError,
     assert_managed_hooks_registered,
+    describe_managed_hooks,
     find_install_root,
+    managed_path_hook_name,
     verify_managed_hooks,
 )
 
@@ -44,6 +46,56 @@ def _hook_command(root: Path, name: str) -> str:
     launcher = shlex.quote(str(root / HOOK_LAUNCHER_RELATIVE))
     path = shlex.quote(str(root / HOOK_DIR / name))
     return f"{launcher} {path}"
+
+
+def test_recorder_host_arguments_preserve_exact_invocation(tmp_path: Path):
+    for script in ("record-command-run.py", "bind-host-worktree.py"):
+        command = _hook_command(tmp_path, script)
+        for host in ("claude", "codex", "omp"):
+            assert managed_path_hook_name(
+                tmp_path, f"{command} --host {host}", host=host
+            ) == script
+            assert managed_path_hook_name(tmp_path, command, host=host) == script
+        for suffix in ("--host unknown", "--host", "--host omp extra", "--host omp ; true"):
+            assert managed_path_hook_name(tmp_path, f"{command} {suffix}", host="omp") is None
+        assert managed_path_hook_name(tmp_path, f"{command} --host omp", host=None) is None
+    guard = _hook_command(tmp_path, "guard-host-worktree.sh")
+    assert managed_path_hook_name(tmp_path, f"{guard} --host omp", host="omp") is None
+
+
+def test_recorder_registered_under_another_host_is_not_a_managed_hook(tmp_path: Path):
+    """반증: `.claude/settings.json`이 `--host codex`나 `--host omp`로 기록 hook을 부르면
+    Claude 실행이 다른 host의 실행 증거로 남는데도 Claude 등록이 정상으로 읽힌다."""
+    def install(root: Path, claude_host: str) -> tuple[str, ...]:
+        _install(root)
+        for relative, host in (
+            (CLAUDE_SETTINGS, claude_host),
+            (CODEX_SETTINGS, "codex"),
+            (Path(".codex") / "hooks.json", "codex"),
+        ):
+            path = root / relative
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            for blocks in payload["hooks"].values():
+                for block in blocks:
+                    for hook in block["hooks"]:
+                        # 대소문자를 구분하지 않는 파일 시스템에서는 `.Codex`와 `.codex`가 같은 파일이다.
+                        if "--host" not in hook["command"] and any(
+                            name in hook["command"]
+                            for name in ("record-command-run.py", "bind-host-worktree.py")
+                        ):
+                            hook["command"] += f" --host {host}"
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return _violations(root)
+
+    assert install(tmp_path / "matched", "claude") == ()
+    for wrong_host in ("codex", "omp"):
+        violations = install(tmp_path / f"mismatched-{wrong_host}", wrong_host)
+        for script in ("record-command-run.py", "bind-host-worktree.py"):
+            assert any(
+                str(CLAUDE_SETTINGS) in v and f"does not register {script}" in v
+                for v in violations
+            ), violations
+        assert not any(".codex" in v.lower() for v in violations), violations
 
 
 def _host_settings(root: Path) -> dict:
@@ -183,6 +235,18 @@ def test_corrupt_registration_file_is_detected(tmp_path):
     _install(tmp_path)
     (tmp_path / CLAUDE_SETTINGS).write_text("{ not json", encoding="utf-8")
     assert any("cannot read the hook registration file" in v for v in _violations(tmp_path))
+
+
+def test_undecodable_omp_registration_is_detected(tmp_path):
+    """반증: OMP 등록 파일을 UTF-8이 아닌 바이트로 바꾸면 검사가 예외로 끝난다. 읽지
+    못하는 등록 파일은 JSON 쪽처럼 위반으로 들어야 게이트와 status가 같은 답을 낸다.
+    """
+    _install(tmp_path)
+    (tmp_path / OMP_EXTENSION).write_bytes(b"\xff\xfe runHook")
+    assert any(
+        "cannot read the hook registration file" in v and str(OMP_EXTENSION) in v
+        for v in _violations(tmp_path)
+    )
 
 
 def test_missing_hook_script_on_disk_is_detected(tmp_path):
@@ -555,6 +619,83 @@ def test_missing_launcher_interpreter_is_detected(tmp_path):
     )
 
 
+def _drop_skill_read_registration(root: Path) -> None:
+    def drop(payload):
+        payload["hooks"]["PostToolUse"] = [
+            entry
+            for entry in payload["hooks"]["PostToolUse"]
+            if not any("record-skill-read.py" in h["command"] for h in entry["hooks"])
+        ]
+
+    _rewrite_claude(root, drop)
+
+
+def _move_branch_guard_off_pretooluse(root: Path) -> None:
+    def move(payload):
+        blocks = payload["hooks"]["PreToolUse"]
+        moved = [b for b in blocks if any("guard-protected-branch.sh" in h["command"] for h in b["hooks"])]
+        payload["hooks"]["PreToolUse"] = [b for b in blocks if b not in moved]
+        payload["hooks"]["PostToolUse"].extend(moved)
+
+    _rewrite_claude(root, move)
+
+
+def _register_planted_hook(root: Path) -> None:
+    def add(payload):
+        payload["hooks"]["PreToolUse"].append(
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": _hook_command(root, "evil.sh")}]}
+        )
+
+    _rewrite_claude(root, add)
+
+
+def _plant_executable(root: Path) -> None:
+    evil = root / HOOK_DIR / "evil.sh"
+    evil.write_text("#!/bin/sh\n", encoding="utf-8")
+    evil.chmod(0o755)
+
+
+def _reregister_disabled_hooks(root: Path) -> None:
+    (root / CLAUDE_SETTINGS).write_text(json.dumps(_host_settings(root)), encoding="utf-8")
+
+
+# run 게이트(`_verify_root`)가 보는 검사 종류마다 하나씩.
+_GATE_DRIFT_CASES = {
+    "clean": lambda root: None,
+    "registration-dropped": _drop_skill_read_registration,
+    "registration-file-deleted": lambda root: (root / CLAUDE_SETTINGS).unlink(),
+    "registration-file-corrupt": lambda root: (root / CLAUDE_SETTINGS).write_text("{", encoding="utf-8"),
+    "script-missing": lambda root: (root / HOOK_DIR / "record-skill-read.py").unlink(),
+    "script-modified": lambda root: (root / HOOK_DIR / "guard-host-worktree.sh").write_text(
+        "#!/bin/sh\nexit 1\n", encoding="utf-8"
+    ),
+    "script-planted": _plant_executable,
+    "planted-hook-registered": _register_planted_hook,
+    "enforcement-hook-moved": _move_branch_guard_off_pretooluse,
+    "project-launcher-missing": lambda root: (root / PROJECT_LAUNCHER_RELATIVE).unlink(),
+    "hook-launcher-missing": lambda root: (root / HOOK_LAUNCHER_RELATIVE).unlink(),
+    "disabled-but-registered": _reregister_disabled_hooks,
+}
+
+
+@pytest.mark.parametrize("case", sorted(_GATE_DRIFT_CASES))
+def test_status_description_reports_the_violations_the_run_gate_reports(tmp_path, case):
+    """반증: status 진단은 게이트와 같은 검사를 다른 자리에서 조립한다. 검사가 한쪽에만
+    추가되면 게이트가 run을 거부하는 설치본을 카드는 `install: ok`로 보여 주거나 그 반대가 된다.
+    """
+    _install(tmp_path, hooks=case != "disabled-but-registered")
+    _GATE_DRIFT_CASES[case](tmp_path)
+
+    description = describe_managed_hooks(tmp_path, tmp_path)
+    described = [
+        *description.install_violations,
+        *(violation for surface in description.surfaces for violation in surface.violations),
+    ]
+
+    assert sorted(described) == sorted(_violations(tmp_path))
+    assert bool(described) == (case != "clean")
+
+
 def test_assert_passes_for_a_clean_install(tmp_path):
     _install(tmp_path)
     reports = assert_managed_hooks_registered(tmp_path)
@@ -574,11 +715,63 @@ def test_run_gate_rejects_hooks_disabled_install(tmp_path):
         assert_managed_hooks_registered(tmp_path)
 
 
-def test_install_root_resolves_from_a_nested_worktree(tmp_path):
-    _install(tmp_path)
-    nested = tmp_path / ".agent-flow" / "worktrees" / "feat-x" / "src"
-    nested.mkdir(parents=True)
-    assert find_install_root(nested) == tmp_path
+def test_run_gate_rejects_a_home_only_install(tmp_path, monkeypatch):
+    """반증: 조상 탐색이 HOME까지 올라가면 `~/.agent-flow/kit.json` 하나가 HOME 아래
+    모든 저장소의 설치본이 되고, 이 저장소의 hook 등록은 한 번도 확인되지 않는다.
+    """
+    home = tmp_path / "home"
+    _install(home)
+    repo = home / "projects" / "repo"
+    _repo(repo)
+    monkeypatch.setenv("HOME", str(home))
+
+    with pytest.raises(HookIntegrityError, match="installation could not be found"):
+        assert_managed_hooks_registered(repo)
+
+
+def test_install_root_resolves_from_a_nested_worktree(tmp_path, monkeypatch):
+    """#100 P0 guard. 설치본 아래 하위 폴더(legacy worktree 모양)에서 설치본을 찾는다.
+
+    #314부터 탐색은 git common root에서 멈춘다. git 밖이면 HOME에서, HOME 밖이면
+    시작점에서 멈춘다(OMP `resolveInstallRoot`와 같은 규칙). 그래서 같은 모양이라도 git
+    저장소 안이면 저장소 설치본을 찾고, git 밖이면서 HOME 밖이면 찾지 않는다. 처음
+    이 guard는 git 밖 배치에서도 조상 설치본을 찾는다고 단정했다.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    nested = Path(".agent-flow") / "worktrees" / "feat-x" / "src"
+
+    repo = tmp_path / "repo"
+    _repo(repo)
+    _install(repo)
+    (repo / nested).mkdir(parents=True)
+    assert find_install_root(repo / nested) == repo
+
+    loose = tmp_path / "loose"
+    _install(loose)
+    (loose / nested).mkdir(parents=True)
+    assert find_install_root(loose / nested) is None
+
+
+def test_run_gate_refuses_when_the_home_directory_cannot_be_determined(tmp_path, monkeypatch):
+    """반증: HOME도 passwd 항목도 없으면 OMP extension은 `os.homedir()`에서 로드되지
+    못한다. 이때 run 시작 검사가 설치본을 찾아 통과하면 OMP 보호 hook 없이 run이 시작된다.
+    """
+    import pwd
+
+    repo = tmp_path / "repo"
+    _repo(repo)
+    _install(repo)
+    assert [report.ok for report in assert_managed_hooks_registered(repo)] == [True]
+
+    def no_passwd_entry(uid):
+        raise KeyError(uid)
+
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.setattr(pwd, "getpwuid", no_passwd_entry)
+
+    assert find_install_root(repo) is None
+    with pytest.raises(HookIntegrityError, match="home directory could not be determined"):
+        assert_managed_hooks_registered(repo)
 
 
 def _git(*args: str, cwd: Path) -> None:

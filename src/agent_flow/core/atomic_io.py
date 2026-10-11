@@ -63,15 +63,21 @@ def read_bounded_regular_file(
     path: Path,
     *,
     max_bytes: int,
+    follow_symlinks: bool = False,
 ) -> tuple[bytes, int]:
-    """Read one regular file without following links or exceeding a byte cap."""
+    """Read one regular file without exceeding a byte cap.
+
+    The type is checked on the opened descriptor, and the open never blocks, so a
+    path swapped for a FIFO after any earlier check cannot hang the reader. Links
+    are refused unless ``follow_symlinks`` is set.
+    """
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
     flags = (
         os.O_RDONLY
         | getattr(os, "O_BINARY", 0)
         | getattr(os, "O_NONBLOCK", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
+        | (0 if follow_symlinks else getattr(os, "O_NOFOLLOW", 0))
     )
     descriptor = os.open(path, flags)
     try:
