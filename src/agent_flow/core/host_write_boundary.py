@@ -100,7 +100,13 @@ _CONTINUE_RECEIPT = re.compile(
     r"^continue_receipt: ([0-9a-f]{64}):([0-9a-f]{64})\r?$", re.MULTILINE,
 )
 _CONTINUE_NONCE_FLAG = "--host-continue-nonce"
-_CONTINUE_STATE_TTL = 300
+# 결과 token은 Runner가 정상 반환한 직후 쓰이고 같은 호출의 PostToolUse가 곧바로 소모한다.
+_CONTINUE_RESULT_TTL = 300
+# 요청은 PreToolUse에서 쓰이지만 CLI는 host 승인 프롬프트가 끝난 뒤에야 소모한다. 승인
+# 대기에는 상한이 없어 하루로 잡는다. 요청은 성공 증거가 아니다 — 재사용은 claim rename이,
+# 성공 증명은 결과 token이 막는다. 이 기한은 소모되지 못한 파일을 치우는 기준이다.
+_CONTINUE_REQUEST_TTL = 24 * 60 * 60
+_CONTINUE_STATE_DIR = "continue-receipts"
 # binding **파일 스키마** 버전. 스냅샷 형식은 별개 축이고
 # `LeaderSnapshot.version`이 들고 있다 — 스냅샷 형식이 바뀌었다고 이걸 올리면
 # 낡은 스냅샷 하나 때문에 binding 파일 전체를 못 읽는 것으로 처리된다.
@@ -159,6 +165,8 @@ def prepare_host_continue_input(payload: object, project_root: Path) -> dict[str
         argument.split("=", 1)[0] == _CONTINUE_NONCE_FLAG for argument in arguments
     ):
         return None
+    directory = _continue_state_dir(root)
+    _sweep_expired_continue_states(directory)
     nonce = secrets.token_hex(32)
     _write_json_atomic(
         _continue_state_path(root, nonce, "request"),
@@ -173,15 +181,26 @@ def prepare_host_continue_input(payload: object, project_root: Path) -> dict[str
 def begin_host_continue(
     project_root: Path, arguments: tuple[str, ...], nonce: str | None,
 ) -> HostContinueRequest | None:
-    """요청을 한 번 소모하고 실제 CLI 인자가 hook 요청과 일치하는지 확인한다."""
+    """요청을 한 번 소모하고 실제 CLI 인자가 hook 요청과 일치하는지 확인한다.
+
+    이 root에 요청이 없거나 기한이 지났으면 receipt 없이 일반 continue로 돈다. 다른 프로젝트
+    root를 가리킨 continue에도 hook은 nonce를 붙이고, 그 요청은 hook 쪽 root에 남는다.
+    lifecycle 명령을 여기서 실패시키면 PR 전에 돌던 continue가 막힌다.
+    """
     if nonce is None:
         return None
     root = _validated_project_root(project_root)
+    if not _continue_state_dir_exists(root):
+        return None
+    _sweep_expired_continue_states(_continue_state_dir(root))
     request = _claim_continue_state(root, nonce, "request")
     original = _continue_arguments(arguments, nonce)
+    if original is None:
+        raise HostWriteBoundaryError("continue nonce does not identify this trusted hook request")
+    if request is None or not _continue_state_is_current(request, _CONTINUE_REQUEST_TTL):
+        return None
     if (
-        original is None or request is None or not _continue_state_is_current(request)
-        or request.get("project_root") != str(root)
+        request.get("project_root") != str(root)
         or request.get("arguments") != list(original)
         or not isinstance(request.get("session_id"), str) or not request["session_id"]
         or not isinstance(request.get("tool_use_id"), str) or not request["tool_use_id"]
@@ -248,7 +267,7 @@ def _consume_host_continue_receipt(
     receipt = _claim_continue_state(root, nonce, "result")
     run_dir = context.runtime_root / ".agent-flow" / "runs" / context.run_id
     return bool(
-        receipt is not None and _continue_state_is_current(receipt)
+        receipt is not None and _continue_state_is_current(receipt, _CONTINUE_RESULT_TTL)
         and receipt.get("token") == token
         and receipt.get("project_root") == str(root)
         and receipt.get("session_id") == payload.get("session_id")
@@ -261,11 +280,11 @@ def _consume_host_continue_receipt(
     )
 
 
-def _continue_state_is_current(state: dict[str, Any]) -> bool:
+def _continue_state_is_current(state: dict[str, Any], ttl: int) -> bool:
     recorded_at = state.get("recorded_at")
     return (
         isinstance(recorded_at, (int, float)) and not isinstance(recorded_at, bool)
-        and 0 <= time.time() - recorded_at <= _CONTINUE_STATE_TTL
+        and 0 <= time.time() - recorded_at <= ttl
     )
 
 
@@ -274,16 +293,56 @@ def _continue_meta_digest(run_dir: Path) -> str:
     return hashlib.sha256((run_dir / "meta.json").read_bytes()).hexdigest()
 
 
-def _continue_state_path(root: Path, nonce: str, kind: str) -> Path:
-    if not re.fullmatch(r"[0-9a-f]{64}", nonce):
-        raise HostWriteBoundaryError("invalid continue nonce")
-    directory = _binding_dir(root) / "continue-receipts"
+def _continue_state_dir_exists(root: Path) -> bool:
+    """만들지 않고 묻는다. 요청을 남긴 적 없는 root에 binding 디렉터리를 새로 만들지 않는다."""
+    try:
+        (root / ".git" / "agent-flow" / _BINDING_DIR / _CONTINUE_STATE_DIR).lstat()
+    except OSError:
+        return False
+    return True
+
+
+def _continue_state_dir(root: Path) -> Path:
+    directory = _binding_dir(root) / _CONTINUE_STATE_DIR
     directory.mkdir(mode=0o700, exist_ok=True)
     _require_directory(directory, label="trusted continue receipt directory")
     identity = directory.lstat()
     if identity.st_uid != os.getuid() or stat.S_IMODE(identity.st_mode) & 0o077:
         raise HostWriteBoundaryError("continue receipt directory is not private to its owner")
-    return directory / f"{nonce}.{kind}.json"
+    return directory
+
+
+def _continue_state_path(root: Path, nonce: str, kind: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{64}", nonce):
+        raise HostWriteBoundaryError("invalid continue nonce")
+    return _continue_state_dir(root) / f"{nonce}.{kind}.json"
+
+
+def _sweep_expired_continue_states(directory: Path) -> None:
+    """승인 거부, PostToolUse 누락, 셸 주석에 묻힌 nonce로 소모되지 못한 파일을 치운다.
+
+    기한은 수정 시각으로 본다. 내용을 읽지 않으므로 위조된 기록 시각에 속지 않는다.
+    청소는 부수 작업이라 실패해도 continue를 막지 않는다.
+    """
+    now = time.time()
+    try:
+        entries = tuple(os.scandir(directory))
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name.endswith(".result.json"):
+            ttl = _CONTINUE_RESULT_TTL
+        elif entry.name.endswith((".request.json", ".claim")):
+            ttl = _CONTINUE_REQUEST_TTL
+        else:
+            continue
+        try:
+            info = entry.stat(follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode) or now - info.st_mtime <= ttl:
+                continue
+            os.unlink(entry.path)
+        except OSError:
+            continue
 
 
 def _claim_continue_state(root: Path, nonce: str, kind: str) -> dict[str, Any] | None:

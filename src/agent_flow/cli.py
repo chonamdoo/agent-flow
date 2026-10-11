@@ -1049,15 +1049,24 @@ def main(argv: list[str] | None = None) -> int:
                 accept_leader_drift=args.accept_leader_drift,
                 concerns=tuple(args.concerns),
             ).run(mode=ResumeMode.RESUME)
-            receipt = complete_host_continue(
-                host_continue, checkout=run_root, run_dir=resume_run_dir,
-            )
-            if receipt is not None:
-                print(f"continue_receipt: {receipt}")
         except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
             # 보여야 사용자가 다음 수를 안다.
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
+        try:
+            receipt = complete_host_continue(
+                host_continue, checkout=run_root, run_dir=resume_run_dir,
+            )
+        except (OSError, RuntimeError) as exc:
+            # run은 이미 진행됐다. 영수증이 없으면 guidance만 닫힌 채로 둔다.
+            print(
+                "warning: continue receipt was not recorded; host guidance stays closed: "
+                f"{_format_cli_error(exc)}",
+                file=sys.stderr,
+            )
+        else:
+            if receipt is not None:
+                print(f"continue_receipt: {receipt}")
         return 0
 
     if args.command == "abort":
