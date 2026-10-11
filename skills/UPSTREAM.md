@@ -131,12 +131,22 @@ unverified; they are not represented as verified external standards.
 Upstream includes this file with each skill for Codex picker
 `interface.display_name`/`short_description` and, for user-invoked skills,
 `policy.allow_implicit_invocation: false`. Do not add it to vendored content skills
-that the host picker does not expose.
+that are not linked into a host skill root (`BUNDLED_HOST_SKILL_NAMES`).
 
 `agent-flow-diagnosing-bugs` is an exception: it is a user-invoked lifecycle wrapper
-in `BUNDLED_HOST_SKILL_NAMES`, linked into `.claude/skills`, `.Codex/skills`, and
+in `BUNDLED_HOST_SKILL_NAMES`, linked into `.claude/skills`, `.agents/skills`, and
 `.omp/skills`. It carries both Claude's `disable-model-invocation: true` and Codex's
 `policy.allow_implicit_invocation: false` to preserve the invocation policy.
+
+Every skill in `BUNDLED_HOST_SKILL_NAMES`, vendored `security-audit` included, carries
+`policy.allow_implicit_invocation: false`. `agent-flow` also keeps its picker
+`interface` block; the files added for #346 are policy-only. Codex lists
+`.agents/skills` entries without that policy in the model's skill catalog and requires
+their use whenever a task matches the description. Most of these skills reach a phase
+through the runner, and the catalog bypassed that scoping in every author phase (#346).
+`security-audit` (io-safety review angle only) and `comment-checker` (hook contract)
+are hidden too: Codex never listed any Agent Flow skill before v0.3.15, and Claude
+still selects them from `.claude/skills`. Explicit `$name` invocation still works.
 
 Other vendored content skills are exposed through `.agent-flow/skills/`,
 the AGENTS.md index, and phase prompts. Adding an unconsumed `agents/openai.yaml`
@@ -153,6 +163,8 @@ verbatim tree import. It does not add a native host entry; the existing
 - Mapping: upstream `skills/security-audit/` → local `skills/security-audit/`.
 - The 21 upstream files are imported verbatim, including domain companions,
   validators, their tests, and the [MIT license](security-audit/LICENSE).
+  The local `agents/openai.yaml` is not an upstream file; it holds the Codex
+  invocation policy described above.
 - [Local provenance manifest](security-audit/upstream.json) records this pin
   and each imported file's SHA-256. The manifest is local metadata, not an
   upstream file or an install-time integrity verifier.
