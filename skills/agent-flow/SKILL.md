@@ -8,18 +8,20 @@ disable-model-invocation: true
 
 Apply this lifecycle only after explicit invocation or an explicit request to resume a run. Installation, plugin enablement, opening a project, and reading this skill do not start a workflow or authorize status guidance. Ordinary project rules and runtime protection remain in force outside this lifecycle.
 
-When the confirmed project has an installed runtime, prepend its absolute `.agent-flow/bin` directory to the current shell's `PATH` before status, lifecycle commands, or their printed `next_command`. Do not let an older global CLI or a plugin-cache launcher select a different runtime.
+When the confirmed project has an installed runtime, prepend its absolute `.agent-flow/bin` directory to the current shell's `PATH` before status, lifecycle commands, or their printed `next_command`. In a verified managed checkout, resolve the leader's installed runtime but keep the requested checkout as the lifecycle target. Do not let an older global CLI or a plugin-cache launcher select a different runtime, or silently install or adopt a checkout.
 
-## Slash Trigger
+## Explicit Native Entry
 
-Dispatch exact inputs in this order:
+Invoke the host's native skill explicitly: `/agent-flow` in Claude Code, `$agent-flow` in Codex (or select it through `/skills`), and `/skill:agent-flow` in OMP. The project installs the entry under `.claude/skills`, `.agents/skills`, and `.omp/skills`, respectively. A managed checkout receives only the leader's canonical entry instructions and Codex metadata, not a second runtime installation.
 
-1. For `/agent-flow status`, run `agent-flow status` from the project root and report its output.
+Dispatch the explicit request in this order:
+
+1. For a status request, run `agent-flow status` from the requested checkout and report its output.
 2. For an explicit task or resume request, run `agent-flow status` from the requested checkout before choosing a lifecycle command.
 3. When status reports an active run, identify its task, run ID, and checkout. Execute its printed `next_command` only when the current request explicitly resumes that run. Discovery alone is not permission to adopt another run. For a new task or an unclear/mismatched resume target, report the active run and ask which task/run the user intends; do not advance it or start a second run before resolving the target.
 4. When status exits 0 and reports no active run:
-   - `/agent-flow` with no task asks the user for `/agent-flow <task>`.
-   - For `/agent-flow <task>`, choose an existing workflow by purpose and requested completion scope, then run `agent-flow run "<task>" --workflow <name>`.
+   - An invocation with no task asks the user to supply the task.
+   - For an explicit task, choose an existing workflow by purpose and requested completion scope, then run `agent-flow run "<task>" --workflow <name>`.
 
 | Purpose and completion scope | Workflow |
 | --- | --- |
@@ -36,7 +38,7 @@ Treat the status command output as the only source of truth. Use the `run` outpu
 
 Do not run install just because a new session started. Install is project setup, not the normal task entry. Do not infer npm, npx, or install failure unless the command exits non-zero with that error.
 
-Existing legacy installations retain their root operating instructions on ordinary updates. Only an explicit root-context conversion request authorizes `install --migrate-root-context`, passed to the same verified installer used for project setup. It requires an unchanged receipt-owned block and preserves project rules, imports, indexes, and backups. Missing or ambiguous ownership requires resolution; `--force-managed` is not permission to bypass it. Never edit a parent directory's shared rules.
+Fresh installs do not add Agent Flow guidance to root `AGENTS.md` or `CLAUDE.md`. Ordinary updates retire unchanged, full receipt-owned legacy blocks per file, including their lifecycle, skill and docs indexes, while preserving outside project bytes, generic Context Economy text, normal Claude project imports and durable backups. Edited, unproven or ambiguous roots are preserved and reported. An explicit `install --migrate-root-context` request uses the same verified project installer and refuses unsafe ownership even with `--force-managed`. Never edit a parent directory's shared rules.
 
 ## SPEC Change Confirmation
 
@@ -62,7 +64,7 @@ Never require an exact phrase or ask the user to enter a terminal command.
 
 ## Behavior
 
-- Treat `/agent-flow` as a project-local workflow trigger, not as a shell path.
+- Treat native skill invocations as project-local workflow requests, not shell paths.
 - Keep git-project runtime state private under the repository git dir, such as `.git/agent-flow/worktrees/feat-<slug>/`; expose it only for status, debugging, or artifact inspection.
 - After a phase writes its artifact, run the `next_command` printed by status or the current phase output.
 - When a phase pauses for user review (`reason: phase_approval_required`), summarize its artifact in chat and ask the user. Run the printed `approval_command` only after the user replies to that summary with approval; no exact phrase is required. An approval given before the pause does not count. `next_command` does not approve; it reports the same pause again.

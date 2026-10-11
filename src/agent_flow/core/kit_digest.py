@@ -14,9 +14,8 @@ import sys
 from pathlib import Path
 
 # install이 target으로 복사하는 자산. host 경로는 installer가 kit에서 **읽는** 자리만
-# 넣는다 — `.Codex/hooks.json`, `.claude/settings.json`, `.Codex/rules/concise-output.md`는
-# installer가 target에 만들어 내는 산출물이라 넣으면 self-install 직후부터 자산 변경
-# 없이 지문이 흔들린다.
+# 넣는다 — `.Codex/hooks.json`, `.claude/settings.json`은 installer가 target에 만들어
+# 내는 산출물이라 넣으면 self-install 직후부터 자산 변경 없이 지문이 흔들린다.
 KIT_SOURCE_DIGEST_ROOTS: tuple[str, ...] = (
     "templates",
     "bootstrap",

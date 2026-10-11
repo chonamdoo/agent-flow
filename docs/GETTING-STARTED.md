@@ -127,12 +127,13 @@ selection without changing `next_command`.
 Use `bugfix`. It has 5 phases — `reproduce`, `implement-fix`, `review`, `qa`, `handoff` — which
 makes it the cheapest workflow that still contains a real review and a real verification step.
 
-Issue these commands from inside a Claude Code or Codex session, not from a bare shell: agent-flow
-prints the phase prompt and waits, and the host CLI in that session is what reads the prompt, does
-the phase's work, and writes `required_artifact`. Inside a session the same steps have a
-slash-command form — `/agent-flow <task>` to start, `/agent-flow` to continue. Run the binary in a
-plain terminal instead and you are left at `status: awaiting_host` with nothing that can write the
-artifact. See [Running](USAGE.md#running) in USAGE.md.
+Issue these commands from inside a Claude Code, Codex or OMP session, not from a bare shell:
+agent-flow prints the phase prompt and waits, and the host CLI reads it, does the phase's work,
+and writes `required_artifact`. You can instead invoke the native skill: `/agent-flow <task>`
+in Claude Code, `$agent-flow <task>` in Codex, or `/skill:agent-flow <task>` in OMP. Ask it to
+resume the selected run when continuing. Discovery or opening a session does not start a run.
+A plain terminal remains at `status: awaiting_host` without a host to write the artifact.
+See [Running](USAGE.md#running) for native entry paths and safe legacy root retirement.
 
 ```bash
 agent-flow run "fix the login timeout on slow networks" --workflow bugfix --worktree fix-login-timeout
