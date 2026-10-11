@@ -1,0 +1,29 @@
+{
+ "argv": [
+  "/Users/namdoo/.nvm/versions/node/v24.14.1/bin/codex",
+  "exec",
+  "-m",
+  "gpt-6.1-sol",
+  "-c",
+  "model_reasoning_effort=\"xhigh\"",
+  "--sandbox",
+  "read-only",
+  "--skip-git-repo-check",
+  "--ephemeral",
+  "--json",
+  "-C",
+  "/private/tmp/agent-flow-grill-review",
+  "-"
+ ],
+ "returncode": 0,
+ "elapsed": 488.59000396728516,
+ "event_types": {
+  "thread.started": 1,
+  "turn.started": 1,
+  "item.completed": 38,
+  "item.started": 33,
+  "turn.completed": 1
+ },
+ "error_events": [],
+ "tool_events": 33
+}

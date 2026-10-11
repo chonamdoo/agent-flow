@@ -1,0 +1,160 @@
+권고안은 **기존 Python core와 프로젝트 runtime을 유지하면서 Claude·Codex·OMP를 같은 강제 계약에 연결하는 방향**이다. native plugin, 기존 extension/adapter, 직접 CLI는 서로 다른 진입 방식으로 인정한다. 호스트마다 같은 manifest나 UI를 요구하지 않고, 지원하는 작업의 lifecycle·승인·evidence·보호 결과를 같게 만든다.
+
+**전역 공유 CLI runtime으로의 전환은 권고하지 않는다.** 여러 에이전트에서 동작하려면 공통 정책이 필요하지만, runtime의 물리적 전역 공유까지 필요한 것은 아니다. `standalone core + host adapters + 선택적 native plugins + 프로젝트에 고정한 runtime`은 하나의 일관된 선택지다. 여기서 standalone은 기존 core의 독립적인 실행 경계를 뜻하며, 새 core를 다시 만들자는 제안이 아니다.
+
+제공된 근거상 plugin pack 구현은 이미 존재한다. 명시적인 프로젝트 준비, 프로젝트 runtime 우선 실행, plugin 제거 후 보호 유지도 현재 구조에 포함된다. 다만 native 설치 호환성, 호스트별 hook 실제 실행, 전체 시나리오 통과는 별도 검증 대상이다. 기존 설계 문서는 통과 증거로 취급하지 않는다. 이 문서는 독립 자문이며, 다른 모델과의 합의나 workflow 승인 증거가 아니다.
+
+대안은 다음처럼 비교한다. 평가는 정성적이며, 속도나 운영비 절감 수치는 가정하지 않는다.
+
+| 대안 | 다중 에이전트 대응 | 강제력·재현성 | 이점 | 단점·위험 | 판단 |
+|---|---|---|---|---|---|
+| **A. 현재 plugin 배포 + 프로젝트 소유 runtime 개선** | 호스트별 진입점과 adapter로 확장 | 현재 보호 구조와 가장 연속적. workflow 외 구성요소 고정은 보완 필요 | 기존 installer·receipt·복구·hook 재사용 | 프로젝트별 자산 중복, 오래된 설치 관리 필요 | **우선 권고** |
+| **A의 권고 형태: standalone core + adapters + 선택적 plugin + 프로젝트 고정 runtime** | Claude·Codex·OMP를 동등한 지원 경로로 설계 | Python/YAML 권위와 공통 승인 계약 유지 | native plugin이 없는 환경에도 같은 core 연결 | 호스트별 capability·callback 검증 비용 | **목표 구조** |
+| **B. 불변 공유 버전 저장소 + 프로젝트/run lock + adapters** | 가능하지만 공유 저장소 자체가 호스트 차이를 해결하지는 않음 | 불변성·참조 보존·실행 환경 고정까지 입증해야 함 | 검증된 경우 중복 저장 감소 가능 | GC, 권한, 변조, 오프라인 복구, 원격 경로 문제가 공통 장애로 확대 | 입증된 필요가 생길 때까지 유보 |
+| **C. native cache/full-plugin runtime** | native 기능이 없는 OMP·원격 환경에 제약 | 제거·cache 삭제·호스트 업데이트와 실행 의존성이 결합 | 프로젝트 복사량 감소 가능 | 실행 중 자산 유실과 보호 단절 위험 | 현재 요구에는 비권고 |
+| **D. skills-only** | 발견과 안내는 쉬움 | lifecycle·hook·실제 subprocess review를 강제할 수 없음 | 배포가 단순함 | prompt 준수에 보호를 의존하게 됨 | 거부 |
+
+C가 프로젝트에 실행 자산과 보호를 별도로 남겨 문제를 해결한다면 실질적으로 A에 가까워진다. B 역시 프로젝트 runtime 제거를 먼저 결정한 뒤 정당화해서는 안 된다.
+
+우선순위별 제안은 다음 일곱 가지다.
+
+1. **P0 — Claude·Codex·OMP의 공통 동작 계약을 먼저 정한다.**
+
+   목적은 세 호스트에서 같은 workflow 결과를 얻는 것이다. Python `runner.py`는 lifecycle과 routing을 계속 소유하고, YAML은 유일한 routing 원천으로 유지한다. JS의 push-watch 전용 상태 경계도 유지한다. adapter는 호스트 입력과 callback을 공통 계약으로 전달하며, phase 승인·생략·정책 판단을 소유하지 않는다.
+
+   plugin 배포와 adapter 배포, 직접 CLI 사용을 모두 허용한다. 다만 직접 CLI가 필수 hook 검증을 생략하는 경로가 되어서는 안 된다. OMP는 동등한 host/controller 경로지만 현재 reviewer 풀에는 포함되지 않는다.
+
+   이점은 native plugin 지원 여부와 제품 지원 여부를 분리하는 것이다. 비용은 호스트별 callback schema, 세션 식별, 경로 전달 방식의 검증이다. 잘못된 adapter가 보호 결과를 바꿀 위험이 있다.
+
+   수용 증거는 세 호스트에 같은 입력을 주었을 때 start 거부, 명시적 resume, gate 실패, evidence 검증, 보호 위반 판정이 같다는 실행 기록이다. 세 호스트의 필수 동작이 입증되기 전에는 다중 에이전트 전환 완료로 선언하지 않는다.
+
+2. **P0 — 기존 plugin pack을 재사용하고 설치와 실행의 경계를 유지한다.**
+
+   native discovery에는 현재처럼 `agent-flow` 진입점만 노출하고, 전체 kit는 내부 payload로 둔다. 설치·enablement·프로젝트 열기·skill 읽기만으로 installer나 workflow가 실행되지 않게 한다. 프로젝트 준비는 명시적으로 leader에서 기존 installer를 호출한다.
+
+   plugin은 배포와 진입을, installer는 materialization·receipt·복구를, 프로젝트 runtime은 실제 실행을 소유한다. user/project/local 설치 범위는 호스트가 실제로 지원하는 범위만 표시한다. 개인 plugin 설치를 모든 프로젝트의 자동 보호나 팀 정책으로 표현하지 않는다.
+
+   이점은 현재 구현을 살리면서 배포를 넓히는 것이다. 단점은 plugin 설치 후 프로젝트 준비 단계가 남는다는 점이다. 중복 등록과 잘못된 kit 경로 선택이 주요 위험이다.
+
+   수용 증거는 새 프로젝트에서 기존 `AGENTS`·`CLAUDE`·imports·상위 규칙이 보존되고, 전역 cache보다 프로젝트 runtime이 선택되는 것이다. 신뢰 경로가 없으면 cache를 추측하지 않는다. legacy root 변환은 명시적 migration과 소유권·변경 여부 검증을 통과한 경우에만 적용한다.
+
+3. **P0 — hook 등록 증명과 실제 실행 증명을 구분한다.**
+
+   현재 등록·digest·placement 검증은 유지한다. 여기에 호스트별 실제 callback 실행 시험과 capability 결과를 붙일 것을 권고한다. 실제 실행 확인 방식은 아직 검증되지 않았으며, 가능한 호스트에서 프로젝트·세션에 연결된 무해한 시험으로 확인해야 한다.
+
+   adapter는 callback schema와 호스트가 제공하는 출처 정보를 검증하고, core는 그 근거로 lifecycle 진입 여부를 판단한다. 합성 callback이나 설정 파일 존재만으로 실제 host hook 실행을 증명하지 않는다. 한 번의 smoke 통과를 이후 모든 실행의 보증으로 확대하지도 않는다.
+
+   이점은 “설정되어 있음”과 “작동함”의 차이를 드러내는 것이다. 비용은 호스트별 시험과 재검증 정책이다. safe/bare mode, hook 생략, 지원하지 않는 event에서는 필수 보장이 없음을 진단하고 정상 start/resume으로 통과시키지 않는다.
+
+   host-write 사전 차단은 **literal protected-path와 protected-path에 도달하는 irreversible command의 정확히 두 가지**로 유지한다. 새 command whitelist는 추가하지 않는다. 참여하지 않은 세션의 보호도 시험하고, Stop 안내만 명시적 참여 세션에 제한한다. 복구·status·좁게 허용된 lifecycle 접근은 막지 않는다.
+
+4. **P1 — workflow pin과 실행 구성요소의 재현성을 구분해 보완한다.**
+
+   현재 workflow identity·digest·snapshot 검증은 Python, interpreter, hook, skill, template 버전까지 고정했다는 뜻이 아니다. 신규 실행에는 기존 설치 digest와 연결된 실행 구성 기록을 추가할 것을 권고한다. 대상은 실제 선택된 runtime, interpreter 식별 정보, 필수 hook·skill·template, profile·architecture 참조다. source/artifact digest는 기존 evidence 범위와 연결한다.
+
+   프로젝트는 선택한 설치 버전을 소유하고, run은 실행 기준을 소유하며, installer는 거래 단위 갱신을 소유한다. reviewer CLI와 모델 식별 정보는 실제 review job의 provenance에 연결한다. 이 기록만으로 변조 방지가 완성된다고 주장하지 않는다.
+
+   이점은 서로 다른 구성요소가 섞인 실행을 설명하고 검출하는 것이다. 비용은 호환성·보존 관리다. active run에는 phase 사이를 포함해 프로젝트 실행 자산의 upgrade·rollback을 허용하지 않는다. 배포 plugin만 바뀌어도 기존 프로젝트 runtime 선택이 유지되는지 검증해야 한다.
+
+   기존 실행을 새 형식으로 옮기려고 repin하거나 baseline을 바꾸지 않는다. 과거에 유효했던 evidence는 보존하되, 변경된 code·scope의 새 승인으로 재사용하지 않는다. 적용은 기존 실행 종료 후의 설치 갱신과 신규 실행부터 시작한다.
+
+5. **P1 — 호스트 전환과 worktree 전환을 같은 authority 규칙으로 검증한다.**
+
+   Claude↔Codex↔OMP 전환은 active run의 소유권을 자동 이전하지 않는다. 명시적 resume, 현재 세션 식별, 대상 checkout, leader, 기존 run lease를 확인한 뒤 연결한다. 다른 곳에서 active run을 발견했다는 사실은 참여나 재개 의도가 아니다.
+
+   leader가 권한과 baseline의 기준이며, worker는 자체 kit나 baseline으로 권한을 만들 수 없다. leader installed root를 ancestor 탐색보다 먼저 선택하는 규칙을 유지한다. worktree 생성·채택은 git 등록만으로 성립하지 않고 Agent Flow CLI를 거친다.
+
+   이점은 여러 세션·호스트에서 같은 작업을 이어갈 수 있다는 것이다. 비용은 세션과 checkout 연결 검증이다. 오래된 callback과 동시 요청이 잘못된 run에 붙는 것이 주요 위험이다.
+
+   수용 증거에는 세 호스트 간 양방향 전환, 중복 resume 경쟁, sibling/unbound session, 다른 프로젝트의 run 오인 방지가 포함된다. 정상 leader fast-forward는 같은 branch·ancestor·leader reflog 조건에서만 허용한다. reset·외부 ref 변경·branch switch는 drift로 남기며, snapshot 형식 갱신으로 숨기지 않는다.
+
+6. **P1 — author와 reviewer에 같은 규범을 전달하고 실제 review만 인정한다.**
+
+   profile과 scoped architecture 선택은 공통 core가 소유한다. adapter는 선택된 필수 참조와 transitive skill을 author/reviewer에 동등하게 전달한다. Clean·stack·local·pending을 유지하고, DDD는 독립 축으로 둔다. local 회사 규칙을 Clean으로 바꾸거나 monorepo의 다른 영역에 규범을 퍼뜨리지 않는다.
+
+   이점은 호스트가 달라도 같은 기준으로 작성하고 검토하는 것이다. 비용은 전달·읽기 기록 검증과 context 관리다. context 절약은 중복 discovery 제거로 달성하며, 필수 규범 생략으로 달성하지 않는다. optional/uninstalled skill에는 기존 degraded availability 계약을 적용하고, 선택된 필수 규범의 손상과 구분한다.
+
+   multi-review는 최소 두 개의 실제 독립 Claude/Codex CLI subprocess를 요구한다. OMP controller, 취소된 실행, 인증 실패, 429, 모델 실패는 reviewer나 승인으로 세지 않는다. 자문에 지정된 `Claude Opus 5.5 xhigh`와 `Codex Astra xhigh`의 실제 CLI 지원 여부도 제공 근거만으로는 미확인이다.
+
+   수용 증거는 bounded UTF-8 JSON, schema·phase·outcome, 고유 job, 현재 artifact·scope binding 검증과 실제 subprocess 기록이다. default gate, reroute·fix loop·상한은 유지한다. nonce/provenance의 추가 구조는 기존 binding으로 막지 못하는 재사용이 시험에서 드러났을 때만 제안한다.
+
+7. **P2 — 완료 범위, 제거, 팀 재현성을 명확히 표시한다.**
+
+   사용자가 선택한 완료 범위와 현재 workflow를 그대로 따른다. review·bugfix·diagnosing-bugs·development의 local handoff와 default/full-feature의 publication/integration 범위를 섞지 않는다. active run의 workflow를 바꾸거나 새 경량 workflow를 만들지 않는다.
+
+   plugin 제거, 프로젝트 보호 해제, abort, detach, worktree cleanup은 서로 다른 행동으로 안내한다. plugin 제거 뒤 남는 프로젝트 hook과 runtime은 의도된 보호다. branch 보호, PR merge·삭제·release·cleanup은 해당 범위와 명시적 권한이 있을 때만 진행한다.
+
+   이점은 “설치 해제했으니 보호도 없어졌다”는 오해를 줄이는 것이다. 비용은 상태 설명과 복구 안내다. runtime이 유실되면 정상 lifecycle을 가장하지 않고 prerequisite 오류와 기존 복구 진입을 제공한다.
+
+   팀이 공유할 버전 선택·설정과 비공개 run 기록은 논리적으로 구분한다. git-dir private state, secret 비노출, 로컬 경로의 재해석을 검증한다. 이점이 입증되지 않은 일괄 디렉터리 이전은 하지 않는다. 수용 증거는 새 machine·clone·재생성 worktree에서 승인된 준비를 거쳐 같은 구성을 재현하는 것이다.
+
+영향 범위는 제공된 파일에 한정해 다음처럼 잡는다. 표의 새 기록·adapter 계약·시험은 제안이며, 현재 구현 완료를 뜻하지 않는다.
+
+| 제안 | 직접 영향 경계 | 유지할 책임 |
+|---|---|---|
+| 1 | `src/agent_flow/runner.py:437`, `src/agent_flow/workflows/*.yaml`, 기존 JS 위임 경계, 호스트 adapter 계약 | Python lifecycle 권위, YAML 단일 routing |
+| 2 | `bin/agent-flow-plugin.mjs:1`, `lib/plugin-bundle.mjs:71`, `lib/plugin-bundle.mjs:218`, `bin/agent-flow-install.mjs:867` | 기존 pack·installer 재사용, 명시적 leader 준비 |
+| 3 | `core/hook_integrity.py:159`, `core/hook_integrity.py:179`, `core/hook_integrity.py:225`, `lib/installer-shared.mjs:3180`, 기존 hook scripts | 등록 무결성, 실행 전 검증, 기존 쓰기 경계 |
+| 4 | `core/workflow_pin.py:59`, `bin/agent-flow-kit.mjs:1122`, `bin/agent-flow-kit.mjs:1265`, `bin/agent-flow-kit.mjs:2580`, receipt·lease·복구 | 프로젝트 runtime 우선, pin·거래 무결성 |
+| 5 | `src/agent_flow/runner.py:477`, 기존 leader/worktree/session/lease 하위 시스템 | hook 검증 후 lease, leader authority |
+| 6 | `core/review_evidence.py:226`, profiles·skills·review templates·host agents | 실제 review, 동일 규범, artifact binding |
+| 7 | `skills/agent-flow/SKILL.md:9`, `skills/agent-flow/SKILL.md:17`, `skills/agent-flow/SKILL.md:53`, `skills/agent-flow/SKILL.md:66` | 명시적 참여, 완료 범위, 비공개 state |
+| 공통 검증 | `docs/issues/0009-plugin-optin-design.md`와 호스트별 acceptance 자료 | 설계 요구와 실제 통과 증거 분리 |
+
+시나리오 시험에는 성공뿐 아니라 아래 실패와 보존 반응을 포함한다.
+
+| 시나리오 | 실패·오인 조건 | 보존해야 할 반응 |
+|---|---|---|
+| user/project/local 설치, 새 저장소 | 설치 범위 미지원, 전역 설치를 프로젝트 준비로 오인 | 지원 범위 진단. 명시적 준비 전 자동 강제·자동 실행 주장 금지 |
+| 기존 규칙과 legacy 설치 | 사용자 수정, imports·parent rules 손상 | 기존 내용 보존. 명시적 migration과 unchanged receipt 조건 유지 |
+| Node·Python·reviewer 부재 | 실행기 누락, 로그인 실패, 모델 미지원 | 단계별 prerequisite 실패. reviewer 대체 승인 금지 |
+| IDE·remote·container·CI·offline | native plugin 부재, 로컬 경로를 원격에 재사용 | adapter/CLI 경로 평가. 필수 capability 미확보 시 제한 표시 |
+| 일반 대화·status·간접 skill 호출 | 조회나 발견을 start/resume으로 해석 | 읽기·발견에 머묾. 실행 의도를 따로 요구 |
+| 여러 사용자·프로젝트·세션 | 다른 active run 자동 채택, lease 충돌 | 프로젝트·checkout·세션 연결 검증과 기존 locking 유지 |
+| Claude↔Codex↔OMP 전환 | 이전 세션 callback, 호스트 변경으로 자산 교체 | 명시적 resume과 새 호스트 trust 확인. 기존 run 기준 유지 |
+| hook 등록과 실제 실행 | 설정은 있으나 callback 미실행 | 등록만으로 실행 보장 주장 금지. 검출한 필수 보장 부재는 lifecycle 실패 |
+| safe/bare mode·event 미지원 | 필수 pre/post event 누락 | 지원 불가 진단. prompt 약속으로 보완 금지 |
+| plugin 비활성·제거·cache 삭제 | 배포 자산 유실, 프로젝트 runtime도 누락 | 프로젝트 자산이 있으면 기존 보호 유지. 유실 시 진단·복구 경로 제공 |
+| plugin/project 중복 등록 | 같은 callback·command 기록 중복 | 중복 검출·단일 귀속. evidence·상태 이중 진행 방지 |
+| 비참여 세션·개인 plugin | 참여 여부로 보호 제외, 팀 전체 보호 오인 | 비참여 세션 보호 유지. 개인 설정과 팀 보장 구분 |
+| active run 갱신·rollback | phase 사이 교체, 구·신 Python/skill/template 혼합 | active-run 자산 갱신 금지. 종료 후 receipt 기반 처리 |
+| 공유 저장소·cache GC | 사용 중 버전 삭제, mutable 자산 교체 | B 채택 전 참조 보존·불변성 입증. A를 먼저 제거하지 않음 |
+| supply chain·경로 공격 | symlink payload, 잘못된 root, HOME/worker kit 우선 | pack의 symlink 거부와 leader 우선 탐색 유지. 예상 자산 검증 |
+| 중단된 준비·동시 설치 | incomplete marker, lease 충돌, 사용자 변경 | 기존 거래 복구. 완료 전 정상 runtime 진입 금지 |
+| evidence 위조·재사용 | marker 위조, 잘못된 phase/job/artifact/scope | 실제 실행과 binding 검증. direct CLI도 같은 gate 적용 |
+| review 취소·auth·429·fix 반복 | 실패를 approve로 처리, loop 상한 우회 | 승인 불인정. 기존 reroute·fix loop·상한 유지 |
+| leader의 dynamic/symlink 쓰기 | reversible command가 보호 경로 변경 | 기존 post-tool tripwire 적용. 판별 불가 reversible command 사전 차단 금지 |
+| sibling/unbound 쓰기 | leader tripwire와 같은 탐지가 있다고 가정 | literal 보호 유지. 탐지 범위를 과장하지 않음 |
+| irreversible 쓰기·복구 | 보호 경로 파괴, 예외의 eval·삭제 확장 | 두 preblock 유지. 좁은 lifecycle 예외와 복구 접근 보존 |
+| worktree·leader drift | git 등록만 채택, reset·branch switch 은폐 | CLI authority 필수. 정상 FF 조건 외 drift 거부 |
+| architecture·mixed·unmatched | local→Clean 변환, 다른 scope 규범 유입 | 선택 범위 유지. pending 비구조 수정 허용·구조 결정 제한 |
+| optional·mandatory skill | optional 부재를 전체 실패 처리, 필수 손상 묵인 | degraded availability와 필수 규범 실패를 구분 |
+| local handoff·PR·merge·release | 완료 범위 확대, 무권한 merge·cleanup | 기존 workflow와 권한 범위 유지. 제거와 cleanup 분리 |
+| fresh clone·재생성·경로 이동 | state·secret 공유, 이전 절대 경로 신뢰 | 비공개 기록 보존, 로컬 경로 재확인, 승인된 구성 재현 |
+| CI와 native/live 평가 | mock 성공을 실제 host·모델 통과로 대체 | CI·native smoke·live review 증거를 별도로 요구 |
+
+보장 범위는 협력하는 AI agent, 연결된 host의 tool 쓰기, Agent Flow lifecycle이다. 악의적인 사용자나 root의 변조, 모든 외부 OS 쓰기를 막는 제품으로 확대해서는 안 된다. 지원되지 않는 호스트에서는 Agent Flow 진입을 거부할 수 있어도 외부 쓰기까지 차단했다고 주장할 수 없다. Windows, OMP native plugin, 각 remote/IDE의 hook 지원은 capability 증거가 필요한 항목으로 남긴다.
+
+다음 변경은 하지 않을 것을 제안한다.
+
+- 설치 단순화를 위한 프로젝트 runtime·hook·필수 gate 제거.
+- 전역 공유 runtime을 기본 전제로 확정하거나 cache 경로를 추측하는 실행.
+- 호스트별 workflow core, 중복 정책, 새 서비스·orchestration 계층 도입.
+- 전체 skill catalog 자동 노출, 무관한 plugin 발견에 따른 규범 활성화.
+- SessionStart 자동 실행, active run 자동 채택, 실행 중 workflow 변경.
+- command write-target whitelist, 광범위한 eval·worktree 제거 예외.
+- migration 성공을 위한 repin·rebaseline, stale evidence의 새 승인 전용.
+- OMP controller를 reviewer로 계산하거나 실패한 CLI를 성공한 review로 대체.
+- plugin 제거에 따른 자동 보호 해제·merge·publication·cleanup.
+- 입증된 비약화 이점이 없는 공유 저장소 전환이나 물리적 state 재배치.
+
+수용과 전환은 다음 순서로 진행할 것을 제안한다.
+
+1. **계약을 먼저 고정한다.** 기존 invariant와 현재 지원 근거를 정리하고, Claude·Codex·OMP × 설치 방식 × 실행 환경의 공통 의미 행렬을 만든다. 각 칸에는 지원·미확인·지원 불가와 필요한 증거를 기록한다.
+2. **기존 구현의 회귀를 확인한다.** pack 결정성, symlink 거부, incomplete output, receipt·사용자 수정 보존, leader 선택, hook 무결성, pin, evidence binding을 검증한다. CI 통과만으로 host 지원을 선언하지 않는다.
+3. **세 호스트의 실제 실행을 확인한다.** callback schema와 실제 hook 실행, 비참여 보호, 중복 등록, 호스트 간 명시적 resume을 시험한다. 직접 CLI도 같은 강제 계약을 통과해야 한다.
+4. **실제 review와 장애 복구를 확인한다.** 독립 CLI subprocess, 모델·auth·rate 실패, forged/stale evidence, offline 복구, 중단·동시 설치, active-run 갱신 금지를 시험한다. 자문 결과를 이 단계의 승인으로 사용하지 않는다.
+5. **신규 opt-in 프로젝트부터 적용한다.** 기존 active run은 기존 runtime에서 마친다. 기존 프로젝트는 실행 종료, receipt 검증, 복구 가능성 확인 후 전환한다. legacy root migration은 별도 명시 동의를 유지한다.
+6. **전환 완료를 결과로 판정한다.** 세 호스트의 지원 작업에서 같은 보호·승인 결과가 관찰되고, plugin 제거 후 프로젝트 보호 유지까지 확인되어야 한다. B는 이후 실제 중복 관리 문제가 입증되고 A와 같은 장애·복구 시험을 통과할 때만 다시 비교한다.
+
+첫 작업으로는 **기존 plugin 구현을 기준으로 Claude·Codex·OMP 공통 acceptance 행렬을 확정하는 것**을 권고한다. 전역 runtime 이전 여부는 그 결과 뒤에 판단한다.
