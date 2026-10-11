@@ -1049,6 +1049,77 @@ def test_skill_frontmatter_dotdot_name_is_sanitized_without_install_failure(tmp_
     assert all(skill["name"] != ".." for skill in index["skills"])
 
 
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("retirement", ["host-change", "deleted"])
+@pytest.mark.parametrize("copied", [False, True])
+def test_retired_codex_skill_exclude_does_not_hide_a_replacement_team_skill(
+    tmp_path: Path, binary: str, retirement: str, copied: bool,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(("git", "init", "-q"), cwd=project, check=True, capture_output=True, timeout=30)
+    name = "Demo.Skill_name" if copied else "demo"
+    skill_dir = project / "skills" / name
+    _skill(skill_dir, "CODEX", hosts="[codex]")
+    assert _install_with(binary, project).returncode == 0
+    entry = project / ".agents/skills" / name
+    if copied and entry.is_symlink():
+        entry.unlink()
+        shutil.copytree(skill_dir, entry)
+    exclude = project / ".git/info/exclude"
+    user_exclusions = b"# user rules\xff\r\n/.agents/skills/private\r\n"
+    exclude.write_bytes(exclude.read_bytes() + user_exclusions)
+    exclude.chmod(0o640)
+    if retirement == "host-change":
+        _skill(skill_dir, "CLAUDE", hosts="[claude]")
+    else:
+        (skill_dir / "SKILL.md").unlink()
+
+    result = _install_with(binary, project)
+    assert result.returncode == 0, result.stderr
+    assert not entry.exists() and not entry.is_symlink()
+    assert f"/.agents/skills/{name}".encode() not in exclude.read_bytes().splitlines()
+    assert exclude.read_bytes().endswith(user_exclusions)
+    assert exclude.stat().st_mode & 0o777 == 0o640
+    _skill(entry, "Team skill", hosts="[codex]")
+    for _ in range(2):
+        result = _install_with(binary, project)
+        assert result.returncode == 0, result.stderr
+        status = subprocess.run(
+            ("git", "status", "--porcelain", "--untracked-files=all"), cwd=project,
+            text=True, capture_output=True, check=True, timeout=30,
+        )
+        assert f"?? .agents/skills/{name}/SKILL.md" in status.stdout.splitlines()
+        assert (entry / "SKILL.md").read_text().endswith("Team skill\n")
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_retired_codex_skill_exclude_recovers_when_the_owned_link_is_already_missing(
+    tmp_path: Path, binary: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(("git", "init", "-q"), cwd=project, check=True, capture_output=True, timeout=30)
+    skill_dir = project / "skills/demo"
+    _skill(skill_dir, "CODEX", hosts="[codex]")
+    assert _install_with(binary, project).returncode == 0
+    entry = project / ".agents/skills/demo"
+    if entry.is_symlink():
+        entry.unlink()
+    else:
+        shutil.rmtree(entry)
+    (skill_dir / "SKILL.md").unlink()
+
+    result = _install_with(binary, project)
+    assert result.returncode == 0, result.stderr
+    _skill(entry, "Team skill", hosts="[codex]")
+    status = subprocess.run(
+        ("git", "status", "--porcelain", "--untracked-files=all"), cwd=project,
+        text=True, capture_output=True, check=True, timeout=30,
+    )
+    assert "?? .agents/skills/demo/SKILL.md" in status.stdout.splitlines()
+
+
 def test_stale_host_skill_link_removed_when_hosts_change(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()

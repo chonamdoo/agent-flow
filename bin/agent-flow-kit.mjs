@@ -89,6 +89,7 @@ import {
   unquoteShellWord,
   upgradeBundledSkills,
   upsertLocalIgnores,
+  removeRetiredSkillIgnores,
   validateSkillDependencies,
   writeKitAssetRecord,
 } from "../lib/installer-shared.mjs";
@@ -1761,7 +1762,9 @@ function installProjectSkills(root, agentFlowDir, previousIndex, force = false, 
       links.push(recordSkillLinkReceipt(linkProjectSkill(root, skill, host, previousIndex, force), skill, previousIndex));
     }
   }
-  links.push(...removeStaleProjectSkillLinks(root, selected.skills, previousIndex, force));
+  const retiredLinks = removeStaleProjectSkillLinks(root, selected.skills, previousIndex, force);
+  removeRetiredSkillIgnores(root, retiredLinks);
+  links.push(...retiredLinks);
   const index = preserveKitSkillHashes({ ...selected, links }, previousIndex, path.join(KIT_ROOT, "skills"));
   // 잘린 index.json은 `readJsonIfExists`가 조용히 삼켜 "설치된 skill 없음"으로
   // 읽힌다. 그러면 다음 install이 관리 링크를 stale로 보고 걷어낸다.
@@ -1925,6 +1928,9 @@ function removeStaleProjectSkillLinks(root, skills, previousIndex, force = false
     ensureChildPath(hostRoot, target);
     const stat = lstatIfExists(target);
     if (!stat) {
+      if (recordsInstalledSkillLink(link)) {
+        removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale" });
+      }
       continue;
     }
     if (stat.isSymbolicLink()) {

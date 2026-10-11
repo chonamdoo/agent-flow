@@ -4695,7 +4695,10 @@ def _replay_native_entry_retirement_at(
         current = _read_regular_worktree_copy_at(parent=parent, name=target.name)
         if moved is not None:
             if moved[1] != expected:
-                raise WorktreeIsolationError(f"native retirement inode changed: {target}")
+                _rollback_native_entry_retirement_at(
+                    parent=parent, target=target, gitdir_fd=gitdir_fd, intent=intent,
+                )
+                return
             # 복구 중 canonical 이름이 사용자 파일로 교체돼도 옛 writer의 inode는 남긴다.
             _link_retired_native_entry(
                 parent=parent, quarantine=quarantine, destination=destination,
@@ -4727,6 +4730,19 @@ def _replay_native_entry_retirement_at(
         os.close(parent)
 
 
+def _rollback_native_entry_retirement_at(
+    *, parent: int, target: Path, gitdir_fd: int, intent: dict,
+) -> None:
+    quarantine = intent["quarantine"]
+    moved = os.stat(quarantine, dir_fd=parent, follow_symlinks=False)
+    intent = {**intent, "identity": [moved.st_dev, moved.st_ino]}
+    _write_native_entry_state_at(gitdir_fd, _NATIVE_ENTRY_RETIREMENT, intent)
+    _restore_host_hook_registration_at(parent=parent, name=target.name, quarantine=quarantine)
+    os.fsync(parent)
+    os.unlink(_NATIVE_ENTRY_RETIREMENT, dir_fd=gitdir_fd)
+    os.fsync(gitdir_fd)
+
+
 def _retire_native_entry_file_at(
     *, parent: int, target: Path, owned: set[str], destination: Path,
     root: Path, checkout: Path, gitdir_fd: int,
@@ -4743,25 +4759,27 @@ def _retire_native_entry_file_at(
     if _read_regular_worktree_copy_at(parent=gitdir_fd, name=_NATIVE_ENTRY_RETIREMENT) is not None:
         raise WorktreeIsolationError(f"native retirement recovery is pending: {checkout}")
     quarantine = f"{target.name}.agent-flow-retired.{os.getpid()}.{secrets.token_hex(8)}"
-    _write_native_entry_state_at(
-        gitdir_fd, _NATIVE_ENTRY_RETIREMENT,
-        {
-            "version": 1, "entry": target.relative_to(checkout).as_posix(),
-            "quarantine": quarantine, "identity": list(observed[1]),
-            "archive": destination.relative_to(
-                _native_retirement_root(root=root, checkout=checkout)
-            ).as_posix(),
-        },
-    )
+    intent = {
+        "version": 1, "entry": target.relative_to(checkout).as_posix(),
+        "quarantine": quarantine, "identity": list(observed[1]),
+        "archive": destination.relative_to(
+            _native_retirement_root(root=root, checkout=checkout)
+        ).as_posix(),
+    }
+    _write_native_entry_state_at(gitdir_fd, _NATIVE_ENTRY_RETIREMENT, intent)
     os.rename(target.name, quarantine, src_dir_fd=parent, dst_dir_fd=parent)
     os.fsync(parent)
     try:
         moved = _read_regular_worktree_copy_at(parent=parent, name=quarantine)
     except BaseException:
-        _restore_host_hook_registration_at(parent=parent, name=target.name, quarantine=quarantine)
+        _rollback_native_entry_retirement_at(
+            parent=parent, target=target, gitdir_fd=gitdir_fd, intent=intent,
+        )
         raise
     if moved != observed:
-        _restore_host_hook_registration_at(parent=parent, name=target.name, quarantine=quarantine)
+        _rollback_native_entry_retirement_at(
+            parent=parent, target=target, gitdir_fd=gitdir_fd, intent=intent,
+        )
         raise WorktreeIsolationError(f"native skill entry changed during cleanup: {target}")
     try:
         _link_retired_native_entry(
@@ -4769,8 +4787,9 @@ def _retire_native_entry_file_at(
             store=_agent_flow_state_dir(root),
         )
     except OSError as exc:
-        _restore_host_hook_registration_at(parent=parent, name=target.name, quarantine=quarantine)
-        os.fsync(parent)
+        _rollback_native_entry_retirement_at(
+            parent=parent, target=target, gitdir_fd=gitdir_fd, intent=intent,
+        )
         raise WorktreeIsolationError(
             f"native skill entry kept: cannot preserve it outside the checkout: {target}: {exc}"
         ) from exc

@@ -232,6 +232,79 @@ def test_kit_upgrade_leaves_a_user_edited_native_entry_blocking_cleanup(tmp_path
 
 
 @pytest.mark.parametrize("action", ["refresh", "cleanup"])
+@pytest.mark.parametrize("interruption", ["none", "rename", "restore"])
+def test_native_retirement_rolls_back_a_swapped_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: str, interruption: str,
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "native-swapped")
+    canonical = root / ".agent-flow/skills/agent-flow"
+    shutil.copytree(KIT_ROOT / "skills/agent-flow", canonical)
+    assert cli_module.main(["worktree", "sync-host-hooks", "--root", str(root)]) == 0
+    entry = status.path / ".agents/skills/agent-flow/SKILL.md"
+    original = entry.read_bytes()
+    user_bytes = b"user replacement\n"
+    replacement = entry.with_name("replacement")
+    replacement.write_bytes(user_bytes)
+    user_inode = replacement.stat().st_ino
+    if action == "refresh":
+        (canonical / "SKILL.md").write_bytes(original + b"\nkit upgrade\n")
+    rename = os.rename
+    restore = W._restore_host_hook_registration_at
+
+    def swap_before_rename(source, destination, **kwargs):
+        if str(destination).startswith("SKILL.md.agent-flow-retired.") and replacement.exists():
+            os.replace(replacement, entry)
+            rename(source, destination, **kwargs)
+            if interruption == "rename":
+                raise SystemExit(73)
+        else:
+            rename(source, destination, **kwargs)
+
+    def interrupt_after_restore(**kwargs):
+        restore(**kwargs)
+        if interruption == "restore":
+            raise SystemExit(73)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(os, "rename", swap_before_rename)
+        fault.setattr(W, "_restore_host_hook_registration_at", interrupt_after_restore)
+        if interruption != "none":
+            with pytest.raises(SystemExit, match="73"):
+                if action == "refresh":
+                    W.provision_native_skill_entry(leader=root, checkout=status.path)
+                else:
+                    W._retire_provisioned_native_skill_entry(root=root, checkout=status.path)
+        elif action == "refresh":
+            W.provision_native_skill_entry(leader=root, checkout=status.path)
+        else:
+            with pytest.raises(W.WorktreeIsolationError, match="changed during cleanup"):
+                W._retire_provisioned_native_skill_entry(root=root, checkout=status.path)
+
+    assert cli_module.main(["worktree", "sync-host-hooks", "--root", str(root)]) == 0
+    assert entry.read_bytes() == user_bytes
+    assert entry.stat().st_ino == user_inode
+    gitdir = Path(_git("rev-parse", "--git-dir", cwd=status.path).stdout.strip())
+    assert not (gitdir / W._NATIVE_ENTRY_RETIREMENT).exists()
+    assert not list(entry.parent.glob("*.agent-flow-retired.*"))
+    with pytest.raises(W.CleanupBlockedError):
+        W.run_worktree_cleanup_transaction(
+            root=root, checkout_path=status.path, run_dir=run_dir,
+            target_branch="main", integration_strategy="merge",
+        )
+    assert entry.read_bytes() == user_bytes
+    entry.write_bytes(original)
+    assert cli_module.main(["worktree", "sync-host-hooks", "--root", str(root)]) == 0
+    result = W.run_worktree_cleanup_transaction(
+        root=root, checkout_path=status.path, run_dir=run_dir,
+        target_branch="main", integration_strategy="merge",
+    )
+    W.complete_worktree_cleanup(result)
+    assert not status.path.exists()
+
+
+@pytest.mark.parametrize("action", ["refresh", "cleanup"])
 @pytest.mark.parametrize("crash_point", ["rename", "archive", "unlink"])
 @pytest.mark.parametrize("user_edit", [False, True])
 def test_native_retirement_recovers_after_process_exit(

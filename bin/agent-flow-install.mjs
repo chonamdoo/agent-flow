@@ -17,7 +17,7 @@ import { installProfile } from "../lib/profile-detection.mjs";
 import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
 import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
 import { parseSimpleYaml, splitFrontmatter } from "../lib/frontmatter.mjs";
-import { captureLegacySkillCopyReceipts, forceMayRemoveSkillEntry, observeSkillContent, parseSkillMetadata, recordSkillLinkReceipt, skillCopyIsInstallerOwned, skillCopyMatchesReceipt, skippedSkillCopy } from "../lib/skill-metadata.mjs";
+import { captureLegacySkillCopyReceipts, forceMayRemoveSkillEntry, observeSkillContent, parseSkillMetadata, recordSkillLinkReceipt, recordsInstalledSkillLink, skillCopyIsInstallerOwned, skillCopyMatchesReceipt, skippedSkillCopy } from "../lib/skill-metadata.mjs";
 import {
   activeInstallProfileIds,
   ensureInstallLease,
@@ -76,6 +76,7 @@ import {
   readJsonIfExists,
   readKitAssetRecord,
   removeCodexBroadTrustState,
+  removeRetiredSkillIgnores,
   removeOmpHooksExtension,
   reportSkippedUserEdit,
   requestedInstallRootOption,
@@ -580,7 +581,9 @@ function installProjectSkills(forceManaged = false, installSelection = null) {
       links.push(recordSkillLinkReceipt(linkProjectSkill(skill, host, previousIndex, forceManaged), skill, previousIndex));
     }
   }
-  links.push(...removeStaleProjectSkillLinks(selected.skills, previousIndex, forceManaged));
+  const retiredLinks = removeStaleProjectSkillLinks(selected.skills, previousIndex, forceManaged);
+  removeRetiredSkillIgnores(PROJECT, retiredLinks);
+  links.push(...retiredLinks);
   const index = preserveKitSkillHashes({ ...selected, links }, previousIndex, path.join(KIT_ROOT, "skills"));
   // 잘린 index.json은 `readJsonIfExists`가 조용히 삼켜 "설치된 skill 없음"으로
   // 읽힌다. 그러면 다음 install이 관리 링크를 stale로 보고 걷어낸다.
@@ -714,7 +717,12 @@ function removeStaleProjectSkillLinks(skills, previousIndex, forceManaged = fals
     }
     ensureChildPath(hostRoot, target);
     const stat = lstatIfExists(target);
-    if (!stat) continue;
+    if (!stat) {
+      if (recordsInstalledSkillLink(link)) {
+        removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale" });
+      }
+      continue;
+    }
     if (stat.isSymbolicLink()) {
       if (link.host === "codex" && !skillLinkMatchesReceipt(PROJECT, target, link, previousIndex)) {
         console.warn(`${SYMLINK_SKIP_NOTICE_PREFIX}${link.path}`);
