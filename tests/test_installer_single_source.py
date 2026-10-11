@@ -951,8 +951,6 @@ _SHARED_ONLY = (
     "readJsonIfExists", "retiredHookScripts", "isRetiredHookCommand",
     "pruneRetiredHooks", "pruneRetiredHookScripts", "mergeHookSettings",
     "mergeHookConfig", "claudeHooksSettings", "codexHooksSettings",
-    "skillIndexBlock", "upsertSkillIndexBlock",
-    "docsIndexBlock", "upsertDocsIndexBlock", "upsertManagedSubBlock",
     "extractCliOption", "cliOptionValue", "requestedInstallRootOption",
     "withoutInstallRootOption", "assertInstallRootIsFinal", "upgradeBundledSkills",
     "preserveKitSkillHashes", "syncKitAssets", "syncKitAsset", "syncRecordedKitAssets",
@@ -966,9 +964,14 @@ _SHARED_ONLY = (
     "resolveManagedWorktreeContext", "resolveManagedWorktreeRoot",
     "resolveGitCommonWorktreeRoot", "resolveLinkedWorktreeLeader",
 )
+_SHARED_HOMES = {name: "lib/installer-shared.mjs" for name in _SHARED_ONLY} | {
+    # 공용 `.agents/skills`의 소유 판정. 진입점마다 사본이 생기면 어느 쪽이 돌았느냐로 지울 것이 갈린다.
+    "skillCopyIsInstallerOwned": "lib/skill-metadata.mjs",
+    "forceMayRemoveSkillEntry": "lib/skill-metadata.mjs",
+}
 
 
-@pytest.mark.parametrize("name", _SHARED_ONLY)
+@pytest.mark.parametrize("name", tuple(_SHARED_HOMES))
 def test_previously_duplicated_helper_is_defined_once(name: str):
     """불변: 사본이 하나라도 돌아오면 둘이 갈라졌는지 보는 검사가 다시 필요해진다."""
     definers = [
@@ -976,7 +979,7 @@ def test_previously_duplicated_helper_is_defined_once(name: str):
         for source, text in _js_sources().items()
         if re.search(rf"^(?:export )?function {re.escape(name)}\(", text, re.M)
     ]
-    assert definers == ["lib/installer-shared.mjs"], (
+    assert definers == [_SHARED_HOMES[name]], (
         f"{name}()를 정의하는 파일이 하나가 아니다: {definers}"
     )
 

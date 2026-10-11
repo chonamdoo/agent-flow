@@ -76,6 +76,302 @@ def _managed_run(root: Path, name: str = "cleanup") -> tuple[W.WorktreeStatus, P
     return status, run_dir
 
 
+@pytest.mark.parametrize("host_root", [".claude/skills", ".agents/skills", ".omp/skills"])
+def test_unchanged_native_entry_does_not_deadlock_cleanup(
+    tmp_path: Path, host_root: str,
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "native-entry")
+    canonical = root / ".agent-flow" / "skills" / "agent-flow"
+    shutil.copytree(KIT_ROOT / "skills" / "agent-flow", canonical)
+    entry = status.path / host_root / "agent-flow"
+    shutil.copytree(canonical, entry)
+
+    blocked = None
+    try:
+        result = W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+    except W.CleanupBlockedError as exc:
+        blocked = str(exc)
+    assert blocked is None, blocked
+    W.complete_worktree_cleanup(result)
+    assert not status.path.exists()
+    assert not W.worktree_branch_exists(root=root, branch=status.branch)
+
+
+def test_native_entry_provisioning_allows_public_cleanup_without_executable_snapshot(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    team = root / ".claude" / "skills" / "team-review" / "SKILL.md"
+    team.parent.mkdir(parents=True)
+    team.write_text("---\nname: team-review\n---\n", encoding="utf-8")
+    _git("add", ".", cwd=root)
+    _git("commit", "-m", "track team skill", cwd=root)
+    status, run_dir = _managed_run(root, "provisioned-native")
+    canonical = root / ".agent-flow" / "skills" / "agent-flow"
+    shutil.copytree(KIT_ROOT / "skills" / "agent-flow", canonical)
+    (canonical / "scripts").mkdir()
+    (canonical / "scripts" / "local.py").write_text("raise RuntimeError('do not copy')\n")
+
+    assert cli_module.main(["worktree", "sync-host-hooks", "--root", str(root)]) == 0
+    for host_root in (".claude/skills", ".agents/skills", ".omp/skills"):
+        entry = status.path / host_root / "agent-flow"
+        assert (entry / "SKILL.md").read_bytes() == (canonical / "SKILL.md").read_bytes()
+        assert (entry / "agents" / "openai.yaml").read_bytes() == (
+            canonical / "agents" / "openai.yaml"
+        ).read_bytes()
+        assert not (status.path / host_root / "agent-flow" / "scripts").exists()
+
+    result = W.run_worktree_cleanup_transaction(
+        root=root,
+        checkout_path=status.path,
+        run_dir=run_dir,
+        target_branch="main",
+        integration_strategy="merge",
+    )
+    W.complete_worktree_cleanup(result)
+    assert not status.path.exists()
+    assert not W.worktree_branch_exists(root=root, branch=status.branch)
+
+
+def test_cleanup_keeps_a_late_write_through_an_open_native_entry(tmp_path: Path) -> None:
+    """반증: cleanup이 바이트 검사를 마친 native entry를 unlink하자, fd를 열어 둔 writer가 그
+    뒤에 쓴 내용은 마지막 경로를 잃고 사라졌다. 그 inode는 checkout 밖 보관 자리에 남아야 한다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "native-open-writer")
+    canonical = root / ".agent-flow" / "skills" / "agent-flow"
+    shutil.copytree(KIT_ROOT / "skills" / "agent-flow", canonical)
+    assert cli_module.main(["worktree", "sync-host-hooks", "--root", str(root)]) == 0
+    entry = status.path / ".agents" / "skills" / "agent-flow" / "SKILL.md"
+
+    with entry.open("ab") as writer:
+        result = W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+        W.complete_worktree_cleanup(result)
+        writer.write(b"\nlate user edit\n")
+
+    assert not status.path.exists()
+    retired = W._agent_flow_state_dir(root) / "retired-native-entries"
+    kept = sorted(retired.glob("*/*/.agents/skills/agent-flow/SKILL.md"))
+    assert [path.read_bytes() for path in kept] == [
+        (canonical / "SKILL.md").read_bytes() + b"\nlate user edit\n"
+    ]
+
+
+@pytest.mark.parametrize("status_before_cleanup", [True, False])
+def test_kit_upgrade_refreshes_provisioned_native_entries_and_keeps_cleanup_open(
+    tmp_path: Path, status_before_cleanup: bool,
+) -> None:
+    """반증: leader kit을 재설치해 canonical entry가 바뀌자, checkout에 우리가 깐 옛 판본이
+    사용자 편집으로 판정돼 status는 새 판본을 못 깔고 cleanup은 `checkout is dirty`로 막혔다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "native-upgrade")
+    canonical = root / ".agent-flow" / "skills" / "agent-flow"
+    shutil.copytree(KIT_ROOT / "skills" / "agent-flow", canonical)
+    assert cli_module.main(["worktree", "sync-host-hooks", "--root", str(root)]) == 0
+    upgraded = (canonical / "SKILL.md").read_bytes() + b"\nkit upgrade\n"
+    (canonical / "SKILL.md").write_bytes(upgraded)
+
+    if status_before_cleanup:
+        assert cli_module.main(["worktree", "sync-host-hooks", "--root", str(root)]) == 0
+        for host_root in (".agents/skills", ".omp/skills"):
+            assert (status.path / host_root / "agent-flow" / "SKILL.md").read_bytes() == upgraded
+    result = W.run_worktree_cleanup_transaction(
+        root=root,
+        checkout_path=status.path,
+        run_dir=run_dir,
+        target_branch="main",
+        integration_strategy="merge",
+    )
+    W.complete_worktree_cleanup(result)
+
+    assert not status.path.exists()
+
+
+def test_kit_upgrade_leaves_a_user_edited_native_entry_blocking_cleanup(tmp_path: Path) -> None:
+    """불변: receipt는 우리가 쓴 바이트만 증명한다. 사용자가 고친 entry는 kit이 바뀐 뒤에도
+    덮이지 않고 cleanup을 막는다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "native-upgrade-edit")
+    canonical = root / ".agent-flow" / "skills" / "agent-flow"
+    shutil.copytree(KIT_ROOT / "skills" / "agent-flow", canonical)
+    assert cli_module.main(["worktree", "sync-host-hooks", "--root", str(root)]) == 0
+    entry = status.path / ".agents" / "skills" / "agent-flow" / "SKILL.md"
+    edited = entry.read_bytes() + b"\nuser edit\n"
+    entry.write_bytes(edited)
+    (canonical / "SKILL.md").write_bytes((canonical / "SKILL.md").read_bytes() + b"\nkit upgrade\n")
+
+    assert cli_module.main(["worktree", "sync-host-hooks", "--root", str(root)]) == 0
+    with pytest.raises(W.CleanupBlockedError):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+
+    assert entry.read_bytes() == edited
+    assert status.path.exists()
+
+
+@pytest.mark.parametrize("action", ["refresh", "cleanup"])
+@pytest.mark.parametrize("crash_point", ["rename", "archive", "unlink"])
+@pytest.mark.parametrize("user_edit", [False, True])
+def test_native_retirement_recovers_after_process_exit(
+    tmp_path: Path, action: str, crash_point: str, user_edit: bool,
+) -> None:
+    """반증: quarantine rename 직후 죽은 프로세스의 entry는 발견되지 않았고, 재시도는
+    그 파일을 사용자 잔재로 보아 cleanup을 계속 막았다. 늦은 fd 쓰기도 복구해야 한다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "native-interrupted")
+    canonical = root / ".agent-flow" / "skills" / "agent-flow"
+    shutil.copytree(KIT_ROOT / "skills" / "agent-flow", canonical)
+    assert cli_module.main(["worktree", "sync-host-hooks", "--root", str(root)]) == 0
+    entry = status.path / ".agents/skills/agent-flow/SKILL.md"
+    original = entry.read_bytes()
+    upgraded = original + b"\nkit upgrade\n"
+    if action == "refresh":
+        (canonical / "SKILL.md").write_bytes(upgraded)
+    script = """
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from agent_flow.core import worktrees as W
+from agent_flow import cli
+root, checkout, run_dir = map(Path, sys.argv[2:5])
+action, point = sys.argv[5:]
+rename, unlink, link = os.rename, os.unlink, W._link_retired_native_entry
+def crash_rename(source, destination, **kwargs):
+    rename(source, destination, **kwargs)
+    if point == "rename" and str(destination).startswith("SKILL.md.agent-flow-retired."):
+        os._exit(73)
+def crash_link(**kwargs):
+    link(**kwargs)
+    if point == "archive":
+        os._exit(73)
+def crash_unlink(name, **kwargs):
+    unlink(name, **kwargs)
+    if point == "unlink" and str(name).startswith("SKILL.md.agent-flow-retired."):
+        os._exit(73)
+os.rename, os.unlink = crash_rename, crash_unlink
+W._link_retired_native_entry = crash_link
+if action == "refresh":
+    cli.main(["worktree", "sync-host-hooks", "--root", str(root)])
+else:
+    W.run_worktree_cleanup_transaction(
+        root=root, checkout_path=checkout, run_dir=run_dir,
+        target_branch="main", integration_strategy="merge",
+    )
+"""
+    with entry.open("ab", buffering=0) as writer:
+        crashed = subprocess.run(
+            (sys.executable, "-c", script, SRC, str(root), str(status.path),
+             str(run_dir), action, crash_point),
+            text=True, capture_output=True, timeout=30,
+        )
+        assert crashed.returncode == 73, crashed.stderr
+        # 죽은 fixture 자식이 만든 stale Git lock만 해제한다. 생산 코드는 다른 Git 작업의
+        # lock을 자동으로 지우거나 우회하지 않는다.
+        gitdir = Path(_git("rev-parse", "--git-dir", cwd=status.path).stdout.strip())
+        (gitdir / "index.lock").unlink()
+        if user_edit:
+            writer.write(b"\nlate user edit\n")
+        assert cli_module.main(["worktree", "sync-host-hooks", "--root", str(root)]) == 0
+        if user_edit and crash_point != "unlink":
+            assert entry.read_bytes() == original + b"\nlate user edit\n"
+            with pytest.raises(W.CleanupBlockedError):
+                W.run_worktree_cleanup_transaction(
+                    root=root, checkout_path=status.path, run_dir=run_dir,
+                    target_branch="main", integration_strategy="merge",
+                )
+            assert status.path.exists()
+        else:
+            assert entry.read_bytes() == (upgraded if action == "refresh" else original)
+            result = W.run_worktree_cleanup_transaction(
+                root=root, checkout_path=status.path, run_dir=run_dir,
+                target_branch="main", integration_strategy="merge",
+            )
+            W.complete_worktree_cleanup(result)
+            assert not status.path.exists()
+        if user_edit and crash_point == "unlink":
+            retired = W._agent_flow_state_dir(root) / "retired-native-entries"
+            kept = list(retired.glob("*/*/.agents/skills/agent-flow/SKILL.md"))
+            assert original + b"\nlate user edit\n" in [path.read_bytes() for path in kept]
+
+
+@pytest.mark.parametrize("host_root", [".claude/skills", ".agents/skills", ".omp/skills"])
+@pytest.mark.parametrize("ignored", [False, True])
+@pytest.mark.parametrize("change", ["extra", "tracked", "target-link", "source-link"])
+def test_native_entry_user_data_blocks_public_cleanup(
+    tmp_path: Path, host_root: str, ignored: bool, change: str,
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    if ignored:
+        (root / ".gitignore").write_text(f"{host_root}/\n", encoding="utf-8")
+        _git("add", ".gitignore", cwd=root)
+        _git("commit", "-m", "ignore native entry", cwd=root)
+    status, run_dir = _managed_run(root, "native-user-data")
+    canonical = root / ".agent-flow" / "skills" / "agent-flow"
+    shutil.copytree(KIT_ROOT / "skills" / "agent-flow", canonical)
+    entry = status.path / host_root / "agent-flow"
+    shutil.copytree(canonical, entry)
+    target = entry / "SKILL.md"
+    original = target.read_bytes()
+    if change == "extra":
+        target = entry / "user.txt"
+        target.write_bytes(b"user notes\n")
+        (canonical / "user.txt").write_bytes(b"user notes\n")
+    elif change == "tracked":
+        _git("add", "-f", str(target.relative_to(status.path)), cwd=status.path)
+    else:
+        outside = tmp_path / "outside.md"
+        outside.write_bytes(original)
+        linked = target if change == "target-link" else canonical / "SKILL.md"
+        linked.unlink()
+        linked.symlink_to(outside)
+    preserved = target.read_bytes()
+
+    with pytest.raises(W.CleanupBlockedError):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+
+    assert target.read_bytes() == preserved
+    assert (entry / "agents" / "openai.yaml").read_bytes() == (
+        canonical / "agents" / "openai.yaml"
+    ).read_bytes()
+    assert status.path.exists()
+    assert W.worktree_branch_exists(root=root, branch=status.branch)
+    if change in {"target-link", "source-link"}:
+        assert linked.is_symlink()
+        assert outside.read_bytes() == original
+
+
+
 
 def test_cleanup_completes_while_another_checkout_holds_a_provider_lease(
     tmp_path: Path,
@@ -1341,6 +1637,38 @@ def test_refused_manual_remove_discards_the_archive_it_just_wrote(
     removal = W.remove_worktree(root=root, status=status, allow_unmerged=True)
     assert removal.archived_runs == (archived,)
     assert (archived / "pr-feedback.json").read_text(encoding="utf-8") == "{}\n"
+
+
+def test_status_restores_native_entries_after_a_refused_remove(tmp_path: Path) -> None:
+    """반증: 정리는 merge 가능 검사보다 먼저 native entry를 걷어낸다. 거부되면 checkout은
+    남는데 status/continue가 entry를 되살리지 않아, 그 checkout에서 Codex와 OMP가 agent-flow를
+    다시 찾지 못했다.
+    """
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status = W.create_worktree(
+        root=root, plan=W.plan_worktree(root=root, name="refused-native")
+    )
+    _inactive_run(root, status, "run-later", "first\n")
+    canonical = root / ".agent-flow" / "skills" / "agent-flow"
+    shutil.copytree(KIT_ROOT / "skills" / "agent-flow", canonical)
+    W.provision_native_skill_entry(leader=root, checkout=status.path)
+    entries = [
+        status.path / host_root / "agent-flow" / "SKILL.md"
+        for host_root in (".agents/skills", ".omp/skills")
+    ]
+    assert all(entry.is_file() for entry in entries)
+    (status.path / "unmerged.txt").write_text("work\n", encoding="utf-8")
+    _git("add", "unmerged.txt", cwd=status.path)
+    _git("commit", "-m", "unmerged work", cwd=status.path)
+
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W.remove_worktree(root=root, status=status)
+
+    assert not any(entry.exists() for entry in entries)
+    assert cli_module.main(["status", "--root", str(root), "--worktree", status.name]) == 0
+    for entry in entries:
+        assert entry.read_bytes() == (canonical / "SKILL.md").read_bytes()
 
 
 def test_status_prefers_pending_cleanup_runtime_while_checkout_still_exists(

@@ -657,6 +657,7 @@ def _remove_worktree_locked(
     try:
         if live:
             _retire_provisioned_host_hook_registrations(root=root, checkout=status.path)
+            _retire_provisioned_native_skill_entry(root=root, checkout=status.path)
         if live and require_merged and not allow_unmerged:
             assert_worktree_mergeable(root=root, path=status.path)
 
@@ -813,6 +814,7 @@ def run_worktree_cleanup_transaction(
     after_step: Callable[[str], None] | None = None,
 ) -> CleanupTransactionResult:
     """Run or resume the ordered, durable retirement of a workflow checkout."""
+    _recover_pending_native_entry_retirement(root=root, checkout=checkout_path)
     journal_path, journal = _prepare_or_load_cleanup_journal(
         root=root,
         checkout_path=checkout_path,
@@ -2263,13 +2265,13 @@ def _kit_owned_host_hook_registrations(*, root: Path, checkout: Path) -> set[str
 
 
 def _kit_copied_worktree_files(*, root: Path, checkout: Path) -> set[str]:
-    """checkout의 worktree setup 복사본 중 leader와 **바이트가 같은** 것들.
-    ``root``는 leader checkout이다.
+    """프로젝트·profile 복사본과 native entry의 canonical source가 **바이트가 같은** 것들.
+    native entry는 이 checkout의 provision receipt와 바이트가 같아도 포함한다(kit이 갱신된 뒤
+    남은 우리 옛 판본). ``root``는 leader checkout이다.
 
-    checkout을 만들 때 kit이 직접 심는 파일이다(`ROOT_CONTEXT_FILES` + profile의
-    `branching.worktree_setup.copy`). 그 이름이 gitignored인 저장소에서는 — 이 저장소의
-    `CLAUDE.md`가 그렇다 — kit이 스스로 심은 파일 하나 때문에 모든 worktree가 영구히
-    정리 불가가 된다.
+    checkout을 만들 때 kit이 직접 심는 instruction·설정 파일이다. 이 저장소의
+    `CLAUDE.md`처럼 gitignored인 사본을 dirty로 세면 kit이 스스로 심은 파일 때문에
+    모든 worktree가 영구히 정리 불가가 된다.
 
     판정 기준은 이름이 아니라 내용이다. 여기서 예외를 받은 경로는 checkout과 함께
     지워지므로, 이름만 보고 통과시키면 사용자가 worktree에서 고친 `local.properties`가
@@ -2280,11 +2282,15 @@ def _kit_copied_worktree_files(*, root: Path, checkout: Path) -> set[str]:
     이유로 예외를 주지 않는다.
     """
     owned: set[str] = set()
+    native_names = {rel for rel, _source in _NATIVE_SKILL_ENTRY_COPIES}
+    receipt: dict[str, str] | None = None
     leader_base = Path(os.path.normpath(str(root)))
     checkout_base = Path(os.path.normpath(str(checkout)))
-    for name in _declared_worktree_copy_names(root):
+    copies = [(name, name) for name in _declared_worktree_copy_names(root)]
+    copies.extend(_NATIVE_SKILL_ENTRY_COPIES)
+    for name, source_name in copies:
         try:
-            source = _worktree_setup_path(leader_base, name)
+            source = _worktree_setup_path(leader_base, source_name)
             target = _worktree_setup_path(checkout_base, name)
         except ValueError:
             # 저장소 밖을 가리키는 선언은 복사 쪽에서도 거부됐다. 심지 않은 파일이다.
@@ -2300,8 +2306,14 @@ def _kit_copied_worktree_files(*, root: Path, checkout: Path) -> set[str]:
                 or not source.is_file()
             ):
                 continue
-            if source.read_bytes() != target.read_bytes():
-                continue
+            observed = target.read_bytes()
+            if source.read_bytes() != observed:
+                if name not in native_names:
+                    continue
+                if receipt is None:
+                    receipt = _read_native_entry_receipt(leader=leader_base, checkout=checkout_base)
+                if receipt.get(name) != _native_entry_digest(observed):
+                    continue
         except OSError:
             continue
         owned.add(target.relative_to(checkout_base).as_posix())
@@ -2415,6 +2427,7 @@ def _remove_journal_checkout(
     # `--force` 없는 `git worktree remove`는 untracked 파일 하나에도 거부한다. 우리가
     # 깐 등록만 걷어내고 사용자 잔재는 남긴다.
     _retire_provisioned_host_hook_registrations(root=root, checkout=path)
+    _retire_provisioned_native_skill_entry(root=root, checkout=path)
     _run_git(root, "worktree", "remove", str(path))
     if path.exists() or _registered_at_path(root=root, path=path) is not None:
         raise CleanupBlockedError(
@@ -4122,6 +4135,22 @@ def run_declared_worktree_actions(
 # local/pending이 legacy Clean으로 바뀌므로 profile 해석 전에 함께 복사한다.
 ROOT_CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md", PROJECT_ARCHITECTURE_FILE)
 
+_NATIVE_SKILL_ENTRY_FILES = ("SKILL.md", "agents/openai.yaml")
+_NATIVE_SKILL_ENTRY_ROOTS = (".claude/skills", ".agents/skills", ".omp/skills")
+_NATIVE_SKILL_ENTRY_COPIES = tuple(
+    (
+        f"{host_root}/agent-flow/{name}",
+        f".agent-flow/skills/agent-flow/{name}",
+    )
+    for host_root in _NATIVE_SKILL_ENTRY_ROOTS
+    for name in _NATIVE_SKILL_ENTRY_FILES
+)
+
+# Claude Code는 `.claude/skills`가 없는 linked checkout에서 main worktree의 것을 읽는다
+# (2.1.296 실측). 여기에 copy를 하나 심으면 leader의 나머지 project skill이 그 checkout에서
+# 사라지므로, checkout이 이미 자기 skill root를 가질 때만 entry를 더한다.
+_MAIN_WORKTREE_FALLBACK_SKILL_ROOTS = frozenset({".claude/skills"})
+
 
 def declared_worktree_copies(profile: Mapping[str, Any]) -> list[str]:
     """새 checkout이 받아야 할 이름: 루트 컨텍스트 파일 + 단일/합성 profile 선언.
@@ -4218,6 +4247,593 @@ def copy_declared_worktree_files(
         shutil.copy2(source, target)
         copied.append(name)
     return tuple(copied)
+
+
+@contextmanager
+def _verified_native_entry_checkout(
+    *, leader: Path, checkout: Path
+) -> Iterator[tuple[int, int, str, tuple[int, int]]]:
+    if not _DIR_FD_SUPPORTED or not getattr(os, "O_NOFOLLOW", 0):
+        raise WorktreeIsolationError("native skill setup requires secure dir-fd operations")
+    before = checkout.lstat()
+    if checkout.is_symlink() or not stat.S_ISDIR(before.st_mode):
+        raise WorktreeIsolationError(f"worktree path is not a trusted directory: {checkout}")
+    registered = registered_worktree_at(leader, checkout)
+    if (
+        registered is None
+        or registered.prunable
+        or not registered.registration_identity
+        or not (
+            _is_managed_child(root=leader, path=checkout)
+            or _adopted(root=leader, path=checkout)
+        )
+    ):
+        raise WorktreeIsolationError(f"native skill setup requires a managed checkout: {checkout}")
+    registration_identity = registered.registration_identity
+    checkout_identity = (before.st_dev, before.st_ino)
+    verify_linked_worktree(
+        root=leader,
+        path=checkout,
+        expected_branch=registered.branch,
+        managed_root=checkout.parent,
+    )
+    _assert_worktree_registration_identity(
+        root=leader, checkout=checkout, expected=registration_identity
+    )
+    _assert_checkout_path_identity(checkout=checkout, expected=checkout_identity)
+    checkout_fd = os.open(
+        checkout, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    try:
+        opened = os.fstat(checkout_fd)
+        if (opened.st_dev, opened.st_ino) != checkout_identity:
+            raise WorktreeIsolationError(f"worktree path changed before native skill setup: {checkout}")
+        with _locked_verified_worktree_index(
+            leader=leader, checkout=checkout, checkout_fd=checkout_fd
+        ) as gitdir_fd:
+            yield checkout_fd, gitdir_fd, registration_identity, checkout_identity
+            _assert_worktree_registration_identity(
+                root=leader, checkout=checkout, expected=registration_identity
+            )
+            _assert_checkout_path_identity(checkout=checkout, expected=checkout_identity)
+    finally:
+        os.close(checkout_fd)
+
+
+def _read_regular_worktree_copy_at(
+    *, parent: int, name: str
+) -> tuple[bytes, tuple[int, int]] | None:
+    try:
+        handle = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent
+        )
+    except FileNotFoundError:
+        return None
+    with os.fdopen(handle, "rb") as stream:
+        identity = os.fstat(stream.fileno())
+        if not stat.S_ISREG(identity.st_mode):
+            raise WorktreeIsolationError(f"native skill instruction is not a regular file: {name}")
+        return stream.read(), (identity.st_dev, identity.st_ino)
+
+
+def _checkout_has_skill_root(*, checkout_fd: int, host_root: str) -> bool:
+    parent_name, leaf = host_root.split("/")
+    try:
+        parent = os.open(
+            parent_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=checkout_fd
+        )
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # symlink거나 디렉터리가 아닌 부모는 아래 guarded writer가 거부하고 알린다.
+        return True
+    try:
+        os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    finally:
+        os.close(parent)
+    return True
+
+
+_NATIVE_ENTRY_RECEIPT = "agent-flow-native-entry.json"
+
+
+def _native_entry_digest(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _read_native_entry_receipt_at(gitdir_fd: int) -> dict[str, str]:
+    """checkout git admin dir의 provision receipt. 읽지 못하면 빈 것으로 본다 — 소유 증거가
+    줄어 덮기·은퇴가 막힐 뿐, 넓게 여는 실패가 아니다."""
+    try:
+        observed = _read_regular_worktree_copy_at(parent=gitdir_fd, name=_NATIVE_ENTRY_RECEIPT)
+        data = json.loads(observed[0]) if observed is not None else None
+    except (OSError, ValueError, WorktreeIsolationError):
+        return {}
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, dict):
+        return {}
+    return {
+        rel: digest
+        for rel, digest in entries.items()
+        if isinstance(rel, str) and isinstance(digest, str)
+    }
+
+
+def _read_native_entry_receipt(*, leader: Path, checkout: Path) -> dict[str, str]:
+    """lock 없이 읽는다. 판정 보조일 뿐이고, 쓰기 직전에는 lock 아래에서 다시 읽는다."""
+    try:
+        checkout_fd = os.open(checkout, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return {}
+    try:
+        gitdir_fd = _open_verified_worktree_gitdir(
+            leader=leader, checkout=checkout, checkout_fd=checkout_fd
+        )
+    except (OSError, WorktreeIsolationError):
+        return {}
+    finally:
+        os.close(checkout_fd)
+    try:
+        return _read_native_entry_receipt_at(gitdir_fd)
+    finally:
+        os.close(gitdir_fd)
+
+
+def _write_native_entry_receipt_at(gitdir_fd: int, entries: Mapping[str, str]) -> None:
+    _write_native_entry_state_at(
+        gitdir_fd, _NATIVE_ENTRY_RECEIPT,
+        {"version": 1, "entries": dict(sorted(entries.items()))},
+    )
+
+
+def _write_native_entry_state_at(gitdir_fd: int, name: str, state: Mapping[str, object]) -> None:
+    payload = json.dumps(state, indent=2)
+    staging = f"{name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    handle = os.open(
+        staging,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o644,
+        dir_fd=gitdir_fd,
+    )
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(f"{payload}\n".encode())
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.rename(staging, name, src_dir_fd=gitdir_fd, dst_dir_fd=gitdir_fd)
+        os.fsync(gitdir_fd)
+    except BaseException:
+        try:
+            os.unlink(staging, dir_fd=gitdir_fd)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _survey_native_skill_entry(
+    *, leader: Path, checkout: Path, payloads: Mapping[str, bytes]
+) -> tuple[bool, tuple[tuple[str, Path], ...]]:
+    """lock 없이 (쓸 것이 있는가, 사용자 것이라 남길 target들)을 본다.
+
+    canonical과도 receipt와도 다른 파일이 하나라도 있으면 그 root에는 쓰지 않는다. 쓰기는
+    빠진 파일, receipt대로인 옛 판본, receipt에 아직 없는 canonical 파일이 있는 root에서만
+    일어난다.
+    """
+    receipt = _read_native_entry_receipt(leader=leader, checkout=checkout)
+    needs_write = False
+    preserved: list[tuple[str, Path]] = []
+    for host_root in _NATIVE_SKILL_ENTRY_ROOTS:
+        if host_root in _MAIN_WORKTREE_FALLBACK_SKILL_ROOTS and not os.path.lexists(checkout / host_root):
+            continue
+        pending = False
+        kept: list[tuple[str, Path]] = []
+        for name, payload in payloads.items():
+            rel = f"{host_root}/agent-flow/{name}"
+            target = checkout / rel
+            try:
+                handle = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except FileNotFoundError:
+                pending = True
+                continue
+            except OSError:
+                kept.append((host_root, target))
+                continue
+            with os.fdopen(handle, "rb") as stream:
+                regular = stat.S_ISREG(os.fstat(stream.fileno()).st_mode)
+                observed = stream.read() if regular else None
+            digest = _native_entry_digest(observed) if observed is not None else None
+            if observed == payload:
+                pending = pending or receipt.get(rel) != digest
+            elif digest is not None and receipt.get(rel) == digest:
+                pending = True
+            else:
+                kept.append((host_root, target))
+        if kept:
+            preserved.extend(kept)
+        elif pending:
+            needs_write = True
+    return needs_write, tuple(preserved)
+
+
+def _native_skill_entry_payloads(leader: Path) -> dict[str, bytes]:
+    payloads: dict[str, bytes] = {}
+    for name in _NATIVE_SKILL_ENTRY_FILES:
+        source = leader / ".agent-flow" / "skills" / "agent-flow" / name
+        try:
+            parent = _open_host_hook_parent(checkout=leader, target=source)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"canonical installed agent-flow skill is missing: {source}") from exc
+        try:
+            observed = _read_regular_worktree_copy_at(parent=parent, name=source.name)
+        finally:
+            os.close(parent)
+        if observed is None:
+            raise FileNotFoundError(f"canonical installed agent-flow skill is missing: {source}")
+        payloads[name] = observed[0]
+    return payloads
+
+
+def provision_native_skill_entry(*, leader: Path, checkout: Path) -> tuple[str, ...]:
+    """검증된 managed checkout에 canonical instruction만 복사한다.
+
+    기존 entry는 이 checkout의 provision receipt와 바이트가 같을 때만(우리가 쓴 옛 판본) 새
+    판본으로 바꾼다. 그 밖의 바이트는 사용자 것이라 덮지 않는다.
+    """
+    leader = Path(os.path.normpath(str(leader)))
+    checkout = Path(os.path.normpath(str(checkout)))
+    if same_worktree_path(leader, checkout):
+        return ()
+    _recover_pending_native_entry_retirement(root=leader, checkout=checkout)
+    payloads = _native_skill_entry_payloads(leader)
+    # status/continue마다 불린다. 쓸 것이 없는데 checkout의 git `index.lock`을 잡으면
+    # 같은 checkout에서 동시에 도는 git 명령이 실패한다.
+    needs_write, preserved = _survey_native_skill_entry(
+        leader=leader, checkout=checkout, payloads=payloads
+    )
+    if not needs_write:
+        for host_root, target in preserved:
+            print(
+                f"warning: native skill entry skipped for {host_root}: "
+                f"existing user native skill preserved: {target}",
+                file=sys.stderr,
+            )
+        return ()
+    written: list[str] = []
+    with _verified_native_entry_checkout(
+        leader=leader, checkout=checkout
+    ) as (checkout_fd, gitdir_fd, registration_identity, checkout_identity):
+        tracked = _tracked_native_skill_entry_paths(gitdir_fd)
+        receipt = _read_native_entry_receipt_at(gitdir_fd)
+        recorded = dict(receipt)
+        retired = _retired_native_entry_dir(root=leader, checkout=checkout)
+        for host_root in _NATIVE_SKILL_ENTRY_ROOTS:
+            if host_root in _MAIN_WORKTREE_FALLBACK_SKILL_ROOTS and not _checkout_has_skill_root(
+                checkout_fd=checkout_fd, host_root=host_root
+            ):
+                continue
+            parents: list[tuple[str, Path, int]] = []
+            try:
+                for name, payload in payloads.items():
+                    _assert_worktree_registration_identity(
+                        root=leader, checkout=checkout, expected=registration_identity
+                    )
+                    _assert_checkout_path_identity(checkout=checkout, expected=checkout_identity)
+                    rel = f"{host_root}/agent-flow/{name}"
+                    target = checkout / rel
+                    parent = _open_host_hook_parent(
+                        checkout=checkout, target=target, checkout_fd=checkout_fd, create=True
+                    )
+                    parents.append((rel, target, parent))
+                    existing = _read_regular_worktree_copy_at(parent=parent, name=target.name)
+                    if (
+                        existing is not None
+                        and existing[0] != payload
+                        and _native_entry_digest(existing[0]) != receipt.get(rel)
+                    ):
+                        raise WorktreeIsolationError(f"existing user native skill preserved: {target}")
+                    if rel in tracked:
+                        raise WorktreeIsolationError(f"tracked native skill preserved: {target}")
+                for rel, target, parent in parents:
+                    payload = payloads[target.relative_to(checkout / host_root / "agent-flow").as_posix()]
+                    current = _read_regular_worktree_copy_at(parent=parent, name=target.name)
+                    if current is not None and current[0] == payload:
+                        recorded[rel] = _native_entry_digest(payload)
+                        continue
+                    _assert_worktree_registration_identity(
+                        root=leader, checkout=checkout, expected=registration_identity
+                    )
+                    _assert_checkout_path_identity(checkout=checkout, expected=checkout_identity)
+                    if current is not None and not _retire_native_entry_file_at(
+                        parent=parent,
+                        target=target,
+                        root=leader, checkout=checkout, gitdir_fd=gitdir_fd,
+                        owned={receipt[rel]} if rel in receipt else set(),
+                        destination=retired / rel,
+                    ):
+                        continue
+                    if _replace_host_hook_registration_at(
+                        parent=parent, name=target.name, payload=payload,
+                        leader=leader, rel=rel, expected=None,
+                    ):
+                        written.append(rel)
+                        recorded[rel] = _native_entry_digest(payload)
+            except (OSError, ValueError, WorktreeIsolationError) as exc:
+                print(f"warning: native skill entry skipped for {host_root}: {exc}", file=sys.stderr)
+            finally:
+                for _rel, _target, parent in parents:
+                    os.close(parent)
+        if recorded != receipt:
+            _write_native_entry_receipt_at(gitdir_fd, recorded)
+    return tuple(written)
+
+
+def _retire_provisioned_native_skill_entry(*, root: Path, checkout: Path) -> None:
+    """정리 직전에 kit이 깐 native entry를 checkout에서 뗀다. ``root``는 leader checkout이다.
+
+    canonical이나 provision receipt와 바이트가 같은 파일만 뗀다. 그 밖은 사용자 것이라 남겨
+    정리를 막는다.
+    """
+    _recover_pending_native_entry_retirement(root=root, checkout=checkout)
+    candidates = _kit_copied_worktree_files(root=root, checkout=checkout)
+    native = [rel for rel, _source in _NATIVE_SKILL_ENTRY_COPIES if rel in candidates]
+    if not native:
+        return
+    retired = _retired_native_entry_dir(root=root, checkout=checkout)
+    with _verified_native_entry_checkout(
+        leader=root, checkout=checkout
+    ) as (checkout_fd, gitdir_fd, registration_identity, checkout_identity):
+        payloads = _native_skill_entry_payloads(root)
+        receipt = _read_native_entry_receipt_at(gitdir_fd)
+        tracked = _tracked_native_skill_entry_paths(gitdir_fd)
+        for rel in native:
+            if rel in tracked:
+                continue
+            target = checkout / rel
+            owned = {_native_entry_digest(payloads["/".join(rel.split("/")[3:])])}
+            if rel in receipt:
+                owned.add(receipt[rel])
+            parent = _open_host_hook_parent(
+                checkout=checkout, target=target, checkout_fd=checkout_fd
+            )
+            try:
+                _assert_worktree_registration_identity(
+                    root=root, checkout=checkout, expected=registration_identity
+                )
+                _assert_checkout_path_identity(checkout=checkout, expected=checkout_identity)
+                _retire_native_entry_file_at(
+                    parent=parent, target=target, owned=owned, destination=retired / rel,
+                    root=root, checkout=checkout, gitdir_fd=gitdir_fd,
+                )
+            finally:
+                os.close(parent)
+            _prune_empty_host_hook_parents(checkout=checkout, target=target)
+
+
+def _retired_native_entry_dir(*, root: Path, checkout: Path) -> Path:
+    """뗀 native entry inode를 남기는 checkout 밖 자리. 호출마다 새 하위 디렉터리를 쓴다."""
+    return _native_retirement_root(root=root, checkout=checkout) / f"{os.getpid()}-{secrets.token_hex(8)}"
+
+
+def _native_retirement_root(*, root: Path, checkout: Path) -> Path:
+    return (
+        _agent_flow_state_dir(root) / "retired-native-entries"
+        / f"{_safe_component(checkout.name)}-{_checkout_path_digest(root=root, path=checkout)}"
+    )
+
+
+_NATIVE_ENTRY_RETIREMENT = "agent-flow-native-entry-retirement.json"
+
+
+def _recover_pending_native_entry_retirement(*, root: Path, checkout: Path) -> None:
+    # 일반 읽기에서는 index.lock을 잡지 않는다. intent가 있을 때만 기존 검증·lock으로 진입한다.
+    try:
+        checkout_fd = os.open(
+            checkout, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
+    except FileNotFoundError:
+        return
+    try:
+        gitdir_fd = _open_verified_worktree_gitdir(
+            leader=root, checkout=checkout, checkout_fd=checkout_fd
+        )
+        try:
+            pending = _read_regular_worktree_copy_at(
+                parent=gitdir_fd, name=_NATIVE_ENTRY_RETIREMENT
+            )
+        finally:
+            os.close(gitdir_fd)
+    finally:
+        os.close(checkout_fd)
+    if pending is None:
+        return
+    with _verified_native_entry_checkout(
+        leader=root, checkout=checkout
+    ) as (checkout_fd, gitdir_fd, _registration_identity, _checkout_identity):
+        _replay_native_entry_retirement_at(
+            root=root, checkout=checkout, checkout_fd=checkout_fd, gitdir_fd=gitdir_fd
+        )
+
+
+def _replay_native_entry_retirement_at(
+    *, root: Path, checkout: Path, checkout_fd: int, gitdir_fd: int
+) -> None:
+    observed = _read_regular_worktree_copy_at(parent=gitdir_fd, name=_NATIVE_ENTRY_RETIREMENT)
+    if observed is None:
+        return
+    try:
+        intent = json.loads(observed[0])
+        rel = intent["entry"]
+        quarantine = intent["quarantine"]
+        archive = Path(intent["archive"])
+        identity = intent["identity"]
+        if (
+            intent.get("version") != 1
+            or rel not in {name for name, _source in _NATIVE_SKILL_ENTRY_COPIES}
+            or not isinstance(quarantine, str)
+            or not re.fullmatch(
+                re.escape(Path(rel).name) + r"\.agent-flow-retired\.[0-9]+\.[0-9a-f]{16}",
+                quarantine,
+            )
+            or len(archive.parts) < 2
+            or not re.fullmatch(r"[0-9]+-[0-9a-f]{16}", archive.parts[0])
+            or archive.parts[1:] != Path(rel).parts
+            or not isinstance(identity, list)
+            or len(identity) != 2
+            or any(type(value) is not int or value < 0 for value in identity)
+        ):
+            raise ValueError("invalid native retirement intent")
+    except (TypeError, ValueError, KeyError, AttributeError) as exc:
+        raise WorktreeIsolationError(f"native retirement intent is unreadable: {checkout}") from exc
+    expected = tuple(identity)
+    target = checkout / rel
+    destination = _native_retirement_root(root=root, checkout=checkout) / archive
+    parent = _open_host_hook_parent(checkout=checkout, target=target, checkout_fd=checkout_fd)
+    try:
+        moved = _read_regular_worktree_copy_at(parent=parent, name=quarantine)
+        current = _read_regular_worktree_copy_at(parent=parent, name=target.name)
+        if moved is not None:
+            if moved[1] != expected:
+                raise WorktreeIsolationError(f"native retirement inode changed: {target}")
+            # 복구 중 canonical 이름이 사용자 파일로 교체돼도 옛 writer의 inode는 남긴다.
+            _link_retired_native_entry(
+                parent=parent, quarantine=quarantine, destination=destination,
+                store=_agent_flow_state_dir(root),
+            )
+            if current is None:
+                try:
+                    os.link(
+                        quarantine, target.name, src_dir_fd=parent, dst_dir_fd=parent,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError:
+                    current = _read_regular_worktree_copy_at(parent=parent, name=target.name)
+                    if current is None:
+                        raise WorktreeIsolationError(f"native entry changed during recovery: {target}")
+            os.fsync(parent)
+            os.unlink(quarantine, dir_fd=parent)
+            os.fsync(parent)
+        elif current is None or current[1] != expected:
+            try:
+                kept = destination.lstat()
+            except FileNotFoundError as exc:
+                raise WorktreeIsolationError(f"native retirement inode is missing: {target}") from exc
+            if not stat.S_ISREG(kept.st_mode) or (kept.st_dev, kept.st_ino) != expected:
+                raise WorktreeIsolationError(f"native retirement archive changed: {target}")
+        os.unlink(_NATIVE_ENTRY_RETIREMENT, dir_fd=gitdir_fd)
+        os.fsync(gitdir_fd)
+    finally:
+        os.close(parent)
+
+
+def _retire_native_entry_file_at(
+    *, parent: int, target: Path, owned: set[str], destination: Path,
+    root: Path, checkout: Path, gitdir_fd: int,
+) -> bool:
+    """``owned`` digest와 바이트가 같은 파일만 checkout에서 뗀다. 뗐으면 True다.
+
+    fd를 열어 둔 writer는 바이트 검사 뒤에도 같은 inode에 쓸 수 있다. 그래서 지우지 않고
+    inode를 ``destination``에 hardlink로 남긴 뒤 checkout 쪽 이름만 뗀다. 늦게 쓴 내용은
+    그 사본에 남는다. 남길 수 없으면(다른 파일시스템 등) entry를 그대로 둔다.
+    """
+    observed = _read_regular_worktree_copy_at(parent=parent, name=target.name)
+    if observed is None or _native_entry_digest(observed[0]) not in owned:
+        return False
+    if _read_regular_worktree_copy_at(parent=gitdir_fd, name=_NATIVE_ENTRY_RETIREMENT) is not None:
+        raise WorktreeIsolationError(f"native retirement recovery is pending: {checkout}")
+    quarantine = f"{target.name}.agent-flow-retired.{os.getpid()}.{secrets.token_hex(8)}"
+    _write_native_entry_state_at(
+        gitdir_fd, _NATIVE_ENTRY_RETIREMENT,
+        {
+            "version": 1, "entry": target.relative_to(checkout).as_posix(),
+            "quarantine": quarantine, "identity": list(observed[1]),
+            "archive": destination.relative_to(
+                _native_retirement_root(root=root, checkout=checkout)
+            ).as_posix(),
+        },
+    )
+    os.rename(target.name, quarantine, src_dir_fd=parent, dst_dir_fd=parent)
+    os.fsync(parent)
+    try:
+        moved = _read_regular_worktree_copy_at(parent=parent, name=quarantine)
+    except BaseException:
+        _restore_host_hook_registration_at(parent=parent, name=target.name, quarantine=quarantine)
+        raise
+    if moved != observed:
+        _restore_host_hook_registration_at(parent=parent, name=target.name, quarantine=quarantine)
+        raise WorktreeIsolationError(f"native skill entry changed during cleanup: {target}")
+    try:
+        _link_retired_native_entry(
+            parent=parent, quarantine=quarantine, destination=destination,
+            store=_agent_flow_state_dir(root),
+        )
+    except OSError as exc:
+        _restore_host_hook_registration_at(parent=parent, name=target.name, quarantine=quarantine)
+        os.fsync(parent)
+        raise WorktreeIsolationError(
+            f"native skill entry kept: cannot preserve it outside the checkout: {target}: {exc}"
+        ) from exc
+    os.unlink(quarantine, dir_fd=parent)
+    os.fsync(parent)
+    os.unlink(_NATIVE_ENTRY_RETIREMENT, dir_fd=gitdir_fd)
+    os.fsync(gitdir_fd)
+    return True
+
+
+def _link_retired_native_entry(
+    *, parent: int, quarantine: str, destination: Path, store: Path
+) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    directory = os.open(
+        destination.parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        try:
+            os.link(
+                quarantine, destination.name, src_dir_fd=parent, dst_dir_fd=directory,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            source = os.stat(quarantine, dir_fd=parent, follow_symlinks=False)
+            kept = os.stat(destination.name, dir_fd=directory, follow_symlinks=False)
+            if (source.st_dev, source.st_ino) != (kept.st_dev, kept.st_ino):
+                raise WorktreeIsolationError(f"native retirement archive already exists: {destination}")
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    # fsync each created parent before the only checkout name is removed.
+    path = destination.parent.parent
+    while True:
+        handle = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.fsync(handle)
+        finally:
+            os.close(handle)
+        if path == store:
+            break
+        path = path.parent
+
+
+def _tracked_native_skill_entry_paths(gitdir_fd: int) -> set[str]:
+    result = git_safe(
+        "--git-dir=.",
+        "ls-files",
+        "-z",
+        "--",
+        *(rel for rel, _source in _NATIVE_SKILL_ENTRY_COPIES),
+        cwd=Path("/"),
+        optional_locks=False,
+        pass_fds=(gitdir_fd,),
+        cwd_fd=gitdir_fd,
+    )
+    if not result.ok:
+        raise WorktreeIsolationError(
+            "cannot inspect the verified worktree index during native skill setup: "
+            f"{result.stderr.strip() or result.error or 'git did not answer'}"
+        )
+    return set(result.stdout.split("\0")) - {""}
 
 
 # host 세션(Claude/Codex/OMP)이 managed hook을 찾는 등록 파일들.

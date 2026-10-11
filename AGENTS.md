@@ -40,33 +40,6 @@ tools/skill-noop/       ← A/B harness that measures whether a skill line chang
 - Undecidable is not blocked. Let a failed shell parse or an undeclared cwd through (destructive commands are the only exception), and instead let lifecycle commands (`status`/`continue`/`run`/`start`) through **in every state**. When the command that clears a deadlock the boundary created sits behind that boundary, the number of ways out is zero. Do not widen that exemption list — an exempted path skips the literal block, the destructive list, and the tripwire all at once, so `eval --judge-command` becomes a channel for arbitrary argv execution and `worktree remove --name` deletes a sibling checkout (`tests/test_host_write_boundary.py::test_lifecycle_exemption_stays_narrow` guards this).
 - A leader that fast-forwards normally is not drift. The HEAD relaxation is granted only when **all three** hold: the same branch, an ancestor relationship, and the leader's own reflog record (`core/worktree_isolation.py:_head_drift_kind`). That is why there is no command to clear a stale baseline by hand — instead `reset --hard` (not an ancestor), a branch switch, and a ref pushed in from outside all still trip. A record whose snapshot **format** changed is recaptured instead of compared (`LeaderSnapshot.version`) — reporting a format difference as contamination would block every run in flight with no basis.
 
-The explicit Agent Flow lifecycle contract lives in `skills/agent-flow/SKILL.md`. The block below only points to it; project rules above remain applicable independently.
-
-<!-- agent-flow:start -->
-## Agent Flow
-
-- Invoke `/agent-flow` explicitly to start or resume an Agent Flow task. Follow `.agent-flow/skills/agent-flow/SKILL.md` only for that invocation; installation or opening a session does not start a workflow.
-- Existing project rules and installed runtime protection remain applicable outside Agent Flow participation.
-
-### Context Economy
+## Context Economy
 
 - Keep answers short and in the language the user writes in; keep code, commands, paths, identifiers, and exact workflow markers verbatim.
-<!-- agent-flow:skills:start -->
-```text
-[agent-flow skill index]|root: .agent-flow/skills
-|IMPORTANT: The files below outrank memory. Skim what you are about to change, and read only what your scope touches.
-|always:{code-generation-discipline,comment-authoring-discipline}
-|on-demand:{agent-flow,agent-flow-concise-output,agent-flow-diagnosing-bugs,architecture-reviewer,clean-architecture,clean-architecture-core,code-review,codebase-design,comment-checker,ddd-architecture,domain-modeling,full-feature-workflow,grill-with-docs,grilling,llm-tool-development,plan-reviewer,product-brief,push-watch,python-api-clean-architecture,python-development-guide,resolving-merge-conflicts,tdd,to-prd,write-for-work}
-```
-<!-- agent-flow:skills:end -->
-<!-- agent-flow:docs:start -->
-```text
-[agent-flow docs index]|root: docs
-|IMPORTANT: Paths only. Read a document when you need it; do not move its body here.
-|docs:{GETTING-STARTED.md,IDENTITY-AND-FREEZE-POLICY.md,mattpocock-skills-upstream-audit.md,PLAN.md,react-native-architecture-proposal-and-install-validation.md,semantic-clean-architecture-code-review.md,semantic-clean-architecture-skill-audit.md,TEAM-ADOPTION.md,USAGE.md}
-|docs/adr:{0001-separate-core-from-environment-adapters.md,0002-use-stage-artifacts-for-subagent-first-workflows.md,0003-keep-team-orchestration-optional.md,0004-exclude-sandboxed-ai-cli-execution.md,0005-prefer-team-state-archive-before-delete.md,0006-add-domain-and-architecture-gates-to-full-feature.md,0006-use-push-watch-as-pr-automation-entrypoint.md,0007-hosted-remote-sandbox-queue-session-infra.md}
-|docs/issues:{0001-host-provider-discovery.md,0002-worktree-backed-run-start.md,0003-team-runtime-tracer.md,0004-installable-workflow-kit.md,0005-domain-ddd-full-feature-phases.md,0005-push-watch-workflow.md,0006-enforce-ddd-architecture-intent.md,0007-architecture-context-refactor.md,0008-issue222-architecture-followup.md,0009-plugin-optin-design.md}
-|docs/ko:{GETTING-STARTED.md,TEAM-ADOPTION.md}
-```
-<!-- agent-flow:docs:end -->
-<!-- agent-flow:end -->

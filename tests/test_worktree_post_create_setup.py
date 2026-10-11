@@ -29,6 +29,7 @@ from agent_flow.core.worktrees import (
     HOST_HOOK_REGISTRATION_FILES,
     copy_declared_worktree_files,
     provision_host_hook_registrations,
+    provision_native_skill_entry,
     provision_registered_worktree_host_hooks,
 )
 from agent_flow.core.worktree_isolation import WorktreeIsolationError
@@ -387,9 +388,10 @@ def test_root_context_files_survive_a_broken_profile(tmp_path: Path, monkeypatch
     """
     from agent_flow import cli as CLI
 
-    leader, checkout = tmp_path / "leader", tmp_path / "wt"
+    leader = tmp_path / "leader"
     _repo(leader)
-    checkout.mkdir()
+    _installed_native_entry(leader)
+    checkout = _managed_checkout(leader, "broken-profile")
     (leader / "AGENTS.md").write_text("leader contract\n", encoding="utf-8")
     (leader / "CLAUDE.md").write_text("leader claude\n", encoding="utf-8")
 
@@ -404,6 +406,12 @@ def test_root_context_files_survive_a_broken_profile(tmp_path: Path, monkeypatch
 
     assert (checkout / "AGENTS.md").read_text(encoding="utf-8") == "leader contract\n"
     assert (checkout / "CLAUDE.md").read_text(encoding="utf-8") == "leader claude\n"
+    for host_root in (".agents/skills", ".omp/skills"):
+        assert (checkout / host_root / "agent-flow" / "SKILL.md").read_bytes() == (
+            Path(__file__).resolve().parents[1] / "skills" / "agent-flow" / "SKILL.md"
+        ).read_bytes()
+        assert (checkout / host_root / "agent-flow" / "agents" / "openai.yaml").is_file()
+    assert not (checkout / ".claude" / "skills").exists()
     captured = capsys.readouterr()
     assert "skipped worktree setup" in captured.err, "profile이 깨졌다는 사실은 계속 알려야 한다"
     assert "AGENTS.md" in captured.out, "무엇이 깔렸는지 말해야 한다"
@@ -432,6 +440,181 @@ def _managed_checkout(leader: Path, name: str) -> Path:
     checkout = leader / ".agent-flow" / "worktrees" / name
     _git("worktree", "add", "-b", f"feat/{name}", str(checkout), "HEAD", cwd=leader)
     return checkout
+
+
+def _installed_native_entry(leader: Path) -> Path:
+    canonical = leader / ".agent-flow" / "skills" / "agent-flow"
+    shutil.copytree(Path(__file__).resolve().parents[1] / "skills" / "agent-flow", canonical)
+    return canonical
+
+
+@pytest.mark.parametrize("checkout_skill_root", [False, True])
+def test_claude_entry_keeps_main_worktree_skill_fallback(
+    tmp_path: Path, checkout_skill_root: bool,
+) -> None:
+    """반증: checkout에 `.claude/skills/agent-flow`를 심자 Claude가 main worktree의
+    `.claude/skills`로 fallback하지 않아 leader의 나머지 project skill이 그 checkout에서 사라졌다.
+    checkout이 이미 자기 skill root를 가지면 fallback이 없으므로 entry를 더해야 한다.
+    """
+    from agent_flow.cli import main as cli_main
+
+    leader = tmp_path / "leader"
+    _repo(leader)
+    canonical = _installed_native_entry(leader)
+    team = leader / ".claude" / "skills" / "team-review" / "SKILL.md"
+    if checkout_skill_root:
+        team.parent.mkdir(parents=True)
+        team.write_bytes(b"---\nname: team-review\n---\n")
+        _git("add", "-f", str(team.relative_to(leader)), cwd=leader)
+        _git("commit", "-m", "track team skill", cwd=leader)
+    checkout = _managed_checkout(leader, "claude-fallback")
+
+    assert cli_main(["worktree", "sync-host-hooks", "--root", str(leader)]) == 0
+
+    if checkout_skill_root:
+        assert (checkout / ".claude" / "skills" / "agent-flow" / "SKILL.md").read_bytes() == (
+            canonical / "SKILL.md"
+        ).read_bytes()
+        assert (checkout / team.relative_to(leader)).read_bytes() == b"---\nname: team-review\n---\n"
+    else:
+        assert not (checkout / ".claude" / "skills").exists()
+    for host_root in (".agents/skills", ".omp/skills"):
+        assert (checkout / host_root / "agent-flow" / "SKILL.md").read_bytes() == (
+            canonical / "SKILL.md"
+        ).read_bytes()
+
+
+
+@pytest.mark.parametrize("host_root", [".claude/skills", ".agents/skills", ".omp/skills"])
+@pytest.mark.parametrize(
+    "collision",
+    ["payload", "metadata", "parent-link", "target-link", "source-link", "source-parent-link"],
+)
+def test_native_entry_setup_preserves_custom_payload_and_refuses_escape(
+    tmp_path: Path, capsys, host_root: str, collision: str,
+) -> None:
+    from agent_flow.cli import main as cli_main
+
+    leader = tmp_path / "leader"
+    _repo(leader)
+    canonical = _installed_native_entry(leader)
+    checkout = _managed_checkout(leader, "native-collision")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "SKILL.md"
+    sentinel.write_bytes(b"user entry\n\xff")
+    entry = checkout / host_root / "agent-flow"
+    name = "agents/openai.yaml" if collision == "metadata" else "SKILL.md"
+    target = entry / name
+    if collision in {"payload", "metadata", "target-link"}:
+        target.parent.mkdir(parents=True)
+        if collision == "target-link":
+            target.symlink_to(sentinel)
+        else:
+            target.write_bytes(b"user entry\n\xff")
+    elif collision == "parent-link":
+        parent = checkout / host_root
+        parent.parent.mkdir(parents=True, exist_ok=True)
+        parent.symlink_to(outside, target_is_directory=True)
+    elif collision == "source-link":
+        (canonical / "SKILL.md").unlink()
+        (canonical / "SKILL.md").symlink_to(sentinel)
+    else:
+        shutil.rmtree(canonical)
+        canonical.symlink_to(outside, target_is_directory=True)
+
+    assert cli_main(["worktree", "sync-host-hooks", "--root", str(leader)]) == 0
+
+    assert sentinel.read_bytes() == b"user entry\n\xff"
+    assert sorted(path.name for path in outside.iterdir()) == ["SKILL.md"]
+    if collision in {"payload", "metadata"}:
+        assert target.read_bytes() == b"user entry\n\xff"
+        other = "SKILL.md" if collision == "metadata" else "agents/openai.yaml"
+        assert not (entry / other).exists()
+    elif collision == "target-link":
+        assert target.is_symlink()
+        assert not (entry / "agents" / "openai.yaml").exists()
+    elif collision == "parent-link":
+        assert (checkout / host_root).is_symlink()
+    else:
+        for native_root in (".claude/skills", ".agents/skills", ".omp/skills"):
+            assert not (checkout / native_root / "agent-flow" / "SKILL.md").exists()
+    assert "native" in capsys.readouterr().err
+    assert not (checkout / "AGENTS.md").exists()
+    assert not (checkout / "CLAUDE.md").exists()
+
+
+def test_preserved_user_entry_does_not_take_the_checkout_index_lock(tmp_path: Path, capsys) -> None:
+    """반증: 사용자 entry가 남아 있으면 쓸 것이 영영 없는데도 status/continue마다 checkout의
+    `index.lock`을 잡았다. 그 순간 같은 checkout에서 도는 git 명령이 lock 충돌로 실패한다."""
+    leader = tmp_path / "leader"
+    _repo(leader)
+    _installed_native_entry(leader)
+    checkout = _managed_checkout(leader, "native-preserved")
+    for host_root in (".agents/skills", ".omp/skills"):
+        target = checkout / host_root / "agent-flow" / "SKILL.md"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"user entry\n")
+    lock = leader / ".git" / "worktrees" / "native-preserved" / "index.lock"
+    lock.write_bytes(b"held by another git command\n")
+
+    assert provision_native_skill_entry(leader=leader, checkout=checkout) == ()
+
+    assert lock.read_bytes() == b"held by another git command\n"
+    for host_root in (".agents/skills", ".omp/skills"):
+        entry = checkout / host_root / "agent-flow"
+        assert (entry / "SKILL.md").read_bytes() == b"user entry\n"
+        assert not (entry / "agents").exists()
+    assert "existing user native skill preserved" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("missing", ["SKILL.md", "agents/openai.yaml"])
+def test_native_entry_setup_reports_missing_canonical_source_without_fake_entry(
+    tmp_path: Path, capsys, missing: str,
+) -> None:
+    from agent_flow.cli import main as cli_main
+
+    leader = tmp_path / "leader"
+    _repo(leader)
+    canonical = _installed_native_entry(leader)
+    (canonical / missing).unlink()
+    checkout = _managed_checkout(leader, "native-missing")
+
+    assert cli_main(["worktree", "sync-host-hooks", "--root", str(leader)]) == 0
+
+    assert f"canonical installed agent-flow skill is missing: {canonical / missing}" in (
+        capsys.readouterr().err
+    )
+    for host_root in (".claude/skills", ".agents/skills", ".omp/skills"):
+        assert not (checkout / host_root / "agent-flow").exists()
+
+
+@pytest.mark.parametrize("kind", ["unregistered", "unowned", "checkout-link", "git-backlink"])
+def test_native_entry_setup_refuses_unverified_checkout(tmp_path: Path, kind: str) -> None:
+    leader = tmp_path / "leader"
+    _repo(leader)
+    _installed_native_entry(leader)
+    if kind == "unregistered":
+        checkout = leader / ".agent-flow" / "worktrees" / "unregistered"
+        checkout.mkdir(parents=True)
+    elif kind == "unowned":
+        checkout = tmp_path / "outsider"
+        _git("worktree", "add", "-b", "feat/outsider", str(checkout), "HEAD", cwd=leader)
+    else:
+        checkout = _managed_checkout(leader, "native-identity")
+        if kind == "checkout-link":
+            moved = checkout.with_name("moved")
+            checkout.rename(moved)
+            checkout.symlink_to(moved, target_is_directory=True)
+        else:
+            gitdir = Path((checkout / ".git").read_text().partition(":")[2].strip())
+            (gitdir / "gitdir").write_text(str(tmp_path / "other" / ".git"), encoding="utf-8")
+
+    with pytest.raises((WorktreeIsolationError, OSError, RuntimeError)):
+        provision_native_skill_entry(leader=leader, checkout=checkout)
+
+    for host_root in (".claude/skills", ".agents/skills", ".omp/skills"):
+        assert not (checkout / host_root / "agent-flow").exists()
 
 
 def _leader_registration_bytes(leader: Path) -> dict[str, bytes]:
@@ -499,16 +682,25 @@ def test_reinstall_backfills_declared_config_into_registered_checkouts(tmp_path:
         json.dumps({"kit": "agent-flow", "profile": "android"}), encoding="utf-8"
     )
     (leader / "local.properties").write_text("sdk.dir=/opt/leader\n", encoding="utf-8")
+    canonical = _installed_native_entry(leader)
     fresh = _managed_checkout(leader, "feat-fresh")
     edited = _managed_checkout(leader, "feat-edited")
     (edited / "local.properties").write_text("sdk.dir=/opt/mine\n", encoding="utf-8")
 
+    custom_entry = edited / ".agents" / "skills" / "agent-flow" / "SKILL.md"
+    custom_entry.parent.mkdir(parents=True)
+    custom_entry.write_text("custom skill\n", encoding="utf-8")
     # 함수가 아니라 install이 실제로 치는 명령을 몬다. 빠져 있던 것이 함수가 아니라
     # 이 sweep에서 그 함수를 부르는 자리였다.
     assert cli_main(["worktree", "sync-host-hooks", "--root", str(leader)]) == 0
 
     assert (fresh / "local.properties").read_text(encoding="utf-8") == "sdk.dir=/opt/leader\n"
     assert (edited / "local.properties").read_text(encoding="utf-8") == "sdk.dir=/opt/mine\n"
+    assert (fresh / ".agents" / "skills" / "agent-flow" / "SKILL.md").read_bytes() == (
+        canonical / "SKILL.md"
+    ).read_bytes()
+    assert custom_entry.read_text(encoding="utf-8") == "custom skill\n"
+    assert not (edited / ".agents" / "skills" / "agent-flow" / "agents" / "openai.yaml").exists()
 
 
 def test_reinstall_does_not_backfill_config_into_unowned_checkouts(tmp_path: Path):

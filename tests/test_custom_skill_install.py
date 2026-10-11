@@ -74,7 +74,7 @@ def test_project_skill_links_all_hosts_and_index_omits_body(tmp_path: Path) -> N
     assert result.returncode == 0, result.stderr
     host_roots = {
         "claude": project / ".claude" / "skills",
-        "codex": project / ".Codex" / "skills",
+        "codex": project / ".agents" / "skills",
         "omp": project / ".omp" / "skills",
     }
     for host_root in host_roots.values():
@@ -142,7 +142,7 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(
         ))
         assert resolved.path is not None
         assert resolved.path.is_file()
-    for host_dir in (".Codex", ".claude", ".omp"):
+    for host_dir in (".agents", ".claude", ".omp"):
         assert (
             project
             / host_dir
@@ -152,10 +152,10 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(
         ).exists()
     assert (project / ".agent-flow" / "skills" / "domain-modeling" / "SKILL.md").exists()
     assert (project / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md").exists()
-    for host_dir in (".Codex", ".claude"):
+    for host_dir in (".agents", ".claude"):
         for skill in matt_skill_closure:
             assert not (project / host_dir / "skills" / skill).exists()
-    assert not (project / ".Codex" / "skills" / "full-feature-workflow").exists()
+    assert not (project / ".agents" / "skills" / "full-feature-workflow").exists()
     assert "write-for-work" in indexed
 
 
@@ -507,7 +507,7 @@ def test_ios_project_auto_selects_ios_profile_skills(tmp_path: Path) -> None:
     assert "webview-json-rpc-bridge" in names
     assert "nextjs-auth-session" not in names
     assert "react-runtime-i18n" not in names
-    for host in (".claude", ".Codex", ".omp"):
+    for host in (".claude", ".agents", ".omp"):
         assert (project / host / "skills/webview-json-rpc-bridge/SKILL.md").is_file()
     assert not any("missing required skill" in warning for warning in index["warnings"])
     assert "android-code-review" not in names
@@ -570,7 +570,7 @@ def test_skill_metadata_dependencies_are_indexed_and_auto_installed(tmp_path: Pa
     assert skills["consumer-skill"]["title"] == "Consumer Skill"
     assert skills["consumer-skill"]["dependencies"] == ["dependency-skill"]
     assert skills["consumer-skill"]["requires"] == ["dependency-skill"]
-    assert (project / ".Codex" / "skills" / "dependency-skill" / "SKILL.md").exists()
+    assert (project / ".agents" / "skills" / "dependency-skill" / "SKILL.md").exists()
     assert (project / ".claude" / "skills" / "dependency-skill" / "SKILL.md").exists()
 
 
@@ -614,7 +614,7 @@ def test_framed_skill_installs_runtime_required_closure(
     assert expected <= indexed
     assert "android-code-review" not in indexed
     for name in expected:
-        assert (project / ".Codex/skills" / name / "SKILL.md").is_file()
+        assert (project / ".agents/skills" / name / "SKILL.md").is_file()
     probe = """
 import json
 from pathlib import Path
@@ -724,7 +724,7 @@ def test_framed_required_metadata_fails_closed_before_install(
         assert "conflicts with" in result.stderr
     assert not (project / ".agent-flow/kit.json").exists()
     assert not (project / ".agent-flow/project.yaml").exists()
-    assert not (project / ".Codex/skills/consumer-skill").exists()
+    assert not (project / ".agents/skills/consumer-skill").exists()
     assert skill.read_bytes() == before
 
 
@@ -834,7 +834,7 @@ def test_host_limited_skill_links_only_requested_host(tmp_path: Path) -> None:
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    assert (project / ".Codex" / "skills" / "codex-only" / "SKILL.md").exists()
+    assert (project / ".agents" / "skills" / "codex-only" / "SKILL.md").exists()
     assert not (project / ".claude" / "skills" / "codex-only").exists()
     assert not (project / ".omp" / "skills" / "codex-only").exists()
 
@@ -848,7 +848,7 @@ def test_host_limited_skill_links_only_omp(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert (project / ".omp" / "skills" / "omp-only" / "SKILL.md").exists()
-    assert not (project / ".Codex" / "skills" / "omp-only").exists()
+    assert not (project / ".agents" / "skills" / "omp-only").exists()
     assert not (project / ".claude" / "skills" / "omp-only").exists()
 
 
@@ -873,7 +873,7 @@ def test_host_limited_skill_accepts_yaml_block_list(tmp_path: Path) -> None:
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    assert (project / ".Codex" / "skills" / "codex-block-list" / "SKILL.md").exists()
+    assert (project / ".agents" / "skills" / "codex-block-list" / "SKILL.md").exists()
     assert not (project / ".claude" / "skills" / "codex-block-list").exists()
     assert not (project / ".omp" / "skills" / "codex-block-list").exists()
 
@@ -882,7 +882,7 @@ def test_existing_user_modified_skill_is_not_overwritten(tmp_path: Path) -> None
     project = tmp_path / "project"
     project.mkdir()
     _skill(project / "skills" / "my-skill", "PROJECT")
-    dest = project / ".Codex" / "skills" / "my-skill"
+    dest = project / ".agents" / "skills" / "my-skill"
     dest.mkdir(parents=True)
     (dest / "SKILL.md").write_text("user modified\n", encoding="utf-8")
 
@@ -936,6 +936,26 @@ def test_git_install_hides_kit_dirs_in_local_exclude_not_tracked_gitignore(
         text=True, capture_output=True, check=True, timeout=30,
     )
     assert status.stdout.splitlines() == ["?? .gitignore"]
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_git_install_leaves_team_codex_skills_visible(tmp_path: Path, binary: str) -> None:
+    """반증: `.agents/` 전체를 exclude에 올리자 `npx skills add`가 그 아래 만든 팀 skill이
+    `git status`에서 사라져 커밋에서 빠졌다. installer가 만든 entry만 가려야 한다."""
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(("git", "init", "-q"), cwd=project, check=True, capture_output=True, timeout=30)
+    team = project / ".agents" / "skills" / "team-review" / "SKILL.md"
+    team.parent.mkdir(parents=True)
+    team.write_text("---\nname: team-review\ndescription: Team review.\n---\n", encoding="utf-8")
+    result = _install_with(binary, project)
+    assert result.returncode == 0, result.stderr
+
+    status = subprocess.run(
+        ("git", "status", "--porcelain", "--untracked-files=all"), cwd=project,
+        text=True, capture_output=True, check=True, timeout=30,
+    )
+    assert status.stdout.splitlines() == ["?? .agents/skills/team-review/SKILL.md"]
+    assert (project / ".agents" / "skills" / "agent-flow").exists()
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_skill_index_separates_manifest_ownership_from_observed_content(
@@ -1035,14 +1055,14 @@ def test_stale_host_skill_link_removed_when_hosts_change(tmp_path: Path) -> None
     skill_dir = project / "skills" / "demo"
     _skill(skill_dir, "CODEX", hosts="[codex]")
     assert _install(project).returncode == 0
-    assert (project / ".Codex" / "skills" / "demo" / "SKILL.md").exists()
+    assert (project / ".agents" / "skills" / "demo" / "SKILL.md").exists()
 
     _skill(skill_dir, "CLAUDE", hosts="[claude]")
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
     assert (project / ".claude" / "skills" / "demo" / "SKILL.md").exists()
-    assert not (project / ".Codex" / "skills" / "demo").exists()
+    assert not (project / ".agents" / "skills" / "demo").exists()
 
 
 def test_stale_broken_host_skill_symlink_removed_when_skill_deleted(tmp_path: Path) -> None:
@@ -1051,7 +1071,7 @@ def test_stale_broken_host_skill_symlink_removed_when_skill_deleted(tmp_path: Pa
     skill_dir = project / "skills" / "demo"
     _skill(skill_dir, "CODEX", hosts="[codex]")
     assert _install(project).returncode == 0
-    codex_link = project / ".Codex" / "skills" / "demo"
+    codex_link = project / ".agents" / "skills" / "demo"
     assert codex_link.exists() or codex_link.is_symlink()
 
     (skill_dir / "SKILL.md").unlink()
@@ -1067,7 +1087,7 @@ def test_stale_copied_host_skill_dir_removed_when_skill_deleted(tmp_path: Path) 
     skill_dir = project / "skills" / "demo"
     _skill(skill_dir, "CODEX", hosts="[codex]")
     assert _install(project).returncode == 0
-    codex_link = project / ".Codex" / "skills" / "demo"
+    codex_link = project / ".agents" / "skills" / "demo"
     if codex_link.is_symlink():
         codex_link.unlink()
         codex_link.mkdir(parents=True)
@@ -1080,20 +1100,232 @@ def test_stale_copied_host_skill_dir_removed_when_skill_deleted(tmp_path: Path) 
     assert not codex_link.exists()
 
 
-def test_host_skill_root_symlink_is_skipped_not_written_outside_project(tmp_path: Path) -> None:
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("symlink_path", [".agents", ".agents/skills"])
+def test_host_skill_root_symlink_is_skipped_not_written_outside_project(
+    tmp_path: Path, binary: str, symlink_path: str,
+) -> None:
     project = tmp_path / "project"
     outside = tmp_path / "outside"
     project.mkdir()
     outside.mkdir()
-    (project / ".Codex").symlink_to(outside, target_is_directory=True)
+    host_path = project / symlink_path
+    host_path.parent.mkdir(parents=True, exist_ok=True)
+    host_path.symlink_to(outside, target_is_directory=True)
     _skill(project / "skills" / "demo", "CODEX", hosts="[codex]")
 
-    result = _install(project)
+    result = _install_with(binary, project)
 
     assert result.returncode == 0, result.stderr
-    assert not (outside / "skills" / "demo").exists()
+    assert list(outside.iterdir()) == []
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
     assert any(link["status"] == "skipped-host-root-symlink" for link in index["links"])
+
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("legacy_root", [".Codex", ".codex"])
+@pytest.mark.parametrize("state", ["linked", "copied", "edited-copy", "edited-link", "unrecorded"])
+@pytest.mark.parametrize("reinstall_flags", [(), ("--force-managed",)])
+def test_codex_native_path_migration_retires_only_receipt_owned_entries(
+    tmp_path: Path, binary: str, legacy_root: str, state: str, reinstall_flags: tuple[str, ...],
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "skills/demo"
+    _skill(source, "PROJECT", hosts="[codex]")
+    (source / "references").mkdir()
+    (source / "references/policy.md").write_bytes(b"Original policy\n")
+    first = _install_with(binary, project)
+    assert first.returncode == 0, first.stderr
+    official = project / ".agents/skills/demo"
+    legacy = project / legacy_root / "skills/demo"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    if official.is_symlink():
+        official.unlink()
+    else:
+        shutil.rmtree(official)
+    if state in {"copied", "edited-copy"}:
+        shutil.copytree(source, legacy)
+        if state == "edited-copy":
+            (legacy / "references/policy.md").write_bytes(b"User policy\xff\x00")
+    else:
+        target = source
+        if state == "edited-link":
+            target = tmp_path / "outside"
+            _skill(target, "OUTSIDE", hosts="[codex]")
+        legacy.symlink_to(target, target_is_directory=True)
+    index_path = project / ".agent-flow/skills/index.json"
+    index = json.loads(index_path.read_text())
+    link = next(item for item in index["links"] if item["name"] == "demo" and item["host"] == "codex")
+    link["path"] = legacy.relative_to(project).as_posix()
+    link["status"] = "copied" if state in {"copied", "edited-copy"} else "linked"
+    if state == "unrecorded":
+        index["links"].remove(link)
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    unknown = legacy.parent / "user-skill"
+    _skill(unknown, "UNKNOWN", hosts="[codex]")
+    before = (legacy / "SKILL.md").read_bytes()
+    reference = (legacy / "references/policy.md").read_bytes() if state == "edited-copy" else None
+    for _ in range(2):
+        result = _install_with(binary, project, *reinstall_flags)
+        assert result.returncode == 0, result.stderr
+        assert (official / "SKILL.md").read_bytes() == (source / "SKILL.md").read_bytes()
+        if state in {"linked", "copied"}:
+            assert not legacy.exists() and not legacy.is_symlink()
+        else:
+            assert (legacy / "SKILL.md").read_bytes() == before
+        if reference is not None:
+            assert (legacy / "references/policy.md").read_bytes() == reference
+        assert b"UNKNOWN" in (unknown / "SKILL.md").read_bytes()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("collision", ["directory", "symlink", "no-skill-md"])
+@pytest.mark.parametrize("flags", [(), ("--force-managed",)], ids=["ordinary", "force"])
+def test_codex_native_collision_preserves_user_payload(
+    tmp_path: Path, binary: str, collision: str, flags: tuple[str, ...],
+) -> None:
+    """반증: `.agents/skills`는 다른 도구와 사용자도 쓰는 공용 경로다. `--force-managed`가
+    receipt 없는 같은 이름 디렉터리를 지우면 installer 소유가 아닌 데이터가 사라진다.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    _skill(project / "skills/demo", "PROJECT", hosts="[codex]")
+    official = project / ".agents/skills/demo"
+    if collision == "directory":
+        _skill(official, "USER", hosts="[codex]")
+    elif collision == "symlink":
+        outside = tmp_path / "outside"
+        _skill(outside, "USER", hosts="[codex]")
+        official.parent.mkdir(parents=True)
+        official.symlink_to(outside, target_is_directory=True)
+    else:
+        official.mkdir(parents=True)
+        (official / "notes.txt").write_bytes(b"user notes\xff\n")
+    payload = official / ("notes.txt" if collision == "no-skill-md" else "SKILL.md")
+    before = payload.read_bytes()
+    for _ in range(2):
+        result = _install_with(binary, project, *flags)
+        assert result.returncode == 0, result.stderr
+        assert payload.read_bytes() == before
+        index = json.loads((project / ".agent-flow/skills/index.json").read_text())
+        link = next(item for item in index["links"] if item["host"] == "codex" and item["name"] == "demo")
+        assert link["status"] == ("skipped-existing" if collision == "no-skill-md" else "skipped-user-modified")
+    assert official.is_symlink() is (collision == "symlink")
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("collision", ["directory", "no-skill-md"])
+def test_forced_reinstall_keeps_a_stale_codex_collision(
+    tmp_path: Path, binary: str, collision: str,
+) -> None:
+    """반증: 사용자 디렉터리와 이름이 겹친 기록(`skipped-*`)은 소유 증거가 아니다. project
+    skill이 빠진 뒤 `--force-managed`가 그 기록을 보고 `.agents/skills`의 사용자 데이터를 지웠다.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "skills/demo"
+    _skill(source, "PROJECT", hosts="[codex]")
+    official = project / ".agents/skills/demo"
+    if collision == "directory":
+        _skill(official, "USER", hosts="[codex]")
+        payload = official / "SKILL.md"
+    else:
+        official.mkdir(parents=True)
+        payload = official / "notes.txt"
+        payload.write_bytes(b"user notes\xff\n")
+    before = payload.read_bytes()
+    first = _install_with(binary, project)
+    assert first.returncode == 0, first.stderr
+    shutil.rmtree(source)
+
+    result = _install_with(binary, project, "--force-managed")
+
+    assert result.returncode == 0, result.stderr
+    assert payload.read_bytes() == before
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_legacy_codex_receipt_does_not_adopt_a_same_content_official_entry(
+    tmp_path: Path, binary: str,
+) -> None:
+    """반증: `.agents/skills/<n>`의 `skipped-*` 기록이 이름만 같은 `.Codex/skills/<n>` receipt의
+    digest를 물려받자, 다음 install이 kit 사본과 바이트가 같은 사용자 디렉터리를 installer 소유로
+    보고 갈아치웠다. 다른 자리의 receipt는 이 자리의 소유를 증명하지 못한다.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "skills/demo"
+    _skill(source, "PROJECT", hosts="[codex]")
+    first = _install_with(binary, project)
+    assert first.returncode == 0, first.stderr
+    official = project / ".agents/skills/demo"
+    if official.is_symlink():
+        official.unlink()
+    else:
+        shutil.rmtree(official)
+    legacy = project / ".Codex/skills/demo"
+    shutil.copytree(source, legacy)
+    shutil.copytree(source, official)
+    before = (official / "SKILL.md").read_bytes()
+    index_path = project / ".agent-flow/skills/index.json"
+    index = json.loads(index_path.read_text())
+    link = next(item for item in index["links"] if item["name"] == "demo" and item["host"] == "codex")
+    link["path"] = legacy.relative_to(project).as_posix()
+    link["status"] = "copied"
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    second = _install_with(binary, project)
+    assert second.returncode == 0, second.stderr
+    _skill(source, "PROJECT v2", hosts="[codex]")
+
+    third = _install_with(binary, project)
+
+    assert third.returncode == 0, third.stderr
+    assert not official.is_symlink()
+    assert (official / "SKILL.md").read_bytes() == before
+    index = json.loads(index_path.read_text())
+    link = next(
+        item for item in index["links"]
+        if item["host"] == "codex" and item["path"] == official.relative_to(project).as_posix()
+    )
+    assert link["status"] == "skipped-user-modified"
+    assert "installedContentDigest" not in link
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_failed_install_leaves_no_codex_skill_links_and_retry_links_them(
+    tmp_path: Path, binary: str,
+) -> None:
+    """반증: rollback이 `.agents/skills`를 모르면 실패한 설치의 link가 남고, 다음 설치는 그것을
+    사용자 수정으로 분류해 다시는 갱신하지 않는다.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    _skill(project / "skills/demo", "PROJECT", hosts="[codex]")
+    preload = tmp_path / "fail-publish.cjs"
+    preload.write_text(
+        "const fs = require('node:fs');\n"
+        "const rename = fs.renameSync;\n"
+        "fs.renameSync = (source, target) => {\n"
+        "  if (String(target).endsWith('/.agent-flow/kit.json')) throw new Error('injected install publication failure');\n"
+        "  return rename(source, target);\n"
+        "};\n"
+        "require('node:module').syncBuiltinESMExports();\n",
+        encoding="utf-8",
+    )
+
+    failed = _install_with(binary, project, env={**os.environ, "NODE_OPTIONS": f"--require={preload}"})
+
+    assert failed.returncode != 0
+    official = project / ".agents/skills/demo"
+    assert not official.exists() and not official.is_symlink()
+    retry = _install_with(binary, project)
+    assert retry.returncode == 0, retry.stderr
+    index = json.loads((project / ".agent-flow/skills/index.json").read_text())
+    link = next(item for item in index["links"] if item["host"] == "codex" and item["name"] == "demo")
+    assert link["status"] == "linked"
+    assert official.is_symlink()
 
 
 def test_android_upstream_skills_are_not_installed_or_vendored(tmp_path: Path) -> None:
@@ -1481,24 +1713,35 @@ def _kit_dirs_ignored_by_previous_install(project: Path) -> None:
     exclude에 kit 디렉터리를 더하지 않으므로, exclude 바이트를 비교하는 migration 검사가
     루트 문서 줄만 본다."""
     (project / ".gitignore").write_text(
-        ".agent-flow/\n.codex/\n.Codex/\n.claude/\n.omp/\nAGENTS/\nCLAUDE/\nagent-flow/\n",
+        ".agent-flow/\n.codex/\n.Codex/\n.claude/\n.omp/\n.agents/\nAGENTS/\nCLAUDE/\nagent-flow/\n",
         encoding="utf-8",
     )
 
 
+
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_legacy_operating_contract_requires_explicit_migration(tmp_path: Path, binary: str) -> None:
+def test_reinstall_removes_only_owned_agent_flow_root_context(
+    tmp_path: Path, binary: str,
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    originals = _owned_legacy_root_context(project)
-    original_contract = originals["AGENTS.md"].split(b"<!-- agent-flow:skills:start -->", 1)[0]
-    for flags in ((), ("--force-managed",)):
-        result = _install_with(binary, project, *flags)
+    _owned_legacy_root_context(project)
+    expected = {
+        "AGENTS.md": (
+            b"# User rules for AGENTS.md\n\n"
+            b"### Context Economy\n\nKeep answers short."
+            b"\n\nDo not publish without approval.\n"
+        ),
+        "CLAUDE.md": (
+            b"# User rules for CLAUDE.md\n\n@AGENTS.md"
+            b"\n\nDo not publish without approval.\n"
+        ),
+    }
+    for _ in range(2):
+        result = _install_with(binary, project)
         assert result.returncode == 0, result.stderr
-        assert (project / "AGENTS.md").read_bytes().startswith(original_contract)
-        assert (project / "CLAUDE.md").read_bytes() == originals["CLAUDE.md"]
-        metadata = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
-        assert metadata["root_context"] == "legacy"
+        assert {label: (project / label).read_bytes() for label in expected} == expected
+
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -1645,7 +1888,7 @@ def test_legacy_install_does_not_hide_an_unowned_root(
         ("git", "check-ignore", "AGENTS.md", "CLAUDE.md"), cwd=project, text=True,
         capture_output=True, check=False, timeout=30,
     )
-    assert ignored.stdout.splitlines() == ["CLAUDE.md"], ignored.stderr
+    assert ignored.returncode == 1, ignored.stdout + ignored.stderr
     subprocess.run(
         ("git", "add", "--", "AGENTS.md"), cwd=project,
         capture_output=True, check=True, timeout=30,
@@ -1653,7 +1896,7 @@ def test_legacy_install_does_not_hide_an_unowned_root(
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_explicit_root_migration_keeps_rules_imports_and_indexes(
+def test_explicit_root_migration_keeps_rules_imports_and_removes_owned_indexes(
     tmp_path: Path, binary: str,
 ) -> None:
     project = tmp_path / "project"
@@ -1679,8 +1922,7 @@ def test_explicit_root_migration_keeps_rules_imports_and_indexes(
         assert backup.read_bytes() in originals[label]
     assert b"Start every session" not in migrated["AGENTS.md"]
     assert b"Keep answers short." in migrated["AGENTS.md"]
-    assert b"existing skill index" in migrated["AGENTS.md"]
-    assert b"existing docs index" in migrated["AGENTS.md"]
+    assert b"<!-- agent-flow:" not in migrated["AGENTS.md"]
     assert b"@AGENTS.md" in migrated["CLAUDE.md"]
     for flags in ((), ("--migrate-root-context", "--force-managed")):
         repeated = _install_with(binary, project, *flags)
@@ -1700,11 +1942,18 @@ def test_explicit_root_migration_keeps_rules_imports_and_indexes(
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_root_migration_preserves_arbitrary_user_bytes(tmp_path: Path, binary: str) -> None:
+@pytest.mark.parametrize("migration_flags", [(), ("--migrate-root-context",)], ids=["ordinary", "explicit"])
+def test_root_migration_preserves_arbitrary_user_bytes(
+    tmp_path: Path, binary: str, migration_flags: tuple[str, ...],
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
     originals = _owned_legacy_root_context(project)
-    prefix = b"user-byte: \xff\x80\x00\r\nmultibyte: \xe2\x98\x83\n"
+    prefix = (
+        b"user-byte: \xff\x80\x00\r\nmultibyte: \xe2\x98\x83\n"
+        b"@project-rules.md\r\n<!-- agent-flow:skills:start -->\r\n"
+        b"User-maintained index\r\n<!-- agent-flow:skills:end -->\r\n"
+    )
     suffix = b"\r\nuser-tail: \xfe\xc0\x00"
     retained = {}
     for label, original in originals.items():
@@ -1712,18 +1961,19 @@ def test_root_migration_preserves_arbitrary_user_bytes(tmp_path: Path, binary: s
         end = original.index(b"<!-- agent-flow:end -->") + len(b"<!-- agent-flow:end -->")
         block = original[start:end]
         (project / label).write_bytes(prefix + block + suffix)
-        retained[label] = (
-            block[block.index(b"### Context Economy"):block.index(b"<!-- agent-flow:end -->")].rstrip()
-            if label == "AGENTS.md" else b"@AGENTS.md"
-        )
-    result = _install_with(binary, project, "--migrate-root-context")
+        retained[label] = b"### Context Economy\n\nKeep answers short." if label == "AGENTS.md" else b"@AGENTS.md"
+        (project / label).chmod(0o640)
+    owners = {label: ((project / label).stat().st_uid, (project / label).stat().st_gid) for label in originals}
+    result = _install_with(binary, project, *migration_flags)
     assert result.returncode == 0, result.stderr
     for label in originals:
         assert (project / label).read_bytes() == prefix + retained[label] + suffix
+        assert (project / label).stat().st_mode & 0o777 == 0o640
+        assert ((project / label).stat().st_uid, (project / label).stat().st_gid) == owners[label]
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-@pytest.mark.parametrize("boundary", ["root", "exclude", "legacy-exclude"])
+@pytest.mark.parametrize("boundary", ["root", "exclude"])
 @pytest.mark.parametrize(("edit_point", "interrupt_recovery"), [
     ("staging", False), ("staging", True),
     ("displace", False), ("displace", True),
@@ -1742,7 +1992,7 @@ def test_root_migration_preserves_concurrent_edits_on_failure_and_retry(
     exclude = project / ".git/info/exclude"
     exclude.unlink()
     destination = (tmp_path / "user-exclude").resolve()
-    managed = b"" if boundary == "legacy-exclude" else b"/AGENTS.md\r\n/CLAUDE.md\r\n"
+    managed = b"/AGENTS.md\r\n/CLAUDE.md\r\n"
     destination.write_bytes(managed + b"/private/\r\n# user-byte: \xff")
     destination.chmod(0o640)
     exclude.symlink_to(destination)
@@ -1813,7 +2063,7 @@ def test_root_migration_preserves_concurrent_edits_on_failure_and_retry(
 """,
         encoding="utf-8",
     )
-    install_args = () if boundary == "legacy-exclude" else ("--migrate-root-context",)
+    install_args = ("--migrate-root-context",)
     failed = _install_with(binary, project, *install_args, env={
         **os.environ,
         "NODE_OPTIONS": f"--require={probe}",
@@ -1848,19 +2098,19 @@ def test_root_migration_preserves_concurrent_edits_on_failure_and_retry(
     )
     assert exclude.is_symlink()
     assert not (project / ".agent-flow/install-recovery").exists()
-    expected_managed = boundary == "legacy-exclude"
-    assert (b"/AGENTS.md" in exclude.read_bytes().splitlines()) == expected_managed
-    assert (b"/CLAUDE.md" in exclude.read_bytes().splitlines()) == expected_managed
+    assert b"/AGENTS.md" not in exclude.read_bytes().splitlines()
+    assert b"/CLAUDE.md" not in exclude.read_bytes().splitlines()
     assert b"/private/\r\n# user-byte: \xff" in exclude.read_bytes()
     for label in originals:
-        assert (b"<!-- agent-flow:start -->" in (project / label).read_bytes()) == expected_managed
+        assert b"<!-- agent-flow:start -->" not in (project / label).read_bytes()
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 @pytest.mark.parametrize("boundary", ["exclude", "ready"])
 @pytest.mark.parametrize("git_layout", ["ordinary", "symlink"])
+@pytest.mark.parametrize("migration_flags", [(), ("--migrate-root-context",)], ids=["ordinary", "explicit"])
 def test_interrupted_root_migration_recovers_root_visibility(
-    tmp_path: Path, binary: str, boundary: str, git_layout: str,
+    tmp_path: Path, binary: str, boundary: str, git_layout: str, migration_flags: tuple[str, ...],
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -1901,7 +2151,7 @@ def test_interrupted_root_migration_recovers_root_visibility(
         encoding="utf-8",
     )
     recovery = project / ".agent-flow/install-recovery"
-    result = _install_with(binary, project, "--migrate-root-context", env={
+    result = _install_with(binary, project, *migration_flags, env={
         **os.environ,
         "NODE_OPTIONS": f"--require={probe}",
         "MIGRATION_BINARY": binary,
@@ -2095,7 +2345,7 @@ def test_root_migration_removes_only_migrated_root_exclusions(
     exclude.chmod(0o640)
     ordinary = _install_with(binary, project)
     assert ordinary.returncode == 0, ordinary.stderr
-    assert exclude.read_bytes() == original_exclusions
+    assert exclude.read_bytes() == (retained if owned_agents else original_exclusions)
     migrated = _install_with(binary, project, "--migrate-root-context")
     assert migrated.returncode == 0, migrated.stderr
     assert (project / "CLAUDE.md").read_bytes() == user_claude
@@ -2149,24 +2399,79 @@ def test_root_migration_refuses_unsafe_backup_destinations(
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-@pytest.mark.parametrize("ambiguous", ["duplicate-markers", "symlink"])
-def test_legacy_index_refresh_cannot_escape_owned_root_block(
-    tmp_path: Path, binary: str, ambiguous: str,
+@pytest.mark.parametrize("unproven", [
+    "missing", "corrupt", "invalid-digest", "edited-index", "duplicate-markers", "symlink", "receipt-symlink",
+])
+def test_reinstall_preserves_a_root_with_unproven_ownership(
+    tmp_path: Path, binary: str, unproven: str,
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
     _owned_legacy_root_context(project)
     target = project / "AGENTS.md"
-    if ambiguous == "duplicate-markers":
+    receipt = project / ".agent-flow/bootstrap/blocks.json"
+    if unproven == "missing":
+        receipt.unlink()
+    elif unproven == "corrupt":
+        receipt.write_bytes(b'{"blocks":')
+    elif unproven == "invalid-digest":
+        receipt.write_bytes(b'{"blocks":{"AGENTS.md":7}}')
+    elif unproven == "edited-index":
+        target.write_bytes(target.read_bytes().replace(b"existing skill index", b"User-maintained index"))
+    elif unproven == "duplicate-markers":
         target.write_bytes(target.read_bytes() + b"\n<!-- agent-flow:start -->\nOther rules\n<!-- agent-flow:end -->\n")
-    else:
+    elif unproven == "symlink":
         parent_rules = tmp_path / "AGENTS.md"
         target.rename(parent_rules)
         target.symlink_to(parent_rules)
+    else:
+        outside = tmp_path / "blocks.json"
+        receipt.rename(outside)
+        receipt.symlink_to(outside)
     before = target.read_bytes()
-    result = _install_with(binary, project, "--force-managed")
-    assert result.returncode == 0, result.stderr
-    assert target.read_bytes() == before
+    receipt_before = receipt.read_bytes() if receipt.exists() else None
+    for flags in ((), ("--force-managed",)):
+        result = _install_with(binary, project, *flags)
+        assert result.returncode == 0, result.stderr
+        assert target.read_bytes() == before
+        assert "root ownership" in result.stdout or "root-context migration incomplete" in result.stdout
+    if unproven in {"missing", "corrupt", "invalid-digest", "receipt-symlink"}:
+        assert (receipt.read_bytes() if receipt.exists() else None) == receipt_before
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("owned_root", ["AGENTS.md", "CLAUDE.md"])
+def test_reinstall_handles_mixed_root_ownership_without_overwriting_user_rules(
+    tmp_path: Path, binary: str, owned_root: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    originals = _owned_legacy_root_context(project)
+    _kit_dirs_ignored_by_previous_install(project)
+    unproven_root = "CLAUDE.md" if owned_root == "AGENTS.md" else "AGENTS.md"
+    receipt = project / ".agent-flow/bootstrap/blocks.json"
+    blocks = json.loads(receipt.read_text())["blocks"]
+    del blocks[unproven_root]
+    receipt.write_text(json.dumps({"blocks": blocks}), encoding="utf-8")
+    subprocess.run(("git", "init", "-q"), cwd=project, capture_output=True, check=True, timeout=30)
+    exclude = project / ".git/info/exclude"
+    outside_exclude = b"packages/*/AGENTS.md\r\n# User rules\xff"
+    exclude.write_bytes(b"/AGENTS.md\r\n/CLAUDE.md\r\n" + outside_exclude)
+    expected_owned = (
+        b"# User rules for AGENTS.md\n\n### Context Economy\n\nKeep answers short."
+        b"\n\nDo not publish without approval.\n"
+        if owned_root == "AGENTS.md" else
+        b"# User rules for CLAUDE.md\n\n@AGENTS.md\n\nDo not publish without approval.\n"
+    )
+    for _ in range(2):
+        result = _install_with(binary, project)
+        assert result.returncode == 0, result.stderr
+        assert (project / owned_root).read_bytes() == expected_owned
+        assert (project / unproven_root).read_bytes() == originals[unproven_root]
+        assert exclude.read_bytes() == f"/{unproven_root}\r\n".encode() + outside_exclude
+        assert json.loads(receipt.read_text())["blocks"] == {}
+    assert (project / f".agent-flow/bootstrap/{owned_root}.removed").is_file()
+    assert not (project / f".agent-flow/bootstrap/{unproven_root}.removed").exists()
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -2221,6 +2526,7 @@ def test_corrupt_install_metadata_cannot_enable_root_writes(tmp_path: Path, bina
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("migration_flags", [(), ("--migrate-root-context",)], ids=["ordinary", "explicit"])
 @pytest.mark.parametrize(("failure_target", "after_publication"), [
     ("CLAUDE.md", False),
     (".agent-flow/kit-assets.json", False),
@@ -2228,7 +2534,7 @@ def test_corrupt_install_metadata_cannot_enable_root_writes(tmp_path: Path, bina
     (".git/info/exclude", True),
 ])
 def test_failed_migration_rolls_back_both_roots_and_receipts(
-    tmp_path: Path, binary: str, failure_target: str, after_publication: bool,
+    tmp_path: Path, binary: str, failure_target: str, after_publication: bool, migration_flags: tuple[str, ...],
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -2266,7 +2572,7 @@ def test_failed_migration_rolls_back_both_roots_and_receipts(
         encoding="utf-8",
     )
     result = _install_with(
-        binary, project, "--migrate-root-context",
+        binary, project, *migration_flags,
         env={
             **os.environ,
             "NODE_OPTIONS": f"--require={probe}",
@@ -2823,7 +3129,6 @@ def test_broken_host_skill_symlink_does_not_brick_install(tmp_path: Path, binary
         pytest.skip("this platform copied instead of symlinking host skills")
 
     dangling = links[0]
-    target = Path(os.readlink(dangling))
     dangling.unlink()
     dangling.symlink_to(project / "gone" / dangling.name)
     assert dangling.is_symlink() and not dangling.exists()
@@ -2834,7 +3139,8 @@ def test_broken_host_skill_symlink_does_not_brick_install(tmp_path: Path, binary
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
-    assert (dangling / "SKILL.md").is_file(), f"stale link was not repaired (was {target})"
+    assert dangling.is_symlink() and dangling.exists()
+    assert dangling.resolve().is_dir()
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -2907,136 +3213,8 @@ def test_reinstall_removes_retired_context_checker(
     assert stale.with_name(f"{script_name}.removed").read_text(encoding="utf-8") == body
 
 
-def _skill_index_block(project: Path, file_name: str = "AGENTS.md") -> str:
-    text = (project / file_name).read_text(encoding="utf-8")
-    start = text.index("<!-- agent-flow:skills:start -->")
-    end = text.index("<!-- agent-flow:skills:end -->")
-    return text[start:end]
-
-
-def _indexed_names(block: str, group: str) -> set[str]:
-    """두 그룹 모두 이름만 있는 한 줄이다: `|always:{...}` / `|on-demand:{...}`."""
-    match = re.search(rf"\|{group}:\{{([^}}]*)\}}", block)
-    if not match:
-        return set()
-    return {name.strip() for name in match.group(1).split(",") if name.strip()}
-
-
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_install_writes_the_skill_index_into_agents_md(tmp_path: Path, binary: str) -> None:
-    """설치된 skill을 루트 instruction file 안에서 바로 보여야 한다.
-
-    `index.json`을 읽으라고 안내만 하면 그건 판단 지점이고, agent는 그 판단을
-    자주 건너뛴다. 목록이 문서 안에 있으면 건너뛸 판단 자체가 없다.
-
-    자리는 `AGENTS.md` 하나다. Claude는 루트 `CLAUDE.md`의 `@AGENTS.md` import로 같은
-    목록을 받으므로, 두 곳에 심으면 Claude만 목록을 두 번 받는다.
-    """
-    project = tmp_path / f"index-{binary}"
-    project.mkdir()
-    _legacy_root_context(project)
-    assert _install_with(binary, project).returncode == 0
-
-    installed = {
-        entry.name
-        for entry in (project / ".agent-flow" / "skills").iterdir()
-        if entry.is_dir() and (entry / "SKILL.md").is_file()
-    }
-    assert installed
-    block = _skill_index_block(project, "AGENTS.md")
-    assert "[agent-flow skill index]" in block, "AGENTS.md 인덱스가 채워지지 않았다"
-    listed = _indexed_names(block, "always") | _indexed_names(block, "on-demand")
-    assert listed == installed, f"AGENTS.md: {installed ^ listed}"
-    assert "[agent-flow skill index]" not in (project / "CLAUDE.md").read_text(encoding="utf-8")
-
-
-def _docs_index_lines(project: Path) -> list[str]:
-    text = (project / "AGENTS.md").read_text(encoding="utf-8")
-    start = text.index("<!-- agent-flow:docs:start -->")
-    end = text.index("<!-- agent-flow:docs:end -->")
-    return [line for line in text[start:end].splitlines() if line.startswith("|")]
-
-
-@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_install_indexes_project_docs_without_touching_two_files(
-    tmp_path: Path, binary: str
-) -> None:
-    """불변: 팀이 `docs/`에 md를 더하면 install이 인덱스를 채운다.
-
-    반증: 인덱스가 없으면 그 문서의 존재를 아는 유일한 경로가 사람이 루트 계약
-    파일을 손으로 고치는 것이다. 그리고 host마다 손댈 파일이 달라진다 — Claude는
-    `CLAUDE.md`만, Codex/OMP는 `AGENTS.md`만 읽으므로.
-
-    본문이 아니라 경로만 싣는다. Claude의 `@path`는 파일 전체를 컨텍스트에 넣고
-    Codex는 그 줄을 확장조차 하지 않으므로, import는 두 host 어디에서도 답이 아니다.
-    """
-    project = tmp_path / f"docs-index-{binary}"
-    (project / "docs" / "adr").mkdir(parents=True)
-    (project / "docs" / "new-rule.md").write_text("# rule\n", encoding="utf-8")
-    (project / "docs" / "adr" / "0001-pick-a-db.md").write_text("# adr\n", encoding="utf-8")
-    (project / "docs" / "diagram.png").write_bytes(b"not markdown")
-    _legacy_root_context(project)
-    assert _install_with(binary, project).returncode == 0
-
-    lines = _docs_index_lines(project)
-    assert "|docs:{new-rule.md}" in lines
-    assert "|docs/adr:{0001-pick-a-db.md}" in lines
-    assert not any("diagram.png" in line for line in lines), "md가 아닌 파일이 인덱스에 올랐다"
-    # 인덱스 자리는 하나다. 두 곳에 심으면 Claude가 `@AGENTS.md`로 같은 목록을 두 번 받는다.
-    assert "[agent-flow docs index]" not in (project / "CLAUDE.md").read_text(encoding="utf-8")
-
-
-@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_install_leaves_the_docs_index_empty_without_a_docs_dir(
-    tmp_path: Path, binary: str
-) -> None:
-    """불변: `docs/`가 없는 프로젝트는 한 줄도 부담하지 않는다.
-
-    반증: "문서가 없다"는 한 줄조차 모든 세션이 상시 낸다. 마커는 남겨야 다음
-    install이 채울 자리를 찾는다.
-    """
-    project = tmp_path / f"docs-empty-{binary}"
-    project.mkdir()
-    _legacy_root_context(project)
-    assert _install_with(binary, project).returncode == 0
-
-    agents = (project / "AGENTS.md").read_text(encoding="utf-8")
-    assert "<!-- agent-flow:docs:start -->" in agents
-    assert "[agent-flow docs index]" not in agents
-    assert _docs_index_lines(project) == []
-
-
-@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_reinstall_refreshes_the_docs_index(tmp_path: Path, binary: str) -> None:
-    """불변: 재설치가 목록을 현재 상태로 맞춘다.
-
-    반증: 한 번 쓰고 갱신하지 않으면 지워진 문서가 인덱스에 남아, 모델이 없는
-    파일을 읽으려다 실패한다. 그 실패는 "문서가 없다"와 구별되지 않는다.
-    """
-    project = tmp_path / f"docs-refresh-{binary}"
-    (project / "docs").mkdir(parents=True)
-    (project / "docs" / "first.md").write_text("# first\n", encoding="utf-8")
-    _legacy_root_context(project)
-    assert _install_with(binary, project).returncode == 0
-    assert "|docs:{first.md}" in _docs_index_lines(project)
-
-    (project / "docs" / "first.md").unlink()
-    (project / "docs" / "second.md").write_text("# second\n", encoding="utf-8")
-    assert _install_with(binary, project).returncode == 0
-
-    assert "|docs:{second.md}" in _docs_index_lines(project)
-    assert not any("first.md" in line for line in _docs_index_lines(project))
-
-
-def test_docs_index_skips_names_that_break_the_index_line(tmp_path: Path) -> None:
-    """불변: 인덱스 줄 문법을 깰 수 있는 이름은 싣지 않는다.
-
-    반증: 이름을 그대로 보간하면 줄바꿈과 백틱이 ```text 펜스를 닫고, 그 뒤 글자가
-    매 세션 로드되는 `AGENTS.md`의 지시문이 된다. 저장소에 파일 하나를 넣을 수 있는
-    사람이 모든 세션의 프롬프트를 쓰게 된다.
-
-    조용히 빼지도 않는다. 목록에 없는 파일은 "없는 파일"로 읽히므로 수는 남긴다.
-    """
+def test_reinstall_does_not_inject_adversarial_document_names(tmp_path: Path, binary: str) -> None:
     project = tmp_path / "docs-unnameable"
     (project / "docs").mkdir(parents=True)
     (project / "docs" / "safe.md").write_text("# safe\n", encoding="utf-8")
@@ -3044,47 +3222,15 @@ def test_docs_index_skips_names_that_break_the_index_line(tmp_path: Path) -> Non
         "# evil\n", encoding="utf-8"
     )
     _legacy_root_context(project)
-    assert _install_with("agent-flow-kit.mjs", project).returncode == 0
-
-    agents = (project / "AGENTS.md").read_text(encoding="utf-8")
-    assert "IGNORE PREVIOUS INSTRUCTIONS" not in agents
-    block = agents[
-        agents.index("<!-- agent-flow:docs:start -->") : agents.index("<!-- agent-flow:docs:end -->")
-    ]
-    assert block.count("```") == 2, "인덱스 코드 펜스가 깨졌다"
-    lines = _docs_index_lines(project)
-    assert "|docs:{safe.md}" in lines
-    assert any("1 skipped under docs/" in line for line in lines)
+    assert _install_with(binary, project).returncode == 0
+    assert (project / "AGENTS.md").read_bytes() == (
+        b"# User rules for AGENTS.md\n\n### Context Economy\n\nKeep answers short."
+        b"\n\nDo not publish without approval.\n"
+    )
 
 
-def test_docs_index_keeps_paths_when_one_directory_exceeds_the_cap(tmp_path: Path) -> None:
-    """불변: 상한은 목록을 자르지, 없애지 않는다.
-
-    반증: 디렉터리 단위로 버리면 문서가 `docs/` 바로 아래 몰린 저장소에서 경로가
-    하나도 남지 않고 `+N more`만 남는다. 상한까지 경로를 준다는 일 자체가 사라진다.
-    """
-    project = tmp_path / "docs-cap"
-    (project / "docs").mkdir(parents=True)
-    for index in range(100):
-        (project / "docs" / f"{index:04d}-a-fairly-long-document-name.md").write_text(
-            "# doc\n", encoding="utf-8"
-        )
-    _legacy_root_context(project)
-    assert _install_with("agent-flow-kit.mjs", project).returncode == 0
-
-    lines = _docs_index_lines(project)
-    listed = next(line for line in lines if line.startswith("|docs:{"))
-    assert "0000-a-fairly-long-document-name.md" in listed
-    assert listed.endswith(",…}"), "잘린 줄이 그 디렉터리의 전부로 읽힌다"
-    assert any(line.startswith("|+") and "more under docs/" in line for line in lines)
-
-
-def test_docs_index_does_not_follow_a_symlinked_docs_root(tmp_path: Path) -> None:
-    """불변: `docs/` 자신이 심링크면 따라가지 않는다.
-
-    반증: 첫 `readdir`가 링크를 따라가면 저장소 밖 트리의 파일명이 루트 계약 파일에
-    실린다. 하위 dirent만 걸러서는 루트에서 그 계약이 깨진다.
-    """
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_reinstall_does_not_inject_external_document_paths(tmp_path: Path, binary: str) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret.md").write_text("# secret\n", encoding="utf-8")
@@ -3092,10 +3238,12 @@ def test_docs_index_does_not_follow_a_symlinked_docs_root(tmp_path: Path) -> Non
     project.mkdir()
     (project / "docs").symlink_to(outside, target_is_directory=True)
     _legacy_root_context(project)
-    assert _install_with("agent-flow-kit.mjs", project).returncode == 0
-
-    assert "secret.md" not in (project / "AGENTS.md").read_text(encoding="utf-8")
-    assert _docs_index_lines(project) == []
+    assert _install_with(binary, project).returncode == 0
+    assert (project / "AGENTS.md").read_bytes() == (
+        b"# User rules for AGENTS.md\n\n### Context Economy\n\nKeep answers short."
+        b"\n\nDo not publish without approval.\n"
+    )
+    assert (outside / "secret.md").read_bytes() == b"# secret\n"
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -3122,9 +3270,6 @@ def test_root_claude_md_is_a_pointer_to_agents_md(tmp_path: Path, binary: str) -
     assert "블록 밖 프로젝트 규칙." in agents
     assert "@AGENTS.md" in claude
     assert "@AGENTS.md" not in agents
-    # import는 블록 안에 있어야 install이 그것을 유지·복구한다.
-    block = claude[claude.index("<!-- agent-flow:start -->") : claude.index("<!-- agent-flow:end -->")]
-    assert "@AGENTS.md" in block
     for duplicated in ("### Workflow Contract", "### Context Economy"):
         assert duplicated not in claude, f"CLAUDE.md가 {duplicated}를 중복으로 담았다"
 
@@ -3152,7 +3297,6 @@ def test_hand_edited_bootstrap_block_survives_reinstall(tmp_path: Path, binary: 
     project = tmp_path / f"kept-block-{binary}"
     project.mkdir()
     _legacy_root_context(project)
-    assert _install_with(binary, project).returncode == 0
     _hand_edit_bootstrap_block(project)
 
     for _ in range(2):
@@ -3168,7 +3312,6 @@ def test_a_corrupt_receipt_stops_the_overwrite(tmp_path: Path, binary: str) -> N
     project = tmp_path / f"corrupt-receipt-{binary}"
     project.mkdir()
     _legacy_root_context(project)
-    assert _install_with(binary, project).returncode == 0
     _hand_edit_bootstrap_block(project)
     (project / ".agent-flow" / "bootstrap" / "blocks.json").write_text(
         '{"blocks": {"AGENTS.md"', encoding="utf-8"
@@ -3192,20 +3335,19 @@ def test_edited_block_preserves_prose_and_indexes(
     project = tmp_path / f"edited-block-{binary}"
     project.mkdir()
     _legacy_root_context(project)
-    assert _install_with(binary, project).returncode == 0
     _hand_edit_bootstrap_block(project)
     docs = project / "docs"
     docs.mkdir()
     (docs / "new-rule.md").write_text("# rule\n", encoding="utf-8")
+    before = (project / "AGENTS.md").read_bytes()
 
     result = _install_with(binary, project)
     assert result.returncode == 0, result.stderr
-    assert "손으로 넣은 줄" in (project / "AGENTS.md").read_text(encoding="utf-8")
-    assert not any("new-rule.md" in line for line in _docs_index_lines(project))
+    assert (project / "AGENTS.md").read_bytes() == before
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_legacy_install_leaves_root_context_ignored(tmp_path: Path, binary: str) -> None:
+def test_reinstall_leaves_retired_root_context_visible_to_git(tmp_path: Path, binary: str) -> None:
     project = tmp_path / f"clean-tree-{binary}"
     project.mkdir()
     _owned_legacy_root_context(project)
@@ -3228,14 +3370,14 @@ def test_legacy_install_leaves_root_context_ignored(tmp_path: Path, binary: str)
         timeout=30,
     )
     dirty = [line for line in status.stdout.splitlines() if "AGENTS.md" in line or "CLAUDE.md" in line]
-    assert dirty == [], status.stdout
+    assert {line[3:] for line in dirty} == {"AGENTS.md", "CLAUDE.md"}, status.stdout
     # 계약은 "git이 무시한다"이지 "어느 파일에 무슨 줄이 적혔다"가 아니다. git에게 묻는다.
     ignored = subprocess.run(
         ("git", "check-ignore", "AGENTS.md", "CLAUDE.md"),
         cwd=project, text=True, capture_output=True, check=False,
         timeout=30,
     )
-    assert ignored.stdout.split() == ["AGENTS.md", "CLAUDE.md"], ignored.stderr
+    assert ignored.returncode == 1, ignored.stdout + ignored.stderr
     # 루트에만 걸려야 한다. 하위 디렉터리의 같은 이름까지 가리면 패키지마다 컨텍스트
     # 파일을 두는 저장소에서 새 문서가 조용히 커밋에서 빠진다.
     nested = project / "packages" / "api"
@@ -3303,39 +3445,6 @@ def test_install_does_not_decide_whether_root_context_files_are_tracked(
     assert "AGENTS.md" not in entries
     assert entries.count("CLAUDE.md") == 1
     assert ".agent-flow/" in entries
-
-
-@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_passive_delivery_lands_on_the_always_line(tmp_path: Path, binary: str) -> None:
-    """반증: 전부 on-demand로 적으면 "항상 적용" 선언이 인덱스에서 사라진다."""
-    project = tmp_path / f"delivery-{binary}"
-    project.mkdir()
-    _legacy_root_context(project)
-    assert _install_with(binary, project).returncode == 0
-
-    block = _skill_index_block(project)
-    always = _indexed_names(block, "always")
-    assert "code-generation-discipline" in always
-    assert "comment-authoring-discipline" in always
-    # 선언하지 않은 skill이 always로 올라가면 안 쓰는 skill이 상시 노출된다.
-    assert "tdd" in _indexed_names(block, "on-demand")
-    assert "tdd" not in always
-
-
-@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_reinstall_does_not_duplicate_the_skill_index(tmp_path: Path, binary: str) -> None:
-    """반증: 블록을 덧붙이면 재설치마다 AGENTS.md가 자란다."""
-    project = tmp_path / f"reinstall-{binary}"
-    project.mkdir()
-    _legacy_root_context(project)
-    assert _install_with(binary, project).returncode == 0
-    first = (project / "AGENTS.md").read_text(encoding="utf-8")
-    assert _install_with(binary, project).returncode == 0
-    second = (project / "AGENTS.md").read_text(encoding="utf-8")
-
-    assert second == first
-    assert second.count("<!-- agent-flow:skills:start -->") == 1
-    assert second.count("[agent-flow skill index]") == 1
 
 
 def _kit_json(project: Path) -> dict:
@@ -4138,28 +4247,6 @@ def test_an_unusable_git_reports_one_line_not_a_stack_trace(tmp_path: Path, bina
         assert help_result.returncode == 0, help_result.stderr
 
 
-@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_skill_index_stays_name_only(tmp_path: Path, binary: str) -> None:
-    """반증: 요약을 다시 달면 설치된 skill 하나마다 한 줄이 모든 세션에 상시 부과된다.
-
-    요약은 각 SKILL.md frontmatter 첫 문장의 사본이었다. "scope가 걸리는가"의 판단
-    재료는 phase 프롬프트가 준다 — required는 경로와 함께, 범위에 걸린 것은 이름으로.
-    이 인덱스의 일은 "무엇이 설치돼 있나" 하나다.
-    """
-    project = tmp_path / f"name-only-{binary}"
-    project.mkdir()
-    _legacy_root_context(project)
-    assert _install_with(binary, project).returncode == 0
-
-    block = _skill_index_block(project)
-    for group in ("always", "on-demand"):
-        line = next(line for line in block.splitlines() if line.startswith(f"|{group}:"))
-        payload = line[len(f"|{group}:") :]
-        assert payload.startswith("{") and payload.endswith("}"), line
-        assert ":" not in payload, line
-    assert "tdd" in _indexed_names(block, "on-demand")
-
-
 _FRAMEWORK_FIXTURES = json.loads((KIT_ROOT / "tests/fixtures/profile-detection.json").read_text(encoding="utf-8"))
 _NEW_HOST_SKILLS = {
     "security-audit",
@@ -4237,7 +4324,7 @@ def test_installer_entrypoints_consume_framework_fixtures(tmp_path: Path, binary
         zustand_link = next(link for link in links if link.endswith("/zustand-state.md"))
         source = KIT_ROOT / "skills/react-tanstack-query/references/zustand-state.md"
         assert (guide.parent / zustand_link).read_bytes() == source.read_bytes()
-    for host in (".claude", ".Codex", ".omp"):
+    for host in (".claude", ".agents", ".omp"):
         for name in _NEW_HOST_SKILLS:
             directory = tmp_path / host / "skills" / name
             if name in expected_host_skills:
@@ -4272,7 +4359,7 @@ def test_copied_host_reference_edits_survive_reinstall_and_retirement(tmp_path: 
     reference.write_text("source policy\n", encoding="utf-8")
     first = _install_with(binary, tmp_path)
     assert first.returncode == 0, first.stderr
-    host = tmp_path / ".Codex/skills/demo"
+    host = tmp_path / ".agents/skills/demo"
     if host.is_symlink():
         host.unlink()
         shutil.copytree(skill, host)
@@ -4299,7 +4386,7 @@ def test_counted_copy_receipt_allows_only_unchanged_retirement(
     (canonical / "references/policy.md").write_text("source policy\n", encoding="utf-8")
     first = _install_with(binary, tmp_path)
     assert first.returncode == 0, first.stderr
-    host = tmp_path / ".Codex/skills/demo"
+    host = tmp_path / ".agents/skills/demo"
     if host.is_symlink():
         host.unlink()
     else:
@@ -4313,7 +4400,7 @@ def test_counted_copy_receipt_allows_only_unchanged_retirement(
         f"{json.dumps((KIT_ROOT / 'lib/skill-metadata.mjs').as_uri())};\n"
         "const skill = JSON.parse(process.argv[1]);\n"
         "console.log(JSON.stringify(recordSkillLinkReceipt({"
-        'name: "demo", host: "codex", path: ".Codex/skills/demo", status: "copied:2:0"'
+        'name: "demo", host: "codex", path: ".agents/skills/demo", status: "copied:2:0"'
         "}, skill, null)));\n"
     )
     receipt = subprocess.run(
@@ -4480,7 +4567,7 @@ def test_legacy_host_copy_upgrade_requires_unchanged_content(
     old = f"---\nname: {name}\n---\n\nPrevious release\n"
     (canonical / "SKILL.md").write_text(old, encoding="utf-8")
     _record_installed_hash(tmp_path, name)
-    host = tmp_path / ".Codex/skills" / name
+    host = tmp_path / ".agents/skills" / name
     if host.is_symlink():
         host.unlink()
     else:
@@ -4518,7 +4605,7 @@ def test_unverified_retired_copy_keeps_explicit_recovery_path(
     canonical = tmp_path / "skills/demo"
     _skill(canonical, "previous source", hosts="[codex]")
     assert _install_with(binary, tmp_path).returncode == 0
-    host = tmp_path / ".Codex/skills/demo"
+    host = tmp_path / ".agents/skills/demo"
     if host.is_symlink():
         host.unlink()
         shutil.copytree(canonical, host)
@@ -5459,7 +5546,7 @@ def test_reinstall_excludes_project_local_clean_overrides(
     index = json.loads((tmp_path / ".agent-flow/skills/index.json").read_text(encoding="utf-8"))
     assert "react-clean-architecture" not in _installed_skill_names(tmp_path)
     assert "react-clean-architecture" not in {skill["name"] for skill in index["skills"]}
-    for host in (".claude", ".Codex", ".omp"):
+    for host in (".claude", ".agents", ".omp"):
         assert not (tmp_path / host / "skills/react-clean-architecture").exists()
     assert (override / "SKILL.md").read_bytes() == original
 
@@ -5882,7 +5969,7 @@ def test_installer_accepts_wrapped_project_local_metadata(
     skills = {skill["name"]: skill for skill in index["skills"]}
     assert {"probe", "python-development-guide"} <= skills.keys()
     assert skills["probe"]["requires"] == ["python-development-guide"]
-    for host in (".claude", ".Codex", ".omp"):
+    for host in (".claude", ".agents", ".omp"):
         assert (tmp_path / host / "skills/probe/SKILL.md").read_bytes() == original
     assert (tmp_path / ".agent-flow/skills/python-development-guide/SKILL.md").is_file()
 
