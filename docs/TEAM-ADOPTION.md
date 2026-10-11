@@ -100,23 +100,15 @@ ids. What it does not get: the environment override sits above the committed val
 deliberately lenient, so a member exporting `AGENT_FLOW_PROFILE` runs a different rule set and
 nothing reports that to the team.
 
-### The `AGENTS.md` contract and `CLAUDE.md` pointer
+### The installed `AGENTS.md` contract block
 
-The managed contract comes from `bootstrap/AGENTS.md.template`; its installed reference copy
-is `.agent-flow/bootstrap/AGENTS.md`. Fresh installs preserve the project's root context.
-Legacy installs retain their existing operating instructions and update eligible indexes
-inside `<!-- agent-flow:start -->` / `<!-- agent-flow:end -->` according to ownership.
-The generated `CLAUDE.md` reference copy, `.agent-flow/bootstrap/CLAUDE.md`, is a pointer
-that is not loaded at session start. Used as the root `CLAUDE.md` beside root `AGENTS.md`,
-its `@AGENTS.md` import gives the Claude author session the contract and project rules
-without duplicating their body; Claude resolves the import relative to the file that holds it.
-Ordinary updates do not rewrite an existing legacy root `CLAUDE.md`, so older pointer wording
-that says the import reaches the Claude reviewer can remain there; this section supersedes it.
-The isolated Claude reviewer runs with `--safe-mode` and receives explicit review input from
-the runner (`src/agent_flow/multi_review.py`). This import is not evidence that the reviewer
-received project prose; inspect the rendered review input to establish that delivery.
+Install writes the contract into the project's root `AGENTS.md` between
+`<!-- agent-flow:start -->` and `<!-- agent-flow:end -->`, from `bootstrap/AGENTS.md.template`.
+`CLAUDE.md` receives a pointer block instead, because the Claude CLI auto-loads only root
+`CLAUDE.md`; that `@AGENTS.md` import line is the only path by which project prose outside the
+block reaches Claude and the Claude reviewer.
 
-Legacy root contract indexes use two installer-managed sub-blocks:
+Two sub-blocks inside it are filled by the installer:
 
 - `<!-- agent-flow:skills:start -->` / `<!-- agent-flow:skills:end -->` — the skill index.
 - `<!-- agent-flow:docs:start -->` / `<!-- agent-flow:docs:end -->` — the docs index.
@@ -124,66 +116,12 @@ Legacy root contract indexes use two installer-managed sub-blocks:
   emits paths only. It carries a size ceiling and reports how many entries it truncated,
   because a silently cut list turns a missing entry into a missing file.
 
-Where an installer-managed root index is active, a team that drops its own markdown into
-`docs/` gets those paths named there. The index carries paths, not content, and it is refreshed
-when the installer runs — not when a file is added. Keep team prose outside the managed block.
-Ownership of an eligible update is decided against a hash recorded in
+So a team that drops its own markdown into `docs/` gets those paths named in the contract every
+agent loads. What it does not get: the index carries paths, not content, and it is refreshed
+when the installer runs — not when a file is added. Team prose has to live outside the managed
+block: install rewrites what is inside it. Ownership is decided against a hash recorded in
 `.agent-flow/bootstrap/blocks.json`, and a block the installer did not write is kept and
 reported as user-edited rather than overwritten.
-
-### Host memory and shared team rules
-
-Host memory is optional context owned by the user. Authors can use the memory of the host
-they run Agent Flow in: Claude Code, Codex, or OMP. Other agents, such as Gemini, follow phase
-prompts only through the generic adapter, without installed host skills. Agent Flow does not
-enable host memory, manage its store, or add an extraction model or injection path. Neither
-Gemini nor OMP joins Agent Flow's Claude/Codex reviewer pool.
-
-`code-generation-discipline` applies the memory evidence and rule-promotion criteria during
-Agent Flow code work. It does not require enabling host memory or scanning session history.
-
-Promote a remembered item only when it supports a reusable team rule worth maintaining.
-Repeated research or a fact readily checked in code is not sufficient by itself. Propose it as
-its own small, user-approved change to tracked `AGENTS.md` outside installer-managed blocks or
-to a tracked project skill, not folded into unrelated work. Include the original human
-correction when available, current code or other primary evidence, and the rule's scope. An AI
-summary or host memory entry is an AI interpretation, not the human original or proof of
-approval. If the original is missing, assess the claim against current evidence without
-relabeling it as a past human correction. Use the existing review and gates; a proposed rule
-cannot authorize its own adoption or weaken those checks. Confirm the target is tracked:
-installation alone does not make a file shared.
-
-Agent Flow's current confined reviewer backend supports macOS only and also requires a
-verified `sandbox-exec` and the required installed Claude/Codex CLI reviewers. Linux and
-Windows fail closed before reviewer launch. A blocked run has no Agent Flow review approval;
-human PR review or CI success does not replace its required reviewer evidence. Adding a
-backend is a separate change from memory handling.
-
-Recheck claims when their linked files or rules change, when the branch changes, when a tool
-or API changes, or when current work contradicts the memory. Record relevant paths and
-verification evidence in the rule change; keep facts tied to one branch or task in its run
-artifact or PR. Correct or remove an unsupported shared rule through the same review path.
-Independent review and passing gates reduce risk but do not guarantee that a remembered
-claim is current or semantically correct. Personal host memory updates remain with the user
-and host; Agent Flow does not synchronize them.
-
-When checking delivery, distinguish the approved file from the selected, rendered, and
-submitted input. Record only stages actually observed and leave the others `unknown`, even
-for tracked files. This is a limit on claims in existing artifacts or reviews, not a new
-metadata schema, journal, or completion gate. A commit or file digest establishes identity,
-not consumption or model compliance. Do not share user memory/home with reviewers or remove
-their isolation to make delivery observable. Codex may still read project `AGENTS.md` in the
-worktree, so isolating user memory does not remove the influence of project instructions
-under review. That reviewer independence question remains open; this memory guidance does
-not resolve it or select a new reviewer setting.
-
-Memory off/on evaluation is not part of this host-memory approach or team-rule acceptance.
-A future proposal should define the decision an evaluation will change before designing
-one. If such an evaluation is needed, freeze code and instructions, dataset and assertions
-with their source and review status, model settings, evaluator and prompt, and scorer.
-Separate observed host/CLI versions, settings, and snapshots from proof of consumed input;
-unobserved input limits reproducibility and causal claims. Live model evaluations remain
-manual and nonblocking, outside required CI. No separate memory-analysis pipeline is needed.
 
 ### Project-local skills
 
