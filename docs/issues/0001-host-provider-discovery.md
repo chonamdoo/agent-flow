@@ -11,7 +11,7 @@ Expose a public CLI path that reports which host AI providers are available for 
 
 ## Acceptance criteria
 
-- [x] `agent-flow provider list` reports Codex, Claude, Gemini, and manual providers.
+- [x] `agent-flow provider list` reports `manual`, `codex-session`, `claude-session`, and `omp-session` providers.
 - [x] Provider availability is based on host environment variables or executables.
 - [x] Output is deterministic enough for tests and scripting.
 
