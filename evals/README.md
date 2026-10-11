@@ -359,6 +359,8 @@ python evals/phase_eval_compare.py <new dir> --summary <new dir>/gate.md \
 
 author 행에 `architecture_lint`가 있으면 객체와 위의 네 status 중 하나여야 한다.
 잘못된 shape·미지원 status는 malformed scoring field와 무효 시행으로 기록하고 export를 거부한다.
+이 schema 검사는 provider·oracle 오류나 세 축 누락으로 이미 채점 제외된 author 행에도 적용한다.
+채점 제외 행의 usage·읽음 누락까지 새로운 fatal 조건으로 확대하지는 않는다.
 필드 없는 legacy 행과 `status`만 있는 compact record는 지원한다.
 `author_architecture_lint_pass_rate`는 `pass`·`fail`이 적용된 행만 분모로 삼으며,
 `n/a`·`error`·필드 부재를 PASS로 가산하지 않는다.

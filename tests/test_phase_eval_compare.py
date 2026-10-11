@@ -743,16 +743,24 @@ def test_architecture_lint_pass_rate_counts_only_rows_where_the_gate_applied(gat
     assert record["architecture_lint"] == {"status": "fail"}
 
 
+@pytest.mark.parametrize("state", ["scored", "provider-error", "oracle-error", "missing-axis"])
 @pytest.mark.parametrize("lint", [
     None, "pass", [], {}, {"status": None}, {"status": ["pass"]}, {"status": "failed"}, {"status": "pass,pass,failed"},
 ], ids=["null", "string", "list", "missing-status", "null-status", "list-status", "unsupported", "combined"])
-def test_malformed_author_lint_is_invalid_and_blocks_export(gate, tmp_path, lint):
+def test_malformed_author_lint_is_invalid_and_blocks_export(gate, tmp_path, lint, state):
     rows = rows_for("before") + rows_for("after")
     authors = [row for row in rows if row["kit"] == "after" and row["scenario"] == "author"]
     for row in authors:
         row["architecture_lint"] = {"status": "pass"}
     authors[-1]["architecture_lint"] = lint
+    if state == "provider-error":
+        authors[-1]["error"] = "provider failed"
+    elif state == "oracle-error":
+        authors[-1]["oracle"] = {"error": "oracle failed"}
+    elif state == "missing-axis":
+        authors[-1]["oracle"].pop("norm")
     thresholds = copy.deepcopy(THRESHOLDS)
+    thresholds["ceilings"]["invalid_rate"] = 1.0
     thresholds["floors"]["author_architecture_lint_pass_rate"] = 1.0
     run = write_run(tmp_path / "run", rows)
     destination = tmp_path / "record"

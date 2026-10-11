@@ -86,10 +86,18 @@ def _count(value: object, minimum: int = 0) -> bool:
 
 
 def malformed_fields(row: dict) -> list[str]:
-    """Scoring fields of a scored row that are missing or of the wrong type or range."""
+    """Malformed supplied author lint, or missing/invalid scoring fields on eligible rows."""
+    problems = []
+    if row["scenario"] == "author" and "architecture_lint" in row:
+        lint = row["architecture_lint"]
+        if not isinstance(lint, dict) or lint.get("status") not in ("pass", "fail", "n/a", "error"):
+            problems.append("architecture_lint.status")
+    if _unscored(row):
+        return problems
     usage = row.get("usage")
     # A scored unit without complete usage cannot be checked for token efficiency, so it is malformed.
-    problems = [f"usage.{axis}" for axis in TOKEN_AXES if not (isinstance(usage, dict) and _count(usage.get(axis)))]
+    problems.extend(f"usage.{axis}" for axis in TOKEN_AXES
+                    if not (isinstance(usage, dict) and _count(usage.get(axis))))
     if row["scenario"] == "author":
         groups = {key: row.get(key) for key in ("required_read", "required_unread")}
         groups["required_unobserved"] = row.get("required_unobserved", [])
@@ -103,10 +111,6 @@ def malformed_fields(row: dict) -> list[str]:
             names = [name for group in groups.values() for name in group]
             if len(names) != len(set(names)):
                 problems.append("required_read/required_unread/required_unobserved overlap")
-        if "architecture_lint" in row:
-            lint = row["architecture_lint"]
-            if not isinstance(lint, dict) or lint.get("status") not in ("pass", "fail", "n/a", "error"):
-                problems.append("architecture_lint.status")
         return problems
     if "expected" not in row:
         problems.append("expected")
@@ -600,7 +604,7 @@ def compare(directories: list[Path], before: str, after: str, thresholds: dict, 
     failures.extend(_review_case_failures(rows, condition, cases))
     failures.extend(
         f"malformed scoring fields in {row.get('kit')} {'/'.join(map(str, _unit_key(row)))}: {', '.join(problems)}"
-        for row in rows if not _unscored(row) for problems in [malformed_fields(row)] if problems
+        for row in rows for problems in [malformed_fields(row)] if problems
     )
     metrics = {kit: kit_metrics(rows, kit) for kit in (before, after)}
     failures.extend(_coverage_failures(rows, before, after, thresholds))
