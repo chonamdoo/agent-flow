@@ -2580,7 +2580,7 @@ Phases with completion markers are not complete just because the artifact file e
 Implementation rules:
 
 - Run every phase through the runner. Do not skip review, QA, PR watch, or fix-loop phases.
-- Apply \`code-generation-discipline\` during red, green, refactor, fix-loop, and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code.
+- Apply \`code-generation-discipline\` during red, green, refactor, fix-loop, and review phases, including its Before Starting selection procedure. Use the runner's resolved profile values and required-read plan when supplied.
 - If review or QA fails, return to the fix phase before continuing.
 - Required review happens before completion QA. Do not run \`agent-flow gates\` as part of a phase and do not author \`gate-results.json\`: the runner runs the profile gates itself at the gates phase, at \`--phase all\`, and writes the result file. A result file you write is discarded. \`agent-flow gates\` remains available for reproducing a failure by hand. If review or QA fails, fix-loop routes back through comment-authoring and review before gates run again.
 - Code review requires at least two independent Claude/Codex reviewer subprocesses. If the changed scope spans multiple areas, run one additional reviewer subprocess in parallel. OMP and controller-session work are never reviewer providers, and every multi-review verdict requires 2+ independent reviewer verdicts with reviewer-source: sub-agent. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.

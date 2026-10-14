@@ -1,0 +1,40 @@
+{
+  "units": 18,
+  "scope": "Focused author regression; not a complete release gate.",
+  "selected_cases": [
+    [
+      "backend",
+      "clean"
+    ],
+    [
+      "app",
+      "clean"
+    ],
+    [
+      "rn",
+      "local"
+    ]
+  ],
+  "trials": 3,
+  "requested_model": "gpt-6.1-sol",
+  "concurrency": 8,
+  "kits": {
+    "before": "/private/tmp/af-pr365-eval/before",
+    "after": "/private/tmp/af-pr365-eval/after"
+  },
+  "kit_digests": {
+    "before": "91644dcc682f62cfda46914581c41c6b0413368c62e4221d7e60f5939eb35fa4",
+    "after": "3adac1cf09516e0f683186610b3d7b333e0c6ace8597ef492ab7ba4f747cd2d9"
+  },
+  "evaluator_sha256": "c90abd23647f315c2e2807155a47493f4d7b2fac7d27c68108f3af18298a4d69",
+  "diagnostic_sha256": "2650aa05092e45776dcac29dc49dc1ef676693e15d2ca8a4f303fcbd440e8c57",
+  "started_utc": "2026-10-14T13:05:05+00:00",
+  "work": "/var/folders/81/308ppjhd4_175x6vnb5flwmr0000gn/T/af-phase-eval-focused-7hzxojx1",
+  "base_commit": "4ff46ad18baa50348016112016aadf4aa98f1648",
+  "candidate_commit": "96eb5b1c07f7fa6eedb6c92453b69663c1b671dd",
+  "tool_versions": {
+    "codex": "codex-cli 0.162.1",
+    "node": "v24.14.1",
+    "dart": "Dart SDK version: 3.13.1 (stable) (Tue Aug 18 01:00:59 2026 -0700) on \"macos_arm64\""
+  }
+}

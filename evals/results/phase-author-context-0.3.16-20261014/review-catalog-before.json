@@ -1,0 +1,10 @@
+{
+  "argv": [
+    "/workspace/agent-flow/.venv/bin/python",
+    "/workspace/agent-flow-evaluation/v0316-focused-skill-nlbp3akj/candidate/evals/phase_eval_context_reads.py",
+    "/workspace/agent-flow-evaluation/v0316-focused-dedup-wfko6tbf/review-fix/filtered-stdout.raw"
+  ],
+  "exit_code": 1,
+  "stdout": "{\n  \"command_count\": 1,\n  \"command_output_bytes\": 85,\n  \"broad_context_outputs\": [\n    {\n      \"kinds\": [\n        \"skill-catalog\"\n      ],\n      \"command\": \"jq filter .agent-flow/skills/index.json\",\n      \"output_bytes\": 85,\n      \"exit_code\": 0\n    }\n  ],\n  \"skill_catalog_outputs\": 1,\n  \"workflow_source_outputs\": 0\n}\n",
+  "stderr": ""
+}

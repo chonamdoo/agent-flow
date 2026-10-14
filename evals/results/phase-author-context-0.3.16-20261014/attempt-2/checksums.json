@@ -1,0 +1,13 @@
+{
+  "artifacts.json": "f73924caee362667ff05242196a1ef702618f93e162197f63e42a3b40257c617",
+  "context-read-analysis.json.gz": "62c12e0220901c1d3d4e3ff2a6bf95d71bd9002bd1f863b11dedf0d483613111",
+  "design.json": "2e57efdf96b1b0c64a9cf4173fd7a84b796785e64e4d4aeb865d8c089c3ce9b8",
+  "focused-evaluation.log": "976301c272fcf26dc21aeeb2fd1bfd2caeb7190d4fad731c4b46903eee5a93cc",
+  "integrity-audit.json": "07cd466e475465f401dea5424a315c021c0929d914a881d2e78953eb115c0695",
+  "meta.json": "1a6c70d26185caa4e2ea97451ae3ce09ef92f12a2731d0729be75cac15e1341b",
+  "native-evidence.tar.gz": "e460a527e6a195cbe53edf12b1e8b7661f63fb1536f1ad5dc7973d68f5e06d64",
+  "results.jsonl.gz": "d2241c50b43dda2032e6e877b719d1144fc55007f0026b159b36fc8d86d8280a",
+  "run-status.json": "1b5ab228c92d57d85e982ecbdaa72b33a1b2e2f6b4258abccd6f2b8f7e8eb2cd",
+  "source.patch.gz": "ce66a6aa1f147ada6219f6a6df05aedefc78d25195ad64e8dab33729d3e5489e",
+  "summary.json": "6210f9276185d3a1f39b88e334acf12489759d64069afe0f324f72134a24622c"
+}

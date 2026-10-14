@@ -1,0 +1,24 @@
+[
+  {
+    "argv": [
+      "/workspace/agent-flow/.venv/bin/python",
+      "/workspace/agent-flow-evaluation/v0316-focused-skill-nlbp3akj/candidate/evals/phase_eval_context_reads.py",
+      "/workspace/agent-flow-evaluation/v0316-focused-dedup-wfko6tbf/review-fix/filtered-stdout.raw"
+    ],
+    "exit_code": 2,
+    "stdout": "",
+    "stderr": "usage: phase_eval_context_reads.py [-h] --catalog CATALOG stdout\nphase_eval_context_reads.py: error: the following arguments are required: --catalog\n"
+  },
+  {
+    "argv": [
+      "/workspace/agent-flow/.venv/bin/python",
+      "/workspace/agent-flow-evaluation/v0316-focused-skill-nlbp3akj/candidate/evals/phase_eval_context_reads.py",
+      "/workspace/agent-flow-evaluation/v0316-focused-dedup-wfko6tbf/review-fix/filtered-stdout.raw",
+      "--catalog",
+      "/workspace/agent-flow-evaluation/v0316-focused-dedup-wfko6tbf/review-fix/catalog.json"
+    ],
+    "exit_code": 0,
+    "stdout": "{\n  \"command_count\": 1,\n  \"command_output_bytes\": 85,\n  \"broad_context_outputs\": [],\n  \"skill_catalog_outputs\": 0,\n  \"workflow_source_outputs\": 0\n}\n",
+    "stderr": ""
+  }
+]

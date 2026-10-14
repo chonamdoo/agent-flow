@@ -426,6 +426,34 @@ author 필수 읽음률에서는 미관측 skill도 분모에 포함해 읽음 �
 바뀐 kit 지문이나 평가기 해시로 전체를 새로 측정한다. 같은 kit·평가기·case 조건으로 다시 돌려
 통과 결과를 고르거나, 실패한 unit만 골라 다시 돌리거나, 근거 없이 기준값을 낮춰 통과시키지 않는다.
 
+### `phase_eval_context_reads.py` — native 출력 진단, 수동·비차단
+
+Codex author의 native `stdout.raw`에서 모델에 실제로 전달된 넓은 맥락 출력을 찾는다.
+작성 phase가 해석된 required-read plan을 두고도 전체 skill catalog나 workflow source를
+다시 출력했는지 확인할 때 쓴다.
+
+```bash
+python evals/phase_eval_context_reads.py <unit>/stdout.raw \
+  --catalog <fixture>/.agent-flow/skills/index.json
+```
+
+- `--catalog`는 필수다. 같은 fixture에 설치된 전체 index를 넘긴다. command 출력 안의 JSON이
+  이 index와 내용이 같을 때만 전체 catalog 출력으로 센다. 필터 없는 설치
+  (`selected_skills: "all"`)도 잡고, 일부 항목을 뽑은 출력이나 경로 목록은 세지 않는다.
+- escaped `source_text`와 `phases:`가 함께 나온 출력은 workflow source 출력으로 센다.
+  grep이 exit 2로 끝나도 출력 내용으로 판단한다.
+- exit 0은 넓은 출력 없음, exit 1은 넓은 출력 있음이다. 손상된 JSON 줄, type이 없는
+  event·item, 문자열이 아닌 command/output, 유효하지 않은 Unicode, 중첩 깊이나 정수 자릿수가
+  decoder 한도를 넘는 event·catalog, 빈/미완료 stream, 읽을 수 없는 파일은 exit 2다.
+  0회 읽음으로 보고하지 않는다.
+- event는 `\n`으로만 나눈다. command 출력 안에서 decode할 수 없는 JSON은 catalog가 아닌
+  것으로 건너뛴다.
+- 경로 언급이나 agent 자기보고는 읽음으로 세지 않는다. 다른 JSON 객체에 감싼 catalog,
+  잘린 catalog, 모든 raw YAML 읽기는 탐지하지 않는다. 실행 필터나 required-read·behavior·
+  plan·norm·릴리스 gate를 대신하지 않는다.
+
+사용 예와 before/after 측정은 `results/phase-author-context-0.3.16-20261014/`에 있다.
+
 ### 해석할 때 주의
 
 - 시행 1회 결과는 방향만 보여 준다. 정확도 개선을 주장하려면 같은 case를

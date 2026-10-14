@@ -1,0 +1,11 @@
+{
+  "context-read-analysis.json.gz": "fea5805cc7b8ae9d5368738f03279364f3b277dd4022ec93fb6e8f721bc419ba",
+  "focused-evaluation.log": "5aa3d07dad82ee687d9a7de6fc6b455e032560bf1a9b3b811bf1f04ad4034fbe",
+  "integrity-audit.json": "a6ebfc3ed27d167873414505e7d4e07de626dec07cee1de0151e05f306ec155d",
+  "meta.json": "2bb9eba382a6e83cf607938f383d64254ad18c006975d348794e2d4bc9b4d2ca",
+  "native-evidence.tar.gz": "f2c7b9e8b2118e6af53b28d379b7c9b53b2c23dfde2b364a185be071fa655d82",
+  "results.jsonl.gz": "9aeda9648b83a16e0e93e0f7e035bfee94654ab6b3ab35cfae83de85506ed0ad",
+  "run-status.json": "687b4e30431547b3fa8f6ef32e42d23684913e23b0128a0dcf9397a723918f87",
+  "source.patch.gz": "6eb6777e06b741a2c5cd688810b95601579af6cd558e9a1f5c674e3fb3b7d303",
+  "summary.json": "85dad1acc3d2b7bb58d4c3c67ce7479fe3fb303cb3ade5fcac8a887abddabafe"
+}

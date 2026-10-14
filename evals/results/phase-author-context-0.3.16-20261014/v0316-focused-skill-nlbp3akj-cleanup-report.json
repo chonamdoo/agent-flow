@@ -1,0 +1,7 @@
+{
+  "status": "PASS",
+  "removed_projects": 18,
+  "freed_bytes": 1741135872,
+  "source_archive_sha256": "d9ba66f96c3b796ac9eb57dfa858212c4bbc3d16d8c0122400dcead215136df9",
+  "results_unchanged_sha256": "c46112bf100e3a989181d05f3e631184bbc2b9d6f539efeb791bb3a47ca54560"
+}

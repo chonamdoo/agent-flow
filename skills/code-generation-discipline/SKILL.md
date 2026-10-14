@@ -18,8 +18,15 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
 - Define the authorized verification command or observable check before editing;
   account for the active phase's execution permissions and assigned owner.
 - For agent-flow user-facing updates, default to short prose in the language the user writes in, and keep code, commands, paths, and identifiers in English.
-- For code generation, modification, and code review, resolve required skills from active profile metadata, `.agent-flow/skills/index.json`, changed files, and task scope before writing or judging code.
-- Load only the required skill union for touched profiles. Do not require unrelated platform skills.
+- When the phase supplies resolved profile values and a required-read plan, use
+  that selection. Apply inline bodies and open only plan-designated files and
+  applicable references.
+  An inline or already-read body satisfies later read instructions for the same
+  body and digest. Reopen it only if the selection or content changes.
+  Do not repeat skill discovery through the full skill index or workflow/run
+  metadata. If the actual scope changes, update the selection for that scope.
+- Without a resolved phase context, select only relevant profile/index entries
+  from touched files and task scope. Load the required union for those profiles:
   - Python files (`*.py`): apply the Python profile required skill group.
   - TypeScript files: apply the TypeScript profile group. TSX alone does not
     distinguish React Web from React Native; inspect dependencies and source scope.

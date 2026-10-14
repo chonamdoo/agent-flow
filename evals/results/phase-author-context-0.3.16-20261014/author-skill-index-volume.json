@@ -1,0 +1,69 @@
+{
+  "file_bytes": 56535,
+  "top_fields": {
+    "version": {
+      "bytes": 1,
+      "type": "int",
+      "items": null
+    },
+    "selection": {
+      "bytes": 803,
+      "type": "dict",
+      "items": 4
+    },
+    "skills": {
+      "bytes": 40418,
+      "type": "list",
+      "items": 31
+    },
+    "conflicts": {
+      "bytes": 2,
+      "type": "list",
+      "items": 0
+    },
+    "warnings": {
+      "bytes": 2,
+      "type": "list",
+      "items": 0
+    },
+    "links": {
+      "bytes": 5742,
+      "type": "list",
+      "items": 27
+    }
+  },
+  "skills_item_fields": [
+    "id",
+    "name",
+    "title",
+    "path",
+    "source",
+    "hosts",
+    "requires",
+    "dependencies",
+    "optionalDependencies",
+    "platforms",
+    "stacks",
+    "references",
+    "hostSupport",
+    "workflowPhases",
+    "reviewAngles",
+    "installGroup",
+    "delivery",
+    "excludes",
+    "tags",
+    "description",
+    "trigger",
+    "triggers",
+    "governance",
+    "observedContentDigest",
+    "hash"
+  ],
+  "links_item_fields": [
+    "name",
+    "host",
+    "path",
+    "status",
+    "installedContentDigest"
+  ]
+}

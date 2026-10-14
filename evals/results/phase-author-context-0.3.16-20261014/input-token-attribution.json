@@ -1,0 +1,1912 @@
+{
+  "author": {
+    "paired_units": 36,
+    "paired_native_prompts": 36,
+    "normalized_native_prompts_equal": 36,
+    "uncached_delta": 47357,
+    "total_input_delta": 861309,
+    "cached_delta": 813952,
+    "output_delta": 944,
+    "commands_before": 1118,
+    "commands_after": 1135,
+    "prompt_bytes_before": 571503,
+    "prompt_bytes_after": 570912,
+    "largest_increases": [
+      {
+        "case": [
+          "backend",
+          "clean",
+          "",
+          1
+        ],
+        "before_uncached": 40143,
+        "after_uncached": 72859,
+        "uncached_delta": 32716,
+        "total_input_delta": 26828,
+        "cached_delta": -5888,
+        "output_delta": -736,
+        "before_prompt_bytes": 15128,
+        "after_prompt_bytes": 15116,
+        "before_commands": 25,
+        "after_commands": 23
+      },
+      {
+        "case": [
+          "app",
+          "clean",
+          "",
+          2
+        ],
+        "before_uncached": 56922,
+        "after_uncached": 86385,
+        "uncached_delta": 29463,
+        "total_input_delta": 63255,
+        "cached_delta": 33792,
+        "output_delta": 858,
+        "before_prompt_bytes": 16063,
+        "after_prompt_bytes": 16049,
+        "before_commands": 34,
+        "after_commands": 36
+      },
+      {
+        "case": [
+          "rn",
+          "local",
+          "",
+          3
+        ],
+        "before_uncached": 44426,
+        "after_uncached": 73846,
+        "uncached_delta": 29420,
+        "total_input_delta": 9324,
+        "cached_delta": -20096,
+        "output_delta": -413,
+        "before_prompt_bytes": 16431,
+        "after_prompt_bytes": 16413,
+        "before_commands": 32,
+        "after_commands": 33
+      },
+      {
+        "case": [
+          "web",
+          "local",
+          "",
+          1
+        ],
+        "before_uncached": 41650,
+        "after_uncached": 65063,
+        "uncached_delta": 23413,
+        "total_input_delta": 257781,
+        "cached_delta": 234368,
+        "output_delta": 1479,
+        "before_prompt_bytes": 15434,
+        "after_prompt_bytes": 15417,
+        "before_commands": 25,
+        "after_commands": 37
+      },
+      {
+        "case": [
+          "rn",
+          "local",
+          "",
+          1
+        ],
+        "before_uncached": 43124,
+        "after_uncached": 62259,
+        "uncached_delta": 19135,
+        "total_input_delta": -69825,
+        "cached_delta": -88960,
+        "output_delta": 63,
+        "before_prompt_bytes": 16431,
+        "after_prompt_bytes": 16413,
+        "before_commands": 33,
+        "after_commands": 35
+      }
+    ],
+    "largest_decreases": [
+      {
+        "case": [
+          "rn",
+          "team",
+          "",
+          1
+        ],
+        "before_uncached": 61022,
+        "after_uncached": 45672,
+        "uncached_delta": -15350,
+        "total_input_delta": 220426,
+        "cached_delta": 235776,
+        "output_delta": 1668,
+        "before_prompt_bytes": 15774,
+        "after_prompt_bytes": 15754,
+        "before_commands": 34,
+        "after_commands": 40
+      },
+      {
+        "case": [
+          "web",
+          "local",
+          "",
+          2
+        ],
+        "before_uncached": 62175,
+        "after_uncached": 46200,
+        "uncached_delta": -15975,
+        "total_input_delta": -114151,
+        "cached_delta": -98176,
+        "output_delta": -313,
+        "before_prompt_bytes": 15434,
+        "after_prompt_bytes": 15417,
+        "before_commands": 46,
+        "after_commands": 31
+      },
+      {
+        "case": [
+          "backend",
+          "local",
+          "",
+          2
+        ],
+        "before_uncached": 55687,
+        "after_uncached": 35741,
+        "uncached_delta": -19946,
+        "total_input_delta": -26218,
+        "cached_delta": -6272,
+        "output_delta": 286,
+        "before_prompt_bytes": 15366,
+        "after_prompt_bytes": 15353,
+        "before_commands": 24,
+        "after_commands": 20
+      },
+      {
+        "case": [
+          "backend",
+          "team",
+          "",
+          2
+        ],
+        "before_uncached": 83897,
+        "after_uncached": 62606,
+        "uncached_delta": -21291,
+        "total_input_delta": 47189,
+        "cached_delta": 68480,
+        "output_delta": 302,
+        "before_prompt_bytes": 16795,
+        "after_prompt_bytes": 16778,
+        "before_commands": 23,
+        "after_commands": 20
+      },
+      {
+        "case": [
+          "rn",
+          "team",
+          "",
+          3
+        ],
+        "before_uncached": 61364,
+        "after_uncached": 37904,
+        "uncached_delta": -23460,
+        "total_input_delta": -136612,
+        "cached_delta": -113152,
+        "output_delta": -747,
+        "before_prompt_bytes": 15774,
+        "after_prompt_bytes": 15754,
+        "before_commands": 30,
+        "after_commands": 34
+      }
+    ],
+    "all_pairs": [
+      {
+        "case": [
+          "web",
+          "local",
+          "",
+          1
+        ],
+        "before_uncached": 41650,
+        "after_uncached": 65063,
+        "uncached_delta": 23413,
+        "total_input_delta": 257781,
+        "cached_delta": 234368,
+        "output_delta": 1479,
+        "before_prompt_bytes": 15434,
+        "after_prompt_bytes": 15417,
+        "before_commands": 25,
+        "after_commands": 37
+      },
+      {
+        "case": [
+          "web",
+          "clean",
+          "",
+          1
+        ],
+        "before_uncached": 66503,
+        "after_uncached": 65550,
+        "uncached_delta": -953,
+        "total_input_delta": 78663,
+        "cached_delta": 79616,
+        "output_delta": 561,
+        "before_prompt_bytes": 15416,
+        "after_prompt_bytes": 15399,
+        "before_commands": 29,
+        "after_commands": 37
+      },
+      {
+        "case": [
+          "web",
+          "team",
+          "",
+          1
+        ],
+        "before_uncached": 43224,
+        "after_uncached": 56766,
+        "uncached_delta": 13542,
+        "total_input_delta": -45850,
+        "cached_delta": -59392,
+        "output_delta": -273,
+        "before_prompt_bytes": 15122,
+        "after_prompt_bytes": 15103,
+        "before_commands": 34,
+        "after_commands": 35
+      },
+      {
+        "case": [
+          "rn",
+          "clean",
+          "",
+          1
+        ],
+        "before_uncached": 58038,
+        "after_uncached": 65288,
+        "uncached_delta": 7250,
+        "total_input_delta": 101970,
+        "cached_delta": 94720,
+        "output_delta": 1748,
+        "before_prompt_bytes": 16773,
+        "after_prompt_bytes": 16755,
+        "before_commands": 38,
+        "after_commands": 36
+      },
+      {
+        "case": [
+          "rn",
+          "local",
+          "",
+          1
+        ],
+        "before_uncached": 43124,
+        "after_uncached": 62259,
+        "uncached_delta": 19135,
+        "total_input_delta": -69825,
+        "cached_delta": -88960,
+        "output_delta": 63,
+        "before_prompt_bytes": 16431,
+        "after_prompt_bytes": 16413,
+        "before_commands": 33,
+        "after_commands": 35
+      },
+      {
+        "case": [
+          "rn",
+          "team",
+          "",
+          1
+        ],
+        "before_uncached": 61022,
+        "after_uncached": 45672,
+        "uncached_delta": -15350,
+        "total_input_delta": 220426,
+        "cached_delta": 235776,
+        "output_delta": 1668,
+        "before_prompt_bytes": 15774,
+        "after_prompt_bytes": 15754,
+        "before_commands": 34,
+        "after_commands": 40
+      },
+      {
+        "case": [
+          "app",
+          "clean",
+          "",
+          1
+        ],
+        "before_uncached": 42494,
+        "after_uncached": 48418,
+        "uncached_delta": 5924,
+        "total_input_delta": 87332,
+        "cached_delta": 81408,
+        "output_delta": 678,
+        "before_prompt_bytes": 16063,
+        "after_prompt_bytes": 16049,
+        "before_commands": 28,
+        "after_commands": 34
+      },
+      {
+        "case": [
+          "app",
+          "local",
+          "",
+          1
+        ],
+        "before_uncached": 38260,
+        "after_uncached": 39971,
+        "uncached_delta": 1711,
+        "total_input_delta": -2257,
+        "cached_delta": -3968,
+        "output_delta": -155,
+        "before_prompt_bytes": 15370,
+        "after_prompt_bytes": 15356,
+        "before_commands": 28,
+        "after_commands": 27
+      },
+      {
+        "case": [
+          "app",
+          "team",
+          "",
+          1
+        ],
+        "before_uncached": 36409,
+        "after_uncached": 43607,
+        "uncached_delta": 7198,
+        "total_input_delta": -7010,
+        "cached_delta": -14208,
+        "output_delta": 454,
+        "before_prompt_bytes": 16829,
+        "after_prompt_bytes": 16811,
+        "before_commands": 33,
+        "after_commands": 33
+      },
+      {
+        "case": [
+          "backend",
+          "clean",
+          "",
+          1
+        ],
+        "before_uncached": 40143,
+        "after_uncached": 72859,
+        "uncached_delta": 32716,
+        "total_input_delta": 26828,
+        "cached_delta": -5888,
+        "output_delta": -736,
+        "before_prompt_bytes": 15128,
+        "after_prompt_bytes": 15116,
+        "before_commands": 25,
+        "after_commands": 23
+      },
+      {
+        "case": [
+          "backend",
+          "local",
+          "",
+          1
+        ],
+        "before_uncached": 34895,
+        "after_uncached": 29648,
+        "uncached_delta": -5247,
+        "total_input_delta": 46593,
+        "cached_delta": 51840,
+        "output_delta": -135,
+        "before_prompt_bytes": 15366,
+        "after_prompt_bytes": 15353,
+        "before_commands": 20,
+        "after_commands": 22
+      },
+      {
+        "case": [
+          "backend",
+          "team",
+          "",
+          1
+        ],
+        "before_uncached": 33585,
+        "after_uncached": 39392,
+        "uncached_delta": 5807,
+        "total_input_delta": -11217,
+        "cached_delta": -17024,
+        "output_delta": -390,
+        "before_prompt_bytes": 16795,
+        "after_prompt_bytes": 16778,
+        "before_commands": 23,
+        "after_commands": 23
+      },
+      {
+        "case": [
+          "web",
+          "clean",
+          "",
+          2
+        ],
+        "before_uncached": 59432,
+        "after_uncached": 67541,
+        "uncached_delta": 8109,
+        "total_input_delta": 23341,
+        "cached_delta": 15232,
+        "output_delta": -1065,
+        "before_prompt_bytes": 15416,
+        "after_prompt_bytes": 15399,
+        "before_commands": 36,
+        "after_commands": 41
+      },
+      {
+        "case": [
+          "web",
+          "local",
+          "",
+          2
+        ],
+        "before_uncached": 62175,
+        "after_uncached": 46200,
+        "uncached_delta": -15975,
+        "total_input_delta": -114151,
+        "cached_delta": -98176,
+        "output_delta": -313,
+        "before_prompt_bytes": 15434,
+        "after_prompt_bytes": 15417,
+        "before_commands": 46,
+        "after_commands": 31
+      },
+      {
+        "case": [
+          "web",
+          "team",
+          "",
+          2
+        ],
+        "before_uncached": 59620,
+        "after_uncached": 47190,
+        "uncached_delta": -12430,
+        "total_input_delta": 23538,
+        "cached_delta": 35968,
+        "output_delta": 315,
+        "before_prompt_bytes": 15122,
+        "after_prompt_bytes": 15103,
+        "before_commands": 36,
+        "after_commands": 37
+      },
+      {
+        "case": [
+          "rn",
+          "clean",
+          "",
+          2
+        ],
+        "before_uncached": 57092,
+        "after_uncached": 53857,
+        "uncached_delta": -3235,
+        "total_input_delta": 26461,
+        "cached_delta": 29696,
+        "output_delta": -509,
+        "before_prompt_bytes": 16773,
+        "after_prompt_bytes": 16755,
+        "before_commands": 33,
+        "after_commands": 36
+      },
+      {
+        "case": [
+          "rn",
+          "local",
+          "",
+          2
+        ],
+        "before_uncached": 39460,
+        "after_uncached": 40596,
+        "uncached_delta": 1136,
+        "total_input_delta": -26384,
+        "cached_delta": -27520,
+        "output_delta": -801,
+        "before_prompt_bytes": 16431,
+        "after_prompt_bytes": 16413,
+        "before_commands": 30,
+        "after_commands": 30
+      },
+      {
+        "case": [
+          "rn",
+          "team",
+          "",
+          2
+        ],
+        "before_uncached": 42012,
+        "after_uncached": 42066,
+        "uncached_delta": 54,
+        "total_input_delta": 43318,
+        "cached_delta": 43264,
+        "output_delta": 100,
+        "before_prompt_bytes": 15774,
+        "after_prompt_bytes": 15754,
+        "before_commands": 36,
+        "after_commands": 34
+      },
+      {
+        "case": [
+          "app",
+          "clean",
+          "",
+          2
+        ],
+        "before_uncached": 56922,
+        "after_uncached": 86385,
+        "uncached_delta": 29463,
+        "total_input_delta": 63255,
+        "cached_delta": 33792,
+        "output_delta": 858,
+        "before_prompt_bytes": 16063,
+        "after_prompt_bytes": 16049,
+        "before_commands": 34,
+        "after_commands": 36
+      },
+      {
+        "case": [
+          "app",
+          "local",
+          "",
+          2
+        ],
+        "before_uncached": 41058,
+        "after_uncached": 36101,
+        "uncached_delta": -4957,
+        "total_input_delta": -120413,
+        "cached_delta": -115456,
+        "output_delta": -422,
+        "before_prompt_bytes": 15370,
+        "after_prompt_bytes": 15356,
+        "before_commands": 27,
+        "after_commands": 28
+      },
+      {
+        "case": [
+          "app",
+          "team",
+          "",
+          2
+        ],
+        "before_uncached": 48583,
+        "after_uncached": 37417,
+        "uncached_delta": -11166,
+        "total_input_delta": -89374,
+        "cached_delta": -78208,
+        "output_delta": -443,
+        "before_prompt_bytes": 16829,
+        "after_prompt_bytes": 16811,
+        "before_commands": 46,
+        "after_commands": 29
+      },
+      {
+        "case": [
+          "backend",
+          "clean",
+          "",
+          2
+        ],
+        "before_uncached": 52031,
+        "after_uncached": 41616,
+        "uncached_delta": -10415,
+        "total_input_delta": -24111,
+        "cached_delta": -13696,
+        "output_delta": -857,
+        "before_prompt_bytes": 15128,
+        "after_prompt_bytes": 15116,
+        "before_commands": 28,
+        "after_commands": 23
+      },
+      {
+        "case": [
+          "backend",
+          "local",
+          "",
+          2
+        ],
+        "before_uncached": 55687,
+        "after_uncached": 35741,
+        "uncached_delta": -19946,
+        "total_input_delta": -26218,
+        "cached_delta": -6272,
+        "output_delta": 286,
+        "before_prompt_bytes": 15366,
+        "after_prompt_bytes": 15353,
+        "before_commands": 24,
+        "after_commands": 20
+      },
+      {
+        "case": [
+          "backend",
+          "team",
+          "",
+          2
+        ],
+        "before_uncached": 83897,
+        "after_uncached": 62606,
+        "uncached_delta": -21291,
+        "total_input_delta": 47189,
+        "cached_delta": 68480,
+        "output_delta": 302,
+        "before_prompt_bytes": 16795,
+        "after_prompt_bytes": 16778,
+        "before_commands": 23,
+        "after_commands": 20
+      },
+      {
+        "case": [
+          "web",
+          "local",
+          "",
+          3
+        ],
+        "before_uncached": 37459,
+        "after_uncached": 54788,
+        "uncached_delta": 17329,
+        "total_input_delta": 79665,
+        "cached_delta": 62336,
+        "output_delta": 59,
+        "before_prompt_bytes": 15434,
+        "after_prompt_bytes": 15417,
+        "before_commands": 35,
+        "after_commands": 33
+      },
+      {
+        "case": [
+          "web",
+          "team",
+          "",
+          3
+        ],
+        "before_uncached": 43140,
+        "after_uncached": 53796,
+        "uncached_delta": 10656,
+        "total_input_delta": 42528,
+        "cached_delta": 31872,
+        "output_delta": -54,
+        "before_prompt_bytes": 15122,
+        "after_prompt_bytes": 15103,
+        "before_commands": 34,
+        "after_commands": 38
+      },
+      {
+        "case": [
+          "web",
+          "clean",
+          "",
+          3
+        ],
+        "before_uncached": 78829,
+        "after_uncached": 65693,
+        "uncached_delta": -13136,
+        "total_input_delta": 332720,
+        "cached_delta": 345856,
+        "output_delta": -1048,
+        "before_prompt_bytes": 15416,
+        "after_prompt_bytes": 15399,
+        "before_commands": 38,
+        "after_commands": 41
+      },
+      {
+        "case": [
+          "rn",
+          "clean",
+          "",
+          3
+        ],
+        "before_uncached": 53106,
+        "after_uncached": 58141,
+        "uncached_delta": 5035,
+        "total_input_delta": -13141,
+        "cached_delta": -18176,
+        "output_delta": -144,
+        "before_prompt_bytes": 16773,
+        "after_prompt_bytes": 16755,
+        "before_commands": 43,
+        "after_commands": 40
+      },
+      {
+        "case": [
+          "rn",
+          "local",
+          "",
+          3
+        ],
+        "before_uncached": 44426,
+        "after_uncached": 73846,
+        "uncached_delta": 29420,
+        "total_input_delta": 9324,
+        "cached_delta": -20096,
+        "output_delta": -413,
+        "before_prompt_bytes": 16431,
+        "after_prompt_bytes": 16413,
+        "before_commands": 32,
+        "after_commands": 33
+      },
+      {
+        "case": [
+          "rn",
+          "team",
+          "",
+          3
+        ],
+        "before_uncached": 61364,
+        "after_uncached": 37904,
+        "uncached_delta": -23460,
+        "total_input_delta": -136612,
+        "cached_delta": -113152,
+        "output_delta": -747,
+        "before_prompt_bytes": 15774,
+        "after_prompt_bytes": 15754,
+        "before_commands": 30,
+        "after_commands": 34
+      },
+      {
+        "case": [
+          "app",
+          "local",
+          "",
+          3
+        ],
+        "before_uncached": 34874,
+        "after_uncached": 35381,
+        "uncached_delta": 507,
+        "total_input_delta": -94341,
+        "cached_delta": -94848,
+        "output_delta": -637,
+        "before_prompt_bytes": 15370,
+        "after_prompt_bytes": 15356,
+        "before_commands": 28,
+        "after_commands": 30
+      },
+      {
+        "case": [
+          "app",
+          "team",
+          "",
+          3
+        ],
+        "before_uncached": 43254,
+        "after_uncached": 40824,
+        "uncached_delta": -2430,
+        "total_input_delta": 128130,
+        "cached_delta": 130560,
+        "output_delta": -509,
+        "before_prompt_bytes": 16829,
+        "after_prompt_bytes": 16811,
+        "before_commands": 30,
+        "after_commands": 27
+      },
+      {
+        "case": [
+          "app",
+          "clean",
+          "",
+          3
+        ],
+        "before_uncached": 48772,
+        "after_uncached": 53650,
+        "uncached_delta": 4878,
+        "total_input_delta": 97934,
+        "cached_delta": 93056,
+        "output_delta": 1786,
+        "before_prompt_bytes": 16063,
+        "after_prompt_bytes": 16049,
+        "before_commands": 35,
+        "after_commands": 43
+      },
+      {
+        "case": [
+          "backend",
+          "clean",
+          "",
+          3
+        ],
+        "before_uncached": 56871,
+        "after_uncached": 46730,
+        "uncached_delta": -10141,
+        "total_input_delta": 20067,
+        "cached_delta": 30208,
+        "output_delta": 299,
+        "before_prompt_bytes": 15128,
+        "after_prompt_bytes": 15116,
+        "before_commands": 20,
+        "after_commands": 28
+      },
+      {
+        "case": [
+          "backend",
+          "local",
+          "",
+          3
+        ],
+        "before_uncached": 36706,
+        "after_uncached": 44639,
+        "uncached_delta": 7933,
+        "total_input_delta": -42627,
+        "cached_delta": -50560,
+        "output_delta": 29,
+        "before_prompt_bytes": 15366,
+        "after_prompt_bytes": 15353,
+        "before_commands": 19,
+        "after_commands": 20
+      },
+      {
+        "case": [
+          "backend",
+          "team",
+          "",
+          3
+        ],
+        "before_uncached": 46619,
+        "after_uncached": 32892,
+        "uncached_delta": -13727,
+        "total_input_delta": -72223,
+        "cached_delta": -58496,
+        "output_delta": -90,
+        "before_prompt_bytes": 16795,
+        "after_prompt_bytes": 16778,
+        "before_commands": 25,
+        "after_commands": 21
+      }
+    ]
+  },
+  "review": {
+    "paired_units": 48,
+    "paired_native_prompts": 272,
+    "normalized_native_prompts_equal": 0,
+    "uncached_delta": 25081,
+    "total_input_delta": 35961,
+    "cached_delta": 10880,
+    "output_delta": -7416,
+    "commands_before": 8297,
+    "commands_after": 8173,
+    "prompt_bytes_before": 5985664,
+    "prompt_bytes_after": 5980328,
+    "largest_increases": [
+      {
+        "case": [
+          "app",
+          "team",
+          "defect",
+          1
+        ],
+        "before_uncached": 161993,
+        "after_uncached": 225512,
+        "uncached_delta": 63519,
+        "total_input_delta": -4577,
+        "cached_delta": -68096,
+        "output_delta": 341,
+        "before_prompt_bytes": 78913,
+        "after_prompt_bytes": 78845,
+        "before_commands": 142,
+        "after_commands": 137
+      },
+      {
+        "case": [
+          "web",
+          "team",
+          "defect",
+          2
+        ],
+        "before_uncached": 261182,
+        "after_uncached": 315038,
+        "uncached_delta": 53856,
+        "total_input_delta": 34400,
+        "cached_delta": -19456,
+        "output_delta": -281,
+        "before_prompt_bytes": 122266,
+        "after_prompt_bytes": 122140,
+        "before_commands": 212,
+        "after_commands": 200
+      },
+      {
+        "case": [
+          "web",
+          "clean",
+          "defect",
+          2
+        ],
+        "before_uncached": 289052,
+        "after_uncached": 338073,
+        "uncached_delta": 49021,
+        "total_input_delta": 70141,
+        "cached_delta": 21120,
+        "output_delta": -34,
+        "before_prompt_bytes": 134998,
+        "after_prompt_bytes": 134860,
+        "before_commands": 194,
+        "after_commands": 186
+      },
+      {
+        "case": [
+          "backend",
+          "clean",
+          "defect",
+          2
+        ],
+        "before_uncached": 255039,
+        "after_uncached": 297131,
+        "uncached_delta": 42092,
+        "total_input_delta": 17772,
+        "cached_delta": -24320,
+        "output_delta": -274,
+        "before_prompt_bytes": 133160,
+        "after_prompt_bytes": 133058,
+        "before_commands": 178,
+        "after_commands": 165
+      },
+      {
+        "case": [
+          "app",
+          "clean",
+          "defect",
+          1
+        ],
+        "before_uncached": 296639,
+        "after_uncached": 338325,
+        "uncached_delta": 41686,
+        "total_input_delta": -80298,
+        "cached_delta": -121984,
+        "output_delta": 474,
+        "before_prompt_bytes": 139161,
+        "after_prompt_bytes": 139035,
+        "before_commands": 174,
+        "after_commands": 210
+      }
+    ],
+    "largest_decreases": [
+      {
+        "case": [
+          "app",
+          "local",
+          "clean",
+          2
+        ],
+        "before_uncached": 294621,
+        "after_uncached": 256931,
+        "uncached_delta": -37690,
+        "total_input_delta": -53818,
+        "cached_delta": -16128,
+        "output_delta": -391,
+        "before_prompt_bytes": 128709,
+        "after_prompt_bytes": 128613,
+        "before_commands": 153,
+        "after_commands": 154
+      },
+      {
+        "case": [
+          "rn",
+          "local",
+          "defect",
+          2
+        ],
+        "before_uncached": 274773,
+        "after_uncached": 233245,
+        "uncached_delta": -41528,
+        "total_input_delta": 11464,
+        "cached_delta": 52992,
+        "output_delta": 240,
+        "before_prompt_bytes": 138930,
+        "after_prompt_bytes": 138804,
+        "before_commands": 165,
+        "after_commands": 176
+      },
+      {
+        "case": [
+          "rn",
+          "clean",
+          "defect",
+          1
+        ],
+        "before_uncached": 359149,
+        "after_uncached": 313757,
+        "uncached_delta": -45392,
+        "total_input_delta": -133200,
+        "cached_delta": -87808,
+        "output_delta": -591,
+        "before_prompt_bytes": 147054,
+        "after_prompt_bytes": 146898,
+        "before_commands": 210,
+        "after_commands": 173
+      },
+      {
+        "case": [
+          "backend",
+          "clean",
+          "defect",
+          1
+        ],
+        "before_uncached": 283565,
+        "after_uncached": 232823,
+        "uncached_delta": -50742,
+        "total_input_delta": -85686,
+        "cached_delta": -34944,
+        "output_delta": -194,
+        "before_prompt_bytes": 133160,
+        "after_prompt_bytes": 133058,
+        "before_commands": 210,
+        "after_commands": 163
+      },
+      {
+        "case": [
+          "web",
+          "local",
+          "clean",
+          2
+        ],
+        "before_uncached": 309457,
+        "after_uncached": 257190,
+        "uncached_delta": -52267,
+        "total_input_delta": -55467,
+        "cached_delta": -3200,
+        "output_delta": -1111,
+        "before_prompt_bytes": 128560,
+        "after_prompt_bytes": 128452,
+        "before_commands": 176,
+        "after_commands": 148
+      }
+    ],
+    "all_pairs": [
+      {
+        "case": [
+          "web",
+          "clean",
+          "clean",
+          1
+        ],
+        "before_uncached": 375149,
+        "after_uncached": 364267,
+        "uncached_delta": -10882,
+        "total_input_delta": 4862,
+        "cached_delta": 15744,
+        "output_delta": -505,
+        "before_prompt_bytes": 134860,
+        "after_prompt_bytes": 134722,
+        "before_commands": 205,
+        "after_commands": 192
+      },
+      {
+        "case": [
+          "web",
+          "clean",
+          "defect",
+          1
+        ],
+        "before_uncached": 348488,
+        "after_uncached": 334367,
+        "uncached_delta": -14121,
+        "total_input_delta": -110889,
+        "cached_delta": -96768,
+        "output_delta": -785,
+        "before_prompt_bytes": 134998,
+        "after_prompt_bytes": 134860,
+        "before_commands": 193,
+        "after_commands": 181
+      },
+      {
+        "case": [
+          "web",
+          "local",
+          "defect",
+          1
+        ],
+        "before_uncached": 281012,
+        "after_uncached": 304929,
+        "uncached_delta": 23917,
+        "total_input_delta": 93677,
+        "cached_delta": 69760,
+        "output_delta": 305,
+        "before_prompt_bytes": 128668,
+        "after_prompt_bytes": 128560,
+        "before_commands": 181,
+        "after_commands": 168
+      },
+      {
+        "case": [
+          "web",
+          "local",
+          "clean",
+          1
+        ],
+        "before_uncached": 287840,
+        "after_uncached": 271691,
+        "uncached_delta": -16149,
+        "total_input_delta": 9195,
+        "cached_delta": 25344,
+        "output_delta": 172,
+        "before_prompt_bytes": 128560,
+        "after_prompt_bytes": 128452,
+        "before_commands": 178,
+        "after_commands": 144
+      },
+      {
+        "case": [
+          "web",
+          "team",
+          "defect",
+          1
+        ],
+        "before_uncached": 288084,
+        "after_uncached": 314145,
+        "uncached_delta": 26061,
+        "total_input_delta": -44083,
+        "cached_delta": -70144,
+        "output_delta": 232,
+        "before_prompt_bytes": 122266,
+        "after_prompt_bytes": 122140,
+        "before_commands": 203,
+        "after_commands": 231
+      },
+      {
+        "case": [
+          "web",
+          "team",
+          "clean",
+          1
+        ],
+        "before_uncached": 325023,
+        "after_uncached": 292063,
+        "uncached_delta": -32960,
+        "total_input_delta": -196800,
+        "cached_delta": -163840,
+        "output_delta": -268,
+        "before_prompt_bytes": 122140,
+        "after_prompt_bytes": 122014,
+        "before_commands": 192,
+        "after_commands": 190
+      },
+      {
+        "case": [
+          "rn",
+          "clean",
+          "defect",
+          1
+        ],
+        "before_uncached": 359149,
+        "after_uncached": 313757,
+        "uncached_delta": -45392,
+        "total_input_delta": -133200,
+        "cached_delta": -87808,
+        "output_delta": -591,
+        "before_prompt_bytes": 147054,
+        "after_prompt_bytes": 146898,
+        "before_commands": 210,
+        "after_commands": 173
+      },
+      {
+        "case": [
+          "rn",
+          "clean",
+          "clean",
+          1
+        ],
+        "before_uncached": 370501,
+        "after_uncached": 342405,
+        "uncached_delta": -28096,
+        "total_input_delta": -832,
+        "cached_delta": 27264,
+        "output_delta": -703,
+        "before_prompt_bytes": 146898,
+        "after_prompt_bytes": 146742,
+        "before_commands": 207,
+        "after_commands": 277
+      },
+      {
+        "case": [
+          "rn",
+          "local",
+          "defect",
+          1
+        ],
+        "before_uncached": 266668,
+        "after_uncached": 246947,
+        "uncached_delta": -19721,
+        "total_input_delta": -281225,
+        "cached_delta": -261504,
+        "output_delta": -1277,
+        "before_prompt_bytes": 138930,
+        "after_prompt_bytes": 138804,
+        "before_commands": 204,
+        "after_commands": 167
+      },
+      {
+        "case": [
+          "rn",
+          "local",
+          "clean",
+          1
+        ],
+        "before_uncached": 247172,
+        "after_uncached": 267326,
+        "uncached_delta": 20154,
+        "total_input_delta": 56378,
+        "cached_delta": 36224,
+        "output_delta": -745,
+        "before_prompt_bytes": 138804,
+        "after_prompt_bytes": 138678,
+        "before_commands": 190,
+        "after_commands": 164
+      },
+      {
+        "case": [
+          "rn",
+          "team",
+          "defect",
+          1
+        ],
+        "before_uncached": 267813,
+        "after_uncached": 268743,
+        "uncached_delta": 930,
+        "total_input_delta": 94882,
+        "cached_delta": 93952,
+        "output_delta": 888,
+        "before_prompt_bytes": 133530,
+        "after_prompt_bytes": 133386,
+        "before_commands": 195,
+        "after_commands": 191
+      },
+      {
+        "case": [
+          "rn",
+          "team",
+          "clean",
+          1
+        ],
+        "before_uncached": 289670,
+        "after_uncached": 288447,
+        "uncached_delta": -1223,
+        "total_input_delta": -5575,
+        "cached_delta": -4352,
+        "output_delta": -91,
+        "before_prompt_bytes": 133386,
+        "after_prompt_bytes": 133242,
+        "before_commands": 207,
+        "after_commands": 196
+      },
+      {
+        "case": [
+          "app",
+          "clean",
+          "defect",
+          1
+        ],
+        "before_uncached": 296639,
+        "after_uncached": 338325,
+        "uncached_delta": 41686,
+        "total_input_delta": -80298,
+        "cached_delta": -121984,
+        "output_delta": 474,
+        "before_prompt_bytes": 139161,
+        "after_prompt_bytes": 139035,
+        "before_commands": 174,
+        "after_commands": 210
+      },
+      {
+        "case": [
+          "app",
+          "clean",
+          "clean",
+          1
+        ],
+        "before_uncached": 314378,
+        "after_uncached": 328171,
+        "uncached_delta": 13793,
+        "total_input_delta": 350305,
+        "cached_delta": 336512,
+        "output_delta": 869,
+        "before_prompt_bytes": 139035,
+        "after_prompt_bytes": 138909,
+        "before_commands": 156,
+        "after_commands": 212
+      },
+      {
+        "case": [
+          "app",
+          "local",
+          "defect",
+          1
+        ],
+        "before_uncached": 210411,
+        "after_uncached": 246180,
+        "uncached_delta": 35769,
+        "total_input_delta": 51001,
+        "cached_delta": 15232,
+        "output_delta": -148,
+        "before_prompt_bytes": 128805,
+        "after_prompt_bytes": 128709,
+        "before_commands": 155,
+        "after_commands": 139
+      },
+      {
+        "case": [
+          "app",
+          "local",
+          "clean",
+          1
+        ],
+        "before_uncached": 250309,
+        "after_uncached": 242647,
+        "uncached_delta": -7662,
+        "total_input_delta": 96530,
+        "cached_delta": 104192,
+        "output_delta": -1000,
+        "before_prompt_bytes": 128709,
+        "after_prompt_bytes": 128613,
+        "before_commands": 161,
+        "after_commands": 135
+      },
+      {
+        "case": [
+          "app",
+          "team",
+          "defect",
+          1
+        ],
+        "before_uncached": 161993,
+        "after_uncached": 225512,
+        "uncached_delta": 63519,
+        "total_input_delta": -4577,
+        "cached_delta": -68096,
+        "output_delta": 341,
+        "before_prompt_bytes": 78913,
+        "after_prompt_bytes": 78845,
+        "before_commands": 142,
+        "after_commands": 137
+      },
+      {
+        "case": [
+          "app",
+          "team",
+          "clean",
+          1
+        ],
+        "before_uncached": 180544,
+        "after_uncached": 198593,
+        "uncached_delta": 18049,
+        "total_input_delta": 67073,
+        "cached_delta": 49024,
+        "output_delta": -35,
+        "before_prompt_bytes": 78845,
+        "after_prompt_bytes": 78777,
+        "before_commands": 137,
+        "after_commands": 119
+      },
+      {
+        "case": [
+          "backend",
+          "clean",
+          "defect",
+          1
+        ],
+        "before_uncached": 283565,
+        "after_uncached": 232823,
+        "uncached_delta": -50742,
+        "total_input_delta": -85686,
+        "cached_delta": -34944,
+        "output_delta": -194,
+        "before_prompt_bytes": 133160,
+        "after_prompt_bytes": 133058,
+        "before_commands": 210,
+        "after_commands": 163
+      },
+      {
+        "case": [
+          "backend",
+          "clean",
+          "clean",
+          1
+        ],
+        "before_uncached": 270784,
+        "after_uncached": 279391,
+        "uncached_delta": 8607,
+        "total_input_delta": -243681,
+        "cached_delta": -252288,
+        "output_delta": -1206,
+        "before_prompt_bytes": 133058,
+        "after_prompt_bytes": 132956,
+        "before_commands": 212,
+        "after_commands": 168
+      },
+      {
+        "case": [
+          "backend",
+          "local",
+          "defect",
+          1
+        ],
+        "before_uncached": 228089,
+        "after_uncached": 218313,
+        "uncached_delta": -9776,
+        "total_input_delta": -29360,
+        "cached_delta": -19584,
+        "output_delta": -322,
+        "before_prompt_bytes": 130130,
+        "after_prompt_bytes": 130046,
+        "before_commands": 129,
+        "after_commands": 132
+      },
+      {
+        "case": [
+          "backend",
+          "local",
+          "clean",
+          1
+        ],
+        "before_uncached": 256330,
+        "after_uncached": 224196,
+        "uncached_delta": -32134,
+        "total_input_delta": -27654,
+        "cached_delta": 4480,
+        "output_delta": 730,
+        "before_prompt_bytes": 130046,
+        "after_prompt_bytes": 129962,
+        "before_commands": 148,
+        "after_commands": 152
+      },
+      {
+        "case": [
+          "backend",
+          "team",
+          "defect",
+          1
+        ],
+        "before_uncached": 161525,
+        "after_uncached": 152077,
+        "uncached_delta": -9448,
+        "total_input_delta": 146072,
+        "cached_delta": 155520,
+        "output_delta": -8,
+        "before_prompt_bytes": 81468,
+        "after_prompt_bytes": 81408,
+        "before_commands": 107,
+        "after_commands": 122
+      },
+      {
+        "case": [
+          "backend",
+          "team",
+          "clean",
+          1
+        ],
+        "before_uncached": 162716,
+        "after_uncached": 170150,
+        "uncached_delta": 7434,
+        "total_input_delta": 70282,
+        "cached_delta": 62848,
+        "output_delta": 119,
+        "before_prompt_bytes": 81408,
+        "after_prompt_bytes": 81348,
+        "before_commands": 107,
+        "after_commands": 135
+      },
+      {
+        "case": [
+          "web",
+          "clean",
+          "defect",
+          2
+        ],
+        "before_uncached": 289052,
+        "after_uncached": 338073,
+        "uncached_delta": 49021,
+        "total_input_delta": 70141,
+        "cached_delta": 21120,
+        "output_delta": -34,
+        "before_prompt_bytes": 134998,
+        "after_prompt_bytes": 134860,
+        "before_commands": 194,
+        "after_commands": 186
+      },
+      {
+        "case": [
+          "web",
+          "clean",
+          "clean",
+          2
+        ],
+        "before_uncached": 331123,
+        "after_uncached": 340041,
+        "uncached_delta": 8918,
+        "total_input_delta": 61526,
+        "cached_delta": 52608,
+        "output_delta": -646,
+        "before_prompt_bytes": 134860,
+        "after_prompt_bytes": 134722,
+        "before_commands": 205,
+        "after_commands": 168
+      },
+      {
+        "case": [
+          "web",
+          "local",
+          "defect",
+          2
+        ],
+        "before_uncached": 242349,
+        "after_uncached": 243145,
+        "uncached_delta": 796,
+        "total_input_delta": -30820,
+        "cached_delta": -31616,
+        "output_delta": 200,
+        "before_prompt_bytes": 128668,
+        "after_prompt_bytes": 128560,
+        "before_commands": 162,
+        "after_commands": 173
+      },
+      {
+        "case": [
+          "web",
+          "local",
+          "clean",
+          2
+        ],
+        "before_uncached": 309457,
+        "after_uncached": 257190,
+        "uncached_delta": -52267,
+        "total_input_delta": -55467,
+        "cached_delta": -3200,
+        "output_delta": -1111,
+        "before_prompt_bytes": 128560,
+        "after_prompt_bytes": 128452,
+        "before_commands": 176,
+        "after_commands": 148
+      },
+      {
+        "case": [
+          "web",
+          "team",
+          "defect",
+          2
+        ],
+        "before_uncached": 261182,
+        "after_uncached": 315038,
+        "uncached_delta": 53856,
+        "total_input_delta": 34400,
+        "cached_delta": -19456,
+        "output_delta": -281,
+        "before_prompt_bytes": 122266,
+        "after_prompt_bytes": 122140,
+        "before_commands": 212,
+        "after_commands": 200
+      },
+      {
+        "case": [
+          "web",
+          "team",
+          "clean",
+          2
+        ],
+        "before_uncached": 320964,
+        "after_uncached": 343614,
+        "uncached_delta": 22650,
+        "total_input_delta": 90618,
+        "cached_delta": 67968,
+        "output_delta": -187,
+        "before_prompt_bytes": 122140,
+        "after_prompt_bytes": 122014,
+        "before_commands": 200,
+        "after_commands": 249
+      },
+      {
+        "case": [
+          "rn",
+          "clean",
+          "defect",
+          2
+        ],
+        "before_uncached": 294681,
+        "after_uncached": 292396,
+        "uncached_delta": -2285,
+        "total_input_delta": -96621,
+        "cached_delta": -94336,
+        "output_delta": -1340,
+        "before_prompt_bytes": 147054,
+        "after_prompt_bytes": 146898,
+        "before_commands": 227,
+        "after_commands": 199
+      },
+      {
+        "case": [
+          "rn",
+          "clean",
+          "clean",
+          2
+        ],
+        "before_uncached": 322685,
+        "after_uncached": 312536,
+        "uncached_delta": -10149,
+        "total_input_delta": -81061,
+        "cached_delta": -70912,
+        "output_delta": -900,
+        "before_prompt_bytes": 146898,
+        "after_prompt_bytes": 146742,
+        "before_commands": 212,
+        "after_commands": 205
+      },
+      {
+        "case": [
+          "rn",
+          "local",
+          "defect",
+          2
+        ],
+        "before_uncached": 274773,
+        "after_uncached": 233245,
+        "uncached_delta": -41528,
+        "total_input_delta": 11464,
+        "cached_delta": 52992,
+        "output_delta": 240,
+        "before_prompt_bytes": 138930,
+        "after_prompt_bytes": 138804,
+        "before_commands": 165,
+        "after_commands": 176
+      },
+      {
+        "case": [
+          "rn",
+          "local",
+          "clean",
+          2
+        ],
+        "before_uncached": 239446,
+        "after_uncached": 265028,
+        "uncached_delta": 25582,
+        "total_input_delta": 117102,
+        "cached_delta": 91520,
+        "output_delta": 710,
+        "before_prompt_bytes": 138804,
+        "after_prompt_bytes": 138678,
+        "before_commands": 182,
+        "after_commands": 173
+      },
+      {
+        "case": [
+          "rn",
+          "team",
+          "defect",
+          2
+        ],
+        "before_uncached": 272725,
+        "after_uncached": 285445,
+        "uncached_delta": 12720,
+        "total_input_delta": 39472,
+        "cached_delta": 26752,
+        "output_delta": 790,
+        "before_prompt_bytes": 133530,
+        "after_prompt_bytes": 133386,
+        "before_commands": 194,
+        "after_commands": 191
+      },
+      {
+        "case": [
+          "rn",
+          "team",
+          "clean",
+          2
+        ],
+        "before_uncached": 293761,
+        "after_uncached": 321263,
+        "uncached_delta": 27502,
+        "total_input_delta": -12946,
+        "cached_delta": -40448,
+        "output_delta": -40,
+        "before_prompt_bytes": 133386,
+        "after_prompt_bytes": 133242,
+        "before_commands": 216,
+        "after_commands": 211
+      },
+      {
+        "case": [
+          "app",
+          "clean",
+          "defect",
+          2
+        ],
+        "before_uncached": 330645,
+        "after_uncached": 307880,
+        "uncached_delta": -22765,
+        "total_input_delta": -76269,
+        "cached_delta": -53504,
+        "output_delta": -165,
+        "before_prompt_bytes": 139161,
+        "after_prompt_bytes": 139035,
+        "before_commands": 169,
+        "after_commands": 191
+      },
+      {
+        "case": [
+          "app",
+          "clean",
+          "clean",
+          2
+        ],
+        "before_uncached": 394808,
+        "after_uncached": 378775,
+        "uncached_delta": -16033,
+        "total_input_delta": 161503,
+        "cached_delta": 177536,
+        "output_delta": 113,
+        "before_prompt_bytes": 139035,
+        "after_prompt_bytes": 138909,
+        "before_commands": 169,
+        "after_commands": 204
+      },
+      {
+        "case": [
+          "app",
+          "local",
+          "defect",
+          2
+        ],
+        "before_uncached": 217339,
+        "after_uncached": 237596,
+        "uncached_delta": 20257,
+        "total_input_delta": 61729,
+        "cached_delta": 41472,
+        "output_delta": 59,
+        "before_prompt_bytes": 128805,
+        "after_prompt_bytes": 128709,
+        "before_commands": 141,
+        "after_commands": 150
+      },
+      {
+        "case": [
+          "app",
+          "local",
+          "clean",
+          2
+        ],
+        "before_uncached": 294621,
+        "after_uncached": 256931,
+        "uncached_delta": -37690,
+        "total_input_delta": -53818,
+        "cached_delta": -16128,
+        "output_delta": -391,
+        "before_prompt_bytes": 128709,
+        "after_prompt_bytes": 128613,
+        "before_commands": 153,
+        "after_commands": 154
+      },
+      {
+        "case": [
+          "app",
+          "team",
+          "defect",
+          2
+        ],
+        "before_uncached": 162815,
+        "after_uncached": 165903,
+        "uncached_delta": 3088,
+        "total_input_delta": -67312,
+        "cached_delta": -70400,
+        "output_delta": -124,
+        "before_prompt_bytes": 78913,
+        "after_prompt_bytes": 78845,
+        "before_commands": 105,
+        "after_commands": 113
+      },
+      {
+        "case": [
+          "app",
+          "team",
+          "clean",
+          2
+        ],
+        "before_uncached": 188315,
+        "after_uncached": 160227,
+        "uncached_delta": -28088,
+        "total_input_delta": -35128,
+        "cached_delta": -7040,
+        "output_delta": 388,
+        "before_prompt_bytes": 78845,
+        "after_prompt_bytes": 78777,
+        "before_commands": 145,
+        "after_commands": 137
+      },
+      {
+        "case": [
+          "backend",
+          "clean",
+          "defect",
+          2
+        ],
+        "before_uncached": 255039,
+        "after_uncached": 297131,
+        "uncached_delta": 42092,
+        "total_input_delta": 17772,
+        "cached_delta": -24320,
+        "output_delta": -274,
+        "before_prompt_bytes": 133160,
+        "after_prompt_bytes": 133058,
+        "before_commands": 178,
+        "after_commands": 165
+      },
+      {
+        "case": [
+          "backend",
+          "clean",
+          "clean",
+          2
+        ],
+        "before_uncached": 281288,
+        "after_uncached": 265952,
+        "uncached_delta": -15336,
+        "total_input_delta": -15976,
+        "cached_delta": -640,
+        "output_delta": -989,
+        "before_prompt_bytes": 133058,
+        "after_prompt_bytes": 132956,
+        "before_commands": 182,
+        "after_commands": 172
+      },
+      {
+        "case": [
+          "backend",
+          "local",
+          "defect",
+          2
+        ],
+        "before_uncached": 219999,
+        "after_uncached": 207550,
+        "uncached_delta": -12449,
+        "total_input_delta": 140127,
+        "cached_delta": 152576,
+        "output_delta": -3,
+        "before_prompt_bytes": 130130,
+        "after_prompt_bytes": 130046,
+        "before_commands": 141,
+        "after_commands": 148
+      },
+      {
+        "case": [
+          "backend",
+          "local",
+          "clean",
+          2
+        ],
+        "before_uncached": 228849,
+        "after_uncached": 237210,
+        "uncached_delta": 8361,
+        "total_input_delta": 32041,
+        "cached_delta": 23680,
+        "output_delta": 945,
+        "before_prompt_bytes": 130046,
+        "after_prompt_bytes": 129962,
+        "before_commands": 137,
+        "after_commands": 149
+      },
+      {
+        "case": [
+          "backend",
+          "team",
+          "defect",
+          2
+        ],
+        "before_uncached": 152438,
+        "after_uncached": 153653,
+        "uncached_delta": 1215,
+        "total_input_delta": -82881,
+        "cached_delta": -84096,
+        "output_delta": -284,
+        "before_prompt_bytes": 81468,
+        "after_prompt_bytes": 81408,
+        "before_commands": 113,
+        "after_commands": 103
+      },
+      {
+        "case": [
+          "backend",
+          "team",
+          "clean",
+          2
+        ],
+        "before_uncached": 168880,
+        "after_uncached": 174880,
+        "uncached_delta": 6000,
+        "total_input_delta": 9968,
+        "cached_delta": 3968,
+        "output_delta": -344,
+        "before_prompt_bytes": 81408,
+        "after_prompt_bytes": 81348,
+        "before_commands": 116,
+        "after_commands": 110
+      }
+    ]
+  }
+}
