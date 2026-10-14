@@ -115,16 +115,16 @@ def test_cli_accepts_required_skill_output(tmp_path, capsys):
     "truncated native event\n",
     '[]\n{"type":"turn.completed"}\n',
     '{"type":"item.completed","item":null}\n{"type":"turn.completed"}\n',
-    '{"type":"item.completed","item":{"type":"command_execution","command":"cat x",'
-    '"aggregated_output":null}}\n{"type":"turn.completed"}\n',
+    ('{"type":"item.completed","item":{"type":"command_execution","command":"cat x",'
+     '"aggregated_output":null}}\n{"type":"turn.completed"}\n'),
     # An untyped item carrying the full catalog must not pass as a non-command item.
-    '{"type":"item.completed","item":{"command":"cat index.json","aggregated_output":'
-    + json.dumps(json.dumps(CATALOG)) + '}}\n{"type":"turn.completed"}\n',
+    ('{"type":"item.completed","item":{"command":"cat index.json","aggregated_output":'
+     + json.dumps(json.dumps(CATALOG)) + '}}\n{"type":"turn.completed"}\n'),
     '{"item":{}}\n{"type":"turn.completed"}\n',
-    '{"type":"item.completed","item":{"type":"command_execution","command":"cat x",'
-    '"aggregated_output":"\\ud800"}}\n{"type":"turn.completed"}\n',
-    '{"type":"item.completed","item":{"type":"command_execution","command":"cat \\ud800",'
-    '"aggregated_output":"ok"}}\n{"type":"turn.completed"}\n',
+    ('{"type":"item.completed","item":{"type":"command_execution","command":"cat x",'
+     '"aggregated_output":"\\ud800"}}\n{"type":"turn.completed"}\n'),
+    ('{"type":"item.completed","item":{"type":"command_execution","command":"cat \\ud800",'
+     '"aggregated_output":"ok"}}\n{"type":"turn.completed"}\n'),
     "[" * 100000 + "]" * 100000 + '\n{"type":"turn.completed"}\n',
 ])
 def test_malformed_native_evidence_is_not_reported_as_zero_reads(tmp_path, content):
