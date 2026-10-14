@@ -149,6 +149,7 @@ from agent_flow.core.worktrees import (
     UnknownWorktreeSetupAction,
     WORKTREE_SETUP_ACTIONS,
     copy_declared_worktree_files,
+    copy_local_skill_files,
     declared_worktree_copies,
     ROOT_CONTEXT_FILES,
     DEFAULT_SLUG_MAX_LENGTH,
@@ -3162,6 +3163,7 @@ def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
     # 루트 컨텍스트 파일은 profile 해석 **앞**에 옮긴다. profile이 깨졌다는 이유로 이
     # 복사까지 건너뛰면, 계약을 못 받는 checkout이 만들어진 뒤 그 안에서 일하게 된다.
     copied = list(_copy_worktree_files(root=root, checkout=checkout, names=ROOT_CONTEXT_FILES))
+    copied.extend(_copy_local_skill_files(root=root, checkout=checkout))
     try:
         _profile_id, profile = resolve_profile(_find_kit_root(), root)
         declared = [str(name) for name in declared_worktree_copies(profile)]
@@ -3200,6 +3202,15 @@ def _copy_worktree_files(
         return copy_declared_worktree_files(leader=root, checkout=checkout, names=list(names))
     except (ValueError, OSError) as exc:
         print(f"warning: worktree setup failed: {_format_cli_error(exc)}", file=sys.stderr)
+        return ()
+
+
+def _copy_local_skill_files(*, root: Path, checkout: Path) -> tuple[str, ...]:
+    """실패는 알리고 넘어간다. receipt를 못 남기면 정리 예외가 leader와 바이트가 같은 사본으로 좁아진다."""
+    try:
+        return copy_local_skill_files(leader=root, checkout=checkout)
+    except (ValueError, OSError, WorktreeIsolationError) as exc:
+        print(f"warning: local skill setup failed: {_format_cli_error(exc)}", file=sys.stderr)
         return ()
 
 

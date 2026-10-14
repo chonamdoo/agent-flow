@@ -2158,18 +2158,18 @@ def _assert_cleanup_checkout_clean(*, root: Path, path: Path) -> None:
         # 사실이 "지워도 된다"를 뜻하지 않는다.
         if rel in kit_copied and record[:2] in ("!!", "??"):
             continue
-        if (
-            record.startswith("!! ")
-            and rel in folded_dirs
-            and _dir_holds_only_provisioned_registrations(
+        blocker = rel
+        if record.startswith("!! ") and rel in folded_dirs:
+            blocker = _unproven_entry_in_folded_dir(
                 checkout=path, rel_dir=rel, provisioned=kit_owned
             )
-        ):
-            continue
+            if blocker is None:
+                continue
         # 어느 경로 때문인지 말하지 않으면 사용자는 `git status`가 깨끗한 checkout을
-        # 두고 무엇을 치워야 하는지 알 수 없다 — 그 조합이 실제로 존재한다.
+        # 두고 무엇을 치워야 하는지 알 수 없다 — 그 조합이 실제로 존재한다. 접힌
+        # 레코드는 그 안에서 증명하지 못한 파일을 댄다.
         raise CleanupBlockedError(
-            f"checkout is dirty at {path}: {rel or '(unnamed path)'}; preserving checkout"
+            f"checkout is dirty at {path}: {blocker or '(unnamed path)'}; preserving checkout"
         )
 
 
@@ -2192,33 +2192,34 @@ def _porcelain_z_records(stdout: str) -> Iterator[tuple[str, str]]:
             index += 1
 
 
-def _dir_holds_only_provisioned_registrations(
+def _unproven_entry_in_folded_dir(
     *, checkout: Path, rel_dir: str, provisioned: set[str]
-) -> bool:
-    """접힌 ignore 레코드가 정말 우리가 깐 등록 파일만 담고 있는가.
+) -> str | None:
+    """접힌 ignore 레코드 안에서 우리가 깐 파일임을 증명하지 못한 첫 경로. 모두 증명하면 None.
 
     git이 디렉터리 하나로 접어 준 레코드는 그 안에 무엇이 있는지 말해 주지 않는다.
     `.claude/settings.json.bak`이나 사용자가 남긴 파일이 같은 접힘 안에 숨는다. 그래서
-    직접 walk해서 그 안의 **모든** 파일이 kit이 깐 등록임을 증명할 때만 dirty 집계에서
-    뺀다. 증명 못 하면 dirty로 남긴다.
+    직접 walk해서 그 안의 **모든** 파일이 kit이 깐 것임을 증명할 때만 dirty 집계에서
+    뺀다. 증명 못 하면 dirty로 남기고, 디렉터리 자체를 증명할 수 없으면 그 디렉터리를 댄다.
     """
     base = checkout / rel_dir.rstrip("/")
     try:
         if base.is_symlink() or not base.is_dir():
-            return False
+            return rel_dir
         proven = 0
         for entry in base.rglob("*"):
+            rel = entry.relative_to(checkout).as_posix()
             # symlink는 따라간 곳이 checkout 밖일 수 있어 내용으로도 증명이 안 된다.
             if entry.is_symlink():
-                return False
+                return rel
             if entry.is_dir():
                 continue
-            if entry.relative_to(checkout).as_posix() not in provisioned:
-                return False
+            if rel not in provisioned:
+                return rel
             proven += 1
-        return proven > 0
+        return None if proven > 0 else rel_dir
     except OSError:
-        return False
+        return rel_dir
 
 
 def _kit_owned_host_hook_registrations(*, root: Path, checkout: Path) -> set[str]:
@@ -2288,7 +2289,10 @@ def _kit_copied_worktree_files(*, root: Path, checkout: Path) -> set[str]:
     receipt: dict[str, str] | None = None
     leader_base = Path(os.path.normpath(str(root)))
     checkout_base = Path(os.path.normpath(str(checkout)))
-    copies = [(name, name) for name in _declared_worktree_copy_names(root)]
+    copies = [
+        (name, name)
+        for name in (*_declared_worktree_copy_names(root), *local_skill_worktree_copies(root))
+    ]
     copies.extend(_NATIVE_SKILL_ENTRY_COPIES)
     for name, source_name in copies:
         try:
@@ -2319,7 +2323,65 @@ def _kit_copied_worktree_files(*, root: Path, checkout: Path) -> set[str]:
         except OSError:
             continue
         owned.add(target.relative_to(checkout_base).as_posix())
+    owned |= _receipted_local_skill_copies(leader=leader_base, checkout=checkout_base)
+    owned |= _local_skill_bytecode_caches(checkout=checkout_base, owned=owned)
     return owned
+
+
+def _receipted_local_skill_copies(*, leader: Path, checkout: Path) -> set[str]:
+    """복사할 때 남긴 receipt와 바이트가 같은 local skill 사본들.
+
+    지금 leader 파일과만 비교하면, checkout을 만든 뒤 leader에서 skill을 고치거나 지우는
+    순간 아무도 손대지 않은 worktree가 모두 정리 불가가 된다. 판정은 여전히 내용이다 —
+    checkout에서 고친 사본은 receipt와 달라 그대로 막는다.
+    """
+    owned: set[str] = set()
+    prefix = f"{LOCAL_SKILLS_DIR}/"
+    receipt = _read_native_entry_receipt(
+        leader=leader, checkout=checkout, name=_LOCAL_SKILL_RECEIPT
+    )
+    for name, digest in receipt.items():
+        if not name.startswith(prefix):
+            continue
+        try:
+            target = _worktree_setup_path(checkout, name)
+            if target.is_symlink() or not target.is_file():
+                continue
+            if _has_symlinked_component(checkout, target):
+                continue
+            if _native_entry_digest(target.read_bytes()) != digest:
+                continue
+        except (ValueError, OSError):
+            continue
+        owned.add(target.relative_to(checkout).as_posix())
+    return owned
+
+
+def _local_skill_bytecode_caches(*, checkout: Path, owned: set[str]) -> set[str]:
+    """kit이 깐 local skill `.py` 사본을 실행하면 Python이 옆 `__pycache__`에 남기는 bytecode.
+
+    사본을 checkout에서 실행하라고 깔았으니 그 실행이 남긴 캐시로 정리가 막히면 안 된다.
+    소스가 kit 사본일 때만 센다 — 사용자가 더한 모듈의 캐시는 그 모듈처럼 사용자 것이다.
+    """
+    caches: set[str] = set()
+    prefix = f"{LOCAL_SKILLS_DIR}/"
+    for rel in owned:
+        if not rel.startswith(prefix) or not rel.endswith(".py"):
+            continue
+        source = checkout / rel
+        cache_dir = source.parent / "__pycache__"
+        pattern = re.compile(rf"{re.escape(source.stem)}\.[^.]+(?:\.opt-\d+)?\.pyc")
+        try:
+            if cache_dir.is_symlink() or not cache_dir.is_dir():
+                continue
+            if _has_symlinked_component(checkout, cache_dir):
+                continue
+            for entry in cache_dir.iterdir():
+                if pattern.fullmatch(entry.name) and not entry.is_symlink() and entry.is_file():
+                    caches.add(entry.relative_to(checkout).as_posix())
+        except OSError:
+            continue
+    return caches
 
 
 def _declared_worktree_copy_names(root: Path) -> tuple[str, ...]:
@@ -4136,6 +4198,8 @@ def run_declared_worktree_actions(
 # 미추적 컨텍스트는 git worktree add가 전달하지 않는다. 아키텍처 선언도 빠지면
 # local/pending이 legacy Clean으로 바뀌므로 profile 해석 전에 함께 복사한다.
 ROOT_CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md", PROJECT_ARCHITECTURE_FILE)
+# gitignore된 개인 skill 자리다. `git worktree add`는 이것을 가져오지 않는다.
+LOCAL_SKILLS_DIR = ".agent-flow/local-skills"
 
 _NATIVE_SKILL_ENTRY_FILES = ("SKILL.md", "agents/openai.yaml")
 _NATIVE_SKILL_ENTRY_ROOTS = (".claude/skills", ".agents/skills", ".omp/skills")
@@ -4213,6 +4277,73 @@ def declared_worktree_copies(profile: Mapping[str, Any]) -> list[str]:
             if name not in names:
                 names.append(name)
     return names
+
+
+def local_skill_worktree_copies(leader: Path) -> tuple[str, ...]:
+    """새 checkout이 받아야 할 leader의 project-local skill 파일 이름들.
+
+    skill 프롬프트는 SKILL.md를 leader 경로로 준다. 읽기는 그것으로 되지만, 동봉
+    스크립트를 leader 경로로 실행하는 셸 명령은 host write boundary가 막는다. 사본이
+    checkout에 있어야 checkout 상대경로로 실행할 수 있다.
+
+    `.env`와 `.env.*` 이름은 파일이든 디렉터리든 넘기지 않는다. skill이 둔 token이
+    checkout마다 사본으로 퍼진다.
+    symlink는 따라가지 않는다. 복사와 정리 예외가 이 목록을 함께 쓴다.
+    """
+    leader_base = Path(os.path.normpath(str(leader)))
+    base = leader_base / LOCAL_SKILLS_DIR
+    if _has_symlinked_component(leader_base, base) or not base.is_dir():
+        return ()
+    names: list[str] = []
+    for current, dirs, files in os.walk(base):
+        dirs[:] = sorted(name for name in dirs if not _is_secret_name(name))
+        for file in sorted(files):
+            if _is_secret_name(file):
+                continue
+            names.append((Path(current) / file).relative_to(leader_base).as_posix())
+    return tuple(names)
+
+
+def _is_secret_name(name: str) -> bool:
+    return name == ".env" or name.startswith(".env.")
+
+
+def copy_local_skill_files(*, leader: Path, checkout: Path) -> tuple[str, ...]:
+    """leader의 local skill 파일을 checkout에 복사하고, 복사한 바이트를 receipt에 남긴다.
+
+    정리 예외는 이 receipt로 사본을 알아본다(`_receipted_local_skill_copies`). receipt는
+    checkout git admin dir에 두므로 checkout 작업트리를 더럽히지 않는다.
+    """
+    copied = copy_declared_worktree_files(
+        leader=leader, checkout=checkout, names=local_skill_worktree_copies(leader)
+    )
+    if copied:
+        _record_local_skill_copies(leader=leader, checkout=checkout, names=copied)
+    return copied
+
+
+def _record_local_skill_copies(*, leader: Path, checkout: Path, names: Iterable[str]) -> None:
+    leader_base = Path(os.path.normpath(str(leader)))
+    checkout_base = Path(os.path.normpath(str(checkout)))
+    checkout_fd = os.open(
+        checkout_base, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        gitdir_fd = _open_verified_worktree_gitdir(
+            leader=leader_base, checkout=checkout_base, checkout_fd=checkout_fd
+        )
+    finally:
+        os.close(checkout_fd)
+    try:
+        recorded = _read_native_entry_receipt_at(gitdir_fd, _LOCAL_SKILL_RECEIPT)
+        for name in names:
+            recorded[name] = _native_entry_digest((checkout_base / name).read_bytes())
+        _write_native_entry_state_at(
+            gitdir_fd, _LOCAL_SKILL_RECEIPT,
+            {"version": 1, "entries": dict(sorted(recorded.items()))},
+        )
+    finally:
+        os.close(gitdir_fd)
 
 
 def copy_declared_worktree_files(
@@ -4339,17 +4470,20 @@ def _checkout_has_skill_root(*, checkout_fd: int, host_root: str) -> bool:
 
 
 _NATIVE_ENTRY_RECEIPT = "agent-flow-native-entry.json"
+_LOCAL_SKILL_RECEIPT = "agent-flow-local-skills.json"
 
 
 def _native_entry_digest(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _read_native_entry_receipt_at(gitdir_fd: int) -> dict[str, str]:
+def _read_native_entry_receipt_at(
+    gitdir_fd: int, name: str = _NATIVE_ENTRY_RECEIPT
+) -> dict[str, str]:
     """checkout git admin dir의 provision receipt. 읽지 못하면 빈 것으로 본다 — 소유 증거가
     줄어 덮기·은퇴가 막힐 뿐, 넓게 여는 실패가 아니다."""
     try:
-        observed = _read_regular_worktree_copy_at(parent=gitdir_fd, name=_NATIVE_ENTRY_RECEIPT)
+        observed = _read_regular_worktree_copy_at(parent=gitdir_fd, name=name)
         data = json.loads(observed[0]) if observed is not None else None
     except (OSError, ValueError, WorktreeIsolationError):
         return {}
@@ -4363,7 +4497,9 @@ def _read_native_entry_receipt_at(gitdir_fd: int) -> dict[str, str]:
     }
 
 
-def _read_native_entry_receipt(*, leader: Path, checkout: Path) -> dict[str, str]:
+def _read_native_entry_receipt(
+    *, leader: Path, checkout: Path, name: str = _NATIVE_ENTRY_RECEIPT
+) -> dict[str, str]:
     """lock 없이 읽는다. 판정 보조일 뿐이고, 쓰기 직전에는 lock 아래에서 다시 읽는다."""
     try:
         checkout_fd = os.open(checkout, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
@@ -4378,7 +4514,7 @@ def _read_native_entry_receipt(*, leader: Path, checkout: Path) -> dict[str, str
     finally:
         os.close(checkout_fd)
     try:
-        return _read_native_entry_receipt_at(gitdir_fd)
+        return _read_native_entry_receipt_at(gitdir_fd, name)
     finally:
         os.close(gitdir_fd)
 
