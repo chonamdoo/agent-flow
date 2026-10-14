@@ -1092,6 +1092,11 @@ def skill_prompt_block(
         lines.append("")
         if resolution.normative_documents:
             lines.extend((
+                "Use the resolved phase/profile selection. Read each planned body once; "
+                "later references reuse the same body/digest, including inline content. "
+                "Do not rescan the full skill index or workflow/run metadata. "
+                "Names below are provenance only:"
+                if role == "author" else
                 "Use the required-read plan below once per exact body. Selected skills "
                 "here are provenance only, not additional read instructions:",
                 "",

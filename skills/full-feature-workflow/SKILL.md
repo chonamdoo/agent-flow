@@ -11,4 +11,4 @@ Drive progress through current runner output. Run `agent-flow status`, then exec
 
 Do not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.
 
-Apply `code-generation-discipline` during code and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code.
+Apply `code-generation-discipline` during code and review phases, including its Before Starting selection procedure. Use the runner's resolved profile values and required-read plan when supplied.
