@@ -1,0 +1,3 @@
+# Interrupted attempt — not a release gate
+
+The managed executor reattached during measurement. The parent wrapper was absent and the evaluator was defunct; the exact signal/platform cause is unknown. This incomplete attempt contains 111 units and 470 persisted native call receipts. After-kit web/clean/clean trial 1 requested changes where the fixture expects approve. That observation is preserved, not replaced or described as fixed by the later run. The evaluator has no resume option. A separate fresh 168-unit paired run supplies the release record; none of these incomplete rows are mixed into it. Original native evidence, generated fixtures, logs and checksums remain in the cloud evidence root.
