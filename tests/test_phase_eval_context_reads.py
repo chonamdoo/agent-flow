@@ -10,6 +10,9 @@ spec = importlib.util.spec_from_file_location("context_reads", PATH)
 context_reads = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(context_reads)
 
+CATALOG = {"selection": {"selected_skills": ["tdd", "other"]},
+           "skills": [{"name": "tdd"}, {"name": "other"}], "links": []}
+
 
 def evidence(tmp_path, *items):
     path = tmp_path / "stdout.raw"
@@ -19,29 +22,34 @@ def evidence(tmp_path, *items):
     return path
 
 
+def installed(tmp_path, catalog=CATALOG):
+    path = tmp_path / "index.json"
+    path.write_text(json.dumps(catalog), encoding="utf-8")
+    return path
+
+
 def command(text, output, exit_code=0):
     return {"type": "command_execution", "command": text,
             "aggregated_output": output, "exit_code": exit_code}
 
 
-def index(tmp_path, value=None):
-    path = tmp_path / "index.json"
-    value = value if value is not None else {
-        "selection": {"selected_skills": ["tdd", "other"]},
-        "skills": [{"name": "tdd"}, {"name": "other"}], "links": []}
-    path.write_text(json.dumps(value))
-    return path
-
-
 def test_catalog_output_is_detected_inside_mixed_command_output(tmp_path):
-    catalog = {"selection": {"selected_skills": ["tdd", "other"]},
-               "skills": [{"name": "tdd"}, {"name": "other"}], "links": []}
-    output = "profile loaded\n" + json.dumps(catalog) + "\nstatus clean\n"
+    output = "profile loaded\n" + json.dumps(CATALOG) + "\nstatus clean\n"
     result = context_reads.context_outputs(evidence(
         tmp_path, command("cat profile.yaml .agent-flow/skills/index.json; git status", output)),
-        catalog=index(tmp_path, catalog))
+        catalog=installed(tmp_path))
     assert result["skill_catalog_outputs"] == 1
     assert result["command_output_bytes"] == len(output.encode())
+
+
+def test_unfiltered_install_catalog_is_detected(tmp_path):
+    catalog = {"selection": {"mode": "all", "profiles": [], "explicit_skills": [],
+                             "selected_skills": "all"},
+               "skills": [{"name": "tdd"}, {"name": "other"}], "links": []}
+    result = context_reads.context_outputs(evidence(
+        tmp_path, command("cat .agent-flow/skills/index.json", json.dumps(catalog, indent=2))),
+        catalog=installed(tmp_path, catalog))
+    assert result["skill_catalog_outputs"] == 1
 
 
 def test_path_listing_and_selected_entry_are_not_full_catalog_reads(tmp_path):
@@ -50,7 +58,7 @@ def test_path_listing_and_selected_entry_are_not_full_catalog_reads(tmp_path):
         command("jq '.skills[] | select(.name == \"tdd\")' .agent-flow/skills/index.json",
                 json.dumps({"name": "tdd", "path": "skills/tdd/SKILL.md"})),
         command("/bin/cat .agent-flow/skills/tdd/SKILL.md", "Use red/green tests.")),
-        catalog=index(tmp_path))
+        catalog=installed(tmp_path))
     assert result["broad_context_outputs"] == []
     assert result["command_count"] == 3
 
@@ -59,7 +67,7 @@ def test_whole_workflow_emitted_by_failed_grep_is_still_observed(tmp_path):
     output = 'meta.json:16: "source_text": "id: full-feature\\nphases:\\n  - id: green"\n'
     result = context_reads.context_outputs(evidence(tmp_path,
         command("rg -n 'green' .agent-flow/runs/run/*.json missing-file", output, 2)),
-        catalog=index(tmp_path))
+        catalog=installed(tmp_path))
     assert result["workflow_source_outputs"] == 1
     assert result["broad_context_outputs"][0]["exit_code"] == 2
 
@@ -68,50 +76,53 @@ def test_selected_phase_metadata_is_not_a_whole_workflow_dump(tmp_path):
     result = context_reads.context_outputs(evidence(tmp_path,
         command("jq '.phase' meta.json", '{"id":"green","required":["tdd"]}'),
         {"type": "agent_message", "text": 'I read skills/index.json and "source_text": phases:'}),
-        catalog=index(tmp_path))
+        catalog=installed(tmp_path))
     assert result["broad_context_outputs"] == []
     assert result["command_count"] == 1
 
 
 def test_filtered_catalog_shape_does_not_count_as_the_full_installed_index(tmp_path):
-    whole = {"selection": {"selected_skills": ["tdd", "other"]},
-             "skills": [{"name": "tdd"}, {"name": "other"}], "links": []}
-    index = tmp_path / "index.json"
-    index.write_text(json.dumps(whole))
     filtered = {"selection": {"selected_skills": ["tdd"]},
                 "skills": [{"name": "tdd"}], "links": []}
     result = context_reads.context_outputs(evidence(tmp_path,
-        command("jq filter .agent-flow/skills/index.json", json.dumps(filtered))), catalog=index)
+        command("jq filter .agent-flow/skills/index.json", json.dumps(filtered))),
+        catalog=installed(tmp_path))
     assert result["broad_context_outputs"] == []
 
 
 def test_catalog_emitted_through_a_wildcard_is_still_detected(tmp_path):
-    catalog = {"selection": {"selected_skills": ["tdd", "other"]},
-               "skills": [{"name": "tdd"}, {"name": "other"}], "links": []}
     result = context_reads.context_outputs(evidence(tmp_path,
-        command("cat .agent-flow/skills/*.json", json.dumps(catalog))),
-        catalog=index(tmp_path, catalog))
+        command("cat .agent-flow/skills/*.json", json.dumps(CATALOG))),
+        catalog=installed(tmp_path))
     assert result["skill_catalog_outputs"] == 1
 
 
 def test_cli_reports_broad_context_as_a_failure(tmp_path, capsys):
     output = '{"source_text":"id: full-feature\\nphases:\\n  - id: green"}'
     path = evidence(tmp_path, command("rg green meta.json", output, 2))
-    assert context_reads.main([str(path), "--catalog", str(index(tmp_path))]) == 1
+    assert context_reads.main([str(path), "--catalog", str(installed(tmp_path))]) == 1
     assert json.loads(capsys.readouterr().out)["workflow_source_outputs"] == 1
 
 
 def test_cli_accepts_required_skill_output(tmp_path, capsys):
     path = evidence(tmp_path, command("/bin/cat skills/tdd/SKILL.md", "Use red/green tests."))
-    assert context_reads.main([str(path), "--catalog", str(index(tmp_path))]) == 0
+    assert context_reads.main([str(path), "--catalog", str(installed(tmp_path))]) == 0
     assert json.loads(capsys.readouterr().out)["broad_context_outputs"] == []
 
 
-def test_malformed_native_evidence_is_not_reported_as_zero_reads(tmp_path):
+@pytest.mark.parametrize("content", [
+    "truncated native event\n",
+    '[]\n{"type":"turn.completed"}\n',
+    '{"type":"item.completed","item":null}\n{"type":"turn.completed"}\n',
+    '{"type":"item.completed","item":{"type":"command_execution","command":"cat x",'
+    '"aggregated_output":null}}\n{"type":"turn.completed"}\n',
+])
+def test_malformed_native_evidence_is_not_reported_as_zero_reads(tmp_path, content):
     path = tmp_path / "stdout.raw"
-    path.write_text("truncated native event\n")
-    with pytest.raises(json.JSONDecodeError):
-        context_reads.main([str(path), "--catalog", str(index(tmp_path))])
+    path.write_text(content)
+    with pytest.raises(SystemExit) as error:
+        context_reads.main([str(path), "--catalog", str(installed(tmp_path))])
+    assert error.value.code == 2
 
 
 @pytest.mark.parametrize("content", ["", '{"type":"thread.started"}\n'])
@@ -119,8 +130,17 @@ def test_cli_rejects_empty_or_incomplete_native_stream(tmp_path, content):
     path = tmp_path / "stdout.raw"
     path.write_text(content)
     with pytest.raises(SystemExit) as error:
-        context_reads.main([str(path), "--catalog", str(index(tmp_path))])
+        context_reads.main([str(path), "--catalog", str(installed(tmp_path))])
     assert error.value.code == 2
+
+
+def test_cli_rejects_missing_evidence_and_non_object_catalog(tmp_path):
+    path = evidence(tmp_path, command("/bin/cat skills/tdd/SKILL.md", "Use red/green tests."))
+    with pytest.raises(SystemExit) as missing:
+        context_reads.main([str(tmp_path / "absent.raw"), "--catalog", str(installed(tmp_path))])
+    with pytest.raises(SystemExit) as listed:
+        context_reads.main([str(path), "--catalog", str(installed(tmp_path, []))])
+    assert (missing.value.code, listed.value.code) == (2, 2)
 
 
 def test_cli_requires_reference_catalog_for_filtered_json(tmp_path):
@@ -130,4 +150,4 @@ def test_cli_requires_reference_catalog_for_filtered_json(tmp_path):
     with pytest.raises(SystemExit) as error:
         context_reads.main([str(path)])
     assert error.value.code == 2
-    assert context_reads.main([str(path), "--catalog", str(index(tmp_path))]) == 0
+    assert context_reads.main([str(path), "--catalog", str(installed(tmp_path))]) == 0
