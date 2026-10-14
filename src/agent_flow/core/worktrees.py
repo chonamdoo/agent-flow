@@ -4227,7 +4227,8 @@ def local_skill_worktree_copies(leader: Path) -> tuple[str, ...]:
     스크립트를 leader 경로로 실행하는 셸 명령은 host write boundary가 막는다. 사본이
     checkout에 있어야 checkout 상대경로로 실행할 수 있다.
 
-    `.env`와 `.env.*`는 넘기지 않는다. skill이 둔 token이 checkout마다 사본으로 퍼진다.
+    `.env`와 `.env.*` 이름은 파일이든 디렉터리든 넘기지 않는다. skill이 둔 token이
+    checkout마다 사본으로 퍼진다.
     symlink는 따라가지 않는다. 복사와 정리 예외가 이 목록을 함께 쓴다.
     """
     leader_base = Path(os.path.normpath(str(leader)))
@@ -4236,12 +4237,16 @@ def local_skill_worktree_copies(leader: Path) -> tuple[str, ...]:
         return ()
     names: list[str] = []
     for current, dirs, files in os.walk(base):
-        dirs.sort()
+        dirs[:] = sorted(name for name in dirs if not _is_secret_name(name))
         for file in sorted(files):
-            if file == ".env" or file.startswith(".env."):
+            if _is_secret_name(file):
                 continue
             names.append((Path(current) / file).relative_to(leader_base).as_posix())
     return tuple(names)
+
+
+def _is_secret_name(name: str) -> bool:
+    return name == ".env" or name.startswith(".env.")
 
 
 def copy_declared_worktree_files(

@@ -437,6 +437,8 @@ def test_local_skill_files_reach_a_new_checkout_without_secrets(
     (skill / "scripts" / "figma.py").write_text("print('fetch')\n", encoding="utf-8")
     (skill / ".env").write_text("FIGMA_TOKEN=secret\n", encoding="utf-8")
     (skill / ".env.local").write_text("FIGMA_TOKEN=secret\n", encoding="utf-8")
+    (skill / ".env.d").mkdir()
+    (skill / ".env.d" / "token").write_text("FIGMA_TOKEN=secret\n", encoding="utf-8")
     _stub_profile(monkeypatch, tmp_path, {})
 
     CLI._apply_worktree_setup(root=leader, checkout=checkout)
@@ -446,6 +448,7 @@ def test_local_skill_files_reach_a_new_checkout_without_secrets(
         assert (copied / rel).read_bytes() == (skill / rel).read_bytes()
     assert not (copied / ".env").exists()
     assert not (copied / ".env.local").exists()
+    assert not (copied / ".env.d").exists(), "secret 이름의 디렉터리 안도 token 자리다"
 
 
 def _hook_command(leader: Path, script: str) -> str:
