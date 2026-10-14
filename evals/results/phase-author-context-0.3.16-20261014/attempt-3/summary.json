@@ -1,0 +1,266 @@
+{
+ "backend/clean": {
+  "before": {
+   "input": 3158708,
+   "uncached_input": 184884,
+   "cached_input": 2973824,
+   "output": 18747,
+   "trials": 3,
+   "required_read_rate": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "catalog_outputs": 0,
+   "workflow_source_outputs": 0,
+   "commands": 126,
+   "command_output_bytes": 419882,
+   "pre_implementation_output_bytes": 401558,
+   "extra_skill_reads": 7
+  },
+  "after": {
+   "input": 2487385,
+   "uncached_input": 155865,
+   "cached_input": 2331520,
+   "output": 18186,
+   "trials": 3,
+   "required_read_rate": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "catalog_outputs": 0,
+   "workflow_source_outputs": 0,
+   "commands": 96,
+   "command_output_bytes": 393662,
+   "pre_implementation_output_bytes": 349205,
+   "extra_skill_reads": 7
+  },
+  "change_percent": {
+   "input": -21.25308828799623,
+   "uncached_input": -15.695787628999804,
+   "cached_input": -21.59858821503895,
+   "output": -2.992478796607457,
+   "commands": -23.809523809523807,
+   "command_output_bytes": -6.244611581349046,
+   "pre_implementation_output_bytes": -13.037469058019017,
+   "extra_skill_reads": 0.0
+  },
+  "pairs": [
+   {
+    "trial": 1,
+    "before_uncached": 56316,
+    "after_uncached": 52432,
+    "change_percent": -6.896796647489169
+   },
+   {
+    "trial": 2,
+    "before_uncached": 60624,
+    "after_uncached": 51109,
+    "change_percent": -15.695104249142252
+   },
+   {
+    "trial": 3,
+    "before_uncached": 67944,
+    "after_uncached": 52324,
+    "change_percent": -22.98952078182032
+   }
+  ]
+ },
+ "app/clean": {
+  "before": {
+   "input": 4070557,
+   "uncached_input": 228509,
+   "cached_input": 3842048,
+   "output": 20337,
+   "trials": 3,
+   "required_read_rate": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "catalog_outputs": 0,
+   "workflow_source_outputs": 0,
+   "commands": 150,
+   "command_output_bytes": 696171,
+   "pre_implementation_output_bytes": 610744,
+   "extra_skill_reads": 17
+  },
+  "after": {
+   "input": 3019819,
+   "uncached_input": 211371,
+   "cached_input": 2808448,
+   "output": 19003,
+   "trials": 3,
+   "required_read_rate": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "catalog_outputs": 0,
+   "workflow_source_outputs": 0,
+   "commands": 110,
+   "command_output_bytes": 587612,
+   "pre_implementation_output_bytes": 523528,
+   "extra_skill_reads": 17
+  },
+  "change_percent": {
+   "input": -25.813125820372985,
+   "uncached_input": -7.4999234165831545,
+   "cached_input": -26.902318763326228,
+   "output": -6.559472881939323,
+   "commands": -26.666666666666668,
+   "command_output_bytes": -15.59372625403816,
+   "pre_implementation_output_bytes": -14.280287649162332,
+   "extra_skill_reads": 0.0
+  },
+  "pairs": [
+   {
+    "trial": 1,
+    "before_uncached": 67443,
+    "after_uncached": 89466,
+    "change_percent": 32.65424135937013
+   },
+   {
+    "trial": 2,
+    "before_uncached": 80465,
+    "after_uncached": 56820,
+    "change_percent": -29.385447088796372
+   },
+   {
+    "trial": 3,
+    "before_uncached": 80601,
+    "after_uncached": 65085,
+    "change_percent": -19.250381508914284
+   }
+  ]
+ },
+ "rn/local": {
+  "before": {
+   "input": 3019151,
+   "uncached_input": 198287,
+   "cached_input": 2820864,
+   "output": 17821,
+   "trials": 3,
+   "required_read_rate": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "catalog_outputs": 2,
+   "workflow_source_outputs": 0,
+   "commands": 147,
+   "command_output_bytes": 760931,
+   "pre_implementation_output_bytes": 657453,
+   "extra_skill_reads": 23
+  },
+  "after": {
+   "input": 2685576,
+   "uncached_input": 187272,
+   "cached_input": 2498304,
+   "output": 17339,
+   "trials": 3,
+   "required_read_rate": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "catalog_outputs": 0,
+   "workflow_source_outputs": 0,
+   "commands": 113,
+   "command_output_bytes": 541677,
+   "pre_implementation_output_bytes": 449623,
+   "extra_skill_reads": 19
+  },
+  "change_percent": {
+   "input": -11.048635858226369,
+   "uncached_input": -5.555079253808873,
+   "cached_input": -11.434794445956983,
+   "output": -2.7046742607036642,
+   "commands": -23.12925170068027,
+   "command_output_bytes": -28.813913482299974,
+   "pre_implementation_output_bytes": -31.61138514844407,
+   "extra_skill_reads": -17.391304347826086
+  },
+  "pairs": [
+   {
+    "trial": 1,
+    "before_uncached": 74330,
+    "after_uncached": 72071,
+    "change_percent": -3.039149737656397
+   },
+   {
+    "trial": 2,
+    "before_uncached": 61726,
+    "after_uncached": 53512,
+    "change_percent": -13.307196319217185
+   },
+   {
+    "trial": 3,
+    "before_uncached": 62231,
+    "after_uncached": 61689,
+    "change_percent": -0.8709485626134885
+   }
+  ]
+ },
+ "total": {
+  "before": {
+   "input": 10248416,
+   "uncached_input": 611680,
+   "cached_input": 9636736,
+   "output": 56905,
+   "trials": 9,
+   "required_read_rate": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "catalog_outputs": 2,
+   "workflow_source_outputs": 0,
+   "commands": 423,
+   "command_output_bytes": 1876984,
+   "pre_implementation_output_bytes": 1669755,
+   "extra_skill_reads": 47
+  },
+  "after": {
+   "input": 8192780,
+   "uncached_input": 554508,
+   "cached_input": 7638272,
+   "output": 54528,
+   "trials": 9,
+   "required_read_rate": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "catalog_outputs": 0,
+   "workflow_source_outputs": 0,
+   "commands": 319,
+   "command_output_bytes": 1522951,
+   "pre_implementation_output_bytes": 1322356,
+   "extra_skill_reads": 43
+  },
+  "change_percent": {
+   "input": -20.058085073829947,
+   "uncached_input": -9.346717237771383,
+   "cached_input": -20.737976011794863,
+   "output": -4.1771373341534135,
+   "commands": -24.58628841607565,
+   "command_output_bytes": -18.861801698895675,
+   "pre_implementation_output_bytes": -20.805387616746167,
+   "extra_skill_reads": -8.51063829787234
+  }
+ }
+}

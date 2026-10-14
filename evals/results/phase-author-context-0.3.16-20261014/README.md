@@ -4,16 +4,45 @@
 workflow/run metadata에서 선택을 다시 찾도록 안내하던 중복 절차를 정리했다.
 필수 본문·적용되는 참조·scope 변경 시 선택 갱신 의무는 유지한다.
 
-이 기록은 **집중 author 평가이며 릴리스 게이트가 아니다**. 두 시도 모두
+이 기록은 **집중 author 평가이며 릴리스 게이트가 아니다**. 세 시도 모두
 `backend/clean`, `app/clean`, `rn/local`을 같은 fixture·task·oracle로 수정 전/후 각 3회,
-총 18회 실행했다. 두 kit은 모두 0.3.16이다. v0.3.15 대비 릴리스 평가는 별도다.
+총 18회 실행했다. 모든 kit은 0.3.16이다. v0.3.15 대비 릴리스 평가는 별도다.
 첫 시도의 app 증가를 보존하고 지침을 변경한 뒤 두 번째 시도를 실행했다.
-잘 나온 시행만 골라 합치거나 서로 다른 시도의 before/after를 섞지 않았다.
+세 번째 시도는 PR 리뷰 지적에 따라 red phase와 설치되는 workflow contract 문구까지
+맞춘 최종 kit을 측정했다. 잘 나온 시행만 골라 합치거나 서로 다른 시도의 before/after를
+섞지 않았다. 시도마다 실행 환경이 달라 시도 사이의 절대값은 비교하지 않는다.
 
-## 최종 결과 — attempt-2
+## 최종 결과 — attempt-3
 
 아래 값은 동일 사례 3회 합계다. 비캐시 입력은 native terminal의
 `input_tokens - cached_input_tokens`이며 USD 청구액은 관측하지 않았다.
+
+| 사례 | 비캐시 입력 before | after | 변화 | 전체 입력 변화 | 코드 수정 전 command 출력 바이트 변화 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| backend/clean | 184,884 | 155,865 | -15.7% | -21.3% | -13.0% |
+| app/clean | 228,509 | 211,371 | -7.5% | -25.8% | -14.3% |
+| rn/local | 198,287 | 187,272 | -5.6% | -11.0% | -31.6% |
+| 합계 | 611,680 | 554,508 | -9.3% | -20.1% | -20.8% |
+
+- 실제 전체 catalog 출력: before 2회(rn/local) → after 0회. 이 실행의 before는
+  attempt-2보다 catalog를 덜 출력했다. Escaped workflow `source_text` 출력은 두 쪽 모두
+  0회이므로 workflow 출력 절감을 주장하지 않는다.
+- command 수: 423 → 319. 코드 수정 전 command 출력 바이트는 -20.8%다.
+- behavior/plan/norm: 18/18 통과. 필수 skill 읽음률: 18/18에서 1.0.
+  읽음률은 성공한 SKILL.md 경로의 관측이며 전체 본문·참조 이해를 증명하지 않는다.
+- Clean architecture-lint: kit마다 6 pass, RN/local 3 n/a. n/a는 pass로 세지 않는다.
+- 출력 토큰 합계: 56,905 → 54,528(-4.2%).
+- app trial 1 비캐시 입력: 67,443 → 89,466(+32.7%). 나머지 8쌍은 줄었다.
+  모든 개별 시행이 줄었다고 보고하지 않는다. 3회 합계의 감소를 장기적인 보장이나
+  통계적 확정으로 보지 않는다.
+- 이미 읽은 SKILL.md 재읽기는 합계 47 → 43회 남았다. 실제 모델의 중복 읽기 제거는
+  확인하지 못했다. 이 PR은 자동 실행 필터나 문서 읽기 캐시를 추가하지 않는다.
+- 감소폭은 attempt-2(-27.3%)보다 작다. 실행 환경과 before의 catalog 출력 횟수가 달라
+  두 시도의 차이를 지침 변경 효과로 귀속하지 않는다.
+
+## 이전 결과 — attempt-2
+
+리뷰 수정 전 kit(`4e4908a`)의 결과다. 같은 방식의 3회 합계다.
 
 | 사례 | 비캐시 입력 before | after | 변화 | 전체 입력 변화 | 코드 수정 전 command 출력 바이트 변화 |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -23,16 +52,12 @@ workflow/run metadata에서 선택을 다시 찾도록 안내하던 중복 절�
 | 합계 | 502,641 | 365,430 | -27.3% | -11.0% | -32.6% |
 
 - 실제 전체 catalog 출력: before 8회 → after 0회. Escaped workflow `source_text`
-  출력은 두 쪽 모두 0회이므로 이 시행에서 workflow 출력 절감을 주장하지 않는다.
-- behavior/plan/norm: 18/18 통과. 필수 skill 읽음률: 18/18에서 1.0.
-  읽음률은 성공한 SKILL.md 경로의 관측이며 전체 본문·참조 이해를 증명하지 않는다.
-- Clean architecture-lint: kit마다 6 pass, RN/local 3 n/a. n/a는 pass로 세지 않는다.
+  출력은 before 1회(app/clean trial 1) → after 0회다. 한 번의 관측이므로 workflow 출력
+  절감을 주장하지 않는다.
+- behavior/plan/norm 18/18 통과, 필수 skill 읽음률 18/18에서 1.0.
 - 출력 토큰 합계: 47,044 → 45,565(-3.1%). backend/clean만 보면 +11.9%다.
-- app trial 3 비캐시 입력: 66,745 → 68,328(+2.4%). 모든 개별 시행이 줄었다고
-  보고하지 않는다. 3회 합계의 감소를 장기적인 보장이나 통계적 확정으로 보지 않는다.
-- 이미 읽은 SKILL.md 재읽기는 합계 36 → 41회 남았다. 읽음 재사용 지침을 명확히
-  했지만 실제 모델의 중복 읽기 제거는 확인하지 못했다. 이 PR은 자동 실행 필터나
-  문서 읽기 캐시를 추가하지 않는다.
+- app trial 3 비캐시 입력: 66,745 → 68,328(+2.4%).
+- 이미 읽은 SKILL.md 재읽기는 합계 36 → 41회 남았다.
 
 ## 첫 수정 결과 — attempt-1
 
@@ -70,20 +95,31 @@ workflow/run metadata에서 선택을 다시 찾도록 안내하던 중복 절�
 - base: `4ff46ad18baa50348016112016aadf4aa98f1648` (origin/main).
 - attempt-1 source: `f9014b7cba85f6093c091f1242aa0e50317941e3`.
 - attempt-2 source: `4e4908a675c92ff9f9662fe0fb83c479a4e578a3`.
-- 입력은 저장소 밖에 각각 `git archive`로 추출했다. 원본 tar, 실제 wheel/sdist/npm
-  패키지와 설치된 0.3.16 wheel CLI도 클라우드 증거 폴더에 보존한다.
+- attempt-3 source: `96eb5b1c07f7fa6eedb6c92453b69663c1b671dd`. kit 지문은 before
+  `91644dcc…5fa4`(attempt-2 before와 같음), after `3adac1cf…cd2d9`다.
+  evaluator 지문은 세 시도 모두 `c90abd23…4d69`다.
+- 입력은 저장소 밖에 각각 `git archive`로 추출했다. attempt-1/2의 원본 tar, 실제
+  wheel/sdist/npm 패키지와 설치된 0.3.16 wheel CLI는 클라우드 증거 폴더에 보존한다.
+  attempt-3은 패키지를 만들지 않고 archive 트리를 kit으로 직접 설치했다.
 - 공식 Codex CLI 0.162.1, 요청 model `gpt-6.1-sol`, 동시성 8,
   author sandbox `workspace-write`, 기존 phase-only green 과제와 oracle 사용.
-- Python 3.12.14, Node 24.19.0, Flutter 3.47.6 / Dart 3.13.5.
+- attempt-1/2: 클라우드 Linux, Python 3.12.14, Node 24.19.0, Flutter 3.47.6 / Dart 3.13.5.
+  attempt-3: 로컬 macOS arm64, Python 3.12.13, Node 24.14.1, Flutter 3.47.2 / Dart 3.13.1.
   app oracle는 기존 pure Dart fixture다. 실제 Flutter UI 앱 평가로 보고하지 않는다.
-- 36개 호출의 prompt/stdout/stderr checksum, command receipt, terminal usage를
+- 54개 호출의 prompt/stdout/stderr checksum, command receipt, terminal usage를
   검증했다. provider error 0. 서버 stream은 model identity를 제공하지 않아 관측값은
   unknown이며, 요청 model 확인과 관측 model 확인을 구분한다.
 - `native-evidence.tar.gz`는 각 unit의 원본 prompt/stdout/stderr/receipt와 실제 설치
-  catalog를 포함한다. 로그에 나온 절대 경로는 당시 클라우드 경로다.
+  catalog를 포함한다. 로그에 나온 절대 경로는 attempt-1/2는 클라우드 경로,
+  attempt-3은 로컬 macOS 경로다. attempt-3 원본에서 credential 형태의 문자열은
+  발견하지 못했다.
 - `context-read-analysis.json.gz`는 첫 구현 파일 변경 이전의 command 목록과 바이트를
   별도 저장한다. fixture에서 관측한 file_change와 literal source redirect가 경계다.
-  두 시도 모두 미확인 경계는 없다. shell 일반 동작을 완전히 해석하는 검사기가 아니다.
+  세 시도 모두 미확인 경계는 없다. shell 일반 동작을 완전히 해석하는 검사기가 아니다.
+  attempt-1/2의 executor는 저장소에 없다. attempt-3은 `focused_run.py`로 실행하고
+  `package_attempt.py`로 묶었다. 이 경계 규칙은 attempt-2의 18개 경계를 native stream에서
+  그대로 재현한다. 재읽기 횟수는 evaluator의 `_codex_read_paths`가 성공으로 본 SKILL.md
+  읽기를 skill별로 센 값이다.
 - CLI는 per-turn uncached 사용량을 제공하지 않는다. 해당 읽기 구간의 token/청구액은
   추정하지 않는다. raw 바이트와 terminal token을 같은 단위로 비교하지 않는다.
 
@@ -108,6 +144,12 @@ workflow/run metadata에서 선택을 다시 찾도록 안내하던 중복 절�
 controller는 같았다. `budget-compare.md`에 다른 condition의 증가도 보존했다.
 이 결정적 측정은 실제 index 재탐색의 tool 출력이나 서버 캐시를 포함하지 않는다.
 CI는 전체 profile/mode를 다시 검사한다. 의도한 지침 증가의 근거는 이 실측이다.
+`budget-compare.md`는 attempt-2 kit의 측정이다. red phase 문구를 바꾼 최종 kit의
+정적 예산은 PR CI의 `phase_budget`이 다시 측정한다.
+
+리뷰 수정 뒤 같은 40개 guard에 진단기의 unfiltered catalog·누락 파일/비객체 catalog
+검사와, `workflowContract()` 파일 계보의 #266/#201 guard를 더해 실행해 모두 통과했다.
+명령과 출력은 `review-fix-guard-output.log`에 있다.
 
 저장된 원본 확인은 모델 호출 없이 실행한다:
 
@@ -122,25 +164,28 @@ python evals/phase_eval_context_reads.py <native-unit>/stdout.raw \
   --catalog <fixture>/.agent-flow/skills/index.json
 ```
 
-`--catalog`는 필수이며 실제 설치된 전체 index를 받는다. JSON shape만 보고 전체 catalog로 판정하지 않는다. 전체 catalog/escaped workflow source가 나오면 exit 1이다. malformed stream과 빈/미완료 stream은 오류로 끝난다.
+전체 catalog/escaped workflow source가 나오면 exit 1이다. 전체 catalog는 `--catalog`로 준
+설치 index와 내용이 같은 JSON 출력만 센다. 그래서 필터 없는 설치(`selected_skills: "all"`)도
+탐지하고, 필터링한 일부 출력은 세지 않는다. `--catalog`는 필수다.
+손상된 JSON 줄, 객체가 아닌 event, 빈/미완료 stream, 읽을 수 없는 파일은 exit 2로 끝난다.
 필요한 한 항목을 추출하거나 필수 SKILL.md를 읽는 동작은 실패시키지 않는다.
 partial/truncated catalog나 모든 raw YAML 읽기를 탐지하는 도구는 아니며 runtime gate가 아니다.
 
-실제 모델 재현은 동일 before/after archive를 사용해 각 사례를 3회씩 실행한다:
+실제 모델 재현은 attempt-3과 같은 executor로 18개 unit을 한 번에 실행한다:
 
 ```sh
+# 저장소 밖의 새 빈 <before>/<after> 디렉터리를 먼저 만든다.
 git archive 4ff46ad18baa50348016112016aadf4aa98f1648 | tar -x -C <before>
 git archive HEAD | tar -x -C <after>
-python evals/phase_eval.py --kit before=<before> --kit after=<after> \
-  --stacks backend --modes clean --scenario author --trials 3 --concurrency 8 \
-  --author-provider codex --review-providers codex --codex-model gpt-6.1-sol \
-  --output <backend-out> --keep
-# 같은 명령에서 --stacks app --modes clean, --stacks rn --modes local을 각각 실행한다.
+python evals/results/phase-author-context-0.3.16-20261014/focused_run.py \
+  <after> <before> <after> <run-out>
+python evals/results/phase-author-context-0.3.16-20261014/package_attempt.py \
+  <run-out> <attempt-dir> . 4ff46ad18baa50348016112016aadf4aa98f1648 <after-commit>
 ```
 
-이 기록의 원 실행은 세 조합을 한 executor에서 동시에 배치했다. 위 공개 CLI로 사례별
-실행하면 scheduling/캐시 조건까지 같아지는 것은 아니다. 상대 경로와 출력 폴더는 반드시
-저장소 밖의 새 디렉터리를 사용한다. 로컬 SDK/CLI/model 조건 차이도 보고에 남긴다.
+`focused_run.py`는 Python 3.12 환경(pyyaml, click)과 Codex CLI 로그인을 사용한다.
+같은 executor라도 scheduling·서버 캐시 조건까지 같아지는 것은 아니다. 출력 폴더는
+저장소 밖의 새 디렉터리를 사용하고, 로컬 SDK/CLI/model 조건 차이도 보고에 남긴다.
 
 전체 pytest suite와 Parity는 PR CI에 맡긴다. 새 kit의 전체 168-unit 평가·릴리스 게이트·
 태그·Homebrew 배포는 이번 집중 변경에서 실행하지 않았다. #364의 이전 gate는 변경된
