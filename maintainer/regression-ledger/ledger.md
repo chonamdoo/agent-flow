@@ -348,3 +348,7 @@ guard는 각 PR이 더하거나 고친 테스트다. PR diff에서 뽑았다. "�
 ### 2026-10-12 배포 문서 정리에서 보충한 merged PR
 
 - #358 (pr, MERGED) chore(evals): record passing v0.3.15 release gate [evidence-recording, gates] — 회귀 금지: 배포에 사용한 before/after의 같은 실행 168행과 kit·evaluator·case 지문, 원본 호출·usage 대조를 보존한다. 요청 모델과 관측 모델을 구분하며 expected=null·n/a를 정확도나 lint PASS 분모에 넣지 않는다. 통과 기록을 다른 실행과 섞거나 기존 threshold를 낮추지 않는다. — guard: 없음 — 데이터 추가 PR로 전용 동작 guard는 없으며 기존 comparator의 clean archive 재판정과 `integrity-audit.json`의 168개 고유 행·616호출 대조가 검증 근거다. 출처: merge `075a79a74a330b99059019f6317fa3131f832927`, https://github.com/chonamdoo/agent-flow/pull/358.
+
+### 2026-10-14 local skill worktree 복사 작업에서 보충한 merged PR
+
+- #359 (pr, MERGED) docs(release): preserve v0.3.15 release notes and deployed evaluation guide [other, evidence-recording] — 회귀 금지: v0.3.15 릴리스 노트는 실제 배포 완료 상태를 기록하고, 평가 README는 배포에 사용한 #358 기록(CLI 0.162.1, concurrency 8, 168행, 616호출)만 설명한다. #357의 별도 측정 기록을 배포 근거로 가져오지 않으며 기존 게이트의 meta/results/gate/audit 파일 bytes를 바꾸지 않는다. `evals/`와 `maintainer/`는 npm 패키지와 wheel에 넣지 않는다. — guard: 없음 — 실행 동작이 없는 문서 변경이며 base/head 실제 npm·wheel member 대조와 기존 게이트의 같은 입력 재판정이 검증 근거다. 출처: merge `5b92996a38c6411c61f36d7be10aed1dc26405e5`, https://github.com/chonamdoo/agent-flow/pull/359.

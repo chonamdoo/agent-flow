@@ -169,6 +169,22 @@ def test_profile_declared_copy_is_exempt_when_identical(tmp_path: Path) -> None:
     W._assert_cleanup_checkout_clean(root=root, path=checkout)
 
 
+def test_local_skill_copy_is_exempt_when_identical(tmp_path: Path) -> None:
+    """반증: 정리가 local skill 사본을 모르면 local skill이 있는 프로젝트의 worktree는
+    만들자마자 지울 수 없다. `.agent-flow/`는 ignore라 `!! .agent-flow/` 하나로 접혀 온다.
+    """
+    root = tmp_path / "repo"
+    _init_repo(root, ignored=(".agent-flow/",))
+    skill = root / ".agent-flow" / "local-skills" / "figma-reader"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: figma-reader\n---\n", encoding="utf-8")
+    (skill / "figma.py").write_text("print('fetch')\n", encoding="utf-8")
+    (skill / ".env").write_text("FIGMA_TOKEN=secret\n", encoding="utf-8")
+    checkout = _checkout_with_kit_copies(root, names=W.local_skill_worktree_copies(root))
+
+    W._assert_cleanup_checkout_clean(root=root, path=checkout)
+
+
 def test_scalar_copy_declaration_does_not_widen_the_cleanup_exemption(tmp_path: Path) -> None:
     """반증: 스칼라 선언을 순회하면 한 글자 이름들이 정리 예외 후보가 된다.
 

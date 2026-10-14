@@ -2288,7 +2288,10 @@ def _kit_copied_worktree_files(*, root: Path, checkout: Path) -> set[str]:
     receipt: dict[str, str] | None = None
     leader_base = Path(os.path.normpath(str(root)))
     checkout_base = Path(os.path.normpath(str(checkout)))
-    copies = [(name, name) for name in _declared_worktree_copy_names(root)]
+    copies = [
+        (name, name)
+        for name in (*_declared_worktree_copy_names(root), *local_skill_worktree_copies(root))
+    ]
     copies.extend(_NATIVE_SKILL_ENTRY_COPIES)
     for name, source_name in copies:
         try:
@@ -4136,6 +4139,8 @@ def run_declared_worktree_actions(
 # 미추적 컨텍스트는 git worktree add가 전달하지 않는다. 아키텍처 선언도 빠지면
 # local/pending이 legacy Clean으로 바뀌므로 profile 해석 전에 함께 복사한다.
 ROOT_CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md", PROJECT_ARCHITECTURE_FILE)
+# gitignore된 개인 skill 자리다. `git worktree add`는 이것을 가져오지 않는다.
+LOCAL_SKILLS_DIR = ".agent-flow/local-skills"
 
 _NATIVE_SKILL_ENTRY_FILES = ("SKILL.md", "agents/openai.yaml")
 _NATIVE_SKILL_ENTRY_ROOTS = (".claude/skills", ".agents/skills", ".omp/skills")
@@ -4213,6 +4218,30 @@ def declared_worktree_copies(profile: Mapping[str, Any]) -> list[str]:
             if name not in names:
                 names.append(name)
     return names
+
+
+def local_skill_worktree_copies(leader: Path) -> tuple[str, ...]:
+    """새 checkout이 받아야 할 leader의 project-local skill 파일 이름들.
+
+    skill 프롬프트는 SKILL.md를 leader 경로로 준다. 읽기는 그것으로 되지만, 동봉
+    스크립트를 leader 경로로 실행하는 셸 명령은 host write boundary가 막는다. 사본이
+    checkout에 있어야 checkout 상대경로로 실행할 수 있다.
+
+    `.env`와 `.env.*`는 넘기지 않는다. skill이 둔 token이 checkout마다 사본으로 퍼진다.
+    symlink는 따라가지 않는다. 복사와 정리 예외가 이 목록을 함께 쓴다.
+    """
+    leader_base = Path(os.path.normpath(str(leader)))
+    base = leader_base / LOCAL_SKILLS_DIR
+    if _has_symlinked_component(leader_base, base) or not base.is_dir():
+        return ()
+    names: list[str] = []
+    for current, dirs, files in os.walk(base):
+        dirs.sort()
+        for file in sorted(files):
+            if file == ".env" or file.startswith(".env."):
+                continue
+            names.append((Path(current) / file).relative_to(leader_base).as_posix())
+    return tuple(names)
 
 
 def copy_declared_worktree_files(

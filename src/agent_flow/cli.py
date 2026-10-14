@@ -150,6 +150,7 @@ from agent_flow.core.worktrees import (
     WORKTREE_SETUP_ACTIONS,
     copy_declared_worktree_files,
     declared_worktree_copies,
+    local_skill_worktree_copies,
     ROOT_CONTEXT_FILES,
     DEFAULT_SLUG_MAX_LENGTH,
     describe_slug,
@@ -3162,6 +3163,11 @@ def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
     # 루트 컨텍스트 파일은 profile 해석 **앞**에 옮긴다. profile이 깨졌다는 이유로 이
     # 복사까지 건너뛰면, 계약을 못 받는 checkout이 만들어진 뒤 그 안에서 일하게 된다.
     copied = list(_copy_worktree_files(root=root, checkout=checkout, names=ROOT_CONTEXT_FILES))
+    copied.extend(
+        _copy_worktree_files(
+            root=root, checkout=checkout, names=local_skill_worktree_copies(root)
+        )
+    )
     try:
         _profile_id, profile = resolve_profile(_find_kit_root(), root)
         declared = [str(name) for name in declared_worktree_copies(profile)]

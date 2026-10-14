@@ -417,6 +417,37 @@ def test_root_context_files_survive_a_broken_profile(tmp_path: Path, monkeypatch
     assert "AGENTS.md" in captured.out, "무엇이 깔렸는지 말해야 한다"
 
 
+def test_local_skill_files_reach_a_new_checkout_without_secrets(
+    tmp_path: Path, monkeypatch
+):
+    """반증: 사본이 없으면 run 안에서 local skill 스크립트를 실행할 길이 없다.
+
+    skill 프롬프트는 leader 경로를 주지만 host write boundary는 leader 경로가 든 셸
+    명령을 막는다. 실행은 checkout 상대경로로만 가능하다. `.env`는 skill이 둔 token이라
+    checkout마다 사본이 생기면 안 된다.
+    """
+    from agent_flow import cli as CLI
+
+    leader = tmp_path / "leader"
+    _repo(leader)
+    checkout = _managed_checkout(leader, "local-skill")
+    skill = leader / ".agent-flow" / "local-skills" / "figma-reader"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: figma-reader\n---\n", encoding="utf-8")
+    (skill / "scripts" / "figma.py").write_text("print('fetch')\n", encoding="utf-8")
+    (skill / ".env").write_text("FIGMA_TOKEN=secret\n", encoding="utf-8")
+    (skill / ".env.local").write_text("FIGMA_TOKEN=secret\n", encoding="utf-8")
+    _stub_profile(monkeypatch, tmp_path, {})
+
+    CLI._apply_worktree_setup(root=leader, checkout=checkout)
+
+    copied = checkout / ".agent-flow" / "local-skills" / "figma-reader"
+    for rel in ("SKILL.md", "scripts/figma.py"):
+        assert (copied / rel).read_bytes() == (skill / rel).read_bytes()
+    assert not (copied / ".env").exists()
+    assert not (copied / ".env.local").exists()
+
+
 def _hook_command(leader: Path, script: str) -> str:
     return (
         f"'{leader}/.agent-flow/bin/agent-flow-hook' "
