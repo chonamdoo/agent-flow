@@ -116,13 +116,28 @@ def test_cli_accepts_required_skill_output(tmp_path, capsys):
     '{"type":"item.completed","item":null}\n{"type":"turn.completed"}\n',
     '{"type":"item.completed","item":{"type":"command_execution","command":"cat x",'
     '"aggregated_output":null}}\n{"type":"turn.completed"}\n',
+    # An untyped item carrying the full catalog must not pass as a non-command item.
+    '{"type":"item.completed","item":{"command":"cat index.json","aggregated_output":'
+    + json.dumps(json.dumps(CATALOG)) + '}}\n{"type":"turn.completed"}\n',
+    '{"item":{}}\n{"type":"turn.completed"}\n',
+    '{"type":"item.completed","item":{"type":"command_execution","command":"cat x",'
+    '"aggregated_output":"\\ud800"}}\n{"type":"turn.completed"}\n',
+    "[" * 100000 + "]" * 100000 + '\n{"type":"turn.completed"}\n',
 ])
 def test_malformed_native_evidence_is_not_reported_as_zero_reads(tmp_path, content):
     path = tmp_path / "stdout.raw"
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
     with pytest.raises(SystemExit) as error:
         context_reads.main([str(path), "--catalog", str(installed(tmp_path))])
     assert error.value.code == 2
+
+
+def test_deeply_nested_command_output_is_scanned_without_crashing(tmp_path, capsys):
+    # Deeper than the json decoder's recursion limit on supported Pythons.
+    nested = '{"a":' * 12000 + "0" + "}" * 12000
+    path = evidence(tmp_path, command("cat deep.json", nested + "\n" + json.dumps(CATALOG)))
+    assert context_reads.main([str(path), "--catalog", str(installed(tmp_path))]) == 1
+    assert json.loads(capsys.readouterr().out)["skill_catalog_outputs"] == 1
 
 
 @pytest.mark.parametrize("content", ["", '{"type":"thread.started"}\n'])

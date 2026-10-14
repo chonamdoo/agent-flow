@@ -4,7 +4,8 @@ This is a diagnostic for phase-scoped author fixtures, not an execution filter
 or a replacement for required-read, behavior, plan, norm or release gates.
 It detects content emitted to the model; a path mention alone is not a read.
 A skill catalog output counts only when it equals the installed index, so a
-filtered or selected extract is not a full catalog read.
+filtered or selected extract is not a full catalog read. A catalog wrapped
+inside another JSON object is not detected.
 The workflow check covers escaped source_text metadata, not every YAML read.
 
 Run against a phase-scoped author's native stdout.raw with the fixture's
@@ -26,8 +27,8 @@ class EvidenceError(ValueError):
 def _load_catalog(path: Path) -> dict:
     try:
         catalog = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        raise EvidenceError(f"{path}: catalog is not JSON ({error.msg})") from error
+    except (json.JSONDecodeError, RecursionError) as error:
+        raise EvidenceError(f"{path}: catalog is not decodable JSON ({error})") from error
     if not isinstance(catalog, dict):
         raise EvidenceError(f"{path}: catalog is not a JSON object")
     return catalog
@@ -38,10 +39,10 @@ def _events(stdout: Path) -> list[dict]:
     for number, line in enumerate(stdout.read_text(encoding="utf-8").splitlines(), 1):
         try:
             event = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise EvidenceError(f"{stdout}:{number}: event is not JSON ({error.msg})") from error
-        if not isinstance(event, dict):
-            raise EvidenceError(f"{stdout}:{number}: event is not a JSON object")
+        except (json.JSONDecodeError, RecursionError) as error:
+            raise EvidenceError(f"{stdout}:{number}: event is not decodable JSON ({error})") from error
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            raise EvidenceError(f"{stdout}:{number}: event is not a typed JSON object")
         events.append(event)
     if not any(event.get("type") == "turn.completed" for event in events):
         raise EvidenceError(f"{stdout}: native evidence does not contain a completed turn")
@@ -54,7 +55,7 @@ def _has_catalog(output: str, catalog: dict) -> bool:
     while (start := output.find("{", offset)) >= 0:
         try:
             value, end = decoder.raw_decode(output, start)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             offset = start + 1
             continue
         if value == catalog:
@@ -73,15 +74,18 @@ def context_outputs(stdout: Path, *, catalog: Path) -> dict:
         if event.get("type") != "item.completed":
             continue
         item = event.get("item")
-        if not isinstance(item, dict):
-            raise EvidenceError(f"{stdout}:{number}: completed item is not a JSON object")
-        if item.get("type") != "command_execution":
+        if not isinstance(item, dict) or not isinstance(item.get("type"), str):
+            raise EvidenceError(f"{stdout}:{number}: completed item is not a typed JSON object")
+        if item["type"] != "command_execution":
             continue
         command = item.get("command")
         output = item.get("aggregated_output")
         if not isinstance(command, str) or not isinstance(output, str):
             raise EvidenceError(f"{stdout}:{number}: command or output is not a string")
-        size = len(output.encode("utf-8"))
+        try:
+            size = len(output.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise EvidenceError(f"{stdout}:{number}: output is not valid Unicode ({error})") from error
         total_bytes += size
         commands += 1
         kinds = []

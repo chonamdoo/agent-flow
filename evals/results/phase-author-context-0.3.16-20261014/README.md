@@ -97,7 +97,9 @@ workflow/run metadata에서 선택을 다시 찾도록 안내하던 중복 절�
 - attempt-2 source: `4e4908a675c92ff9f9662fe0fb83c479a4e578a3`.
 - attempt-3 source: `96eb5b1c07f7fa6eedb6c92453b69663c1b671dd`. kit 지문은 before
   `91644dcc…5fa4`(attempt-2 before와 같음), after `3adac1cf…cd2d9`다.
-  evaluator 지문은 세 시도 모두 `c90abd23…4d69`다.
+  evaluator 지문은 세 시도 모두 `c90abd23…4d69`다. 측정 뒤 PR head(`00e0526`)
+  위로 rebase해 같은 변경이 `a12cf99`가 됐다. rebase로 바뀐 파일은 `evals/`와 `tests/`뿐이라
+  kit 지문은 측정한 after와 같은 `3adac1cf…cd2d9`다.
 - 입력은 저장소 밖에 각각 `git archive`로 추출했다. attempt-1/2의 원본 tar, 실제
   wheel/sdist/npm 패키지와 설치된 0.3.16 wheel CLI는 클라우드 증거 폴더에 보존한다.
   attempt-3은 패키지를 만들지 않고 archive 트리를 kit으로 직접 설치했다.
@@ -167,9 +169,12 @@ python evals/phase_eval_context_reads.py <native-unit>/stdout.raw \
 전체 catalog/escaped workflow source가 나오면 exit 1이다. 전체 catalog는 `--catalog`로 준
 설치 index와 내용이 같은 JSON 출력만 센다. 그래서 필터 없는 설치(`selected_skills: "all"`)도
 탐지하고, 필터링한 일부 출력은 세지 않는다. `--catalog`는 필수다.
-손상된 JSON 줄, 객체가 아닌 event, 빈/미완료 stream, 읽을 수 없는 파일은 exit 2로 끝난다.
+손상된 JSON 줄, type이 없는 event·item, 문자열이 아닌 command/output, 유효하지 않은 Unicode,
+decoder 한도를 넘게 중첩된 event·catalog, 빈/미완료 stream, 읽을 수 없는 파일은 exit 2로 끝난다.
+command 출력 안의 지나치게 깊은 JSON은 catalog가 아닌 것으로 건너뛴다.
 필요한 한 항목을 추출하거나 필수 SKILL.md를 읽는 동작은 실패시키지 않는다.
-partial/truncated catalog나 모든 raw YAML 읽기를 탐지하는 도구는 아니며 runtime gate가 아니다.
+partial/truncated catalog, 다른 JSON 객체 안에 감싼 catalog, 모든 raw YAML 읽기를 탐지하는
+도구는 아니며 runtime gate가 아니다.
 
 실제 모델 재현은 attempt-3과 같은 executor로 18개 unit을 한 번에 실행한다:
 
