@@ -185,6 +185,58 @@ def test_local_skill_copy_is_exempt_when_identical(tmp_path: Path) -> None:
     W._assert_cleanup_checkout_clean(root=root, path=checkout)
 
 
+def _checkout_with_local_skill(root: Path) -> tuple[Path, Path]:
+    _init_repo(root, ignored=(".agent-flow/",))
+    skill = root / ".agent-flow" / "local-skills" / "figma-reader"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: figma-reader\n---\n", encoding="utf-8")
+    (skill / "scripts" / "figma.py").write_text("import helper\n", encoding="utf-8")
+    (skill / "scripts" / "helper.py").write_text("print('fetch')\n", encoding="utf-8")
+    status = W.create_worktree(root=root, plan=W.plan_worktree(root=root, name="local-skill"))
+    copied = W.copy_local_skill_files(leader=root, checkout=status.path)
+    assert copied == W.local_skill_worktree_copies(root)
+    return skill, status.path
+
+
+def test_local_skill_copy_stays_exempt_after_the_leader_changes(tmp_path: Path) -> None:
+    """반증: 지금 leader 파일과만 비교하면, checkout을 만든 뒤 leader에서 skill을 고치거나
+    지우는 순간 아무도 손대지 않은 worktree가 모두 정리 불가가 된다.
+    """
+    root = tmp_path / "repo"
+    skill, checkout = _checkout_with_local_skill(root)
+    (skill / "SKILL.md").write_text("---\nname: figma-reader\nv: 2\n---\n", encoding="utf-8")
+    (skill / "scripts" / "helper.py").unlink()
+
+    W._assert_cleanup_checkout_clean(root=root, path=checkout)
+
+    copy = checkout / ".agent-flow" / "local-skills" / "figma-reader" / "SKILL.md"
+    copy.write_text("edited in the checkout\n", encoding="utf-8")
+    with pytest.raises(W.CleanupBlockedError, match="figma-reader/SKILL.md"):
+        W._assert_cleanup_checkout_clean(root=root, path=checkout)
+
+
+def test_bytecode_from_running_a_local_skill_copy_does_not_block_cleanup(
+    tmp_path: Path,
+) -> None:
+    """반증: 사본은 checkout에서 실행하라고 깐 것이다. 그 실행이 남긴 `__pycache__`로
+    정리가 막히면 스크립트를 한 번 돌린 worktree는 지울 수 없다.
+    """
+    root = tmp_path / "repo"
+    _skill, checkout = _checkout_with_local_skill(root)
+    scripts = checkout / ".agent-flow" / "local-skills" / "figma-reader" / "scripts"
+    subprocess.run(
+        (sys.executable, str(scripts / "figma.py")), cwd=checkout, check=True, capture_output=True
+    )
+    assert list((scripts / "__pycache__").glob("helper.*.pyc"))
+
+    W._assert_cleanup_checkout_clean(root=root, path=checkout)
+
+    # 사용자가 더한 모듈의 캐시는 그 모듈처럼 사용자 것이다. 막고, 그 파일을 댄다.
+    (scripts / "__pycache__" / "mine.cpython-311.pyc").write_bytes(b"user")
+    with pytest.raises(W.CleanupBlockedError, match=r"__pycache__/mine\.cpython-311\.pyc"):
+        W._assert_cleanup_checkout_clean(root=root, path=checkout)
+
+
 def test_scalar_copy_declaration_does_not_widen_the_cleanup_exemption(tmp_path: Path) -> None:
     """반증: 스칼라 선언을 순회하면 한 글자 이름들이 정리 예외 후보가 된다.
 
