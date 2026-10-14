@@ -14,7 +14,7 @@ v0.3.15 이후 managed worktree에서 project-local skill 스크립트를 실행
   생긴 Python bytecode도 정상 정리를 막지 않는다. checkout에서 수정한 사본과
   사용자가 추가한 파일·캐시는 계속 보존하며, 정리를 막은 파일 경로를 알린다.
 
-작성 phase의 skill 선택이 이미 해석된 경우에는 전달된 profile 값과 required-read plan을 사용하도록 안내한다. inline 본문은 바로 적용하고 계획에 지정된 파일·적용되는 참조만 읽으며, 같은 본문·지문을 가리키는 후속 읽기 지시는 기존 읽음을 재사용한다. 선택을 다시 해석하기 위한 전체 skill index·workflow/run metadata 읽기를 줄인다. 독립 reviewer·미설치 skill 처리와 필수 규범은 유지한다.
+작성 phase의 skill 선택이 이미 해석된 경우에는 전달된 profile 값과 required-read plan을 사용하도록 안내한다. inline 본문은 바로 적용하고 계획에 지정된 파일·적용되는 참조만 읽으며, 같은 본문·지문을 가리키는 후속 읽기 지시는 기존 읽음을 재사용한다. 선택을 다시 해석하기 위한 전체 skill index·workflow/run metadata 읽기를 줄인다. full-feature의 red phase와 설치되는 `.agent-flow/rules/workflow-contract.md`도 같은 Before Starting 선택 절차를 가리킨다. 독립 reviewer·미설치 skill 처리와 필수 규범은 유지한다.
 
 기존 프로젝트는 leader checkout에서 kit을 재설치하고 host 세션을 다시 시작한다.
 기존 worktree의 local skill 사본은 다음 `run`/`start` 재사용 때 채워진다.

@@ -280,12 +280,13 @@ phases:
       `record-command-run.py` PostToolUse hook, so "I wrote a test" without a
       test command in this phase is rejected regardless of what you record.
       A test that passes on the first run is not a red phase.
-      Resolve required skills from active profile metadata,
-      `.agent-flow/skills/index.json`, changed files, and task scope. Read only
-      the touched profile skill union before writing tests. Unrelated
-      platform skill absence must not block. Save the failure summary and
-      command output. For missing required skills, follow the Missing Required
-      Skills section of `.agent-flow/skills/code-generation-discipline/SKILL.md`.
+      Select skills through the `code-generation-discipline` Before Starting
+      procedure: use the runner's resolved profile values and required-read
+      plan when supplied, and read only the touched profile skill union before
+      writing tests. Unrelated platform skill absence must not block. Save the
+      failure summary and command output. For missing required skills, follow
+      the Missing Required Skills section of
+      `.agent-flow/skills/code-generation-discipline/SKILL.md`.
       End with:
 
           ## Completion Gate
