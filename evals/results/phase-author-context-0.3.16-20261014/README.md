@@ -206,6 +206,22 @@ API와 CLI 모두 catalog를 필수로 받도록 바꾸고, 기준 없이 실행
 원본 36 native 호출을 재판독해 결과가 같음을 확인했다. 이 수정은 shipped kit/evaluator와
 실제 모델 입력을 바꾸지 않아 추가 모델 측정은 하지 않았다.
 
+이후 로컬 병렬 리뷰(Claude·Codex reviewer 각 3)에서 확인한 문제도 고쳤다.
+
+- 필터 없는 설치의 index(`selected_skills: "all"`)는 list shape 검사 때문에 전체 catalog로
+  세지 못했다. 이제 설치 index와 내용이 같은지만으로 판정한다.
+- 손상된 JSON, 객체가 아니거나 type이 없는 event·item, 유효하지 않은 Unicode, 과도한 중첩,
+  정수 자릿수 한도(Python 3.11+)가 traceback(exit 1, "넓은 출력 있음"과 같은 코드)이나
+  0회 읽음으로 끝났다. 모두 exit 2로 바꿨다. 문자열 안의 U+2028·U+0085 때문에 정상
+  evidence를 손상으로 판정하던 줄 분리도 `\n` 기준으로 고쳤다.
+- `verify.py`의 무결성 검사가 `assert`라 `python -O`에서 빠진 채 PASS를 출력할 수 있었다.
+  명시적 검사로 바꾸고 UTF-8을 지정했다.
+- full-feature red phase와 설치되는 workflow contract에 전체 index 재탐색 문구가 남아 있었다.
+  같은 Before Starting 절차를 가리키도록 맞추고 최종 kit으로 attempt-3을 측정했다.
+- attempt-2의 workflow 출력 횟수를 before 1 → after 0으로 정정했다.
+
+진단기 변경 뒤에도 attempt-1/2/3의 기록된 `context_outputs`는 `verify.py`에서 그대로 재현된다.
+
 사용자 요청에 따라 이전 168-unit과 이번 두 집중 실행의 테스트 설치 중복물을 정리했다.
 생성 source/test/phase/readiness 파일은 각각 압축하고 모든 파일 checksum을 원본과 대조한
 뒤 제거했다. raw 결과·native 로그·SHA-256·kit archive·패키지·배포용 SDK/CLI/인증·공유
