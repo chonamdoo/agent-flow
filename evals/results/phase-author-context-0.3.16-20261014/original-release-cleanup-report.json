@@ -1,0 +1,20 @@
+{
+  "status": "PASS",
+  "removed_directories": 172,
+  "removed_dependency_archives": 84,
+  "disk_free_before_bytes": 10669559808,
+  "disk_free_after_bytes": 20190969856,
+  "results_unchanged_sha256": "fbab8a6d748335a4f853136987ae953559fa1fc7334394cc8c8caeec004c1740",
+  "source_result_archive_sha256": "aa860317b1d0a9c5dd612d7d840829d12a476e279b2655e1a205d6c2dbb650f6",
+  "preserved": [
+    "/workspace/agent-flow-evaluation/v0.3.16-preparation/release-goe7o4fp/before",
+    "/workspace/agent-flow-evaluation/v0.3.16-preparation/release-goe7o4fp/after",
+    "/workspace/agent-flow-evaluation/v0.3.16-preparation/release-goe7o4fp/out",
+    "/workspace/agent-flow-evaluation/v0.3.16-preparation/release-goe7o4fp/packages",
+    "/workspace/agent-flow-evaluation/v0.3.16-preparation/release-goe7o4fp/install-verification/base/wheel-env",
+    "/workspace/agent-flow-evaluation/v0.3.16-preparation/release-goe7o4fp/install-verification/head/wheel-env",
+    "/workspace/agent-flow-evaluation/v0.3.16-preparation/release-goe7o4fp/fixtures/af-phase-eval-okfhgv0g/.phase-eval-dependencies",
+    "/workspace/agent-flow-evaluation/cli-auth",
+    "/workspace/toolchains"
+  ]
+}

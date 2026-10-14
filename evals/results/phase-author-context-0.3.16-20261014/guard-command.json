@@ -10,7 +10,7 @@
     "0",
     "-p",
     "no:cacheprovider",
-    "--basetemp=/var/tmp/agent-flow-v0316-final-guards",
+    "--basetemp=/var/tmp/agent-flow-v0316-review-guards",
     "tests/test_phase_eval_context_reads.py::test_catalog_output_is_detected_inside_mixed_command_output",
     "tests/test_phase_eval_context_reads.py::test_path_listing_and_selected_entry_are_not_full_catalog_reads",
     "tests/test_phase_eval_context_reads.py::test_whole_workflow_emitted_by_failed_grep_is_still_observed",
@@ -27,7 +27,8 @@
     "tests/test_phase_eval_context_reads.py::test_cli_reports_broad_context_as_a_failure",
     "tests/test_phase_eval_context_reads.py::test_cli_accepts_required_skill_output",
     "tests/test_phase_eval_context_reads.py::test_malformed_native_evidence_is_not_reported_as_zero_reads",
-    "tests/test_phase_eval_context_reads.py::test_cli_rejects_empty_or_incomplete_native_stream"
+    "tests/test_phase_eval_context_reads.py::test_cli_rejects_empty_or_incomplete_native_stream",
+    "tests/test_phase_eval_context_reads.py::test_cli_requires_reference_catalog_for_filtered_json"
   ],
   "cwd": "/workspace/agent-flow-evaluation/v0316-focused-skill-nlbp3akj/candidate",
   "node_ids": [
@@ -47,6 +48,7 @@
     "tests/test_phase_eval_context_reads.py::test_cli_reports_broad_context_as_a_failure",
     "tests/test_phase_eval_context_reads.py::test_cli_accepts_required_skill_output",
     "tests/test_phase_eval_context_reads.py::test_malformed_native_evidence_is_not_reported_as_zero_reads",
-    "tests/test_phase_eval_context_reads.py::test_cli_rejects_empty_or_incomplete_native_stream"
+    "tests/test_phase_eval_context_reads.py::test_cli_rejects_empty_or_incomplete_native_stream",
+    "tests/test_phase_eval_context_reads.py::test_cli_requires_reference_catalog_for_filtered_json"
   ]
 }

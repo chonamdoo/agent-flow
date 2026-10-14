@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 
-def _has_catalog(output: str, catalog: dict | None) -> bool:
+def _has_catalog(output: str, catalog: dict) -> bool:
     decoder = json.JSONDecoder()
     offset = 0
     while (start := output.find("{", offset)) >= 0:
@@ -32,15 +32,15 @@ def _has_catalog(output: str, catalog: dict | None) -> bool:
                 and isinstance(selection.get("selected_skills"), list)
                 and isinstance(value.get("skills"), list)
                 and isinstance(value.get("links"), list)):
-            if catalog is None or value == catalog:
+            if value == catalog:
                 return True
     return False
 
 
-def context_outputs(stdout: Path, *, catalog: Path | None = None) -> dict:
+def context_outputs(stdout: Path, *, catalog: Path) -> dict:
     """Classify completed Codex commands using output content, including errors."""
     broad = []
-    full_catalog = json.loads(catalog.read_text(encoding="utf-8")) if catalog is not None else None
+    full_catalog = json.loads(catalog.read_text(encoding="utf-8"))
     total_bytes = 0
     commands = 0
     for line in stdout.read_text(encoding="utf-8").splitlines():
@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stdout", type=Path, help="Native Codex stdout.raw")
-    parser.add_argument("--catalog", type=Path, help="Full installed skills/index.json")
+    parser.add_argument("--catalog", required=True, type=Path, help="Full installed skills/index.json")
     args = parser.parse_args(argv)
     result = context_outputs(args.stdout, catalog=args.catalog)
     events = (json.loads(line) for line in args.stdout.read_text(encoding="utf-8").splitlines())

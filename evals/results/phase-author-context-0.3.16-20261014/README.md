@@ -89,7 +89,7 @@ workflow/run metadata에서 선택을 다시 찾도록 안내하던 중복 절�
 
 ## 회귀 확인과 재현
 
-선택한 guard 39개를 명시적 node id로 직렬 실행해 모두 통과했다.
+선택한 guard 40개를 명시적 node id로 직렬 실행해 모두 통과했다.
 `guard-command.json`, `guard-output.log`, `guard-result.json`에 실행을 기록했다.
 첫 실행의 20개 실패는 `/var/tmp/agent-flow-onboarding/.git` 조상에 의해 non-Git fixture가
 추적 상태를 판단하지 못한 문제였다. 독립 임시 경로로 옮겨 같은 코드·단정으로 통과했다.
@@ -122,7 +122,7 @@ python evals/phase_eval_context_reads.py <native-unit>/stdout.raw \
   --catalog <fixture>/.agent-flow/skills/index.json
 ```
 
-전체 catalog/escaped workflow source가 나오면 exit 1이다. malformed stream과 빈/미완료 stream은 오류로 끝난다.
+`--catalog`는 필수이며 실제 설치된 전체 index를 받는다. JSON shape만 보고 전체 catalog로 판정하지 않는다. 전체 catalog/escaped workflow source가 나오면 exit 1이다. malformed stream과 빈/미완료 stream은 오류로 끝난다.
 필요한 한 항목을 추출하거나 필수 SKILL.md를 읽는 동작은 실패시키지 않는다.
 partial/truncated catalog나 모든 raw YAML 읽기를 탐지하는 도구는 아니며 runtime gate가 아니다.
 
@@ -145,3 +145,18 @@ python evals/phase_eval.py --kit before=<before> --kit after=<after> \
 전체 pytest suite와 Parity는 PR CI에 맡긴다. 새 kit의 전체 168-unit 평가·릴리스 게이트·
 태그·Homebrew 배포는 이번 집중 변경에서 실행하지 않았다. #364의 이전 gate는 변경된
 kit을 증명하지 못하므로 배포 전 새 전체 측정 기록이 필요하다.
+
+## PR 리뷰 수정과 테스트 설치 정리
+
+PR #365 리뷰에서 기준 catalog 없이 filtered JSON을 전체 catalog로 세는 오탐을 확인했다.
+API와 CLI 모두 catalog를 필수로 받도록 바꾸고, 기준 없이 실행하면 exit 2, 실제 전체 기준과
+대조한 filtered output은 exit 0인 재현을 추가했다. `review-catalog-before.json`과
+`review-catalog-after.json`에 이전 exit 1 오탐과 수정 결과를 기록했다. 같은 기준 catalog로
+원본 36 native 호출을 재판독해 결과가 같음을 확인했다. 이 수정은 shipped kit/evaluator와
+실제 모델 입력을 바꾸지 않아 추가 모델 측정은 하지 않았다.
+
+사용자 요청에 따라 이전 168-unit과 이번 두 집중 실행의 테스트 설치 중복물을 정리했다.
+생성 source/test/phase/readiness 파일은 각각 압축하고 모든 파일 checksum을 원본과 대조한
+뒤 제거했다. raw 결과·native 로그·SHA-256·kit archive·패키지·배포용 SDK/CLI/인증·공유
+의존 환경은 유지했다. cleanup report 세 개에 결과 hash의 동일성과 source archive hash를
+남겼으며 클라우드의 source archive manifest에는 파일별 checksum이 있다.
