@@ -1,0 +1,1389 @@
+{
+  "units": 168,
+  "native_calls": 616,
+  "duration_minutes": 82.81623573333333,
+  "results_sha256": "e299762ef82a3261217cd23f13a4b390b4ff453670225c1ab8e16dad36efa4ae",
+  "metrics": {
+    "before": {
+      "author_required_read_rate": 1.0,
+      "author_pass_rate": 1.0,
+      "review_correct_rate": 1.0,
+      "defect_detection_rate": 1.0,
+      "false_request_changes_rate": 0.0,
+      "reviewer_read_rate": 1.0,
+      "invalid_rate": 0.0,
+      "author_architecture_lint_pass_rate": 1.0
+    },
+    "after": {
+      "author_required_read_rate": 1.0,
+      "author_pass_rate": 1.0,
+      "review_correct_rate": 1.0,
+      "defect_detection_rate": 1.0,
+      "false_request_changes_rate": 0.0,
+      "reviewer_read_rate": 1.0,
+      "invalid_rate": 0.0,
+      "author_architecture_lint_pass_rate": 1.0
+    }
+  },
+  "token_ratios": {
+    "author": {
+      "uncached_input": 0.8153911978895763,
+      "output": 0.9703870099660198
+    },
+    "review": {
+      "uncached_input": 0.8488631447800538,
+      "output": 0.9421852093075447
+    }
+  },
+  "group_details": [
+    {
+      "scenario": "author",
+      "stack": "app",
+      "mode": "clean",
+      "units": {
+        "before": 3,
+        "after": 3
+      },
+      "totals": {
+        "before": {
+          "input": 1601403,
+          "cached_input": 1437184,
+          "uncached_input": 164219,
+          "output": 16427
+        },
+        "after": {
+          "input": 1471208,
+          "cached_input": 1345408,
+          "uncached_input": 125800,
+          "output": 15284
+        }
+      },
+      "ratios": {
+        "input": 0.9186994154500772,
+        "cached_input": 0.9361417883861775,
+        "uncached_input": 0.7660502134344991,
+        "output": 0.9304194314238753
+      }
+    },
+    {
+      "scenario": "author",
+      "stack": "app",
+      "mode": "local",
+      "units": {
+        "before": 3,
+        "after": 3
+      },
+      "totals": {
+        "before": {
+          "input": 1300243,
+          "cached_input": 1160448,
+          "uncached_input": 139795,
+          "output": 12100
+        },
+        "after": {
+          "input": 1116166,
+          "cached_input": 1011968,
+          "uncached_input": 104198,
+          "output": 11522
+        }
+      },
+      "ratios": {
+        "input": 0.8584287706221068,
+        "cached_input": 0.872049415398191,
+        "uncached_input": 0.7453628527486676,
+        "output": 0.9522314049586776
+      }
+    },
+    {
+      "scenario": "author",
+      "stack": "app",
+      "mode": "team",
+      "units": {
+        "before": 3,
+        "after": 3
+      },
+      "totals": {
+        "before": {
+          "input": 1365249,
+          "cached_input": 1237376,
+          "uncached_input": 127873,
+          "output": 10956
+        },
+        "after": {
+          "input": 1031992,
+          "cached_input": 924416,
+          "uncached_input": 107576,
+          "output": 10660
+        }
+      },
+      "ratios": {
+        "input": 0.7559002057500134,
+        "cached_input": 0.7470776869763112,
+        "uncached_input": 0.8412721997607001,
+        "output": 0.97298284045272
+      }
+    },
+    {
+      "scenario": "author",
+      "stack": "backend",
+      "mode": "clean",
+      "units": {
+        "before": 3,
+        "after": 3
+      },
+      "totals": {
+        "before": {
+          "input": 1294058,
+          "cached_input": 1170176,
+          "uncached_input": 123882,
+          "output": 14919
+        },
+        "after": {
+          "input": 1290575,
+          "cached_input": 1133440,
+          "uncached_input": 157135,
+          "output": 16245
+        }
+      },
+      "ratios": {
+        "input": 0.9973084668538813,
+        "cached_input": 0.9686064318529862,
+        "uncached_input": 1.2684247913336886,
+        "output": 1.0888799517393928
+      }
+    },
+    {
+      "scenario": "author",
+      "stack": "backend",
+      "mode": "local",
+      "units": {
+        "before": 3,
+        "after": 3
+      },
+      "totals": {
+        "before": {
+          "input": 1199748,
+          "cached_input": 1066240,
+          "uncached_input": 133508,
+          "output": 12068
+        },
+        "after": {
+          "input": 810412,
+          "cached_input": 708992,
+          "uncached_input": 101420,
+          "output": 10344
+        }
+      },
+      "ratios": {
+        "input": 0.67548518522223,
+        "cached_input": 0.6649459783913565,
+        "uncached_input": 0.7596548521436918,
+        "output": 0.8571428571428571
+      }
+    },
+    {
+      "scenario": "author",
+      "stack": "backend",
+      "mode": "team",
+      "units": {
+        "before": 3,
+        "after": 3
+      },
+      "totals": {
+        "before": {
+          "input": 1149415,
+          "cached_input": 1022976,
+          "uncached_input": 126439,
+          "output": 10832
+        },
+        "after": {
+          "input": 995112,
+          "cached_input": 875904,
+          "uncached_input": 119208,
+          "output": 10745
+        }
+      },
+      "ratios": {
+        "input": 0.8657551885089372,
+        "cached_input": 0.8562312312312312,
+        "uncached_input": 0.942810367054469,
+        "output": 0.9919682422451994
+      }
+    },
+    {
+      "scenario": "author",
+      "stack": "rn",
+      "mode": "clean",
+      "units": {
+        "before": 3,
+        "after": 3
+      },
+      "totals": {
+        "before": {
+          "input": 1746977,
+          "cached_input": 1531392,
+          "uncached_input": 215585,
+          "output": 18361
+        },
+        "after": {
+          "input": 1696306,
+          "cached_input": 1555072,
+          "uncached_input": 141234,
+          "output": 19815
+        }
+      },
+      "ratios": {
+        "input": 0.970995038858554,
+        "cached_input": 1.015463055834169,
+        "uncached_input": 0.6551197903379178,
+        "output": 1.0791895866238221
+      }
+    },
+    {
+      "scenario": "author",
+      "stack": "rn",
+      "mode": "local",
+      "units": {
+        "before": 3,
+        "after": 3
+      },
+      "totals": {
+        "before": {
+          "input": 1443441,
+          "cached_input": 1273344,
+          "uncached_input": 170097,
+          "output": 13983
+        },
+        "after": {
+          "input": 1149617,
+          "cached_input": 1041408,
+          "uncached_input": 108209,
+          "output": 13165
+        }
+      },
+      "ratios": {
+        "input": 0.7964419744208457,
+        "cached_input": 0.8178528347406514,
+        "uncached_input": 0.636160543689777,
+        "output": 0.9415003933347637
+      }
+    },
+    {
+      "scenario": "author",
+      "stack": "rn",
+      "mode": "team",
+      "units": {
+        "before": 3,
+        "after": 3
+      },
+      "totals": {
+        "before": {
+          "input": 1290533,
+          "cached_input": 1155072,
+          "uncached_input": 135461,
+          "output": 14853
+        },
+        "after": {
+          "input": 1208975,
+          "cached_input": 1054464,
+          "uncached_input": 154511,
+          "output": 14902
+        }
+      },
+      "ratios": {
+        "input": 0.9368028558742783,
+        "cached_input": 0.9128989361702128,
+        "uncached_input": 1.1406308826894827,
+        "output": 1.003298996835656
+      }
+    },
+    {
+      "scenario": "author",
+      "stack": "web",
+      "mode": "clean",
+      "units": {
+        "before": 3,
+        "after": 3
+      },
+      "totals": {
+        "before": {
+          "input": 2774716,
+          "cached_input": 2587008,
+          "uncached_input": 187708,
+          "output": 22532
+        },
+        "after": {
+          "input": 1700474,
+          "cached_input": 1567744,
+          "uncached_input": 132730,
+          "output": 16949
+        }
+      },
+      "ratios": {
+        "input": 0.6128461435332481,
+        "cached_input": 0.6060066300529414,
+        "uncached_input": 0.707108913844908,
+        "output": 0.7522190662169359
+      }
+    },
+    {
+      "scenario": "author",
+      "stack": "web",
+      "mode": "local",
+      "units": {
+        "before": 3,
+        "after": 3
+      },
+      "totals": {
+        "before": {
+          "input": 1388042,
+          "cached_input": 1245184,
+          "uncached_input": 142858,
+          "output": 13254
+        },
+        "after": {
+          "input": 1269503,
+          "cached_input": 1162496,
+          "uncached_input": 107007,
+          "output": 13502
+        }
+      },
+      "ratios": {
+        "input": 0.9145998464023423,
+        "cached_input": 0.93359375,
+        "uncached_input": 0.7490445057329655,
+        "output": 1.0187113324279462
+      }
+    },
+    {
+      "scenario": "author",
+      "stack": "web",
+      "mode": "team",
+      "units": {
+        "before": 3,
+        "after": 3
+      },
+      "totals": {
+        "before": {
+          "input": 1682340,
+          "cached_input": 1529088,
+          "uncached_input": 153252,
+          "output": 15111
+        },
+        "after": {
+          "input": 1559648,
+          "cached_input": 1434112,
+          "uncached_input": 125536,
+          "output": 17069
+        }
+      },
+      "ratios": {
+        "input": 0.9270706278160181,
+        "cached_input": 0.937887158881634,
+        "uncached_input": 0.8191475478297183,
+        "output": 1.12957448216531
+      }
+    },
+    {
+      "scenario": "review",
+      "stack": "app",
+      "mode": "clean",
+      "units": {
+        "before": 4,
+        "after": 4
+      },
+      "totals": {
+        "before": {
+          "input": 6770689,
+          "cached_input": 5456896,
+          "uncached_input": 1313793,
+          "output": 47895
+        },
+        "after": {
+          "input": 5914401,
+          "cached_input": 4794112,
+          "uncached_input": 1120289,
+          "output": 46471
+        }
+      },
+      "ratios": {
+        "input": 0.8735301532827752,
+        "cached_input": 0.8785419403265153,
+        "uncached_input": 0.8527134792162845,
+        "output": 0.970268295229147
+      }
+    },
+    {
+      "scenario": "review",
+      "stack": "app",
+      "mode": "local",
+      "units": {
+        "before": 4,
+        "after": 4
+      },
+      "totals": {
+        "before": {
+          "input": 4682268,
+          "cached_input": 3741056,
+          "uncached_input": 941212,
+          "output": 27637
+        },
+        "after": {
+          "input": 3714181,
+          "cached_input": 2899584,
+          "uncached_input": 814597,
+          "output": 25442
+        }
+      },
+      "ratios": {
+        "input": 0.7932440005569951,
+        "cached_input": 0.7750709959968523,
+        "uncached_input": 0.8654766407568114,
+        "output": 0.9205774867026089
+      }
+    },
+    {
+      "scenario": "review",
+      "stack": "app",
+      "mode": "team",
+      "units": {
+        "before": 4,
+        "after": 4
+      },
+      "totals": {
+        "before": {
+          "input": 3194869,
+          "cached_input": 2529920,
+          "uncached_input": 664949,
+          "output": 20872
+        },
+        "after": {
+          "input": 2772897,
+          "cached_input": 2173440,
+          "uncached_input": 599457,
+          "output": 20136
+        }
+      },
+      "ratios": {
+        "input": 0.8679219711355928,
+        "cached_input": 0.8590943587149,
+        "uncached_input": 0.9015082359699766,
+        "output": 0.9647374472978153
+      }
+    },
+    {
+      "scenario": "review",
+      "stack": "backend",
+      "mode": "clean",
+      "units": {
+        "before": 4,
+        "after": 4
+      },
+      "totals": {
+        "before": {
+          "input": 5834665,
+          "cached_input": 4688000,
+          "uncached_input": 1146665,
+          "output": 44474
+        },
+        "after": {
+          "input": 5046313,
+          "cached_input": 4071168,
+          "uncached_input": 975145,
+          "output": 41124
+        }
+      },
+      "ratios": {
+        "input": 0.8648847877298868,
+        "cached_input": 0.8684232081911263,
+        "uncached_input": 0.8504183872360279,
+        "output": 0.9246750910644421
+      }
+    },
+    {
+      "scenario": "review",
+      "stack": "backend",
+      "mode": "local",
+      "units": {
+        "before": 4,
+        "after": 4
+      },
+      "totals": {
+        "before": {
+          "input": 4410160,
+          "cached_input": 3474048,
+          "uncached_input": 936112,
+          "output": 26294
+        },
+        "after": {
+          "input": 3333033,
+          "cached_input": 2682624,
+          "uncached_input": 650409,
+          "output": 24261
+        }
+      },
+      "ratios": {
+        "input": 0.7557623759682188,
+        "cached_input": 0.7721896761357356,
+        "uncached_input": 0.6947982720016408,
+        "output": 0.9226819806800031
+      }
+    },
+    {
+      "scenario": "review",
+      "stack": "backend",
+      "mode": "team",
+      "units": {
+        "before": 4,
+        "after": 4
+      },
+      "totals": {
+        "before": {
+          "input": 3506773,
+          "cached_input": 2837376,
+          "uncached_input": 669397,
+          "output": 20428
+        },
+        "after": {
+          "input": 2579376,
+          "cached_input": 2076032,
+          "uncached_input": 503344,
+          "output": 18385
+        }
+      },
+      "ratios": {
+        "input": 0.7355411941405959,
+        "cached_input": 0.7316732079216854,
+        "uncached_input": 0.7519364442924005,
+        "output": 0.8999902095163501
+      }
+    },
+    {
+      "scenario": "review",
+      "stack": "rn",
+      "mode": "clean",
+      "units": {
+        "before": 4,
+        "after": 4
+      },
+      "totals": {
+        "before": {
+          "input": 6850133,
+          "cached_input": 5602048,
+          "uncached_input": 1248085,
+          "output": 46464
+        },
+        "after": {
+          "input": 6649481,
+          "cached_input": 5472768,
+          "uncached_input": 1176713,
+          "output": 46853
+        }
+      },
+      "ratios": {
+        "input": 0.9707083059555194,
+        "cached_input": 0.9769227254032811,
+        "uncached_input": 0.942814792261745,
+        "output": 1.0083720730027548
+      }
+    },
+    {
+      "scenario": "review",
+      "stack": "rn",
+      "mode": "local",
+      "units": {
+        "before": 4,
+        "after": 4
+      },
+      "totals": {
+        "before": {
+          "input": 4489145,
+          "cached_input": 3474560,
+          "uncached_input": 1014585,
+          "output": 29045
+        },
+        "after": {
+          "input": 4258325,
+          "cached_input": 3420032,
+          "uncached_input": 838293,
+          "output": 26559
+        }
+      },
+      "ratios": {
+        "input": 0.9485826365599686,
+        "cached_input": 0.9843065021182538,
+        "uncached_input": 0.8262422566862313,
+        "output": 0.9144086761921156
+      }
+    },
+    {
+      "scenario": "review",
+      "stack": "rn",
+      "mode": "team",
+      "units": {
+        "before": 4,
+        "after": 4
+      },
+      "totals": {
+        "before": {
+          "input": 5512561,
+          "cached_input": 4425344,
+          "uncached_input": 1087217,
+          "output": 34706
+        },
+        "after": {
+          "input": 5070411,
+          "cached_input": 4077440,
+          "uncached_input": 992971,
+          "output": 32502
+        }
+      },
+      "ratios": {
+        "input": 0.9197922707794073,
+        "cached_input": 0.9213837387556764,
+        "uncached_input": 0.9133144533244053,
+        "output": 0.9364951305249812
+      }
+    },
+    {
+      "scenario": "review",
+      "stack": "web",
+      "mode": "clean",
+      "units": {
+        "before": 4,
+        "after": 4
+      },
+      "totals": {
+        "before": {
+          "input": 6564381,
+          "cached_input": 5276416,
+          "uncached_input": 1287965,
+          "output": 47102
+        },
+        "after": {
+          "input": 6112119,
+          "cached_input": 4988288,
+          "uncached_input": 1123831,
+          "output": 44603
+        }
+      },
+      "ratios": {
+        "input": 0.9311036333814262,
+        "cached_input": 0.9453932366212217,
+        "uncached_input": 0.8725633072327276,
+        "output": 0.9469449280285338
+      }
+    },
+    {
+      "scenario": "review",
+      "stack": "web",
+      "mode": "local",
+      "units": {
+        "before": 4,
+        "after": 4
+      },
+      "totals": {
+        "before": {
+          "input": 4800659,
+          "cached_input": 3748992,
+          "uncached_input": 1051667,
+          "output": 28571
+        },
+        "after": {
+          "input": 4134392,
+          "cached_input": 3247232,
+          "uncached_input": 887160,
+          "output": 25474
+        }
+      },
+      "ratios": {
+        "input": 0.8612134292396106,
+        "cached_input": 0.866161357506231,
+        "uncached_input": 0.8435750099603772,
+        "output": 0.8916033740506107
+      }
+    },
+    {
+      "scenario": "review",
+      "stack": "web",
+      "mode": "team",
+      "units": {
+        "before": 4,
+        "after": 4
+      },
+      "totals": {
+        "before": {
+          "input": 6222277,
+          "cached_input": 5017856,
+          "uncached_input": 1204421,
+          "output": 36459
+        },
+        "after": {
+          "input": 5434327,
+          "cached_input": 4449664,
+          "uncached_input": 984663,
+          "output": 34436
+        }
+      },
+      "ratios": {
+        "input": 0.8733662934003099,
+        "cached_input": 0.8867659813274833,
+        "uncached_input": 0.8175405443777549,
+        "output": 0.9445130146191613
+      }
+    }
+  ],
+  "author_trial_pairs": [
+    {
+      "stack": "app",
+      "mode": "clean",
+      "trial": 1,
+      "before": {
+        "input": 632964,
+        "uncached_input": 75396,
+        "cached_input": 557568,
+        "output": 5830
+      },
+      "after": {
+        "input": 530099,
+        "uncached_input": 40627,
+        "cached_input": 489472,
+        "output": 5565
+      },
+      "uncached_input_ratio": 0.5388482147594037
+    },
+    {
+      "stack": "app",
+      "mode": "clean",
+      "trial": 2,
+      "before": {
+        "input": 468460,
+        "uncached_input": 41836,
+        "cached_input": 426624,
+        "output": 5618
+      },
+      "after": {
+        "input": 480773,
+        "uncached_input": 42757,
+        "cached_input": 438016,
+        "output": 5434
+      },
+      "uncached_input_ratio": 1.0220145329381394
+    },
+    {
+      "stack": "app",
+      "mode": "clean",
+      "trial": 3,
+      "before": {
+        "input": 499979,
+        "uncached_input": 46987,
+        "cached_input": 452992,
+        "output": 4979
+      },
+      "after": {
+        "input": 460336,
+        "uncached_input": 42416,
+        "cached_input": 417920,
+        "output": 4285
+      },
+      "uncached_input_ratio": 0.9027177730010428
+    },
+    {
+      "stack": "app",
+      "mode": "local",
+      "trial": 1,
+      "before": {
+        "input": 516923,
+        "uncached_input": 45499,
+        "cached_input": 471424,
+        "output": 4337
+      },
+      "after": {
+        "input": 372667,
+        "uncached_input": 33979,
+        "cached_input": 338688,
+        "output": 4131
+      },
+      "uncached_input_ratio": 0.7468076221455416
+    },
+    {
+      "stack": "app",
+      "mode": "local",
+      "trial": 2,
+      "before": {
+        "input": 402853,
+        "uncached_input": 55205,
+        "cached_input": 347648,
+        "output": 3857
+      },
+      "after": {
+        "input": 347008,
+        "uncached_input": 38912,
+        "cached_input": 308096,
+        "output": 3843
+      },
+      "uncached_input_ratio": 0.7048636898831627
+    },
+    {
+      "stack": "app",
+      "mode": "local",
+      "trial": 3,
+      "before": {
+        "input": 380467,
+        "uncached_input": 39091,
+        "cached_input": 341376,
+        "output": 3906
+      },
+      "after": {
+        "input": 396491,
+        "uncached_input": 31307,
+        "cached_input": 365184,
+        "output": 3548
+      },
+      "uncached_input_ratio": 0.8008748816863217
+    },
+    {
+      "stack": "app",
+      "mode": "team",
+      "trial": 1,
+      "before": {
+        "input": 448698,
+        "uncached_input": 50106,
+        "cached_input": 398592,
+        "output": 4001
+      },
+      "after": {
+        "input": 374998,
+        "uncached_input": 41174,
+        "cached_input": 333824,
+        "output": 3785
+      },
+      "uncached_input_ratio": 0.821737915618888
+    },
+    {
+      "stack": "app",
+      "mode": "team",
+      "trial": 2,
+      "before": {
+        "input": 476828,
+        "uncached_input": 39836,
+        "cached_input": 436992,
+        "output": 3373
+      },
+      "after": {
+        "input": 317434,
+        "uncached_input": 32506,
+        "cached_input": 284928,
+        "output": 3384
+      },
+      "uncached_input_ratio": 0.8159955818857315
+    },
+    {
+      "stack": "app",
+      "mode": "team",
+      "trial": 3,
+      "before": {
+        "input": 439723,
+        "uncached_input": 37931,
+        "cached_input": 401792,
+        "output": 3582
+      },
+      "after": {
+        "input": 339560,
+        "uncached_input": 33896,
+        "cached_input": 305664,
+        "output": 3491
+      },
+      "uncached_input_ratio": 0.8936226305660278
+    },
+    {
+      "stack": "backend",
+      "mode": "clean",
+      "trial": 1,
+      "before": {
+        "input": 465144,
+        "uncached_input": 40824,
+        "cached_input": 424320,
+        "output": 5270
+      },
+      "after": {
+        "input": 594830,
+        "uncached_input": 71950,
+        "cached_input": 522880,
+        "output": 6082
+      },
+      "uncached_input_ratio": 1.7624436605918088
+    },
+    {
+      "stack": "backend",
+      "mode": "clean",
+      "trial": 2,
+      "before": {
+        "input": 406598,
+        "uncached_input": 40902,
+        "cached_input": 365696,
+        "output": 4990
+      },
+      "after": {
+        "input": 388547,
+        "uncached_input": 36035,
+        "cached_input": 352512,
+        "output": 5389
+      },
+      "uncached_input_ratio": 0.8810082636545891
+    },
+    {
+      "stack": "backend",
+      "mode": "clean",
+      "trial": 3,
+      "before": {
+        "input": 422316,
+        "uncached_input": 42156,
+        "cached_input": 380160,
+        "output": 4659
+      },
+      "after": {
+        "input": 307198,
+        "uncached_input": 49150,
+        "cached_input": 258048,
+        "output": 4774
+      },
+      "uncached_input_ratio": 1.165907581364456
+    },
+    {
+      "stack": "backend",
+      "mode": "local",
+      "trial": 1,
+      "before": {
+        "input": 478046,
+        "uncached_input": 41822,
+        "cached_input": 436224,
+        "output": 4944
+      },
+      "after": {
+        "input": 254736,
+        "uncached_input": 35856,
+        "cached_input": 218880,
+        "output": 3425
+      },
+      "uncached_input_ratio": 0.8573478073741093
+    },
+    {
+      "stack": "backend",
+      "mode": "local",
+      "trial": 2,
+      "before": {
+        "input": 351310,
+        "uncached_input": 47822,
+        "cached_input": 303488,
+        "output": 3204
+      },
+      "after": {
+        "input": 267305,
+        "uncached_input": 27049,
+        "cached_input": 240256,
+        "output": 3349
+      },
+      "uncached_input_ratio": 0.565618334657689
+    },
+    {
+      "stack": "backend",
+      "mode": "local",
+      "trial": 3,
+      "before": {
+        "input": 370392,
+        "uncached_input": 43864,
+        "cached_input": 326528,
+        "output": 3920
+      },
+      "after": {
+        "input": 288371,
+        "uncached_input": 38515,
+        "cached_input": 249856,
+        "output": 3570
+      },
+      "uncached_input_ratio": 0.8780548969542221
+    },
+    {
+      "stack": "backend",
+      "mode": "team",
+      "trial": 1,
+      "before": {
+        "input": 374408,
+        "uncached_input": 40456,
+        "cached_input": 333952,
+        "output": 3350
+      },
+      "after": {
+        "input": 299382,
+        "uncached_input": 30454,
+        "cached_input": 268928,
+        "output": 3517
+      },
+      "uncached_input_ratio": 0.7527684397864346
+    },
+    {
+      "stack": "backend",
+      "mode": "team",
+      "trial": 2,
+      "before": {
+        "input": 341624,
+        "uncached_input": 35576,
+        "cached_input": 306048,
+        "output": 3629
+      },
+      "after": {
+        "input": 336010,
+        "uncached_input": 58378,
+        "cached_input": 277632,
+        "output": 3689
+      },
+      "uncached_input_ratio": 1.6409377108162806
+    },
+    {
+      "stack": "backend",
+      "mode": "team",
+      "trial": 3,
+      "before": {
+        "input": 433383,
+        "uncached_input": 50407,
+        "cached_input": 382976,
+        "output": 3853
+      },
+      "after": {
+        "input": 359720,
+        "uncached_input": 30376,
+        "cached_input": 329344,
+        "output": 3539
+      },
+      "uncached_input_ratio": 0.6026147162100501
+    },
+    {
+      "stack": "rn",
+      "mode": "clean",
+      "trial": 1,
+      "before": {
+        "input": 550279,
+        "uncached_input": 104711,
+        "cached_input": 445568,
+        "output": 5983
+      },
+      "after": {
+        "input": 577351,
+        "uncached_input": 45383,
+        "cached_input": 531968,
+        "output": 7312
+      },
+      "uncached_input_ratio": 0.43341196244902636
+    },
+    {
+      "stack": "rn",
+      "mode": "clean",
+      "trial": 2,
+      "before": {
+        "input": 588638,
+        "uncached_input": 54238,
+        "cached_input": 534400,
+        "output": 6624
+      },
+      "after": {
+        "input": 503116,
+        "uncached_input": 42572,
+        "cached_input": 460544,
+        "output": 6024
+      },
+      "uncached_input_ratio": 0.7849109480438069
+    },
+    {
+      "stack": "rn",
+      "mode": "clean",
+      "trial": 3,
+      "before": {
+        "input": 608060,
+        "uncached_input": 56636,
+        "cached_input": 551424,
+        "output": 5754
+      },
+      "after": {
+        "input": 615839,
+        "uncached_input": 53279,
+        "cached_input": 562560,
+        "output": 6479
+      },
+      "uncached_input_ratio": 0.9407267462391412
+    },
+    {
+      "stack": "rn",
+      "mode": "local",
+      "trial": 1,
+      "before": {
+        "input": 432502,
+        "uncached_input": 43510,
+        "cached_input": 388992,
+        "output": 4625
+      },
+      "after": {
+        "input": 464663,
+        "uncached_input": 35991,
+        "cached_input": 428672,
+        "output": 5090
+      },
+      "uncached_input_ratio": 0.827189151919099
+    },
+    {
+      "stack": "rn",
+      "mode": "local",
+      "trial": 2,
+      "before": {
+        "input": 443505,
+        "uncached_input": 62833,
+        "cached_input": 380672,
+        "output": 4529
+      },
+      "after": {
+        "input": 371111,
+        "uncached_input": 40231,
+        "cached_input": 330880,
+        "output": 4401
+      },
+      "uncached_input_ratio": 0.64028456384384
+    },
+    {
+      "stack": "rn",
+      "mode": "local",
+      "trial": 3,
+      "before": {
+        "input": 567434,
+        "uncached_input": 63754,
+        "cached_input": 503680,
+        "output": 4829
+      },
+      "after": {
+        "input": 313843,
+        "uncached_input": 31987,
+        "cached_input": 281856,
+        "output": 3674
+      },
+      "uncached_input_ratio": 0.5017253819368197
+    },
+    {
+      "stack": "rn",
+      "mode": "team",
+      "trial": 1,
+      "before": {
+        "input": 462974,
+        "uncached_input": 41086,
+        "cached_input": 421888,
+        "output": 4876
+      },
+      "after": {
+        "input": 411184,
+        "uncached_input": 67504,
+        "cached_input": 343680,
+        "output": 5624
+      },
+      "uncached_input_ratio": 1.6429927469210923
+    },
+    {
+      "stack": "rn",
+      "mode": "team",
+      "trial": 2,
+      "before": {
+        "input": 370047,
+        "uncached_input": 57727,
+        "cached_input": 312320,
+        "output": 4759
+      },
+      "after": {
+        "input": 383168,
+        "uncached_input": 41664,
+        "cached_input": 341504,
+        "output": 4465
+      },
+      "uncached_input_ratio": 0.7217419924818542
+    },
+    {
+      "stack": "rn",
+      "mode": "team",
+      "trial": 3,
+      "before": {
+        "input": 457512,
+        "uncached_input": 36648,
+        "cached_input": 420864,
+        "output": 5218
+      },
+      "after": {
+        "input": 414623,
+        "uncached_input": 45343,
+        "cached_input": 369280,
+        "output": 4813
+      },
+      "uncached_input_ratio": 1.2372571490940842
+    },
+    {
+      "stack": "web",
+      "mode": "clean",
+      "trial": 1,
+      "before": {
+        "input": 831349,
+        "uncached_input": 53621,
+        "cached_input": 777728,
+        "output": 7418
+      },
+      "after": {
+        "input": 536066,
+        "uncached_input": 48514,
+        "cached_input": 487552,
+        "output": 5938
+      },
+      "uncached_input_ratio": 0.9047574644262509
+    },
+    {
+      "stack": "web",
+      "mode": "clean",
+      "trial": 2,
+      "before": {
+        "input": 1068667,
+        "uncached_input": 60027,
+        "cached_input": 1008640,
+        "output": 7555
+      },
+      "after": {
+        "input": 538988,
+        "uncached_input": 42220,
+        "cached_input": 496768,
+        "output": 4871
+      },
+      "uncached_input_ratio": 0.7033501590950739
+    },
+    {
+      "stack": "web",
+      "mode": "clean",
+      "trial": 3,
+      "before": {
+        "input": 874700,
+        "uncached_input": 74060,
+        "cached_input": 800640,
+        "output": 7559
+      },
+      "after": {
+        "input": 625420,
+        "uncached_input": 41996,
+        "cached_input": 583424,
+        "output": 6140
+      },
+      "uncached_input_ratio": 0.56705374021064
+    },
+    {
+      "stack": "web",
+      "mode": "local",
+      "trial": 1,
+      "before": {
+        "input": 454385,
+        "uncached_input": 41457,
+        "cached_input": 412928,
+        "output": 4639
+      },
+      "after": {
+        "input": 475753,
+        "uncached_input": 37865,
+        "cached_input": 437888,
+        "output": 4962
+      },
+      "uncached_input_ratio": 0.9133560074293846
+    },
+    {
+      "stack": "web",
+      "mode": "local",
+      "trial": 2,
+      "before": {
+        "input": 521840,
+        "uncached_input": 62192,
+        "cached_input": 459648,
+        "output": 4991
+      },
+      "after": {
+        "input": 423836,
+        "uncached_input": 35868,
+        "cached_input": 387968,
+        "output": 4245
+      },
+      "uncached_input_ratio": 0.5767301260612298
+    },
+    {
+      "stack": "web",
+      "mode": "local",
+      "trial": 3,
+      "before": {
+        "input": 411817,
+        "uncached_input": 39209,
+        "cached_input": 372608,
+        "output": 3624
+      },
+      "after": {
+        "input": 369914,
+        "uncached_input": 33274,
+        "cached_input": 336640,
+        "output": 4295
+      },
+      "uncached_input_ratio": 0.8486316917034354
+    },
+    {
+      "stack": "web",
+      "mode": "team",
+      "trial": 1,
+      "before": {
+        "input": 537333,
+        "uncached_input": 46709,
+        "cached_input": 490624,
+        "output": 4620
+      },
+      "after": {
+        "input": 482519,
+        "uncached_input": 38743,
+        "cached_input": 443776,
+        "output": 4962
+      },
+      "uncached_input_ratio": 0.8294547089426021
+    },
+    {
+      "stack": "web",
+      "mode": "team",
+      "trial": 2,
+      "before": {
+        "input": 606937,
+        "uncached_input": 50905,
+        "cached_input": 556032,
+        "output": 5544
+      },
+      "after": {
+        "input": 536436,
+        "uncached_input": 39924,
+        "cached_input": 496512,
+        "output": 5650
+      },
+      "uncached_input_ratio": 0.7842844514291327
+    },
+    {
+      "stack": "web",
+      "mode": "team",
+      "trial": 3,
+      "before": {
+        "input": 538070,
+        "uncached_input": 55638,
+        "cached_input": 482432,
+        "output": 4947
+      },
+      "after": {
+        "input": 540693,
+        "uncached_input": 46869,
+        "cached_input": 493824,
+        "output": 6457
+      },
+      "uncached_input_ratio": 0.8423918904345951
+    }
+  ],
+  "review_incorrect": [],
+  "pending_unscored": 8,
+  "interpretation": "Measured token counts; no pricing or monetary cost is inferred. Group increases and individual increases are retained even if the aggregate release gate passes."
+}

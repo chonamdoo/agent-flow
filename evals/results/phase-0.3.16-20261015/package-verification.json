@@ -1,0 +1,45 @@
+{
+  "status": "PASS",
+  "artifacts": [
+    {
+      "kit": "before",
+      "format": "npm",
+      "sha256": "a1d982be7c54a0dab0862651d43b5a4024058acd7a3e2a585ff4f11f4c8d59db",
+      "development_trees": []
+    },
+    {
+      "kit": "before",
+      "format": "sdist",
+      "sha256": "a2c7d3a0f57bb794d06c39a7dba10a4e7f3bb9ee999e4a335b83191eaf04b2f9",
+      "scope": "Archive readability and checksum; direct sdist installation not measured."
+    },
+    {
+      "kit": "before",
+      "format": "wheel",
+      "sha256": "3a6e0b974c993effca87073aaafa0480b877ce921ea06063f591174a6eeaab89",
+      "version": "0.3.15",
+      "checked_namespace": "agent_flow/",
+      "development_trees": []
+    },
+    {
+      "kit": "after",
+      "format": "sdist",
+      "sha256": "09b0b75968ba1e0f72434aacade6d3fc36e590ec829c43629924a61174b38ae3",
+      "scope": "Archive readability and checksum; direct sdist installation not measured."
+    },
+    {
+      "kit": "after",
+      "format": "npm",
+      "sha256": "b02ed5a7eef8a7aa75660a16950ef653cf6178a81f40d0d560ee3457a2731b73",
+      "development_trees": []
+    },
+    {
+      "kit": "after",
+      "format": "wheel",
+      "sha256": "aa925fe862a03e7298d830f334b4bd8d155a7137bb848595637a1bdb3af53c61",
+      "version": "0.3.16",
+      "checked_namespace": "agent_flow/",
+      "development_trees": []
+    }
+  ]
+}

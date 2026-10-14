@@ -1,0 +1,79 @@
+{
+  "status": "FAIL",
+  "failures": [
+    "Incomplete 168-unit measurement",
+    "Native evidence set differs from referenced calls"
+  ],
+  "units": 111,
+  "unique_units": 111,
+  "scenarios": {
+    "author": 37,
+    "review": 74
+  },
+  "results_sha256": "da1dd7e3b44a2b5fcc9b983aceca5963a4ca951f2e45fb5adbe87cbfcaca73ed",
+  "native_calls": 465,
+  "provider_error_events": {
+    "error": 100
+  },
+  "tool_exit_codes": {
+    "0": 13523,
+    "1": 224,
+    "2": 49,
+    "254": 13
+  },
+  "model_flag": "gpt-6.1-sol",
+  "models_reported_by_native_stream": {},
+  "model_observation_limit": "Native stream may omit model identity; requested model flag is verified for every call.",
+  "usage_totals": {
+    "author/before": {
+      "input": 9474894,
+      "uncached_input": 956110,
+      "cached_input": 8518784,
+      "output": 94493
+    },
+    "author/after": {
+      "input": 8033329,
+      "uncached_input": 818737,
+      "cached_input": 7214592,
+      "output": 90862
+    },
+    "review/after": {
+      "input": 42152110,
+      "uncached_input": 8641710,
+      "cached_input": 33510400,
+      "output": 291512
+    },
+    "review/before": {
+      "input": 51666008,
+      "uncached_input": 10691672,
+      "cached_input": 40974336,
+      "output": 340659
+    }
+  },
+  "author_lint": {
+    "before": {
+      "n/a": 12,
+      "pass": 7
+    },
+    "after": {
+      "pass": 6,
+      "n/a": 12
+    }
+  },
+  "author_axis_failures": [],
+  "review_incorrect": [
+    {
+      "unit": [
+        "review",
+        "after",
+        "web",
+        "clean",
+        "clean",
+        1
+      ],
+      "overall": "request-changes",
+      "expected": "approve"
+    }
+  ],
+  "review_unscored": 4
+}

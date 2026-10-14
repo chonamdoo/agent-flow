@@ -1,0 +1,13 @@
+{
+  "status": "PASS",
+  "matrix_combinations": 24,
+  "installer_calls": 96,
+  "automatic_cleanup_checks": 24,
+  "candidate": "f5bee439bddb85d96545236502e49c1e8d62046e",
+  "versions": [
+    "0.3.15",
+    "0.3.16"
+  ],
+  "scope": "Actual npm installers and standalone wheel runtime; no source PYTHONPATH; host settings are not authenticated app-session proof.",
+  "test_fixture_disposal": "Deferred until completed model audit/gate; original results/checksums and deployment environment will be preserved."
+}
