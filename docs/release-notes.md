@@ -1,5 +1,22 @@
 # Release notes
 
+## v0.3.16
+
+v0.3.15 이후 managed worktree에서 project-local skill 스크립트를 실행하고 사본을
+안전하게 정리할 수 있도록 수정했다. [#362](https://github.com/chonamdoo/agent-flow/pull/362)
+
+- 새 worktree 생성과 기존 checkout의 재사용·채택 때 leader의
+  `.agent-flow/local-skills/` 파일을 복사한다. checkout 상대경로로 동봉 스크립트를
+  실행할 수 있다. 기존 checkout 파일은 덮지 않고 `.env`·`.env.*` 파일과
+  디렉터리, symlink는 복사하지 않는다.
+- 복사한 바이트의 기록으로 정상 사본을 알아보므로, 이후 leader에서 skill을
+  고치거나 지워도 그대로인 사본이 자동 정리를 막지 않는다. 사본 실행으로
+  생긴 Python bytecode도 정상 정리를 막지 않는다. checkout에서 수정한 사본과
+  사용자가 추가한 파일·캐시는 계속 보존하며, 정리를 막은 파일 경로를 알린다.
+
+기존 프로젝트는 leader checkout에서 kit을 재설치하고 host 세션을 다시 시작한다.
+기존 worktree의 local skill 사본은 다음 `run`/`start` 재사용 때 채워진다.
+
 ## v0.3.15 (2026-10-12)
 
 v0.3.14 이후의 변경을 정리한다. 실제 모델 평가 168건과 릴리스 게이트를 통과해
