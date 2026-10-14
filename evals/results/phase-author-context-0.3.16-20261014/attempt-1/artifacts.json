@@ -1,0 +1,38 @@
+[
+  {
+    "kit": "before",
+    "file": "/workspace/agent-flow-evaluation/v0316-focused-skill-nlbp3akj/packages/before/agent_flow-0.3.16.tar.gz",
+    "sha256": "cfdc7ea63221c5b9a27df2f2ff6b1300baf396459ec87ac23e263bd6d7ed850d",
+    "bytes": 9722768
+  },
+  {
+    "kit": "before",
+    "file": "/workspace/agent-flow-evaluation/v0316-focused-skill-nlbp3akj/packages/before/agent-flow-kit-0.3.16.tgz",
+    "sha256": "35aa2e76e7c72842c7cf2ffdc2a67842ab3fd8c7eae0757a298382355234caa6",
+    "bytes": 1478518
+  },
+  {
+    "kit": "before",
+    "file": "/workspace/agent-flow-evaluation/v0316-focused-skill-nlbp3akj/packages/before/agent_flow-0.3.16-py3-none-any.whl",
+    "sha256": "6ee12bc4e5ce6dbbf58f010636451a21c2d1b4d759d6ff6aac8b64d24c9abd30",
+    "bytes": 1132037
+  },
+  {
+    "kit": "after",
+    "file": "/workspace/agent-flow-evaluation/v0316-focused-skill-nlbp3akj/packages/after/agent_flow-0.3.16.tar.gz",
+    "sha256": "976749b602af7bcc702c56acb07421ac799566f4583661cb23cfe1a38454acb5",
+    "bytes": 9725222
+  },
+  {
+    "kit": "after",
+    "file": "/workspace/agent-flow-evaluation/v0316-focused-skill-nlbp3akj/packages/after/agent-flow-kit-0.3.16.tgz",
+    "sha256": "44465407bf07b0bf4fe067c447651baea2dcd9aa4ac37a58658c2d05c602335c",
+    "bytes": 1478963
+  },
+  {
+    "kit": "after",
+    "file": "/workspace/agent-flow-evaluation/v0316-focused-skill-nlbp3akj/packages/after/agent_flow-0.3.16-py3-none-any.whl",
+    "sha256": "c21ae6e8a0b5bcedbd47b9330938c4c8bc4b9b8a70fb27e862ce77e15b5a8d54",
+    "bytes": 1132214
+  }
+]

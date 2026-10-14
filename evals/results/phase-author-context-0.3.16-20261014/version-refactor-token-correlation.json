@@ -1,0 +1,36 @@
+{
+  "file_comparisons": [
+    {
+      "file": "evals/phase_eval.py",
+      "same_bytes": true
+    },
+    {
+      "file": "evals/phase_eval_environment.py",
+      "same_bytes": true
+    },
+    {
+      "file": "evals/phase_eval_compare.py",
+      "same_bytes": true
+    },
+    {
+      "file": "bin/agent-flow-kit.mjs",
+      "same_bytes": true
+    },
+    {
+      "file": "lib/installer-shared.mjs",
+      "same_bytes": true
+    },
+    {
+      "file": "skills/code-generation-discipline/SKILL.md",
+      "same_bytes": true
+    },
+    {
+      "file": "skills/agent-flow/SKILL.md",
+      "same_bytes": true
+    }
+  ],
+  "index_before_bytes": 56535,
+  "index_after_bytes": 56535,
+  "index_semantically_equal_after_path_normalization": true,
+  "index_changed_fields": []
+}

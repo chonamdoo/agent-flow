@@ -1,0 +1,35 @@
+{
+  "units": 18,
+  "scope": "Focused author regression; not a complete release gate.",
+  "selected_cases": [
+    [
+      "backend",
+      "clean"
+    ],
+    [
+      "app",
+      "clean"
+    ],
+    [
+      "rn",
+      "local"
+    ]
+  ],
+  "trials": 3,
+  "requested_model": "gpt-6.1-sol",
+  "concurrency": 8,
+  "kits": {
+    "before": "/workspace/agent-flow-evaluation/v0316-focused-dedup-wfko6tbf/before",
+    "after": "/workspace/agent-flow-evaluation/v0316-focused-dedup-wfko6tbf/after"
+  },
+  "kit_digests": {
+    "before": "91644dcc682f62cfda46914581c41c6b0413368c62e4221d7e60f5939eb35fa4",
+    "after": "df560c386d194aec837dd59e59acb27a8dc5b51f084e5e7d48558816b42928ed"
+  },
+  "base_commit": "4ff46ad18baa50348016112016aadf4aa98f1648",
+  "candidate_commit": "4e4908a675c92ff9f9662fe0fb83c479a4e578a3",
+  "evaluator_sha256": "c90abd23647f315c2e2807155a47493f4d7b2fac7d27c68108f3af18298a4d69",
+  "diagnostic_sha256": "4e92faa3353b284830ec5c066d4dc10ae248fdd786fe4e79caead9883c437982",
+  "started_utc": "2026-10-14T12:18:45.648848+00:00",
+  "work": "/workspace/agent-flow-evaluation/v0316-focused-dedup-wfko6tbf/fixtures/af-phase-eval-focused"
+}

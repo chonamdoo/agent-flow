@@ -13,8 +13,9 @@ spec.loader.exec_module(context_reads)
 
 def evidence(tmp_path, *items):
     path = tmp_path / "stdout.raw"
-    path.write_text("\n".join(json.dumps({"type": "item.completed", "item": item})
-                              for item in items), encoding="utf-8")
+    events = [{"type": "item.completed", "item": item} for item in items]
+    events.append({"type": "turn.completed"})
+    path.write_text("\n".join(json.dumps(event) for event in events), encoding="utf-8")
     return path
 
 
@@ -97,3 +98,12 @@ def test_malformed_native_evidence_is_not_reported_as_zero_reads(tmp_path):
     path.write_text("truncated native event\n")
     with pytest.raises(json.JSONDecodeError):
         context_reads.main([str(path)])
+
+
+@pytest.mark.parametrize("content", ["", '{"type":"thread.started"}\n'])
+def test_cli_rejects_empty_or_incomplete_native_stream(tmp_path, content):
+    path = tmp_path / "stdout.raw"
+    path.write_text(content)
+    with pytest.raises(SystemExit) as error:
+        context_reads.main([str(path)])
+    assert error.value.code == 2

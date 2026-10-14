@@ -78,6 +78,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--catalog", type=Path, help="Full installed skills/index.json")
     args = parser.parse_args(argv)
     result = context_outputs(args.stdout, catalog=args.catalog)
+    events = (json.loads(line) for line in args.stdout.read_text(encoding="utf-8").splitlines())
+    if not any(event.get("type") == "turn.completed" for event in events):
+        parser.error("native evidence does not contain a completed turn")
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return int(bool(result["broad_context_outputs"]))
 

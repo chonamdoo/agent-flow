@@ -1,0 +1,29 @@
+{
+  "scope": "Resolved author skill selection; preserve selection/dependencies/missing coverage and reviewer ownership.",
+  "selected_contracts": [
+    224,
+    225,
+    258,
+    275,
+    317,
+    340,
+    354,
+    355,
+    356,
+    362,
+    363
+  ],
+  "history": "function-ancestry.log; 37359ff/#275, 5b8da39/#258, ddacc4c/#225, d2a9e70/#224",
+  "focused_model_cases": [
+    "backend/clean",
+    "app/clean",
+    "rn/local"
+  ],
+  "trials_per_kit_per_case": 3,
+  "native_calls_expected": 18,
+  "model_requested": "gpt-6.1-sol",
+  "concurrency": 8,
+  "full_release_matrix": "Not rerun: user explicitly requested only the known author cases. Existing gate #364 is draft and cannot bind the changed kit.",
+  "regression_checks": "Required skill/doc delivery, planned scope, missing coverage, local/Clean/pending boundaries, reviewer/controller separation; raw native broad-output and usage diagnostics.",
+  "diagnostic_limit": "Raw command output bytes differ from server tokens. Whole catalog is matched against installed JSON; no attribution from path mentions alone. Native workflow source outputs are diagnostic for these phase-scoped fixture tasks."
+}

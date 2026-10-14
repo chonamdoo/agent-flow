@@ -1,0 +1,29 @@
+{
+  "status": "PASS",
+  "failures": [],
+  "units": 18,
+  "native_calls": 18,
+  "results_sha256": "c46112bf100e3a989181d05f3e631184bbc2b9d6f539efeb791bb3a47ca54560",
+  "provider_error_events": [],
+  "tool_exit_codes": {
+    "0": 482,
+    "1": 25,
+    "254": 10,
+    "2": 3,
+    "255": 1
+  },
+  "requested_model": "gpt-6.1-sol",
+  "models_reported_by_native_stream": {},
+  "model_limit": "The requested flag is verified; absent native model identity remains unknown.",
+  "lint": {
+    "before": {
+      "pass": 6,
+      "n/a": 3
+    },
+    "after": {
+      "pass": 6,
+      "n/a": 3
+    }
+  },
+  "pre_implementation_unknown_boundaries": []
+}
