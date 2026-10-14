@@ -170,8 +170,9 @@ python evals/phase_eval_context_reads.py <native-unit>/stdout.raw \
 설치 index와 내용이 같은 JSON 출력만 센다. 그래서 필터 없는 설치(`selected_skills: "all"`)도
 탐지하고, 필터링한 일부 출력은 세지 않는다. `--catalog`는 필수다.
 손상된 JSON 줄, type이 없는 event·item, 문자열이 아닌 command/output, 유효하지 않은 Unicode,
-decoder 한도를 넘게 중첩된 event·catalog, 빈/미완료 stream, 읽을 수 없는 파일은 exit 2로 끝난다.
-command 출력 안의 지나치게 깊은 JSON은 catalog가 아닌 것으로 건너뛴다.
+decoder 한도를 넘는 중첩이나 정수 자릿수가 있는 event·catalog, 빈/미완료 stream, 읽을 수 없는
+파일은 exit 2로 끝난다. event는 `\n`으로만 나누므로 문자열 안의 U+2028·U+0085는 그대로 읽는다.
+command 출력 안에서 decode할 수 없는 JSON은 catalog가 아닌 것으로 건너뛴다.
 필요한 한 항목을 추출하거나 필수 SKILL.md를 읽는 동작은 실패시키지 않는다.
 partial/truncated catalog, 다른 JSON 객체 안에 감싼 catalog, 모든 raw YAML 읽기를 탐지하는
 도구는 아니며 runtime gate가 아니다.

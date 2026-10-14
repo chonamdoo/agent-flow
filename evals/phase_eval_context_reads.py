@@ -24,10 +24,15 @@ class EvidenceError(ValueError):
     """Native evidence or catalog cannot support a classification."""
 
 
+# JSONDecodeError is a ValueError; Python >=3.11 also raises plain ValueError past
+# the integer digit limit, and deep nesting raises RecursionError.
+_UNDECODABLE = (ValueError, RecursionError)
+
+
 def _load_catalog(path: Path) -> dict:
     try:
         catalog = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, RecursionError) as error:
+    except _UNDECODABLE as error:
         raise EvidenceError(f"{path}: catalog is not decodable JSON ({error})") from error
     if not isinstance(catalog, dict):
         raise EvidenceError(f"{path}: catalog is not a JSON object")
@@ -36,10 +41,16 @@ def _load_catalog(path: Path) -> dict:
 
 def _events(stdout: Path) -> list[dict]:
     events = []
-    for number, line in enumerate(stdout.read_text(encoding="utf-8").splitlines(), 1):
+    text = stdout.read_text(encoding="utf-8")
+    # Split on newline only: str.splitlines() also breaks on U+2028/U+0085, which
+    # JSONL writers leave unescaped inside strings.
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    for number, line in enumerate(lines, 1):
         try:
             event = json.loads(line)
-        except (json.JSONDecodeError, RecursionError) as error:
+        except _UNDECODABLE as error:
             raise EvidenceError(f"{stdout}:{number}: event is not decodable JSON ({error})") from error
         if not isinstance(event, dict) or not isinstance(event.get("type"), str):
             raise EvidenceError(f"{stdout}:{number}: event is not a typed JSON object")
@@ -55,7 +66,7 @@ def _has_catalog(output: str, catalog: dict) -> bool:
     while (start := output.find("{", offset)) >= 0:
         try:
             value, end = decoder.raw_decode(output, start)
-        except (json.JSONDecodeError, RecursionError):
+        except _UNDECODABLE:
             offset = start + 1
             continue
         if value == catalog:
@@ -83,9 +94,10 @@ def context_outputs(stdout: Path, *, catalog: Path) -> dict:
         if not isinstance(command, str) or not isinstance(output, str):
             raise EvidenceError(f"{stdout}:{number}: command or output is not a string")
         try:
+            command.encode("utf-8")
             size = len(output.encode("utf-8"))
         except UnicodeEncodeError as error:
-            raise EvidenceError(f"{stdout}:{number}: output is not valid Unicode ({error})") from error
+            raise EvidenceError(f"{stdout}:{number}: command or output is not valid Unicode ({error})") from error
         total_bytes += size
         commands += 1
         kinds = []

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -122,6 +123,8 @@ def test_cli_accepts_required_skill_output(tmp_path, capsys):
     '{"item":{}}\n{"type":"turn.completed"}\n',
     '{"type":"item.completed","item":{"type":"command_execution","command":"cat x",'
     '"aggregated_output":"\\ud800"}}\n{"type":"turn.completed"}\n',
+    '{"type":"item.completed","item":{"type":"command_execution","command":"cat \\ud800",'
+    '"aggregated_output":"ok"}}\n{"type":"turn.completed"}\n',
     "[" * 100000 + "]" * 100000 + '\n{"type":"turn.completed"}\n',
 ])
 def test_malformed_native_evidence_is_not_reported_as_zero_reads(tmp_path, content):
@@ -136,6 +139,30 @@ def test_deeply_nested_command_output_is_scanned_without_crashing(tmp_path, caps
     # Deeper than the json decoder's recursion limit on supported Pythons.
     nested = '{"a":' * 12000 + "0" + "}" * 12000
     path = evidence(tmp_path, command("cat deep.json", nested + "\n" + json.dumps(CATALOG)))
+    assert context_reads.main([str(path), "--catalog", str(installed(tmp_path))]) == 1
+    assert json.loads(capsys.readouterr().out)["skill_catalog_outputs"] == 1
+
+
+def test_unicode_line_separators_inside_strings_do_not_split_events(tmp_path, capsys):
+    event = {"type": "item.completed",
+             "item": command("cat notes.txt", "a\u2028b\u2029c\x85d")}
+    path = tmp_path / "stdout.raw"
+    path.write_text(json.dumps(event, ensure_ascii=False) + '\n{"type":"turn.completed"}\n',
+                    encoding="utf-8")
+    assert context_reads.main([str(path), "--catalog", str(installed(tmp_path))]) == 0
+    assert json.loads(capsys.readouterr().out)["command_count"] == 1
+
+
+@pytest.mark.skipif(not hasattr(sys, "set_int_max_str_digits"),
+                    reason="integer digit limit exists from Python 3.11")
+def test_integer_digit_limit_is_malformed_evidence_but_not_a_scan_crash(tmp_path, capsys):
+    huge = "1" * 5000
+    path = tmp_path / "stdout.raw"
+    path.write_text('{"type":"x","n":' + huge + '}\n{"type":"turn.completed"}\n', encoding="utf-8")
+    with pytest.raises(SystemExit) as error:
+        context_reads.main([str(path), "--catalog", str(installed(tmp_path))])
+    assert error.value.code == 2
+    path = evidence(tmp_path, command("cat n.json", '{"n":' + huge + "}\n" + json.dumps(CATALOG)))
     assert context_reads.main([str(path), "--catalog", str(installed(tmp_path))]) == 1
     assert json.loads(capsys.readouterr().out)["skill_catalog_outputs"] == 1
 
