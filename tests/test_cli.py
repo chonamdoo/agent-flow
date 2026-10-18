@@ -7115,7 +7115,7 @@ if (codexContext !== undefined) {
             bin_dir.mkdir()
             env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
             for review_decision, expected_status in (
-                ("", "pending"),
+                ("", "green"),
                 ("REVIEW_REQUIRED", "pending"),
                 ("APPROVED", "green"),
             ):

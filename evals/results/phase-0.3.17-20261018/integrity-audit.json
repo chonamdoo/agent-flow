@@ -1,0 +1,119 @@
+{
+  "status": "PASS",
+  "failures": [],
+  "units": 168,
+  "unique_units": 168,
+  "scenarios": {
+    "review": 96,
+    "author": 72
+  },
+  "results_sha256": "cba0f21b2a17121a598e2d3a8ef9f9bb34c03f5e8f3bd6ea170a3525f795d1a4",
+  "native_calls": 616,
+  "provider_error_events": {},
+  "tool_exit_codes": {
+    "0": 17900,
+    "2": 143,
+    "1": 262,
+    "127": 36,
+    "254": 27
+  },
+  "model_flag": "gpt-6.1-sol",
+  "models_reported_by_native_stream": {},
+  "model_observation_limit": "Requested flag verified; missing server model identity remains unknown.",
+  "usage_totals": {
+    "review/after": {
+      "input": 68286113,
+      "uncached_input": 12750753,
+      "cached_input": 55535360,
+      "output": 353146
+    },
+    "review/before": {
+      "input": 68726537,
+      "uncached_input": 12741257,
+      "cached_input": 55985280,
+      "output": 357456
+    },
+    "author/before": {
+      "input": 35151050,
+      "uncached_input": 2108490,
+      "cached_input": 33042560,
+      "output": 201616
+    },
+    "author/after": {
+      "input": 33847002,
+      "uncached_input": 1956826,
+      "cached_input": 31890176,
+      "output": 202487
+    }
+  },
+  "author_lint": {
+    "before": {
+      "n/a": 24,
+      "pass": 12
+    },
+    "after": {
+      "pass": 12,
+      "n/a": 24
+    }
+  },
+  "author_axis_failures": [],
+  "review_incorrect": [
+    {
+      "identity": [
+        "review",
+        "before",
+        "backend",
+        "clean",
+        "clean",
+        1
+      ],
+      "overall": "request-changes",
+      "expected": "approve",
+      "defects": {}
+    },
+    {
+      "identity": [
+        "review",
+        "after",
+        "backend",
+        "clean",
+        "clean",
+        1
+      ],
+      "overall": "request-changes",
+      "expected": "approve",
+      "defects": {}
+    },
+    {
+      "identity": [
+        "review",
+        "before",
+        "backend",
+        "clean",
+        "clean",
+        2
+      ],
+      "overall": "request-changes",
+      "expected": "approve",
+      "defects": {}
+    },
+    {
+      "identity": [
+        "review",
+        "after",
+        "backend",
+        "clean",
+        "clean",
+        2
+      ],
+      "overall": "request-changes",
+      "expected": "approve",
+      "defects": {}
+    }
+  ],
+  "review_unscored": 8,
+  "kit_digests": {
+    "before": "3adac1cf09516e0f683186610b3d7b333e0c6ace8597ef492ab7ba4f747cd2d9",
+    "after": "b4fddd0ea3f007f38242e8f8176bf249c2b8e5849ade8da10206fecac0acd612"
+  }
+}

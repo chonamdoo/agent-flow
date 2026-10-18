@@ -1,0 +1,9 @@
+{
+  "status": "PASS",
+  "original_results_sha256": "cba0f21b2a17121a598e2d3a8ef9f9bb34c03f5e8f3bd6ea170a3525f795d1a4",
+  "public_redacted_results_sha256": "1776af7504563223fedae87904f3f38e5008b1e18bdf8858c310553255e323f0",
+  "public_gzip_sha256": "3f4a209bc3902324283894ff84f5ff2940c592a5fb75855e54d2eee7595c2cd4",
+  "private_native_archive_sha256": "a677aaa2a409660524b999c91a59c429cea375e509a03d0fc6d5e5cd7a815abf",
+  "redaction": "Absolute local home, before/after snapshot, fixture-work and nested verification-work prefixes (including resolved /private/var aliases) replaced with placeholders in public results/meta only; verdicts, scores, usage, checksums and source/evaluator/case fingerprints unchanged. Original bytes and native calls preserved privately under the workflow run.",
+  "private_native_archive_files": 3179
+}

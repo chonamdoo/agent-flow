@@ -578,8 +578,10 @@ agent-flow spec approve <spec-id> --run-dir <run-dir>
 For a `due: pre-merge` item, the approval records the published HEAD. It also requires that HEAD
 to have green required CI checks and no unresolved feedback. It does not wait for a GitHub review
 decision: a repository without a review rule has none, and the PR author cannot approve their own
-PR. Entering `merge` still requires `reviewDecision: APPROVED`. In such a repository the merge
-happens on GitHub, and the run continues through the watcher's `merged` route.
+PR. Entering `merge-approval` or `merge` waits when GitHub reports `REVIEW_REQUIRED`;
+an explicit empty or null decision means no required review is waiting. Unknown or missing
+decision data still blocks readiness, and `CHANGES_REQUESTED` still requires feedback handling.
+The workflow's separate user merge-approval pause remains mandatory.
 
 ### Gates
 
@@ -725,9 +727,11 @@ requires explicit user approval to preserve and end it before a focused new run.
 The legacy Node `agent-flow-kit run push-watch-tick` command delegates bound PR
 observation to the Python watcher, so both entry points use the same check
 classification and recorded feedback evidence. It passes `--require-ready` to
-preserve its stricter readiness contract: at least one check must be registered
-and `reviewDecision` must be `APPROVED` before the result can be green. The Python
-watcher also accepts this flag; without it, no-CI repositories remain supported.
+preserve its stricter readiness contract: at least one check must be registered,
+and any GitHub-required review must be approved before the result can be green.
+An explicit empty or null `reviewDecision` does not require a synthetic approval in a
+repository without a review rule. Unknown or missing decision data stays pending.
+The Python watcher also accepts this flag; without it, no-CI repositories remain supported.
 The runner's `merge-approval` and `merge` entries apply the same contract, and
 `merge-approval` then pauses for the user's merge approval. Recording a pre-merge
 SPEC approval applies the contract without the review decision.

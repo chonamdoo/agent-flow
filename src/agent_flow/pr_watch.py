@@ -449,7 +449,9 @@ def _classify(
             pending_checks=pending,
             issue_comments=issue_comments,
         )
-    awaiting_review = require_review_approval and data.get("reviewDecision") != "APPROVED"
+    awaiting_review = require_review_approval and data.get(
+        "reviewDecision", "REVIEW_REQUIRED"
+    ) not in ("APPROVED", "", None)
     if pending or (require_ready and (not rollup or awaiting_review)):
         return PRSnapshot(
             number=number,

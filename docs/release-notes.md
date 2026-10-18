@@ -1,5 +1,21 @@
 # Release notes
 
+## v0.3.17 (준비 중)
+
+다음 patch 후보다. 태그 생성과 실제 배포는 아직 하지 않았다.
+
+- managed project launcher의 `install`이 Python runtime 자산 디렉터리 대신
+  설치기를 만든 kit origin으로 위임한다. Homebrew의 검증된 `opt` 링크를
+  interpreter와 installer가 공유하며 Python 격리와 launcher 무결성을 유지한다.
+  [#368](https://github.com/chonamdoo/agent-flow/pull/368)
+- GitHub가 명시적으로 빈/null `reviewDecision`을 반환하는 저장소는 승인 없는
+  상태를 무한 대기하지 않는다. 필수 리뷰·변경 요청·누락/미지 관측·CI·게시 HEAD
+  검증과 별도의 사용자 병합 승인 단계는 유지한다.
+
+기존 launcher는 active run이 끝난 뒤 leader에서 새 installer로 갱신하고 host
+세션을 다시 시작해야 한다. npx kit cache가 제거된 경우의 installer-missing 실패,
+`update`와 전역 PATH 탐색 문제를 해결한 것으로 확대하지 않는다.
+
 ## v0.3.16
 
 v0.3.15 이후 managed worktree에서 project-local skill 스크립트를 실행하고 사본을
