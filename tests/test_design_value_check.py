@@ -657,7 +657,7 @@ def test_premerge_manual_approval_does_not_wait_for_review_but_merge_entry_does(
     """반증: review 규칙이 없는 저장소는 `reviewDecision`이 비고 작성자는 자기 PR을 승인할 수 없어,
     green 게시 HEAD에서도 pre-merge 수동 승인을 영영 기록하지 못하고 run이 abort로만 끝났다.
 
-    승인 기록은 게시 HEAD와 필수 CI만 본다. merge 진입은 여전히 GitHub 승인을 기다린다.
+    승인 기록은 게시 HEAD와 필수 CI만 본다. merge 진입은 필수 GitHub 승인을 기다린다.
     """
     import agent_flow.pr_watch as pr_watch
     import agent_flow.spec_publication as publication_module
@@ -693,6 +693,7 @@ def test_premerge_manual_approval_does_not_wait_for_review_but_merge_entry_does(
         publication_observer=observe_spec_publication,
     )
     assert read_manual_spec_approvals(run_dir, project_root=project) == {"SPEC-1"}
+    payload["reviewDecision"] = "REVIEW_REQUIRED"
     assert missing_spec_item_evidence(
         project, run_dir, "merge", GATE, publication_observer=observe_spec_publication,
     ) == ["pre-merge SPEC: expected green publication (pending)"]
@@ -1208,7 +1209,7 @@ def test_default_merge_approval_entry_still_requires_review_approval(
     project, run_dir, tmp_path, monkeypatch,
 ):
     """반증: default가 green PR을 곧장 `merge`로 보내면 merge 직전 사용자 승인 pause가 없다.
-    새 `merge-approval` 진입도 merge와 같은 pre-merge gate(GitHub 승인)를 거쳐야 한다."""
+    새 `merge-approval` 진입도 필수 GitHub 승인을 확인하고, 승인 규칙이 없으면 사용자 pause로 간다."""
     import agent_flow.pr_watch as pr_watch
     from agent_flow.core.commands import SafeCommandResult
     from agent_flow.core.phase_workflow import find_kit_root
@@ -1233,7 +1234,7 @@ def test_default_merge_approval_entry_still_requires_review_approval(
     gates.write_text(json.dumps({"produced_by": {"gate_phase": "all", "gate_execution": "local"}}))
     pr = {
         "url": url, "state": "OPEN", "baseRefName": "main", "headRefName": branch, "headRefOid": head,
-        "reviewDecision": "",
+        "reviewDecision": "REVIEW_REQUIRED",
         "statusCheckRollup": [{"name": "pytest", "status": "COMPLETED", "conclusion": "SUCCESS"}],
     }
     monkeypatch.setattr(
@@ -1264,7 +1265,7 @@ def test_default_merge_approval_entry_still_requires_review_approval(
         runner._commit_transition(runner._plan_transition(watch, runner.phases[watch]))
     assert read_meta(run_dir)["current_phase"] == "pr-watch"
 
-    pr["reviewDecision"] = "APPROVED"
+    pr["reviewDecision"] = ""
     runner._commit_transition(runner._plan_transition(watch, runner.phases[watch]))
     assert read_meta(run_dir)["current_phase"] == "merge-approval"
 

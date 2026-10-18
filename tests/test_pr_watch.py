@@ -43,7 +43,9 @@ def test_green():
 @pytest.mark.parametrize(("checks", "decision", "expected"), [
     (None, "APPROVED", "pending"),
     ([], "APPROVED", "pending"),
-    ([{"name": "unit", "conclusion": "SUCCESS"}], None, "pending"),
+    ([{"name": "unit", "conclusion": "SUCCESS"}], None, "green"),
+    ([{"name": "unit", "conclusion": "SUCCESS"}], "", "green"),
+    ([{"name": "unit", "conclusion": "SUCCESS"}], "UNKNOWN", "pending"),
     ([{"name": "unit", "conclusion": "SUCCESS"}], "REVIEW_REQUIRED", "pending"),
     ([{"name": "unit", "conclusion": "SUCCESS"}], "CHANGES_REQUESTED", "has_comments"),
     ([{"name": "unit", "conclusion": "SUCCESS"}], "APPROVED", "green"),

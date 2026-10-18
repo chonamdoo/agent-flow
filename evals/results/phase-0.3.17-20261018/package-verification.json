@@ -1,0 +1,235 @@
+{
+  "packages": {
+    "before": {
+      "version": "0.3.16",
+      "cli_version": "agent-flow 0.3.16",
+      "npm_files": 381,
+      "npm_sha256": "b02ed5a7eef8a7aa75660a16950ef653cf6178a81f40d0d560ee3457a2731b73",
+      "wheel_files": 322,
+      "wheel_sha256": "d5fe319ffc525636ad33af9b4b4bab468fa37163e4ea5781b52da824609e063a",
+      "sdist_sha256": "502f197ce36e3834a683f80b9be4244bea77c9a4e5094a8aef9f1deb14946cab",
+      "manifest_versions_equal": true,
+      "development_material_excluded_from_npm_and_wheel": true
+    },
+    "after": {
+      "version": "0.3.17",
+      "cli_version": "agent-flow 0.3.17",
+      "npm_files": 381,
+      "npm_sha256": "e4abc95aca4be5af0fe5aed63cace4d27aab9ae697aec617d3722d4f960602a0",
+      "wheel_files": 322,
+      "wheel_sha256": "ae2779d906d0129551fc49da0a9ccf1e3166704bf469fc3cf09cab41d71bb310",
+      "sdist_sha256": "24e51768c8208b5a83e9249c367f8c0d1e1dce57cd43662c567f621206be40c7",
+      "manifest_versions_equal": true,
+      "development_material_excluded_from_npm_and_wheel": true
+    }
+  },
+  "installations": [
+    {
+      "kit": "before",
+      "entry": "agent-flow-kit.mjs",
+      "mode": "clean",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "user_root_legacy_memory_and_skill_bytes_preserved": true,
+      "wheel_python_alias_pinned": true,
+      "launcher_receipt_matches": true,
+      "managed_installer_help_exit": 2
+    },
+    {
+      "kit": "before",
+      "entry": "agent-flow-kit.mjs",
+      "mode": "local",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "user_root_legacy_memory_and_skill_bytes_preserved": true,
+      "wheel_python_alias_pinned": true,
+      "launcher_receipt_matches": true,
+      "managed_installer_help_exit": 2
+    },
+    {
+      "kit": "before",
+      "entry": "agent-flow-kit.mjs",
+      "mode": "pending",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "user_root_legacy_memory_and_skill_bytes_preserved": true,
+      "wheel_python_alias_pinned": true,
+      "launcher_receipt_matches": true,
+      "managed_installer_help_exit": 2
+    },
+    {
+      "kit": "before",
+      "entry": "agent-flow-install.mjs",
+      "mode": "clean",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "user_root_legacy_memory_and_skill_bytes_preserved": true,
+      "wheel_python_alias_pinned": true,
+      "launcher_receipt_matches": true,
+      "managed_installer_help_exit": 2
+    },
+    {
+      "kit": "before",
+      "entry": "agent-flow-install.mjs",
+      "mode": "local",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "user_root_legacy_memory_and_skill_bytes_preserved": true,
+      "wheel_python_alias_pinned": true,
+      "launcher_receipt_matches": true,
+      "managed_installer_help_exit": 2
+    },
+    {
+      "kit": "before",
+      "entry": "agent-flow-install.mjs",
+      "mode": "pending",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "user_root_legacy_memory_and_skill_bytes_preserved": true,
+      "wheel_python_alias_pinned": true,
+      "launcher_receipt_matches": true,
+      "managed_installer_help_exit": 2
+    },
+    {
+      "kit": "after",
+      "entry": "agent-flow-kit.mjs",
+      "mode": "clean",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "user_root_legacy_memory_and_skill_bytes_preserved": true,
+      "wheel_python_alias_pinned": true,
+      "launcher_receipt_matches": true,
+      "managed_installer_help_exit": 0
+    },
+    {
+      "kit": "after",
+      "entry": "agent-flow-kit.mjs",
+      "mode": "local",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "user_root_legacy_memory_and_skill_bytes_preserved": true,
+      "wheel_python_alias_pinned": true,
+      "launcher_receipt_matches": true,
+      "managed_installer_help_exit": 0
+    },
+    {
+      "kit": "after",
+      "entry": "agent-flow-kit.mjs",
+      "mode": "pending",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "user_root_legacy_memory_and_skill_bytes_preserved": true,
+      "wheel_python_alias_pinned": true,
+      "launcher_receipt_matches": true,
+      "managed_installer_help_exit": 0
+    },
+    {
+      "kit": "after",
+      "entry": "agent-flow-install.mjs",
+      "mode": "clean",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "user_root_legacy_memory_and_skill_bytes_preserved": true,
+      "wheel_python_alias_pinned": true,
+      "launcher_receipt_matches": true,
+      "managed_installer_help_exit": 0
+    },
+    {
+      "kit": "after",
+      "entry": "agent-flow-install.mjs",
+      "mode": "local",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "user_root_legacy_memory_and_skill_bytes_preserved": true,
+      "wheel_python_alias_pinned": true,
+      "launcher_receipt_matches": true,
+      "managed_installer_help_exit": 0
+    },
+    {
+      "kit": "after",
+      "entry": "agent-flow-install.mjs",
+      "mode": "pending",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "user_root_legacy_memory_and_skill_bytes_preserved": true,
+      "wheel_python_alias_pinned": true,
+      "launcher_receipt_matches": true,
+      "managed_installer_help_exit": 0
+    }
+  ],
+  "limits": [
+    "Host registrations are not native trust or hook execution.",
+    "Fake Homebrew opt rotation is not an actual brew upgrade.",
+    "Source sdist is a source archive, not installed runtime."
+  ],
+  "npm_member_names_equal": true,
+  "npm_changed_members": [
+    "package/docs/USAGE.md",
+    "package/docs/release-notes.md",
+    "package/lib/installer-shared.mjs",
+    "package/package.json",
+    "package/pyproject.toml",
+    "package/src/agent_flow/cli.py",
+    "package/src/agent_flow/pr_watch.py"
+  ]
+}

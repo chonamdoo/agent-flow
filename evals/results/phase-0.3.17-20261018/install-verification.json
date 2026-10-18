@@ -1,0 +1,42 @@
+{
+  "status": "pass",
+  "source": "actual npm packed candidate",
+  "observations": {
+    "npmSha256": "e4abc95aca4be5af0fe5aed63cace4d27aab9ae697aec617d3722d4f960602a0",
+    "managed-install": [
+      {
+        "entry": "agent-flow-kit.mjs",
+        "freshInstall": "pass",
+        "managedHelp": "exit 0",
+        "helpPreservesInstallReceipt": true,
+        "managedInstallToSecondProject": "pass",
+        "secondManagedHelp": "exit 0",
+        "managedReinstallPreservesUserSkill": true,
+        "hooksRemainEnabled": true,
+        "launcherReceiptMatches": true
+      },
+      {
+        "entry": "agent-flow-install.mjs",
+        "freshInstall": "pass",
+        "managedHelp": "exit 0",
+        "helpPreservesInstallReceipt": true,
+        "managedInstallToSecondProject": "pass",
+        "secondManagedHelp": "exit 0",
+        "managedReinstallPreservesUserSkill": true,
+        "hooksRemainEnabled": true,
+        "launcherReceiptMatches": true
+      }
+    ],
+    "origin-rotation": {
+      "quotedKitPath": "pass",
+      "ignoresProjectKitLookalike": true,
+      "optRotationAfterOldKegRemoval": "exit 0",
+      "launcherUnchanged": true
+    }
+  },
+  "limits": [
+    "Host registration files observed; native plugin trust or hook execution not exercised.",
+    "Homebrew opt rotation simulated with quoted-path fixture; real brew upgrade not executed.",
+    "No tag, release, registry publish or deployment executed."
+  ]
+}
