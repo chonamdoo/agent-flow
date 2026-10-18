@@ -692,6 +692,10 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
         return leader_drift_message(exc.drift, worker_root=current.checkout)
     except WorktreeIsolationError as exc:
         return str(exc)
+    if tool_name in _COMMAND_TOOLS and _is_bound_spec_record_command(
+        command, root=root, current=current, cwd=session_cwd,
+    ):
+        return None
     return _scope_violation(
         payload,
         root=root,
@@ -2460,6 +2464,41 @@ def _is_installed_cli(token: str, *, root: Path, cwd: Path | None) -> bool:
         return False
     resolved = _resolve_path(token, cwd or root)
     return resolved is not None and resolved == real_path(installed)
+
+
+def _is_bound_spec_record_command(
+    command: str,
+    *,
+    root: Path,
+    current: ActiveCheckout,
+    cwd: Path | None,
+) -> bool:
+    argv = _direct_shell_argv(command)
+    if (
+        not argv
+        or cwd is None
+        or not _is_within(cwd, current.checkout)
+        or not _is_installed_cli(argv[0], root=root, cwd=cwd)
+    ):
+        return False
+    if argv[1:3] == ("spec", "confirm"):
+        selectors = argv[3:]
+    elif (
+        argv[1:3] == ("spec", "approve")
+        and len(argv) > 3
+        and re.fullmatch(r"SPEC-[1-9]\d*", argv[3].strip().upper())
+    ):
+        selectors = argv[4:]
+    else:
+        return False
+    if len(selectors) == 2 and selectors[0] == "--run-dir":
+        target = selectors[1]
+    elif len(selectors) == 1 and selectors[0].startswith("--run-dir="):
+        target = selectors[0].removeprefix("--run-dir=")
+    else:
+        return False
+    expected = current.runtime_root / ".agent-flow" / "runs" / current.run_id
+    return target == str(expected) and _resolve_path(target, cwd) == expected
 
 
 def _is_lifecycle_command(

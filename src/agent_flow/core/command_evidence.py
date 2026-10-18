@@ -408,6 +408,9 @@ def missing_test_evidence_markers(
     if phase_id not in TEST_EVIDENCE_PHASES:
         return []
     values = completion_gate_marker_values(text)
+    values["regression-test"] = completion_gate_marker_values_exact(text).get(
+        "regression-test", ""
+    )
     change_kind = values.get("change-kind")
     if change_kind is not None and change_kind not in {"bugfix", "feature", "behavior-preserving"}:
         return ["change-kind: bugfix|feature|behavior-preserving"]
@@ -521,7 +524,7 @@ def read_red_reference(
     cwd_root: Path | None = None,
 ) -> tuple[str, str] | None:
     """관측된 RED의 digest와 게시할 내용을 계산한다. 파일은 만들지 않는다."""
-    values = completion_gate_marker_values(text)
+    values = completion_gate_marker_values_exact(text)
     selector = values.get("regression-test", "").strip()
     evidence = read_command_evidence(evidence_root, since=since, cwd_root=cwd_root)
     failures = [
