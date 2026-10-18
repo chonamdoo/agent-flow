@@ -66,6 +66,11 @@ npx <path-to-this-kit> install --root <project-path>
 
 Install always happens in the leader checkout. Running it inside a linked worktree is blocked.
 
+A managed project launcher binds `install` to the kit package that created it, not the project's
+Python runtime asset directory. On Homebrew, that package path follows the verified `opt` link
+so a normal keg upgrade does not strand installer delegation. Refresh existing project launchers
+with the updated installer from the leader only after active runs finish.
+
 ## Architecture selection
 
 Choose the project's architecture before starting a run. The selection authority is

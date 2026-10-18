@@ -7,6 +7,7 @@ brew로 설치한 사용자에게는 `npx <kit> install`이 없다. kit이 Cella
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -42,6 +43,26 @@ def test_a_bare_directory_installs_the_project(tmp_path: Path) -> None:
     assert not (project / "CLAUDE.md").exists()
     assert kit["root_context"] == "opt-in"
     assert (project / ".agent-flow" / "skills").is_dir()
+
+
+def test_managed_launcher_install_help_reaches_the_installer(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert main([str(project)]) == 0
+
+    result = subprocess.run(
+        [str(project / ".agent-flow" / "bin" / "agent-flow"), "install", ".", "--help"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "usage:" in result.stdout.lower()
+    assert "--root" in result.stdout
+    assert "--profile" in result.stdout
+    assert "--architecture-mode" in result.stdout
 
 
 def test_installer_flags_are_validated_by_the_installer(tmp_path: Path) -> None:

@@ -287,8 +287,10 @@ def _with_install_shorthand(argv: list[str], commands: set[str]) -> list[str]:
     return ["install", *argv]
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Run the agent-flow command-line interface."""
+def main(
+    argv: list[str] | None = None, *, installer_root: Path | None = None
+) -> int:
+    """Run the CLI, optionally binding install to the managed launcher's kit."""
     parser = argparse.ArgumentParser(prog="agent-flow")
     parser.add_argument(
         "--version",
@@ -782,7 +784,7 @@ def main(argv: list[str] | None = None) -> int:
     # 않은 디렉터리이고, `update`는 프로젝트가 아니라 kit 자신을 본다.
     if args.command == "install":
         return run_project_install(
-            kit_root=_find_kit_root(),
+            kit_root=installer_root if installer_root is not None else _find_kit_root(),
             target=Path(args.path).expanduser().resolve(),
             extra_args=tuple(args.installer_args),
         )
