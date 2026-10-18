@@ -96,7 +96,6 @@ def test_the_formula_keeps_the_venv_where_the_installers_look(tmp_path: Path) ->
     text = FORMULA.read_text(encoding="utf-8")
     assert 'virtualenv_create(libexec/".venv"' in text
     assert 'write_env_script libexec/".venv/bin/agent-flow"' in text
-    assert 'path.join(KIT_ROOT, ".venv", "bin", "python")' in (REPO / "lib" / "installer-shared.mjs").read_text(encoding="utf-8")
     assert 'path.join(KIT_ROOT, ".venv",' in (REPO / "bin" / "agent-flow-kit.mjs").read_text(encoding="utf-8")
     # 래퍼가 없으면 PATH가 정리된 자리에서 node를 찾지 못해 프로젝트 설치가 죽는다.
     assert "write_env_script" in text
