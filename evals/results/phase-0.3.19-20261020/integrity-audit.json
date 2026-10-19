@@ -1,0 +1,67 @@
+{
+  "status": "PASS",
+  "source_commit": "4da1c7c012dd37465850dbeb28c99e64682f2243",
+  "units": 168,
+  "unique_units": 168,
+  "native_calls": 610,
+  "requested_model_flags": {
+    "gpt-6.1-sol": 610
+  },
+  "sandbox_flags": {
+    "read-only": 538,
+    "workspace-write": 72
+  },
+  "native_exit_codes": {
+    "0": 610
+  },
+  "provider_error_events": {},
+  "usage_totals_all_observed_calls": {
+    "review/before": {
+      "input": 51427520,
+      "cached_input": 41137536,
+      "output": 366073,
+      "uncached_input": 10289984
+    },
+    "review/after": {
+      "input": 50499848,
+      "cached_input": 40379520,
+      "output": 360532,
+      "uncached_input": 10120328
+    },
+    "author/after": {
+      "input": 14165074,
+      "cached_input": 12671360,
+      "output": 160209,
+      "uncached_input": 1493714
+    },
+    "author/before": {
+      "input": 14794815,
+      "cached_input": 13262464,
+      "output": 170515,
+      "uncached_input": 1532351
+    }
+  },
+  "raw_results_sha256": "1ac6a8f380cdb925c9d06dd5ac8ae6a5b06a5acb71f1f4b2fcda0b9cacbac004",
+  "compact_results_sha256": "a1863baf82a3f9922ef579b16dbdbff23612a68e2707bd456f9c467531e47cee",
+  "missing_receipts": [],
+  "pre_model_unit_errors": [
+    {
+      "scenario": "review",
+      "kit": "after",
+      "stack": "app",
+      "mode": "clean",
+      "variant": "defect",
+      "trial": 1,
+      "error_sha256": "9475eacd5800884ad62bfda3c03b3f70f5c62dc2dee31c13fd3dd610db191d75"
+    }
+  ],
+  "failures": [],
+  "model_observation_limit": "Requested model flags checked; native stream model identity not inferred.",
+  "private_native_archive": {
+    "file": "native-evidence.tar.gz",
+    "sha256": "26f20d2e40ff06cdf5f9ec9347693f09772396b63c4dfebfa1d7796990fbdc7e",
+    "bytes": 31662376
+  },
+  "compact_rows_match_raw_metrics": true,
+  "public_record_contains_local_path_prefix": false
+}
