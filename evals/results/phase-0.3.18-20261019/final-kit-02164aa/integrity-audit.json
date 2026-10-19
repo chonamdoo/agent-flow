@@ -1,0 +1,112 @@
+{
+  "status": "PASS",
+  "source_commit": "02164aa7318d3de7a2bcdafda9418a4d822b2f2b",
+  "units": 168,
+  "unique_units": 168,
+  "scenarios": {
+    "author": 72,
+    "review": 96
+  },
+  "native_calls": 616,
+  "requested_model_flags": {
+    "gpt-6.1-sol": 616
+  },
+  "sandbox_flags": {
+    "workspace-write": 72,
+    "read-only": 544
+  },
+  "native_exit_codes": {
+    "0": 603,
+    "-9": 13
+  },
+  "command_receipt_mismatches": 0,
+  "prompt_stdout_stderr_sha256_mismatches": 0,
+  "native_usage_mismatches": 0,
+  "compact_rows_match_raw_metrics": true,
+  "public_record_contains_local_path_prefix": false,
+  "raw_results_sha256": "a7f53d5411e4e6ba5cc62b5d2fda94731100e5835819662a7ab4d68e5c1f442a",
+  "compact_results_sha256": "f6ca433f7f2dc97f51c9191250e130eec6986608255426f61a4d979e8c329467",
+  "models_reported_by_native_stream": {},
+  "model_observation_limit": "Requested gpt-6.1-sol flag verified for all calls; native stream did not supply observed model identity.",
+  "provider_error_events": {},
+  "usage_totals_all_observed_calls": {
+    "author/before": {
+      "input": 33980151,
+      "cached_input": 31864064,
+      "output": 196214,
+      "uncached_input": 2116087
+    },
+    "author/after": {
+      "input": 34563884,
+      "cached_input": 32483200,
+      "output": 192589,
+      "uncached_input": 2080684
+    },
+    "review/after": {
+      "input": 65370924,
+      "cached_input": 53017984,
+      "output": 338027,
+      "uncached_input": 12352940
+    },
+    "review/before": {
+      "input": 68952601,
+      "cached_input": 56227712,
+      "output": 354153,
+      "uncached_input": 12724889
+    }
+  },
+  "author_lint": {
+    "before": {
+      "pass": 12,
+      "n/a": 24
+    },
+    "after": {
+      "pass": 12,
+      "n/a": 24
+    }
+  },
+  "invalid_review_units": [
+    {
+      "kit": "after",
+      "stack": "web",
+      "mode": "clean",
+      "variant": "defect",
+      "trial": 1,
+      "invalid_reviewers": 6,
+      "reason": "reviewer timeout after 1500 seconds"
+    },
+    {
+      "kit": "before",
+      "stack": "web",
+      "mode": "clean",
+      "variant": "clean",
+      "trial": 1,
+      "invalid_reviewers": 1,
+      "reason": "reviewer timeout after 1500 seconds"
+    },
+    {
+      "kit": "after",
+      "stack": "web",
+      "mode": "local",
+      "variant": "defect",
+      "trial": 1,
+      "invalid_reviewers": 6,
+      "reason": "reviewer timeout after 1500 seconds"
+    }
+  ],
+  "review_incorrect": [
+    {
+      "kit": "before",
+      "stack": "rn",
+      "mode": "team",
+      "variant": "clean",
+      "trial": 1,
+      "overall": "request-changes",
+      "expected": "approve"
+    }
+  ],
+  "limits": [
+    "All observed native usage is reported separately from comparator token ratios, which use pairs valid in both kits.",
+    "Timeout units and expected=null units were retained, not rerun or relabeled."
+  ]
+}

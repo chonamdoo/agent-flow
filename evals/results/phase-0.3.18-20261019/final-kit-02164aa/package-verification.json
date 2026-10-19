@@ -1,0 +1,111 @@
+{
+  "source_commit": "02164aa7318d3de7a2bcdafda9418a4d822b2f2b",
+  "artifacts": {
+    "agent-flow-kit-0.3.18.tgz": {
+      "sha256": "80915651422b62eee7907c26cd1589333d49d0f78cf85a4ee93fc9b0eca15beb",
+      "entries": 381,
+      "packaging_checks": "pass"
+    },
+    "agent_flow-0.3.18-py3-none-any.whl": {
+      "sha256": "7158d62e79dc348455184ea75d52f4d76eb3f55a81c77c4cb8760bcb3d81f239",
+      "entries": 320,
+      "packaging_checks": "pass"
+    },
+    "agent_flow-0.3.18.tar.gz": {
+      "sha256": "c94c79346a2667ac09f8e993b7577bbbe25c4eeca793928c8c0389059f06cea5",
+      "entries": 1249,
+      "packaging_checks": "pass"
+    }
+  },
+  "installations": [
+    {
+      "entry_point": "agent-flow-kit.mjs",
+      "architecture_mode": "clean",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "owned_bytes_preserved": true,
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "launcher_workflow_export": "pass"
+    },
+    {
+      "entry_point": "agent-flow-kit.mjs",
+      "architecture_mode": "local",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "owned_bytes_preserved": true,
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "launcher_workflow_export": "pass"
+    },
+    {
+      "entry_point": "agent-flow-kit.mjs",
+      "architecture_mode": "pending",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "owned_bytes_preserved": true,
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "launcher_workflow_export": "pass"
+    },
+    {
+      "entry_point": "agent-flow-install.mjs",
+      "architecture_mode": "clean",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "owned_bytes_preserved": true,
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "launcher_workflow_export": "pass"
+    },
+    {
+      "entry_point": "agent-flow-install.mjs",
+      "architecture_mode": "local",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "owned_bytes_preserved": true,
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "launcher_workflow_export": "pass"
+    },
+    {
+      "entry_point": "agent-flow-install.mjs",
+      "architecture_mode": "pending",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "owned_bytes_preserved": true,
+      "host_registrations": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "launcher_workflow_export": "pass"
+    }
+  ],
+  "versions": {
+    "npm": "0.3.18",
+    "python": "0.3.18",
+    "lock": "0.3.18",
+    "lock_root": "0.3.18"
+  },
+  "wheel_cli": "pass",
+  "limits": [
+    "Synthetic fixture installation only; native host trust/startup and Homebrew upgrade not exercised.",
+    "sdist may contain development source; installed npm/wheel payloads were checked for exclusion."
+  ]
+}
