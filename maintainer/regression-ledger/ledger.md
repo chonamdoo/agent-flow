@@ -402,3 +402,7 @@ guard는 각 PR이 더하거나 고친 테스트다. PR diff에서 뽑았다. "�
 ### 2026-10-19 규범 재진입 RED 시간창 보존에서 보충한 merged PR
 
 - #374 (pr, MERGED) chore(release): record passing v0.3.18 final-kit gate [evidence-recording, gates, installer] — 회귀 금지: v0.3.17과 최종 merged kit `02164aa`를 같은 실행에서 측정한 168개 고유 unit·616개 native 호출과 kit/evaluator/case 지문을 보존한다. 이전 실패 두 번의 compact 기록을 지우거나 최종 측정과 섞지 않고, timeout 무효 unit·`expected=null`·lint n/a를 삭제하거나 pass로 바꾸지 않는다. 요청 model flag 확인과 관측 model 확인, 무효 시행을 뺀 토큰 비율과 전체 비용을 구분한다. 기록이 포함된 main 커밋에만 태그하고 기록이 없는 `02164aa` 자체에는 태그하지 않는다. — guard: 없음 — runtime·evaluator·테스트를 바꾸지 않은 기록 PR이다. comparator의 원본→export→release-workflow 재판정과 패키지 설치 smoke는 PR에 보존된 별도 실행 근거이며 전용 guard는 아니다. 출처: merge `8d94016442e9456e5875d0c558d26b13ccf21ebe`, https://github.com/chonamdoo/agent-flow/pull/374.
+
+### 2026-10-19 v0.3.19 준비에서 보충한 merged PR
+
+- #375 (pr, MERGED) fix(runner): 규범 scope 재진입에서 RED 증거 시간창을 보존한다 [evidence-recording, routing, approval-spec] — 회귀 금지: 규범 scope 확장으로 같은 작성 phase에 재진입할 때만 기존 RED 시간창(`test_evidence_entered_at`, legacy run은 `phase_entered_at`에서 복구)과 `test_code_baseline`을 보존한다. 규범 승인·artifact는 새로 요구하며, 실제 phase 전이와 수정 self-loop에서는 시간창·기준선을 초기화한다. RED 전이의 검사 단계는 읽기 전용이고 commit 단계에서만 증거를 게시한다. — guard: `tests/test_architecture_followup_integration.py::test_norm_reentry_keeps_red_but_requires_fresh_norm_approval`, `tests/test_runner_smoke.py::test_red_transition_inspection_is_read_only_and_commit_publishes_evidence`. 출처: merge `d55daea437d8e88253ce2f375bcd0ab74058f3a7`, https://github.com/chonamdoo/agent-flow/pull/375.

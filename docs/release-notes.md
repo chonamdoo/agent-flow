@@ -1,12 +1,17 @@
 # Release notes
 
-## v0.3.18 (준비 중)
+## v0.3.19 (준비 중)
 
 다음 patch 후보다. 태그 생성과 실제 배포는 아직 하지 않았다.
 
 - 필수 규범의 scope 확장으로 같은 작성 phase에 재진입할 때 기존 RED 실행의
   시간창·코드 기준선을 보존한다. 규범 승인과 artifact는 계속 새로 요구하며,
   실제 phase 전이·수정 self-loop에서는 이전 RED를 재사용하지 않는다.
+  [#375](https://github.com/chonamdoo/agent-flow/pull/375)
+
+## v0.3.18 (2026-10-19)
+
+v0.3.17 이후의 변경이다. [v0.3.18](https://github.com/chonamdoo/agent-flow/releases/tag/v0.3.18)로 배포했다.
 
 - managed worktree에 bind된 host 세션이 leader에 설치된 launcher를 정확한 경로로
   불러 자기 run을 `abort`할 수 있다. leader가 바뀐 뒤에도 열리며, launcher가 설치
