@@ -2050,6 +2050,47 @@ def test_recovery_commands_survive_a_hook_integrity_violation(tmp_path):
     assert "managed hook registration" in blocked.stderr
 
 
+def test_abort_closes_another_worktree_run_only_from_the_leader(tmp_path):
+    """불변: 한 worktree 안에서 다른 worktree의 run을 abort하지 못한다.
+
+    host 경계는 `--worktree <이름>`을 경로로 보지 못한다. 대상과 실행 위치를 함께 아는
+    CLI가 막아야 셸 문법과 무관하게 형제 run이 보존된다.
+    """
+    from agent_flow.artifact import create_run
+
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+    _git("add", ".gitignore", cwd=tmp_path)
+    _git("commit", "-m", "ignore agent-flow", cwd=tmp_path)
+    checkouts = {}
+    for name in ("own", "sibling"):
+        status = W.create_worktree(root=tmp_path, plan=W.plan_worktree(root=tmp_path, name=name))
+        run_dir = create_run(
+            W.worktree_runtime_root(root=tmp_path, name=status.name),
+            "default",
+            f"task-{name}",
+            checkout_identity=f"worktree:{status.name}",
+            checkout_registration_identity=status.registration_identity,
+        )
+        checkouts[name] = (status, run_dir / "active")
+    own, own_marker = checkouts["own"]
+    sibling, sibling_marker = checkouts["sibling"]
+
+    for argv in (
+        ["abort", "--worktree", sibling.name, "--yes"],
+        ["abort", "--root", str(sibling.path), "--yes"],
+    ):
+        refused = _cli(argv, cwd=own.path)
+        assert refused.returncode == 2, f"{argv}: {refused.stdout}{refused.stderr}"
+        assert sibling_marker.is_file(), f"{argv} closed the sibling run"
+
+    assert _cli(["abort", "--worktree", own.name, "--yes"], cwd=own.path).returncode == 0
+    assert not own_marker.exists()
+    from_leader = _cli(["abort", "--worktree", sibling.name, "--yes"], cwd=tmp_path)
+    assert from_leader.returncode == 0, from_leader.stderr
+    assert not sibling_marker.exists()
+
+
 def test_run_rejects_install_with_hooks_explicitly_disabled(tmp_path):
     project = tmp_path / "proj"
     project.mkdir()

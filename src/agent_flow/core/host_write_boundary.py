@@ -662,16 +662,15 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
             active=active,
             cwd=session_cwd,
         )
-    if binding is not None and tool_name in _COMMAND_TOOLS and command:
-        if _is_bound_own_abort(
-            command, root=root, current=binding.checkout, cwd=session_cwd
-        ):
-            return None
-        abort_violation = _bound_abort_violation(
+    if (
+        binding is not None
+        and tool_name in _COMMAND_TOOLS
+        and command
+        and _is_bound_own_abort(
             command, root=root, current=binding.checkout, cwd=session_cwd
         )
-        if abort_violation is not None:
-            return abort_violation
+    ):
+        return None
     if binding is None:
         return _unbound_violation(
             payload,
@@ -836,34 +835,6 @@ def _is_bound_own_abort(
     )
     return options is not None and _abort_targets_own_run(
         options, root=root, current=current, cwd=cwd
-    )
-
-
-def _bound_abort_violation(
-    command: str,
-    *,
-    root: Path,
-    current: ActiveCheckout,
-    cwd: Path | None,
-) -> str | None:
-    """bound 세션의 단순 `abort`가 자기 run이 아닌 대상을 고르면 거절한다.
-
-    `--worktree <이름>`은 경로 literal이 아니라 R1이 보지 못한다. 셸 확장이 낀 명령은
-    대상을 정할 수 없으므로 판정하지 않고 기존 경로로 넘긴다.
-    """
-    if any(character in _LAUNCHER_UNSAFE_CHARACTERS for character in command):
-        return None
-    arguments = _agent_flow_arguments(command, root=root, cwd=cwd)
-    if not arguments or arguments[0] != "abort":
-        return None
-    options = _abort_options(arguments)
-    if options is not None and _abort_targets_own_run(
-        options, root=root, current=current, cwd=cwd
-    ):
-        return None
-    return (
-        f"this host session is bound to {current.checkout}; abort may close only its "
-        "own run, named with --root/--worktree once and in full"
     )
 
 

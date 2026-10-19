@@ -205,6 +205,7 @@ from agent_flow.core.worktree_isolation import (
     git_repo_state,
     git_safe,
     git_toplevel,
+    leader_root_for,
     provider_lease,
     registered_worktree_at,
     same_worktree_path,
@@ -1103,6 +1104,10 @@ def main(
 
     if args.command == "abort":
         try:
+            foreign = _abort_from_another_checkout(root, args.worktree)
+            if foreign is not None:
+                print(foreign, file=sys.stderr)
+                return 2
             # cleanup journal이 있어도 archive 사본을 보지 않는다. abort가 걷어낼
             # active 표식은 살아 있는 run에만 있고, checkout 회수를 막는 것도 그것이다.
             # archive를 보면 봉인된 사본만 고쳐 쓴 채 데드락이 그대로 남는다.
@@ -2690,6 +2695,30 @@ def _pending_cleanup_for_checkout(
 ) -> CleanupTransactionResult | None:
     """core가 검증한 살아 있는 owner 또는 terminal-resume journal을 돌려준다."""
     return find_pending_worktree_cleanup(root=root, selector=name)
+
+
+def _abort_from_another_checkout(root: Path, worktree: str | None) -> str | None:
+    """다른 worktree 안에서 그 worktree가 아닌 run을 닫으려는 abort를 거절한다.
+
+    host 경계는 `--worktree <이름>`을 경로로 보지 못하고 셸 문법도 풀지 않는다. 대상과
+    실제 실행 위치를 함께 아는 곳은 CLI뿐이다. leader나 저장소 밖에서는 그대로 연다.
+    """
+    if worktree is None:
+        return None
+    cwd = Path.cwd()
+    standing_leader = leader_root_for(cwd)
+    if standing_leader is None or not same_worktree_path(standing_leader, root):
+        return None
+    standing = git_toplevel(cwd)
+    if standing is None:
+        return None
+    target = get_worktree_status(root=root, name=worktree).path
+    if same_worktree_path(standing, target):
+        return None
+    return (
+        f"abort for {worktree} must run from the leader checkout or from that worktree; "
+        f"this shell is in {standing}. Nothing was changed."
+    )
 
 
 def _worktree_context(
