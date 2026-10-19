@@ -120,7 +120,7 @@ _BINDING_DIR = "host-sessions"
 # 워커가 **자기 런을 진행시키는** 명령. 면제 범위를 넓히면 안 되는 이유는
 # `_is_lifecycle_command` docstring에 있다.
 _LIFECYCLE_COMMANDS = frozenset({"continue", "run", "start", "status"})
-_ABORT_VALUE_OPTIONS = frozenset({"--root", "--worktree"})
+_TARGET_OPTIONS = frozenset({"--root", "--worktree"})
 _ABORT_SWITCHES = {"--yes": "--yes", "-y": "--yes", "--help": "--help", "-h": "--help"}
 _LAUNCHER_UNSAFE_CHARACTERS = frozenset("$`\\*?[]{}~!#\n\r")
 _Request = TypeVar("_Request")
@@ -662,15 +662,16 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
             active=active,
             cwd=session_cwd,
         )
-    if (
-        binding is not None
-        and tool_name in _COMMAND_TOOLS
-        and command
-        and _is_bound_own_abort(
+    if binding is not None and tool_name in _COMMAND_TOOLS and command:
+        if _is_bound_own_abort(
+            command, root=root, current=binding.checkout, cwd=session_cwd
+        ):
+            return None
+        abort_violation = _bound_abort_violation(
             command, root=root, current=binding.checkout, cwd=session_cwd
         )
-    ):
-        return None
+        if abort_violation is not None:
+            return abort_violation
     if binding is None:
         return _unbound_violation(
             payload,
@@ -735,6 +736,13 @@ def _lifecycle_violation(
             f"this host session is bound to {current.checkout}; refusing to start "
             "a new run until the current worktree session is complete"
         )
+    ambiguous = _ambiguous_target(_agent_flow_arguments(command, root=root, cwd=cwd) or ())
+    if ambiguous is not None:
+        return (
+            f"this host session is bound to {current.checkout}; refusing a lifecycle "
+            f"target the CLI could read differently ({ambiguous}); pass --root and "
+            "--worktree once, in full, without ~"
+        )
     lifecycle_cwd = _declared_command_cwd(payload, command, current.checkout)
     command_root = _lifecycle_root(
         command, current.checkout, root=root, cwd=cwd, base=lifecycle_cwd
@@ -759,6 +767,31 @@ def _lifecycle_violation(
             f"lifecycle cwd is not bound to {current.checkout}; resume the host "
             "from that exact worktree"
         )
+    return None
+
+
+def _ambiguous_target(arguments: tuple[str, ...]) -> str | None:
+    """CLI argparse가 guard와 다르게 읽을 대상 지정. 축약, 중복, `~`로 시작하는 값.
+
+    guard는 정확한 `--root`/`--worktree`의 첫 값만 읽는다. argparse는 축약을 받고
+    마지막 값을 쓰며, 셸은 따옴표 밖의 `~`만 펼친다. 그 차이로 guard가 본 대상과
+    CLI가 쓰는 대상이 갈라진다.
+    """
+    seen: set[str] = set()
+    tokens = iter(arguments)
+    for token in tokens:
+        name, separator, value = token.partition("=")
+        if name not in _TARGET_OPTIONS:
+            if len(name) > 2 and any(option.startswith(name) for option in _TARGET_OPTIONS):
+                return token
+            continue
+        if name in seen:
+            return token
+        seen.add(name)
+        if not separator:
+            value = next(tokens, "")
+        if value.startswith("~"):
+            return token
     return None
 
 
@@ -797,16 +830,56 @@ def _is_bound_own_abort(
     current: ActiveCheckout,
     cwd: Path | None,
 ) -> bool:
-    """자기 run을 닫는 abort. #87 복구 계약에 따라 leader drift 검사보다 먼저 판정한다.
-
-    CLI와 같은 root·worktree 추론으로 대상이 binding의 checkout일 때만 연다. 명시한
-    `--root`는 lifecycle 명령처럼 leader나 자기 checkout이어야 한다. 이 예외는 R1을
-    건너뛰므로, 대상이 자기 run이어도 형제 경로 literal을 통과시키지 않는다.
-    """
+    """자기 run을 닫는 abort. #87 복구 계약에 따라 leader drift 검사보다 먼저 판정한다."""
     options = _bound_launcher_request(
         command, root=root, current=current, cwd=cwd, parse=_abort_options
     )
-    if options is None or cwd is None:
+    return options is not None and _abort_targets_own_run(
+        options, root=root, current=current, cwd=cwd
+    )
+
+
+def _bound_abort_violation(
+    command: str,
+    *,
+    root: Path,
+    current: ActiveCheckout,
+    cwd: Path | None,
+) -> str | None:
+    """bound 세션의 단순 `abort`가 자기 run이 아닌 대상을 고르면 거절한다.
+
+    `--worktree <이름>`은 경로 literal이 아니라 R1이 보지 못한다. 셸 확장이 낀 명령은
+    대상을 정할 수 없으므로 판정하지 않고 기존 경로로 넘긴다.
+    """
+    if any(character in _LAUNCHER_UNSAFE_CHARACTERS for character in command):
+        return None
+    arguments = _agent_flow_arguments(command, root=root, cwd=cwd)
+    if not arguments or arguments[0] != "abort":
+        return None
+    options = _abort_options(arguments)
+    if options is not None and _abort_targets_own_run(
+        options, root=root, current=current, cwd=cwd
+    ):
+        return None
+    return (
+        f"this host session is bound to {current.checkout}; abort may close only its "
+        "own run, named with --root/--worktree once and in full"
+    )
+
+
+def _abort_targets_own_run(
+    options: dict[str, str],
+    *,
+    root: Path,
+    current: ActiveCheckout,
+    cwd: Path | None,
+) -> bool:
+    """CLI와 같은 root·worktree 추론으로 abort 대상이 binding의 checkout인가.
+
+    명시한 `--root`는 lifecycle 명령처럼 leader나 자기 checkout이어야 한다. 대상이
+    자기 run이어도 형제 경로 literal을 R1 밖으로 내보내지 않는다.
+    """
+    if cwd is None:
         return False
     try:
         from agent_flow.core.worktrees import resolve_cli_root_context, resolve_worktree
@@ -833,7 +906,7 @@ def _abort_options(arguments: tuple[str, ...]) -> dict[str, str] | None:
     tokens = iter(arguments[1:])
     for token in tokens:
         name, separator, value = token.partition("=")
-        if name in _ABORT_VALUE_OPTIONS:
+        if name in _TARGET_OPTIONS:
             if not separator:
                 value = next(tokens, "")
             if not value or value.startswith("-"):

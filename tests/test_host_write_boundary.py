@@ -2370,6 +2370,63 @@ def test_lifecycle_paths_resolve_from_the_command_cwd(
     ) is not None, "alias가 hook cwd 기준으로 풀려 형제 run의 continue가 열렸다"
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        "--roo {sibling}",
+        "--root={root} --root={sibling}",
+        "--worktree {own} --worktree {other}",
+        "--work {other}",
+        "--root ~/{leader}",
+    ),
+)
+def test_lifecycle_refuses_targets_argparse_reads_differently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arguments: str
+):
+    """불변: lifecycle 면제는 CLI가 실제로 쓸 대상만 판정한다.
+
+    guard는 정확한 옵션의 첫 값을 읽지만 argparse는 축약을 받고 마지막 값을 쓴다.
+    따옴표 안 `~`는 셸이 펼치지 않는다. 그 틈으로 면제가 형제 run의 continue를 연다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first, second = statuses
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    monkeypatch.setenv("HOME", str(root.parent))
+    tail = arguments.format(
+        root=root, sibling=second.path, own=first.name, other=second.name, leader=root.name
+    )
+
+    assert host_write_boundary_violation(
+        _command_payload(f"agent-flow continue {tail}", cwd=first.path), root
+    ) is not None, f"CLI가 다르게 읽을 대상이 lifecycle 면제를 받았다: {tail}"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "allowed"),
+    (
+        ("--worktree {own} --yes", True),
+        ("--yes", True),
+        ("--worktree {other} --yes", False),
+        ("--work {other} --yes", False),
+        ("--worktree {own} --worktree {other} --yes", False),
+    ),
+)
+def test_bound_abort_closes_only_its_own_run(
+    tmp_path: Path, arguments: str, allowed: bool
+):
+    """불변: bound 세션의 단순 abort는 이름 selector로도 형제 run을 닫지 못한다."""
+    root, statuses, runs = _setup(tmp_path)
+    first, second = statuses
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    tail = arguments.format(own=first.name, other=second.name)
+
+    violation = host_write_boundary_violation(
+        _command_payload(f"agent-flow abort {tail}", cwd=first.path), root
+    )
+
+    assert (violation is None) is allowed, violation
+
+
 def test_command_key_priority_is_independent_of_hash_seed(tmp_path: Path):
     root, statuses, runs = _setup(tmp_path)
     first = statuses[0]

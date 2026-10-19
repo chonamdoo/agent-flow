@@ -357,7 +357,9 @@ A host session bound to that worktree can run this `abort` even after the leader
 only through the leader's installed launcher at its exact path, from inside the worktree, and
 for its own run. Use the leader path that `status` prints after `--root`; a path through a
 symlink is refused. Other options, targets, launchers, and shell syntax stay behind the worktree
-boundary.
+boundary. From that session, a plain `abort` that names another worktree is refused even through
+`agent-flow` on `PATH`, and lifecycle commands must give `--root` and `--worktree` at most once,
+in full, and without `~`.
 
 `abort` leaves the old run's artifacts in the checkout's runtime state. Before `agent-flow
 worktree remove` deletes the runtime state that belongs to that checkout, it copies every run
