@@ -41,7 +41,8 @@ from agent_flow.core.worktrees import (
     worktree_runtime_root,
     write_worktree_manifest,
 )
-from agent_flow.cli import _resolve_cli_root_context, _verified_checkout_identity
+from agent_flow.cli import _verified_checkout_identity
+from agent_flow.core.worktrees import resolve_cli_root_context
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
     adopted_worktree_parent,
@@ -243,7 +244,9 @@ def test_cli_routes_a_home_central_checkout_back_to_its_leader(
     monkeypatch.setenv("HOME", str(home))
     created = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
 
-    config_root, worktree, unadopted = _resolve_cli_root_context(created.path, None)
+    config_root, worktree, unadopted = resolve_cli_root_context(
+        created.path, None, cwd=Path.cwd()
+    )
 
     assert same_worktree_path(config_root, root)
     assert worktree == created.name

@@ -2999,15 +2999,15 @@ def test_tripwire_retry_predicate_only_fires_on_lock_contention():
 
 def test_managed_worktree_context_tolerates_a_missing_checkout_name() -> None:
     """`<marker>/worktrees`로 끝나는 경로에는 이름이 없다. 무가드로 읽으면 IndexError다."""
-    from agent_flow.cli import _managed_worktree_context
+    from agent_flow.core.worktrees import managed_worktree_context
 
     with tempfile.TemporaryDirectory() as temp_dir:
         container = Path(temp_dir) / "proj" / ".agent-flow" / "worktrees"
         container.mkdir(parents=True)
-        assert _managed_worktree_context(container) == (container.parent.parent.resolve(), None)
+        assert managed_worktree_context(container) == (container.parent.parent.resolve(), None)
         checkout = container / "foo"
         checkout.mkdir()
-        assert _managed_worktree_context(checkout) == (container.parent.parent.resolve(), "foo")
+        assert managed_worktree_context(checkout) == (container.parent.parent.resolve(), "foo")
 
 
 def test_checkout_identity_never_emits_a_literal_none() -> None:

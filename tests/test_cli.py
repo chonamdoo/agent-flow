@@ -9495,7 +9495,7 @@ if (codexContext !== undefined) {
         self.assertEqual(result.stdout.strip(), "ok")
 
     def test_python_recognizes_project_omp_worktrees_but_not_home_omp(self) -> None:
-        from agent_flow.cli import _managed_worktree_context
+        from agent_flow.core.worktrees import managed_worktree_context
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -9503,19 +9503,19 @@ if (codexContext !== undefined) {
             project = root / "project"
             with mock.patch.dict(os.environ, {"HOME": str(home)}):
                 self.assertEqual(
-                    _managed_worktree_context(
+                    managed_worktree_context(
                         project / ".omp" / "worktrees" / "feat-task" / "src"
                     ),
                     (project.resolve(), "feat-task"),
                 )
                 self.assertIsNone(
-                    _managed_worktree_context(
+                    managed_worktree_context(
                         home / ".omp" / "worktrees" / "global-task" / "src"
                     )
                 )
 
     def test_python_does_not_treat_user_central_worktrees_as_project_markers(self) -> None:
-        from agent_flow.cli import _managed_worktree_context
+        from agent_flow.core.worktrees import managed_worktree_context
 
         with tempfile.TemporaryDirectory() as temp_dir:
             home = Path(temp_dir) / "home"
@@ -9531,7 +9531,7 @@ if (codexContext !== undefined) {
                 os.environ,
                 {"HOME": str(home), "XDG_STATE_HOME": ""},
             ):
-                self.assertIsNone(_managed_worktree_context(checkout))
+                self.assertIsNone(managed_worktree_context(checkout))
 
 
 

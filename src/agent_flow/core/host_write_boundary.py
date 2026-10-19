@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from agent_flow.core.hook_integrity import project_launcher_violations
 from agent_flow.core.workflow_status import status_value
 from agent_flow.core.worktree_isolation import (
     LEADER_SWEEP_TRACKED_ONLY,
@@ -119,6 +120,9 @@ _BINDING_DIR = "host-sessions"
 # 워커가 **자기 런을 진행시키는** 명령. 면제 범위를 넓히면 안 되는 이유는
 # `_is_lifecycle_command` docstring에 있다.
 _LIFECYCLE_COMMANDS = frozenset({"continue", "run", "start", "status"})
+_ABORT_VALUE_OPTIONS = frozenset({"--root", "--worktree"})
+_ABORT_SWITCHES = {"--yes": "--yes", "-y": "--yes", "--help": "--help", "-h": "--help"}
+_ABORT_UNSAFE_CHARACTERS = frozenset("$`\\*?[]{}~!#\n\r")
 
 
 class HostWriteBoundaryError(RuntimeError):
@@ -657,6 +661,15 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
             active=active,
             cwd=session_cwd,
         )
+    if (
+        binding is not None
+        and tool_name in _COMMAND_TOOLS
+        and command
+        and _is_bound_own_abort(
+            command, root=root, current=binding.checkout, cwd=session_cwd
+        )
+    ):
+        return None
     if binding is None:
         return _unbound_violation(
             payload,
@@ -742,6 +755,62 @@ def _lifecycle_violation(
             "from that exact worktree"
         )
     return None
+
+
+def _is_bound_own_abort(
+    command: str,
+    *,
+    root: Path,
+    current: ActiveCheckout,
+    cwd: Path | None,
+) -> bool:
+    if cwd is None or not _is_within(cwd, current.checkout):
+        return False
+    if any(character in _ABORT_UNSAFE_CHARACTERS for character in command):
+        return False
+    argv = _direct_shell_argv(command)
+    if not argv or argv[0] != str(root / ".agent-flow" / "bin" / "agent-flow"):
+        return False
+    options = _abort_options(argv[1:])
+    if options is None or project_launcher_violations(root):
+        return False
+    try:
+        from agent_flow.core.worktrees import resolve_cli_root_context, resolve_worktree
+
+        requested = Path(options.get("--root", "."))
+        config_root, worktree, _ = resolve_cli_root_context(
+            (requested if requested.is_absolute() else cwd / requested).resolve(),
+            options.get("--worktree"),
+            cwd=cwd,
+        )
+        if worktree is None or real_path(config_root) != root:
+            return False
+        selected = resolve_worktree(root=root, selector=worktree)
+    except (ImportError, OSError, ValueError, RuntimeError, WorktreeIsolationError):
+        return False
+    return selected is not None and real_path(selected.path) == current.checkout
+
+
+def _abort_options(arguments: tuple[str, ...]) -> dict[str, str] | None:
+    if not arguments or arguments[0] != "abort":
+        return None
+    options: dict[str, str] = {}
+    tokens = iter(arguments[1:])
+    for token in tokens:
+        name, separator, value = token.partition("=")
+        if name in _ABORT_VALUE_OPTIONS:
+            if not separator:
+                value = next(tokens, "")
+            if not value or value.startswith("-"):
+                return None
+        elif token in _ABORT_SWITCHES:
+            name, value = _ABORT_SWITCHES[token], ""
+        else:
+            return None
+        if name in options:
+            return None
+        options[name] = value
+    return options
 
 
 def _unbound_violation(

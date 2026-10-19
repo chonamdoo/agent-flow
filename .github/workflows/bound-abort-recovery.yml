@@ -1,0 +1,184 @@
+name: Bound abort recovery
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: "base revision whose packaged kit must show the RED"
+        required: true
+        default: "d986ac4728cb1e67239ac42e010ebe33ae91573c"
+
+jobs:
+  consumer:
+    name: consumer ${{ matrix.kit }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        kit: [base, head]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - name: Pack and extract the kit under test
+        env:
+          REF: ${{ matrix.kit == 'base' && (github.event.pull_request.base.sha || inputs.base_ref) || (github.event.pull_request.head.sha || github.sha) }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/kit-src" "$RUNNER_TEMP/packed" "$RUNNER_TEMP/consumer"
+          git archive "$REF" | tar -x -C "$RUNNER_TEMP/kit-src"
+          (cd "$RUNNER_TEMP/kit-src" && npm pack --pack-destination "$RUNNER_TEMP/packed")
+          tar -xzf "$RUNNER_TEMP"/packed/*.tgz -C "$RUNNER_TEMP/consumer"
+          git rev-parse "$REF" > "$RUNNER_TEMP/consumer/kit-revision.txt"
+          tar -tzf "$RUNNER_TEMP"/packed/*.tgz | sort > "$RUNNER_TEMP/consumer/package-members.txt"
+      - name: Run the installed consumer regression
+        shell: bash
+        env:
+          AGENT_FLOW_CONSUMER_KIT: ${{ runner.temp }}/consumer/package
+          AGENT_FLOW_SKIP_CODEX_TRUST: "1"
+          AGENT_FLOW_NO_UPDATE_CHECK: "1"
+        run: |
+          set +e
+          PYTHONPATH=src python3 -m pytest tests/test_bound_abort_recovery.py -v \
+            -p no:cacheprovider -o addopts="" -n 0 \
+            --junitxml "$RUNNER_TEMP/consumer/junit.xml" 2>&1 | tee "$RUNNER_TEMP/consumer/pytest.log"
+          echo "${PIPESTATUS[0]}" > "$RUNNER_TEMP/consumer/exit-code.txt"
+          exit 0
+      - name: Judge the ${{ matrix.kit }} outcome
+        env:
+          KIT: ${{ matrix.kit }}
+          RESULT_DIR: ${{ runner.temp }}/consumer
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+          import xml.etree.ElementTree as ElementTree
+          from pathlib import Path
+
+          kit = os.environ["KIT"]
+          results = Path(os.environ["RESULT_DIR"])
+          exit_code = int((results / "exit-code.txt").read_text().strip())
+          cases = {}
+          for case in ElementTree.parse(results / "junit.xml").iter("testcase"):
+              outcome = "passed"
+              message = ""
+              for kind in ("error", "failure", "skipped"):
+                  node = case.find(kind)
+                  if node is not None:
+                      outcome = kind
+                      message = (node.get("message") or "") + (node.text or "")
+                      break
+              cases[case.get("name")] = (outcome, message)
+          positive = {name: value for name, value in cases.items()
+                      if name.startswith("test_packaged_canonical_abort_recovers_only_its_bound_run[")}
+          negative = {name: value for name, value in cases.items()
+                      if name.startswith("test_packaged_abort_rejects_foreign_or_unproven_recovery[")}
+          print(f"kit={kit} exit_code={exit_code}")
+          for name, (outcome, _) in sorted(cases.items()):
+              print(f"{outcome}: {name}")
+          problems = []
+          if len(positive) != 2 or len(negative) != 2:
+              problems.append(f"expected two installer cases per test, got {sorted(cases)}")
+          if kit == "base":
+              if exit_code == 0:
+                  problems.append("base kit passed the regression; no RED was observed")
+              for name, (outcome, message) in positive.items():
+                  if outcome != "failure" or "bound-abort-red:" not in message:
+                      problems.append(f"{name}: not the expected guard refusal RED ({outcome})")
+              for name, (outcome, _) in negative.items():
+                  if outcome != "passed":
+                      problems.append(f"{name}: base kit must already refuse every foreign case ({outcome})")
+          else:
+              if exit_code != 0:
+                  problems.append(f"head kit exited {exit_code}")
+              for name, (outcome, _) in {**positive, **negative}.items():
+                  if outcome != "passed":
+                      problems.append(f"{name}: {outcome}")
+          for problem in problems:
+              print(f"::error::{problem}")
+          sys.exit(1 if problems else 0)
+          PY
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bound-abort-consumer-${{ matrix.kit }}
+          path: |
+            ${{ runner.temp }}/consumer/kit-revision.txt
+            ${{ runner.temp }}/consumer/package-members.txt
+            ${{ runner.temp }}/consumer/exit-code.txt
+            ${{ runner.temp }}/consumer/junit.xml
+            ${{ runner.temp }}/consumer/pytest.log
+            ${{ runner.temp }}/packed/*.tgz
+          retention-days: 30
+
+  bound-abort-consumer:
+    if: always()
+    needs: consumer
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require base RED and head GREEN from the same batch
+        env:
+          RESULT: ${{ needs.consumer.result }}
+        run: test "$RESULT" = success
+
+  bound-abort-qa:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - name: architecture-lint
+        env:
+          AGENT_FLOW_NO_UPDATE_CHECK: "1"
+        run: agent-flow architecture-lint --profile python
+
+  bound-abort-type:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e . mypy
+      - run: mypy .
+
+  bound-abort-lint:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .

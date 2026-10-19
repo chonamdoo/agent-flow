@@ -173,11 +173,14 @@ from agent_flow.core.worktrees import (
     worktree_metadata_is_unreachable,
     remove_worktree,
     removable_worktrees,
+    git_common_worktree_root,
+    managed_worktree_context,
+    registered_checkout,
+    resolve_cli_root_context,
     resolve_worktree,
     worktree_branch_exists,
     worktree_runtime_root,
     worktree_runtime_root_for_path,
-    user_worktrees_root,
 )
 from agent_flow.core.hook_integrity import (
     HookIntegrityError,
@@ -199,11 +202,9 @@ from agent_flow.core.worktree_isolation import (
     assert_cwd_bound,
     assert_leader_unchanged,
     capture_leader_snapshot,
-    git_common_dir,
     git_repo_state,
     git_safe,
     git_toplevel,
-    leader_root_for,
     provider_lease,
     registered_worktree_at,
     same_worktree_path,
@@ -794,9 +795,10 @@ def main(
     args._worktree_explicit = bool(getattr(args, "worktree", None))
     requested_root = Path(getattr(args, "root", ".")).resolve()
     root = requested_root
-    root, inferred_worktree, unadopted_checkout = _resolve_cli_root_context(
+    root, inferred_worktree, unadopted_checkout = resolve_cli_root_context(
         root,
         getattr(args, "worktree", None),
+        cwd=Path.cwd(),
     )
     if args.command == "run-command":
         command_argv = args.command_argv
@@ -2588,7 +2590,7 @@ def _print_gate_progress(gate: GateCommand, index: int, total: int) -> None:
 
 def _implicit_pr_watch_run_dir() -> Path | None:
     checkout = Path.cwd()
-    leader = _git_common_worktree_root(checkout)
+    leader = git_common_worktree_root(checkout)
     if leader is not None and not _same_path(leader, checkout):
         for name in known_worktree_names(root=leader):
             status = get_worktree_status(root=leader, name=name)
@@ -2941,7 +2943,7 @@ def _warn_if_cwd_is_other_checkout(*, root: Path, target: Path) -> None:
 def _command_project_root(config_root: Path, requested_root: Path, worktree: str | None) -> Path | None:
     if worktree is None:
         return config_root
-    managed = _managed_worktree_context(requested_root)
+    managed = managed_worktree_context(requested_root)
     if managed is not None and managed[1] == worktree:
         return requested_root
     literal_checkout = config_root / ".agent-flow" / "worktrees" / worktree
@@ -2953,7 +2955,7 @@ def _command_project_root(config_root: Path, requested_root: Path, worktree: str
 def _profile_source_root(config_root: Path, requested_root: Path, worktree: str | None) -> Path:
     if worktree is None:
         return config_root
-    managed = _managed_worktree_context(requested_root)
+    managed = managed_worktree_context(requested_root)
     if managed is not None and managed[1] == worktree:
         return managed[0]
     return config_root
@@ -3419,71 +3421,6 @@ def _print_legacy_js_state_migration(root: Path) -> None:
 
 
 
-def _resolve_cli_root_context(
-    root: Path, worktree: str | None
-) -> tuple[Path, str | None, Path | None]:
-    """(config root, worktree 이름, 채택되지 않은 checkout).
-
-    세 번째 값이 non-None이면 cwd가 이 저장소의 linked worktree인데 agent-flow가
-    채택한 기록이 없다는 뜻이다. 진입 명령은 그 상태에서 멈춘다.
-    """
-    managed = _managed_worktree_context(root)
-    if managed is not None:
-        leader_root, inferred_worktree = managed
-        return leader_root, worktree or inferred_worktree, None
-    cwd_managed = _managed_worktree_context(Path.cwd())
-    if cwd_managed is not None and (_same_path(root, Path.cwd()) or _same_path(root, cwd_managed[0])):
-        leader_root, inferred_worktree = cwd_managed
-        return leader_root, worktree or inferred_worktree, None
-    cwd_leader = leader_root_for(Path.cwd())
-    if cwd_leader is not None and _same_path(root, cwd_leader):
-        # `--root <leader>`로 불렸어도 서 있는 자리가 채택된 checkout이면 그 자리를 쓴다.
-        # JS relay가 언제나 `--root`를 붙여 주므로(`relayPythonRunLifecycle`) 이 분기가
-        # 없으면 채택된 worktree에서 부른 lifecycle 명령이 전부 leader로 접힌다.
-        cwd_checkout = _registered_checkout(leader_root=cwd_leader, path=Path.cwd())
-        if (
-            cwd_checkout is not None
-            and adopted_worktree_parent(root=cwd_leader, path=cwd_checkout) is not None
-        ):
-            return cwd_leader, worktree or cwd_checkout.name, None
-    leader_root = leader_root_for(root)
-    if leader_root is not None:
-        # 경로 모양이 관리 규약과 달라도 이 저장소의 linked worktree다. 인식 근거를
-        # 경로에서 등록부로 옮기는 자리가 여기다.
-        checkout = _registered_checkout(leader_root=leader_root, path=root)
-        if checkout is None:
-            return leader_root, worktree, None
-        if adopted_worktree_parent(root=leader_root, path=checkout) is not None:
-            return leader_root, worktree or checkout.name, None
-        return leader_root, worktree, checkout
-    git_common_root = _git_common_worktree_root(root)
-    if git_common_root is not None:
-        return git_common_root, worktree, None
-    return root, worktree, None
-
-
-def _registered_checkout(*, leader_root: Path, path: Path) -> Path | None:
-    """``path``가 leader가 아닌 checkout에 서 있으면 그 checkout 경로.
-
-    등록부를 읽을 수 없거나 등록 행이 없어도 경로를 돌려준다. 호출자는 그 답을
-    미채택으로 취급해 진입을 막는다 — 증명 실패를 통과로 접으면 격리 없이 leader에서
-    도는 쪽으로 흐른다. leader(또는 그 하위 디렉터리)면 ``None``이다.
-    """
-    top_level = git_toplevel(path)
-    if top_level is None or _same_path(top_level, leader_root):
-        return None
-    try:
-        registered = registered_worktree_at(leader_root, top_level)
-    except WorktreeIsolationError:
-        return top_level
-    if registered is None or registered.prunable:
-        # 등록 행이 없다 = 이 checkout이 이 저장소의 관리 대상이라는 증명이 없다.
-        # 예전처럼 leader로 접으면(디렉터리를 옮긴 worktree가 이 상태다) 사용자가
-        # 서 있는 자리가 아닌 곳에서 런이 돈다. 증명 실패는 통과가 아니다.
-        return top_level
-    return registered.path
-
-
 def _unadopted_next_step(*, root: Path, checkout: Path) -> str:
     """미채택 checkout에서 실제로 통하는 다음 명령 한 줄.
 
@@ -3504,49 +3441,11 @@ def _unadopted_next_step(*, root: Path, checkout: Path) -> str:
     return adopt
 
 
-def _managed_worktree_context(path: Path) -> tuple[Path, str | None] | None:
-    resolved = path.resolve()
-    central_root = user_worktrees_root().resolve()
-    # 사용자 중앙 컨테이너의 `.agent-flow/worktrees`는 프로젝트 marker가 아니다.
-    # 여기서 leader를 HOME으로 오인하면 status/run/start가 실제 저장소를 떠난다.
-    if resolved == central_root or central_root in resolved.parents:
-        return None
-    parts = resolved.parts
-    markers = {".agent-flow", ".codex", ".Codex", ".omp"}
-    for index in range(len(parts) - 2, 0, -1):
-        if parts[index] not in markers or parts[index + 1] != "worktrees":
-            continue
-        root = Path(*parts[:index])
-        if parts[index] in {".codex", ".Codex", ".omp"} and _same_path(root, _home_path()):
-            continue
-        # `<marker>/worktrees`로 끝나는 경로에는 이름이 없다. 무가드로 읽으면 그
-        # 자리에서 IndexError로 죽는다. JS 쌍둥이도 여기서 null을 낸다.
-        return root, parts[index + 2] if index + 2 < len(parts) else None
-    return None
-
-
-def _git_common_worktree_root(root: Path) -> Path | None:
-    # anchor 유도는 sanitize된 git으로만 한다. ambient GIT_DIR/GIT_COMMON_DIR을
-    # 상속한 채 물으면 대답이 다른 저장소를 가리키고, 그 부모가 그대로 config root와
-    # state root가 된다(kit.json을 심은 decoy면 hook 무결성 게이트까지 통과한다).
-    if git_toplevel(root) is None:
-        return None
-    common_path = git_common_dir(root)
-    if common_path is None or common_path.name != ".git":
-        return None
-    return common_path.parent
-
-
 def _same_path(left: Path, right: Path) -> bool:
     try:
         return left.resolve() == right.resolve()
     except OSError:
         return left.absolute() == right.absolute()
-
-
-def _home_path() -> Path:
-    home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or str(Path.home())
-    return Path(home).expanduser()
 
 
 def _latest_run_dir(root: Path) -> Path | None:
@@ -3853,10 +3752,10 @@ def _verified_checkout_identity(*, root: Path, path: Path) -> str | None:
     낡은 기록은 거절이다. 그렇지 않으면 지운 뒤 같은 자리에 다시 만든 checkout이
     앞 checkout의 런타임 상태를 물려받는다.
     """
-    checkout = _registered_checkout(leader_root=root, path=path)
+    checkout = registered_checkout(leader_root=root, path=path)
     if checkout is None:
         return "leader"
-    managed = _managed_worktree_context(checkout)
+    managed = managed_worktree_context(checkout)
     if managed is not None and _same_path(managed[0], root):
         # 이름 없는 컨테이너 경로에서는 `None`이 온다. f-string으로 바로 끼우면
         # 리터럴 `worktree:None`이 나가고 하류가 그걸 이름으로 받는다.
