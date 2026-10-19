@@ -741,15 +741,17 @@ def _lifecycle_violation(
             f"this host session is bound to {root}; refusing a lifecycle command "
             f"for another project root ({command_root})"
         )
+    lifecycle_cwd = _declared_command_cwd(payload, command, current.checkout)
     selector = _worktree_selector(command, root=root, cwd=cwd)
     if selector is not None:
-        selected = _active_checkout(root, selector=selector, active=active)
+        selected = _active_checkout(
+            root, selector=selector, active=active, cwd=lifecycle_cwd
+        )
         if selected is None or selected.checkout != current.checkout:
             return (
                 f"this host session is bound to {current.checkout}; refusing a lifecycle "
                 f"command for another worktree ({selector})"
             )
-    lifecycle_cwd = _declared_command_cwd(payload, command, current.checkout)
     if lifecycle_cwd is None or not _is_within(lifecycle_cwd, current.checkout):
         return (
             f"lifecycle cwd is not bound to {current.checkout}; resume the host "
@@ -1192,6 +1194,7 @@ def _active_checkout(
     selector: str,
     run_id: str | None = None,
     active: tuple[ActiveCheckout, ...] | None = None,
+    cwd: Path | None = None,
 ) -> ActiveCheckout | None:
     """``active``를 주면 그 목록에서 고른다. 열거는 active run 수에 비례해 비싸다.
 
@@ -1199,11 +1202,14 @@ def _active_checkout(
     목록을 갖고 있는데 여기서 다시 열거하면 같은 검증을 두 번 치르고, 그 두 배가
     host hook의 실행 시간 제한을 넘기면 세션이 binding되지 못한 채 guard에 막힌다 —
     run이 늘수록 확실히 막히는 쪽으로 기운다.
+
+    상대 경로 selector는 ``cwd``에서도 푼다. 명령을 판정할 때는 hook 프로세스가 아니라
+    그 명령이 실행될 자리를 넘겨야 CLI와 같은 checkout을 고른다.
     """
     matches: list[ActiveCheckout] = []
     path_candidates = [_resolve_path(selector, root)]
     try:
-        path_candidates.append(_resolve_path(selector, Path.cwd()))
+        path_candidates.append(_resolve_path(selector, cwd if cwd is not None else Path.cwd()))
     except OSError:
         pass
     for context in (_active_checkouts(root) if active is None else active):
