@@ -1397,7 +1397,9 @@ class Runner:
                     evidence_root=self.config_root,
                     text=self._existing_artifact_path(phase).read_text(encoding="utf-8"),
                     profile=self.profile,
-                    since=_meta_timestamp(meta.get("phase_entered_at")),
+                    since=_meta_timestamp(
+                        meta.get("test_evidence_entered_at") or meta.get("phase_entered_at")
+                    ),
                 )
                 if reference:
                     print(f"  [evidence] red-reference: {reference}")
@@ -1751,6 +1753,9 @@ class Runner:
         )
         if entering or meta.get("current_phase") != phase_id or not meta.get("phase_entered_at"):
             meta["phase_entered_at"] = datetime.now(timezone.utc).isoformat()
+            meta.pop("test_evidence_entered_at", None)
+            if phase_id in TEST_EVIDENCE_PHASES:
+                meta["test_evidence_entered_at"] = meta["phase_entered_at"]
             project_root = getattr(self, "project_root", None)
             if project_root is not None:
                 if phase_id in TEST_EVIDENCE_PHASES:
@@ -2341,7 +2346,9 @@ class Runner:
                     text,
                     profile=self.profile,
                     required_markers=required_markers,
-                    since=_meta_timestamp(meta.get("phase_entered_at")),
+                    since=_meta_timestamp(
+                        meta.get("test_evidence_entered_at") or meta.get("phase_entered_at")
+                    ),
                     # 관측 로그는 저장소 전체가 공유한다. cwd를 좁히지 않으면 형제
                     # worktree에서 돈 테스트가 이 run의 증거로 잡힌다.
                     cwd_root=self.project_root,
@@ -2638,8 +2645,13 @@ class Runner:
                 write_run_subpath_text(self.run_dir, history, text)
             meta = read_meta(self.run_dir)
             pr_fix_baseline = meta.get("pr_fix_baseline")
+            test_entered_at = meta.get("test_evidence_entered_at") or meta.get("phase_entered_at")
+            test_baseline = meta.get("test_code_baseline")
             phase_index = next(index for index, item in enumerate(self.phases) if item.id == phase.id)
             self._advance_phase(meta, phase_index, blocked=False)
+            if phase.id in TEST_EVIDENCE_PHASES and test_entered_at:
+                meta["test_evidence_entered_at"] = test_entered_at
+                meta["test_code_baseline"] = test_baseline
             if phase.id in {"pr-comment-fix", "pr-ci-fix"}:
                 meta["pr_fix_baseline"] = pr_fix_baseline
             write_meta(self.run_dir, meta)
