@@ -1715,6 +1715,10 @@ class _CommandWord:
     # bare 이름과 같게 볼 수 있는 자리는 여기뿐이다 — 인수 자리의 launcher 경로는
     # 쓰기 대상일 수 있다.
     command: bool = False
+    # 원문에서 이 낱말이 차지한 자리 `[start, end)`. 인용·역슬래시까지 포함한다.
+    # 치환 안의 낱말도 바깥 원문 기준이다. 알 수 없으면 -1이다.
+    start: int = -1
+    end: int = -1
 
 
 def _leading_command_words(command: str) -> tuple[_CommandWord, ...]:
@@ -1775,6 +1779,7 @@ def _absorb_command(
     words: list["_CommandWord"],
     segment: int,
     depth: int,
+    offset: int,
 ) -> int:
     """치환 안의 명령을 같은 목록에 넣는다. 다음 순번을 돌려준다.
 
@@ -1795,7 +1800,9 @@ def _absorb_command(
     for word in inner:
         words.append(
             _CommandWord(
-                word.text, word.truncated, base + word.segment, word.prefixed, word.command
+                word.text, word.truncated, base + word.segment, word.prefixed, word.command,
+                word.start + offset if word.start >= 0 else -1,
+                word.end + offset if word.end >= 0 else -1,
             )
         )
     return base + max((word.segment for word in inner), default=0) + 1
@@ -1848,6 +1855,11 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
     # 바로 앞이 리다이렉션 연산자였는가. 다음 낱말은 명령 이름이 아니라 대상이다 —
     # `>& <launcher>`처럼 `&`가 구분자로 읽혀도 대상이다.
     redirect_target = False
+    # 이 낱말이 원문에서 시작한 자리. 아직 낱말이 없으면 -1이다.
+    word_start = -1
+    # 이 낱말에 인용이나 역슬래시가 있었는가. 인용된 `'if'`는 예약어가 아니라 명령
+    # 이름이다 — 예약어로 읽으면 그 뒤의 인수가 명령 이름 자리로 오인된다.
+    quoted = False
     segment = 0
     # 이 줄이 끝나면 본문을 건너뛸 here-document 표식들.
     heredocs: list[str] = []
@@ -1855,22 +1867,23 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
     index = 0
     length = len(command)
 
-    def flush(*, ends_command: bool = False) -> None:
+    def flush(*, end: int, ends_command: bool = False) -> None:
         nonlocal current, dynamic, truncated, started, assignment, prefixed
-        nonlocal command_position, segment, redirect_target
+        nonlocal command_position, segment, redirect_target, word_start, quoted
         if started:
             text = "".join(current)
+            target = redirect_target
             words.append(
                 _CommandWord(
                     text, truncated, segment, prefixed,
-                    command_position and not redirect_target,
+                    command_position and not target, word_start, end,
                 )
             )
             redirect_target = False
             # 낱말이 실제로 있었을 때만 자리를 소비한다. 빈 flush(구분자 뒤 공백)가
-            # 자리를 지우면 `true && VAR=../sib/f cmd`의 대입을 놓친다. 대입과 예약어는
-            # 명령 이름이 아니므로 그 뒤도 여전히 명령 앞자리다.
-            if not assignment and text not in _SHELL_KEYWORDS:
+            # 자리를 지우면 `true && VAR=../sib/f cmd`의 대입을 놓친다. 대입과 예약어,
+            # 리다이렉션 대상은 명령 이름이 아니므로 그 뒤도 여전히 명령 앞자리다.
+            if not assignment and not target and (quoted or text not in _SHELL_KEYWORDS):
                 command_position = False
         if ends_command:
             command_position = True
@@ -1881,8 +1894,11 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
         started = False
         assignment = False
         prefixed = False
+        word_start = -1
+        quoted = False
 
     while index < length:
+        position = index
         char = command[index]
         index += 1
         if char == "\\" and quote != "'":
@@ -1891,6 +1907,8 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
                 index += 1
                 continue
             started = True
+            quoted = True
+            word_start = position if word_start < 0 else word_start
             # `"` 안에서 역슬래시는 정해진 몇 글자 앞에서만 이스케이프다(POSIX).
             # 그 밖에서는 역슬래시가 이름의 일부다 — `"a\ b"`는 `a b`가 아니라
             # `a\ b`이고, 둘을 같게 보면 없는 경로로 판정한다.
@@ -1913,9 +1931,10 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             started = True
             dynamic = True
             truncated = True
+            word_start = position if word_start < 0 else word_start
             end = _skip_substitution(command, index + 1)
             segment = _absorb_command(
-                command[index + 1 : max(end - 1, index + 1)], words, segment, depth
+                command[index + 1 : max(end - 1, index + 1)], words, segment, depth, index + 1
             )
             index = end
             continue
@@ -1924,19 +1943,22 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             started = True
             dynamic = True
             truncated = True
+            word_start = position if word_start < 0 else word_start
             index = _skip_braces(command, index + 1)
             continue
         if char == "`":
             started = True
             dynamic = True
             truncated = True
+            word_start = position if word_start < 0 else word_start
             end = _skip_backticks(command, index)
             segment = _absorb_command(
-                command[index : max(end - 1, index)], words, segment, depth
+                command[index : max(end - 1, index)], words, segment, depth, index
             )
             index = end
             continue
         if char == "$":
+            word_start = position if word_start < 0 else word_start
             if index < length and command[index] in "'\"":
                 continue
             dynamic = True
@@ -1951,25 +1973,27 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             continue
         if char in "'\"":
             quote = char
+            quoted = True
+            word_start = position if word_start < 0 else word_start
             # 빈 인용도 인수 하나다. `cd ""`의 자리를 잃으면 다음 낱말이 `cd`의
             # 대상으로 읽힌다.
             started = True
             continue
         if char in _COMMAND_SEPARATORS:
-            flush(ends_command=True)
+            flush(end=position, ends_command=True)
             if char == "\n" and heredocs:
                 index = _skip_heredoc_bodies(command, index, heredocs)
                 heredocs = []
             continue
         if char.isspace():
-            flush()
+            flush(end=position)
             continue
         if char == "<" and command[index : index + 2] == "<<":
             # `<<<`는 herestring이다. 본문이 없으므로 세 글자를 함께 소비하고 낱말만
             # 끊는다. 첫 `<`에서 걸러내지 않으면 두 번째 `<`가 here-document로 읽혀,
             # 뒤따르는 줄이 본문으로 버려진다.
             index += 2
-            flush()
+            flush(end=position)
             redirect_target = True
             continue
         if char == "<" and command[index : index + 1] == "<":
@@ -1978,12 +2002,12 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             index, delimiter = _read_heredoc_delimiter(command, index + 1)
             if delimiter:
                 heredocs.append(delimiter)
-            flush()
+            flush(end=position)
             continue
         if char in _REDIRECTIONS:
             # 리다이렉션은 낱말만 끊는다. 명령 앞자리를 되돌리면 `cmd >out` 뒤의
             # 인수가 대입으로 읽힌다.
-            flush()
+            flush(end=position)
             redirect_target = True
             continue
         if dynamic:
@@ -2005,9 +2029,10 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
                 assignment = True
         current.append(char)
         started = True
+        word_start = position if word_start < 0 else word_start
     if quote:
         return ()
-    flush()
+    flush(end=length)
     return tuple(words)
 
 
@@ -2452,9 +2477,12 @@ def _is_installed_cli(token: str, *, root: Path, cwd: Path | None) -> bool:
     checkout에 `x/y/agent-flow -> <launcher>`를 두고 부르면 파일은 같아도 runtime은
     `x`에서 온다 — 워커가 심은 코드가 lifecycle 면제를 받는다. 실행 파일과 launcher가
     고를 root를 둘 다 확인한다. 셸이 넘긴 낱말 그대로 본다. 따옴표를 다시 벗기면
-    `tool'` 같은 다른 파일이 같은 이름이 된다.
+    `tool'` 같은 다른 파일이 같은 이름이 된다. `~`로 시작하는 낱말도 인정하지 않는다
+    — 셸은 따옴표 밖의 `~`만 펼치는데 낱말만으로는 인용 여부를 알 수 없어서,
+    `'~/proj/...'`가 워커가 심은 `<cwd>/~/proj/...`를 실행해도 launcher로 보인다.
+    cwd를 모르면 상대 낱말이 어디를 가리키는지도 알 수 없다.
     """
-    if "/" not in token:
+    if "/" not in token or token.startswith("~"):
         return False
     installed = root / ".agent-flow" / "bin" / "agent-flow"
     try:
@@ -2464,9 +2492,11 @@ def _is_installed_cli(token: str, *, root: Path, cwd: Path | None) -> bool:
     if not stat.S_ISREG(info.st_mode):
         return False
     try:
-        path = Path(os.path.expanduser(token))
+        path = Path(token)
         if not path.is_absolute():
-            path = (cwd or root) / path
+            if cwd is None:
+                return False
+            path = cwd / path
         # launcher의 `cd -- "$launcher_dir/../.."`는 `..`를 글자로 지운 뒤 실제 경로로 간다.
         selected_root = Path(os.path.normpath(path)).parent.parent.parent
         return real_path(path) == real_path(installed) and real_path(selected_root) == root
@@ -2482,30 +2512,24 @@ def _launcher_as_bare(command: str, *, root: Path, cwd: Path | None) -> str:
     (다른 인자의 R1, R2, cwd)을 bare와 똑같이 받게 한다. 명령마다 예외를 두지 않고
     launcher 형태가 bare보다 좁아지지 않게 하는 규칙 하나다.
 
-    바꾸지 않는 경우: launcher 내용·interpreter가 설치 기록과 다를 때, 같은 경로가
-    인수·리다이렉션 대상·heredoc·주석처럼 명령 이름이 아닌 자리에도 있을 때. 그
-    자리의 launcher 경로는 쓰기 대상일 수 있다. drift 전에 판정하는 자기 abort는
-    이 규칙이 아니라 ``_is_bound_own_abort``가 맡는다.
+    명령 이름 자리의 낱말만 원문 자리(`start`/`end`) 그대로 바꾼다. 같은 경로가 인수·
+    리다이렉션 대상·heredoc·주석에 또 있으면 그 글자는 남아 R1에 그대로 걸린다 —
+    그 자리의 launcher 경로는 쓰기 대상일 수 있다. launcher 내용·interpreter가 설치
+    기록과 다르면 아무것도 바꾸지 않는다. drift 전에 판정하는 자기 abort는 이 규칙이
+    아니라 ``_is_bound_own_abort``가 맡는다.
     """
-    words = _command_path_words(command)
-    launchers = {
-        word.text
-        for word in words
+    spans = [
+        (word.start, word.end)
+        for word in _command_path_words(command)
         if word.command
         and not word.truncated
+        and word.start >= 0
         and _is_installed_cli(word.text, root=root, cwd=cwd)
-    }
-    if not launchers:
+    ]
+    if not spans or project_launcher_violations(root):
         return command
-    for text in launchers:
-        named = sum(1 for word in words if word.command and word.text == text)
-        mentioned = sum(1 for word in words if text in word.text)
-        if mentioned != named or command.count(text) != named:
-            return command
-    if project_launcher_violations(root):
-        return command
-    for text in sorted(launchers, key=len, reverse=True):
-        command = command.replace(text, "agent-flow")
+    for start, end in sorted(spans, reverse=True):
+        command = f"{command[:start]}agent-flow{command[end:]}"
     return command
 
 

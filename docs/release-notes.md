@@ -19,14 +19,15 @@
   `agent-flow`와 똑같이 판정한다. 명령별 예외 없이 `pr-watch`·`run-command`·
   `gates`·`spec approve` 같은 명령이 PATH 없는 세션에서도 열린다. 인수·리다이렉션
   대상 자리의 launcher 경로와 설치 기록과 달라진 launcher는 계속 막는다. 자기
-  checkout 안의 symlink나 따옴표로 다른 runtime을 고르는 호출은 lifecycle 면제를
-  받지 못한다.
+  checkout 안의 symlink, 따옴표, `~`로 다른 실행 파일을 고르는 호출은 lifecycle
+  면제를 받지 못한다.
   [#372](https://github.com/chonamdoo/agent-flow/pull/372)
 - worktree 안에서 실행한 명령은 `--worktree`·`--root`·`--run-dir`·
-  `worktree --name/--path`로 다른 checkout이나 run을 고르지 못한다. 형제 worktree를
-  `worktree remove --allow-unmerged`로 지우던 경로가 닫힌다. `spec approve`·
-  `spec confirm`은 그 worktree의 active run에만 기록한다(#370의 정확한 현재 run
-  규칙을 CLI로 옮겼다).
+  `worktree --name/--path`로 이미 있는 다른 checkout이나 run을 고르지 못한다.
+  형제 worktree를 `worktree remove --allow-unmerged`로 지우던 경로가 닫힌다.
+  새 run·checkout을 만드는 `run`·`start`·`worktree create`는 그대로다.
+  `spec approve`·`spec confirm`은 그 worktree의 active run에만 기록한다(#370의
+  정확한 현재 run 규칙을 CLI로 옮겼다).
   [#372](https://github.com/chonamdoo/agent-flow/pull/372)
 - RED reference와 GREEN 명령을 대조할 때 regression selector의 대소문자를
   보존한다. enum 마커 값은 계속 정규화한다.

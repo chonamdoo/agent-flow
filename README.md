@@ -169,11 +169,12 @@ The launcher is the one execution path the approval hooks ride on, so it is defe
 A bound worker that calls the leader's installed launcher in a command's name position is judged
 exactly as if it had typed `agent-flow` from `PATH`, as long as that launcher still matches its
 install record. No command gets its own exemption. The launcher path stays protected anywhere
-else in a command, such as an argument or a redirection target. Only `abort` of the worker's own
-run goes further: it stays available after the leader changes, through the exact launcher path.
-Inside a worktree, the CLI refuses any command that names another checkout or run by
-`--worktree`, `--root`, `--run-dir`, or `worktree --name/--path`, and `spec approve`/`spec confirm`
-record only to that worktree's active run.
+else in a command, such as an argument or a redirection target, and a launcher path written with
+`~` is not recognized. Only `abort` of the worker's own run goes further: it stays available
+after the leader changes, through the exact launcher path. Inside a worktree, the CLI refuses any
+command that names another existing checkout or run by `--worktree`, `--root`, `--run-dir`, or
+`worktree --name/--path`, and `spec approve`/`spec confirm` record only to that worktree's active
+run. `run`, `start`, and `worktree create` still name where a new run or checkout goes.
 
 ### The numbers in this README are checked too
 

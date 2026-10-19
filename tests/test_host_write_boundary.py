@@ -2575,20 +2575,25 @@ def test_installed_launcher_is_never_judged_stricter_than_the_bare_name(tmp_path
             for cli in ("agent-flow", quoted)
         )
 
-    for name in _cli_commands():
-        bare, via_launcher = verdicts(f"{{cli}} {name} --run-dir {run_dir}")
-        assert bare is not None or via_launcher is None, f"{name}: {via_launcher}"
     for shape in (
         f"cd {shlex.quote(str(own))} && {{cli}} pr-watch 12 --run-dir {run_dir} --once",
         f"{{cli}} pr-watch 12 --run-dir {run_dir} --once 2>&1 | tail -5",
+        f">{shlex.quote(str(own / 'watch.log'))} {{cli}} pr-watch 12 --run-dir {run_dir} --once",
         "{cli} run-command --host-session-id session-1 -- pytest -q",
         f"{{cli}} spec approve SPEC-1 --run-dir {run_dir}",
     ):
         assert verdicts(shape) == (None, None), shape
+    partly_quoted = f"'{root}'/.agent-flow/bin/agent-flow pr-watch 12 --run-dir {run_dir} --once"
+    assert host_write_boundary_violation(
+        _command_payload(partly_quoted, cwd=own), root
+    ) is None, "quoting only part of the launcher path must not make it stricter"
     assert all(
         verdict is not None
         for verdict in verdicts(f"{{cli}} handoff --run-dir {shlex.quote(str(runs[1]))}")
     ), "a sibling run named on the command line must stay protected in both forms"
+    for name in _cli_commands():
+        bare, via_launcher = verdicts(f"{{cli}} {name} --run-dir {run_dir}")
+        assert bare is not None or via_launcher is None, f"{name}: {via_launcher}"
 
     (root / "README.md").write_text("leader moved\n", encoding="utf-8")
     for name in _cli_commands():
@@ -2604,6 +2609,8 @@ def test_installed_launcher_is_never_judged_stricter_than_the_bare_name(tmp_path
     "{launcher} pr-watch 12 # {launcher}",
     "{launcher} pr-watch 12 <<EOF\n{launcher}\nEOF",
     "env {launcher} pr-watch 12",
+    "'if' {launcher} pr-watch 12",
+    "\\then {launcher} pr-watch 12",
     "printf x > {launcher}",
 ))
 def test_launcher_paths_outside_the_command_name_stay_protected(tmp_path: Path, command: str):
@@ -2633,12 +2640,15 @@ def test_launcher_that_left_its_install_record_is_not_the_bare_name(tmp_path: Pa
     ) is not None, "a launcher that no longer matches its install record was judged as agent-flow"
 
 
-def test_lifecycle_exemption_requires_the_launcher_to_pick_the_leader_runtime(tmp_path: Path):
+def test_lifecycle_exemption_requires_the_launcher_to_pick_the_leader_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
     """불변: lifecycle 면제는 설치 launcher가 leader runtime을 고르는 호출에만 준다.
 
     launcher는 `${0%/*}/../..`로 runtime을 고른다. 자기 checkout 안의 symlink로 부르면
-    파일은 같아도 runtime은 그 checkout에서 온다. 따옴표를 다시 벗겨 판정하면
-    `tool'` 같은 다른 파일이 launcher 이름이 된다. 둘 다 leader drift 중에도 통과해
+    파일은 같아도 runtime은 그 checkout에서 온다. 따옴표를 다시 벗기거나 인용된 `~`를
+    펼쳐 판정하면 `tool'`·`<cwd>/~/...` 같은 다른 파일이 launcher 이름이 된다. cwd를
+    모르는 상대 낱말은 셸이 어디서 찾을지 알 수 없다. 모두 leader drift 중에도 통과해
     워커 코드가 lifecycle 면제로 실행됐다.
     """
     root, statuses, runs, launcher = _bound_launcher(tmp_path)
@@ -2652,11 +2662,18 @@ def test_lifecycle_exemption_requires_the_launcher_to_pick_the_leader_runtime(tm
     lookalike.chmod(0o755)
     linked_root = tmp_path / "linked-root"
     linked_root.symlink_to(root, target_is_directory=True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home_relative = f"~/{root.relative_to(tmp_path)}/.agent-flow/bin/agent-flow"
     (root / "README.md").write_text("leader moved\n", encoding="utf-8")
 
-    for command in (f"{nested / 'agent-flow'} status", f"{shlex.quote(str(lookalike))} status"):
+    for command, cwd in (
+        (f"{nested / 'agent-flow'} status", own),
+        (f"{shlex.quote(str(lookalike))} status", own),
+        (f"'{home_relative}' status", own),
+        (".agent-flow/bin/agent-flow status", None),
+    ):
         assert host_write_boundary_violation(
-            _command_payload(command, cwd=own), root
+            _command_payload(command, cwd=cwd), root
         ) is not None, command
     for command in (
         f"{launcher} status",

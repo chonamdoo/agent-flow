@@ -2124,6 +2124,7 @@ def test_worktree_commands_refuse_other_checkouts(tmp_path):
         ["status", "--root", str(sibling.path)],
         ["report", "--run-dir", str(sibling_run)],
         ["spec", "confirm", "--run-dir", str(sibling_run)],
+        ["report", "--root", str(tmp_path.parent), "--run-dir", str(sibling_run)],
     ):
         refused = _cli(argv, cwd=own.path)
         assert refused.returncode == 2, f"{argv}: {refused.stdout}{refused.stderr}"
@@ -2163,9 +2164,11 @@ def test_worktree_spec_recorders_write_only_the_active_run(tmp_path):
         (alias, "is not this worktree"),
     ):
         for operation in (["approve", "SPEC-1"], ["confirm"]):
-            refused = _cli(["spec", *operation, "--run-dir", str(run_dir)], cwd=own.path)
-            assert refused.returncode == 2, f"{run_dir}: {refused.stdout}{refused.stderr}"
-            assert reason in refused.stderr, refused.stderr
+            for root in ([], ["--root", str(tmp_path.parent)]):
+                argv = ["spec", *operation, *root, "--run-dir", str(run_dir)]
+                refused = _cli(argv, cwd=own.path)
+                assert refused.returncode == 2, f"{argv}: {refused.stdout}{refused.stderr}"
+                assert reason in refused.stderr, refused.stderr
     for argv in (
         ["spec", "confirm", "--run-dir", str(current)],
         ["spec", "confirm", "--root", str(tmp_path), "--run-dir", str(current)],

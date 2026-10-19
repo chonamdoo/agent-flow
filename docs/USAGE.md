@@ -361,9 +361,11 @@ session must give `--root` and `--worktree` at most once, in full, and without `
 
 Apart from that `abort`, the launcher in a command's name position counts as plain `agent-flow`:
 a command that passes with `agent-flow` on `PATH` also passes through the launcher path, and one
-that is refused stays refused. Run inside one worktree, the CLI refuses commands that name another
-checkout or run (`--worktree`, `--root`, `--run-dir`, `worktree --name/--path`) and an `abort`
-that would close the leader's run; run those from the leader checkout or from that worktree.
+that is refused stays refused. Write the launcher path in full; a path that starts with `~` is
+not recognized as the launcher. Run inside one worktree, the CLI refuses commands that name
+another existing checkout or run (`--worktree`, `--root`, `--run-dir`, `worktree --name/--path`)
+and an `abort` that would close the leader's run; run those from the leader checkout or from that
+worktree. `run`, `start`, and `worktree create` may still name where a new run or checkout goes.
 `spec approve` and `spec confirm` run inside a worktree record only to its active run.
 
 `abort` leaves the old run's artifacts in the checkout's runtime state. Before `agent-flow
