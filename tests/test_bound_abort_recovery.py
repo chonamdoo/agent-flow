@@ -15,11 +15,9 @@ from pathlib import Path
 import pytest
 
 KIT = Path(__file__).resolve().parents[1]
-CONSUMER_KIT_ENV = "AGENT_FLOW_CONSUMER_KIT"
 INSTALLERS = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
 SESSION = "bound-abort-consumer"
 UNBOUND_SESSION = "bound-abort-unbound"
-RED_MARKER = "bound-abort-red:"
 _HOST_ENVIRONMENT = frozenset(
     {
         "AGENT_FLOW_PROFILE", "AGENT_FLOW_HOST", "AGENT_FLOW_GENERIC_MODE",
@@ -60,9 +58,6 @@ class Consumer:
 
 @pytest.fixture(scope="module")
 def packaged_kit(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    configured = os.environ.get(CONSUMER_KIT_ENV)
-    if configured:
-        return Path(configured).resolve()
     npm = shutil.which("npm")
     assert npm is not None, "npm is required to pack the consumer kit"
     destination = tmp_path_factory.mktemp("packed")
@@ -146,7 +141,7 @@ def test_packaged_canonical_abort_recovers_only_its_bound_run(consumer: Consumer
     ):
         decision = _guard(consumer, command)
         assert decision.returncode == 0, (
-            f"{RED_MARKER} installed guard refused the bound session's own canonical "
+            "installed guard refused the bound session's own canonical "
             f"abort --help ({command}): {decision.stderr}"
         )
     helped = _run(shlex.split(help_command), cwd=consumer.own.path, env=consumer.environment)
@@ -167,7 +162,7 @@ def test_packaged_canonical_abort_recovers_only_its_bound_run(consumer: Consumer
     ):
         decision = _guard(consumer, command)
         assert decision.returncode == 0, (
-            f"{RED_MARKER} installed guard refused the bound session's own canonical "
+            "installed guard refused the bound session's own canonical "
             f"abort after leader drift ({command}): {decision.stderr}"
         )
     assert _state(consumer) == before

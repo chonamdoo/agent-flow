@@ -349,9 +349,14 @@ If the original definition cannot be recovered, ask the user to authorize ending
 run and starting a successor. In the selected worktree, after that approval:
 
 ```bash
-agent-flow abort --root <leader-path> --worktree <worktree-name> --yes
+<leader-path>/.agent-flow/bin/agent-flow abort --root <leader-path> --worktree <worktree-name> --yes
 agent-flow run "<remaining work>" --workflow development --reuse-existing-worktree
 ```
+
+A host session bound to that worktree can run this `abort` even after the leader changed, but
+only through the leader's installed launcher at its exact path, from inside the worktree, and
+for its own run. Other options, targets, launchers, and shell syntax stay behind the worktree
+boundary.
 
 `abort` leaves the old run's artifacts in the checkout's runtime state. Before `agent-flow
 worktree remove` deletes the runtime state that belongs to that checkout, it copies every run

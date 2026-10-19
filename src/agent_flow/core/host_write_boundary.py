@@ -10,7 +10,7 @@ import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, TypeVar
 
 from agent_flow.core.hook_integrity import project_launcher_violations
 from agent_flow.core.workflow_status import status_value
@@ -122,7 +122,8 @@ _BINDING_DIR = "host-sessions"
 _LIFECYCLE_COMMANDS = frozenset({"continue", "run", "start", "status"})
 _ABORT_VALUE_OPTIONS = frozenset({"--root", "--worktree"})
 _ABORT_SWITCHES = {"--yes": "--yes", "-y": "--yes", "--help": "--help", "-h": "--help"}
-_ABORT_UNSAFE_CHARACTERS = frozenset("$`\\*?[]{}~!#\n\r")
+_LAUNCHER_UNSAFE_CHARACTERS = frozenset("$`\\*?[]{}~!#\n\r")
+_Request = TypeVar("_Request")
 
 
 class HostWriteBoundaryError(RuntimeError):
@@ -757,6 +758,34 @@ def _lifecycle_violation(
     return None
 
 
+def _bound_launcher_request(
+    command: str,
+    *,
+    root: Path,
+    current: ActiveCheckout,
+    cwd: Path | None,
+    parse: Callable[[tuple[str, ...]], _Request | None],
+) -> _Request | None:
+    """bound 세션이 자기 checkout에서 설치된 launcher를 직접 부른 요청.
+
+    launcher는 leader 안에 있어 그 경로만으로 R1에 걸린다. lifecycle 밖의 예외는
+    실행 주체를 먼저 증명한다: 자기 checkout cwd, 확장·복합 없는 단일 argv, 정확한
+    설치 경로, 설치 기록과 같은 launcher bytes와 interpreter. ``parse``가 그
+    서브커맨드의 전체 인자 문법을 받아들여야 하고, 대상 검증은 호출자가 한다.
+    """
+    if cwd is None or not _is_within(cwd, current.checkout):
+        return None
+    if any(character in _LAUNCHER_UNSAFE_CHARACTERS for character in command):
+        return None
+    argv = _direct_shell_argv(command)
+    if not argv or argv[0] != str(root / ".agent-flow" / "bin" / "agent-flow"):
+        return None
+    request = parse(argv[1:])
+    if request is None or project_launcher_violations(root):
+        return None
+    return request
+
+
 def _is_bound_own_abort(
     command: str,
     *,
@@ -764,15 +793,14 @@ def _is_bound_own_abort(
     current: ActiveCheckout,
     cwd: Path | None,
 ) -> bool:
-    if cwd is None or not _is_within(cwd, current.checkout):
-        return False
-    if any(character in _ABORT_UNSAFE_CHARACTERS for character in command):
-        return False
-    argv = _direct_shell_argv(command)
-    if not argv or argv[0] != str(root / ".agent-flow" / "bin" / "agent-flow"):
-        return False
-    options = _abort_options(argv[1:])
-    if options is None or project_launcher_violations(root):
+    """자기 run을 닫는 abort. #87 복구 계약에 따라 leader drift 검사보다 먼저 판정한다.
+
+    CLI와 같은 root·worktree 추론으로 대상이 binding의 checkout일 때만 연다.
+    """
+    options = _bound_launcher_request(
+        command, root=root, current=current, cwd=cwd, parse=_abort_options
+    )
+    if options is None or cwd is None:
         return False
     try:
         from agent_flow.core.worktrees import resolve_cli_root_context, resolve_worktree
