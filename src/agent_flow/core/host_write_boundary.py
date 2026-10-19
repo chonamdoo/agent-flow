@@ -735,13 +735,15 @@ def _lifecycle_violation(
             f"this host session is bound to {current.checkout}; refusing to start "
             "a new run until the current worktree session is complete"
         )
-    command_root = _lifecycle_root(command, current.checkout, root=root, cwd=cwd)
+    lifecycle_cwd = _declared_command_cwd(payload, command, current.checkout)
+    command_root = _lifecycle_root(
+        command, current.checkout, root=root, cwd=cwd, base=lifecycle_cwd
+    )
     if command_root not in {root, current.checkout}:
         return (
             f"this host session is bound to {root}; refusing a lifecycle command "
             f"for another project root ({command_root})"
         )
-    lifecycle_cwd = _declared_command_cwd(payload, command, current.checkout)
     selector = _worktree_selector(command, root=root, cwd=cwd)
     if selector is not None:
         selected = _active_checkout(
@@ -797,7 +799,9 @@ def _is_bound_own_abort(
 ) -> bool:
     """자기 run을 닫는 abort. #87 복구 계약에 따라 leader drift 검사보다 먼저 판정한다.
 
-    CLI와 같은 root·worktree 추론으로 대상이 binding의 checkout일 때만 연다.
+    CLI와 같은 root·worktree 추론으로 대상이 binding의 checkout일 때만 연다. 명시한
+    `--root`는 lifecycle 명령처럼 leader나 자기 checkout이어야 한다. 이 예외는 R1을
+    건너뛰므로, 대상이 자기 run이어도 형제 경로 literal을 통과시키지 않는다.
     """
     options = _bound_launcher_request(
         command, root=root, current=current, cwd=cwd, parse=_abort_options
@@ -807,11 +811,12 @@ def _is_bound_own_abort(
     try:
         from agent_flow.core.worktrees import resolve_cli_root_context, resolve_worktree
 
-        requested = Path(options.get("--root", "."))
+        requested = options.get("--root")
+        command_root = (cwd / requested if requested is not None else cwd).resolve()
+        if requested is not None and real_path(command_root) not in {root, current.checkout}:
+            return False
         config_root, worktree, _ = resolve_cli_root_context(
-            (requested if requested.is_absolute() else cwd / requested).resolve(),
-            options.get("--worktree"),
-            cwd=cwd,
+            command_root, options.get("--worktree"), cwd=cwd
         )
         if worktree is None or real_path(config_root) != root:
             return False
@@ -2466,14 +2471,21 @@ def _lifecycle_root(
     *,
     root: Path | None = None,
     cwd: Path | None = None,
+    base: Path | None = None,
 ) -> Path:
+    """명령의 `--root`. 상대 경로는 ``base``(명령이 실행될 자리)에서 푼다."""
     arguments = _agent_flow_arguments(command, root=root, cwd=cwd) or ()
     for index, token in enumerate(arguments):
         if token == "--root" and index + 1 < len(arguments):
-            return real_path(Path(arguments[index + 1]).expanduser())
+            return _command_path(arguments[index + 1], base)
         if token.startswith("--root="):
-            return real_path(Path(token.split("=", 1)[1]).expanduser())
+            return _command_path(token.split("=", 1)[1], base)
     return real_path(default)
+
+
+def _command_path(value: str, base: Path | None) -> Path:
+    path = Path(value).expanduser()
+    return real_path(path if path.is_absolute() or base is None else base / path)
 
 
 def _worktree_selector(

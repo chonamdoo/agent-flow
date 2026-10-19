@@ -2344,12 +2344,15 @@ def test_recovery_command_passes_in_every_blocked_state(tmp_path: Path):
     ) is None, "leader가 dirty해진 뒤에 복구 명령이 막혔다"
 
 
-def test_lifecycle_selector_resolves_from_the_command_cwd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "arguments", ("--root {root} --worktree alias", "--root alias")
+)
+def test_lifecycle_paths_resolve_from_the_command_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arguments: str
 ):
-    """불변: lifecycle selector는 hook 프로세스 cwd가 아니라 명령의 cwd에서 푼다.
+    """불변: lifecycle의 상대 `--worktree`·`--root`는 hook 프로세스가 아니라 명령의 cwd에서 푼다.
 
-    CLI는 명령의 cwd에서 상대 selector를 푼다. guard가 다른 자리에서 풀면 자기
+    CLI는 명령의 cwd에서 상대 경로를 푼다. guard가 다른 자리에서 풀면 자기
     checkout으로 보이는 alias가 CLI에서는 형제 checkout을 가리킨다.
     """
     root, statuses, runs = _setup(tmp_path)
@@ -2361,9 +2364,9 @@ def test_lifecycle_selector_resolves_from_the_command_cwd(
     (nested / "alias").symlink_to(second.path, target_is_directory=True)
     monkeypatch.chdir(first.path)
 
+    command = f"agent-flow continue {arguments.format(root=root)}"
     assert host_write_boundary_violation(
-        _command_payload(f"agent-flow continue --root {root} --worktree alias", cwd=nested),
-        root,
+        _command_payload(command, cwd=nested), root
     ) is not None, "alias가 hook cwd 기준으로 풀려 형제 run의 continue가 열렸다"
 
 

@@ -205,6 +205,7 @@ def test_packaged_abort_rejects_foreign_or_unproven_recovery(consumer: Consumer)
         (shlex.join([launcher, "abort", "--yes"]), consumer.leader, SESSION),
         (shlex.join([launcher, "abort", "--help"]), consumer.sibling.path, SESSION),
         (consumer.abort_command("--worktree", own, "--worktree", sibling), consumer.own.path, SESSION),
+        (shlex.join([launcher, "abort", "--root", str(consumer.sibling.path), "--worktree", own, "--yes"]), consumer.own.path, SESSION),
         (consumer.abort_command("--root", leader, "--worktree", own), consumer.own.path, SESSION),
         (consumer.abort_command("--worktree", own, "--run-id", consumer.sibling.run_dir.name), consumer.own.path, SESSION),
         (consumer.abort_command("--worktree", own, "--run-dir", str(consumer.sibling.run_dir)), consumer.own.path, SESSION),
