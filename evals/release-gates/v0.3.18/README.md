@@ -16,6 +16,10 @@ Codex CLI `0.163.0`에 `gpt-6.1-sol`을 요청했다. author 3회·review 2회·
 
 리뷰어 13개 호출이 1500초 timeout으로 끝나 before 1개·after 2개 review unit이 무효다.
 무효 시행을 지우거나 재시도하지 않았다. 유효 review 정확도는 before `42/43`, after `42/42`다.
+timeout 13개 중 12개는 후보 kit의 web/clean·web/local defect 첫 시행에서 났다(각 리뷰어 6명).
+나머지 1개는 before web/clean/clean 첫 시행이다. 후보 결함 탐지는 24개 defect unit 중 유효한
+22개로 측정했다. 무효 시행과 그 짝은 review 토큰 비율에서 빠지므로 timeout 비용을 포함한
+총비용 개선으로 해석할 수 없다. timeout 호출의 미관측 사용량은 추정하지 않는다.
 `expected=null` 8개는 정확도·오탐 분모에서 제외한다. author architecture-lint는 kit별
 pass 12개·n/a 24개이며 n/a를 pass로 세지 않는다.
 
@@ -30,7 +34,7 @@ pass 12개·n/a 24개이며 n/a를 pass로 세지 않는다.
 모든 기준 통과가 이전 kit의 토큰 증가 원인을 규명했다는 뜻은 아니다.
 
 npm tarball·wheel·sdist 빌드와 두 installer의 clean/local/pending 신규 설치·재설치를 검증했다.
-사용자 파일·installed_at 보존, Claude/Codex/OMP hook 등록 파일, 설치 launcher의 workflow export,
+사용자 파일 보존, Claude/Codex/OMP hook 등록 파일, 설치 launcher의 workflow export,
 wheel CLI 실행을 확인했다. 실제 host trust/startup과 Homebrew 업그레이드는 검증하지 않았다.
 
 태그·GitHub Release·배포는 하지 않았다. 이 기록이 포함된 PR을 merge한 뒤 그 main 커밋에
