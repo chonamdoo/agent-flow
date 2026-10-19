@@ -1869,8 +1869,6 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
     # 열린 `(`마다 그 `(`가 명령을 열었는가. 그 안의 구분자와 짝 `)`는 같은 답을 따른다 —
     # `tee *(.) <launcher>`의 `)`는 열지 않고, 짝 없는 `)`(case 패턴 끝)는 연다.
     parens: list[bool] = []
-    # `case 값 in`을 몇 낱말째 읽었는가. 1은 `case` 뒤, 2는 값 뒤다.
-    case_header = 0
     segment = 0
     # 이 줄이 끝나면 본문을 건너뛸 here-document 표식들.
     heredocs: list[str] = []
@@ -1881,7 +1879,6 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
     def flush(*, end: int, ends_command: bool = False, opens: bool = True) -> None:
         nonlocal current, dynamic, truncated, started, assignment, prefixed, sound
         nonlocal command_position, segment, redirect_target, word_start, quoted, fresh
-        nonlocal case_header
         if started:
             text = "".join(current)
             target = redirect_target
@@ -1889,12 +1886,6 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             # 일부다.
             literal = not quoted and not truncated and not target
             keyword = fresh and literal and text in _SHELL_KEYWORDS
-            # `case 값 in`의 `in` 뒤는 패턴 자리다. 첫 패턴의 선택적 `(`도 명령을 연 `(`처럼
-            # 짝 `)` 뒤를 열도록 앞자리를 되살린다.
-            pattern_start = case_header == 2 and literal and text == "in"
-            case_header = (
-                1 if fresh and literal and text == "case" else 2 if case_header == 1 else 0
-            )
             words.append(
                 _CommandWord(
                     text, truncated, segment, prefixed,
@@ -1906,17 +1897,14 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             # 자리를 지우면 `true && VAR=../sib/f cmd`의 대입을 놓친다. 대입과 리다이렉션
             # 대상은 명령 이름이 아니므로 그 뒤도 여전히 명령 앞자리다. 첫 낱말 자리의
             # 예약어 뒤는 새 단순 명령의 첫 낱말이다.
-            fresh = keyword or pattern_start
-            if pattern_start:
-                command_position = True
-            elif not keyword and not assignment and not target:
+            fresh = keyword
+            if not keyword and not assignment and not target:
                 command_position = False
         if ends_command:
             command_position = True
             fresh = True
             sound = opens
             redirect_target = False
-            case_header = 0
             segment += 1
         current = []
         dynamic = False
@@ -2035,6 +2023,11 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
                 parens.append(opens)
             elif char == ")":
                 opens = parens.pop() if parens else True
+            elif char == ";" and command[index : index + 1] in (";", "&"):
+                # `;;`·`;&`·`;;&`는 case 절의 끝이다. 뒤는 다음 패턴이라 명령을 열지 않고,
+                # 패턴 끝의 짝 없는 `)`가 연다. 패턴 앞 괄호(`(x)`)는 열지 않는다.
+                index += 2 if command[index : index + 2] == ";&" else 1
+                opens = False
             else:
                 # `\r`은 셸 구분자가 아니라 낱말 글자다. CRLF 줄은 뒤의 `\n`이 연다. 명령을
                 # 열지 않은 `(` 안의 `|`는 glob 패턴의 일부다(`tee x(a|<launcher>)`).

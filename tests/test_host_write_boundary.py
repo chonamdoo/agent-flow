@@ -2583,11 +2583,12 @@ def test_installed_launcher_is_never_judged_stricter_than_the_bare_name(tmp_path
         f"{{cli}} spec approve SPEC-1 --run-dir {run_dir}",
         f"2>{shlex.quote(str(own / 'watch.err'))} {{cli}} pr-watch 12 --run-dir {run_dir} --once",
         f"case x in x) {{cli}} pr-watch 12 --run-dir {run_dir} --once;; esac",
+        f"case x in a) :;; x) {{cli}} pr-watch 12 --run-dir {run_dir} --once;; esac",
         f"({{cli}} pr-watch 12 --run-dir {run_dir} --once)",
+        f"(true | {{cli}} pr-watch 12 --run-dir {run_dir} --once)",
         f"{{cli}} pr-watch 12 --run-dir {run_dir} --once <<EOF\nok\nEOF",
         f"{{{{ {{cli}} pr-watch 12 --run-dir {run_dir} --once; }}}}",
         f"! {{cli}} pr-watch 12 --run-dir {run_dir} --once",
-        f"case x in (x) {{cli}} pr-watch 12 --run-dir {run_dir} --once;; esac",
     ):
         assert verdicts(shape) == (None, None), shape
     partly_quoted = f"'{root}'/.agent-flow/bin/agent-flow pr-watch 12 --run-dir {run_dir} --once"
@@ -2627,7 +2628,9 @@ def test_installed_launcher_is_never_judged_stricter_than_the_bare_name(tmp_path
     "12>x {launcher} pr-watch 12",
     "!$X {launcher} pr-watch 12",
     "{{$X {launcher} pr-watch 12",
-    "echo case x in (x) {launcher}",
+    "case x in ({launcher}) :;; esac",
+    "case x in a) :;; {launcher}) :;; esac",
+    "case x in a) :;; ({launcher}) :;; esac",
     ">! {launcher} pr-watch 12",
     "tee (a|b)(N) {launcher}",
     "tee x(a|{launcher})",
