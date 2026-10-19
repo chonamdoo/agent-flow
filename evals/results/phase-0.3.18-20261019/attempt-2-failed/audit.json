@@ -1,0 +1,37 @@
+{
+  "status": "failed-not-a-release-gate",
+  "rows": 168,
+  "source_sha256": {
+    "meta.json": "ad6aa122ddb4fcfb92f130965a5ee4bd0df580b2ce5edd46836643a74a5b510e",
+    "results.jsonl": "f2a080a9e469e1a91124b23c8b1cb09a7d6ef7196f06997afc7ccdb196f52ee6"
+  },
+  "compact_sha256": {
+    "meta.json": "ac4bf406d18c7a80b04f4d14506e54bab451b1db55a80f6bb735624e7ef20062",
+    "results.jsonl.gz": "5d89c2acdffa8fbd03310f16b8afaed6b32451835779b2be8da7cb89c502c7ab"
+  },
+  "evaluator_sha256": "d26712dacdb315eedec88cb900c8a1d5c7a7434bd25a5b438d497278c0eef3ac",
+  "review_accuracy": {
+    "before": "40/40",
+    "after": "40/40"
+  },
+  "valid_author_pairs": 32,
+  "paired_author_uncached_input": {
+    "before": 1937356,
+    "after": 2059003
+  },
+  "author_uncached_input_ratio": 1.0627902151179236,
+  "author_capacity_errors": 4,
+  "declared_author_document_content_differences": [],
+  "author_prompt_byte_deltas": [
+    -20,
+    -19,
+    -18,
+    -17,
+    -14,
+    -13,
+    -12
+  ],
+  "diagnosis": "No established kit/evaluator defect causing the token increase. Valid paired units are compared correctly; declared author documents have identical content. No unchanged rerun, threshold change, invalid-row dropping or selective rescoring is authorized.",
+  "release_export_created": false,
+  "limits": "Observed model identity is not reported by Codex. Capacity errors and stochastic tool paths do not establish that the token regression is harmless."
+}

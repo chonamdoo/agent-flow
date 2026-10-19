@@ -20,7 +20,13 @@ Review responses exposed missing named-test evidence in the prepared execution r
 - `package-verification.json`: built npm tarball, wheel, and sdist; both installer entry points passed fresh/reinstall checks in clean/local/pending projects. User-owned files, host registration files, launcher receipts, installed SPEC commands, drift/run rejection, and exact-case pytest evidence were exercised.
 - Actual Claude and Codex CLI reviews independently approved the final source. Claude reported `claude-opus-5-5`; Codex was requested as `gpt-6.1-sol` but did not report its observed model identity. The earlier static-selector finding was explicitly resolved in fresh reviews.
 
-The official paired release decision is recorded separately by `phase_eval_compare.py` under `evals/release-gates/v0.3.18/` only if the fresh complete measurement passes.
+## Final measurement: release blocked
+
+`attempt-2-failed/` preserves the fresh complete 168-row measurement with the final reviewed evaluator (`d26712dacdb315eedec88cb900c8a1d5c7a7434bd25a5b438d497278c0eef3ac`). Review accuracy is `40/40` for both kits; defect detection, author pass rate, and required reading are all 1.000. The gate still fails: 32 valid paired author units consumed `1,937,356 → 2,059,003` uncached input tokens, ratio `1.0627902151`, exceeding `1.05`. Output-token ratio is `1.033801`; four after-kit author units reported provider capacity errors and remain recorded.
+
+The comparator correctly uses only units valid in both kits. The declared author documents have identical content hashes, and after-kit author prompts are 12–20 bytes smaller. No kit/evaluator defect causing the token increase has been established; these facts do not justify dismissing the regression. No unchanged rerun, threshold relaxation, selective rescoring, or passing release export was performed.
+
+Published source commit `7cbc3c4` passed the full PR CI, including all four pytest shards, minimum Python, installed parity, frozen invariants, and phase-budget comparison ([Tests](https://github.com/chonamdoo/agent-flow/actions/runs/39182007930), [Parity](https://github.com/chonamdoo/agent-flow/actions/runs/39182007931)). Source review/CI approval is not a passing release measurement. Merge/tag/deployment and deployment-conditional cleanup remain unperformed.
 
 ## Limits
 
