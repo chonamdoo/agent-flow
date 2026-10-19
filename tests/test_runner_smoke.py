@@ -5380,7 +5380,8 @@ def test_legacy_pin_publication_reports_active_lock_contention(legacy_pin_runner
     assert recovered.source_bytes == pin["source_text"].encode("utf-8")
 
 
-def test_red_transition_inspection_is_read_only_and_commit_publishes_evidence(tmp_path, monkeypatch):
+@pytest.mark.parametrize("norm_reentries", [0, 2])
+def test_red_transition_inspection_is_read_only_and_commit_publishes_evidence(tmp_path, monkeypatch, norm_reentries):
     from agent_flow.artifact import read_meta
     from agent_flow.core.command_evidence import missing_test_evidence_markers, test_code_baseline
     from agent_flow.runner import Phase, Runner
@@ -5403,9 +5404,13 @@ def test_red_transition_inspection_is_read_only_and_commit_publishes_evidence(tm
     write_meta(run_dir, {
         "run_id": "r1", "phase_index": 0, "current_phase": "red",
         "phase_entered_at": "1970-01-01T00:00:01+00:00",
+        "test_code_baseline": baseline,
     })
     (run_dir / "red.md").write_text(GATE, encoding="utf-8")
     _observe(project, "pytest tests/test_x.py::test_bug", 1, at=2, code_baseline=baseline)
+    for _ in range(norm_reentries):
+        assert runner._invalidate_architecture_evidence_for_reentry(phase) is None
+        (run_dir / "red.md").write_text(GATE, encoding="utf-8")
     before = {str(path.relative_to(project)): path.read_bytes()
               for path in project.rglob("*") if path.is_file()}
     transition = runner._plan_transition(0, phase)

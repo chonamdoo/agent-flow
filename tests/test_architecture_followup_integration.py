@@ -496,6 +496,56 @@ def test_document_growth_preserves_unreadable_evidence_and_emits_blocked_status(
     assert payload["next_command"] == "agent-flow continue"
 
 
+@pytest.mark.parametrize("legacy_window", [False, True])
+def test_norm_reentry_keeps_red_but_requires_fresh_norm_approval(project, legacy_window):
+    phase = Phase(
+        id="fix-loop", description="Repair the reproduced defect",
+        required_markers=("regression-test:", "red-observed:", "test-run-evidence: verified|unavailable"),
+    )
+    runner = _pin_runner(project, phase)
+    meta = read_meta(runner.run_dir)
+    runner._stamp_phase(meta, 0, entering=True)
+    entered = "2026-01-01T00:00:00+00:00"
+    meta["phase_entered_at"] = entered
+    if legacy_window:
+        meta.pop("test_evidence_entered_at", None)
+    else:
+        meta["test_evidence_entered_at"] = entered
+    baseline = meta["test_code_baseline"]
+    meta["phase_approval"] = {"approved": True}
+    meta["phase_approval_request"] = {"phase": phase.id}
+    write_meta(runner.run_dir, meta)
+    artifact = _write(runner.run_dir, "fix-loop.md", "# Prior norm assessment\n")
+    _write(project, "apps/a/model.py", "value = 2\n")
+    records = [
+        {"command": "pytest -q tests/test_regression.py::test_red", "cwd": str(project),
+         "at": 1767225600 + offset, "exit_code": code}
+        for offset, code in ((1, 1), (2, 0))
+    ]
+    _write(project, ".agent-flow/commands-run.jsonl", "".join(json.dumps(row) + "\n" for row in records))
+
+    for _ in range(2):
+        assert runner._invalidate_architecture_evidence_for_reentry(phase) is None
+        current = read_meta(runner.run_dir)
+        assert current["phase_entered_at"] > entered
+        assert "phase_approval" not in current and "phase_approval_request" not in current
+        assert not artifact.exists()
+        artifact.write_text(
+            _completion("architecture")
+            + "regression-test: tests/test_regression.py::test_red\nred-observed: 1\n"
+            + "test-run-evidence: verified\n", encoding="utf-8",
+        )
+        assert runner._missing_required_markers(phase) == []
+        assert current["test_code_baseline"] == baseline
+        assert current["test_evidence_entered_at"] == entered
+
+    runner._advance_phase(current, 0, blocked=False)
+    write_meta(runner.run_dir, current)
+    missing = runner._missing_required_markers(phase)
+    assert any("no test command was observed" in item for item in missing)
+    assert current["test_code_baseline"] != baseline
+
+
 def test_pr_watch_cold_start_reports_unavailable_gh(tmp_path):
     result = subprocess.run(
         [sys.executable, "-c", """
