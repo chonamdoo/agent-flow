@@ -10,7 +10,7 @@ import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, TypeVar
+from typing import Any, Iterable
 
 from agent_flow.core.hook_integrity import project_launcher_violations
 from agent_flow.core.workflow_status import status_value
@@ -85,7 +85,7 @@ _MAX_SUBSTITUTION_DEPTH = 4
 # 뒤에 **명령이 오는** 셸 예약어만. 이 뒤는 여전히 명령 앞자리이므로
 # `if VAR=../sib/f cmd; then`의 `VAR=`는 대입이다. `case`처럼 뒤에 값이 오는
 # 예약어는 넣지 않는다 — `case x=../sib/f in`의 `x=`는 대입이 아니다.
-_SHELL_KEYWORDS = frozenset({"if", "then", "elif", "else", "while", "until", "do"})
+_SHELL_KEYWORDS = frozenset({"if", "then", "elif", "else", "while", "until", "do", "{", "!"})
 # `"` 안에서 역슬래시가 이스케이프로 동작하는 글자. POSIX가 정한 목록이다.
 _DOUBLE_QUOTE_ESCAPES = frozenset("$`\"\\\n")
 _PATCH_PATH = re.compile(
@@ -123,7 +123,6 @@ _LIFECYCLE_COMMANDS = frozenset({"continue", "run", "start", "status"})
 _TARGET_OPTIONS = frozenset({"--root", "--worktree"})
 _ABORT_SWITCHES = {"--yes": "--yes", "-y": "--yes", "--help": "--help", "-h": "--help"}
 _LAUNCHER_UNSAFE_CHARACTERS = frozenset("$`\\*?[]{}~!#\n\r")
-_Request = TypeVar("_Request")
 
 
 class HostWriteBoundaryError(RuntimeError):
@@ -692,10 +691,9 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
         return leader_drift_message(exc.drift, worker_root=current.checkout)
     except WorktreeIsolationError as exc:
         return str(exc)
-    if tool_name in _COMMAND_TOOLS and _is_bound_spec_record_command(
-        command, root=root, current=current, cwd=session_cwd,
-    ):
-        return None
+    command_cwd = (
+        _declared_command_cwd(payload, command, current.checkout) if command else None
+    )
     return _scope_violation(
         payload,
         root=root,
@@ -706,13 +704,13 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
         ),
         protected=_protected_write_roots(root, survey, current),
         active=active,
-        command=command,
-        tool_name=tool_name,
-        command_cwd=(
-            _declared_command_cwd(payload, command, current.checkout)
-            if command
-            else None
+        command=(
+            _launcher_as_bare(command, root=root, cwd=command_cwd)
+            if tool_name in _COMMAND_TOOLS and command
+            else command
         ),
+        tool_name=tool_name,
+        command_cwd=command_cwd,
         require_cwd_inside_scope=True,
     )
 
@@ -798,34 +796,6 @@ def _ambiguous_target(arguments: tuple[str, ...]) -> str | None:
     return None
 
 
-def _bound_launcher_request(
-    command: str,
-    *,
-    root: Path,
-    current: ActiveCheckout,
-    cwd: Path | None,
-    parse: Callable[[tuple[str, ...]], _Request | None],
-) -> _Request | None:
-    """bound 세션이 자기 checkout에서 설치된 launcher를 직접 부른 요청.
-
-    launcher는 leader 안에 있어 그 경로만으로 R1에 걸린다. lifecycle 밖의 예외는
-    실행 주체를 먼저 증명한다: 자기 checkout cwd, 확장·복합 없는 단일 argv, 정확한
-    설치 경로, 설치 기록과 같은 launcher bytes와 interpreter. ``parse``가 그
-    서브커맨드의 전체 인자 문법을 받아들여야 하고, 대상 검증은 호출자가 한다.
-    """
-    if cwd is None or not _is_within(cwd, current.checkout):
-        return None
-    if any(character in _LAUNCHER_UNSAFE_CHARACTERS for character in command):
-        return None
-    argv = _direct_shell_argv(command)
-    if not argv or argv[0] != str(root / ".agent-flow" / "bin" / "agent-flow"):
-        return None
-    request = parse(argv[1:])
-    if request is None or project_launcher_violations(root):
-        return None
-    return request
-
-
 def _is_bound_own_abort(
     command: str,
     *,
@@ -833,13 +803,24 @@ def _is_bound_own_abort(
     current: ActiveCheckout,
     cwd: Path | None,
 ) -> bool:
-    """자기 run을 닫는 abort. #87 복구 계약에 따라 leader drift 검사보다 먼저 판정한다."""
-    options = _bound_launcher_request(
-        command, root=root, current=current, cwd=cwd, parse=_abort_options
-    )
-    return options is not None and _abort_targets_own_run(
-        options, root=root, current=current, cwd=cwd
-    )
+    """자기 run을 닫는 abort. #87 복구 계약에 따라 leader drift 검사보다 먼저 판정한다.
+
+    drift 검사를 건너뛰는 특권이라 일반 판정(``_launcher_as_bare``)보다 좁다. 실행
+    주체를 먼저 증명한다: 자기 checkout cwd, 확장·복합 없는 단일 argv, 정확한 설치
+    경로, 설치 기록과 같은 launcher bytes와 interpreter. bare `agent-flow`는 PATH를
+    워커가 바꿀 수 있어 이 특권을 받지 않는다.
+    """
+    if cwd is None or not _is_within(cwd, current.checkout):
+        return False
+    if any(character in _LAUNCHER_UNSAFE_CHARACTERS for character in command):
+        return False
+    argv = _direct_shell_argv(command)
+    if not argv or argv[0] != str(root / ".agent-flow" / "bin" / "agent-flow"):
+        return False
+    options = _abort_options(argv[1:])
+    if options is None or project_launcher_violations(root):
+        return False
+    return _abort_targets_own_run(options, root=root, current=current, cwd=cwd)
 
 
 def _abort_targets_own_run(
@@ -894,41 +875,6 @@ def _abort_options(arguments: tuple[str, ...]) -> dict[str, str] | None:
             return None
         options[name] = value
     return options
-
-
-def _is_bound_spec_record_command(
-    command: str,
-    *,
-    root: Path,
-    current: ActiveCheckout,
-    cwd: Path | None,
-) -> bool:
-    """자기 run의 `spec approve`/`spec confirm`. leader drift 검사 뒤에 판정한다."""
-    target = _bound_launcher_request(
-        command, root=root, current=current, cwd=cwd, parse=_spec_record_run_dir
-    )
-    if target is None or cwd is None:
-        return False
-    expected = current.runtime_root / ".agent-flow" / "runs" / current.run_id
-    return target == str(expected) and _resolve_path(target, cwd) == expected
-
-
-def _spec_record_run_dir(arguments: tuple[str, ...]) -> str | None:
-    if arguments[:2] == ("spec", "confirm"):
-        selectors = arguments[2:]
-    elif (
-        arguments[:2] == ("spec", "approve")
-        and len(arguments) > 2
-        and re.fullmatch(r"SPEC-[1-9]\d*", arguments[2].strip().upper())
-    ):
-        selectors = arguments[3:]
-    else:
-        return None
-    if len(selectors) == 2 and selectors[0] == "--run-dir":
-        return selectors[1]
-    if len(selectors) == 1 and selectors[0].startswith("--run-dir="):
-        return selectors[0].removeprefix("--run-dir=")
-    return None
 
 
 def _unbound_violation(
@@ -1765,6 +1711,14 @@ class _CommandWord:
     segment: int
     # `NAME=`/`-flag=` 접두사가 붙은 낱말인가. 값 쪽이 경로일 수 있다는 표시다.
     prefixed: bool = False
+    # 셸이 실행할 명령 이름 자리인가. 리다이렉션 대상·인수는 아니다. 설치 launcher를
+    # bare 이름과 같게 볼 수 있는 자리는 여기뿐이다 — 인수 자리의 launcher 경로는
+    # 쓰기 대상일 수 있다.
+    command: bool = False
+    # 원문에서 이 낱말이 차지한 자리 `[start, end)`. 인용·역슬래시까지 포함한다.
+    # 치환 안의 낱말도 바깥 원문 기준이다. 알 수 없으면 -1이다.
+    start: int = -1
+    end: int = -1
 
 
 def _leading_command_words(command: str) -> tuple[_CommandWord, ...]:
@@ -1825,6 +1779,7 @@ def _absorb_command(
     words: list["_CommandWord"],
     segment: int,
     depth: int,
+    offset: int,
 ) -> int:
     """치환 안의 명령을 같은 목록에 넣는다. 다음 순번을 돌려준다.
 
@@ -1844,7 +1799,11 @@ def _absorb_command(
     base = segment + 1
     for word in inner:
         words.append(
-            _CommandWord(word.text, word.truncated, base + word.segment, word.prefixed)
+            _CommandWord(
+                word.text, word.truncated, base + word.segment, word.prefixed, word.command,
+                word.start + offset if word.start >= 0 else -1,
+                word.end + offset if word.end >= 0 else -1,
+            )
         )
     return base + max((word.segment for word in inner), default=0) + 1
 
@@ -1893,6 +1852,23 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
     assignment = False
     # 명령 앞자리인가. `VAR=값`이 대입인지 그냥 인수인지는 이것으로 갈린다.
     command_position = True
+    # 바로 앞이 리다이렉션 연산자였는가. 다음 낱말은 명령 이름이 아니라 대상이다.
+    redirect_target = False
+    # 이 낱말이 원문에서 시작한 자리. 아직 낱말이 없으면 -1이다.
+    word_start = -1
+    # 이 낱말에 인용이나 역슬래시가 있었는가. 인용된 `'if'`는 예약어가 아니라 명령
+    # 이름이다 — 예약어로 읽으면 그 뒤의 인수가 명령 이름 자리로 오인된다.
+    quoted = False
+    # 지금 낱말이 단순 명령의 첫 낱말인가. 예약어는 그 자리에서만 예약어다 —
+    # `>out if x`·`VAR=1 if x`의 `if`는 명령 이름이고 `x`는 그 인수다.
+    fresh = True
+    # 명령 앞자리를 연 경계가 셸에서도 명령을 시작하는가. 명령 앞자리가 아닌 `(`와 그
+    # 짝 `)`는 zsh glob(`tee x(N) <launcher>`)일 수 있다. 대입 판정은 앞자리를 넓게
+    # 봐야 안전하고 launcher 이름 판정은 좁게 봐야 안전하므로 따로 든다.
+    sound = True
+    # 열린 `(`마다 그 `(`가 명령을 열었는가. 짝이 맞는 `)`는 같은 답을 따른다 —
+    # `tee *(.) <launcher>`의 `)`는 열지 않고, 짝 없는 `)`(case 패턴 끝)는 연다.
+    parens: list[bool] = []
     segment = 0
     # 이 줄이 끝나면 본문을 건너뛸 here-document 표식들.
     heredocs: list[str] = []
@@ -1900,19 +1876,32 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
     index = 0
     length = len(command)
 
-    def flush(*, ends_command: bool = False) -> None:
-        nonlocal current, dynamic, truncated, started, assignment, prefixed
-        nonlocal command_position, segment
+    def flush(*, end: int, ends_command: bool = False, opens: bool = True) -> None:
+        nonlocal current, dynamic, truncated, started, assignment, prefixed, sound
+        nonlocal command_position, segment, redirect_target, word_start, quoted, fresh
         if started:
             text = "".join(current)
-            words.append(_CommandWord(text, truncated, segment, prefixed))
+            target = redirect_target
+            keyword = fresh and not quoted and not target and text in _SHELL_KEYWORDS
+            words.append(
+                _CommandWord(
+                    text, truncated, segment, prefixed,
+                    command_position and sound and not target, word_start, end,
+                )
+            )
+            redirect_target = False
             # 낱말이 실제로 있었을 때만 자리를 소비한다. 빈 flush(구분자 뒤 공백)가
-            # 자리를 지우면 `true && VAR=../sib/f cmd`의 대입을 놓친다. 대입과 예약어는
-            # 명령 이름이 아니므로 그 뒤도 여전히 명령 앞자리다.
-            if not assignment and text not in _SHELL_KEYWORDS:
+            # 자리를 지우면 `true && VAR=../sib/f cmd`의 대입을 놓친다. 대입과 리다이렉션
+            # 대상은 명령 이름이 아니므로 그 뒤도 여전히 명령 앞자리다. 첫 낱말 자리의
+            # 예약어 뒤는 새 단순 명령의 첫 낱말이다.
+            fresh = keyword
+            if not keyword and not assignment and not target:
                 command_position = False
         if ends_command:
             command_position = True
+            fresh = True
+            sound = opens
+            redirect_target = False
             segment += 1
         current = []
         dynamic = False
@@ -1920,8 +1909,23 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
         started = False
         assignment = False
         prefixed = False
+        word_start = -1
+        quoted = False
+
+    def drop_io_number() -> None:
+        """`2>file`의 `2`는 낱말이 아니라 fd 번호다. 명령 이름 자리를 소비하지 않는다.
+
+        ASCII 한 자리만 fd로 본다. zsh는 `12>x`의 `12`를 인수로 읽고, `²` 같은 유니코드
+        숫자는 어느 셸에서도 명령 이름이다.
+        """
+        nonlocal current, started, word_start
+        if len(current) == 1 and current[0] in "0123456789" and not quoted and not dynamic:
+            current = []
+            started = False
+            word_start = -1
 
     while index < length:
+        position = index
         char = command[index]
         index += 1
         if char == "\\" and quote != "'":
@@ -1930,6 +1934,8 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
                 index += 1
                 continue
             started = True
+            quoted = True
+            word_start = position if word_start < 0 else word_start
             # `"` 안에서 역슬래시는 정해진 몇 글자 앞에서만 이스케이프다(POSIX).
             # 그 밖에서는 역슬래시가 이름의 일부다 — `"a\ b"`는 `a b`가 아니라
             # `a\ b`이고, 둘을 같게 보면 없는 경로로 판정한다.
@@ -1952,9 +1958,10 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             started = True
             dynamic = True
             truncated = True
+            word_start = position if word_start < 0 else word_start
             end = _skip_substitution(command, index + 1)
             segment = _absorb_command(
-                command[index + 1 : max(end - 1, index + 1)], words, segment, depth
+                command[index + 1 : max(end - 1, index + 1)], words, segment, depth, index + 1
             )
             index = end
             continue
@@ -1963,19 +1970,22 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             started = True
             dynamic = True
             truncated = True
+            word_start = position if word_start < 0 else word_start
             index = _skip_braces(command, index + 1)
             continue
         if char == "`":
             started = True
             dynamic = True
             truncated = True
+            word_start = position if word_start < 0 else word_start
             end = _skip_backticks(command, index)
             segment = _absorb_command(
-                command[index : max(end - 1, index)], words, segment, depth
+                command[index : max(end - 1, index)], words, segment, depth, index
             )
             index = end
             continue
         if char == "$":
+            word_start = position if word_start < 0 else word_start
             if index < length and command[index] in "'\"":
                 continue
             dynamic = True
@@ -1990,25 +2000,45 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             continue
         if char in "'\"":
             quote = char
+            quoted = True
+            word_start = position if word_start < 0 else word_start
             # 빈 인용도 인수 하나다. `cd ""`의 자리를 잃으면 다음 낱말이 `cd`의
             # 대상으로 읽힌다.
             started = True
             continue
+        if char == "&" and command[index : index + 1] == ">":
+            # `&>`·`&>>`는 리다이렉션이다. `&`를 구분자로 읽으면 대상 뒤의 인수가
+            # 명령 앞자리로 오인된다. `>`는 다음 바퀴가 읽는다.
+            flush(end=position)
+            continue
         if char in _COMMAND_SEPARATORS:
-            flush(ends_command=True)
+            if char == "(":
+                opens = (
+                    command_position and sound and fresh and not started
+                    and not redirect_target
+                )
+                parens.append(opens)
+            elif char == ")":
+                opens = parens.pop() if parens else True
+            else:
+                # `\r`은 셸 구분자가 아니라 낱말 글자다. CRLF 줄은 뒤의 `\n`이 연다.
+                opens = char != "\r"
+            flush(end=position, ends_command=True, opens=opens)
             if char == "\n" and heredocs:
                 index = _skip_heredoc_bodies(command, index, heredocs)
                 heredocs = []
             continue
         if char.isspace():
-            flush()
+            flush(end=position)
             continue
         if char == "<" and command[index : index + 2] == "<<":
             # `<<<`는 herestring이다. 본문이 없으므로 세 글자를 함께 소비하고 낱말만
             # 끊는다. 첫 `<`에서 걸러내지 않으면 두 번째 `<`가 here-document로 읽혀,
             # 뒤따르는 줄이 본문으로 버려진다.
             index += 2
-            flush()
+            drop_io_number()
+            flush(end=position)
+            redirect_target = True
             continue
         if char == "<" and command[index : index + 1] == "<":
             # `<<DELIM`의 본문은 stdin 데이터다. 낱말로 읽으면 `python3 - <<'PY'`
@@ -2016,12 +2046,35 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             index, delimiter = _read_heredoc_delimiter(command, index + 1)
             if delimiter:
                 heredocs.append(delimiter)
-            flush()
+            drop_io_number()
+            flush(end=position)
+            # 표식은 리다이렉션의 대상이다. 그 뒤의 `if`는 예약어가 아니라 명령 이름이다.
+            fresh = False
+            continue
+        if char in _REDIRECTIONS and command[index : index + 1] == "(":
+            # `<(cmd)`·`>(cmd)`는 프로세스 치환이다. 안은 명령이고 바깥에서는 인수
+            # 한 낱말이다. `(`·`)`를 구분자로 읽으면 뒤따르는 인수가 명령 앞자리가 된다.
+            started = True
+            dynamic = True
+            truncated = True
+            word_start = position if word_start < 0 else word_start
+            end = _skip_substitution(command, index + 1)
+            segment = _absorb_command(
+                command[index + 1 : max(end - 1, index + 1)], words, segment, depth, index + 1
+            )
+            index = end
             continue
         if char in _REDIRECTIONS:
+            # `>&`·`<&`·`>|`와 zsh의 `>!`는 한 연산자다. 둘째 글자를 구분자나 대상으로
+            # 읽으면 대상 뒤의 인수가 명령 앞자리로 오인된다.
+            following = command[index : index + 1]
+            if following in ("&", "|") or (char == ">" and following == "!"):
+                index += 1
             # 리다이렉션은 낱말만 끊는다. 명령 앞자리를 되돌리면 `cmd >out` 뒤의
             # 인수가 대입으로 읽힌다.
-            flush()
+            drop_io_number()
+            flush(end=position)
+            redirect_target = True
             continue
         if dynamic:
             continue
@@ -2035,16 +2088,18 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             text = "".join(current)
             if text.startswith("-"):
                 prefixed = True
-            elif command_position and _ENV_ASSIGNMENT_TOKEN.match(f"{text}="):
+            elif command_position and not quoted and _ENV_ASSIGNMENT_TOKEN.match(f"{text}="):
+                # 이름 쪽에 인용이나 역슬래시가 있으면 대입이 아니라 명령 이름이다(`'F'=x`).
                 # 대입 뒤도 여전히 명령 앞자리다. 접두사는 낱말에 남긴다 — 인수를
                 # 그대로 들고 있어야 자리로 읽는 쪽이 무엇을 받았는지 안다.
                 prefixed = True
                 assignment = True
         current.append(char)
         started = True
+        word_start = position if word_start < 0 else word_start
     if quote:
         return ()
-    flush()
+    flush(end=length)
     return tuple(words)
 
 
@@ -2477,28 +2532,72 @@ def _agent_flow_arguments(
 
 
 def _is_installed_cli(token: str, *, root: Path, cwd: Path | None) -> bool:
-    """이 argv[0]이 **이 프로젝트에 설치된** CLI 실체인가.
+    """이 낱말이 **이 프로젝트에 설치된** launcher를 leader runtime 그대로 실행하는가.
 
     이름만 인정하면 PATH에 없는 환경에서 복구 경로가 사라진다. 실제로 그 상태에
     갇힌 세션이 있었다 — 활성 run 때문에 모든 write가 막혔는데, 유일한 해제 명령이
     PATH에 없어서 경로로 부르면 거부됐다. 경계의 복구 명령이 그 경계 뒤에 있으면
     그건 경계가 아니라 교착이다.
 
-    그래서 이름 대신 **설치 산출물과의 경로 동일성**으로 판정한다. 이름만 흉내 낸
-    실행 파일(`node /tmp/agent-flow-kit.mjs`, `/tmp/agent-flow`)은 통과하지 못하고,
-    이 shim 자체는 leader 안이라 경계가 다른 세션의 수정을 막는다.
+    그래서 이름 대신 **설치 산출물로 실행되는가**로 판정한다. 같은 파일을 가리킨다는
+    것만으로는 부족하다. launcher는 `${0%/*}/../..`로 runtime을 고르므로, 자기
+    checkout에 `x/y/agent-flow -> <launcher>`를 두고 부르면 파일은 같아도 runtime은
+    `x`에서 온다 — 워커가 심은 코드가 lifecycle 면제를 받는다. 실행 파일과 launcher가
+    고를 root를 둘 다 확인한다. 셸이 넘긴 낱말 그대로 본다. 따옴표를 다시 벗기면
+    `tool'` 같은 다른 파일이 같은 이름이 된다. `~`로 시작하는 낱말도 인정하지 않는다
+    — 셸은 따옴표 밖의 `~`만 펼치는데 낱말만으로는 인용 여부를 알 수 없어서,
+    `'~/proj/...'`가 워커가 심은 `<cwd>/~/proj/...`를 실행해도 launcher로 보인다.
+    cwd를 모르면 상대 낱말이 어디를 가리키는지도 알 수 없다.
     """
-    if "/" not in token:
+    if "/" not in token or token.startswith("~"):
         return False
     installed = root / ".agent-flow" / "bin" / "agent-flow"
     try:
         info = installed.lstat()
     except OSError:
         return False
-    if installed.is_symlink() or not stat.S_ISREG(info.st_mode):
+    if not stat.S_ISREG(info.st_mode):
         return False
-    resolved = _resolve_path(token, cwd or root)
-    return resolved is not None and resolved == real_path(installed)
+    try:
+        path = Path(token)
+        if not path.is_absolute():
+            if cwd is None:
+                return False
+            path = cwd / path
+        # launcher의 `cd -- "$launcher_dir/../.."`는 `..`를 글자로 지운 뒤 실제 경로로 간다.
+        selected_root = Path(os.path.normpath(path)).parent.parent.parent
+        return real_path(path) == real_path(installed) and real_path(selected_root) == root
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _launcher_as_bare(command: str, *, root: Path, cwd: Path | None) -> str:
+    """bound 세션의 일반 판정에서 설치 launcher를 PATH의 `agent-flow`와 같게 본다.
+
+    launcher는 leader 안에 있어 그 경로만으로 R1에 걸린다. 같은 명령을 bare 이름으로
+    부르면 통과하므로, 명령 이름 자리의 launcher 낱말만 이름으로 바꿔 나머지 판정
+    (다른 인자의 R1, R2, cwd)을 bare와 똑같이 받게 한다. 명령마다 예외를 두지 않고
+    launcher 형태가 bare보다 좁아지지 않게 하는 규칙 하나다.
+
+    명령 이름 자리의 낱말만 원문 자리(`start`/`end`) 그대로 바꾼다. 같은 경로가 인수·
+    리다이렉션 대상·heredoc·주석에 또 있으면 그 글자는 남아 R1에 그대로 걸린다 —
+    그 자리의 launcher 경로는 쓰기 대상일 수 있다. launcher 내용·interpreter가 설치
+    기록과 다르면 아무것도 바꾸지 않는다. drift 전에 판정하는 자기 abort는 이 규칙이
+    아니라 ``_is_bound_own_abort``가 맡는다.
+    """
+    spans = [
+        (word.start, word.end)
+        for word in _command_path_words(command)
+        if word.command
+        and not word.truncated
+        and word.start >= 0
+        and _is_installed_cli(word.text, root=root, cwd=cwd)
+    ]
+    if not spans or project_launcher_violations(root):
+        return command
+    for start, end in sorted(spans, reverse=True):
+        command = f"{command[:start]}agent-flow{command[end:]}"
+    return command
 
 
 def _is_lifecycle_command(

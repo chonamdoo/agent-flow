@@ -355,11 +355,19 @@ agent-flow run "<remaining work>" --workflow development --reuse-existing-worktr
 
 A host session bound to that worktree can run this `abort` even after the leader changed, but
 only through the leader's installed launcher at its exact path, from inside the worktree, and
-for its own run. Use the leader path that `status` prints after `--root`; a path through a
-symlink is refused. Other options, targets, launchers, and shell syntax stay behind the worktree
-boundary. Lifecycle commands from that session must give `--root` and `--worktree` at most once,
-in full, and without `~`. Run inside one worktree, `abort` refuses to close another worktree's or
-the leader's run; close it from the leader checkout or from that worktree.
+for its own run. Use the leader path that `status` prints after `--root`. Other options, targets,
+launchers, and shell syntax stay behind the worktree boundary. Lifecycle commands from that
+session must give `--root` and `--worktree` at most once, in full, and without `~`.
+
+Apart from that `abort`, the launcher in a command's name position counts as plain `agent-flow`:
+a command that passes with `agent-flow` on `PATH` also passes through the launcher path, and one
+that is refused stays refused. Write the launcher path in full; a path that starts with `~` is
+not recognized as the launcher. Run inside one worktree, the CLI refuses commands that name
+another existing checkout or run (`--worktree`, `--root`, `--run-dir`, `worktree --name/--path`)
+and an `abort` that would close the leader's run; run those from the leader checkout or from that
+worktree. `run` and `start` may still name where a new run goes, and `worktree create` may still
+name a checkout that does not exist yet.
+`spec approve` and `spec confirm` run inside a worktree record only to its active run.
 
 `abort` leaves the old run's artifacts in the checkout's runtime state. Before `agent-flow
 worktree remove` deletes the runtime state that belongs to that checkout, it copies every run

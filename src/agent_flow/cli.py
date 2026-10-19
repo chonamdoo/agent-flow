@@ -289,10 +289,8 @@ def _with_install_shorthand(argv: list[str], commands: set[str]) -> list[str]:
     return ["install", *argv]
 
 
-def main(
-    argv: list[str] | None = None, *, installer_root: Path | None = None
-) -> int:
-    """Run the CLI, optionally binding install to the managed launcher's kit."""
+def _build_parser() -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]:
+    """명령과 옵션 전체. 경계 테스트가 같은 목록을 읽어 새 명령·옵션을 빠짐없이 본다."""
     parser = argparse.ArgumentParser(prog="agent-flow")
     parser.add_argument(
         "--version",
@@ -775,6 +773,14 @@ def main(
     team_import_apply.add_argument("--file", required=True)
     team_import_apply.add_argument("--report")
 
+    return parser, subparsers
+
+
+def main(
+    argv: list[str] | None = None, *, installer_root: Path | None = None
+) -> int:
+    """Run the CLI, optionally binding install to the managed launcher's kit."""
+    parser, subparsers = _build_parser()
     invocation_arguments = tuple(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(
         _with_install_shorthand(
@@ -861,6 +867,10 @@ def main(
             return 2
     if inferred_worktree is not None and hasattr(args, "worktree") and args.worktree is None:
         args.worktree = inferred_worktree
+    foreign = _foreign_checkout_target(args, root, inferred_worktree)
+    if foreign is not None:
+        print(foreign, file=sys.stderr)
+        return 2
     reuse_entry_commands = {"run", "start"}
     reuse_preapproved = bool(
         getattr(args, "reuse_existing_worktree", False)
@@ -1339,20 +1349,8 @@ def main(
             on_start=_print_gate_progress,
         )
         if args.run_dir is not None:
-            # run을 소유하는 것은 leader checkout도 worktree checkout도 아니라
-            # worktree runtime root다(`cli.py:497`가 state_root로 쓰는 자리).
-            # 상대 --run-dir을 command_root 기준으로 풀면 runner가 읽지 않는
-            # 자리에 결과가 남는다.
-            # 절대경로면 base가 쓰이지 않는다. worktree_runtime_root는 git을 새로
-            # 띄우고 실패 시 예외를 던지므로, 방금 끝난 게이트 결과를 그 조회
-            # 때문에 잃지 않도록 필요한 때만 계산한다.
-            run_base = (
-                worktree_runtime_root(root=root, name=args.worktree)
-                if getattr(args, "worktree", None) and not Path(args.run_dir).is_absolute()
-                else root
-            )
             write_gate_results(
-                run_dir=_resolve_project_path(run_base, args.run_dir),
+                run_dir=_requested_run_dir(args, root),
                 results=results,
                 cwd=command_root,
                 phase=args.phase,
@@ -2697,27 +2695,127 @@ def _pending_cleanup_for_checkout(
     return find_pending_worktree_cleanup(root=root, selector=name)
 
 
-def _abort_from_another_checkout(root: Path, worktree: str | None) -> str | None:
-    """다른 worktree 안에서 그 worktree가 아닌 run을 닫으려는 abort를 거절한다.
+def _standing_linked_checkout() -> tuple[Path, Path] | None:
+    """이 셸이 서 있는 linked worktree와 그 leader. leader·저장소 밖·판정 불가면 ``None``.
 
-    host 경계는 `--worktree <이름>`을 경로로 보지 못하고 셸 문법도 풀지 않는다. 대상과
-    실제 실행 위치를 함께 아는 곳은 CLI뿐이다. worktree를 정하지 못한 abort는 leader의
-    run을 닫으므로 그것도 다른 대상이다. leader나 저장소 밖에서는 그대로 연다.
+    요청한 `--root`와 따로 cwd에서만 구한다. `--root`를 다른 곳으로 주는 것만으로 서
+    있는 자리가 사라지면 안 된다.
     """
     cwd = Path.cwd()
-    standing_leader = leader_root_for(cwd)
-    if standing_leader is None or not same_worktree_path(standing_leader, root):
+    leader = leader_root_for(cwd)
+    standing = git_toplevel(cwd) if leader is not None else None
+    if leader is None or standing is None:
         return None
-    standing = git_toplevel(cwd)
-    if standing is None:
+    return leader, standing
+
+
+def _foreign_checkout_target(
+    args: argparse.Namespace, root: Path, inferred_worktree: str | None
+) -> str | None:
+    """linked worktree 안에서 이름이나 경로로 다른 checkout을 고른 명령을 거절한다.
+
+    host 경계는 `--worktree <이름>` 같은 이름 선택자를 경로로 보지 못하고, 셸 문법도
+    풀지 않는다. 대상과 실행 위치를 함께 아는 곳은 CLI뿐이라 해석이 끝난 대상을 여기서
+    한 번 본다. 서브커맨드 목록은 두지 않는다: `--worktree`(명시하거나 `--root`로
+    추론한 것), `worktree`의 `--name`/`--path`, `--run-dir`이 가리키는 checkout이 서
+    있는 checkout과 같아야 한다. 이름은 요청한 root가 이 저장소일 때만 뜻이 있고,
+    `--run-dir`은 root와 무관하게 이 checkout의 runtime 안이어야 한다. worktree 안의
+    `spec approve`/`spec confirm`은 그 checkout의 active run에만 기록한다. 판정할 수
+    없으면(저장소 밖, git 정보 없음) 막지 않는다 — 복구 명령이 이 검사 뒤에 갇히면
+    안 된다.
+    """
+    found = _standing_linked_checkout()
+    if found is None:
         return None
-    if worktree is not None and same_worktree_path(
-        standing, get_worktree_status(root=root, name=worktree).path
-    ):
+    leader, standing = found
+
+    def refusal(target: object) -> str:
+        return (
+            f"{target} is not this worktree; run it from the leader checkout or from that "
+            f"worktree. This shell is in {standing}. Nothing was changed."
+        )
+
+    try:
+        # `run`·`start`의 이름은 새 run이 들어설 자리다. cwd와 다르면
+        # `_warn_if_cwd_is_other_checkout`가 알리고, bound 세션은 경계가 새 run을 막는다.
+        # `worktree create`의 이름은 아직 없는 checkout만 새 자리다 — 이미 있으면 create가
+        # 그 checkout을 다시 쓰고 셋업을 적용하므로 다른 checkout을 고른 것이다.
+        creating = args.command == "worktree" and args.worktree_command == "create"
+        if same_worktree_path(leader, root) and args.command not in {"run", "start"}:
+            names = [getattr(args, "worktree", None), inferred_worktree]
+            if args.command == "worktree":
+                names.append(getattr(args, "name", None))
+                path = getattr(args, "path", None)
+                if path and not same_worktree_path(Path(path).expanduser().resolve(), standing):
+                    return refusal(path)
+            for name in names:
+                if not name:
+                    continue
+                target = get_worktree_status(root=root, name=name)
+                if creating and not target.exists:
+                    continue
+                if not same_worktree_path(target.path, standing):
+                    return refusal(name)
+        run_dir = _requested_run_dir(args, root)
+        if run_dir is None:
+            return None
+        _, standing_name, _ = resolve_cli_root_context(standing, None, cwd=standing)
+        runtime = (
+            worktree_runtime_root(root=leader, name=standing_name).resolve()
+            if standing_name is not None
+            else None
+        )
+        resolved = run_dir.resolve()
+        if runtime is None or not resolved.is_relative_to(runtime):
+            return refusal(run_dir)
+        if args.command == "spec" and args.spec_command in {"approve", "confirm"}:
+            active = find_active_run(runtime)
+            if active is None or active.path.resolve() != resolved:
+                current = active.path if active is not None else "no active run"
+                return (
+                    f"spec {args.spec_command} in a worktree records only to its active run "
+                    f"({current}), not {run_dir}. Nothing was changed."
+                )
+    except (OSError, ValueError, RuntimeError):
         return None
-    target = worktree if worktree is not None else "the leader checkout"
+    return None
+
+
+def _requested_run_dir(args: argparse.Namespace, root: Path) -> Path | None:
+    """명령이 쓸 `--run-dir`.
+
+    run을 소유하는 것은 leader checkout도 worktree checkout도 아니라 worktree runtime
+    root다(`state_root`). `--worktree`와 함께 온 상대 경로는 거기서 푼다 — command root
+    기준으로 풀면 runner가 읽지 않는 자리에 결과가 남는다. 절대경로면 base가 쓰이지
+    않는다. `worktree_runtime_root`는 git을 새로 띄우고 실패하면 예외를 던지므로 필요할
+    때만 계산한다.
+    """
+    value = getattr(args, "run_dir", None)
+    if value is None:
+        return None
+    base = (
+        worktree_runtime_root(root=root, name=args.worktree)
+        if getattr(args, "worktree", None) and not Path(value).is_absolute()
+        else root
+    )
+    return _resolve_project_path(base, value)
+
+
+def _abort_from_another_checkout(root: Path, worktree: str | None) -> str | None:
+    """worktree 안에서 worktree를 정하지 못한 abort를 거절한다.
+
+    그런 abort는 leader의 run을 닫으므로 다른 대상이다. 이름으로 다른 worktree를 고른
+    abort는 ``_foreign_checkout_target``이 먼저 거절한다. leader나 저장소 밖에서는
+    그대로 연다.
+    """
+    if worktree is not None:
+        return None
+    found = _standing_linked_checkout()
+    if found is None or not same_worktree_path(found[0], root):
+        return None
+    standing = found[1]
     return (
-        f"abort for {target} must run from the leader checkout or from that worktree; "
+        "abort for the leader checkout must run from the leader checkout; "
         f"this shell is in {standing}. Nothing was changed."
     )
 

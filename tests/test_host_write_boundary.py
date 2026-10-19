@@ -2510,11 +2510,11 @@ print(json.dumps(results))
         assert json.loads(result.stdout) == expected, f"PYTHONHASHSEED={seed}: {result.stdout}"
 
 
-def _bound_spec_recorder(tmp_path: Path):
+def _bound_launcher(tmp_path: Path):
     root, statuses, runs = _setup(tmp_path)
-    shim = _installed_launcher(root)
+    launcher = _installed_launcher(root)
     record_host_checkout_binding(_status_payload(root, statuses[0], runs[0]), root)
-    return root, statuses, runs, shim
+    return root, statuses, runs, launcher
 
 
 def _installed_launcher(root: Path) -> Path:
@@ -2546,6 +2546,166 @@ def _installed_launcher(root: Path) -> Path:
     return launcher
 
 
+def _cli_commands() -> list[str]:
+    """`agent-flow`가 받는 최상위 명령 전체. 새 명령은 자동으로 아래 판정에 들어온다."""
+    import argparse
+
+    from agent_flow.cli import _build_parser
+
+    _, subparsers = _build_parser()
+    assert isinstance(subparsers, argparse._SubParsersAction)
+    return sorted(subparsers.choices)
+
+
+def test_installed_launcher_is_never_judged_stricter_than_the_bare_name(tmp_path: Path):
+    """불변: 명령 이름 자리의 설치 launcher는 PATH의 `agent-flow`보다 좁게 판정되지 않는다.
+
+    launcher는 leader 안에 있어 경로 글자만으로 R1에 걸린다. 그래서 PATH가 없는 세션은
+    `pr-watch`·`run-command`처럼 bare 이름으로는 되는 명령을 쓰지 못했고, 막힌 명령마다
+    예외가 늘었다. 명령 목록을 CLI parser에서 읽으므로 새 명령도 이 판정에 들어온다.
+    """
+    root, statuses, runs, launcher = _bound_launcher(tmp_path)
+    own = statuses[0].path
+    quoted = shlex.quote(str(launcher))
+    run_dir = shlex.quote(str(runs[0]))
+
+    def verdicts(command: str) -> tuple[str | None, str | None]:
+        return tuple(
+            host_write_boundary_violation(_command_payload(command.format(cli=cli), cwd=own), root)
+            for cli in ("agent-flow", quoted)
+        )
+
+    for shape in (
+        f"cd {shlex.quote(str(own))} && {{cli}} pr-watch 12 --run-dir {run_dir} --once",
+        f"{{cli}} pr-watch 12 --run-dir {run_dir} --once 2>&1 | tail -5",
+        f">{shlex.quote(str(own / 'watch.log'))} {{cli}} pr-watch 12 --run-dir {run_dir} --once",
+        "{cli} run-command --host-session-id session-1 -- pytest -q",
+        f"{{cli}} spec approve SPEC-1 --run-dir {run_dir}",
+        f"2>{shlex.quote(str(own / 'watch.err'))} {{cli}} pr-watch 12 --run-dir {run_dir} --once",
+        f"case x in x) {{cli}} pr-watch 12 --run-dir {run_dir} --once;; esac",
+        f"({{cli}} pr-watch 12 --run-dir {run_dir} --once)",
+        f"{{cli}} pr-watch 12 --run-dir {run_dir} --once <<EOF\nok\nEOF",
+        f"{{{{ {{cli}} pr-watch 12 --run-dir {run_dir} --once; }}}}",
+        f"! {{cli}} pr-watch 12 --run-dir {run_dir} --once",
+    ):
+        assert verdicts(shape) == (None, None), shape
+    partly_quoted = f"'{root}'/.agent-flow/bin/agent-flow pr-watch 12 --run-dir {run_dir} --once"
+    assert host_write_boundary_violation(
+        _command_payload(partly_quoted, cwd=own), root
+    ) is None, "quoting only part of the launcher path must not make it stricter"
+    assert all(
+        verdict is not None
+        for verdict in verdicts(f"{{cli}} handoff --run-dir {shlex.quote(str(runs[1]))}")
+    ), "a sibling run named on the command line must stay protected in both forms"
+    for name in _cli_commands():
+        bare, via_launcher = verdicts(f"{{cli}} {name} --run-dir {run_dir}")
+        assert bare is not None or via_launcher is None, f"{name}: {via_launcher}"
+
+    (root / "README.md").write_text("leader moved\n", encoding="utf-8")
+    for name in _cli_commands():
+        bare, via_launcher = verdicts(f"{{cli}} {name} --run-dir {run_dir}")
+        assert bare is not None or via_launcher is None, f"after drift, {name}: {via_launcher}"
+
+
+@pytest.mark.parametrize("command", (
+    "{launcher} pr-watch 12 > {launcher}",
+    "{launcher} pr-watch 12 >| {launcher}",
+    "{launcher} pr-watch 12 >& {launcher}",
+    "{launcher} pr-watch 12 && cp README.md {launcher}",
+    "{launcher} pr-watch 12 # {launcher}",
+    "{launcher} pr-watch 12 <<EOF\n{launcher}\nEOF",
+    "env {launcher} pr-watch 12",
+    "'if' {launcher} pr-watch 12",
+    "\\then {launcher} pr-watch 12",
+    ">out if {launcher} pr-watch 12",
+    "VAR=1 if {launcher} pr-watch 12",
+    "<<EOF if {launcher} pr-watch 12\nEOF",
+    "tee x \r {launcher}",
+    "\u00b2>out {launcher} pr-watch 12",
+    "\u0662>x {launcher} pr-watch 12",
+    "12>x {launcher} pr-watch 12",
+    ">! {launcher} pr-watch 12",
+    "tee (a|b)(N) {launcher}",
+    "'F'=x {launcher} pr-watch 12",
+    "\\F=x {launcher} pr-watch 12",
+    "cp x 2>&1 {launcher}",
+    "cp x &>/dev/null {launcher}",
+    "cp x >|out {launcher}",
+    "tee x(N) {launcher}",
+    "tee >(cat) {launcher}",
+    "printf x > {launcher}",
+))
+def test_launcher_paths_outside_the_command_name_stay_protected(tmp_path: Path, command: str):
+    """불변: 명령 이름이 아닌 자리의 launcher 경로는 계속 R1에 걸린다.
+
+    launcher는 git이 무시하는 `.agent-flow/` 안에 있어 tripwire가 바뀐 내용을 보지 못한다.
+    인수·리다이렉션 대상 자리의 경로까지 이름으로 바꾸면 launcher를 덮어쓰는 명령이
+    통과한다.
+    """
+    root, statuses, runs, launcher = _bound_launcher(tmp_path)
+
+    assert host_write_boundary_violation(
+        _command_payload(
+            command.format(launcher=shlex.quote(str(launcher))), cwd=statuses[0].path
+        ),
+        root,
+    ) is not None
+
+
+def test_launcher_that_left_its_install_record_is_not_the_bare_name(tmp_path: Path):
+    root, statuses, runs, launcher = _bound_launcher(tmp_path)
+    launcher.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+
+    assert host_write_boundary_violation(
+        _command_payload(f"{launcher} pr-watch 12 --run-dir {runs[0]}", cwd=statuses[0].path),
+        root,
+    ) is not None, "a launcher that no longer matches its install record was judged as agent-flow"
+
+
+def test_lifecycle_exemption_requires_the_launcher_to_pick_the_leader_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """불변: lifecycle 면제는 설치 launcher가 leader runtime을 고르는 호출에만 준다.
+
+    launcher는 `${0%/*}/../..`로 runtime을 고른다. 자기 checkout 안의 symlink로 부르면
+    파일은 같아도 runtime은 그 checkout에서 온다. 따옴표를 다시 벗기거나 인용된 `~`를
+    펼쳐 판정하면 `tool'`·`<cwd>/~/...` 같은 다른 파일이 launcher 이름이 된다. cwd를
+    모르는 상대 낱말은 셸이 어디서 찾을지 알 수 없다. 모두 leader drift 중에도 통과해
+    워커 코드가 lifecycle 면제로 실행됐다.
+    """
+    root, statuses, runs, launcher = _bound_launcher(tmp_path)
+    own = statuses[0].path
+    nested = own / "x" / "y"
+    nested.mkdir(parents=True)
+    (nested / "agent-flow").symlink_to(launcher)
+    (own / "tool").symlink_to(launcher)
+    lookalike = own / "tool'"
+    lookalike.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    lookalike.chmod(0o755)
+    linked_root = tmp_path / "linked-root"
+    linked_root.symlink_to(root, target_is_directory=True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home_relative = f"~/{root.relative_to(tmp_path)}/.agent-flow/bin/agent-flow"
+    (root / "README.md").write_text("leader moved\n", encoding="utf-8")
+
+    for command, cwd in (
+        (f"{nested / 'agent-flow'} status", own),
+        (f"{shlex.quote(str(lookalike))} status", own),
+        (f"'{home_relative}' status", own),
+        (".agent-flow/bin/agent-flow status", None),
+    ):
+        assert host_write_boundary_violation(
+            _command_payload(command, cwd=cwd), root
+        ) is not None, command
+    for command in (
+        f"{launcher} status",
+        f"{linked_root / '.agent-flow' / 'bin' / 'agent-flow'} status",
+    ):
+        assert host_write_boundary_violation(
+            _command_payload(command, cwd=own), root
+        ) is None, command
+
+
 @pytest.mark.parametrize(
     "operation", ("approve SPEC-1", "approve spec-1", "approve ' SPEC-1 '", "confirm"),
 )
@@ -2553,7 +2713,7 @@ def _installed_launcher(root: Path) -> Path:
 def test_bound_canonical_spec_recorders_allow_current_run(
     tmp_path: Path, operation: str, equals_option: bool,
 ):
-    root, statuses, runs, shim = _bound_spec_recorder(tmp_path)
+    root, statuses, runs, launcher = _bound_launcher(tmp_path)
     selector = (
         f"--run-dir={shlex.quote(str(runs[0]))}" if equals_option
         else f"--run-dir {shlex.quote(str(runs[0]))}"
@@ -2561,71 +2721,55 @@ def test_bound_canonical_spec_recorders_allow_current_run(
 
     assert host_write_boundary_violation(
         _command_payload(
-            f"{shlex.quote(str(shim))} spec {operation} {selector}",
+            f"{shlex.quote(str(launcher))} spec {operation} {selector}",
             cwd=statuses[0].path,
         ),
         root,
     ) is None
 
 
-@pytest.mark.parametrize("case", (
-    "foreign-run", "invented-run", "traversal", "symlink-alias",
-    "missing-selector", "duplicate-selector", "missing-id", "invalid-id",
-    "extra-root", "extra-worktree", "other-action", "extra-positional",
-    "semicolon", "pipe", "substitution", "newline",
-))
-def test_bound_spec_recorders_reject_ambiguous_or_foreign_requests(
-    tmp_path: Path, case: str,
-):
-    root, statuses, runs, shim = _bound_spec_recorder(tmp_path)
-    current = runs[0]
-    alias = statuses[0].path / "run-alias"
-    alias.symlink_to(current, target_is_directory=True)
-    select = f"--run-dir {shlex.quote(str(current))}"
+@pytest.mark.parametrize("case", ("foreign-run", "extra-root", "leader-write"))
+def test_bound_spec_recorders_keep_protected_paths_closed(tmp_path: Path, case: str):
+    """다른 run·leader를 글자로 적은 SPEC 기록은 launcher 형태로도 막힌다.
+
+    현재 run이 아닌 자기 run, 인수 오류 같은 나머지 경우는 CLI가 거절한다
+    (`tests/test_worktree_isolation.py::test_worktree_spec_recorders_write_only_the_active_run`).
+    """
+    root, statuses, runs, launcher = _bound_launcher(tmp_path)
+    select = f"--run-dir {shlex.quote(str(runs[0]))}"
     arguments = {
         "foreign-run": f"approve SPEC-1 --run-dir {shlex.quote(str(runs[1]))}",
-        "invented-run": f"approve SPEC-1 --run-dir {current.with_name('invented')}",
-        "traversal": f"approve SPEC-1 --run-dir {current}/../{current.name}",
-        "symlink-alias": f"approve SPEC-1 --run-dir {alias}",
-        "missing-selector": "approve SPEC-1",
-        "duplicate-selector": f"approve SPEC-1 {select} {select}",
-        "missing-id": f"approve {select}",
-        "invalid-id": f"approve SPEC-0 {select}",
-        "extra-root": f"approve SPEC-1 {select} --root {root}",
-        "extra-worktree": f"approve SPEC-1 {select} --worktree {statuses[1].name}",
-        "other-action": f"refresh {select}",
-        "extra-positional": f"confirm {select} unrelated",
-        "semicolon": f"approve SPEC-1 {select}; printf x > {root / 'leaked.py'}",
-        "pipe": f"approve SPEC-1 {select} | true",
-        "substitution": f"approve SPEC-1 {select} $(printf extra)",
-        "newline": f"approve SPEC-1 {select}\ntrue",
+        "extra-root": f"approve SPEC-1 {select} --root {shlex.quote(str(root))}",
+        "leader-write": f"approve SPEC-1 {select}; printf x > {root / 'leaked.py'}",
     }
 
     assert host_write_boundary_violation(
         _command_payload(
-            f"{shlex.quote(str(shim))} spec {arguments[case]}",
+            f"{shlex.quote(str(launcher))} spec {arguments[case]}",
             cwd=statuses[0].path,
         ),
         root,
     ) is not None
 
 
-@pytest.mark.parametrize("location", ("leader", "sibling", "missing"))
+@pytest.mark.parametrize("location", ("leader", "sibling"))
 def test_bound_spec_recorders_require_owned_checkout_cwd(
     tmp_path: Path, location: str,
 ):
-    root, statuses, runs, shim = _bound_spec_recorder(tmp_path)
-    cwd = {"leader": root, "sibling": statuses[1].path, "missing": None}[location]
+    """다른 checkout에 선 SPEC 기록은 막힌다. cwd를 밝히지 않은 세션은 bare 이름과 같다 —
+    bound 세션은 cwd가 없으면 자기 checkout에 선 것으로 본다."""
+    root, statuses, runs, launcher = _bound_launcher(tmp_path)
+    cwd = {"leader": root, "sibling": statuses[1].path}[location]
 
     assert host_write_boundary_violation(
-        _command_payload(f"{shim} spec confirm --run-dir {runs[0]}", cwd=cwd),
+        _command_payload(f"{launcher} spec confirm --run-dir {runs[0]}", cwd=cwd),
         root,
     ) is not None
 
 
 def test_spec_recorders_do_not_exempt_impostor_or_unbound_session(tmp_path: Path):
-    root, statuses, runs, shim = _bound_spec_recorder(tmp_path)
-    impostor = shim.with_name("fake-agent-flow")
+    root, statuses, runs, launcher = _bound_launcher(tmp_path)
+    impostor = launcher.with_name("fake-agent-flow")
     impostor.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     impostor.chmod(0o755)
 
@@ -2638,15 +2782,15 @@ def test_spec_recorders_do_not_exempt_impostor_or_unbound_session(tmp_path: Path
     ) is not None
     assert host_write_boundary_violation(
         _command_payload(
-            f"{shim} spec confirm --run-dir {runs[0]}",
+            f"{launcher} spec confirm --run-dir {runs[0]}",
             cwd=statuses[0].path, session="unbound-spec",
         ),
         root,
     ) is not None
-    shim.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    launcher.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     assert host_write_boundary_violation(
         _command_payload(
-            f"{shim} spec confirm --run-dir {runs[0]}",
+            f"{launcher} spec confirm --run-dir {runs[0]}",
             cwd=statuses[0].path,
         ),
         root,
@@ -2654,12 +2798,12 @@ def test_spec_recorders_do_not_exempt_impostor_or_unbound_session(tmp_path: Path
 
 
 def test_spec_recorder_still_checks_leader_tripwire(tmp_path: Path):
-    root, statuses, runs, shim = _bound_spec_recorder(tmp_path)
+    root, statuses, runs, launcher = _bound_launcher(tmp_path)
     (root / "README.md").write_text("unexpected leader change\n", encoding="utf-8")
 
     assert host_write_boundary_violation(
         _command_payload(
-            f"{shim} spec approve SPEC-1 --run-dir {runs[0]}",
+            f"{launcher} spec approve SPEC-1 --run-dir {runs[0]}",
             cwd=statuses[0].path,
         ),
         root,
