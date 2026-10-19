@@ -344,6 +344,10 @@ class HookInstallDescription:
     surfaces: tuple[HookSurfaceState, ...]
 
 
+def project_launcher_violations(root: Path) -> tuple[str, ...]:
+    return tuple(_project_launcher_violations(root, _read_kit_json(root)))
+
+
 def describe_managed_hooks(install_root: Path, surface_root: Path) -> HookInstallDescription:
     """설치 무결성과 등록 파일별 상태를 따로 돌려준다.
 

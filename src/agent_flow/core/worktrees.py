@@ -49,9 +49,12 @@ from agent_flow.core.worktree_isolation import (
     assert_worktree_mergeable,
     exclusive_file_lease,
     forget_adopted_checkout,
+    git_common_dir,
     git_repo_state,
     git_safe,
+    git_toplevel,
     is_git_lock_contention,
+    leader_root_for,
     list_registered_worktrees,
     real_path,
     record_adopted_checkout,
@@ -3364,14 +3367,20 @@ def removable_worktrees(*, root: Path) -> list[RegisteredWorktree]:
     ]
 
 
-def resolve_worktree(*, root: Path, selector: str) -> RegisteredWorktree | None:
-    """Resolve one registered worktree without letting aliases beat exact IDs."""
+def resolve_worktree(
+    *, root: Path, selector: str, cwd: Path | None = None
+) -> RegisteredWorktree | None:
+    """Resolve one registered worktree without letting aliases beat exact IDs.
+
+    A relative path selector also resolves from ``cwd``, the caller's process directory by
+    default. A guard judging another process's command must pass that command's directory.
+    """
     wanted = selector.strip()
     if not wanted:
         return None
     ranked: dict[int, dict[str, RegisteredWorktree]] = {}
     for entry in removable_worktrees(root=root):
-        rank = _selector_match_rank(root=root, selector=wanted, entry=entry)
+        rank = _selector_match_rank(root=root, selector=wanted, entry=entry, cwd=cwd)
         if rank is not None:
             ranked.setdefault(rank, {})[worktree_path_key(entry.path)] = entry
     if not ranked:
@@ -3385,11 +3394,11 @@ def resolve_worktree(*, root: Path, selector: str) -> RegisteredWorktree | None:
 
 
 def _selector_match_rank(
-    *, root: Path, selector: str, entry: RegisteredWorktree
+    *, root: Path, selector: str, entry: RegisteredWorktree, cwd: Path | None
 ) -> int | None:
     if any(
         same_worktree_path(candidate, entry.path)
-        for candidate in _selector_path_candidates(root=root, selector=selector)
+        for candidate in _selector_path_candidates(root=root, selector=selector, cwd=cwd)
     ):
         return 0
     if selector == entry.branch:
@@ -3413,13 +3422,15 @@ def _derived_worktree_identity(selector: str) -> tuple[str, str] | None:
     return name, f"feat/{name.removeprefix('feat-')}"
 
 
-def _selector_path_candidates(*, root: Path, selector: str) -> tuple[Path, ...]:
+def _selector_path_candidates(
+    *, root: Path, selector: str, cwd: Path | None
+) -> tuple[Path, ...]:
     """선택자를 경로로 읽었을 때의 후보. 상대경로는 leader root와 cwd 양쪽에서 푼다."""
     raw = Path(selector)
     if raw.is_absolute():
         return (raw,)
     try:
-        return (root / raw, Path.cwd() / raw)
+        return (root / raw, (cwd if cwd is not None else Path.cwd()) / raw)
     except OSError:
         return (root / raw,)
 
@@ -3857,6 +3868,116 @@ def user_worktrees_root() -> Path:
     if not base.is_absolute():
         raise WorktreeIsolationError(f"XDG_STATE_HOME must be absolute: {base}")
     return base / "worktrees"
+
+
+def resolve_cli_root_context(
+    root: Path, worktree: str | None, *, cwd: Path
+) -> tuple[Path, str | None, Path | None]:
+    """(config root, worktree 이름, 채택되지 않은 checkout).
+
+    세 번째 값이 non-None이면 cwd가 이 저장소의 linked worktree인데 agent-flow가
+    채택한 기록이 없다는 뜻이다. 진입 명령은 그 상태에서 멈춘다.
+    """
+    managed = managed_worktree_context(root)
+    if managed is not None:
+        leader_root, inferred_worktree = managed
+        return leader_root, worktree or inferred_worktree, None
+    cwd_managed = managed_worktree_context(cwd)
+    if cwd_managed is not None and (_same_path(root, cwd) or _same_path(root, cwd_managed[0])):
+        leader_root, inferred_worktree = cwd_managed
+        return leader_root, worktree or inferred_worktree, None
+    cwd_leader = leader_root_for(cwd)
+    if cwd_leader is not None and _same_path(root, cwd_leader):
+        # `--root <leader>`로 불렸어도 서 있는 자리가 채택된 checkout이면 그 자리를 쓴다.
+        # JS relay가 언제나 `--root`를 붙여 주므로(`relayPythonRunLifecycle`) 이 분기가
+        # 없으면 채택된 worktree에서 부른 lifecycle 명령이 전부 leader로 접힌다.
+        cwd_checkout = registered_checkout(leader_root=cwd_leader, path=cwd)
+        if (
+            cwd_checkout is not None
+            and adopted_worktree_parent(root=cwd_leader, path=cwd_checkout) is not None
+        ):
+            return cwd_leader, worktree or cwd_checkout.name, None
+    leader_root = leader_root_for(root)
+    if leader_root is not None:
+        # 경로 모양이 관리 규약과 달라도 이 저장소의 linked worktree다. 인식 근거를
+        # 경로에서 등록부로 옮기는 자리가 여기다.
+        checkout = registered_checkout(leader_root=leader_root, path=root)
+        if checkout is None:
+            return leader_root, worktree, None
+        if adopted_worktree_parent(root=leader_root, path=checkout) is not None:
+            return leader_root, worktree or checkout.name, None
+        return leader_root, worktree, checkout
+    git_common_root = git_common_worktree_root(root)
+    if git_common_root is not None:
+        return git_common_root, worktree, None
+    return root, worktree, None
+
+
+def registered_checkout(*, leader_root: Path, path: Path) -> Path | None:
+    """``path``가 leader가 아닌 checkout에 서 있으면 그 checkout 경로.
+
+    등록부를 읽을 수 없거나 등록 행이 없어도 경로를 돌려준다. 호출자는 그 답을
+    미채택으로 취급해 진입을 막는다 — 증명 실패를 통과로 접으면 격리 없이 leader에서
+    도는 쪽으로 흐른다. leader(또는 그 하위 디렉터리)면 ``None``이다.
+    """
+    top_level = git_toplevel(path)
+    if top_level is None or _same_path(top_level, leader_root):
+        return None
+    try:
+        registered = registered_worktree_at(leader_root, top_level)
+    except WorktreeIsolationError:
+        return top_level
+    if registered is None or registered.prunable:
+        # 등록 행이 없다 = 이 checkout이 이 저장소의 관리 대상이라는 증명이 없다.
+        # 예전처럼 leader로 접으면(디렉터리를 옮긴 worktree가 이 상태다) 사용자가
+        # 서 있는 자리가 아닌 곳에서 런이 돈다. 증명 실패는 통과가 아니다.
+        return top_level
+    return registered.path
+
+
+def managed_worktree_context(path: Path) -> tuple[Path, str | None] | None:
+    resolved = path.resolve()
+    central_root = user_worktrees_root().resolve()
+    # 사용자 중앙 컨테이너의 `.agent-flow/worktrees`는 프로젝트 marker가 아니다.
+    # 여기서 leader를 HOME으로 오인하면 status/run/start가 실제 저장소를 떠난다.
+    if resolved == central_root or central_root in resolved.parents:
+        return None
+    parts = resolved.parts
+    markers = {".agent-flow", ".codex", ".Codex", ".omp"}
+    for index in range(len(parts) - 2, 0, -1):
+        if parts[index] not in markers or parts[index + 1] != "worktrees":
+            continue
+        root = Path(*parts[:index])
+        if parts[index] in {".codex", ".Codex", ".omp"} and _same_path(root, _home_path()):
+            continue
+        # `<marker>/worktrees`로 끝나는 경로에는 이름이 없다. 무가드로 읽으면 그
+        # 자리에서 IndexError로 죽는다. JS 쌍둥이도 여기서 null을 낸다.
+        return root, parts[index + 2] if index + 2 < len(parts) else None
+    return None
+
+
+def git_common_worktree_root(root: Path) -> Path | None:
+    # anchor 유도는 sanitize된 git으로만 한다. ambient GIT_DIR/GIT_COMMON_DIR을
+    # 상속한 채 물으면 대답이 다른 저장소를 가리키고, 그 부모가 그대로 config root와
+    # state root가 된다(kit.json을 심은 decoy면 hook 무결성 게이트까지 통과한다).
+    if git_toplevel(root) is None:
+        return None
+    common_path = git_common_dir(root)
+    if common_path is None or common_path.name != ".git":
+        return None
+    return common_path.parent
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return left.absolute() == right.absolute()
+
+
+def _home_path() -> Path:
+    home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or str(Path.home())
+    return Path(home).expanduser()
 
 
 def managed_worktrees_root(root: Path) -> Path:

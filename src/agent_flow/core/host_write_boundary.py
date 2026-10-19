@@ -10,8 +10,9 @@ import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, TypeVar
 
+from agent_flow.core.hook_integrity import project_launcher_violations
 from agent_flow.core.workflow_status import status_value
 from agent_flow.core.worktree_isolation import (
     LEADER_SWEEP_TRACKED_ONLY,
@@ -119,6 +120,10 @@ _BINDING_DIR = "host-sessions"
 # 워커가 **자기 런을 진행시키는** 명령. 면제 범위를 넓히면 안 되는 이유는
 # `_is_lifecycle_command` docstring에 있다.
 _LIFECYCLE_COMMANDS = frozenset({"continue", "run", "start", "status"})
+_TARGET_OPTIONS = frozenset({"--root", "--worktree"})
+_ABORT_SWITCHES = {"--yes": "--yes", "-y": "--yes", "--help": "--help", "-h": "--help"}
+_LAUNCHER_UNSAFE_CHARACTERS = frozenset("$`\\*?[]{}~!#\n\r")
+_Request = TypeVar("_Request")
 
 
 class HostWriteBoundaryError(RuntimeError):
@@ -657,6 +662,15 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
             active=active,
             cwd=session_cwd,
         )
+    if (
+        binding is not None
+        and tool_name in _COMMAND_TOOLS
+        and command
+        and _is_bound_own_abort(
+            command, root=root, current=binding.checkout, cwd=session_cwd
+        )
+    ):
+        return None
     if binding is None:
         return _unbound_violation(
             payload,
@@ -721,7 +735,17 @@ def _lifecycle_violation(
             f"this host session is bound to {current.checkout}; refusing to start "
             "a new run until the current worktree session is complete"
         )
-    command_root = _lifecycle_root(command, current.checkout, root=root, cwd=cwd)
+    ambiguous = _ambiguous_target(_agent_flow_arguments(command, root=root, cwd=cwd) or ())
+    if ambiguous is not None:
+        return (
+            f"this host session is bound to {current.checkout}; refusing a lifecycle "
+            f"target the CLI could read differently ({ambiguous}); pass --root and "
+            "--worktree once, in full, without ~"
+        )
+    lifecycle_cwd = _declared_command_cwd(payload, command, current.checkout)
+    command_root = _lifecycle_root(
+        command, current.checkout, root=root, cwd=cwd, base=lifecycle_cwd
+    )
     if command_root not in {root, current.checkout}:
         return (
             f"this host session is bound to {root}; refusing a lifecycle command "
@@ -729,19 +753,143 @@ def _lifecycle_violation(
         )
     selector = _worktree_selector(command, root=root, cwd=cwd)
     if selector is not None:
-        selected = _active_checkout(root, selector=selector, active=active)
+        selected = _active_checkout(
+            root, selector=selector, active=active, cwd=lifecycle_cwd
+        )
         if selected is None or selected.checkout != current.checkout:
             return (
                 f"this host session is bound to {current.checkout}; refusing a lifecycle "
                 f"command for another worktree ({selector})"
             )
-    lifecycle_cwd = _declared_command_cwd(payload, command, current.checkout)
     if lifecycle_cwd is None or not _is_within(lifecycle_cwd, current.checkout):
         return (
             f"lifecycle cwd is not bound to {current.checkout}; resume the host "
             "from that exact worktree"
         )
     return None
+
+
+def _ambiguous_target(arguments: tuple[str, ...]) -> str | None:
+    """CLI argparse가 guard와 다르게 읽을 대상 지정. 축약, 중복, `~`로 시작하는 값.
+
+    guard는 정확한 `--root`/`--worktree`의 첫 값만 읽는다. argparse는 축약을 받고
+    마지막 값을 쓰며, 셸은 따옴표 밖의 `~`만 펼친다. 그 차이로 guard가 본 대상과
+    CLI가 쓰는 대상이 갈라진다.
+    """
+    seen: set[str] = set()
+    tokens = iter(arguments)
+    for token in tokens:
+        name, separator, value = token.partition("=")
+        if name not in _TARGET_OPTIONS:
+            if len(name) > 2 and any(option.startswith(name) for option in _TARGET_OPTIONS):
+                return token
+            continue
+        if name in seen:
+            return token
+        seen.add(name)
+        if not separator:
+            value = next(tokens, "")
+        if value.startswith("~"):
+            return token
+    return None
+
+
+def _bound_launcher_request(
+    command: str,
+    *,
+    root: Path,
+    current: ActiveCheckout,
+    cwd: Path | None,
+    parse: Callable[[tuple[str, ...]], _Request | None],
+) -> _Request | None:
+    """bound 세션이 자기 checkout에서 설치된 launcher를 직접 부른 요청.
+
+    launcher는 leader 안에 있어 그 경로만으로 R1에 걸린다. lifecycle 밖의 예외는
+    실행 주체를 먼저 증명한다: 자기 checkout cwd, 확장·복합 없는 단일 argv, 정확한
+    설치 경로, 설치 기록과 같은 launcher bytes와 interpreter. ``parse``가 그
+    서브커맨드의 전체 인자 문법을 받아들여야 하고, 대상 검증은 호출자가 한다.
+    """
+    if cwd is None or not _is_within(cwd, current.checkout):
+        return None
+    if any(character in _LAUNCHER_UNSAFE_CHARACTERS for character in command):
+        return None
+    argv = _direct_shell_argv(command)
+    if not argv or argv[0] != str(root / ".agent-flow" / "bin" / "agent-flow"):
+        return None
+    request = parse(argv[1:])
+    if request is None or project_launcher_violations(root):
+        return None
+    return request
+
+
+def _is_bound_own_abort(
+    command: str,
+    *,
+    root: Path,
+    current: ActiveCheckout,
+    cwd: Path | None,
+) -> bool:
+    """자기 run을 닫는 abort. #87 복구 계약에 따라 leader drift 검사보다 먼저 판정한다."""
+    options = _bound_launcher_request(
+        command, root=root, current=current, cwd=cwd, parse=_abort_options
+    )
+    return options is not None and _abort_targets_own_run(
+        options, root=root, current=current, cwd=cwd
+    )
+
+
+def _abort_targets_own_run(
+    options: dict[str, str],
+    *,
+    root: Path,
+    current: ActiveCheckout,
+    cwd: Path | None,
+) -> bool:
+    """CLI와 같은 root·worktree 추론으로 abort 대상이 binding의 checkout인가.
+
+    명시한 `--root`는 lifecycle 명령처럼 leader나 자기 checkout이어야 한다. 대상이
+    자기 run이어도 형제 경로 literal을 R1 밖으로 내보내지 않는다.
+    """
+    if cwd is None:
+        return False
+    try:
+        from agent_flow.core.worktrees import resolve_cli_root_context, resolve_worktree
+
+        requested = options.get("--root")
+        command_root = (cwd / requested if requested is not None else cwd).resolve()
+        if requested is not None and real_path(command_root) not in {root, current.checkout}:
+            return False
+        config_root, worktree, _ = resolve_cli_root_context(
+            command_root, options.get("--worktree"), cwd=cwd
+        )
+        if worktree is None or real_path(config_root) != root:
+            return False
+        selected = resolve_worktree(root=root, selector=worktree, cwd=cwd)
+    except (ImportError, OSError, ValueError, RuntimeError, WorktreeIsolationError):
+        return False
+    return selected is not None and real_path(selected.path) == current.checkout
+
+
+def _abort_options(arguments: tuple[str, ...]) -> dict[str, str] | None:
+    if not arguments or arguments[0] != "abort":
+        return None
+    options: dict[str, str] = {}
+    tokens = iter(arguments[1:])
+    for token in tokens:
+        name, separator, value = token.partition("=")
+        if name in _TARGET_OPTIONS:
+            if not separator:
+                value = next(tokens, "")
+            if not value or value.startswith("-"):
+                return None
+        elif token in _ABORT_SWITCHES:
+            name, value = _ABORT_SWITCHES[token], ""
+        else:
+            return None
+        if name in options:
+            return None
+        options[name] = value
+    return options
 
 
 def _unbound_violation(
@@ -1095,6 +1243,7 @@ def _active_checkout(
     selector: str,
     run_id: str | None = None,
     active: tuple[ActiveCheckout, ...] | None = None,
+    cwd: Path | None = None,
 ) -> ActiveCheckout | None:
     """``active``를 주면 그 목록에서 고른다. 열거는 active run 수에 비례해 비싸다.
 
@@ -1102,11 +1251,14 @@ def _active_checkout(
     목록을 갖고 있는데 여기서 다시 열거하면 같은 검증을 두 번 치르고, 그 두 배가
     host hook의 실행 시간 제한을 넘기면 세션이 binding되지 못한 채 guard에 막힌다 —
     run이 늘수록 확실히 막히는 쪽으로 기운다.
+
+    상대 경로 selector는 ``cwd``에서도 푼다. 명령을 판정할 때는 hook 프로세스가 아니라
+    그 명령이 실행될 자리를 넘겨야 CLI와 같은 checkout을 고른다.
     """
     matches: list[ActiveCheckout] = []
     path_candidates = [_resolve_path(selector, root)]
     try:
-        path_candidates.append(_resolve_path(selector, Path.cwd()))
+        path_candidates.append(_resolve_path(selector, cwd if cwd is not None else Path.cwd()))
     except OSError:
         pass
     for context in (_active_checkouts(root) if active is None else active):
@@ -2363,14 +2515,21 @@ def _lifecycle_root(
     *,
     root: Path | None = None,
     cwd: Path | None = None,
+    base: Path | None = None,
 ) -> Path:
+    """명령의 `--root`. 상대 경로는 ``base``(명령이 실행될 자리)에서 푼다."""
     arguments = _agent_flow_arguments(command, root=root, cwd=cwd) or ()
     for index, token in enumerate(arguments):
         if token == "--root" and index + 1 < len(arguments):
-            return real_path(Path(arguments[index + 1]).expanduser())
+            return _command_path(arguments[index + 1], base)
         if token.startswith("--root="):
-            return real_path(Path(token.split("=", 1)[1]).expanduser())
+            return _command_path(token.split("=", 1)[1], base)
     return real_path(default)
+
+
+def _command_path(value: str, base: Path | None) -> Path:
+    path = Path(value).expanduser()
+    return real_path(path if path.is_absolute() or base is None else base / path)
 
 
 def _worktree_selector(
