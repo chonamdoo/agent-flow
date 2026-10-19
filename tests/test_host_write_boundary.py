@@ -2582,6 +2582,11 @@ def test_installed_launcher_is_never_judged_stricter_than_the_bare_name(tmp_path
         "{cli} run-command --host-session-id session-1 -- pytest -q",
         f"{{cli}} spec approve SPEC-1 --run-dir {run_dir}",
         f"2>{shlex.quote(str(own / 'watch.err'))} {{cli}} pr-watch 12 --run-dir {run_dir} --once",
+        f"case x in x) {{cli}} pr-watch 12 --run-dir {run_dir} --once;; esac",
+        f"({{cli}} pr-watch 12 --run-dir {run_dir} --once)",
+        f"{{cli}} pr-watch 12 --run-dir {run_dir} --once <<EOF\nok\nEOF",
+        f"{{{{ {{cli}} pr-watch 12 --run-dir {run_dir} --once; }}}}",
+        f"! {{cli}} pr-watch 12 --run-dir {run_dir} --once",
     ):
         assert verdicts(shape) == (None, None), shape
     partly_quoted = f"'{root}'/.agent-flow/bin/agent-flow pr-watch 12 --run-dir {run_dir} --once"
@@ -2614,6 +2619,13 @@ def test_installed_launcher_is_never_judged_stricter_than_the_bare_name(tmp_path
     "\\then {launcher} pr-watch 12",
     ">out if {launcher} pr-watch 12",
     "VAR=1 if {launcher} pr-watch 12",
+    "<<EOF if {launcher} pr-watch 12\nEOF",
+    "tee x \r {launcher}",
+    "\u00b2>out {launcher} pr-watch 12",
+    "\u0662>x {launcher} pr-watch 12",
+    "12>x {launcher} pr-watch 12",
+    ">! {launcher} pr-watch 12",
+    "tee (a|b)(N) {launcher}",
     "'F'=x {launcher} pr-watch 12",
     "\\F=x {launcher} pr-watch 12",
     "cp x 2>&1 {launcher}",

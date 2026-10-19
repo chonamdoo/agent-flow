@@ -85,7 +85,7 @@ _MAX_SUBSTITUTION_DEPTH = 4
 # 뒤에 **명령이 오는** 셸 예약어만. 이 뒤는 여전히 명령 앞자리이므로
 # `if VAR=../sib/f cmd; then`의 `VAR=`는 대입이다. `case`처럼 뒤에 값이 오는
 # 예약어는 넣지 않는다 — `case x=../sib/f in`의 `x=`는 대입이 아니다.
-_SHELL_KEYWORDS = frozenset({"if", "then", "elif", "else", "while", "until", "do"})
+_SHELL_KEYWORDS = frozenset({"if", "then", "elif", "else", "while", "until", "do", "{", "!"})
 # `"` 안에서 역슬래시가 이스케이프로 동작하는 글자. POSIX가 정한 목록이다.
 _DOUBLE_QUOTE_ESCAPES = frozenset("$`\"\\\n")
 _PATCH_PATH = re.compile(
@@ -1862,10 +1862,13 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
     # 지금 낱말이 단순 명령의 첫 낱말인가. 예약어는 그 자리에서만 예약어다 —
     # `>out if x`·`VAR=1 if x`의 `if`는 명령 이름이고 `x`는 그 인수다.
     fresh = True
-    # 명령 앞자리를 연 경계가 셸에서도 명령을 시작하는가. `)` 뒤와 명령 앞자리가 아닌
-    # `(`는 case 패턴·zsh glob(`tee x(N) <launcher>`)일 수 있다. 대입 판정은 앞자리를
-    # 넓게 봐야 안전하고 launcher 이름 판정은 좁게 봐야 안전하므로 따로 든다.
+    # 명령 앞자리를 연 경계가 셸에서도 명령을 시작하는가. 명령 앞자리가 아닌 `(`와 그
+    # 짝 `)`는 zsh glob(`tee x(N) <launcher>`)일 수 있다. 대입 판정은 앞자리를 넓게
+    # 봐야 안전하고 launcher 이름 판정은 좁게 봐야 안전하므로 따로 든다.
     sound = True
+    # 열린 `(`마다 그 `(`가 명령을 열었는가. 짝이 맞는 `)`는 같은 답을 따른다 —
+    # `tee *(.) <launcher>`의 `)`는 열지 않고, 짝 없는 `)`(case 패턴 끝)는 연다.
+    parens: list[bool] = []
     segment = 0
     # 이 줄이 끝나면 본문을 건너뛸 here-document 표식들.
     heredocs: list[str] = []
@@ -1910,9 +1913,13 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
         quoted = False
 
     def drop_io_number() -> None:
-        """`2>file`의 `2`는 낱말이 아니라 fd 번호다. 명령 이름 자리를 소비하지 않는다."""
+        """`2>file`의 `2`는 낱말이 아니라 fd 번호다. 명령 이름 자리를 소비하지 않는다.
+
+        ASCII 한 자리만 fd로 본다. zsh는 `12>x`의 `12`를 인수로 읽고, `²` 같은 유니코드
+        숫자는 어느 셸에서도 명령 이름이다.
+        """
         nonlocal current, started, word_start
-        if current and not quoted and not dynamic and "".join(current).isdigit():
+        if len(current) == 1 and current[0] in "0123456789" and not quoted and not dynamic:
             current = []
             started = False
             word_start = -1
@@ -2005,10 +2012,17 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             flush(end=position)
             continue
         if char in _COMMAND_SEPARATORS:
-            opens = char not in "()" or (
-                char == "(" and command_position and fresh and not started
-                and not redirect_target
-            )
+            if char == "(":
+                opens = (
+                    command_position and sound and fresh and not started
+                    and not redirect_target
+                )
+                parens.append(opens)
+            elif char == ")":
+                opens = parens.pop() if parens else True
+            else:
+                # `\r`은 셸 구분자가 아니라 낱말 글자다. CRLF 줄은 뒤의 `\n`이 연다.
+                opens = char != "\r"
             flush(end=position, ends_command=True, opens=opens)
             if char == "\n" and heredocs:
                 index = _skip_heredoc_bodies(command, index, heredocs)
@@ -2034,6 +2048,8 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
                 heredocs.append(delimiter)
             drop_io_number()
             flush(end=position)
+            # 표식은 리다이렉션의 대상이다. 그 뒤의 `if`는 예약어가 아니라 명령 이름이다.
+            fresh = False
             continue
         if char in _REDIRECTIONS and command[index : index + 1] == "(":
             # `<(cmd)`·`>(cmd)`는 프로세스 치환이다. 안은 명령이고 바깥에서는 인수
@@ -2049,9 +2065,10 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             index = end
             continue
         if char in _REDIRECTIONS:
-            # `>&`·`<&`·`>|`의 둘째 글자는 연산자의 일부다. 구분자로 읽으면 대상 뒤의
-            # 인수가 명령 앞자리로 오인된다.
-            if command[index : index + 1] in ("&", "|"):
+            # `>&`·`<&`·`>|`와 zsh의 `>!`는 한 연산자다. 둘째 글자를 구분자나 대상으로
+            # 읽으면 대상 뒤의 인수가 명령 앞자리로 오인된다.
+            following = command[index : index + 1]
+            if following in ("&", "|") or (char == ">" and following == "!"):
                 index += 1
             # 리다이렉션은 낱말만 끊는다. 명령 앞자리를 되돌리면 `cmd >out` 뒤의
             # 인수가 대입으로 읽힌다.
