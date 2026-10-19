@@ -2587,6 +2587,7 @@ def test_installed_launcher_is_never_judged_stricter_than_the_bare_name(tmp_path
         f"{{cli}} pr-watch 12 --run-dir {run_dir} --once <<EOF\nok\nEOF",
         f"{{{{ {{cli}} pr-watch 12 --run-dir {run_dir} --once; }}}}",
         f"! {{cli}} pr-watch 12 --run-dir {run_dir} --once",
+        f"case x in (x) {{cli}} pr-watch 12 --run-dir {run_dir} --once;; esac",
     ):
         assert verdicts(shape) == (None, None), shape
     partly_quoted = f"'{root}'/.agent-flow/bin/agent-flow pr-watch 12 --run-dir {run_dir} --once"
@@ -2624,8 +2625,12 @@ def test_installed_launcher_is_never_judged_stricter_than_the_bare_name(tmp_path
     "\u00b2>out {launcher} pr-watch 12",
     "\u0662>x {launcher} pr-watch 12",
     "12>x {launcher} pr-watch 12",
+    "!$X {launcher} pr-watch 12",
+    "{{$X {launcher} pr-watch 12",
+    "echo case x in (x) {launcher}",
     ">! {launcher} pr-watch 12",
     "tee (a|b)(N) {launcher}",
+    "tee x(a|{launcher})",
     "'F'=x {launcher} pr-watch 12",
     "\\F=x {launcher} pr-watch 12",
     "cp x 2>&1 {launcher}",
