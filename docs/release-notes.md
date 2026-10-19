@@ -25,7 +25,8 @@
 - worktree 안에서 실행한 명령은 `--worktree`·`--root`·`--run-dir`·
   `worktree --name/--path`로 이미 있는 다른 checkout이나 run을 고르지 못한다.
   형제 worktree를 `worktree remove --allow-unmerged`로 지우던 경로가 닫힌다.
-  새 run·checkout을 만드는 `run`·`start`·`worktree create`는 그대로다.
+  새 run을 만드는 `run`·`start`와 아직 없는 checkout을 만드는 `worktree create`는
+  그대로다.
   `spec approve`·`spec confirm`은 그 worktree의 active run에만 기록한다(#370의
   정확한 현재 run 규칙을 CLI로 옮겼다).
   [#372](https://github.com/chonamdoo/agent-flow/pull/372)

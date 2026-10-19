@@ -174,7 +174,8 @@ else in a command, such as an argument or a redirection target, and a launcher p
 after the leader changes, through the exact launcher path. Inside a worktree, the CLI refuses any
 command that names another existing checkout or run by `--worktree`, `--root`, `--run-dir`, or
 `worktree --name/--path`, and `spec approve`/`spec confirm` record only to that worktree's active
-run. `run`, `start`, and `worktree create` still name where a new run or checkout goes.
+run. `run` and `start` still name where a new run goes, and `worktree create` may still name a
+checkout that does not exist yet.
 
 ### The numbers in this README are checked too
 

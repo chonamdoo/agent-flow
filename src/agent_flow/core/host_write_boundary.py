@@ -1852,14 +1852,20 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
     assignment = False
     # 명령 앞자리인가. `VAR=값`이 대입인지 그냥 인수인지는 이것으로 갈린다.
     command_position = True
-    # 바로 앞이 리다이렉션 연산자였는가. 다음 낱말은 명령 이름이 아니라 대상이다 —
-    # `>& <launcher>`처럼 `&`가 구분자로 읽혀도 대상이다.
+    # 바로 앞이 리다이렉션 연산자였는가. 다음 낱말은 명령 이름이 아니라 대상이다.
     redirect_target = False
     # 이 낱말이 원문에서 시작한 자리. 아직 낱말이 없으면 -1이다.
     word_start = -1
     # 이 낱말에 인용이나 역슬래시가 있었는가. 인용된 `'if'`는 예약어가 아니라 명령
     # 이름이다 — 예약어로 읽으면 그 뒤의 인수가 명령 이름 자리로 오인된다.
     quoted = False
+    # 지금 낱말이 단순 명령의 첫 낱말인가. 예약어는 그 자리에서만 예약어다 —
+    # `>out if x`·`VAR=1 if x`의 `if`는 명령 이름이고 `x`는 그 인수다.
+    fresh = True
+    # 명령 앞자리를 연 경계가 셸에서도 명령을 시작하는가. `)` 뒤와 명령 앞자리가 아닌
+    # `(`는 case 패턴·zsh glob(`tee x(N) <launcher>`)일 수 있다. 대입 판정은 앞자리를
+    # 넓게 봐야 안전하고 launcher 이름 판정은 좁게 봐야 안전하므로 따로 든다.
+    sound = True
     segment = 0
     # 이 줄이 끝나면 본문을 건너뛸 here-document 표식들.
     heredocs: list[str] = []
@@ -1867,26 +1873,32 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
     index = 0
     length = len(command)
 
-    def flush(*, end: int, ends_command: bool = False) -> None:
-        nonlocal current, dynamic, truncated, started, assignment, prefixed
-        nonlocal command_position, segment, redirect_target, word_start, quoted
+    def flush(*, end: int, ends_command: bool = False, opens: bool = True) -> None:
+        nonlocal current, dynamic, truncated, started, assignment, prefixed, sound
+        nonlocal command_position, segment, redirect_target, word_start, quoted, fresh
         if started:
             text = "".join(current)
             target = redirect_target
+            keyword = fresh and not quoted and not target and text in _SHELL_KEYWORDS
             words.append(
                 _CommandWord(
                     text, truncated, segment, prefixed,
-                    command_position and not target, word_start, end,
+                    command_position and sound and not target, word_start, end,
                 )
             )
             redirect_target = False
             # 낱말이 실제로 있었을 때만 자리를 소비한다. 빈 flush(구분자 뒤 공백)가
-            # 자리를 지우면 `true && VAR=../sib/f cmd`의 대입을 놓친다. 대입과 예약어,
-            # 리다이렉션 대상은 명령 이름이 아니므로 그 뒤도 여전히 명령 앞자리다.
-            if not assignment and not target and (quoted or text not in _SHELL_KEYWORDS):
+            # 자리를 지우면 `true && VAR=../sib/f cmd`의 대입을 놓친다. 대입과 리다이렉션
+            # 대상은 명령 이름이 아니므로 그 뒤도 여전히 명령 앞자리다. 첫 낱말 자리의
+            # 예약어 뒤는 새 단순 명령의 첫 낱말이다.
+            fresh = keyword
+            if not keyword and not assignment and not target:
                 command_position = False
         if ends_command:
             command_position = True
+            fresh = True
+            sound = opens
+            redirect_target = False
             segment += 1
         current = []
         dynamic = False
@@ -1896,6 +1908,14 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
         prefixed = False
         word_start = -1
         quoted = False
+
+    def drop_io_number() -> None:
+        """`2>file`의 `2`는 낱말이 아니라 fd 번호다. 명령 이름 자리를 소비하지 않는다."""
+        nonlocal current, started, word_start
+        if current and not quoted and not dynamic and "".join(current).isdigit():
+            current = []
+            started = False
+            word_start = -1
 
     while index < length:
         position = index
@@ -1979,8 +1999,17 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             # 대상으로 읽힌다.
             started = True
             continue
+        if char == "&" and command[index : index + 1] == ">":
+            # `&>`·`&>>`는 리다이렉션이다. `&`를 구분자로 읽으면 대상 뒤의 인수가
+            # 명령 앞자리로 오인된다. `>`는 다음 바퀴가 읽는다.
+            flush(end=position)
+            continue
         if char in _COMMAND_SEPARATORS:
-            flush(end=position, ends_command=True)
+            opens = char not in "()" or (
+                char == "(" and command_position and fresh and not started
+                and not redirect_target
+            )
+            flush(end=position, ends_command=True, opens=opens)
             if char == "\n" and heredocs:
                 index = _skip_heredoc_bodies(command, index, heredocs)
                 heredocs = []
@@ -1993,6 +2022,7 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             # 끊는다. 첫 `<`에서 걸러내지 않으면 두 번째 `<`가 here-document로 읽혀,
             # 뒤따르는 줄이 본문으로 버려진다.
             index += 2
+            drop_io_number()
             flush(end=position)
             redirect_target = True
             continue
@@ -2002,11 +2032,30 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             index, delimiter = _read_heredoc_delimiter(command, index + 1)
             if delimiter:
                 heredocs.append(delimiter)
+            drop_io_number()
             flush(end=position)
             continue
+        if char in _REDIRECTIONS and command[index : index + 1] == "(":
+            # `<(cmd)`·`>(cmd)`는 프로세스 치환이다. 안은 명령이고 바깥에서는 인수
+            # 한 낱말이다. `(`·`)`를 구분자로 읽으면 뒤따르는 인수가 명령 앞자리가 된다.
+            started = True
+            dynamic = True
+            truncated = True
+            word_start = position if word_start < 0 else word_start
+            end = _skip_substitution(command, index + 1)
+            segment = _absorb_command(
+                command[index + 1 : max(end - 1, index + 1)], words, segment, depth, index + 1
+            )
+            index = end
+            continue
         if char in _REDIRECTIONS:
+            # `>&`·`<&`·`>|`의 둘째 글자는 연산자의 일부다. 구분자로 읽으면 대상 뒤의
+            # 인수가 명령 앞자리로 오인된다.
+            if command[index : index + 1] in ("&", "|"):
+                index += 1
             # 리다이렉션은 낱말만 끊는다. 명령 앞자리를 되돌리면 `cmd >out` 뒤의
             # 인수가 대입으로 읽힌다.
+            drop_io_number()
             flush(end=position)
             redirect_target = True
             continue
@@ -2022,7 +2071,8 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
             text = "".join(current)
             if text.startswith("-"):
                 prefixed = True
-            elif command_position and _ENV_ASSIGNMENT_TOKEN.match(f"{text}="):
+            elif command_position and not quoted and _ENV_ASSIGNMENT_TOKEN.match(f"{text}="):
+                # 이름 쪽에 인용이나 역슬래시가 있으면 대입이 아니라 명령 이름이다(`'F'=x`).
                 # 대입 뒤도 여전히 명령 앞자리다. 접두사는 낱말에 남긴다 — 인수를
                 # 그대로 들고 있어야 자리로 읽는 쪽이 무엇을 받았는지 안다.
                 prefixed = True

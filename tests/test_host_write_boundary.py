@@ -2581,6 +2581,7 @@ def test_installed_launcher_is_never_judged_stricter_than_the_bare_name(tmp_path
         f">{shlex.quote(str(own / 'watch.log'))} {{cli}} pr-watch 12 --run-dir {run_dir} --once",
         "{cli} run-command --host-session-id session-1 -- pytest -q",
         f"{{cli}} spec approve SPEC-1 --run-dir {run_dir}",
+        f"2>{shlex.quote(str(own / 'watch.err'))} {{cli}} pr-watch 12 --run-dir {run_dir} --once",
     ):
         assert verdicts(shape) == (None, None), shape
     partly_quoted = f"'{root}'/.agent-flow/bin/agent-flow pr-watch 12 --run-dir {run_dir} --once"
@@ -2611,6 +2612,15 @@ def test_installed_launcher_is_never_judged_stricter_than_the_bare_name(tmp_path
     "env {launcher} pr-watch 12",
     "'if' {launcher} pr-watch 12",
     "\\then {launcher} pr-watch 12",
+    ">out if {launcher} pr-watch 12",
+    "VAR=1 if {launcher} pr-watch 12",
+    "'F'=x {launcher} pr-watch 12",
+    "\\F=x {launcher} pr-watch 12",
+    "cp x 2>&1 {launcher}",
+    "cp x &>/dev/null {launcher}",
+    "cp x >|out {launcher}",
+    "tee x(N) {launcher}",
+    "tee >(cat) {launcher}",
     "printf x > {launcher}",
 ))
 def test_launcher_paths_outside_the_command_name_stay_protected(tmp_path: Path, command: str):

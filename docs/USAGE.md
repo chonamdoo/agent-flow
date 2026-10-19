@@ -365,7 +365,8 @@ that is refused stays refused. Write the launcher path in full; a path that star
 not recognized as the launcher. Run inside one worktree, the CLI refuses commands that name
 another existing checkout or run (`--worktree`, `--root`, `--run-dir`, `worktree --name/--path`)
 and an `abort` that would close the leader's run; run those from the leader checkout or from that
-worktree. `run`, `start`, and `worktree create` may still name where a new run or checkout goes.
+worktree. `run` and `start` may still name where a new run goes, and `worktree create` may still
+name a checkout that does not exist yet.
 `spec approve` and `spec confirm` run inside a worktree record only to its active run.
 
 `abort` leaves the old run's artifacts in the checkout's runtime state. Before `agent-flow

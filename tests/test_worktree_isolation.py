@@ -2118,6 +2118,7 @@ def test_worktree_commands_refuse_other_checkouts(tmp_path):
 
     for argv in (
         ["worktree", "remove", "--name", sibling.name, "--allow-unmerged"],
+        ["worktree", "create", "--name", sibling.name, "--allow-dirty"],
         ["worktree", "status", "--name", sibling.name],
         ["gates", "--worktree", sibling.name],
         ["status", "--worktree", sibling.name],
@@ -2133,6 +2134,8 @@ def test_worktree_commands_refuse_other_checkouts(tmp_path):
 
     own_status = _cli(["status", "--worktree", own.name], cwd=own.path)
     assert "is not this worktree" not in own_status.stderr, own_status.stderr
+    fresh = _cli(["worktree", "create", "--name", "fresh"], cwd=own.path)
+    assert fresh.returncode == 0, fresh.stdout + fresh.stderr
     from_leader = _cli(["worktree", "status", "--name", sibling.name], cwd=tmp_path)
     assert from_leader.returncode == 0, from_leader.stderr
 

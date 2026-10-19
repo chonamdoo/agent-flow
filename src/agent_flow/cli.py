@@ -2736,13 +2736,12 @@ def _foreign_checkout_target(
         )
 
     try:
-        # `run`·`start`·`worktree create`의 이름은 새 run이나 checkout이 들어설 자리다.
-        # 다른 checkout의 작업을 건드리지 않고, cwd와 다르면
-        # `_warn_if_cwd_is_other_checkout`가 알린다. bound 세션은 경계가 새 run을 막는다.
-        creates_target = args.command in {"run", "start"} or (
-            args.command == "worktree" and args.worktree_command == "create"
-        )
-        if same_worktree_path(leader, root) and not creates_target:
+        # `run`·`start`의 이름은 새 run이 들어설 자리다. cwd와 다르면
+        # `_warn_if_cwd_is_other_checkout`가 알리고, bound 세션은 경계가 새 run을 막는다.
+        # `worktree create`의 이름은 아직 없는 checkout만 새 자리다 — 이미 있으면 create가
+        # 그 checkout을 다시 쓰고 셋업을 적용하므로 다른 checkout을 고른 것이다.
+        creating = args.command == "worktree" and args.worktree_command == "create"
+        if same_worktree_path(leader, root) and args.command not in {"run", "start"}:
             names = [getattr(args, "worktree", None), inferred_worktree]
             if args.command == "worktree":
                 names.append(getattr(args, "name", None))
@@ -2750,9 +2749,12 @@ def _foreign_checkout_target(
                 if path and not same_worktree_path(Path(path).expanduser().resolve(), standing):
                     return refusal(path)
             for name in names:
-                if name and not same_worktree_path(
-                    get_worktree_status(root=root, name=name).path, standing
-                ):
+                if not name:
+                    continue
+                target = get_worktree_status(root=root, name=name)
+                if creating and not target.exists:
+                    continue
+                if not same_worktree_path(target.path, standing):
                     return refusal(name)
         run_dir = _requested_run_dir(args, root)
         if run_dir is None:
