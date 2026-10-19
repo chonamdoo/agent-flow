@@ -161,6 +161,8 @@ def test_packaged_canonical_abort_recovers_only_its_bound_run(consumer: Consumer
         abort_command,
         consumer.abort_command("--yes"),
         consumer.abort_command("--worktree", consumer.own.name, "--yes"),
+        shlex.join([str(consumer.launcher), "abort", "--root", str(consumer.own.path), "--yes"]),
+        shlex.join([str(consumer.launcher), "abort", "--root", ".", "--yes"]),
     ):
         decision = _guard(consumer, command)
         assert decision.returncode == 0, (
