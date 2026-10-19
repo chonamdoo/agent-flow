@@ -1,0 +1,123 @@
+{
+  "status": "pass",
+  "scope": "actual phase_eval prepare plus actual legacy backend discovery comparison; both clean and defect variants across all modes; no model calls",
+  "cases": [
+    {
+      "stack": "backend",
+      "mode": "clean",
+      "variant": "clean",
+      "test_exit": 0,
+      "command": "<smoke-root>/build-venv/bin/python3 -m unittest -v tests.test_list_orders.ListOrdersHandlerTest.test_customer_without_orders_gets_the_same_message tests.test_list_orders.ListOrdersHandlerTest.test_empty_filter_result_carries_the_planned_message tests.test_list_orders.ListOrdersHandlerTest.test_filters_by_status tests.test_list_orders.ListOrdersHandlerTest.test_lists_only_the_requested_customers_orders tests.test_list_orders.ListOrdersHandlerTest.test_order_payload_shape_and_money_format tests.test_list_orders.ListOrdersHandlerTest.test_orders_are_newest_first tests.test_list_orders.ListOrdersHandlerTest.test_rejects_unknown_status tests.test_list_orders.ListOrdersHandlerTest.test_requires_customer_id tests.test_list_orders.ListOrdersHandlerTest.test_totals_keep_two_decimal_places tests.test_version.VersionPayloadTest.test_reports_service_and_version",
+      "legacy_discovery_count": 10,
+      "named_execution_count": 10,
+      "full_test_inventory_preserved": true
+    },
+    {
+      "stack": "backend",
+      "mode": "clean",
+      "variant": "defect",
+      "test_exit": 0,
+      "command": "<smoke-root>/build-venv/bin/python3 -m unittest -v tests.test_list_orders.ListOrdersHandlerTest.test_customer_without_orders_gets_the_same_message tests.test_list_orders.ListOrdersHandlerTest.test_empty_filter_result_carries_the_planned_message tests.test_list_orders.ListOrdersHandlerTest.test_filters_by_status tests.test_list_orders.ListOrdersHandlerTest.test_lists_only_the_requested_customers_orders tests.test_list_orders.ListOrdersHandlerTest.test_order_payload_shape_and_money_format tests.test_list_orders.ListOrdersHandlerTest.test_rejects_unknown_status tests.test_list_orders.ListOrdersHandlerTest.test_requires_customer_id tests.test_version.VersionPayloadTest.test_reports_service_and_version",
+      "legacy_discovery_count": 8,
+      "named_execution_count": 8,
+      "full_test_inventory_preserved": true
+    },
+    {
+      "stack": "backend",
+      "mode": "local",
+      "variant": "clean",
+      "test_exit": 0,
+      "command": "<smoke-root>/build-venv/bin/python3 -m unittest -v tests.test_list_orders.ListOrdersHandlerTest.test_customer_without_orders_gets_the_same_message tests.test_list_orders.ListOrdersHandlerTest.test_empty_filter_result_carries_the_planned_message tests.test_list_orders.ListOrdersHandlerTest.test_filters_by_status tests.test_list_orders.ListOrdersHandlerTest.test_lists_only_the_requested_customers_orders tests.test_list_orders.ListOrdersHandlerTest.test_order_payload_shape_and_money_format tests.test_list_orders.ListOrdersHandlerTest.test_orders_are_newest_first tests.test_list_orders.ListOrdersHandlerTest.test_rejects_unknown_status tests.test_list_orders.ListOrdersHandlerTest.test_requires_customer_id tests.test_list_orders.ListOrdersHandlerTest.test_totals_keep_two_decimal_places tests.test_version.VersionPayloadTest.test_reports_service_and_version",
+      "legacy_discovery_count": 10,
+      "named_execution_count": 10,
+      "full_test_inventory_preserved": true
+    },
+    {
+      "stack": "backend",
+      "mode": "local",
+      "variant": "defect",
+      "test_exit": 0,
+      "command": "<smoke-root>/build-venv/bin/python3 -m unittest -v tests.test_list_orders.ListOrdersHandlerTest.test_customer_without_orders_gets_the_same_message tests.test_list_orders.ListOrdersHandlerTest.test_empty_filter_result_carries_the_planned_message tests.test_list_orders.ListOrdersHandlerTest.test_filters_by_status tests.test_list_orders.ListOrdersHandlerTest.test_lists_only_the_requested_customers_orders tests.test_list_orders.ListOrdersHandlerTest.test_order_payload_shape_and_money_format tests.test_list_orders.ListOrdersHandlerTest.test_orders_are_newest_first tests.test_list_orders.ListOrdersHandlerTest.test_rejects_unknown_status tests.test_list_orders.ListOrdersHandlerTest.test_requires_customer_id tests.test_version.VersionPayloadTest.test_reports_service_and_version",
+      "legacy_discovery_count": 9,
+      "named_execution_count": 9,
+      "full_test_inventory_preserved": true
+    },
+    {
+      "stack": "backend",
+      "mode": "team",
+      "variant": "clean",
+      "test_exit": 0,
+      "command": "<smoke-root>/build-venv/bin/python3 -m unittest -v tests.test_list_orders.ListOrdersHandlerTest.test_customer_without_orders_gets_the_same_message tests.test_list_orders.ListOrdersHandlerTest.test_empty_filter_result_carries_the_planned_message tests.test_list_orders.ListOrdersHandlerTest.test_filters_by_status tests.test_list_orders.ListOrdersHandlerTest.test_lists_only_the_requested_customers_orders tests.test_list_orders.ListOrdersHandlerTest.test_order_payload_shape_and_money_format tests.test_list_orders.ListOrdersHandlerTest.test_orders_are_newest_first tests.test_list_orders.ListOrdersHandlerTest.test_rejects_unknown_status tests.test_list_orders.ListOrdersHandlerTest.test_requires_customer_id tests.test_list_orders.ListOrdersHandlerTest.test_totals_keep_two_decimal_places tests.test_stock_level.StockLevelHandlerTest.test_reports_level_and_state tests.test_stock_level.StockLevelHandlerTest.test_requires_sku tests.test_stock_level.StockLevelHandlerTest.test_unknown_sku_is_not_found tests.test_version.VersionPayloadTest.test_reports_service_and_version",
+      "legacy_discovery_count": 13,
+      "named_execution_count": 13,
+      "full_test_inventory_preserved": true
+    },
+    {
+      "stack": "backend",
+      "mode": "team",
+      "variant": "defect",
+      "test_exit": 0,
+      "command": "<smoke-root>/build-venv/bin/python3 -m unittest -v tests.test_list_orders.ListOrdersHandlerTest.test_empty_filter_result_carries_the_planned_message tests.test_list_orders.ListOrdersHandlerTest.test_filters_by_status tests.test_list_orders.ListOrdersHandlerTest.test_order_payload_shape_and_money_format tests.test_list_orders.ListOrdersHandlerTest.test_orders_are_newest_first tests.test_list_orders.ListOrdersHandlerTest.test_rejects_unknown_status tests.test_list_orders.ListOrdersHandlerTest.test_requires_customer_id tests.test_list_orders.ListOrdersHandlerTest.test_totals_keep_two_decimal_places tests.test_stock_level.StockLevelHandlerTest.test_reports_level_and_state tests.test_stock_level.StockLevelHandlerTest.test_requires_sku tests.test_stock_level.StockLevelHandlerTest.test_unknown_sku_is_not_found tests.test_version.VersionPayloadTest.test_reports_service_and_version",
+      "legacy_discovery_count": 11,
+      "named_execution_count": 11,
+      "full_test_inventory_preserved": true
+    },
+    {
+      "stack": "app",
+      "mode": "clean",
+      "variant": "clean",
+      "test_exit": 0,
+      "command": "/opt/homebrew/bin/flutter test --reporter expanded test/http_orders_remote_source_test.dart test/order_repository_impl_test.dart test/orders_list_holder_test.dart",
+      "all_fixture_test_files_named": true,
+      "reporter_expanded": true
+    },
+    {
+      "stack": "app",
+      "mode": "clean",
+      "variant": "defect",
+      "test_exit": 0,
+      "command": "/opt/homebrew/bin/flutter test --reporter expanded test/http_orders_remote_source_test.dart test/order_repository_impl_test.dart test/orders_list_holder_test.dart",
+      "all_fixture_test_files_named": true,
+      "reporter_expanded": true
+    },
+    {
+      "stack": "app",
+      "mode": "local",
+      "variant": "clean",
+      "test_exit": 0,
+      "command": "/opt/homebrew/bin/flutter test --reporter expanded test/orders_list_holder_test.dart test/orders_repository_test.dart",
+      "all_fixture_test_files_named": true,
+      "reporter_expanded": true
+    },
+    {
+      "stack": "app",
+      "mode": "local",
+      "variant": "defect",
+      "test_exit": 0,
+      "command": "/opt/homebrew/bin/flutter test --reporter expanded test/orders_list_holder_test.dart test/orders_repository_test.dart",
+      "all_fixture_test_files_named": true,
+      "reporter_expanded": true
+    },
+    {
+      "stack": "app",
+      "mode": "team",
+      "variant": "clean",
+      "test_exit": 0,
+      "command": "/opt/homebrew/bin/flutter test --reporter expanded test/orders_list_notifier_test.dart test/orders_repository_test.dart",
+      "all_fixture_test_files_named": true,
+      "reporter_expanded": true
+    },
+    {
+      "stack": "app",
+      "mode": "team",
+      "variant": "defect",
+      "test_exit": 0,
+      "command": "/opt/homebrew/bin/flutter test --reporter expanded test/orders_list_notifier_test.dart test/orders_repository_test.dart",
+      "all_fixture_test_files_named": true,
+      "reporter_expanded": true
+    }
+  ],
+  "thresholds_changed": false,
+  "case_corpus_changed": false,
+  "oracle_and_expected_verdicts_changed": false
+}

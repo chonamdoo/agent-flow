@@ -1,0 +1,24 @@
+{
+  "status": "failed-not-a-release-gate",
+  "rows": 168,
+  "source_sha256": {
+    "meta.json": "8d1c041228e0a6e60e5bde2bd42c378447bd0722dbe0408587e7d08eef7e300d",
+    "results.jsonl": "92b8ef87dc706561cc742955022914788c38f94ead7ae98623da947b2bddfb2d"
+  },
+  "compact_sha256": {
+    "meta.json": "22dce27e0622dce81f064a00eba36358225018380bd70f485c9caf0fa0d78d0a",
+    "results.jsonl.gz": "755de0b932e9c6d7151806ed81eb403dac05cc98bd0415d30238f8395b9e7517"
+  },
+  "source_evaluator_unchanged_for_this_attempt": true,
+  "review_accuracy": {
+    "before": "35/38",
+    "after": "34/38"
+  },
+  "author_uncached_input_ratio": 1.11,
+  "provider_capacity_invalid_units": {
+    "before_review": 6,
+    "after_review": 6,
+    "after_author": 1
+  },
+  "subsequent_change": "Real named-test evidence correction; full fresh matrix required, not rescoring or selectively retrying old units."
+}

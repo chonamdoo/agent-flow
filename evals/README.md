@@ -250,13 +250,17 @@ author의 `setup/`은 설치 전에, red 테스트인 `pre/`는 설치 커밋 �
   run 폴더에는 공유 prd·ddd-design·slice-plan 위에 review 전용 계획이 있으면 덮어쓰고,
   design-spec과 리뷰 대상 트리의 테스트 실행 기록(`test-evidence.md`, 전체 출력)을
   남긴다. 테스트는 프로젝트 복사본에서 돌려 실행 부산물이 리뷰 diff에 섞이지 않게 한다
-  (`review_test_command`가 있으면 그것을 쓴다). 런타임과 같은 판정 계약을 쓰고, 무효
-  리뷰어가 있으면 그 시행은 채점하지 않는다. 결함은 request-changes 판정의
-  Must-fix/blocking 지적 안에서만 찾는다. Should-fix·Notes 같은 비차단 구간의 언급은
-  탐지로 세지 않는다.
+  (`review_test_command`가 있으면 그것을 쓴다). backend는 fixture의 unittest discovery가
+  찾은 실제 test ID 전체를 명시해 한 번 실행한다. import 오류나 빈 suite이면 원래
+  discovery 명령으로 실패·빈 결과를 그대로 기록한다. Flutter는 실제 테스트 파일
+  경로를 실행 인자에 명시해 expanded 출력과 함께 남긴다. verifier 이름이 없던 증거를
+  보강하는 것이며 case·기대 판정·oracle·threshold는 바꾸지 않는다. 런타임과 같은 판정
+  계약을 쓰고, 무효 리뷰어가 있으면 그 시행은 채점하지 않는다. 결함은 request-changes
+  판정의 Must-fix/blocking 지적 안에서만 찾는다. Should-fix·Notes 같은 비차단 구간의
+  언급은 탐지로 세지 않는다.
 
 fixture 준비는 버전 probe, cache lock, 의존성 설치, installer 재시도, Git, review 검사를
-합산한 4983초 한도를 사용한다. cache lock 대기는 최대 600초다. evaluator·준비 helper·
+합산한 5103초 한도를 사용한다. cache lock 대기는 최대 600초다. evaluator·준비 helper·
 네 oracle의 실행 helper가 소유한 새 session/group은 timeout·SIGTERM·SIGINT에 의한 취소를 하위
 소유 process까지 전달하고, 유한한 grace 뒤 강제 종료·pipe drain·reap을 수행한다.
 signal callback은 취소 의도만 기록하고, 0.2초 간격의 worker loop가 process 정리·reap을 소유한다.

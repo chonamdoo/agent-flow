@@ -80,10 +80,25 @@ READ_EVIDENCE_PROMPT = (
     "shell commands are not read evidence. "
     "This changes only evidence collection, not the task requirements or implementation."
 )
+_UNITTEST_DISCOVERY_SCRIPT = """
+import json
+import unittest
+
+def test_ids(suite):
+    for test in suite:
+        if isinstance(test, unittest.TestSuite):
+            yield from test_ids(test)
+        else:
+            yield test.id()
+
+loader = unittest.TestLoader()
+suite = loader.discover("tests", top_level_dir=".")
+print(json.dumps({"ids": list(test_ids(suite)), "errors": bool(loader.errors)}))
+"""
 PREPARATION_TIMEOUT = (
     2 * COMMAND_TIMEOUT + CACHE_LOCK_TIMEOUT + DEPENDENCY_TIMEOUT + COMMAND_TIMEOUT
     + 2 * 600 + 6 * COMMAND_TIMEOUT + 600 + 2 * COMMAND_TIMEOUT
-    + 600 + 3 * (PROCESS_CLEANUP_GRACE + PIPE_DRAIN_TIMEOUT + PROCESS_REAP_TIMEOUT + 1)
+    + 600 + COMMAND_TIMEOUT + 3 * (PROCESS_CLEANUP_GRACE + PIPE_DRAIN_TIMEOUT + PROCESS_REAP_TIMEOUT + 1)
 )
 
 
@@ -291,6 +306,18 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
     with tempfile.TemporaryDirectory(prefix="af-phase-eval-tests-") as scratch:
         copy = Path(scratch) / "project"
         shutil.copytree(project, copy, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+        if case["stack"] == "app":
+            command = [*command, *(path.relative_to(copy).as_posix()
+                                   for path in sorted((copy / "test").glob("*_test.dart")))]
+        if case["stack"] == "backend":
+            python = tooling["tools"]["python3"]
+            discovered = _run_group(
+                [python, "-c", _UNITTEST_DISCOVERY_SCRIPT], cwd=copy, timeout=COMMAND_TIMEOUT,
+            )
+            discovered.check_returncode()
+            selection = json.loads(discovered.stdout)
+            if selection["ids"] and not selection["errors"]:
+                command = [python, "-m", "unittest", "-v", *selection["ids"]]
         tests = _run_group(command, cwd=copy, timeout=600)
         review_verification = verify_web_review(copy) if case["stack"] == "web" and mode == "team" else []
     (run_dir / "test-evidence.md").write_text(

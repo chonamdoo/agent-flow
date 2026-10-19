@@ -1,0 +1,134 @@
+{
+  "version": "0.3.18",
+  "npm_files": 381,
+  "wheel_files": 320,
+  "development_material_excluded": true,
+  "sha256": {
+    "agent-flow-kit-0.3.18.tgz": "e5184d89b207c20175940f28eee65d68399aee529e50d9866d103f2e5fdcf0d6",
+    "agent_flow-0.3.18-py3-none-any.whl": "8e565fa4cc78c3af03b2994b97b19e13cd062185c8780b17b963aa5676f0de20",
+    "agent_flow-0.3.18.tar.gz": "b09aed5dd8deec4519f5daf13bd59b492d647e3345dfd7e8f716234d7cec46b5"
+  },
+  "installation_smoke": {
+    "status": "pass",
+    "version": "0.3.18",
+    "installations": [
+      {
+        "entry": "agent-flow-kit.mjs",
+        "mode": "clean",
+        "fresh": "pass",
+        "reinstall": "pass",
+        "user_files_preserved": true,
+        "host_registrations": [
+          "claude",
+          "codex",
+          "omp"
+        ],
+        "launcher_receipt_matches": true
+      },
+      {
+        "entry": "agent-flow-kit.mjs",
+        "mode": "local",
+        "fresh": "pass",
+        "reinstall": "pass",
+        "user_files_preserved": true,
+        "host_registrations": [
+          "claude",
+          "codex",
+          "omp"
+        ],
+        "launcher_receipt_matches": true
+      },
+      {
+        "entry": "agent-flow-kit.mjs",
+        "mode": "pending",
+        "fresh": "pass",
+        "reinstall": "pass",
+        "user_files_preserved": true,
+        "host_registrations": [
+          "claude",
+          "codex",
+          "omp"
+        ],
+        "launcher_receipt_matches": true
+      },
+      {
+        "entry": "agent-flow-install.mjs",
+        "mode": "clean",
+        "fresh": "pass",
+        "reinstall": "pass",
+        "user_files_preserved": true,
+        "host_registrations": [
+          "claude",
+          "codex",
+          "omp"
+        ],
+        "launcher_receipt_matches": true
+      },
+      {
+        "entry": "agent-flow-install.mjs",
+        "mode": "local",
+        "fresh": "pass",
+        "reinstall": "pass",
+        "user_files_preserved": true,
+        "host_registrations": [
+          "claude",
+          "codex",
+          "omp"
+        ],
+        "launcher_receipt_matches": true
+      },
+      {
+        "entry": "agent-flow-install.mjs",
+        "mode": "pending",
+        "fresh": "pass",
+        "reinstall": "pass",
+        "user_files_preserved": true,
+        "host_registrations": [
+          "claude",
+          "codex",
+          "omp"
+        ],
+        "launcher_receipt_matches": true
+      }
+    ],
+    "synthetic_spec_smoke": {
+      "actual_installed_hooks_and_launcher": true,
+      "confirm_approve": "pass",
+      "changed_spec_invalidates_approval": "pass",
+      "lowercase_whitespace_reapproval": "pass",
+      "foreign_run_rejected": "pass",
+      "leader_drift_rejected": "pass"
+    },
+    "limits": [
+      "Synthetic temporary projects, not real application approvals.",
+      "Host registration files observed; native host trust/startup not exercised.",
+      "Homebrew remote release and user runtime upgrade not executed by this smoke."
+    ]
+  },
+  "selector_smoke": {
+    "status": "pass",
+    "version": "0.3.18",
+    "actual_test_command": [
+      "<build-venv>/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/test_Catalog.py::test_Case"
+    ],
+    "test_exit": 0,
+    "test_output": ".                                                                        [100%]\n1 passed in 0.01s\n",
+    "hook_exit": 0,
+    "exact_selector_missing": [],
+    "wrong_case_selector_missing": [
+      "test-run-evidence: unavailable (CI-only test deferred to PR check)"
+    ],
+    "mixed_case_enum_markers_accepted": true,
+    "scope": "synthetic pytest fixture and packed-package observation hook, not Android Gradle execution"
+  },
+  "version_declarations": {
+    "npm": "0.3.18",
+    "lock": "0.3.18",
+    "lock_root": "0.3.18",
+    "python": "0.3.18"
+  }
+}

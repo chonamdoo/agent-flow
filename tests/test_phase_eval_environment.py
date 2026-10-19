@@ -370,6 +370,49 @@ def test_app_review_requires_flutter_executable_without_claiming_test_pass(envir
     assert report["readiness"]["flutter_test"]["status"] == "NOT_RUN"
 
 
+@pytest.mark.parametrize("mode", ("clean", "local", "team"))
+@pytest.mark.parametrize("variant", ("clean", "defect"))
+def test_backend_review_evidence_preserves_discovered_tests(
+    tmp_path, monkeypatch, mode, variant,
+):
+    import re
+    import shlex
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("AGENT_FLOW_SKIP_CODEX_TRUST", "1")
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    monkeypatch.setenv("PATH", str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"])
+    project = tmp_path / "project"
+    preparation = subprocess.run(
+        [
+            sys.executable, str(ROOT / "evals/phase_eval.py"), "--prepare",
+            json.dumps([
+                str(ROOT), str(ROOT / "evals/phase-cases/backend"),
+                mode, "review", variant, str(project),
+            ]),
+            "--author-provider", "codex", "--review-providers", "codex",
+        ],
+        cwd=ROOT, capture_output=True, text=True, timeout=120,
+    )
+    assert preparation.returncode == 0, preparation.stderr
+    evidence = (project / ".agent-flow/runs/eval-review/test-evidence.md").read_text()
+    assert "\nexit 0\n" in evidence, evidence
+    command = shlex.split(evidence.partition("$ ")[2].splitlines()[0])
+    legacy = subprocess.run(
+        [
+            sys.executable, "-m", "unittest", "discover", "-s", "tests",
+            "-t", ".", "-v",
+        ],
+        cwd=project, env={**os.environ, "PYTHONPATH": str(project / "src")},
+        capture_output=True, text=True, timeout=30,
+    )
+    assert legacy.returncode == 0, legacy.stdout + legacy.stderr
+    discovered = set(re.findall(r"^test_\w+ \(([^)]+)\) \.\.\. ok$", legacy.stderr, re.MULTILINE))
+    assert discovered and set(command[4:]) == discovered
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="the child explicitly escapes its POSIX session")
 def test_command_timeout_does_not_wait_for_escaped_pipe_holder(environment, tmp_path):
     pid_path = tmp_path / "escaped.pid"
