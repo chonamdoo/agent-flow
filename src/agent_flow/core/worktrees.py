@@ -3367,14 +3367,20 @@ def removable_worktrees(*, root: Path) -> list[RegisteredWorktree]:
     ]
 
 
-def resolve_worktree(*, root: Path, selector: str) -> RegisteredWorktree | None:
-    """Resolve one registered worktree without letting aliases beat exact IDs."""
+def resolve_worktree(
+    *, root: Path, selector: str, cwd: Path | None = None
+) -> RegisteredWorktree | None:
+    """Resolve one registered worktree without letting aliases beat exact IDs.
+
+    A relative path selector also resolves from ``cwd``, the caller's process directory by
+    default. A guard judging another process's command must pass that command's directory.
+    """
     wanted = selector.strip()
     if not wanted:
         return None
     ranked: dict[int, dict[str, RegisteredWorktree]] = {}
     for entry in removable_worktrees(root=root):
-        rank = _selector_match_rank(root=root, selector=wanted, entry=entry)
+        rank = _selector_match_rank(root=root, selector=wanted, entry=entry, cwd=cwd)
         if rank is not None:
             ranked.setdefault(rank, {})[worktree_path_key(entry.path)] = entry
     if not ranked:
@@ -3388,11 +3394,11 @@ def resolve_worktree(*, root: Path, selector: str) -> RegisteredWorktree | None:
 
 
 def _selector_match_rank(
-    *, root: Path, selector: str, entry: RegisteredWorktree
+    *, root: Path, selector: str, entry: RegisteredWorktree, cwd: Path | None
 ) -> int | None:
     if any(
         same_worktree_path(candidate, entry.path)
-        for candidate in _selector_path_candidates(root=root, selector=selector)
+        for candidate in _selector_path_candidates(root=root, selector=selector, cwd=cwd)
     ):
         return 0
     if selector == entry.branch:
@@ -3416,13 +3422,15 @@ def _derived_worktree_identity(selector: str) -> tuple[str, str] | None:
     return name, f"feat/{name.removeprefix('feat-')}"
 
 
-def _selector_path_candidates(*, root: Path, selector: str) -> tuple[Path, ...]:
+def _selector_path_candidates(
+    *, root: Path, selector: str, cwd: Path | None
+) -> tuple[Path, ...]:
     """선택자를 경로로 읽었을 때의 후보. 상대경로는 leader root와 cwd 양쪽에서 푼다."""
     raw = Path(selector)
     if raw.is_absolute():
         return (raw,)
     try:
-        return (root / raw, Path.cwd() / raw)
+        return (root / raw, (cwd if cwd is not None else Path.cwd()) / raw)
     except OSError:
         return (root / raw,)
 

@@ -813,7 +813,7 @@ def _is_bound_own_abort(
         )
         if worktree is None or real_path(config_root) != root:
             return False
-        selected = resolve_worktree(root=root, selector=worktree)
+        selected = resolve_worktree(root=root, selector=worktree, cwd=cwd)
     except (ImportError, OSError, ValueError, RuntimeError, WorktreeIsolationError):
         return False
     return selected is not None and real_path(selected.path) == current.checkout

@@ -59,7 +59,8 @@ class Consumer:
 @pytest.fixture(scope="module")
 def packaged_kit(tmp_path_factory: pytest.TempPathFactory) -> Path:
     npm = shutil.which("npm")
-    assert npm is not None, "npm is required to pack the consumer kit"
+    if npm is None:
+        pytest.skip("npm is required to pack the consumer kit")
     destination = tmp_path_factory.mktemp("packed")
     packed = subprocess.run(
         [npm, "pack", "--pack-destination", str(destination)],
@@ -101,7 +102,8 @@ def consumer(request: pytest.FixtureRequest, packaged_kit: Path, tmp_path: Path)
     _git(leader, "add", ".")
     _git(leader, "commit", "-m", "init")
     node = shutil.which("node")
-    assert node is not None, "node is required to run the packaged installer"
+    if node is None:
+        pytest.skip("node is required to run the packaged installer")
     installed = _run(
         [node, str(packaged_kit / "bin" / request.param), "install"],
         cwd=leader,
@@ -199,6 +201,7 @@ def test_packaged_abort_rejects_foreign_or_unproven_recovery(consumer: Consumer)
     refused = [
         (consumer.abort_command("--worktree", sibling, "--yes"), consumer.own.path, SESSION),
         (consumer.abort_command("--worktree", sibling, "--help"), consumer.own.path, SESSION),
+        (shlex.join([launcher, "abort", "--root", str(consumer.sibling.path), "--yes"]), consumer.own.path, SESSION),
         (shlex.join([launcher, "abort", "--yes"]), consumer.leader, SESSION),
         (shlex.join([launcher, "abort", "--help"]), consumer.sibling.path, SESSION),
         (consumer.abort_command("--worktree", own, "--worktree", sibling), consumer.own.path, SESSION),
@@ -239,6 +242,15 @@ def test_packaged_abort_rejects_foreign_or_unproven_recovery(consumer: Consumer)
         assert decision.returncode == 2, f"guard opened an unproven recovery: {command!r} from {cwd}"
         assert _state(consumer) == before, f"guard decision changed run state: {command!r}"
     assert not (consumer.leader / "pwned.txt").exists()
+
+    nested = consumer.own.path / "nested"
+    nested.mkdir()
+    (consumer.own.path / "alias").symlink_to(consumer.own.path, target_is_directory=True)
+    (nested / "alias").symlink_to(consumer.sibling.path, target_is_directory=True)
+    aliased = shlex.join([launcher, "abort", "--root", leader, "--worktree", "alias", "--yes"])
+    decision = _guard(consumer, aliased, cwd=nested, hook_cwd=consumer.own.path)
+    assert decision.returncode == 2, "the selector must resolve from the command cwd, not the hook cwd"
+    assert _state(consumer) == before
 
     original = consumer.launcher.read_bytes()
     mode = stat.S_IMODE(consumer.launcher.stat().st_mode)
@@ -319,6 +331,7 @@ def _guard(
     *,
     cwd: Path | None = None,
     session: str = SESSION,
+    hook_cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     where = consumer.own.path if cwd is None else cwd
     payload = {
@@ -331,7 +344,9 @@ def _guard(
         "tool_input": {"command": command, "description": "bound abort recovery"},
         "tool_use_id": "bound-abort-guard",
     }
-    return _hook(consumer, "PreToolUse", "guard-host-worktree.sh", payload, cwd=where)
+    return _hook(
+        consumer, "PreToolUse", "guard-host-worktree.sh", payload, cwd=hook_cwd or where
+    )
 
 
 def _hook(

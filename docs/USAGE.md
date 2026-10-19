@@ -355,7 +355,8 @@ agent-flow run "<remaining work>" --workflow development --reuse-existing-worktr
 
 A host session bound to that worktree can run this `abort` even after the leader changed, but
 only through the leader's installed launcher at its exact path, from inside the worktree, and
-for its own run. Other options, targets, launchers, and shell syntax stay behind the worktree
+for its own run. Use the leader path that `status` prints after `--root`; a path through a
+symlink is refused. Other options, targets, launchers, and shell syntax stay behind the worktree
 boundary.
 
 `abort` leaves the old run's artifacts in the checkout's runtime state. Before `agent-flow
