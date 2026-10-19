@@ -2050,19 +2050,15 @@ def test_recovery_commands_survive_a_hook_integrity_violation(tmp_path):
     assert "managed hook registration" in blocked.stderr
 
 
-def test_abort_closes_another_worktree_run_only_from_the_leader(tmp_path):
-    """불변: 한 worktree 안에서 다른 worktree나 leader의 run을 abort하지 못한다.
-
-    host 경계는 `--worktree <이름>`을 경로로 보지 못한다. 대상과 실행 위치를 함께 아는
-    CLI가 막아야 셸 문법과 무관하게 다른 run이 보존된다.
-    """
+def _worktrees_with_runs(tmp_path):
+    """leader와 `own`·`sibling` 두 worktree. 각 worktree에 active run이 하나씩 있다."""
     from agent_flow.artifact import create_run
 
     _init_repo(tmp_path)
     (tmp_path / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
     _git("add", ".gitignore", cwd=tmp_path)
     _git("commit", "-m", "ignore agent-flow", cwd=tmp_path)
-    checkouts = {}
+    checkouts = []
     for name in ("own", "sibling"):
         status = W.create_worktree(root=tmp_path, plan=W.plan_worktree(root=tmp_path, name=name))
         run_dir = create_run(
@@ -2072,9 +2068,20 @@ def test_abort_closes_another_worktree_run_only_from_the_leader(tmp_path):
             checkout_identity=f"worktree:{status.name}",
             checkout_registration_identity=status.registration_identity,
         )
-        checkouts[name] = (status, run_dir / "active")
-    own, own_marker = checkouts["own"]
-    sibling, sibling_marker = checkouts["sibling"]
+        checkouts.append((status, run_dir))
+    return checkouts
+
+
+def test_abort_closes_another_worktree_run_only_from_the_leader(tmp_path):
+    """불변: 한 worktree 안에서 다른 worktree나 leader의 run을 abort하지 못한다.
+
+    host 경계는 `--worktree <이름>`을 경로로 보지 못한다. 대상과 실행 위치를 함께 아는
+    CLI가 막아야 셸 문법과 무관하게 다른 run이 보존된다.
+    """
+    from agent_flow.artifact import create_run
+
+    (own, own_run), (sibling, sibling_run) = _worktrees_with_runs(tmp_path)
+    own_marker, sibling_marker = own_run / "active", sibling_run / "active"
     leader_marker = create_run(tmp_path, "default", "task-leader") / "active"
     (tmp_path / "sub").mkdir()
     raw = tmp_path.parent / f"{tmp_path.name}-raw"
@@ -2096,6 +2103,127 @@ def test_abort_closes_another_worktree_run_only_from_the_leader(tmp_path):
     from_leader = _cli(["abort", "--worktree", sibling.name, "--yes"], cwd=tmp_path)
     assert from_leader.returncode == 0, from_leader.stderr
     assert not sibling_marker.exists()
+
+
+def test_worktree_commands_refuse_other_checkouts(tmp_path):
+    """불변: worktree 안에서는 이름이나 경로로 다른 checkout을 대상으로 삼지 못한다.
+
+    host 경계는 `--worktree <이름>`·`worktree --name`을 경로로 보지 못한다. 설치
+    launcher를 bare 이름과 같게 판정하므로 PATH 없는 세션도 이 명령들을 쓴다. 대상과
+    실행 위치를 함께 아는 CLI가 막아야 형제 checkout과 그 미커밋 작업이 남는다.
+    """
+    (own, _), (sibling, sibling_run) = _worktrees_with_runs(tmp_path)
+    work = sibling.path / "uncommitted.txt"
+    work.write_text("work in progress\n", encoding="utf-8")
+
+    for argv in (
+        ["worktree", "remove", "--name", sibling.name, "--allow-unmerged"],
+        ["worktree", "status", "--name", sibling.name],
+        ["gates", "--worktree", sibling.name],
+        ["status", "--worktree", sibling.name],
+        ["status", "--root", str(sibling.path)],
+        ["report", "--run-dir", str(sibling_run)],
+        ["spec", "confirm", "--run-dir", str(sibling_run)],
+    ):
+        refused = _cli(argv, cwd=own.path)
+        assert refused.returncode == 2, f"{argv}: {refused.stdout}{refused.stderr}"
+        assert "is not this worktree" in refused.stderr, f"{argv}: {refused.stderr}"
+        assert work.is_file() and (sibling_run / "active").is_file(), f"{argv} touched the sibling"
+
+    own_status = _cli(["status", "--worktree", own.name], cwd=own.path)
+    assert "is not this worktree" not in own_status.stderr, own_status.stderr
+    from_leader = _cli(["worktree", "status", "--name", sibling.name], cwd=tmp_path)
+    assert from_leader.returncode == 0, from_leader.stderr
+
+
+def test_worktree_spec_recorders_write_only_the_active_run(tmp_path):
+    """불변: worktree 안의 `spec approve`/`spec confirm`은 그 checkout의 active run에만 기록한다.
+
+    host 경계는 설치 launcher를 bare 이름과 같게 판정하므로 run 선택은 CLI가 지킨다.
+    지난 run이나 없는 run에 남은 승인은 runner가 읽지 않는다.
+    """
+    from agent_flow.artifact import create_run
+
+    (own, older), (_, sibling_run) = _worktrees_with_runs(tmp_path)
+    runtime = W.worktree_runtime_root(root=tmp_path, name=own.name)
+    (older / "active").unlink()
+    current = create_run(
+        runtime,
+        "default",
+        "task-own-again",
+        checkout_identity=f"worktree:{own.name}",
+        checkout_registration_identity=own.registration_identity,
+    )
+    alias = own.path / "sibling-run"
+    alias.symlink_to(sibling_run, target_is_directory=True)
+
+    for run_dir, reason in (
+        (older, "records only to its active run"),
+        (runtime / ".agent-flow" / "runs" / "invented", "records only to its active run"),
+        (alias, "is not this worktree"),
+    ):
+        for operation in (["approve", "SPEC-1"], ["confirm"]):
+            refused = _cli(["spec", *operation, "--run-dir", str(run_dir)], cwd=own.path)
+            assert refused.returncode == 2, f"{run_dir}: {refused.stdout}{refused.stderr}"
+            assert reason in refused.stderr, refused.stderr
+    for argv in (
+        ["spec", "confirm", "--run-dir", str(current)],
+        ["spec", "confirm", "--root", str(tmp_path), "--run-dir", str(current)],
+    ):
+        allowed = _cli(argv, cwd=own.path)
+        assert "records only to its active run" not in allowed.stderr, allowed.stderr
+        assert "is not this worktree" not in allowed.stderr, allowed.stderr
+
+
+def test_cli_options_that_could_name_a_checkout_are_classified():
+    """불변: 값을 받는 CLI 옵션은 모두 checkout 선택자인지 분류돼 있다.
+
+    `cli._foreign_checkout_target`은 해석된 `--root`·`--worktree`·`--run-dir`과 `worktree`의
+    `--name`·`--path`만 본다. 다른 checkout을 고르는 새 옵션이 그 검사를 거치지 않으면
+    worktree 안에서 형제 checkout을 다시 고를 수 있다. 새 옵션은 아래 두 표 중 하나에
+    넣는다 — 선택자라면 그 검사도 함께 고친다.
+    """
+    import argparse
+
+    from agent_flow.cli import _build_parser
+
+    checked = {"root", "worktree", "run_dir", ("worktree", "name"), ("worktree", "path")}
+    not_checkout = {
+        "ack_feedback", "ack_head", "approve", "architecture", "archive_path", "artifact",
+        "body", "branch", "brief", "claim_token", "command_argv", "concerns", "content",
+        "decided", "description", "details_json", "editor", "event", "execution", "file",
+        "files", "fixtures", "format", "from_actor", "from_stage", "host_session_id", "id",
+        "judge_command", "limit", "max_polls", "message", "mode", "notes", "phase",
+        "poll_interval", "profile", "publication_base", "reason", "rejected", "remaining",
+        "repo", "report", "result", "retry_after", "reviewer", "reviews", "risks", "role",
+        "signal", "since", "skill", "status", "subject", "task", "team", "timeout", "to_stage",
+        "to_worker", "verdict", "worker", "workflow", "worktree_branch", "write_scope",
+        # run·checkout 신원을 **검증**하는 값이다. 대상은 `--worktree`가 정한다.
+        "checkout_identity",
+        # 이미 정해진 worktree 안의 run이다.
+        "run_id",
+        # 읽기 전용 marker 추출의 기준 checkout이다. 아무것도 쓰지 않는다.
+        "project_root",
+        ("team", "name"),
+        ("context", "name"),
+    }
+
+    pairs: set[tuple[str, str]] = set()
+
+    def walk(parser: argparse.ArgumentParser, command: str | None) -> None:
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for name, sub in action.choices.items():
+                    walk(sub, command or name)
+            elif action.option_strings and action.nargs != 0 and action.dest != "help":
+                pairs.add((command or "", action.dest))
+
+    walk(_build_parser()[0], None)
+    unclassified = sorted(
+        pair for pair in pairs
+        if not ({pair, pair[1]} & checked) and not ({pair, pair[1]} & not_checkout)
+    )
+    assert unclassified == [], f"classify these options for checkout targets: {unclassified}"
 
 
 def test_run_rejects_install_with_hooks_explicitly_disabled(tmp_path):

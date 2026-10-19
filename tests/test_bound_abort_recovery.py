@@ -217,8 +217,6 @@ def test_packaged_abort_rejects_foreign_or_unproven_recovery(consumer: Consumer)
         (consumer.abort_command("--worktree", own, "-yh"), consumer.own.path, SESSION),
         (consumer.abort_command("--worktree", own, sibling), consumer.own.path, SESSION),
         (consumer.abort_command("--worktree", own, "--", sibling), consumer.own.path, SESSION),
-        (shlex.join([launcher, "abort", "--root", str(other_project), "--worktree", own]), consumer.own.path, SESSION),
-        (shlex.join([launcher, "abort", "--root", "..", "--worktree", own]), consumer.own.path, SESSION),
         (shlex.join([launcher, "abort", "--root", ".", "--worktree", own]), consumer.leader, SESSION),
         (own_abort, consumer.leader, SESSION),
         (own_abort, consumer.sibling.path, SESSION),
@@ -245,6 +243,18 @@ def test_packaged_abort_rejects_foreign_or_unproven_recovery(consumer: Consumer)
         assert decision.returncode == 2, f"guard opened an unproven recovery: {command!r} from {cwd}"
         assert _state(consumer) == before, f"guard decision changed run state: {command!r}"
     assert not (consumer.leader / "pwned.txt").exists()
+
+    # 이 프로젝트 밖 root는 경계가 지킬 경로가 아니다. launcher 형태도 bare 이름과
+    # 똑같이 판정하고, 실제로 부르면 CLI가 아무 run도 닫지 못한 채 끝난다.
+    for arguments in (["--root", str(other_project)], ["--root", ".."]):
+        command = shlex.join([launcher, "abort", *arguments, "--worktree", own])
+        bare = shlex.join(["agent-flow", "abort", *arguments, "--worktree", own])
+        assert (
+            _guard(consumer, command).returncode == _guard(consumer, bare).returncode
+        ), command
+        ran = _run(shlex.split(command), cwd=consumer.own.path, env=consumer.environment)
+        assert ran.returncode != 0, f"{command}: {ran.stdout}{ran.stderr}"
+        assert _state(consumer) == before, f"{command} changed run state"
 
     nested = consumer.own.path / "nested"
     nested.mkdir()
