@@ -2701,10 +2701,9 @@ def _abort_from_another_checkout(root: Path, worktree: str | None) -> str | None
     """다른 worktree 안에서 그 worktree가 아닌 run을 닫으려는 abort를 거절한다.
 
     host 경계는 `--worktree <이름>`을 경로로 보지 못하고 셸 문법도 풀지 않는다. 대상과
-    실제 실행 위치를 함께 아는 곳은 CLI뿐이다. leader나 저장소 밖에서는 그대로 연다.
+    실제 실행 위치를 함께 아는 곳은 CLI뿐이다. worktree를 정하지 못한 abort는 leader의
+    run을 닫으므로 그것도 다른 대상이다. leader나 저장소 밖에서는 그대로 연다.
     """
-    if worktree is None:
-        return None
     cwd = Path.cwd()
     standing_leader = leader_root_for(cwd)
     if standing_leader is None or not same_worktree_path(standing_leader, root):
@@ -2712,11 +2711,13 @@ def _abort_from_another_checkout(root: Path, worktree: str | None) -> str | None
     standing = git_toplevel(cwd)
     if standing is None:
         return None
-    target = get_worktree_status(root=root, name=worktree).path
-    if same_worktree_path(standing, target):
+    if worktree is not None and same_worktree_path(
+        standing, get_worktree_status(root=root, name=worktree).path
+    ):
         return None
+    target = worktree if worktree is not None else "the leader checkout"
     return (
-        f"abort for {worktree} must run from the leader checkout or from that worktree; "
+        f"abort for {target} must run from the leader checkout or from that worktree; "
         f"this shell is in {standing}. Nothing was changed."
     )
 

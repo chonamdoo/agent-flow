@@ -2051,10 +2051,10 @@ def test_recovery_commands_survive_a_hook_integrity_violation(tmp_path):
 
 
 def test_abort_closes_another_worktree_run_only_from_the_leader(tmp_path):
-    """불변: 한 worktree 안에서 다른 worktree의 run을 abort하지 못한다.
+    """불변: 한 worktree 안에서 다른 worktree나 leader의 run을 abort하지 못한다.
 
     host 경계는 `--worktree <이름>`을 경로로 보지 못한다. 대상과 실행 위치를 함께 아는
-    CLI가 막아야 셸 문법과 무관하게 형제 run이 보존된다.
+    CLI가 막아야 셸 문법과 무관하게 다른 run이 보존된다.
     """
     from agent_flow.artifact import create_run
 
@@ -2075,14 +2075,21 @@ def test_abort_closes_another_worktree_run_only_from_the_leader(tmp_path):
         checkouts[name] = (status, run_dir / "active")
     own, own_marker = checkouts["own"]
     sibling, sibling_marker = checkouts["sibling"]
+    leader_marker = create_run(tmp_path, "default", "task-leader") / "active"
+    (tmp_path / "sub").mkdir()
+    raw = tmp_path.parent / f"{tmp_path.name}-raw"
+    _git("worktree", "add", "-b", "raw", str(raw), cwd=tmp_path)
 
-    for argv in (
-        ["abort", "--worktree", sibling.name, "--yes"],
-        ["abort", "--root", str(sibling.path), "--yes"],
+    for argv, cwd in (
+        (["abort", "--worktree", sibling.name, "--yes"], own.path),
+        (["abort", "--root", str(sibling.path), "--yes"], own.path),
+        (["abort", "--root", str(tmp_path / "sub"), "--yes"], own.path),
+        (["abort", "--yes"], raw),
     ):
-        refused = _cli(argv, cwd=own.path)
+        refused = _cli(argv, cwd=cwd)
         assert refused.returncode == 2, f"{argv}: {refused.stdout}{refused.stderr}"
         assert sibling_marker.is_file(), f"{argv} closed the sibling run"
+        assert leader_marker.is_file(), f"{argv} closed the leader run"
 
     assert _cli(["abort", "--worktree", own.name, "--yes"], cwd=own.path).returncode == 0
     assert not own_marker.exists()
