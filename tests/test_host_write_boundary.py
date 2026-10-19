@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import shlex
@@ -2511,12 +2512,38 @@ print(json.dumps(results))
 
 def _bound_spec_recorder(tmp_path: Path):
     root, statuses, runs = _setup(tmp_path)
-    shim = root / ".agent-flow" / "bin" / "agent-flow"
-    shim.parent.mkdir(parents=True, exist_ok=True)
-    shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    shim.chmod(0o755)
+    shim = _installed_launcher(root)
     record_host_checkout_binding(_status_payload(root, statuses[0], runs[0]), root)
     return root, statuses, runs, shim
+
+
+def _installed_launcher(root: Path) -> Path:
+    """설치 기록과 bytes·interpreter가 일치하는 최소 project launcher.
+
+    실제 설치처럼 `.agent-flow/`를 git이 무시하게 둔다. 그래야 launcher 교체가 leader
+    drift가 아니라 설치 기록 대조로 걸리는지 볼 수 있다.
+    """
+    with (root / ".git" / "info" / "exclude").open("a", encoding="utf-8") as exclude:
+        exclude.write(".agent-flow/\n")
+    launcher = root / ".agent-flow" / "bin" / "agent-flow"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    runtime_cli = root / ".agent-flow" / "runtime" / "python" / "agent_flow" / "cli.py"
+    runtime_cli.parent.mkdir(parents=True, exist_ok=True)
+    runtime_cli.touch()
+    interpreter = Path(sys.executable).resolve()
+    (root / ".agent-flow" / "kit.json").write_text(
+        json.dumps({
+            "project_launcher_digest": hashlib.sha256(launcher.read_bytes()).hexdigest(),
+            "project_launcher_python": {
+                "path": str(interpreter),
+                "sha256": hashlib.sha256(interpreter.read_bytes()).hexdigest(),
+            },
+        }),
+        encoding="utf-8",
+    )
+    return launcher
 
 
 @pytest.mark.parametrize(
@@ -2616,6 +2643,14 @@ def test_spec_recorders_do_not_exempt_impostor_or_unbound_session(tmp_path: Path
         ),
         root,
     ) is not None
+    shim.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    assert host_write_boundary_violation(
+        _command_payload(
+            f"{shim} spec confirm --run-dir {runs[0]}",
+            cwd=statuses[0].path,
+        ),
+        root,
+    ) is not None, "a launcher that no longer matches its install record opened a recorder"
 
 
 def test_spec_recorder_still_checks_leader_tripwire(tmp_path: Path):

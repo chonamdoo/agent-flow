@@ -166,10 +166,12 @@ The launcher is the one execution path the approval hooks ride on, so it is defe
   single `argparse.py` dropped into the project would execute inside the approval process
 - The run-start hook compares the launcher file digests
 
-Bound workers may use the installed project launcher for `spec approve` and `spec confirm`
-only with the exact current run directory. Leader-drift checks and normal SPEC validation
-still apply; other actions, foreign runs, extra options, and compound shell commands receive
-no exemption.
+A bound worker may call the leader's installed launcher by its exact path, from its own
+checkout, only while that launcher still matches its install record. `abort` must target the
+worker's own run and stays available after the leader changes. `spec approve` and `spec confirm`
+must name the exact current run directory; leader-drift checks and normal SPEC validation still
+apply. Other actions, foreign runs or worktrees, extra options, and compound shell commands
+receive no exemption.
 
 ### The numbers in this README are checked too
 

@@ -28,6 +28,8 @@ The comparator correctly uses only units valid in both kits. The declared author
 
 Published source commit `7cbc3c4` passed the full PR CI, including all four pytest shards, minimum Python, installed parity, frozen invariants, and phase-budget comparison ([Tests](https://github.com/chonamdoo/agent-flow/actions/runs/39182007930), [Parity](https://github.com/chonamdoo/agent-flow/actions/runs/39182007931)). Source review/CI approval is not a passing release measurement. Merge/tag/deployment and deployment-conditional cleanup remain unperformed.
 
+After this measurement the kit gained #371 (bound own `abort` recovery) and the shared launcher check that now also guards `spec approve`/`spec confirm`. Both failed attempts therefore describe an earlier kit. The release decision needs a new paired measurement of the final kit, run in the cloud, and a passing `phase_eval_compare.py --export evals/release-gates/v0.3.18` record before tagging.
+
 ## Limits
 
-Installation checks use synthetic projects, not real application approvals. Host registration files were checked, but native host trust/startup and a user Homebrew runtime upgrade were not exercised. Full-suite, minimum-Python, installed-parity, frozen-invariant, and phase-budget gates remain PR CI responsibilities. Raw model responses contain local paths and are retained privately; committed result files contain compact measurement/provenance data.
+Installation checks use synthetic projects, not real application approvals. Host registration files were checked, but native host trust/startup and a user Homebrew runtime upgrade were not exercised. Full-suite, minimum-Python, installed-parity, frozen-invariant, and phase-budget gates remain PR CI responsibilities. Raw model responses contained local paths; at the user's request they and the local scratch trees were deleted after compact extraction. Only the committed compact measurement/provenance files remain.
