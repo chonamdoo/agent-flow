@@ -18,10 +18,12 @@
 - bound 세션이 leader에 설치된 launcher를 명령 이름 자리에서 부르면 PATH의
   `agent-flow`와 똑같이 판정한다. 명령별 예외 없이 `pr-watch`·`run-command`·
   `gates`·`spec approve` 같은 명령이 PATH 없는 세션에서도 열린다. 인수·리다이렉션
-  대상 자리의 launcher 경로와 설치 기록과 달라진 launcher는 계속 막는다. 자기
-  checkout 안의 symlink, 따옴표, `~`로 다른 실행 파일을 고르는 호출은 lifecycle
-  면제를 받지 못한다.
-  [#372](https://github.com/chonamdoo/agent-flow/pull/372)
+  대상처럼 셸이 명령 이름으로 읽지 않는 자리의 launcher 경로와 설치 기록과 달라진
+  launcher는 계속 막는다. 예약어는 인용·확장 없는 낱말만 인정한다(`!$X <launcher>`의
+  launcher는 인수다). 자기 checkout 안의 symlink, 따옴표, `~`로 다른 실행 파일을
+  고르는 호출은 lifecycle 면제를 받지 못한다.
+  [#372](https://github.com/chonamdoo/agent-flow/pull/372),
+  [#373](https://github.com/chonamdoo/agent-flow/pull/373)
 - worktree 안에서 실행한 명령은 `--worktree`·`--root`·`--run-dir`·
   `worktree --name/--path`로 이미 있는 다른 checkout이나 run을 고르지 못한다.
   형제 worktree를 `worktree remove --allow-unmerged`로 지우던 경로가 닫힌다.

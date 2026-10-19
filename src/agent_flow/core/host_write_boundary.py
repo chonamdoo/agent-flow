@@ -1866,7 +1866,7 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
     # 짝 `)`는 zsh glob(`tee x(N) <launcher>`)일 수 있다. 대입 판정은 앞자리를 넓게
     # 봐야 안전하고 launcher 이름 판정은 좁게 봐야 안전하므로 따로 든다.
     sound = True
-    # 열린 `(`마다 그 `(`가 명령을 열었는가. 짝이 맞는 `)`는 같은 답을 따른다 —
+    # 열린 `(`마다 그 `(`가 명령을 열었는가. 그 안의 구분자와 짝 `)`는 같은 답을 따른다 —
     # `tee *(.) <launcher>`의 `)`는 열지 않고, 짝 없는 `)`(case 패턴 끝)는 연다.
     parens: list[bool] = []
     segment = 0
@@ -1882,7 +1882,10 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
         if started:
             text = "".join(current)
             target = redirect_target
-            keyword = fresh and not quoted and not target and text in _SHELL_KEYWORDS
+            # 예약어는 인용·확장 없이 그 글자 그대로일 때만이다. `!$X`의 `!`는 명령 이름의
+            # 일부다.
+            literal = not quoted and not truncated and not target
+            keyword = fresh and literal and text in _SHELL_KEYWORDS
             words.append(
                 _CommandWord(
                     text, truncated, segment, prefixed,
@@ -2020,9 +2023,15 @@ def _command_path_words(command: str, *, depth: int = 0) -> tuple[_CommandWord, 
                 parens.append(opens)
             elif char == ")":
                 opens = parens.pop() if parens else True
+            elif char == ";" and command[index : index + 1] in (";", "&"):
+                # `;;`·`;&`·`;;&`는 case 절의 끝이다. 뒤는 다음 패턴이라 명령을 열지 않고,
+                # 패턴 끝의 짝 없는 `)`가 연다. 패턴 앞 괄호(`(x)`)는 열지 않는다.
+                index += 2 if command[index : index + 2] == ";&" else 1
+                opens = False
             else:
-                # `\r`은 셸 구분자가 아니라 낱말 글자다. CRLF 줄은 뒤의 `\n`이 연다.
-                opens = char != "\r"
+                # `\r`은 셸 구분자가 아니라 낱말 글자다. CRLF 줄은 뒤의 `\n`이 연다. 명령을
+                # 열지 않은 `(` 안의 `|`는 glob 패턴의 일부다(`tee x(a|<launcher>)`).
+                opens = char != "\r" and (not parens or parens[-1])
             flush(end=position, ends_command=True, opens=opens)
             if char == "\n" and heredocs:
                 index = _skip_heredoc_bodies(command, index, heredocs)
