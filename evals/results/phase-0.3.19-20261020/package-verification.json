@@ -1,0 +1,84 @@
+{
+  "artifacts": {
+    "agent-flow-kit-0.3.19.tgz": {
+      "sha256": "ca8cfbf9a3ad0191f158f563a2af100f315e73aa4d41d09a4f5e2247d70933c2",
+      "entries": 381
+    },
+    "agent_flow-0.3.19-py3-none-any.whl": {
+      "sha256": "ae955920a5583a1877a0b65fe2bf25bd2b5550dc58ab8f0f33161f354a27c5b2",
+      "entries": 322
+    },
+    "agent_flow-0.3.19.tar.gz": {
+      "sha256": "f13269d6652937053bf6b09a1896eb8e54833f91a3b83b5e648ef8763bae6f88",
+      "entries": 1258
+    }
+  },
+  "installations": [
+    {
+      "entry_point": "agent-flow-kit.mjs",
+      "architecture_mode": "clean",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "user_files_preserved": true,
+      "host_registration_files": "pass",
+      "launcher_workflow_export": "pass"
+    },
+    {
+      "entry_point": "agent-flow-kit.mjs",
+      "architecture_mode": "local",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "user_files_preserved": true,
+      "host_registration_files": "pass",
+      "launcher_workflow_export": "pass"
+    },
+    {
+      "entry_point": "agent-flow-kit.mjs",
+      "architecture_mode": "pending",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "user_files_preserved": true,
+      "host_registration_files": "pass",
+      "launcher_workflow_export": "pass"
+    },
+    {
+      "entry_point": "agent-flow-install.mjs",
+      "architecture_mode": "clean",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "user_files_preserved": true,
+      "host_registration_files": "pass",
+      "launcher_workflow_export": "pass"
+    },
+    {
+      "entry_point": "agent-flow-install.mjs",
+      "architecture_mode": "local",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "user_files_preserved": true,
+      "host_registration_files": "pass",
+      "launcher_workflow_export": "pass"
+    },
+    {
+      "entry_point": "agent-flow-install.mjs",
+      "architecture_mode": "pending",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "user_files_preserved": true,
+      "host_registration_files": "pass",
+      "launcher_workflow_export": "pass"
+    }
+  ],
+  "normalized_package_members_equal_to_v0.3.18": true,
+  "wheel_version": "agent-flow 0.3.19",
+  "wheel_workflow_export": "pass",
+  "limits": [
+    "Synthetic fixture installation; real host trust/startup and Homebrew upgrade untested."
+  ],
+  "verification_provenance": {
+    "installation_matrix": "Retained preparation checks for measured candidate 4da1c7c; not rerun during the model evaluation.",
+    "rechecked": "Candidate/evaluator fingerprints and all three artifact SHA-256 values match the preparation record.",
+    "installed_parity": "Rechecked successfully from a completed clean installation fixture.",
+    "model_gate": "Paired 168-unit run passed; one candidate review preparation timeout remains invalid."
+  }
+}
