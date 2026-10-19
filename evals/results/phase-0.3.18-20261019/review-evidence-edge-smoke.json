@@ -1,0 +1,20 @@
+{
+  "status": "pass",
+  "cases": [
+    {
+      "case": "import-error",
+      "preparation_exit": 0,
+      "original_discovery_command_retained": true,
+      "observed_test_exit": 1,
+      "failure_or_empty_result_preserved": true
+    },
+    {
+      "case": "empty-suite",
+      "preparation_exit": 0,
+      "original_discovery_command_retained": true,
+      "observed_test_exit": 5,
+      "failure_or_empty_result_preserved": true,
+      "note": "Python 3.13 unittest reports NO TESTS RAN with exit 5; original exit preserved, not treated as success."
+    }
+  ]
+}

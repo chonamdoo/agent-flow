@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import shlex
@@ -2507,3 +2508,159 @@ print(json.dumps(results))
             check=True,
         )
         assert json.loads(result.stdout) == expected, f"PYTHONHASHSEED={seed}: {result.stdout}"
+
+
+def _bound_spec_recorder(tmp_path: Path):
+    root, statuses, runs = _setup(tmp_path)
+    shim = _installed_launcher(root)
+    record_host_checkout_binding(_status_payload(root, statuses[0], runs[0]), root)
+    return root, statuses, runs, shim
+
+
+def _installed_launcher(root: Path) -> Path:
+    """설치 기록과 bytes·interpreter가 일치하는 최소 project launcher.
+
+    실제 설치처럼 `.agent-flow/`를 git이 무시하게 둔다. 그래야 launcher 교체가 leader
+    drift가 아니라 설치 기록 대조로 걸리는지 볼 수 있다.
+    """
+    with (root / ".git" / "info" / "exclude").open("a", encoding="utf-8") as exclude:
+        exclude.write(".agent-flow/\n")
+    launcher = root / ".agent-flow" / "bin" / "agent-flow"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    runtime_cli = root / ".agent-flow" / "runtime" / "python" / "agent_flow" / "cli.py"
+    runtime_cli.parent.mkdir(parents=True, exist_ok=True)
+    runtime_cli.touch()
+    interpreter = Path(sys.executable).resolve()
+    (root / ".agent-flow" / "kit.json").write_text(
+        json.dumps({
+            "project_launcher_digest": hashlib.sha256(launcher.read_bytes()).hexdigest(),
+            "project_launcher_python": {
+                "path": str(interpreter),
+                "sha256": hashlib.sha256(interpreter.read_bytes()).hexdigest(),
+            },
+        }),
+        encoding="utf-8",
+    )
+    return launcher
+
+
+@pytest.mark.parametrize(
+    "operation", ("approve SPEC-1", "approve spec-1", "approve ' SPEC-1 '", "confirm"),
+)
+@pytest.mark.parametrize("equals_option", (False, True))
+def test_bound_canonical_spec_recorders_allow_current_run(
+    tmp_path: Path, operation: str, equals_option: bool,
+):
+    root, statuses, runs, shim = _bound_spec_recorder(tmp_path)
+    selector = (
+        f"--run-dir={shlex.quote(str(runs[0]))}" if equals_option
+        else f"--run-dir {shlex.quote(str(runs[0]))}"
+    )
+
+    assert host_write_boundary_violation(
+        _command_payload(
+            f"{shlex.quote(str(shim))} spec {operation} {selector}",
+            cwd=statuses[0].path,
+        ),
+        root,
+    ) is None
+
+
+@pytest.mark.parametrize("case", (
+    "foreign-run", "invented-run", "traversal", "symlink-alias",
+    "missing-selector", "duplicate-selector", "missing-id", "invalid-id",
+    "extra-root", "extra-worktree", "other-action", "extra-positional",
+    "semicolon", "pipe", "substitution", "newline",
+))
+def test_bound_spec_recorders_reject_ambiguous_or_foreign_requests(
+    tmp_path: Path, case: str,
+):
+    root, statuses, runs, shim = _bound_spec_recorder(tmp_path)
+    current = runs[0]
+    alias = statuses[0].path / "run-alias"
+    alias.symlink_to(current, target_is_directory=True)
+    select = f"--run-dir {shlex.quote(str(current))}"
+    arguments = {
+        "foreign-run": f"approve SPEC-1 --run-dir {shlex.quote(str(runs[1]))}",
+        "invented-run": f"approve SPEC-1 --run-dir {current.with_name('invented')}",
+        "traversal": f"approve SPEC-1 --run-dir {current}/../{current.name}",
+        "symlink-alias": f"approve SPEC-1 --run-dir {alias}",
+        "missing-selector": "approve SPEC-1",
+        "duplicate-selector": f"approve SPEC-1 {select} {select}",
+        "missing-id": f"approve {select}",
+        "invalid-id": f"approve SPEC-0 {select}",
+        "extra-root": f"approve SPEC-1 {select} --root {root}",
+        "extra-worktree": f"approve SPEC-1 {select} --worktree {statuses[1].name}",
+        "other-action": f"refresh {select}",
+        "extra-positional": f"confirm {select} unrelated",
+        "semicolon": f"approve SPEC-1 {select}; printf x > {root / 'leaked.py'}",
+        "pipe": f"approve SPEC-1 {select} | true",
+        "substitution": f"approve SPEC-1 {select} $(printf extra)",
+        "newline": f"approve SPEC-1 {select}\ntrue",
+    }
+
+    assert host_write_boundary_violation(
+        _command_payload(
+            f"{shlex.quote(str(shim))} spec {arguments[case]}",
+            cwd=statuses[0].path,
+        ),
+        root,
+    ) is not None
+
+
+@pytest.mark.parametrize("location", ("leader", "sibling", "missing"))
+def test_bound_spec_recorders_require_owned_checkout_cwd(
+    tmp_path: Path, location: str,
+):
+    root, statuses, runs, shim = _bound_spec_recorder(tmp_path)
+    cwd = {"leader": root, "sibling": statuses[1].path, "missing": None}[location]
+
+    assert host_write_boundary_violation(
+        _command_payload(f"{shim} spec confirm --run-dir {runs[0]}", cwd=cwd),
+        root,
+    ) is not None
+
+
+def test_spec_recorders_do_not_exempt_impostor_or_unbound_session(tmp_path: Path):
+    root, statuses, runs, shim = _bound_spec_recorder(tmp_path)
+    impostor = shim.with_name("fake-agent-flow")
+    impostor.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    impostor.chmod(0o755)
+
+    assert host_write_boundary_violation(
+        _command_payload(
+            f"{impostor} spec confirm --run-dir {runs[0]}",
+            cwd=statuses[0].path,
+        ),
+        root,
+    ) is not None
+    assert host_write_boundary_violation(
+        _command_payload(
+            f"{shim} spec confirm --run-dir {runs[0]}",
+            cwd=statuses[0].path, session="unbound-spec",
+        ),
+        root,
+    ) is not None
+    shim.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    assert host_write_boundary_violation(
+        _command_payload(
+            f"{shim} spec confirm --run-dir {runs[0]}",
+            cwd=statuses[0].path,
+        ),
+        root,
+    ) is not None, "a launcher that no longer matches its install record opened a recorder"
+
+
+def test_spec_recorder_still_checks_leader_tripwire(tmp_path: Path):
+    root, statuses, runs, shim = _bound_spec_recorder(tmp_path)
+    (root / "README.md").write_text("unexpected leader change\n", encoding="utf-8")
+
+    assert host_write_boundary_violation(
+        _command_payload(
+            f"{shim} spec approve SPEC-1 --run-dir {runs[0]}",
+            cwd=statuses[0].path,
+        ),
+        root,
+    ) is not None

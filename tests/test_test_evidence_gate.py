@@ -435,3 +435,104 @@ def test_red_reference_requires_same_regression_and_entry_code_baseline(tmp_path
         root, "implement", other_test, profile=PYTHON_PROFILE, since=phase_entered_at,
         run_dir=run_dir, code_baseline=baseline, cwd_root=root,
     ) == ["test-run-evidence: verified (the referenced regression must end green)"]
+
+
+@pytest.mark.parametrize(
+    ("marker_class", "observed_class", "exit_code", "accepted"),
+    (
+        ("CatalogTest", "CatalogTest", 0, True),
+        ("CatalogTest", "catalogtest", 0, False),
+        ("catalogtest", "CatalogTest", 0, False),
+        ("CatalogTest", "CatalogTest", 1, False),
+    ),
+)
+def test_behavior_preserving_case_sensitive_selector(
+    tmp_path, marker_class, observed_class, exit_code, accepted,
+):
+    root = _project(tmp_path)
+    text = (
+        "## Completion Gate\n"
+        f"regression-test: example.{marker_class}\n"
+        "change-kind: Behavior-Preserving\n"
+        "behavior-preserving-reason: unchanged catalog boundary\n"
+        "test-run-evidence: VERIFIED\n"
+    )
+    _observe(root, f"./gradlew test --tests example.{observed_class}", exit_code)
+
+    missing = missing_test_evidence_markers(
+        root, "implement", text, profile=ANDROID_PROFILE, cwd_root=root,
+    )
+
+    assert (missing == []) is accepted
+
+
+def test_ci_selector_preserves_case_and_normalized_evidence(tmp_path):
+    root = _project(tmp_path)
+    text = (
+        "## Completion Gate\n"
+        "regression-test: example.CatalogTest\n"
+        "change-kind: Behavior-Preserving\n"
+        "behavior-preserving-reason: unchanged catalog boundary\n"
+        "test-run-evidence: VERIFIED\n"
+    )
+    profile = {"gates": [{
+        **ANDROID_PROFILE["gates"][0],
+        "required": True, "execution": "ci", "ci_check": "jvm",
+    }]}
+    _observe(root, "./gradlew test --tests example.CatalogTest", 0)
+
+    assert missing_test_evidence_markers(
+        root, "implement", text, profile=profile, cwd_root=root,
+    ) == []
+
+
+def test_case_sensitive_red_reference_round_trip(tmp_path):
+    import subprocess
+    from agent_flow.core.command_evidence import read_red_reference, test_code_baseline
+    from agent_flow.runner import publish_red_reference
+
+    root = _project(tmp_path)
+    (root / ".agent-flow" / "kit.json").write_text("{}\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+    code = root / "logic.py"
+    code.write_text("value = 0\n", encoding="utf-8")
+    for args in (
+        ("init", "-b", "main"), ("config", "user.email", "test@example.com"),
+        ("config", "user.name", "Test"), ("add", "."), ("commit", "-m", "baseline"),
+    ):
+        subprocess.run(("git", *args), cwd=root, check=True, capture_output=True)
+    run_dir = root / ".agent-flow" / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    baseline = test_code_baseline(root)
+    text = (
+        "## Completion Gate\n"
+        "regression-test: example.CatalogTest\n"
+        "change-kind: feature\n"
+        "test-run-evidence: verified\n"
+    )
+    _observe(
+        root, "./gradlew test --tests example.CatalogTest",
+        1, at=1, code_baseline=baseline,
+    )
+    reference = publish_red_reference(
+        root, run_dir, evidence_root=root, text=text, profile=ANDROID_PROFILE,
+    )
+    code.write_text("value = 1\n", encoding="utf-8")
+    _observe(root, "./gradlew test --tests example.CatalogTest", 0, at=3)
+    green = text + f"red-reference: {reference}\n"
+
+    assert missing_test_evidence_markers(
+        root, "implement", green, profile=ANDROID_PROFILE, since=2,
+        run_dir=run_dir, code_baseline=baseline, cwd_root=root,
+    ) == []
+
+    wrong_case = green.replace("CatalogTest", "catalogtest")
+    _observe(root, "./gradlew test --tests example.catalogtest", 0, at=4)
+    assert missing_test_evidence_markers(
+        root, "implement", wrong_case, profile=ANDROID_PROFILE, since=2,
+        run_dir=run_dir, code_baseline=baseline, cwd_root=root,
+    ) != []
+    assert read_red_reference(
+        root, text=wrong_case, profile=ANDROID_PROFILE,
+        code_baseline=baseline, cwd_root=root,
+    ) is None

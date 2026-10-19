@@ -100,6 +100,10 @@ an explicit `run`/`start`/`continue` binds the session, the binding hook hands t
 `agent-flow status` shows, per host, whether the hooks are actually running
 ([Host connection](docs/USAGE.md#host-connection)).
 
+Related-test selectors preserve their exact case, including recorded RED references.
+`example.CatalogTest` and `example.catalogtest` identify different tests; enum marker values
+remain normalized.
+
 ### Attach one verification method to each requirement
 
 In workflows that have a `design` or `prd` phase (`default`, `full-feature`), every instruction
@@ -161,6 +165,13 @@ The launcher is the one execution path the approval hooks ride on, so it is defe
 - The current directory is removed from `sys.path` on Python runs, closing the path by which a
   single `argparse.py` dropped into the project would execute inside the approval process
 - The run-start hook compares the launcher file digests
+
+A bound worker may call the leader's installed launcher by its exact path, from its own
+checkout, only while that launcher still matches its install record. `abort` must target the
+worker's own run and stays available after the leader changes. `spec approve` and `spec confirm`
+must name the exact current run directory; leader-drift checks and normal SPEC validation still
+apply. Other actions, foreign runs or worktrees, extra options, and compound shell commands
+receive no exemption.
 
 ### The numbers in this README are checked too
 

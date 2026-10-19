@@ -692,6 +692,10 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
         return leader_drift_message(exc.drift, worker_root=current.checkout)
     except WorktreeIsolationError as exc:
         return str(exc)
+    if tool_name in _COMMAND_TOOLS and _is_bound_spec_record_command(
+        command, root=root, current=current, cwd=session_cwd,
+    ):
+        return None
     return _scope_violation(
         payload,
         root=root,
@@ -890,6 +894,41 @@ def _abort_options(arguments: tuple[str, ...]) -> dict[str, str] | None:
             return None
         options[name] = value
     return options
+
+
+def _is_bound_spec_record_command(
+    command: str,
+    *,
+    root: Path,
+    current: ActiveCheckout,
+    cwd: Path | None,
+) -> bool:
+    """자기 run의 `spec approve`/`spec confirm`. leader drift 검사 뒤에 판정한다."""
+    target = _bound_launcher_request(
+        command, root=root, current=current, cwd=cwd, parse=_spec_record_run_dir
+    )
+    if target is None or cwd is None:
+        return False
+    expected = current.runtime_root / ".agent-flow" / "runs" / current.run_id
+    return target == str(expected) and _resolve_path(target, cwd) == expected
+
+
+def _spec_record_run_dir(arguments: tuple[str, ...]) -> str | None:
+    if arguments[:2] == ("spec", "confirm"):
+        selectors = arguments[2:]
+    elif (
+        arguments[:2] == ("spec", "approve")
+        and len(arguments) > 2
+        and re.fullmatch(r"SPEC-[1-9]\d*", arguments[2].strip().upper())
+    ):
+        selectors = arguments[3:]
+    else:
+        return None
+    if len(selectors) == 2 and selectors[0] == "--run-dir":
+        return selectors[1]
+    if len(selectors) == 1 and selectors[0].startswith("--run-dir="):
+        return selectors[0].removeprefix("--run-dir=")
+    return None
 
 
 def _unbound_violation(

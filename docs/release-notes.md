@@ -1,8 +1,33 @@
 # Release notes
 
-## v0.3.17 (준비 중)
+## v0.3.18 (준비 중)
 
 다음 patch 후보다. 태그 생성과 실제 배포는 아직 하지 않았다.
+
+- managed worktree에 bind된 host 세션이 leader에 설치된 launcher를 정확한 경로로
+  불러 자기 run을 `abort`할 수 있다. leader가 바뀐 뒤에도 열리며, launcher가 설치
+  기록과 달라졌거나 다른 run·worktree·옵션·복합 셸을 쓰면 계속 막는다.
+  [#371](https://github.com/chonamdoo/agent-flow/pull/371)
+- bound 세션의 lifecycle 명령이 다른 worktree를 고르지 못하게 했다. 상대
+  `--worktree`·`--root`는 명령이 실행되는 자리에서 풀고, CLI가 다르게 읽을 수
+  있는 축약 옵션·중복 옵션·`~` 값은 거절한다.
+  [#371](https://github.com/chonamdoo/agent-flow/pull/371)
+- worktree 안에서 실행한 `abort`는 다른 worktree나 leader의 run을 닫지 않는다.
+  그런 run은 leader checkout이나 해당 worktree에서 닫는다.
+  [#371](https://github.com/chonamdoo/agent-flow/pull/371)
+- 같은 launcher 검증으로 현재 run 디렉터리를 정확히 지정한 `spec approve`와
+  `spec confirm`만 허용한다. leader drift 검사와 SPEC 검증은 유지한다.
+  [#370](https://github.com/chonamdoo/agent-flow/pull/370)
+- RED reference와 GREEN 명령을 대조할 때 regression selector의 대소문자를
+  보존한다. enum 마커 값은 계속 정규화한다.
+  [#370](https://github.com/chonamdoo/agent-flow/pull/370)
+- `phase_eval` review fixture의 실행 증거가 실제 발견한 테스트 전체를 이름으로
+  실행한다. case·기대 판정·threshold는 바꾸지 않았다.
+  [#370](https://github.com/chonamdoo/agent-flow/pull/370)
+
+## v0.3.17 (2026-10-18)
+
+v0.3.16 이후의 변경이다. [v0.3.17](https://github.com/chonamdoo/agent-flow/releases/tag/v0.3.17)로 배포했다.
 
 - managed project launcher의 `install`이 Python runtime 자산 디렉터리 대신
   설치기를 만든 kit origin으로 위임한다. Homebrew의 검증된 `opt` 링크를
