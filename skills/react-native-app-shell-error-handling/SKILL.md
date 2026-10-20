@@ -2,7 +2,7 @@
 name: react-native-app-shell-error-handling
 description: Use when implementing or reviewing React Native app-wide error handling where screens notify common errors and the app or framework root owns global Modal, snackbar, toast hosts, auth-flow switching, navigation recovery, SessionExpired handling, and Maintenance handling. Covers plain React Navigation and framework-managed roots such as Expo Router.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [app shell, appshell, global error, common error, session expired, navigation reset, modal host, toast host, global exception, 전역 예외, "401", unauthorized response, token rejected, token is rejected, 토큰 만료, 토큰이 만료]
+taskTerms: [app shell, appshell, global error, common error, session expired, navigation reset, modal host, toast host, global exception, 전역 예외, "401", unauthorized response, token rejected, token is rejected, 토큰 만료, 토큰이 만료, uncaught exception, unhandled error, unexpected error, fallback page, fallback screen, blank screen, navigation stack, navigation history, login expired, login has expired, session ended, session has ended, 예상치 못한 예외, 처리되지 않은 오류, 잡히지 않은 예외, 대체 화면, 흰 화면, 내비게이션 스택, 라우터 기록, 로그인 만료]
 pathGlobs: ["**/App.tsx", "**/*AppShell*.tsx", "**/*CommonError*Host.tsx"]
 requires: [app-shell-error-contract]
 ---

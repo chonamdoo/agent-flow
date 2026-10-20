@@ -2,7 +2,7 @@
 name: flutter-clean-presentation-architecture
 description: Use when creating, modifying, or reviewing a Flutter Clean Architecture presentation layer with Riverpod provider DI, state-holder notifiers, UiState modeling, UiModel mapping, navigation effects, and state-based presentation code review.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [uistate, ui state, state holder, screen state, navigation effect, riverpod, asyncvalue, notifier, presentation layer, view model, viewmodel, 뷰모델, ui 상태, view state, loading state, error state, empty state, 로딩 상태, 에러 상태, 빈 상태]
+taskTerms: [uistate, ui state, state holder, screen state, navigation effect, riverpod, asyncvalue, notifier, presentation layer, view model, viewmodel, 뷰모델, ui 상태, view state, loading state, error state, empty state, 로딩 상태, 에러 상태, 빈 상태, skeleton, loading flag, display model, display-ready, 화면용 모델, 표시용 모델, 로딩 플래그, 불러오는 중]
 pathGlobs: ["**/*_ui_state.dart", "**/*_notifier.dart", "**/presentation/**"]
 requires: [clean-architecture-core, flutter-clean-architecture]
 ---

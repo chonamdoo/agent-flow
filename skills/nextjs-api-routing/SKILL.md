@@ -2,7 +2,7 @@
 name: nextjs-api-routing
 description: Implement or review Next.js browser/RSC upstream routing, rewrites versus direct API or BFF, environment binding, proxy response contracts, and network-mock coverage. Not generic Next.js UI, standalone auth policy, Query cache policy, or non-Next mocking adoption.
 workflowPhases: [design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [Next.js rewrites, Next API proxy, Next.js BFF, Next upstream routing, Next API mocking]
+taskTerms: [Next.js rewrites, Next API proxy, Next.js BFF, Next upstream routing, Next API mocking, app/api, API route handler, route handler, BFF, upstream service, API 프록시, 중계 경로, 중계 API]
 ---
 
 # Next.js API Routing
