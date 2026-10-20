@@ -335,7 +335,19 @@ def test_command_timeout_kills_descendants(environment, tmp_path):
         assert pid_path.is_file(), "the subprocess never started the descendant"
         descendant = int(pid_path.read_text())
         state_path = Path(f"/proc/{descendant}/stat")
-        assert not state_path.exists() or state_path.read_text().split(")", 1)[1].split()[0] == "Z"
+
+        def gone() -> bool:
+            try:
+                return state_path.read_text().split(")", 1)[1].split()[0] == "Z"
+            except FileNotFoundError:
+                return True
+
+        # SIGKILL to the group is delivered at once, but the kernel finishes the descendant asynchronously;
+        # reading /proc right after the timeout can still see it running.
+        deadline = time.monotonic() + 5
+        while not gone() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert gone()
     finally:
         if descendant is None and pid_path.is_file():
             descendant = int(pid_path.read_text())

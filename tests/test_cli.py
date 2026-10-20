@@ -1235,9 +1235,9 @@ class CliTest(unittest.TestCase):
                 project_root,
             )
 
-        self.assertIn("samantha-architecture-guide", prompt)
+        self.assertIn("sample-architecture-guide", prompt)
         self.assertIn(
-            str(config_root / ".agent-flow" / "local-skills" / "samantha-architecture-guide" / "SKILL.md"),
+            str(config_root / ".agent-flow" / "local-skills" / "sample-architecture-guide" / "SKILL.md"),
             prompt,
         )
 
@@ -1597,7 +1597,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("feature-presentation contains forbidden token Dto", "\n".join(f.message for f in web_presentation_findings))
 
             # 필수 pre-commit gate의 오탐 회귀. `useIdentity`는 `Entity`를 부분문자열로
-            # 포함해 samantha 프로덕션 소스 70건을 위반으로 잡고 커밋을 막았다.
+            # 포함해 실제 앱 프로덕션 소스 70건을 위반으로 잡고 커밋을 막았다.
             web_presentation_ok = root / "src" / "features" / "checkout" / "presentation" / "useIdentity.ts"
             web_presentation_ok.write_text("export const identity = 1\n", encoding="utf-8")
             self.assertEqual(lint_project(root, "nextjs", files=[str(web_presentation_ok.relative_to(root))]), [])
@@ -5298,7 +5298,7 @@ if (codexContext !== undefined) {
                 encoding="utf-8"
             )
             # install 시점 스냅샷에는 skill 목록을 굽지 않는다. 새 skill을 설치하면 바로 stale해지기 때문이다.
-            self.assertNotIn("samantha-architecture-guide/SKILL.md", baked_prompt)
+            self.assertNotIn("sample-architecture-guide/SKILL.md", baked_prompt)
             self.assertIn("computed live", baked_prompt)
             self.assertEqual(
                 subprocess.run(
@@ -12241,10 +12241,10 @@ def _write_local_skill_index(root: Path, *, include_code_skill: bool = True) -> 
     if include_code_skill:
         skills.append(
             {
-                "name": "samantha-architecture-guide",
-                "path": ".agent-flow/local-skills/samantha-architecture-guide/SKILL.md",
+                "name": "sample-architecture-guide",
+                "path": ".agent-flow/local-skills/sample-architecture-guide/SKILL.md",
                 "source": "local",
-                "description": "Use before Samantha Android code development or review involving modules.",
+                "description": "Use before Sample Android code development or review involving modules.",
             }
         )
     index_path = root / ".agent-flow" / "skills" / "index.json"
@@ -12260,7 +12260,7 @@ def _write_local_skill_files(root: Path) -> None:
         "release-branch-review": "Use during release branch review.",
         "api": "Use for code review of APIs.",
         "api-contract-guide": "Use for code review of API contracts.",
-        "samantha-architecture-guide": "Use before Samantha Android code development or review involving modules. Do not install this skill globally.",
+        "sample-architecture-guide": "Use before Sample Android code development or review involving modules. Do not install this skill globally.",
     }
     for name, description in skills.items():
         skill_path = root / ".agent-flow" / "local-skills" / name / "SKILL.md"
@@ -12380,7 +12380,7 @@ def _node_project_local_applied_gate() -> str:
         "project-local-skills-used: "
         + ", ".join(_node_declared_skills("implement"))
         + ", api, api-contract-guide, figma-screen-spec, merge-review-flow, pr-review-flow,"
-        " release-branch-review, release-first-branch-pr, samantha-architecture-guide\n"
+        " release-branch-review, release-first-branch-pr, sample-architecture-guide\n"
         "project-local-skill-docs: applied\n"
     )
 
