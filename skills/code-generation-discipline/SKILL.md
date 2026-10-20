@@ -14,6 +14,7 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
 - Restate the requested behavior in one or two lines.
 - State assumptions and uncertainty. If the repo can answer a question, inspect it first.
 - Check existing patterns, helpers, APIs, and project instructions before adding a new approach.
+- When the phase prompt names a slice plan, read it in full before editing. List each decision it records (names, placement, signatures, behavior choices, exclusions) and implement each as written; the plan overrides your own preference and the "smallest path" default. Before finishing, re-check every listed decision against the diff.
 - Choose the smallest code path that can satisfy the request.
 - Define the authorized verification command or observable check before editing;
   account for the active phase's execution permissions and assigned owner.
