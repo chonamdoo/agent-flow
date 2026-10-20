@@ -557,7 +557,9 @@ def test_premerge_observation_requires_ci_from_every_active_profile(project, run
         (profiles / f"{profile_id}.yaml").write_text(json.dumps({
             "id": profile_id,
             "gates": [{
-                "id": "test", "command": ["pytest", "-q"], "required": True,
+                # Distinct stacks require distinct checks. Identical argv with
+                # conflicting ci_check names is deliberately rejected.
+                "id": "test", "command": ["pytest", "-q"] if profile_id == "python" else ["pnpm", "test"], "required": True,
                 "phase": "pre-push", "execution": "ci", "ci_check": f"{profile_id}-ci",
             }],
         }))
