@@ -70,6 +70,16 @@ npm install -g @openai/codex@0.163.0
 codex login --device-auth          # 출력된 URL·일회용 코드를 사람이 브라우저에서 ChatGPT 계정으로 입력
 codex login status                 # "Logged in using ChatGPT"
 codex exec --skip-git-repo-check "Reply with exactly: pong"   # 응답 확인
+
+# Flutter/Dart(릴리스 게이트의 app stack): 컨테이너에 기본으로 없다. 없으면 app unit 42개가 모두
+# "evaluation tool unavailable: dart"로 무효가 되어 게이트가 반드시 실패한다.
+curl -sS https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json -o /tmp/fl.json
+python3 -c "import json;d=json.load(open('/tmp/fl.json'));h=d['current_release']['stable'];r=[x for x in d['releases'] if x['hash']==h][0];print(r['archive'],r['sha256'])"
+curl -sS -o /tmp/flutter.tar.xz https://storage.googleapis.com/flutter_infra_release/releases/<archive>
+echo "<sha256>  /tmp/flutter.tar.xz" | sha256sum -c - && tar -xJf /tmp/flutter.tar.xz -C /opt
+git config --global --add safe.directory /opt/flutter
+ln -sf /opt/flutter/bin/flutter /usr/local/bin/flutter && ln -sf /opt/flutter/bin/dart /usr/local/bin/dart
+flutter config --no-analytics && dart --disable-analytics && flutter precache --universal
 ```
 
 - 클라우드 환경의 Network access에 `auth.openai.com`(로그인), `chatgpt.com`(구독 호출), `api.openai.com`을 허용해야
@@ -181,6 +191,14 @@ Codex(구독)는 달러 대신 사용 한도를 쓴다. 토큰은 Claude와 비�
 위 표 구성으로 Claude 한 사이클은 약 $35–45, 리뷰 검사가 가장 비싸다.
 
 ## 함정 (실제로 겪은 것)
+
+- **게이트 전에 stack 도구를 확인한다(2026-10-20)**: v0.3.20 게이트 1차는 컨테이너에 Dart/Flutter가 없어서 app unit이 모두
+  준비 단계에서 무효가 됐다. 18 unit째에 발견해 중단하고, Flutter를 설치한 뒤 처음부터 다시 쟀다. 게이트 전에는
+  `--stacks app --modes clean --trials 1 --review-trials 1`로 6 unit만 돌려 네 stack 모두 준비가 통과하는지 본다.
+- **게이트 중 디스크**: web·rn fixture가 unit마다 약 400MB라 168 unit이면 60GB를 넘는다. 끝난 unit의 `node_modules`·`.next`만
+  지우는 정리 스크립트를 함께 띄운다(v0.3.19 기록과 같은 방식, 소스·증거·측정값은 건드리지 않는다).
+- **kit 변경 동결**: 게이트가 측정하는 커밋 뒤에 kit 지문 범위(skills·src·templates 등)나 평가기·사례를 바꾸는 PR을 merge하면
+  `release.yml`이 기록을 거부한다. 그런 PR은 태그 뒤로 미룬다(v0.3.20에서는 #394).
 
 - **사례 하나로 매긴 점수와 "짧아짐" tie-break**: 루프가 측정되지 않는 지침 네 문단을 지웠다. model 트랙에서는 이
   tie-break를 없앴다(#383). 채택 전 held-out·회귀 검사를 생략하지 않는다.
