@@ -193,6 +193,36 @@ python3 evals/skill_tasks.py --rescore /tmp/agent-flow-skill-eval/report.json \
 사후 채점 수정과 새 모델 실행을 구분한다. 반복하지 않은 단일 시행이나
 baseline 만점만으로 스킬의 개선 효과를 주장하지 않는다.
 
+## 실전 UI 과제 (`ui-tasks/`)
+
+공개 사이트에서 관찰한 구조·화면 흐름·상호작용을 중립 PRD로 옮기고, 그 PRD로 만든 빌드를 브라우저
+수용 검사로 채점한다. 원본 사이트 대신 `reference/`의 기준 클론이 100%를 받는 비교 기준이다. 상표·로고·
+실제 상품명·이미지·가격은 쓰지 않고, 데이터는 `fixtures/`의 생성 데이터만 쓴다.
+
+| 파일 | 내용 |
+|---|---|
+| `ui-tasks/<task>/prd.md` | 과제 버전·관찰 날짜, 화면·상수, test-id 계약, Spec Item(`SPEC-n`) |
+| `ui-tasks/<task>/acceptance.json` | Spec Item마다 브라우저 검사. 요소는 `data-testid`로만 찾는다 |
+| `ui-tasks/<task>/fixtures/` | `generate.py`가 같은 seed로 다시 만드는 `catalog.json` |
+| `ui-tasks/<task>/reference/` | 의존성 없는 정적 기준 클론(바닐라 HTML/JS) |
+| `ui_task.py` | 과제 검증(`validate`)과 채점(`run`) |
+| `ui_task_runner.mjs` | Node + Playwright 실행기. 검사마다 새 context와 가짜 시계를 쓴다 |
+
+```bash
+python evals/ui_task.py validate evals/ui-tasks/beauty-store
+# 정적 빌드: SPA fallback으로 띄우고 과제의 fixtures를 /fixtures/에 붙인다.
+python evals/ui_task.py run evals/ui-tasks/beauty-store --static <build-dir> --repeat 3 --summary ui.md --json ui.json
+# 이미 떠 있는 앱(예: next start):
+python evals/ui_task.py run evals/ui-tasks/beauty-store --url http://127.0.0.1:3000 --repeat 3
+# 한 slice만 만든 작은 회차: 그 Spec Item의 검사만 잰다.
+python evals/ui_task.py run evals/ui-tasks/beauty-store --static <build-dir> --spec SPEC-7 --spec SPEC-8
+```
+
+`--repeat N`이면 검사는 N번 모두 통과해야 통과다. 종료 코드는 모든 검사가 통과할 때만 0이다. 타이머
+동작(debounce, 자동 넘김)은 실제 대기 없이 `pause`·`tick`으로 잰다. 픽셀 비교는 하지 않는다.
+Node와 Playwright(`npm i -g playwright`, Chromium)가 필요하다. `tests/test_ui_task.py`가 과제 검증,
+서버, fixture 재현성을 확인하고, 브라우저가 있으면 기준 클론이 모든 검사를 통과하는지도 확인한다.
+
 ## phase skill 전달 평가
 
 workflow의 각 phase가 필요한 skill을 정확히 받는지, 쓰지 않는 텍스트에 토큰을
