@@ -37,6 +37,12 @@ v0.3.19 이후의 변경이다. [v0.3.20](https://github.com/chonamdoo/agent-flo
   걸려 상태바 색 변경이 프레젠테이션 skill을 요구하던 문제를 고친다. 앱 셸(401·토큰 만료), 프레젠테이션
   (loading·error·empty state), 백엔드 API(HTTP 메서드+경로), LLM 도구, Next.js 인증(로그인 여부)의 흔한
   표현도 해당 skill로 라우팅한다. [#392](https://github.com/chonamdoo/agent-flow/pull/392)
+- Next.js 인증 리뷰 skill은 보호·소유 표현("only signed-in", "signed-in cookie", "로그인한 사용자만")에서만
+  라우팅한다. #392의 bare "signed-in"이 대상 사용자만 말하는 화면 작업("Signed-in users can see their orders")에도
+  약 10KB짜리 skill을 리뷰어 필수 읽기로 붙이던 문제를 고친다. [#396](https://github.com/chonamdoo/agent-flow/pull/396)
+- 리뷰어는 읽기 계획의 각 필수 본문을 한 번만 읽고, 이미 읽기 계획이 절대경로로 주는 skill은 목록에서 절대경로를
+  다시 적지 않는다. Codex 리뷰어가 같은 skill 파일을 리뷰 도중 다시 읽던 양이 각도당 약 28KB에서 11KB로 줄고,
+  리뷰 정답·결함 검출·오탐은 Claude·Codex 모두 같다. [#401](https://github.com/chonamdoo/agent-flow/pull/401)
 
 유지보수·평가:
 
@@ -52,6 +58,8 @@ v0.3.19 이후의 변경이다. [v0.3.20](https://github.com/chonamdoo/agent-flo
   [#388](https://github.com/chonamdoo/agent-flow/pull/388)
 - 테스트 fixture의 실제 회사 패키지명·앱 이름을 중립 이름으로 바꾸고, 종료된 하위 프로세스 확인 테스트의
   경쟁 조건을 고친다. [#390](https://github.com/chonamdoo/agent-flow/pull/390), [#391](https://github.com/chonamdoo/agent-flow/pull/391)
+- 라우팅 heldout 사례 h2–h6(블라인드로 쓴 긍정·부정 문장 190개)을 `evals/routing-cases.json`에 더한다.
+  [#393](https://github.com/chonamdoo/agent-flow/pull/393)
 
 ## v0.3.19 (2026-10-20)
 
