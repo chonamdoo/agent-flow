@@ -55,7 +55,7 @@ def _anchors(tmp_path: Path, previous_meta: dict) -> Path:
                     continue
                 if scenario == "review" and row.get("expected") is not None and not row.get("correct"):
                     continue
-                chosen.append(row)
+                chosen.extend({**row, "trial": trial} for trial in range(1, reuse.ANCHOR_TRIALS + 1))
                 break
     directory = tmp_path / "anchors"
     directory.mkdir()
@@ -151,7 +151,7 @@ def test_a_missing_or_failing_anchor_blocks_reuse(tmp_path, setting):
     defect["defects"] = {key: False for key in defect["defects"]}
     (anchors / "results.jsonl").write_text("".join(json.dumps(row) + "\n" for row in kept))
     _, failures = reuse.assemble(_plan(meta), previous, None, anchors, tmp_path / "record")
-    assert "no anchor for author/app/team/-" in failures
+    assert "anchor for author/app/team/- has 0 of 2 trials" in failures
     assert any("anchor review/web/" in failure and "missed a seeded defect" in failure for failure in failures)
 
 
@@ -248,3 +248,13 @@ def test_an_anchor_that_did_not_read_its_required_skills_blocks_reuse(tmp_path, 
     assert any("anchor author/rn/team/- t" in failure and "did not observably read" in failure for failure in failures)
     assert any("anchor review/web/local/" in failure and "did not read a required document" in failure
                for failure in failures)
+
+
+def test_a_single_anchor_trial_is_not_enough(tmp_path, setting):
+    previous, meta, anchors = setting
+    rows = [json.loads(line) for line in (anchors / "results.jsonl").read_text().splitlines()]
+    kept = [row for row in rows if not (row["stack"] == "web" and row["mode"] == "clean"
+                                         and row["scenario"] == "author" and row["trial"] == 2)]
+    (anchors / "results.jsonl").write_text("".join(json.dumps(row) + "\n" for row in kept))
+    _, failures = reuse.assemble(_plan(meta), previous, None, anchors, tmp_path / "record")
+    assert failures == ["anchor for author/web/clean/- has 1 of 2 trials"]
