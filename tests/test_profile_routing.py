@@ -941,6 +941,25 @@ def test_python_api_contract_routes_an_explicit_concern_without_server_named_fil
     assert "backend-api-contract" in names
 
 
+@pytest.mark.parametrize(
+    "task,expected",
+    [
+        ("Signed-in users can see their orders; fetch GET /api/orders and render the list", False),
+        ("로그인한 사용자의 주문 목록을 보여준다", False),
+        ("Next.js 서버 컴포넌트에서 계정 영역의 로그인 여부를 확인한다", True),
+        ("Protect the account pages so only signed-in users can see them", True),
+        ("로그인한 사용자만 주문 내역 페이지를 볼 수 있게 서버에서 막는다", True),
+    ],
+)
+def test_nextjs_auth_review_skill_needs_auth_work_not_a_signed_in_audience(task: str, expected: bool) -> None:
+    """반증: bare "signed-in"·"로그인한 사용자"는 대상 사용자만 말하는 화면 작업("Signed-in users can see their
+    orders")에도 auth-session skill(약 10KB)을 리뷰어 필수 읽기로 올렸다. 보호·소유 표현과 함께일 때만 맞춘다."""
+    names = _names(_route(
+        "nextjs", phase_id="review", changed_files=["src/features/orders/presentation/OrdersPage.tsx"], task_text=task,
+    ))
+    assert ("nextjs-auth-session" in names) is expected
+
+
 @pytest.mark.parametrize("profile_id", ["spring", "ktor"])
 @pytest.mark.parametrize(
     "task,concerns,expected",
@@ -1232,3 +1251,17 @@ def test_glob_directories_match_case_sensitively_but_extensions_do_not(pattern, 
     from agent_flow.core.skill_resolver import _glob_matches
 
     assert _glob_matches(pattern, path) is expected
+
+
+def test_korean_terms_match_before_particles_and_endings_but_not_inside_longer_words():
+    """반증: 한글 term에 경계가 없으면 "화면 상태"가 "화면 상태바"에 걸려 상태바 색 변경이 프레젠테이션
+    skill을 required로 올린다. 경계를 조사 하나로만 좁히면 "에서도"·"되었을" 같은 복합 조사·활용이 빠진다."""
+    from agent_flow.core.skill_resolver import term_in
+
+    for text in ("주문 화면 상태를 노출한다", "화면 상태", "화면 상태에만 의존하도록", "공통 에러에서도 재시도",
+                 "세션 만료되었을 때 로그인으로", "세션 만료 시 공통 에러"):
+        assert any(term_in(term, text) for term in ("화면 상태", "공통 에러", "세션 만료")), text
+    assert not term_in("화면 상태", "화면 상태바 색상을 바꾼다")
+    assert term_in("post /", "the api answers post /api/cart/quote")
+    assert not term_in("post /", "write a post about it")
+    assert not term_in("uistate", "guistatemachine")
