@@ -18,7 +18,8 @@ from agent_flow.core.gates import run_gate
 from agent_flow.core.command_evidence import is_test_command_execution
 
 
-def test_project_only_tool_runs_in_project_venv_without_activation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("separate_config_root", [False, True])
+def test_project_only_tool_runs_in_project_venv_without_activation(tmp_path, monkeypatch, separate_config_root):
     project_python = tmp_path / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     venv.EnvBuilder(with_pip=False).create(tmp_path / ".venv")
     purelib = subprocess.check_output(
@@ -30,7 +31,16 @@ def test_project_only_tool_runs_in_project_venv_without_activation(tmp_path, mon
     )
     # A foreign active environment must not select the kit's tool/dependencies.
     monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "unrelated-venv"))
-    command = next(g for g in profile_gate_commands(["python"], root=tmp_path) if g.gate_id == "lint")
+    config_root = tmp_path
+    if separate_config_root:
+        config_root = tmp_path / "leader-config"
+        config_root.mkdir()
+        # Profile declarations may come from the leader, but its environment
+        # must not override the checkout being tested.
+        (config_root / "uv.lock").touch()
+    command = next(g for g in profile_gate_commands(
+        ["python"], root=config_root, execution_root=tmp_path
+    ) if g.gate_id == "lint")
     result = run_gate(command, cwd=tmp_path)
     assert result.passed, result.stderr
     assert json.loads(result.stdout) == {"prefix": str(tmp_path / ".venv"), "args": ["check", "."]}
@@ -89,3 +99,34 @@ def test_identical_project_commands_cannot_silently_drop_a_distinct_ci_check(tmp
         }))
     with pytest.raises(ValueError, match="conflicting gate ci_check"):
         profile_gate_commands(["python", "nextjs"], root=tmp_path, execution="ci")
+
+
+def test_runner_uses_checkout_environment_with_leader_profile_declarations(tmp_path):
+    from agent_flow.artifact import create_run
+    from tests.test_gate_provenance import _gates_runner
+
+    leader = tmp_path / "leader"
+    checkout = tmp_path / "checkout"
+    profiles = leader / ".agent-flow/profiles"
+    profiles.mkdir(parents=True)
+    checkout.mkdir()
+    (leader / ".agent-flow/kit.json").write_text(json.dumps({"profile": "python", "profiles": ["python"]}))
+    (leader / "uv.lock").touch()  # The leader's environment must not select uv here.
+    (profiles / "python.local.yaml").write_text(
+        "gates:\n  - id: lint\n    command: [ruff, check, .]\n    required: true\n"
+    )
+    venv.EnvBuilder(with_pip=False).create(checkout / ".venv")
+    python = checkout / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    purelib = subprocess.check_output(
+        [str(python), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"], text=True
+    ).strip()
+    (Path(purelib) / "ruff.py").write_text("import sys\nprint(sys.prefix)\n")
+    run_dir = create_run(leader, "default", "task", checkout_root=checkout)
+    _gates_runner(run_dir, checkout, leader)._run_project_gates()
+    ledger = json.loads((run_dir / "artifacts/gate-results.json").read_text())
+    assert len(ledger["results"]) == 1
+    result = ledger["results"][0]
+    assert result["passed"] is True, result
+    # The persisted gate ledger deliberately makes checkout paths relative.
+    assert result["stdout"].strip() == ".venv"
+    assert result["command"][0] == str(python.relative_to(checkout))

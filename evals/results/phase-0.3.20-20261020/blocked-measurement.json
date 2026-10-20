@@ -16,5 +16,6 @@
   "invalid_review_units": 12,
   "native_file_digests_verified": true,
   "raw_results_sha256": "1776f3999de17e75643348b49fe54084feb259be073b8335b1083a3f304d8c26",
-  "reason": "Repeated HTTP 429 Too Many Requests, including a standalone workspace-write diagnostic; canceled remaining units rather than repeatedly calling the provider. Comparator rejects incomplete/invalid measurement. No release-gate export or tag. No selective retry or threshold/evaluator change."
+  "reason": "Repeated HTTP 429 Too Many Requests, including a standalone workspace-write diagnostic; canceled remaining units rather than repeatedly calling the provider. Comparator rejects incomplete/invalid measurement. No release-gate export or tag. No selective retry or threshold/evaluator change.",
+  "candidate_scope": "Measurement predates the subsequent execution_root/checkout fix. This failed partial run does not validate the final runtime, which still requires a fresh complete paired gate after provider access recovers."
 }

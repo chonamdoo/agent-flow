@@ -5,7 +5,8 @@
 - Python 프로젝트의 기본 `pytest`·`mypy`·`ruff` 게이트는 Agent Flow 설치 Python과
   분리한다. `uv.lock`이 있으면 `uv run --locked python -m <도구>`로 잠긴 프로젝트
   환경을 쓰고, 그 외에는 프로젝트 `.venv`의 Python을 우선한다. 둘 다 없으면
-  선언된 PATH 명령을 사용한다. 별도로 지정한 uv·Poetry·절대경로 명령은 보존한다.
+  선언된 PATH 명령을 사용한다. worktree는 실제 checkout의 환경을 선택하고
+  profile 선언은 기존 leader에서 읽는다. 별도로 지정한 uv·Poetry·절대경로 명령은 보존한다.
 - 프로젝트 Python 3.12 문법과 의존성을 검사하기 위해 Agent Flow 전용 환경에
   프로젝트 도구를 따로 설치할 필요가 없다. Agent Flow 최소 지원은 Python 3.11로
   유지하며 architecture-lint는 계속 설치된 Agent Flow Python으로 실행한다.
