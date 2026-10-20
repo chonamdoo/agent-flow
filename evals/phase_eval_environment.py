@@ -370,7 +370,7 @@ def prepare_fixture_environment(project: Path, case_dir: Path, cache_root: Path,
         ignore.write_text(existing + ("\n" if existing and not existing.endswith("\n") else "") +
                           "\n".join(entries) + "\n", encoding="utf-8")
     stack = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))["stack"]
-    if stack in ("web", "rn"):
+    if stack in ("web", "rn", "commerce"):
         readiness = _node_dependencies(project, case_dir, cache_root, stack)
     elif stack == "app":
         readiness = _dart_readiness(project, require_flutter=scenario == "review")

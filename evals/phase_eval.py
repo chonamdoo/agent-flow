@@ -51,6 +51,7 @@ from phase_eval_environment import (
 )
 from phase_eval_fingerprint import evaluator_sha256
 from phase_eval_web_verification import verify_web_review
+from phase_eval_fail_fast import FailFast
 import claim_audit
 
 CASES = HERE / "phase-cases"
@@ -930,6 +931,9 @@ def main() -> int:
     parser.add_argument("--codex-model")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--fail-fast", action="store_true",
+                        help="stop once the release gate can no longer pass for --fail-fast-kit")
+    parser.add_argument("--fail-fast-kit", default="after")
     args = parser.parse_args()
     trials = {"author": args.trials,
               "review": args.trials if args.review_trials is None else args.review_trials}
@@ -970,9 +974,14 @@ def main() -> int:
                             units.append(("review", kit_name, kit, case_dir, mode, variant, trial))
     results_path = args.output / "results.jsonl"
     lock = threading.Lock()
+    stop = threading.Event()
+    guard = (FailFast(args.fail_fast_kit, sum(unit[1] == args.fail_fast_kit for unit in units))
+             if args.fail_fast else None)
 
     def execute(unit):
         scenario, kit_name, kit, case_dir, mode, variant, trial = unit
+        if stop.is_set():
+            return None
         unit_id = hashlib.sha256(json.dumps([scenario, kit_name, case_dir.name, mode, variant, trial]).encode()).hexdigest()
         evidence = args.output / "evidence" / unit_id
         try:
@@ -990,6 +999,11 @@ def main() -> int:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             print(f"[{time.strftime('%H:%M:%S')}] {scenario} {case_dir.name}/{mode}/{variant or '-'} "
                   f"{kit_name} t{trial}: {row.get('error') and 'ERROR' or 'ok'}", flush=True)
+            reason = guard.observe(row) if guard is not None and not stop.is_set() else None
+            if reason:
+                stop.set()
+                (args.output / "fail-fast.json").write_text(json.dumps({"reason": reason}), encoding="utf-8")
+                print(f"fail-fast: {reason}; remaining units are not run", flush=True)
         return row
 
     # Content fingerprint of each measured kit; the release check matches it to the tag tree.
@@ -1021,7 +1035,7 @@ def main() -> int:
             list(pool.map(execute, units))
     if not args.keep:
         shutil.rmtree(work, ignore_errors=True)
-    return 0
+    return 1 if stop.is_set() else 0
 
 
 if __name__ == "__main__":
