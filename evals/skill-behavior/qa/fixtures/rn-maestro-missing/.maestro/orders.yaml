@@ -1,0 +1,5 @@
+appId: com.example.orders
+---
+- launchApp
+- tapOn: "Orders"
+- assertVisible: "No orders yet"

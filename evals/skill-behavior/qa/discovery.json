@@ -1,0 +1,11 @@
+{
+  "competitors": ["tdd", "code-review", "diagnosing-bugs"],
+  "cases": [
+    {"id": "D1", "split": "dev", "expect": "qa", "request": "Before we ship, QA the cart change: the page now shows free shipping once the subtotal reaches 60 dollars."},
+    {"id": "D2", "split": "dev", "expect": "qa", "request": "Smoke-test the new GET /orders endpoint against its spec and tell me if it is ready."},
+    {"id": "D3", "split": "heldout", "expect": "qa", "request": "e2e test the checkout postcode validation that was just merged."},
+    {"id": "D4", "split": "dev", "expect": "not-qa", "request": "Write unit tests for the formatPrice function."},
+    {"id": "D5", "split": "dev", "expect": "not-qa", "request": "Review this diff for bugs before I open the PR."},
+    {"id": "D6", "split": "heldout", "expect": "not-qa", "request": "The checkout test started failing this morning; find out why."}
+  ]
+}

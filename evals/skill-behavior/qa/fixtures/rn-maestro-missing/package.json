@@ -1,0 +1,1 @@
+{"name":"orders-app","private":true,"scripts":{"test":"node --test","e2e":"maestro test .maestro"},"dependencies":{"react-native":"0.76.0"}}

@@ -47,6 +47,8 @@ phases:
       Output: review.md.
 
   - id: qa
+    skills:
+      required: [qa]
     description: Run focused verification.
     required_markers:
       - "feedback-command:"
