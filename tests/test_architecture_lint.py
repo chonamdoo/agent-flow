@@ -23,7 +23,7 @@ CAPTURES = {"context": "auth"}
 
 def _findings(package: str):
     return validate_package_suffix(
-        "core/data/auth/src/main/java/io/levvels/samantha/core/data/auth/X.kt",
+        "core/data/auth/src/main/java/com/example/sample/core/data/auth/X.kt",
         f"package {package}\n",
         CORE_DATA_ROLE,
         CAPTURES,
@@ -31,23 +31,23 @@ def _findings(package: str):
 
 
 def test_exact_root_package_passes():
-    assert _findings("io.levvels.samantha.core.data.auth") == []
+    assert _findings("com.example.sample.core.data.auth") == []
 
 
 def test_subpackages_pass():
-    assert _findings("io.levvels.samantha.core.data.auth.repository") == []
-    assert _findings("io.levvels.samantha.core.data.auth.source.remote") == []
-    assert _findings("io.levvels.samantha.core.data.auth.di") == []
+    assert _findings("com.example.sample.core.data.auth.repository") == []
+    assert _findings("com.example.sample.core.data.auth.source.remote") == []
+    assert _findings("com.example.sample.core.data.auth.di") == []
 
 
 def test_wrong_context_fails():
-    findings = _findings("io.levvels.samantha.core.data.user")
+    findings = _findings("com.example.sample.core.data.user")
     assert len(findings) == 1
     assert "does not match role suffix core.data.auth" in findings[0].message
 
 
 def test_partial_segment_is_not_a_false_match():
-    assert len(_findings("io.levvels.samantha.core.data.authentication")) == 1
+    assert len(_findings("com.example.sample.core.data.authentication")) == 1
 
 
 def test_missing_package_declaration_reported():
@@ -93,7 +93,7 @@ def test_uppercase_run_interior_is_not_a_forbidden_token():
 
 
 def test_camel_hump_and_separator_boundaries_are_reported():
-    findings = _forbidden(ANDROID_PRESENTATION_ROLE, "ChatScreen.kt", "import io.levvels.samantha.core.data.chat.ChatEntity\n")
+    findings = _forbidden(ANDROID_PRESENTATION_ROLE, "ChatScreen.kt", "import com.example.sample.core.data.chat.ChatEntity\n")
     assert len(findings) == 1
     assert "feature-presentation contains forbidden token Entity" in findings[0].message
     # 프로필은 `Dto`로 적지만 실제 코드는 `CheckoutDTO`로 쓴다. 험프 경계가 이 둘을 잇는다.
