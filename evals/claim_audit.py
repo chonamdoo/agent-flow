@@ -68,8 +68,12 @@ def overclaims(claims: dict[str, str] | None, row: dict) -> list[str]:
 
 
 def author_artifact(project: Path, phase_id: str = "green") -> Path | None:
-    """The author's phase artifact in the evaluation run, whatever extension it was given."""
-    matches = sorted(project.glob(f".agent-flow/runs/*/artifacts/{phase_id}.*"))
+    """The author's phase artifact in the evaluation run, whatever extension it was given.
+
+    full-feature writes under `artifacts/`; development and bugfix write at the run root.
+    """
+    matches = sorted(project.glob(f".agent-flow/runs/*/artifacts/{phase_id}.*")) or \
+        sorted(project.glob(f".agent-flow/runs/*/{phase_id}.*"))
     return matches[0] if matches else None
 
 

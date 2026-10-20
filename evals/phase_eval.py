@@ -251,7 +251,8 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
         _overlay(case_dir / "author" / fixture_mode / "pre", project)
     else:
         _overlay(case_dir / "review" / fixture_mode / variant, project)
-    run_dir = create_run(project, "full-feature", case["task"], run_id=f"eval-{scenario}")
+    workflow = case.get("workflow", "full-feature")
+    run_dir = create_run(project, workflow, case["task"], run_id=f"eval-{scenario}")
     artifacts = case_dir / "author" / fixture_mode / "artifacts"
     _overlay(artifacts, run_dir)
     if scenario == "review":
@@ -266,7 +267,7 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
 
         # runner의 prd 완료 경로와 같은 함수로 원장을 굳힌다. kit마다 자기 코드로 쓴다.
         capture_design_ledger(run_dir, "prd", prd.read_text(encoding="utf-8"))
-    runner = Runner(project, workflow="full-feature", run_dir=run_dir)
+    runner = Runner(project, workflow=workflow, run_dir=run_dir)
     adapter = HostedAdapter(host)
     adapter._profile_id = runner.profile_id
     adapter._profile_snapshot = runner.profile
@@ -292,6 +293,7 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
         return {
             "prompt": _author_execution_contract(prompt, project, tooling, author_phase) + READ_EVIDENCE_PROMPT,
             "profile": case["profile"],
+            "author_phase": author_phase,
             "execution_scope": f"phase-only {author_phase}; controller owns lifecycle; hooks disabled",
             "tooling": tooling,
             "fixture_environment": fixture_environment,
@@ -814,7 +816,7 @@ def run_author(kit_name: str, kit: Path, case_dir: Path, mode: str, trial: int, 
     row["norm_scope"] = "case-specific fixture contract; general architecture correctness is unverified"
     row["oracle"] = _oracle(case_dir, "author", "--project", str(project), "--mode", mode)
     row["architecture_lint"] = _architecture_lint(project, prepared.get("profile", "auto"))
-    artifact = claim_audit.author_artifact(project)
+    artifact = claim_audit.author_artifact(project, prepared.get("author_phase", "green"))
     row["claims"] = (
         claim_audit.parse_completion_gate(artifact.read_text(encoding="utf-8", errors="replace"))
         if artifact is not None else None
