@@ -83,6 +83,7 @@ def observe_spec_publication(
         profile_ids = active_profile.get("active_profiles") or [active_profile["id"]]
         configured_checks = deferred_check_names(profile_gate_commands(
             profile_ids, root=config_root or project_root, phase="all", execution="ci",
+            execution_root=project_root,
         ))
         required_checks = tuple(dict.fromkeys((
             *configured_checks, *read_deferred_ci_checks(run_dir),

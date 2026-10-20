@@ -2,7 +2,7 @@
 name: app-shell-error-contract
 description: Shared semantic contract for app-wide error classification, queue identity, acknowledgement, retry, and metadata preservation. Use when Android, iOS, Flutter, React Web, or React Native AppShell handles session, maintenance, or product-defined common errors above feature UI.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [app shell, appshell, global error, common error, session expired, root reset]
+taskTerms: [app shell, appshell, global error, common error, session expired, root reset, global exception, 전역 예외]
 requires_by_architecture:
   clean: [clean-architecture-core]
 ---

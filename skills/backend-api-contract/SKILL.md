@@ -2,7 +2,7 @@
 name: backend-api-contract
 description: "Architecture-neutral backend API development and review: wire compatibility, authorization, business invariants, retries and recovery, migrations, and operations. Use for confirmed server/API work; not for client-only networking, Python CLI tasks, or non-server language/build edits."
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [backend API, server API]
+taskTerms: [backend API, server API, REST endpoint, HTTP endpoint, REST 엔드포인트, API 엔드포인트, 백엔드 API, 서버 API]
 ---
 
 # Backend API Contract

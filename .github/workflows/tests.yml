@@ -291,6 +291,43 @@ jobs:
           path: budget-${{ matrix.kit }}.json
           retention-days: 14
 
+  # 과제 문장(정확한 어휘·바꿔 말하기·비슷한 부정 사례)마다 base kit과 head kit의 resolver가
+  # required로 올리는 skill을 비교한다(모델 호출 없음, 결정적). base에서 통과한 사례가 head에서
+  # 실패하면 막는다. 원래 실패하던 사례는 보고만 한다.
+  skill-routing:
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - name: Measure base and head kits
+        env:
+          AGENT_FLOW_SKIP_CODEX_TRUST: "1"
+          AGENT_FLOW_NO_UPDATE_CHECK: "1"
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          for kit in base head; do
+            ref=$([ "$kit" = base ] && echo "$BASE" || echo "$HEAD")
+            mkdir -p "$RUNNER_TEMP/$kit"
+            git archive "$ref" | tar -x -C "$RUNNER_TEMP/$kit"
+            python evals/skill_routing.py --kit "$RUNNER_TEMP/$kit" --output "routing-$kit.json"
+          done
+      - name: Compare base and head
+        run: python evals/skill_routing.py --compare routing-base.json routing-head.json --summary "$GITHUB_STEP_SUMMARY"
+
   # 의도한 변화면 PR 본문에 이유를 적고 `phase-budget-accepted` 라벨을 붙인 뒤 이 job만
   # 다시 돌린다. 라벨은 이벤트 payload가 아니라 실행 시점의 PR에서 읽으므로 재실행에 반영된다.
   phase-budget-compare:

@@ -2031,11 +2031,13 @@ class Runner:
         commands = profile_gate_commands(
             profile_ids,
             root=self.config_root,
+            execution_root=self.project_root,
             phase=GATE_PHASE_ALL,
         )
         deferred = profile_gate_commands(
             profile_ids,
             root=self.config_root,
+            execution_root=self.project_root,
             phase=GATE_PHASE_ALL,
             execution="ci",
         )

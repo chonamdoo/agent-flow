@@ -49,7 +49,11 @@ def write_gate_results(
     serialized_results = [_gate_result_payload(result, base) for result in results]
     payload = {
         "passed": passed,
-        "status": "error" if timed_out else "green" if passed else "request-changes",
+        "status": (
+            "error" if timed_out
+            else "blocked" if any(result.unavailable and result.required for result in results)
+            else "green" if passed else "request-changes"
+        ),
         "results": serialized_results,
         "execution": execution,
         "deferred_ci_checks": list(deferred_ci_checks),
@@ -155,6 +159,7 @@ def _gate_result_payload(result: GateResult, base: Path) -> dict[str, object]:
         "required": result.required,
         "exit_code": result.exit_code,
         "timed_out": result.timed_out,
+        "unavailable": result.unavailable,
         "stdout": relativize_local_paths(result.stdout, base),
         "stderr": relativize_local_paths(result.stderr, base),
     }

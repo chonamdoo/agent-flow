@@ -202,9 +202,16 @@ def _measure_condition(project: Path, run_id: str, *, planned_files: tuple[str, 
                     provider: [len(job.prompt_by_provider[provider].encode()) for job in jobs]
                     for provider in providers
                 }
+                reviewer_resolutions = {
+                    provider: adapter.phase_resolution(phase, project, skill_host=provider) for provider in providers
+                }
                 entry["reviewer_read_bytes_by_provider"] = {
-                    provider: _file_read_bytes(adapter.phase_resolution(phase, project, skill_host=provider))
-                    for provider in providers
+                    provider: _file_read_bytes(resolution) for provider, resolution in reviewer_resolutions.items()
+                }
+                # 리뷰어가 작성자와 같은 잣대를 받는지 비교하려고 이름도 남긴다.
+                entry["reviewer_required_by_provider"] = {
+                    provider: sorted(skill.name for skill in resolution.required)
+                    for provider, resolution in reviewer_resolutions.items()
                 }
                 entry["reviewer_sections"] = _sections(jobs[0].prompt_by_provider["claude"]) if jobs else {}
         except Exception as exc:  # 한 phase의 실패가 전체 측정을 지우지 않게 기록만 한다.

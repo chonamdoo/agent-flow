@@ -90,6 +90,10 @@ def gates_route_key(text: str, *, nonce: str = "") -> str:
     # 죽어도 passed 집계는 required만 보므로 green이 된다. 그 구멍을 여기서 닫는다.
     if _gate_results_timed_out(payload.get("results")):
         return "error"
+    # 실행 파일이 없는 required gate는 코드 결함이 아니라 환경 부재다. fix-loop로 보내면
+    # 고칠 수 없는 것을 세 라운드 동안 고치려다 상한에 걸린다.
+    if _gate_results_unavailable(payload.get("results")):
+        return "blocked"
     # 통과 라우팅에만 출처를 요구한다. 실패/차단은 손으로 써도 앞으로 못 가므로
     # 막을 이유가 없고, 막으면 복구 경로만 좁아진다.
     proven = (
@@ -108,6 +112,15 @@ def gates_route_key(text: str, *, nonce: str = "") -> str:
     if payload["passed"] is True:
         return "green" if proven else "default"
     return "request-changes"
+
+
+def _gate_results_unavailable(results: object) -> bool:
+    if not isinstance(results, list):
+        return False
+    return any(
+        isinstance(result, dict) and result.get("unavailable") is True and result.get("required") is not False
+        for result in results
+    )
 
 
 def _gate_results_timed_out(results: object) -> bool:

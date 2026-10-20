@@ -180,3 +180,33 @@ def test_a_partially_failed_base_keeps_comparing_successful_measurements(tmp_pat
     monkeypatch.setattr("sys.argv", ["phase_budget_compare.py", str(before_path), str(after_path)])
     assert compare_module.main() == 0
     assert "No skill-delivery regression found." in capsys.readouterr().out
+
+
+def _with_reviewer_skills(result: dict, names: list[str]) -> dict:
+    for condition in result["results"][0]["conditions"].values():
+        condition["phases"]["multi-review"]["reviewer_required_by_provider"] = {
+            "claude": list(names), "codex": list(names),
+        }
+    return result
+
+
+def test_an_author_skill_that_stops_reaching_reviewers_fails(tmp_path):
+    """작성자가 따르는 tdd를 리뷰어가 더 이상 받지 않으면 같은 잣대로 리뷰할 수 없다."""
+    before = _with_reviewer_skills(_result(), ["code-generation-discipline", "tdd", "code-review"])
+    after = _with_reviewer_skills(_result(), ["code-generation-discipline", "code-review"])
+    failures = _run(tmp_path, before, after)
+    assert any("author skills no longer reaching a reviewer" in item and "claude/tdd" in item for item in failures)
+
+
+def test_an_existing_review_gap_is_reported_but_does_not_fail(tmp_path):
+    before = _with_reviewer_skills(_result(), ["code-generation-discipline", "code-review"])
+    after = _with_reviewer_skills(_result(), ["code-generation-discipline", "code-review"])
+    before_path, after_path = _write_measurements(tmp_path, before, after)
+    lines, failures = compare_module.compare(before_path, after_path)
+    assert failures == []
+    assert any("Author-phase skills no reviewer receives" in line and "tdd ×2" in line for line in lines)
+
+
+def test_measurements_without_reviewer_skill_names_skip_the_parity_check(tmp_path):
+    after = _with_reviewer_skills(_result(), ["code-review"])
+    assert _run(tmp_path, _result(), after) == []

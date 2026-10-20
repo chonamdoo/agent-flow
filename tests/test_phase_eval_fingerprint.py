@@ -57,3 +57,17 @@ def test_comparator_uses_shared_fingerprint_for_helper_bound_measurement(tmp_pat
     assert comparison.evaluation_fingerprint(tmp_path)["evaluator_sha256"] == expected
     (directory / "phase_eval_environment.py").write_text("# new environment behavior\n")
     assert comparison.evaluation_fingerprint(tmp_path)["evaluator_sha256"] != expected
+
+
+def test_claim_audit_is_bound_but_its_absence_keeps_older_digests(tmp_path):
+    directory = tmp_path / "evals"
+    directory.mkdir()
+    for name in ("phase_eval.py", "phase_eval_environment.py", "phase_eval_web_verification.py", "phase_eval_fingerprint.py"):
+        (directory / name).write_text(f"# {name}\n")
+    module = _module()
+    without = module.evaluator_sha256(tmp_path)
+    (directory / "claim_audit.py").write_text("# audit\n")
+    with_audit = module.evaluator_sha256(tmp_path)
+    assert with_audit != without
+    (directory / "claim_audit.py").write_text("# audit changed\n")
+    assert module.evaluator_sha256(tmp_path) not in {without, with_audit}
