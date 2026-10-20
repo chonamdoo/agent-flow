@@ -76,3 +76,15 @@ def test_qa_phases_require_the_skill():
     for workflow in ("development", "bugfix"):
         qa = next(p for p in load_phase_workflow_definition(REPO, workflow).phases if p.id == "qa")
         assert "qa" in qa.skills.required, workflow
+
+
+def test_the_behavior_judge_reads_the_status_through_markdown():
+    import sys
+
+    sys.path.insert(0, str(REPO / "evals"))
+    from skill_behavior import _status
+
+    assert _status("**Status: request-changes**") == "request-changes"
+    assert _status("Status: **green**") == "green"
+    assert _status("status: `blocked`") == "blocked"
+    assert _status("no verdict here") is None

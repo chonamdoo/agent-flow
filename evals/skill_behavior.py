@@ -7,6 +7,7 @@ Discovery: with competing bundled skills installed, record which skill the host 
 
     python evals/skill_behavior.py --skill qa --scenario behavior --config skill,baseline --output <new dir>
     python evals/skill_behavior.py --skill qa --scenario discovery --output <new dir>
+    python evals/skill_behavior.py --skill qa --scenario behavior --rejudge --output <that dir>
 
 Needs an authenticated `claude` CLI and costs model usage. Each criterion is pass, fail, unverified
 or not-applicable; a required fail fails the case, a required unverified blocks a verified claim.
@@ -28,7 +29,8 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 ARTIFACT = "qa.md"
 PRODUCED_BY_PROJECT = {"e2e-report.json"}
-STATUS = re.compile(r"status\s*:\s*`?\s*(green|request-changes|blocked|error)\b", re.IGNORECASE)
+# Tolerates markdown around the value ("**Status: green**", "Status: `blocked`").
+STATUS = re.compile(r"status\W{0,6}(green|request-changes|blocked|error)\b", re.IGNORECASE)
 
 
 def _digest_tree(root: Path) -> dict[str, str]:
@@ -83,14 +85,41 @@ def judge(criterion: dict, before: dict, after: dict, artifact: str | None) -> t
     return "unverified", f"unknown method {kind}"
 
 
+def _settle(record: dict) -> None:
+    required = [v for v in record["criteria"] if v["required"]]
+    record["passed"] = all(v["verdict"] != "fail" for v in required)
+    record["verified"] = record["passed"] and all(v["verdict"] in ("pass", "not-applicable") for v in required)
+
+
+def rejudge(output: Path, criteria: list[dict]) -> list[dict]:
+    """Re-judge saved artifacts after a judge fix. Workspace checks (unchanged, port) keep their
+    recorded verdict because the workspace is gone."""
+    records = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    by_id = {criterion["id"]: criterion for criterion in criteria}
+    for record in records:
+        path = output / record["config"] / record["case"] / ARTIFACT
+        artifact = path.read_text(encoding="utf-8") if path.is_file() else None
+        record["status"] = _status(artifact or "")
+        for verdict in record["criteria"]:
+            criterion = by_id[verdict["id"]]
+            if verdict["verdict"] == "not-applicable" or criterion["method"] in (
+                    "mechanical:unchanged",) or criterion["method"].startswith("mechanical:port-free="):
+                continue
+            verdict["verdict"], verdict["evidence"] = judge(criterion, {}, {}, artifact)
+        _settle(record)
+    return records
+
+
 def run_claude(prompt: str, cwd: Path, *, model: str | None, budget: float, timeout: int,
-               stream: bool = False) -> subprocess.CompletedProcess:
+               stream: bool = False, max_turns: int | None = None) -> subprocess.CompletedProcess:
     argv = ["claude", "-p", "--output-format", "stream-json" if stream else "json",
             "--permission-mode", "acceptEdits", "--max-budget-usd", str(budget),
             "--allowedTools", "Read,Glob,Grep,Write,Edit,Bash,Skill",
             "--disallowedTools", "WebFetch,WebSearch,Agent"]
     if stream:
         argv.append("--verbose")
+    if max_turns:
+        argv += ["--max-turns", str(max_turns)]
     if model:
         argv += ["--model", model]
     return subprocess.run(argv, cwd=cwd, input=prompt, capture_output=True, text=True, timeout=timeout)
@@ -124,9 +153,7 @@ def behavior(skill: str, config: str, task: dict, criteria: list[dict], args: ar
         record = {"case": task["id"], "split": task["split"], "config": config, "rc": process.returncode,
                   "cost_usd": payload.get("total_cost_usd"), "status": _status(artifact or ""),
                   "criteria": verdicts}
-        record["passed"] = all(v["verdict"] != "fail" for v in verdicts if v["required"])
-        record["verified"] = record["passed"] and all(
-            v["verdict"] in ("pass", "not-applicable") for v in verdicts if v["required"])
+        _settle(record)
         case_dir = output / config / task["id"]
         case_dir.mkdir(parents=True, exist_ok=True)
         (case_dir / "stdout.json").write_text(process.stdout, encoding="utf-8")
@@ -143,8 +170,10 @@ def discovery(skill: str, case: dict, competitors: list[str], args: argparse.Nam
         subprocess.run(["git", "init", "-q"], cwd=work, check=True)
         for name in [skill, *competitors]:
             shutil.copytree(REPO / "skills" / name, work / ".claude" / "skills" / name)
-        prompt = case["request"] + "\n\n(Planning only: say which approach you would take first; do not run anything.)"
-        process = run_claude(prompt, work, model=args.model, budget=args.budget_usd, timeout=args.timeout, stream=True)
+        # The request goes in as a user would write it; a "plan only" suffix suppressed every skill load.
+        # A few turns are enough to see the first skill choice.
+        process = run_claude(case["request"], work, model=args.model, budget=args.budget_usd, timeout=args.timeout,
+                             stream=True, max_turns=4)
         loaded = []
         for line in process.stdout.splitlines():
             try:
@@ -175,12 +204,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--budget-usd", type=float, default=1.0, help="per executor session")
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--rejudge", action="store_true", help="re-judge an existing behavior --output")
     args = parser.parse_args(argv)
     evals = HERE / "skill-behavior" / args.skill
-    args.output.mkdir(parents=True, exist_ok=False)
+    if not args.rejudge:
+        args.output.mkdir(parents=True, exist_ok=False)
     keep = lambda item: (args.split == "all" or item["split"] == args.split) and (  # noqa: E731
         not args.case or item["id"] in args.case)
-    if args.scenario == "behavior":
+    if args.rejudge:
+        criteria = json.loads((evals / "expectations.json").read_text(encoding="utf-8"))["criteria"]
+        records = rejudge(args.output, criteria)
+    elif args.scenario == "behavior":
         tasks = [task for task in json.loads((evals / "tasks.json").read_text(encoding="utf-8")) if keep(task)]
         criteria = json.loads((evals / "expectations.json").read_text(encoding="utf-8"))["criteria"]
         records = [behavior(args.skill, config, task, criteria, args, evals, args.output)
