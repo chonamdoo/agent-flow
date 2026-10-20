@@ -1,0 +1,292 @@
+[2026-10-20T21:15:51Z] agent-flow continue --root /root/store --worktree feat-implement-the-store-in-docs-source-prd.md-all-five-screens-and-the-header-every-spec-item-spec-1-spec-9-and-the-exact-data-testid-contract-reading-fixtures-catalog.json
+▶ resuming    : 20261020-205937
+▶ task        : Implement the Store in docs/source-prd.md: all five screens and the header, every Spec Item (SPEC-1..SPEC-9) and the exact data-testid contract, reading fixtures/catalog.json
+▶ host adapter: claude
+▶ available  : claude, codex
+▶ profile    : nextjs
+▶ architecture: default
+▶ workflow   : full-feature (24 phases)
+
+  [skip] green
+  [run]  refactor — TDD refactor phase.
+# agent-flow phase: refactor
+
+**Description**: TDD refactor phase.
+
+**Task**: Implement the Store in docs/source-prd.md: all five screens and the header, every Spec Item (SPEC-1..SPEC-9) and the exact data-testid contract, reading fixtures/catalog.json
+**Run id**: 20261020-205937
+**Project root**: /root/.agent-flow/worktrees/store-2ebbfa61be15/feat-implement-the-store-in-docs-source-prd.md-all-five-screens-and-the-header-every-spec-item-spec-1-spec-9-and-the-exact-data-testid-contract-reading-fixtures-catalog.json
+**Artifact target** (write this when the phase is complete):
+  `/root/store/.git/agent-flow/worktrees/feat-implement-the-store-in-docs-source-prd.md-all-five-screens-and-the-header-every-spec-item-spec-1-spec-9-and-the-exact-data-testid-contract-reading-fixtures-catalog.json/.agent-flow/runs/20261020-205937/artifacts/refactor.md`
+
+## Phase prompt
+
+Follow the effective Completion gate below for this run’s selected architecture.
+Clean mode additionally requires every listed Clean boundary heading and marker,
+including all applicability exceptions; local mode assesses its own complete
+contract instead. Pending mode does not authorize structural decisions.
+Apply code-generation-discipline. Refactor only after green. Keep
+the slice-plan.md slices and ddd-design.md decisions intact, and keep prd.md
+and the design-spec.md SPEC items satisfied as the definition of done. Keep
+behavior stable, apply `.agent-flow/skills/tdd/SKILL.md` and the architecture
+contract skills this prompt lists as required, read every required profile skill
+before changing code, and summarize structural changes. Apply
+code-generation-discipline's Before Starting skill resolution and
+Missing Required Skills procedure.
+End with:
+
+    ## Completion Gate
+    skills_checked: true
+    profile-skill-selection: applied
+    active-profiles: <profile list>
+    changed-file-skill-resolution: applied
+    required-profile-skills: checked
+    missing-required-profile-skills: none|<list>
+    architecture-contract: applied|n/a
+    project-local-skills: checked|n/a
+    project-local-skills-used: <skill list or n/a>
+
+Output: artifacts/refactor.md.
+
+
+## Design specification ledger (injected by the runner)
+
+Recorded in the `prd` phase and carried into every phase of this run. You did not opt in to this block and cannot suppress it; it is the only thing that survives a compacted conversation.
+
+### Confirmed Spec Items
+
+SPEC-1: Header search. Focusing the empty input opens `search-layer` with `popular-searches` (the 10 fixture terms, in order) and `recent-searches` (hidden when empty). Typing shows suggestions only after the input has been idle for 200 ms: at most 2 `suggest-brand` (brand names), 2 `suggest-category` (category names) and 10 `suggest-keyword` (popular search terms, then product names), each containing the query case-insensitively. Escape closes the layer. Enter with a non-empty trimmed query navigates to `/search?q=<query>`, shows it in `search-query`, and puts it first in recent searches (no duplicates, at most 30). An empty or whitespace query does nothing.
+verify: test:spec1-header-search
+due: review
+SPEC-2: Home hero carousel. It auto-advances every 6 s and shows `hero-counter` as "n / total". `hero-toggle` stops and restarts auto-advance. Prev and next move one slide and wrap around.
+verify: test:spec2-hero-carousel
+due: review
+SPEC-3: Product cards and rails. A card shows brand and name. A discounted product shows a struck `price-original` and a `price-sale`; a product whose options differ in price shows only `price-range` as "$min - $max"; an undiscounted single-price product shows only `price-sale`. The best-seller rail shows `rank` 1..N. A rail's `rail-prev` is disabled at the start and `rail-next` at the end.
+verify: test:spec3-cards-rails
+due: review
+SPEC-4: Category listing. `/category/<id>` shows the category name, "N items" counting the whole subtree, the sort control (options "Most Popular" by `popularity` descending, "Price Low to High" and "Price High to Low" by the product's `salePrice`) defaulting to "Most Popular", and the first 24 cards. There is one `filter-<id>` checkbox for each descendant category; ticking several shows the union. `load-more` reads "MORE (k/P)" with P = ceil(N / page size), appends the next page, and hides on the last page. Changing the sort returns to page 1. Ticking a sub-category filter narrows the count to that subtree, adds a `refine-chip`, and keeps the sort; removing the chip or `clear-all` restores the count. A category or filter set with no products shows `empty-result` with the text "Sorry, there is no item matching the applied filter." and no `load-more`. `page-size` offers "24", "36" and "48"; changing it returns to page 1 and recomputes P.
+verify: test:spec4-category-listing
+due: review
+SPEC-5: Product detail and options. Clicking a card opens `/product/<id>`. The page shows `breadcrumb` (the category path, e.g. "Home > Skincare > Toners > Mists"), brand, name and prices; `qty-value` shows the quantity as text or as an input value. For a product with options, before a choice `qty-minus` and `qty-plus` are disabled and `add-to-cart` reads "Add to Cart"; pressing it opens `option-list` instead of adding. Sold-out options are disabled and read "Sold out". Choosing an option closes the list, sets the quantity to 1 and makes the button read "Add to Cart - $<sale × qty>". A product without options starts at quantity 1 with that label. Plus stops at min(10, stock); minus stops at 1. A card or price range over options uses their sale prices, sold-out options included.
+verify: test:spec5-product-detail
+due: review
+SPEC-6: Add to cart. Adding opens `added-dialog` with `go-to-cart`, and `cart-badge` shows the number of distinct lines. Adding the same product option again increases that line's quantity instead of adding a line.
+verify: test:spec6-add-to-cart
+due: review
+SPEC-7: Cart totals and free shipping. Each `cart-line` has a stepper (1..min(10, stock)) and `line-remove`. Changing quantity updates `line-total`, `subtotal`, `shipping-fee` and `estimated-total` without reload. With subtotal S < 60.00, `free-shipping-msg` reads "Only $<60.00 − S> left for Free Shipping!", `free-shipping-bar` is at round(100 × S / 60), shipping is $25.00 and the estimated total is S + 25.00. With S ≥ 60.00 the message reads "You've got Free Shipping!", the bar is at 100, shipping is "Free" and the estimated total is S.
+verify: test:spec7-cart-totals
+due: review
+SPEC-8: Remove and empty cart. `line-remove` asks for confirmation; `remove-cancel` changes nothing and `remove-confirm` removes the line and updates totals and the badge. Removing the last line shows `cart-empty` and hides `checkout-button`.
+verify: test:spec8-remove-empty
+due: review
+SPEC-9: Shipping location. While the location is "Global (Select Location)", `ship-error` reads "Unable to ship to Global (Select Location)" and `checkout-button` is disabled. In the preferences dialog, `prefs-currency` is disabled until a location is chosen, and choosing a location selects its default currency. After saving a shippable location the error disappears and checkout is enabled.
+verify: test:spec9-shipping-location
+due: review
+SPEC-10: Test-id contract. Every element named in the `docs/source-prd.md` test-id table carries exactly that `data-testid`; ids that are not per item appear at most once in the page, hidden copies included; `sort-select`, `page-size`, `prefs-location`, `prefs-currency` are native `<select>`; `filter-<categoryId>` are checkboxes; `free-shipping-bar` carries `aria-valuenow` 0–100.
+verify: test:spec10-testid-contract
+due: review
+SPEC-11: Persistence and data. The cart, recent searches and the saved shipping location and currency persist in `localStorage` across reloads; `fixtures/catalog.json` is the only data source; money is shown as `$` with two decimals.
+verify: test:spec11-persistence
+due: review
+
+Review-due items (the default) require evidence before publication. Explicit pre-merge items remain pending, not satisfied, at review; all items require evidence before merge or terminal completion. Pre-merge manual approval binds the current published HEAD; a new HEAD requires fresh user approval after its prerequisites are met.
+
+### Design Values
+
+- `free-shipping-threshold`: `60.00`
+- `flat-shipping`: `25.00`
+- `max-qty-per-line`: `10`
+- `listing-page-size-default`: `24`
+- `listing-page-sizes`: `24, 36, 48`
+- `money-format`: `$ with two decimals`
+- `search-suggest-idle`: `200 ms`
+- `suggest-brand-max`: `2`
+- `suggest-category-max`: `2`
+- `suggest-keyword-max`: `10`
+- `popular-searches-count`: `10`
+- `recent-searches-max`: `30`
+- `hero-auto-advance`: `6 s`
+- `hero-counter-format`: `n / total`
+- `price-range-format`: `$min - $max`
+- `load-more-label`: `MORE (k/P)`
+- `empty-result-text`: `Sorry, there is no item matching the applied filter.`
+- `free-shipping-msg-below`: `Only $<60.00 − S> left for Free Shipping!`
+- `free-shipping-msg-reached`: `You've got Free Shipping!`
+- `shipping-free-label`: `Free`
+- `ship-error-text`: `Unable to ship to Global (Select Location)`
+- `add-to-cart-label`: `Add to Cart`
+- `add-to-cart-priced-label`: `Add to Cart - $<sale × qty>`
+- `sold-out-label`: `Sold out`
+- `breadcrumb-format`: `Home > Skincare > Toners > Mists`
+
+Use these exact values. If one of them is wrong, say so and stop — do not silently substitute a different number.
+
+## Active profile: `nextjs`
+
+This is the parsed profile YAML — use these values directly, don't ask the user to look them up:
+
+```yaml
+id: nextjs
+capabilities:
+- react-web
+- webview-json-rpc
+branching:
+  strategy: trunk
+  base: main
+  integration: main
+  worktree: required
+  naming:
+    prefix: feat/
+    slug_style: kebab-case
+    slug_source: feature title
+    max_slug_length: 60
+gates:
+- id: architecture-lint
+  command:
+  - agent-flow
+  - architecture-lint
+  - --profile
+  - nextjs
+  required: true
+  phase: pre-commit
+- id: build
+  command:
+  - npm
+  - run
+  - build
+  required: true
+  phase: pre-push
+- id: test
+  command:
+  - npm
+  - test
+  required: true
+  phase: pre-commit
+- id: lint
+  command:
+  - npm
+  - run
+  - lint
+  required: false
+  phase: pre-commit
+review_angles:
+- id: architecture-design
+  prompt: templates/_shared/review/architecture-design.md
+- id: render-stability
+  prompt: templates/_shared/review/render-stability.md
+- id: a11y
+  prompt: templates/_shared/review/a11y.md
+architecture:
+  platform: react
+artifacts:
+  prd: optional
+  adr: optional
+  slice_plan: required
+vocabulary:
+  prd: spec
+  adr: decision-log
+commit_convention:
+  style: conventional
+  co_author: skip
+pr:
+  target_branch: main
+  merge_strategy: squash
+```
+
+## Completion gate
+
+Do not write the artifact as complete until the phase genuinely satisfies these markers. The runner blocks advancement when any marker is missing. The artifact must include a `## Completion Gate` heading followed by the marker lines.
+
+Required marker lines:
+
+- `skills_checked: true`
+- `profile-skill-selection: applied`
+- `active-profiles:`
+- `changed-file-skill-resolution: applied`
+- `required-profile-skills: checked`
+- `missing-required-profile-skills:`
+- `architecture-contract: applied|n/a`
+- `project-local-skills: checked|n/a`
+- `project-local-skills-used:`
+
+## Required skills for this phase
+
+Prefer what these files say over what you already know. Where a skill and your prior knowledge disagree, the skill wins — it is this project's norm, not the general one.
+
+First skim the files this phase actually changes, then read every one of these before you write or judge code. The completion gate takes your word for it — it blocks this phase until the artifact records a `skill-use-evidence` value, and it does not check which files you actually opened; when nothing was recorded during this phase the block message says so, and nothing more:
+
+Use the resolved phase/profile selection. Read each planned body once; later references reuse the same body/digest, including inline content. Do not rescan the full skill index or workflow/run metadata. Names below are provenance only:
+
+- `code-generation-discipline` (bundled) — body 1 in the required-read plan.
+- `tdd` (bundled) — body 2 in the required-read plan.
+- `code-review` (bundled) — body 3 in the required-read plan.
+- `react-app-shell-error-handling` (bundled) — body 4 in the required-read plan.
+- `react-development-guide` (bundled) — body 5 in the required-read plan.
+- `typescript-development-guide` (bundled) — body 6 in the required-read plan.
+- `react-fsd-architecture` (bundled) — body 7 in the required-read plan.
+- `app-shell-error-contract` (bundled) — body 8 in the required-read plan.
+- `codebase-design` (bundled) — body 9 in the required-read plan.
+- `write-for-work` (bundled) — body 10 in the required-read plan.
+
+## Selected architecture contract
+
+Mode: `stack`. Snapshot SHA-256: `1796b5c0917ce4df138b74e6007ee0c8bce2877543bf8759bd768341095d150f`.
+Use this selection for project architecture; shared security, correctness, review independence, and workflow completion duties still apply.
+
+## Required-read plan
+
+- Read `/root/store/.agent-flow/skills/code-generation-discipline/SKILL.md` (SHA-256: `a0e3f4858b4b3114ba0101e9ccaf4c97a96454738b5d99a0342b45a629ec299d`). Body 1.
+- Read `/root/store/.agent-flow/skills/tdd/SKILL.md` (SHA-256: `c650a6fcece6000e83c62e62abda55840af84b33ca3f562638ef7b9ae07076ed`). Body 2.
+- Read `/root/store/.agent-flow/skills/code-review/SKILL.md` (SHA-256: `b89ae12af62c40e8143531eebe91a4af4cc5783d7c96a46448ab37ea93324591`). Body 3.
+- Read `/root/store/.agent-flow/skills/react-app-shell-error-handling/SKILL.md` (SHA-256: `c6e625975979cabb09d98a0bbd91ca1ec3d846034596fd99b608e9d3099b2617`). Body 4.
+- Read `/root/store/.agent-flow/skills/react-development-guide/SKILL.md` (SHA-256: `bcae6254ef6cc95856b8e9154843a1114c624718d7f96028c20274c4087d3ea5`). Body 5.
+- Read `/root/store/.agent-flow/skills/typescript-development-guide/SKILL.md` (SHA-256: `bfa8c4a0e540db7215d1c3a52bd3126c47925d90ac92f55830659bf00894670f`). Body 6.
+- Read `/root/store/.agent-flow/skills/react-fsd-architecture/SKILL.md` (SHA-256: `e5a76ad9c105beaf6bf867a42e82060ea31ee2569b2963b763f911d3ac8072d5`). Body 7.
+- Read `/root/store/.agent-flow/skills/app-shell-error-contract/SKILL.md` (SHA-256: `fe99d4946016356979a404d4f0e9d1d7a13f70277d1f0c4ecbf7656eb7305edf`). Body 8.
+- Read `/root/store/.agent-flow/skills/codebase-design/SKILL.md` (SHA-256: `640615155783fcee7e1387f203e36f8165a6c38417b8ffa5bed635fc0313fca5`). Body 9.
+- Read `/root/store/.agent-flow/skills/write-for-work/SKILL.md` (SHA-256: `6d07e8216c6db9a156693e2bc9113dd76342ee9c4fa5b0d9a5d57f9b203f5d24`). Body 10.
+
+## Normative provenance and inline bodies
+
+All paths, digests, and routes below are provenance only, not additional read instructions. Each plan entry satisfies every selection route for that exact body; all selected obligations still apply.
+
+The `## Completion Gate` must include:
+
+```text
+skill-availability: pass
+skill-use-evidence: verified|unavailable
+architecture-contract: applied
+project-local-skills: checked
+project-local-skills-used: code-generation-discipline, tdd, code-review, react-app-shell-error-handling, react-development-guide, typescript-development-guide, react-fsd-architecture, app-shell-error-contract, codebase-design, write-for-work
+project-local-skill-docs: applied
+missing-required-profile-skills: none
+```
+
+
+## Host-specific guidance
+- Multi-review angles are launched by agent-flow as independent OS-confined
+  subprocesses. Aggregate their per-angle artifacts; do not replace them with
+  in-session Task sub-agents.
+- Use `TodoWrite` for slice tracking during `implement` phase. Mark each
+  TDD red→green→refactor step in_progress / completed.
+- For long-running phases, prefer parallel reads (multiple `Read` calls in
+  one message) over sequential.
+- Cite file:line references using the `path/to/file:42` format.
+
+
+### Host-session isolation boundary
+This controller session is not counted as an isolated worker. Every child reviewer is launched separately through the verified provider sandbox; never substitute controller-session work for a failed child process.
+
+## When complete
+After writing the artifact, run `agent-flow status` from `/root/.agent-flow/worktrees/store-2ebbfa61be15/feat-implement-the-store-in-docs-source-prd.md-all-five-screens-and-the-header-every-spec-item-spec-1-spec-9-and-the-exact-data-testid-contract-reading-fixtures-catalog.json` and follow the printed `next_command`.
+
+═══ phase 'refactor' awaits host AI. Write artifact → `agent-flow continue --root /root/store --worktree feat-implement-the-store-in-docs-source-prd.md-all-five-screens-and-the-header-every-spec-item-spec-1-spec-9-and-the-exact-data-testid-contract-reading-fixtures-catalog.json`. ═══
+status: awaiting_host
+run: full-feature/20261020-205937
+task: Implement the Store in docs/source-prd.md: all five screens and the header, every Spec Item (SPEC-1..SPEC-9) and the exact data-testid contract, reading fixtures/catalog.json
+current_phase: refactor
+reason: missing_phase_artifact
+required_artifact: /root/store/.git/agent-flow/worktrees/feat-implement-the-store-in-docs-source-prd.md-all-five-screens-and-the-header-every-spec-item-spec-1-spec-9-and-the-exact-data-testid-contract-reading-fixtures-catalog.json/.agent-flow/runs/20261020-205937/artifacts/refactor.md
+next_command: agent-flow continue --root /root/store --worktree feat-implement-the-store-in-docs-source-prd.md-all-five-screens-and-the-header-every-spec-item-spec-1-spec-9-and-the-exact-data-testid-contract-reading-fixtures-catalog.json
+status_json: {"current_phase": "refactor", "detail": null, "next_command": "agent-flow continue --root /root/store --worktree feat-implement-the-store-in-docs-source-prd.md-all-five-screens-and-the-header-every-spec-item-spec-1-spec-9-and-the-exact-data-testid-contract-reading-fixtures-catalog.json", "reason": "missing_phase_artifact", "report": null, "required_artifact": "/root/store/.git/agent-flow/worktrees/feat-implement-the-store-in-docs-source-prd.md-all-five-screens-and-the-header-every-spec-item-spec-1-spec-9-and-the-exact-data-testid-contract-reading-fixtures-catalog.json/.agent-flow/runs/20261020-205937/artifacts/refactor.md", "run": "full-feature/20261020-205937", "status": "awaiting_host", "task": "Implement the Store in docs/source-prd.md: all five screens and the header, every Spec Item (SPEC-1..SPEC-9) and the exact data-testid contract, reading fixtures/catalog.json"}
+[exit 0 2026-10-20T21:15:55Z]
