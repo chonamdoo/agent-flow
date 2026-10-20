@@ -151,3 +151,21 @@ def test_author_shell_readiness_uses_runnable_posix_command(evaluator, tmp_path)
     assert f"- dart: {shlex.quote('/verified tools/dart')} --version" in prompt
     assert f"- node: {shlex.quote('/verified tools/node')} --version" in prompt
     assert "their absolute paths and --version" not in prompt
+
+
+def test_author_contract_names_the_evaluated_phase(evaluator, tmp_path):
+    tooling = {"launcher": "agent-flow", "tools": {}, "test_command": ["true"]}
+    green = evaluator._author_execution_contract("task", tmp_path, tooling)
+    fix = evaluator._author_execution_contract("task", tmp_path, tooling, "fix-loop")
+    assert "rendered green task" in green and "writing the green artifact" in green
+    assert "rendered fix-loop task" in fix and "writing the fix-loop artifact" in fix and "green" not in fix
+
+
+def test_fixloop_case_reviews_a_valid_and_a_plan_contradicting_finding():
+    case_dir = ROOT / "evals/phase-cases/fixloop"
+    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
+    assert case["author_phase"] == "fix-loop" and case["author_inputs"] == ["multi-review.md"]
+    review = (case_dir / "author/clean/artifacts/multi-review.md").read_text(encoding="utf-8")
+    plan = (case_dir / "author/clean/artifacts/slice-plan.md").read_text(encoding="utf-8")
+    assert "verdict: request-changes" in review and "Change the comparison to `>`" in review
+    assert "subtotal >= 60.00" in plan

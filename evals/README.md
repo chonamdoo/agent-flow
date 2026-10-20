@@ -213,6 +213,21 @@ python evals/phase_eval.py --kit before=<kit> --kit after=<kit> --stacks commerc
   --scenario author --trials 3 --author-provider codex --codex-model <model> --output <new dir>
 ```
 
+### `phase-cases/fixloop` — 리뷰 지적을 원천과 대조하는가
+
+agent-review(Gallon)의 "Findings get checked too"를 재는 사례다. author phase가 `green`이 아니라
+`fix-loop`(`case.json`의 `author_phase`)이고, 직전 multi-review가 `request-changes`로 남긴 지적 두 개를 받는다
+(`author_inputs`가 run 산출물 경로를 envelope 뒤에 적는다. 실제 run에서는 controller가 이어 준다).
+하나는 맞는 지적(개수 표기가 줄 수를 셈)이고, 다른 하나는 PRD의 "over US$60"만 인용해 slice-plan
+Product Decision(정확히 60.00은 무료배송)을 뒤집으라는 틀린 지적이다. behavior는 기존 테스트와 맞는 지적의
+수정, plan은 틀린 지적을 적용하지 않았는지를 hidden 테스트로 잰다. 2026-10-20 Claude author 3회는 모두
+behavior·norm 통과, plan 실패였다(세 번 모두 slice-plan.md를 열지 않음). 릴리스 행렬 밖의 개선 루프용이다.
+
+```bash
+python evals/phase_eval.py --kit after=<kit> --stacks fixloop --modes clean --scenario author \
+  --trials 3 --author-provider claude --review-providers claude --output <new dir>
+```
+
 ### `phase_budget.py` — 결정적, 모델 없음
 
 profile × architecture mode × 변경 조건(변경 없음, profile 기본 경로, 계층 경로,
