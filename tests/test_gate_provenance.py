@@ -1192,3 +1192,90 @@ def test_architecture_lint_gate_ignores_a_package_planted_at_the_checkout_root(t
     assert "PLANTED" not in result.stdout
     assert [line.split(":", 1)[0] for line in result.stdout.splitlines()] == profile_ids
     assert all("architecture lint" in line for line in result.stdout.splitlines())
+
+
+def test_a_missing_gate_executable_is_recorded_as_unavailable(tmp_path):
+    """도구가 없으면 게이트가 '실패'한 것이 아니다. 코드를 고쳐도 풀리지 않는다."""
+    result = run_gate(
+        GateCommand(gate_id="device", command=("agent-flow-no-such-tool-xyz", "test")),
+        cwd=tmp_path,
+        timeout_s=30,
+    )
+    assert result.unavailable is True
+    assert result.passed is False
+    assert result.exit_code is None
+
+
+def _unavailable_results(required: bool) -> list[GateResult]:
+    return [
+        GateResult(gate_id="unit", command=("true",), passed=True, exit_code=0, stdout="ok", stderr=""),
+        GateResult(gate_id="device", command=("xcodebuild", "test"), passed=False, exit_code=None,
+                   stdout="", stderr="[Errno 2] No such file or directory: 'xcodebuild'",
+                   required=required, unavailable=True),
+    ]
+
+
+def test_an_unavailable_required_gate_blocks_instead_of_asking_for_fixes(tmp_path):
+    run_dir = tmp_path / "run"
+    (run_dir / "artifacts").mkdir(parents=True)
+    (run_dir / "meta.json").write_text(json.dumps({"gate_nonce": "abc123"}), encoding="utf-8")
+    path = write_gate_results(run_dir=run_dir, results=_unavailable_results(required=True), phase="all")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["passed"] is False
+    assert payload["status"] == "blocked"
+    assert payload["results"][1]["unavailable"] is True
+    assert gates_route_key(path.read_text(encoding="utf-8"), nonce=run_gate_nonce(run_dir)) == "blocked"
+
+
+def test_an_unavailable_optional_gate_does_not_block(tmp_path):
+    run_dir = tmp_path / "run"
+    (run_dir / "artifacts").mkdir(parents=True)
+    (run_dir / "meta.json").write_text(json.dumps({"gate_nonce": "abc123"}), encoding="utf-8")
+    path = write_gate_results(run_dir=run_dir, results=_unavailable_results(required=False), phase="all")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["status"] != "blocked"
+    assert gates_route_key(path.read_text(encoding="utf-8"), nonce=run_gate_nonce(run_dir)) != "blocked"
+
+
+@pytest.mark.parametrize("workflow", ["full-feature", "default"])
+def test_blocked_gates_stop_the_run_instead_of_entering_the_fix_loop(workflow):
+    from agent_flow.core.phase_workflow import load_phase_workflow_definition
+
+    gates = next(phase for phase in load_phase_workflow_definition(REPO, workflow).phases if phase.id == "gates")
+    assert gates.routes["blocked"] == "block"
+    assert gates.routes["request-changes"] == "fix-loop"
+    assert gates.routes["error"] == "fix-loop"
+
+
+def test_node_and_python_agree_on_unavailable_routing(tmp_path):
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required")
+    kit = (REPO / "bin" / "agent-flow-kit.mjs").read_text(encoding="utf-8")
+    end = kit.index("\n}\n", kit.index("function hasGateEvidence(result)")) + 3
+    helpers = kit[kit.index("function gateNonceMatches(data, nonce)"):end]
+    script = tmp_path / "probe.mjs"
+    script.write_text(
+        "import fs from 'node:fs';\n" + helpers
+        + "\nconsole.log(readGatesRouteKey(process.argv[2], process.argv[3] ?? ''));\n",
+        encoding="utf-8",
+    )
+    for required, expected in ((True, "blocked"), (False, None)):
+        payload = {
+            "passed": not required, "status": "request-changes" if required else "green",
+            "produced_by": {"tool": "agent-flow gates", "nonce": "abc123"},
+            "results": [{"gate_id": "device", "command": "xcodebuild test", "passed": False,
+                         "required": required, "exit_code": None, "timed_out": False,
+                         "unavailable": True, "stdout": "", "stderr": "No such file"}],
+        }
+        target = tmp_path / f"gate-results-{required}.json"
+        target.write_text(json.dumps(payload), encoding="utf-8")
+        routed = subprocess.run([node, str(script), str(target), "abc123"],
+                                capture_output=True, text=True, check=True).stdout.strip()
+        python = gates_route_key(target.read_text(encoding="utf-8"), nonce="abc123")
+        assert routed == python
+        if expected is not None:
+            assert routed == expected
