@@ -2,7 +2,7 @@
 name: backend-api-contract
 description: "Architecture-neutral backend API development and review: wire compatibility, authorization, business invariants, retries and recovery, migrations, and operations. Use for confirmed server/API work; not for client-only networking, Python CLI tasks, or non-server language/build edits."
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [backend API, server API, REST endpoint, HTTP endpoint, REST 엔드포인트, API 엔드포인트, 백엔드 API, 서버 API, Python API, over HTTP, HTTP handler, HTTP route, GET /, POST /, PUT /, PATCH /, DELETE /, HTTP 핸들러, HTTP 라우트, status code, JSON body, request and response, request/response, 상태 코드, 요청·응답, 요청/응답]
+taskTerms: [backend API, server API, REST endpoint, HTTP endpoint, REST 엔드포인트, API 엔드포인트, 백엔드 API, 서버 API, Python API, over HTTP, HTTP handler, HTTP route, GET /, POST /, PUT /, PATCH /, DELETE /, HTTP 핸들러, HTTP 라우트, status code, JSON body, request and response, request/response, 상태 코드, 요청·응답, 요청/응답, API contract, API 계약, response body, error body, 요청 바디, 응답 바디, 엔드포인트를 추가, 엔드포인트 추가]
 ---
 
 # Backend API Contract
