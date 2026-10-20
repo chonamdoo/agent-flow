@@ -383,7 +383,7 @@ python evals/claim_audit.py <phase_eval output dir>
 ```bash
 python evals/release_reuse.py plan --previous <이전 태그 트리> --kit <새 kit> --output plan.json
 # plan이 바뀐 셀로 보고한 조합만 phase_eval.py로 잰다(--kit before=... --kit after=...).
-# 앵커: 새 kit에서 stack마다 author·결함·정상 리뷰 1회(예: --kit after=<새 kit> --modes clean --trials 1).
+# 앵커: 새 kit에서 stack × mode마다 author·결함·정상 리뷰 1회(--kit after=<새 kit> --trials 1, 36 unit).
 python evals/release_reuse.py assemble --plan plan.json --previous-record evals/release-gates/v<이전> \
   [--run <바뀐 셀 측정>] --anchors <앵커 측정> --export evals/release-gates/v<새 버전>
 python evals/release_reuse.py verify --record evals/release-gates/v<새 버전> \
@@ -391,7 +391,9 @@ python evals/release_reuse.py verify --record evals/release-gates/v<새 버전> 
 ```
 
 v0.3.19 → PR #377(v0.3.20 후보)에서 36개 셀이 모두 재사용 가능했다(계획 109초, 검증 117초). 그 경우
-모델 측정은 앵커 12 unit이다. 스킬 하나를 고치면 모든 셀이 바뀐다: 설치된 모든 skill이 모델이 읽을 수
+모델 측정은 앵커 36 unit이다(168의 약 21%). 앵커는 실제 설치와 모델 실행이고, author는 필수 skill을
+모두 관측 가능하게 읽어야 하며(미읽음·미관측 0) 리뷰어도 필수 문서를 모두 읽어야 통과한다. 재사용이
+스킬 로딩을 다시 재지 않는 대신 매 릴리스 stack × mode(팀·로컬·Clean)마다 이 확인을 남긴다. 스킬 하나를 고치면 모든 셀이 바뀐다: 설치된 모든 skill이 모델이 읽을 수
 있는 입력이기 때문이다. `--reuse-before`는 바뀐 셀을 새 kit에서만 재고 `before`를 직전 기록에서
 가져온다. 이전 kit 앵커가 같은 결과를 내고 토큰이 1.25배 범위 안일 때만 허용한다.
 

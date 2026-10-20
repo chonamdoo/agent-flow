@@ -15,6 +15,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "evals"))
 
 import release_reuse as reuse  # noqa: E402
+from phase_eval_compare import _invalid  # noqa: E402
 
 PREVIOUS = REPO / "evals" / "release-gates" / "v0.3.19"
 NEW_DIGEST = "a" * 64
@@ -40,17 +41,19 @@ def _plan(previous_meta: dict, unchanged: bool = True) -> dict:
 
 
 def _anchors(tmp_path: Path, previous_meta: dict) -> Path:
-    """One passing new-kit row per stack and scenario, taken from the previous record's rows."""
+    """One passing new-kit row per stack, mode and scenario, taken from the previous record's rows."""
     chosen = []
     after = [row for row in _rows(PREVIOUS) if row["kit"] == "after"]
     for stack in ("web", "rn", "app", "backend"):
-        for scenario, variant in reuse.ANCHOR_SCENARIOS:
+        for mode in ("clean", "local", "team"):
+          for scenario, variant in reuse.ANCHOR_SCENARIOS:
             for row in after:
-                if row["stack"] != stack or row["scenario"] != scenario or (row.get("variant") or "") != variant:
+                if (row["stack"], row["mode"], row["scenario"], row.get("variant") or "") != (
+                        stack, mode, scenario, variant):
                     continue
-                if scenario == "author" and not all(row["oracle"].values()):
+                if _invalid(row) or (scenario == "author" and not all(row["oracle"].values())):
                     continue
-                if scenario == "review" and (row.get("expected") is None or not row.get("correct")):
+                if scenario == "review" and row.get("expected") is not None and not row.get("correct"):
                     continue
                 chosen.append(row)
                 break
@@ -143,13 +146,13 @@ def test_a_different_evaluator_or_model_blocks_all_reuse(tmp_path, setting):
 def test_a_missing_or_failing_anchor_blocks_reuse(tmp_path, setting):
     previous, meta, anchors = setting
     rows = [json.loads(line) for line in (anchors / "results.jsonl").read_text().splitlines()]
-    kept = [row for row in rows if not (row["stack"] == "app" and row["scenario"] == "author")]
+    kept = [row for row in rows if not (row["stack"] == "app" and row["mode"] == "team" and row["scenario"] == "author")]
     defect = next(row for row in kept if row["stack"] == "web" and row.get("variant") == "defect")
     defect["defects"] = {key: False for key in defect["defects"]}
     (anchors / "results.jsonl").write_text("".join(json.dumps(row) + "\n" for row in kept))
     _, failures = reuse.assemble(_plan(meta), previous, None, anchors, tmp_path / "record")
-    assert "no anchor for author/app/-" in failures
-    assert any("anchor review/web/defect" in failure and "missed a seeded defect" in failure for failure in failures)
+    assert "no anchor for author/app/team/-" in failures
+    assert any("anchor review/web/" in failure and "missed a seeded defect" in failure for failure in failures)
 
 
 def test_normalisation_hides_run_identity_but_not_content():
@@ -229,3 +232,19 @@ def test_a_plan_for_other_providers_cannot_reuse(tmp_path, setting):
     plan["providers"] = {"author": "claude", "review": ["claude", "codex"]}
     _, failures = reuse.assemble(plan, previous, None, anchors, tmp_path / "record")
     assert any("the plan rendered prompts for" in failure for failure in failures)
+
+
+def test_an_anchor_that_did_not_read_its_required_skills_blocks_reuse(tmp_path, setting):
+    """재사용은 스킬 로딩을 다시 재지 않는 대신이다. 새 표본에서 필수 skill을 다 읽었는지가 그 확인이다."""
+    previous, meta, anchors = setting
+    rows = [json.loads(line) for line in (anchors / "results.jsonl").read_text().splitlines()]
+    author = next(row for row in rows if row["scenario"] == "author" and row["stack"] == "rn" and row["mode"] == "team")
+    author["required_unread"] = [author["required_read"][-1]]
+    author["required_read"] = author["required_read"][:-1]
+    review = next(row for row in rows if row["scenario"] == "review" and row["stack"] == "web" and row["mode"] == "local")
+    review["angles"][0]["documents"][0]["read_path_observed"] = False
+    (anchors / "results.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    _, failures = reuse.assemble(_plan(meta), previous, None, anchors, tmp_path / "record")
+    assert any("anchor author/rn/team/- t" in failure and "did not observably read" in failure for failure in failures)
+    assert any("anchor review/web/local/" in failure and "did not read a required document" in failure
+               for failure in failures)

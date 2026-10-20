@@ -349,44 +349,54 @@ def assemble(plan_payload: dict, previous_record: Path, run: Path | None, anchor
 
 # --------------------------------------------------------------------------- verification
 
-def _outcome_failures(rows: list[dict], stacks: list[str], kit: str, label: str) -> list[str]:
-    """Every stack needs a valid, correct `kit` row for each anchor scenario."""
+def _outcome_failures(rows: list[dict], combos: list[tuple[str, str]], kit: str, label: str) -> list[str]:
+    """Every stack × mode needs a valid, correct `kit` row for each anchor scenario, and every
+    skill the phase required must have been observed read: reuse stands in for re-measuring
+    whether skills load, so the fresh sample has to show they still do."""
     from phase_eval_compare import AXES, _invalid
 
     failures = []
-    for stack in stacks:
+    for stack, mode in combos:
         for scenario, variant in ANCHOR_SCENARIOS:
             matching = [row for row in rows if row.get("kit") == kit and row["scenario"] == scenario
-                        and row["stack"] == stack and (row.get("variant") or "") == variant]
-            name = f"{scenario}/{stack}/{variant or '-'}"
+                        and row["stack"] == stack and row["mode"] == mode and (row.get("variant") or "") == variant]
+            name = f"{scenario}/{stack}/{mode}/{variant or '-'}"
             if not matching:
                 failures.append(f"no {label} for {name}")
             for row in matching:
+                where = f"{label} {name} t{row['trial']}"
                 if _invalid(row):
-                    failures.append(f"{label} {name} t{row['trial']} is invalid")
+                    failures.append(f"{where} is invalid")
                 elif scenario == "author" and not all(row["oracle"][axis] for axis in AXES):
-                    failures.append(f"{label} {name} t{row['trial']} failed the oracle")
+                    failures.append(f"{where} failed the oracle")
+                elif scenario == "author" and (row.get("required_unread") or row.get("required_unobserved")):
+                    failures.append(f"{where} did not observably read "
+                                    f"{sorted({*(row.get('required_unread') or []), *(row.get('required_unobserved') or [])})}")
                 elif scenario == "review" and row.get("expected") is not None and not row.get("correct"):
-                    failures.append(f"{label} {name} t{row['trial']} gave the wrong verdict")
+                    failures.append(f"{where} gave the wrong verdict")
                 elif scenario == "review" and row.get("expected") == "request-changes" and not all(
                         row["defects"].values()):
-                    failures.append(f"{label} {name} t{row['trial']} missed a seeded defect")
+                    failures.append(f"{where} missed a seeded defect")
+                elif scenario == "review" and not all(
+                        document.get("read_path_observed") is not False
+                        for angle in row.get("angles") or [] for document in angle.get("documents") or []):
+                    failures.append(f"{where} has a reviewer that did not read a required document")
     return failures
 
 
-def _stacks(cells: list[str]) -> list[str]:
-    return sorted({cell.split("/")[1] for cell in cells})
+def _combos(cells: list[str]) -> list[tuple[str, str]]:
+    return sorted({(cell.split("/")[1], cell.split("/")[2]) for cell in cells})
 
 
 def anchor_failures(anchor_rows: list[dict], reused_cells: list[str], new_digest: str | None,
                     anchor_meta: dict) -> list[str]:
-    """Each stack with a reused cell needs fresh, passing new-kit evidence for every scenario."""
+    """Each stack × mode with a reused cell needs fresh, passing new-kit evidence for every scenario."""
     if not reused_cells:
         return []
     failures = []
     if new_digest is None or anchor_meta.get("kit_digests", {}).get("after") != new_digest:
         failures.append("the anchor run did not measure this kit as `after`")
-    return failures + _outcome_failures(anchor_rows, _stacks(reused_cells), "after", "anchor")
+    return failures + _outcome_failures(anchor_rows, _combos(reused_cells), "after", "anchor")
 
 
 def drift_failures(anchor_rows: list[dict], previous_rows: list[dict], cells: list[str],
@@ -395,7 +405,7 @@ def drift_failures(anchor_rows: list[dict], previous_rows: list[dict], cells: li
     failures = []
     if anchor_meta.get("kit_digests", {}).get("before") != previous_digest:
         failures.append("the anchor run did not measure the previous kit as `before`")
-    failures += _outcome_failures(anchor_rows, _stacks(cells), "before", "previous-kit anchor")
+    failures += _outcome_failures(anchor_rows, _combos(cells), "before", "previous-kit anchor")
     from phase_eval_compare import TOKEN_AXES, _invalid
 
     for axis in TOKEN_AXES:
