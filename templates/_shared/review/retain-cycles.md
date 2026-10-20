@@ -36,8 +36,6 @@ or leaks.
 ```text
 ## Retain-cycle review findings
 
-verdict: approve | request-changes
-
 ### Must-fix
 - <severity:high> [path:line] <statement>. Cycle path: A → B → A.
 

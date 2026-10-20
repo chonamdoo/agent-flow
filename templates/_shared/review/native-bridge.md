@@ -46,8 +46,6 @@ platform-specific failures.
 ```text
 ## Native-bridge review findings
 
-verdict: approve | request-changes
-
 ### Must-fix
 - <severity:high> [path:line] <statement>. Risk: <crash / leak / parity break>.
 

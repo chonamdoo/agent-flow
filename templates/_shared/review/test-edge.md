@@ -40,8 +40,6 @@ failure-path coverage.
 ```text
 ## Test-edge review findings
 
-verdict: approve | request-changes
-
 ### Must-fix
 - <severity:high> [path:line] <statement>. Missing case: <description>.
 
