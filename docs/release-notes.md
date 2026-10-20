@@ -12,6 +12,9 @@
 - `pytest` 전체 검사는 계속 CI 전용이다. 기존 설치는 active run이 끝난 뒤 leader에서
   새 installer로 갱신해야 이 게이트 실행 방식이 적용된다.
 
+- Python 소스 배포본에서도 `agent-flow` 스킬을 포함해, sdist로 만든 wheel에서
+  진입 스킬이 빠지는 문제를 고친다.
+
 ## v0.3.19 (2026-10-20)
 
 [v0.3.19](https://github.com/chonamdoo/agent-flow/releases/tag/v0.3.19)로 배포했다.
