@@ -2244,6 +2244,10 @@ function readGatesRouteKey(pathName, nonce = "") {
     if (data.results.some((r) => r && r.timed_out === true)) {
       return "error";
     }
+    // 실행 파일이 없는 required gate는 환경 부재다. Python runner와 같은 규칙이다.
+    if (data.results.some((r) => r && r.unavailable === true && r.required !== false)) {
+      return "blocked";
+    }
     // 완료 보고는 실제 실행한 gate command와 결과 evidence가 함께 있을 때만 허용한다.
     const requiredResults = data.results.filter((r) => r && r.required !== false);
     const resultsPass =

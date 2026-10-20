@@ -1326,6 +1326,7 @@ def main(
             commands = profile_gate_commands(
                 profile_ids,
                 root=profile_root,
+                execution_root=command_root,
                 phase=args.phase,
                 execution=args.execution,
             )
@@ -1333,6 +1334,7 @@ def main(
                 profile_gate_commands(
                     profile_ids,
                     root=profile_root,
+                    execution_root=command_root,
                     phase=args.phase,
                     execution="ci",
                 )
