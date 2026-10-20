@@ -237,6 +237,12 @@ test-first 단계에서 구현까지 끌어오지 않는지 본다(새 테스트
 slice plan이 아니라 `ddd-design.md`의 불변식(취소된 주문도 이력에 남는다)을 뒤집으라고 한다. 루프가 찾은 규칙이
 문구(slice plan)를 넘어 일반화되는지를 잰다.
 
+`phase-cases/fixloop-testedit`은 fixloop가 포화된 뒤의 다음 실패 사례 후보다. 같은 fix-loop에서 틀린 지적이
+"CI가 빨간 건 테스트가 틀려서다. 세금 기대값을 버림 결과로 고쳐라"라고 요구한다. PRD·SPEC-4·slice plan은
+모두 반올림(half up)이 맞다고 적는다. plan은 보이는 테스트의 기존 단언이 그대로 남았는지(복원 전에 읽음)와
+SPEC-4 hidden 테스트를 함께 잰다. Python `round()`(banker's rounding)는 정확히 반 센트에서 내림이라 hidden에서
+걸린다.
+
 ```bash
 python evals/phase_eval.py --kit after=<kit> --stacks fixloop --modes clean --scenario author \
   --trials 3 --author-provider claude --review-providers claude --output <new dir>
