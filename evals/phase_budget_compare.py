@@ -8,7 +8,9 @@ Failure conditions, from `maintainer/verification-policy.md`:
 - a non-Clean mode envelope carries the Clean `roles` table;
 - the total of phase envelopes, controller sessions and reviewer subprocesses grew;
 - a combination, condition or phase measured before can no longer be measured (a broken
-  phase would otherwise count as zero bytes and read as a saving).
+  phase would otherwise count as zero bytes and read as a saving);
+- a skill an author phase must follow stops reaching a reviewer that reached it before.
+  Gaps that already existed are reported, not failed.
 
 `--accept` reports the same findings but exits 0. CI passes it when the PR carries the
 `phase-budget-accepted` label, i.e. a maintainer confirmed the reported change is intended
@@ -26,6 +28,7 @@ import sys
 from pathlib import Path
 
 CONTROLLER_PHASES = {"multi-review", "architecture-review"}
+AUTHOR_PHASES = {"red", "green", "refactor", "fix-loop"}
 LAYER = "layer"
 
 
@@ -58,6 +61,24 @@ def _sections(row: dict, condition: str = LAYER) -> tuple[int, int, int]:
         else:
             author += own
     return author, controller, reviewers
+
+
+def _review_gaps(row: dict, condition: str) -> set[tuple[str, str]] | None:
+    """(provider, skill) pairs an author phase requires but no reviewer of that provider receives.
+
+    None when the measurement predates reviewer skill names, so no parity can be judged.
+    """
+    phases = row["conditions"].get(condition, {}).get("phases", {})
+    author: set[str] = set()
+    for phase_id in AUTHOR_PHASES & set(phases):
+        author.update(phases[phase_id].get("required", []))
+    reviewed: dict[str, set[str]] = {}
+    for phase in phases.values():
+        for provider, names in (phase.get("reviewer_required_by_provider") or {}).items():
+            reviewed.setdefault(provider, set()).update(names)
+    if not reviewed:
+        return None
+    return {(provider, name) for provider, names in reviewed.items() for name in author - names}
 
 
 def compare(before_path: Path, after_path: Path) -> tuple[list[str], list[str]]:
@@ -119,6 +140,22 @@ def compare(before_path: Path, after_path: Path) -> tuple[list[str], list[str]]:
                     if phase.get("roles_in_envelope"):
                         roles_leaks.append(f"{key[0]}:{key[1]}/{condition}/{phase_id}")
 
+    new_gaps: dict[tuple[str, str], int] = {}
+    existing_gaps: dict[str, int] = {}
+    for key in common:
+        for condition in after[key]["conditions"]:
+            gaps_after = _review_gaps(after[key], condition)
+            gaps_before = _review_gaps(before[key], condition) if condition in before[key]["conditions"] else None
+            if gaps_after is None:
+                continue
+            if condition == LAYER:
+                for _, name in gaps_after:
+                    existing_gaps[name] = existing_gaps.get(name, 0) + 1
+            if gaps_before is None:
+                continue
+            for pair in gaps_after - gaps_before:
+                new_gaps[pair] = new_gaps.get(pair, 0) + 1
+
     total_before, total_after = sum(totals["before"]), sum(totals["after"])
     if lost:
         failures.append(
@@ -127,6 +164,11 @@ def compare(before_path: Path, after_path: Path) -> tuple[list[str], list[str]]:
         )
     if roles_leaks:
         failures.append(f"Clean roles in non-Clean envelopes: {', '.join(roles_leaks)}")
+    if new_gaps:
+        failures.append(
+            "author skills no longer reaching a reviewer: "
+            + ", ".join(f"{provider}/{name} ×{count}" for (provider, name), count in sorted(new_gaps.items()))
+        )
     # 표는 layer 조건을 보이지만, 증가는 조건마다 판정한다. 커밋 후 라우팅 같은 한 조건의 증가가
     # 다른 조건의 감소에 묻히지 않게 한다.
     for condition, (condition_before, condition_after) in sorted(grown.items()):
@@ -163,6 +205,13 @@ def compare(before_path: Path, after_path: Path) -> tuple[list[str], list[str]]:
             + (", ".join(f"{p}:{m}" for p, m in sorted(before_failed)) or "none")
             + "; after "
             + (", ".join(f"{p}:{m}" for p, m in sorted(after_failed)) or "none")
+            + "."
+        )
+        lines.append("")
+    if existing_gaps:
+        lines.append(
+            f"Author-phase skills no reviewer receives (`{LAYER}`, combination × provider): "
+            + ", ".join(f"{name} ×{count}" for name, count in sorted(existing_gaps.items()))
             + "."
         )
         lines.append("")
