@@ -451,7 +451,7 @@ phases:
   - id: multi-review
     architecture_decision: required
     skills:
-      required: [code-generation-discipline, code-review, clean-architecture-core, agent-flow-concise-output]
+      required: [code-generation-discipline, tdd, codebase-design, code-review, clean-architecture-core, agent-flow-concise-output]
     description: Run implementation review with at least two independent sub-agent reviewers before approve. Runner routes approve→architecture-review, request-changes→fix-loop.
     multi_review: true
     required_markers:
