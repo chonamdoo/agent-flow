@@ -21,7 +21,7 @@ Decided with product on 2026-10-14; the PRD's examples do not cover them.
 
 ## Slice 1 — Cart pricing in the API
 
-- Files: api/src/shop/cart/domain.py, api/src/shop/cart/http.py
+- Files: api/src/shop/cart/__init__.py, api/src/shop/cart/domain.py, api/src/shop/cart/http.py
 - Scope: a pure pricing function over integer cents that takes the requested lines and the injected catalog
   (`product_id` → `name`, `price_cents`, `list_price_cents`) and returns the quote, raising
   domain errors for an unknown product or a quantity outside 1–5; an HTTP handler built from the catalog that
