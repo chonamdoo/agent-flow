@@ -26,6 +26,8 @@ PATHS = [
     (re.compile(r"/home/[\w.-]+"), "<home>"),
     (re.compile(r"/root\b"), "<home>"),
     (re.compile(r"/tmp/[\w.-]+"), "<tmp>"),
+    # Anything else that is a machine path (tool installs, PATH entries) says nothing the record needs.
+    (re.compile(r"(?<![\w.<>/])/(?:opt|nix|usr|var|srv|mnt|etc|run|snap|Users|private|Library)(?:/[^\s\"':,;\\]*)?"), "<abs>"),
 ]
 SECRETS = [
     re.compile(r"sk-ant-[\w-]{8,}"),

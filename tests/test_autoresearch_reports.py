@@ -92,7 +92,9 @@ def test_evidence_stats_read_claude_and_codex_and_ignore_the_case_name(tmp_path)
 
 def test_archive_sanitises_paths_and_secrets_and_keeps_evidence_stats(tmp_path):
     run = tmp_path / "run"
-    row = _author("fixloop", "after", 1, True, tooling={"path": "/root/.local/bin:/tmp/af-phase-eval-q1/author-x"},
+    row = _author("fixloop", "after", 1, True,
+                  tooling={"path": "/root/.local/bin:/tmp/af-phase-eval-q1/author-x:/nix/var/nix/profiles/default/bin",
+                           "node": "/opt/node22/bin/node", "python": "/usr/bin/python3"},
                   note="key sk-ant-api03-abcdefghijkl token=ghp_" + "a" * 30 + " by someone@example.com")
     run.mkdir()
     (run / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
@@ -106,9 +108,9 @@ def test_archive_sanitises_paths_and_secrets_and_keeps_evidence_stats(tmp_path):
         text = archive.extractfile("fix/results.jsonl").read().decode()
         stats = json.loads(archive.extractfile("fix/evidence-stats.json").read())
     assert names == ["fix/evidence-stats.json", "fix/results.jsonl", "loop/results.tsv"]
-    for leaked in ("/root", "/tmp/af-", "sk-ant-", "ghp_", "someone@example.com"):
+    for leaked in ("/root", "/tmp/af-", "/nix/", "/opt/", "/usr/", "sk-ant-", "ghp_", "someone@example.com"):
         assert leaked not in text
-    assert "<home>/.local/bin:<work>" in text and "<redacted>" in text
+    assert "<home>/.local/bin:<work>/author-x:<abs>" in text and "<redacted>" in text
     assert stats == [{"stack": "fixloop", "kit": "after", "trial": 1, "tool_calls": 1, "plan_searches": 1}]
     # An archived run reads back with its evidence stats attached to the row.
     extracted = tmp_path / "extracted"
