@@ -2,7 +2,7 @@
 name: react-app-shell-error-handling
 description: Use when implementing or reviewing React Web app-wide error handling where feature components notify common errors and an AppShell, root layout, root route, or client provider layer owns global dialogs, snackbars, toasts, auth flow switching, router resets, SessionExpired handling, Maintenance handling, React Router layout/error boundaries, or Next.js App Router layout/error boundaries.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [app shell, appshell, global error, common error, session expired, error boundary, snackbar, toast host, router reset, global exception, 전역 예외]
+taskTerms: [app shell, appshell, global error, common error, session expired, error boundary, snackbar, toast host, router reset, global exception, 전역 예외, "401", unauthorized response, token rejected, token is rejected, 토큰 만료, 토큰이 만료]
 pathGlobs: ["**/*AppShell*.tsx", "**/app/layout.tsx", "**/*CommonError*Provider.tsx", "**/*CommonError*Host.tsx"]
 requires: [app-shell-error-contract]
 ---

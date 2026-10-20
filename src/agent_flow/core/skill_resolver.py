@@ -1447,6 +1447,12 @@ def selector_matches(
 
 
 _TERM_PATTERNS: dict[str, re.Pattern[str]] = {}
+_HANGUL = re.compile(r"[가-힣]")
+# 명사 term 뒤에 붙는 조사와 `-하다`·`-되다` 활용. 이 밖의 한글이 이어지면 다른 낱말이다.
+_KOREAN_PARTICLES = (
+    r"(?:은|는|이|가|을|를|의|에|에서|에게|으로|로|와|과|도|만|까지|부터|처럼|보다|이나|나|랑|이랑"
+    r"|하고|하는|하며|하면|해서|하여|한다|하다|할|한|된|되는|되면|됨|하기|시)"
+)
 
 
 def term_in(term: str, text: str) -> bool:
@@ -1456,16 +1462,28 @@ def term_in(term: str, text: str) -> bool:
     무관한 task가 skill을 required로 올린다.
 
     경계는 ASCII 영숫자로만 잡는다. `\w`를 쓰면 한글이 word 문자라서 `화면 상태를`
-    처럼 조사가 붙은 한국어 task 문구가 전부 미매치가 된다. 그래서 한글 term은
-    경계가 없는 것과 같다 - `프레젠테이션`은 "팀 프레젠테이션으로"에 계속 걸린다.
-    그 오탐은 어휘를 구절로 좁혀서 막는다.
+    처럼 조사가 붙은 한국어 task 문구가 전부 미매치가 된다. 대신 한글로 끝나는 term
+    뒤에 한글이 이어지면 조사·어미일 때만 맞춘다. 그렇지 않으면 `화면 상태`가 "화면
+    상태바"에 걸린다(실측: 상태바 색 변경이 프레젠테이션 skill을 required로 올렸다).
+    한글 term의 앞쪽은 여전히 경계가 없다 - `프레젠테이션`은 "팀 프레젠테이션으로"에
+    걸리므로 그 오탐은 어휘를 구절로 좁혀서 막는다.
+
+    경계는 term 끝 글자가 영숫자일 때만 요구한다. `POST /`처럼 기호로 끝나는 term은
+    바로 뒤에 경로가 붙는다.
 
     복수 접미사는 허용한다. skill description이 term을 복수로 쓰는 쪽이 흔하다 —
     `skill_matching._term_in`과 같은 규칙이고, 그쪽이 이 함수를 쓴다.
     """
     pattern = _TERM_PATTERNS.get(term)
     if pattern is None:
-        pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?:e?s)?(?![A-Za-z0-9_])")
+        head = r"(?<![A-Za-z0-9_])" if term[:1].isascii() and term[:1].isalnum() else ""
+        if _HANGUL.fullmatch(term[-1:]):
+            tail = rf"(?![가-힣])|(?={_KOREAN_PARTICLES}(?![가-힣]))"
+        elif term[-1:].isascii() and term[-1:].isalnum():
+            tail = r"(?:e?s)?(?![A-Za-z0-9_])"
+        else:
+            tail = ""
+        pattern = re.compile(rf"{head}{re.escape(term)}(?:{tail})")
         _TERM_PATTERNS[term] = pattern
     return pattern.search(text) is not None
 
