@@ -373,6 +373,28 @@ raw에는 로컬 경로와 입력 내용이 있으므로 공개 전 별도 검�
 python evals/claim_audit.py <phase_eval output dir>
 ```
 
+### `release_reuse.py` — 바뀌지 않은 셀의 재사용
+
+릴리스가 모델에게 보이는 것을 하나도 바꾸지 않았어도 168 unit을 다시 재지 않도록, 셀마다 모델 입력
+지문을 비교해 같은 셀은 직전 릴리스 기록의 행을 그대로 쓴다. 지문은 렌더된 프롬프트, 설치된 프로젝트
+파일(run 산출물 포함), 리뷰 셀의 채점 모듈 소스다. 경로·commit id·digest·시각·nonce는 정규화하고,
+의존성 설치와 fixture 테스트 실행은 kit과 무관해 상수로 대체한다. 그래서 Node와 Python만 있으면 된다.
+
+```bash
+python evals/release_reuse.py plan --previous <이전 태그 트리> --kit <새 kit> --output plan.json
+# plan이 바뀐 셀로 보고한 조합만 phase_eval.py로 잰다(--kit before=... --kit after=...).
+# 앵커: 새 kit에서 stack마다 author·결함·정상 리뷰 1회(예: --kit after=<새 kit> --modes clean --trials 1).
+python evals/release_reuse.py assemble --plan plan.json --previous-record evals/release-gates/v<이전> \
+  [--run <바뀐 셀 측정>] --anchors <앵커 측정> --export evals/release-gates/v<새 버전>
+python evals/release_reuse.py verify --record evals/release-gates/v<새 버전> \
+  --previous-record <이전 트리>/evals/release-gates/v<이전> --previous <이전 트리> --kit <새 kit>
+```
+
+v0.3.19 → PR #377(v0.3.20 후보)에서 36개 셀이 모두 재사용 가능했다(계획 109초, 검증 117초). 그 경우
+모델 측정은 앵커 12 unit이다. 스킬 하나를 고치면 모든 셀이 바뀐다: 설치된 모든 skill이 모델이 읽을 수
+있는 입력이기 때문이다. `--reuse-before`는 바뀐 셀을 새 kit에서만 재고 `before`를 직전 기록에서
+가져온다. 이전 kit 앵커가 같은 결과를 내고 토큰이 1.25배 범위 안일 때만 허용한다.
+
 ### `phase_eval_compare.py` — 릴리스 차단 검사
 
 릴리스 전에 이전 릴리스 kit(`before`)과 새 kit(`after`)를 같은 `phase_eval.py` 실행에서
