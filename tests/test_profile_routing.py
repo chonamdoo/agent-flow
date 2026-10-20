@@ -1232,3 +1232,17 @@ def test_glob_directories_match_case_sensitively_but_extensions_do_not(pattern, 
     from agent_flow.core.skill_resolver import _glob_matches
 
     assert _glob_matches(pattern, path) is expected
+
+
+def test_korean_terms_match_before_particles_and_endings_but_not_inside_longer_words():
+    """반증: 한글 term에 경계가 없으면 "화면 상태"가 "화면 상태바"에 걸려 상태바 색 변경이 프레젠테이션
+    skill을 required로 올린다. 경계를 조사 하나로만 좁히면 "에서도"·"되었을" 같은 복합 조사·활용이 빠진다."""
+    from agent_flow.core.skill_resolver import term_in
+
+    for text in ("주문 화면 상태를 노출한다", "화면 상태", "화면 상태에만 의존하도록", "공통 에러에서도 재시도",
+                 "세션 만료되었을 때 로그인으로", "세션 만료 시 공통 에러"):
+        assert any(term_in(term, text) for term in ("화면 상태", "공통 에러", "세션 만료")), text
+    assert not term_in("화면 상태", "화면 상태바 색상을 바꾼다")
+    assert term_in("post /", "the api answers post /api/cart/quote")
+    assert not term_in("post /", "write a post about it")
+    assert not term_in("uistate", "guistatemachine")
