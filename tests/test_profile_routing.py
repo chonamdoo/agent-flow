@@ -941,6 +941,25 @@ def test_python_api_contract_routes_an_explicit_concern_without_server_named_fil
     assert "backend-api-contract" in names
 
 
+@pytest.mark.parametrize(
+    "task,expected",
+    [
+        ("Signed-in users can see their orders; fetch GET /api/orders and render the list", False),
+        ("로그인한 사용자의 주문 목록을 보여준다", False),
+        ("Next.js 서버 컴포넌트에서 계정 영역의 로그인 여부를 확인한다", True),
+        ("Protect the account pages so only signed-in users can see them", True),
+        ("로그인한 사용자만 주문 내역 페이지를 볼 수 있게 서버에서 막는다", True),
+    ],
+)
+def test_nextjs_auth_review_skill_needs_auth_work_not_a_signed_in_audience(task: str, expected: bool) -> None:
+    """반증: bare "signed-in"·"로그인한 사용자"는 대상 사용자만 말하는 화면 작업("Signed-in users can see their
+    orders")에도 auth-session skill(약 10KB)을 리뷰어 필수 읽기로 올렸다. 보호·소유 표현과 함께일 때만 맞춘다."""
+    names = _names(_route(
+        "nextjs", phase_id="review", changed_files=["src/features/orders/presentation/OrdersPage.tsx"], task_text=task,
+    ))
+    assert ("nextjs-auth-session" in names) is expected
+
+
 @pytest.mark.parametrize("profile_id", ["spring", "ktor"])
 @pytest.mark.parametrize(
     "task,concerns,expected",
