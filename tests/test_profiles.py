@@ -222,9 +222,10 @@ def test_default_gate_run_excludes_the_pre_push_test_gate():
     )
 
 
-def test_python_profile_tools_run_through_the_current_interpreter():
-    """반증: `mypy`·`ruff`·`pytest`를 argv 그대로 두면 PATH의 다른 venv 도구가
-    실행되는데, 이 변환을 단언하는 테스트가 없어 전체 스위트가 green이었다(#285).
+def test_python_profile_tools_without_project_context_keep_declared_commands():
+    """#286의 kit Python 고정은 프로젝트 전용 의존성과 Python 문법을 깨뜨렸다.
+    프로젝트 root가 없으면 선언된 PATH 명령을 보존한다. root가 있을 때의 실제
+    환경 선택과 실행은 test_python_gate_environment.py에서 별도로 검증한다.
     """
     local = {
         command.gate_id: command.command
@@ -237,9 +238,9 @@ def test_python_profile_tools_run_through_the_current_interpreter():
         )
     }
 
-    assert local["type"] == (sys.executable, "-m", "mypy", ".")
-    assert local["lint"] == (sys.executable, "-m", "ruff", "check", ".")
-    assert ci["test"] == (sys.executable, "-m", "pytest", "-q")
+    assert local["type"] == ("mypy", ".")
+    assert local["lint"] == ("ruff", "check", ".")
+    assert ci["test"] == ("pytest", "-q")
 
 
 def test_phase_all_runs_only_local_gates_by_default():

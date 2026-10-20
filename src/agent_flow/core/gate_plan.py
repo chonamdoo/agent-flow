@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 from dataclasses import replace
@@ -26,6 +27,7 @@ def profile_gate_commands(
     profile_ids: list[str],
     *,
     root: Path | None = None,
+    execution_root: Path | None = None,
     phase: str = DEFAULT_GATE_PHASE,
     execution: GateExecution = "local",
 ) -> list[GateCommand]:
@@ -48,6 +50,7 @@ def profile_gate_commands(
                 gate.gate_id,
                 gate.command,
                 profile_root=root,
+                execution_root=execution_root,
             )
             required = gate.required
             timeout_s = gate.timeout_s
@@ -131,6 +134,7 @@ def _normalize_profile_gate_command(
     command: tuple[str, ...],
     *,
     profile_root: Path | None = None,
+    execution_root: Path | None = None,
 ) -> tuple[str, ...]:
     if is_architecture_lint_gate(gate_id, command):
         profile_index = command.index("--profile") + 1 if "--profile" in command else -1
@@ -141,7 +145,18 @@ def _normalize_profile_gate_command(
             )
     if profile_id == "python" and command:
         if command[0] in {"mypy", "pytest", "ruff"}:
-            return (sys.executable, "-m", command[0], *command[1:])
+            # These tools belong to the project, not the installed kit. A uv
+            # lock declares the dependency environment; otherwise use the
+            # checkout's venv without requiring the host to activate it.
+            project_root = execution_root if execution_root is not None else profile_root
+            if project_root is not None:
+                if (project_root / "uv.lock").is_file():
+                    return ("uv", "run", "--locked", "python", "-m", *command)
+                python = project_root / ".venv" / (
+                    "Scripts/python.exe" if os.name == "nt" else "bin/python"
+                )
+                if python.is_file():
+                    return (str(python.absolute()), "-m", *command)
     return command
 
 

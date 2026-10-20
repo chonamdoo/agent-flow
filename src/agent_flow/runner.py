@@ -2031,11 +2031,13 @@ class Runner:
         commands = profile_gate_commands(
             profile_ids,
             root=self.config_root,
+            execution_root=self.project_root,
             phase=GATE_PHASE_ALL,
         )
         deferred = profile_gate_commands(
             profile_ids,
             root=self.config_root,
+            execution_root=self.project_root,
             phase=GATE_PHASE_ALL,
             execution="ci",
         )
@@ -2299,17 +2301,29 @@ class Runner:
         return expected
 
     def _feedback_recoverable_statuses(self, phase: Phase) -> tuple[str, ...]:
-        """성공 증거를 생략할 수 있는 것은 차단 또는 역방향 route뿐이다."""
+        """성공 증거를 생략할 수 있는 것은 차단 또는 역방향 route뿐이다.
+
+        뒤에 놓인 수정 phase(`fix-loop`)도 그 phase의 모든 route가 이 phase 이전으로
+        돌아가면 역방향이다. 목록 순서만 보면 실패한 QA가 성공 증거를 요구받아 막힌다.
+        """
         if not phase.routes:
             return ()
         indexes = {candidate.id: index for index, candidate in enumerate(self.phases)}
+        by_id = {candidate.id: candidate for candidate in self.phases}
         current = indexes[phase.id]
+
+        def returns_before(target: str) -> bool:
+            if indexes.get(target, current + 1) <= current:
+                return True
+            routes = getattr(by_id.get(target), "routes", None) or {}
+            return bool(routes) and all(
+                indexes.get(next_target, current + 1) <= current for next_target in routes.values()
+            )
+
         recoverable: list[str] = []
         for status in ("request-changes", "blocked", "error"):
             target = phase.routes.get(status)
-            if target == "block" or (
-                target is not None and indexes.get(target, current + 1) <= current
-            ):
+            if target == "block" or (target is not None and returns_before(target)):
                 recoverable.append(status)
         return tuple(recoverable)
 

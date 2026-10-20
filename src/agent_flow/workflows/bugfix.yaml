@@ -69,18 +69,38 @@ phases:
 
   - id: qa
     description: Verify the fixed defect.
+    required_markers:
+      - "feedback-command:"
+      - "feedback-green-exit:"
+      - "feedback-run-evidence: verified|unavailable"
+    required_markers_by_architecture: {}
     routes:
       green: handoff
       approve: handoff
       request-changes: implement-fix
-      blocked: implement-fix
-      error: implement-fix
-      default: implement-fix
+      blocked: block
+      error: block
+      default: block
     prompt: |
-      Run the regression test and the smallest relevant quality checks for the
-      touched stack. Output `status: green` when verified, or
-      `status: request-changes`, `status: blocked`, or `status: error` with the
-      exact failure.
+      Re-run the reproduction from reproduce.md against the fixed code — the
+      smallest failing command or test it recorded — and observe exit 0, then run
+      the regression test and the smallest relevant quality checks for the touched
+      stack. The command run is observed, so `status: green` needs that exact
+      reproduction command observed with exit 0 in this phase; a green status
+      without it is rejected. Use `status: request-changes` with the exact failure
+      when the defect still reproduces. Use `status: blocked` or `status: error`
+      only for an external blocker the code cannot fix (a missing tool, device or
+      service), naming it; those stop the run instead of sending the code back.
+      For a non-green status, still record the command when known and the
+      observed exit or `unavailable`.
+
+      End with:
+
+          ## Completion Gate
+          feedback-command: <exact reproduction command>
+          feedback-green-exit: 0
+          feedback-run-evidence: verified|unavailable
+
       Output: qa.md.
 
   - id: handoff
