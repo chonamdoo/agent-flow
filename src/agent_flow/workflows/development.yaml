@@ -48,18 +48,36 @@ phases:
 
   - id: qa
     description: Run focused verification.
+    required_markers:
+      - "feedback-command:"
+      - "feedback-green-exit:"
+      - "feedback-run-evidence: verified|unavailable"
+    required_markers_by_architecture: {}
     routes:
       green: handoff
       approve: handoff
       request-changes: fix-loop
-      blocked: fix-loop
-      error: fix-loop
-      default: fix-loop
+      blocked: block
+      error: block
+      default: block
     prompt: |
       Run the verification command recorded in explore.md plus any focused checks
-      needed for the touched stack. Output `status: green` when verified, or
-      `status: request-changes`, `status: blocked`, or `status: error` with the
-      exact failure.
+      needed for the touched stack. The command run is observed, so `status: green`
+      needs that exact command observed with exit 0 in this phase; a green status
+      without it is rejected. Use `status: request-changes` with the exact failure
+      when the change is wrong. Use `status: blocked` or `status: error` only for an
+      external blocker the code cannot fix (a missing tool, device or service),
+      naming it; those stop the run instead of sending the code back to fix-loop.
+      For a non-green status, still record the command when known and the
+      observed exit or `unavailable`.
+
+      End with:
+
+          ## Completion Gate
+          feedback-command: <exact verification command>
+          feedback-green-exit: 0
+          feedback-run-evidence: verified|unavailable
+
       Output: qa.md.
 
   - id: fix-loop
