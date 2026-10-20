@@ -201,12 +201,11 @@ def better(candidate: dict, best: dict, track: str, candidate_bytes: int, best_b
         return False, "required-read rate dropped"
     passed, plan, _ = candidate["score"]
     best_passed, best_plan, _ = best["score"]
-    # Model runs are noisy; a token change alone is not evidence. Only more passing runs keep an
-    # edit, or the same passes with shorter skills.
+    # Model runs are noisy; a token change alone is not evidence. Only more passing runs keep an edit.
+    # No "same passes, shorter" tie-break here: the score covers a few cases, so it cannot see what a
+    # deleted rule protects elsewhere (the first fixloop run kept four deletions of unrelated guidance).
     if passed > best_passed:
         return True, "improved"
-    if passed == best_passed and plan >= best_plan and candidate_bytes < best_bytes:
-        return True, "same passes, shorter"
     return False, "no improvement"
 
 

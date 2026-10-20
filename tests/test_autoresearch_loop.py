@@ -38,6 +38,12 @@ def test_model_track_ignores_token_only_gains_and_read_rate_drops():
         False, "required-read rate dropped")
 
 
+def test_model_track_never_keeps_a_deletion_for_being_shorter():
+    best = {"score": (3, 3, -1000), "read_rate": 1.0}
+    assert loop.better({"score": (3, 3, -900), "read_rate": 1.0}, best, "model", 5, 10) == (
+        False, "no improvement")
+
+
 def _repo(tmp_path: Path) -> Path:
     root = tmp_path / "kit"
     (root / "skills" / "demo").mkdir(parents=True)

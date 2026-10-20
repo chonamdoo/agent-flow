@@ -2,7 +2,8 @@
 
 You are improving Agent Flow, a deterministic multi-phase coding workflow kit, one small edit at a time.
 A fixed evaluator you cannot see scores every edit. The loop keeps an edit only if the score improves
-(or stays equal while the edited files get shorter) and otherwise resets it. You cannot change the
+(in the routing track, also when it stays equal while the edited lines get shorter) and otherwise
+resets it. You cannot change the
 evaluator, the cases or this file.
 
 ## Your turn
@@ -41,3 +42,5 @@ Editable: the body (not the frontmatter) of the skill files listed in the state,
 Claude session implements a task with the kit, then fewer tokens. A failing `plan` check means the author
 missed a decision written only in the slice plan; a failing `norm` check means it broke the architecture
 contract. Improve how the skill makes an author read and apply the plan and the contract, in general terms.
+Only more passing runs keep an edit here. Do not delete text to shorten a skill: these few cases
+cannot show what a removed rule protects in other phases and stacks.
