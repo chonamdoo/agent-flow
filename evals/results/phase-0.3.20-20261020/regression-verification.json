@@ -2,7 +2,7 @@
   "project_python": "3.12.14",
   "launcher_python": "3.13.5",
   "base_commit": "5a9cbaef1411a48a181e0c9420a2957ce67b28b6",
-  "head_runtime_commit": "f7fc39b3cd3f3417cbef90b0111e752c2e8f34a7",
+  "head_runtime_commit": "bb652338444d38661e52cb08e25e0973cf1f890f",
   "base_result": "No module named ruff, exit 1",
   "head_results": {
     "project_venv_without_activation": "pass",
@@ -23,5 +23,6 @@
     "Existing shared temporary directories contain stale .git entries; clean user-owned TMPDIR used for local guards.",
     "The 19-case runtime guard selection was rerun after adjusting the ledger assertion to its existing relative-path privacy contract."
   ],
-  "CI_fixture_adjustment": "Preserve every-active-profile approval assertion and conflicting identical-command rejection; use actual Next.js pnpm test in the mixed-stack fixture."
+  "CI_fixture_adjustment": "Preserve every-active-profile approval assertion and conflicting identical-command rejection; use actual Next.js pnpm test in the mixed-stack fixture.",
+  "final_package_source_commit": "bb652338444d38661e52cb08e25e0973cf1f890f"
 }
