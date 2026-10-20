@@ -246,6 +246,11 @@ SPEC-4 hidden 테스트를 함께 잰다. Python `round()`(banker's rounding)는
 걸린다. snippet은 같은 세금 코드에서 두 지적이 모두 맞지만, 두 번째 지적이 제안한 코드(`round()`)가 SPEC-4의
 half up과 정확히 반 센트에서 다르다. 보이는 테스트는 어느 쪽이든 통과하고 hidden 테스트만 가른다.
 
+`phase-cases/fixloop-compat`은 testedit과 같은 리뷰에 `ddd-design.md`의 호환성 불변식(iOS v1은 수량을 숫자 문자열로
+보내고 어댑터는 계속 받는다)을 더한다. Codex가 testedit에서 지적받지 않은 입력 검증을 10회 중 5회 고쳤기 때문에,
+지적 범위를 넘는 수정이 문서화된 계약을 깨는지 잰다. plan은 세금 기대값·SPEC-4와 숫자 문자열 수량 hidden 테스트를
+함께 본다.
+
 ```bash
 python evals/phase_eval.py --kit after=<kit> --stacks fixloop --modes clean --scenario author \
   --trials 3 --author-provider claude --review-providers claude --output <new dir>
