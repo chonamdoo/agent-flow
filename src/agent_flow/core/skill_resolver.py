@@ -1448,11 +1448,9 @@ def selector_matches(
 
 _TERM_PATTERNS: dict[str, re.Pattern[str]] = {}
 _HANGUL = re.compile(r"[가-힣]")
-# 명사 term 뒤에 붙는 조사와 `-하다`·`-되다` 활용. 이 밖의 한글이 이어지면 다른 낱말이다.
-_KOREAN_PARTICLES = (
-    r"(?:은|는|이|가|을|를|의|에|에서|에게|으로|로|와|과|도|만|까지|부터|처럼|보다|이나|나|랑|이랑"
-    r"|하고|하는|하며|하면|해서|하여|한다|하다|할|한|된|되는|되면|됨|하기|시)"
-)
+# 명사 term 뒤에 올 수 있는 조사·`-하다`·`-되다` 활용의 첫 음절. 첫 음절만 보므로 "에서도"·"에만"
+# 같은 복합 조사와 "되었을" 같은 활용도 맞는다. 이 밖의 음절이 이어지면 다른 낱말이다("상태바").
+_KOREAN_PARTICLE_STARTS = "은는이가을를의에와과도만로으나랑까부처보하한할함해했되된될됨됐시"
 
 
 def term_in(term: str, text: str) -> bool:
@@ -1463,7 +1461,7 @@ def term_in(term: str, text: str) -> bool:
 
     경계는 ASCII 영숫자로만 잡는다. `\w`를 쓰면 한글이 word 문자라서 `화면 상태를`
     처럼 조사가 붙은 한국어 task 문구가 전부 미매치가 된다. 대신 한글로 끝나는 term
-    뒤에 한글이 이어지면 조사·어미일 때만 맞춘다. 그렇지 않으면 `화면 상태`가 "화면
+    뒤에 한글이 이어지면 조사·어미의 첫 음절일 때만 맞춘다. 그렇지 않으면 `화면 상태`가 "화면
     상태바"에 걸린다(실측: 상태바 색 변경이 프레젠테이션 skill을 required로 올렸다).
     한글 term의 앞쪽은 여전히 경계가 없다 - `프레젠테이션`은 "팀 프레젠테이션으로"에
     걸리므로 그 오탐은 어휘를 구절로 좁혀서 막는다.
@@ -1478,7 +1476,7 @@ def term_in(term: str, text: str) -> bool:
     if pattern is None:
         head = r"(?<![A-Za-z0-9_])" if term[:1].isascii() and term[:1].isalnum() else ""
         if _HANGUL.fullmatch(term[-1:]):
-            tail = rf"(?![가-힣])|(?={_KOREAN_PARTICLES}(?![가-힣]))"
+            tail = rf"(?![가-힣])|(?=[{_KOREAN_PARTICLE_STARTS}])"
         elif term[-1:].isascii() and term[-1:].isalnum():
             tail = r"(?:e?s)?(?![A-Za-z0-9_])"
         else:
