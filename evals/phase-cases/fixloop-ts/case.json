@@ -1,0 +1,15 @@
+{
+  "stack": "fixloop-ts",
+  "profile": "nextjs",
+  "author_phase": "fix-loop",
+  "author_inputs": ["multi-review.md"],
+  "task": "Add the account orders list view state: toOrdersViewState(orders) turns the customer's orders into the view the orders screen renders — empty when there are none, otherwise loaded rows of {id, state, total} newest first with totals formatted as US$ with two decimals.",
+  "test_command": ["node", "--test", "tests/*.test.ts"],
+  "fix_test_command": ["node", "--test", "tests/hidden_fix/*.test.ts"],
+  "hidden_test_command": ["node", "--test", "tests/hidden_plan/*.test.ts"],
+  "modes": {
+    "clean": {
+      "install": ["--architecture-mode", "clean"]
+    }
+  }
+}

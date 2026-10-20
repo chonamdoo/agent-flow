@@ -226,6 +226,10 @@ behavior·norm 통과, plan 실패였다(세 번 모두 slice-plan.md를 열지 
 대조한다" 한 줄을 더해 3/3이 됐고, commerce 3/3·backend 2/2(이전 2/2)로 회귀가 없었다. 릴리스 행렬 밖의
 개선 루프용이다.
 
+`phase-cases/fixloop-ts`는 루프가 보지 않는 held-out 짝이다. TypeScript(nextjs profile)이고, 틀린 지적이
+slice plan이 아니라 `ddd-design.md`의 불변식(취소된 주문도 이력에 남는다)을 뒤집으라고 한다. 루프가 찾은 규칙이
+문구(slice plan)를 넘어 일반화되는지를 잰다.
+
 ```bash
 python evals/phase_eval.py --kit after=<kit> --stacks fixloop --modes clean --scenario author \
   --trials 3 --author-provider claude --review-providers claude --output <new dir>
