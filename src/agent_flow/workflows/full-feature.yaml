@@ -634,13 +634,13 @@ phases:
       `verdict: approve` or `verdict: request-changes`.
 
   - id: gates
-    description: Runner runs gates after reviewer approve; green/approve→commit, pending→block, else→fix-loop.
+    description: Runner runs gates after reviewer approve; green/approve→commit, pending/blocked→block, else→fix-loop.
     artifact: artifacts/gate-results.json
     routes:
       green: commit
       approve: commit
       request-changes: fix-loop
-      blocked: fix-loop
+      blocked: block
       error: fix-loop
       pending: block
       default: fix-loop

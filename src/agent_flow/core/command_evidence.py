@@ -302,7 +302,13 @@ def _effective_executable(argv: Sequence[str]) -> str:
     if first.startswith("python") and len(names) >= 3 and names[1] == "-m":
         return names[2]
     if first in {"uv", "poetry", "pipenv"} and len(names) >= 3 and names[1] == "run":
-        return names[2]
+        index = 2
+        if first == "uv":
+            # These switches take no value. Never guess past an unknown flag
+            # (e.g. --with) and mistake its argument for the executed tool.
+            while index < len(names) and names[index] in {"--locked", "--frozen"}:
+                index += 1
+        return _effective_executable(argv[index:])
     if first == "bundle" and len(names) >= 3 and names[1] == "exec":
         return names[2]
     if first in {"npx", "pnpx"} and len(names) >= 2:
