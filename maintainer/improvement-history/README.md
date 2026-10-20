@@ -103,6 +103,42 @@ git worktree add --detach $S/kit-after <후보 sha>       # 후보
 평가기(`evals/phase_eval.py`와 사례)는 실행하는 checkout의 것을 쓴다. 릴리스 행렬 밖 사례(fixloop 등)를 쓰려면 그
 사례가 있는 checkout에서 실행한다.
 
+## skill 수정 기준 (work-skills)
+
+skill을 만들거나 고칠 때의 기준은 [chonamdoo/work-skills](https://github.com/chonamdoo/work-skills)다. 로컬 클론은
+`/home/user/chonamdoo/work-skills`를 쓰고, 없으면 `git clone --depth 1 https://github.com/chonamdoo/work-skills`로 받는다.
+
+- **무엇인가**: agent-flow `skills/`의 원본이 아니다. `work-to-skill` skill 하나(`skills/work-to-skill/SKILL.md`), 행동 검증
+  기준(`references/validation.md`), 패키지 구조 검사(`tests/test_package.py`)로 된 **작성 규칙**이다. agent-flow는 이미 이를
+  따른다: `code-generation-discipline`이 `work-to-skill`을 조건부 작성 지침으로 가리키고, `evals/skill_behavior.py`가 그
+  검증 방식을, `tests/test_qa_skill_package.py`가 그 구조 검사를 옮겨 왔다.
+- **원본과 반영**: agent-flow skill의 원본은 agent-flow 저장소다. 고치는 곳도 agent-flow `skills/`이고 work-skills로 옮길
+  것은 없다. mattpocock/skills에서 가져온 skill은 `skills/UPSTREAM.md`의 pin·의도적 차이를 지킨다. work-skills 쓰기
+  권한은 필요 없다. `work-to-skill` 자체를 고칠 때만 work-skills에 PR을 내며, 그때는 쓰기 권한(세션에 `access: push`로
+  연결)과 그 저장소 절차(`python -m unittest discover -s tests -v`, 태그 릴리스, `Formula/work-to-skill.rb` SHA 갱신 PR)를 따른다.
+- **고치기 전**: `work-to-skill`의 *Establish the assignment*, *Build the smallest useful package*, *Validate and hand off*와
+  `references/validation.md`를 읽는다.
+
+적용 규칙:
+
+1. **좁은 수정**: 요청한 동작만 바꾸고, 무관한 범위·예외·참조·frontmatter·호출 정책은 그대로 둔다. 실제 diff로 의도하지
+   않은 범위 변화가 없는지 본다.
+2. **메타데이터**: `name`·`description` 외 필드(`requires`, `taskTerms`, `workflowPhases`, `delivery`)는 agent-flow가 실제로
+   읽는 host 요구일 때만 더하거나 바꾼다.
+3. **근거 분리**: A(작성 품질: 구조·범위·diff 검사)와 B(그 skill로 한 실제 작업: `phase_eval`·`skill_behavior.py`)를 나눠
+   적는다. 형식 검사나 다른 모델의 동의는 B를 대신하지 못한다. 좁은 문구 수정은 구조·범위 검사만으로 충분할 수 있으나,
+   돌리지 않은 행동 검사는 unverified로 적는다.
+4. **개선 주장**: 같은 조건의 baseline(이전 버전) 대비로만 주장한다. 문구를 고르거나 고치는 데 쓴 사례의 결과는
+   development 근거다. 독립적인 개선 주장에는 그 과정에서 보지 않은 held-out 사례가 필요하다.
+5. **기준(oracle) 수정**: 출력을 본 뒤 채점 기준을 고쳤다면 이유를 기록하고, 영향받는 결과를 모든 kit에 같은 기준으로
+   다시 채점한다. 기준을 고쳐도 development 사례가 held-out이 되지는 않는다.
+6. **라우팅 어휘(`taskTerms`, profile `task_terms`)**: `skill_routing`(dev·heldout·새 blind set)에 더해, 릴리스 게이트
+   fixture의 라우팅이 바뀌는지 본다. `evals/phase-cases/*/case.json`의 `task`와 `author/clean/artifacts/prd.md`를 사례로 만들어
+   base·후보 kit에서 `skill_routing.py --cases`로 재고 required 집합을 비교한다. 새 skill이 붙으면 맞는 라우팅인지 판단한다.
+   맞으면 게이트 토큰 변화로 PR에 적고, 틀리면 표현을 좁힌다. 대상 사용자만 가리키는 단어(`signed-in`, `anonymous user`)는
+   단독으로 넣지 않고 보호·행동 표현(`only signed-in`, `redirect anonymous`)으로 묶는다(v0.3.20 #396·#394).
+7. **보고**: 바뀐 파일, 실제로 돌린 검사와 증거, 돌리지 못한 행동 검사, 설치·배포 여부를 적는다.
+
 ## 순서
 
 1. **결정적 검사**(모델 없음): `phase_budget`·`skill_routing`을 base와 후보에서 재고 비교한다.
