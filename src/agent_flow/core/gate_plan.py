@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 from dataclasses import replace
@@ -141,7 +142,17 @@ def _normalize_profile_gate_command(
             )
     if profile_id == "python" and command:
         if command[0] in {"mypy", "pytest", "ruff"}:
-            return (sys.executable, "-m", command[0], *command[1:])
+            # These tools belong to the project, not the installed kit. A uv
+            # lock declares the dependency environment; otherwise use the
+            # checkout's venv without requiring the host to activate it.
+            if profile_root is not None:
+                if (profile_root / "uv.lock").is_file():
+                    return ("uv", "run", "--locked", "python", "-m", *command)
+                python = profile_root / ".venv" / (
+                    "Scripts/python.exe" if os.name == "nt" else "bin/python"
+                )
+                if python.is_file():
+                    return (str(python.absolute()), "-m", *command)
     return command
 
 

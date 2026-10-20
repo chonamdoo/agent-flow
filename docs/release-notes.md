@@ -1,8 +1,20 @@
 # Release notes
 
-## v0.3.19 (준비 중)
+## v0.3.20 (준비 중)
 
-다음 patch 후보다. 태그 생성과 실제 배포는 아직 하지 않았다.
+- Python 프로젝트의 기본 `pytest`·`mypy`·`ruff` 게이트는 Agent Flow 설치 Python과
+  분리한다. `uv.lock`이 있으면 `uv run --locked python -m <도구>`로 잠긴 프로젝트
+  환경을 쓰고, 그 외에는 프로젝트 `.venv`의 Python을 우선한다. 둘 다 없으면
+  선언된 PATH 명령을 사용한다. 별도로 지정한 uv·Poetry·절대경로 명령은 보존한다.
+- 프로젝트 Python 3.12 문법과 의존성을 검사하기 위해 Agent Flow 전용 환경에
+  프로젝트 도구를 따로 설치할 필요가 없다. Agent Flow 최소 지원은 Python 3.11로
+  유지하며 architecture-lint는 계속 설치된 Agent Flow Python으로 실행한다.
+- `pytest` 전체 검사는 계속 CI 전용이다. 기존 설치는 active run이 끝난 뒤 leader에서
+  새 installer로 갱신해야 이 게이트 실행 방식이 적용된다.
+
+## v0.3.19 (2026-10-20)
+
+[v0.3.19](https://github.com/chonamdoo/agent-flow/releases/tag/v0.3.19)로 배포했다.
 
 - 필수 규범의 scope 확장으로 같은 작성 phase에 재진입할 때 기존 RED 실행의
   시간창·코드 기준선을 보존한다. 규범 승인과 artifact는 계속 새로 요구하며,
