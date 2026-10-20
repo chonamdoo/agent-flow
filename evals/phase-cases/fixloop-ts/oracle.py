@@ -29,6 +29,8 @@ PRESENTATION = Path("src/features/orders/presentation/ordersViewState.ts")
 IMPORT_RE = re.compile(r"""(?:import|export)\s[^'"]*?from\s+['"]([^'"]+)['"]""")
 
 Check = Dict[str, object]
+# node --test prints TAP (`# pass N`) when piped and the spec reporter (`ℹ pass N`) on a TTY or when chosen.
+NODE_PASS = re.compile(r"^(?:#|ℹ) pass (\d+)", re.MULTILINE)
 
 
 def _check(check_id: str, ok: bool, detail: str) -> Check:
@@ -52,7 +54,7 @@ def _run(project: Path, argv: List[str]) -> Check:
     except (OSError, subprocess.TimeoutExpired) as error:
         return {"ok": False, "detail": f"{error}"}
     output = result.stdout + result.stderr
-    ran = sum(int(n) for n in re.findall(r"^# pass (\d+)", output, re.MULTILINE))
+    ran = sum(int(n) for n in NODE_PASS.findall(output))
     # An empty suite is not a pass.
     return {"ok": result.returncode == 0 and ran > 0, "detail": f"exit={result.returncode} ran={ran}"}
 

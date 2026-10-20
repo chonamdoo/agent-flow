@@ -166,7 +166,7 @@ def compare(before_path: Path, after_path: Path) -> tuple[list[str], list[str]]:
         failures.append(f"Clean roles in non-Clean envelopes: {', '.join(roles_leaks)}")
     if new_gaps:
         failures.append(
-            "author skills no longer reaching a reviewer: "
+            "author skills new since base that no reviewer receives: "
             + ", ".join(f"{provider}/{name} ×{count}" for (provider, name), count in sorted(new_gaps.items()))
         )
     # 표는 layer 조건을 보이지만, 증가는 조건마다 판정한다. 커밋 후 라우팅 같은 한 조건의 증가가
