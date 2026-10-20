@@ -277,7 +277,7 @@ flowchart TD
 
 ## Skills and profiles
 
-76 skills ship with the kit, and only the ones the changed files and the active profile call
+77 skills ship with the kit, and only the ones the changed files and the active profile call
 for are loaded. Reading all of them costs more context than the work can carry.
 
 They fall into architecture (`clean-architecture-core`, `ddd-architecture`,
