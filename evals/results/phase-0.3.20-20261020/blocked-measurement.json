@@ -1,0 +1,20 @@
+{
+  "status": "BLOCKED",
+  "release": "v0.3.20",
+  "candidate_commit": "f7fc39b3cd3f3417cbef90b0111e752c2e8f34a7",
+  "baseline_tag": "v0.3.19",
+  "planned_units": 168,
+  "retained_units": 19,
+  "native_calls": 89,
+  "native_turn_events": {
+    "turn.failed": 71,
+    "turn.completed": 18
+  },
+  "unit_errors": {
+    "exceeded retry limit, last status: 429 Too Many Requests": 5
+  },
+  "invalid_review_units": 12,
+  "native_file_digests_verified": true,
+  "raw_results_sha256": "1776f3999de17e75643348b49fe54084feb259be073b8335b1083a3f304d8c26",
+  "reason": "Repeated HTTP 429 Too Many Requests, including a standalone workspace-write diagnostic; canceled remaining units rather than repeatedly calling the provider. Comparator rejects incomplete/invalid measurement. No release-gate export or tag. No selective retry or threshold/evaluator change."
+}

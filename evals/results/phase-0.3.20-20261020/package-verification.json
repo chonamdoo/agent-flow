@@ -1,0 +1,87 @@
+{
+  "artifacts": {
+    "agent-flow-kit-0.3.20.tgz": {
+      "sha256": "e26d880bc5af6c0871d97716fe4fb383727cb3fccd736120589300eb0dffe810",
+      "entries": 381
+    },
+    "agent_flow-0.3.20-py3-none-any.whl": {
+      "sha256": "61b2c6b2c9e31fe5cf58cfe3e73b6e124fb822dda0e5604f1e0ff9ae5469dd07",
+      "entries": 322
+    },
+    "agent_flow-0.3.20.tar.gz": {
+      "sha256": "ba14781ed12e3f35cb3f7c963b9ef004d411b7a1f2eea2a530950aad1e1c1271",
+      "entries": 1272
+    }
+  },
+  "installations": [
+    {
+      "entry_point": "agent-flow-kit.mjs",
+      "architecture_mode": "clean",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "user_files_preserved": true,
+      "host_registration_files": "pass",
+      "launcher_workflow_export": "pass"
+    },
+    {
+      "entry_point": "agent-flow-kit.mjs",
+      "architecture_mode": "local",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "user_files_preserved": true,
+      "host_registration_files": "pass",
+      "launcher_workflow_export": "pass"
+    },
+    {
+      "entry_point": "agent-flow-kit.mjs",
+      "architecture_mode": "pending",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "user_files_preserved": true,
+      "host_registration_files": "pass",
+      "launcher_workflow_export": "pass"
+    },
+    {
+      "entry_point": "agent-flow-install.mjs",
+      "architecture_mode": "clean",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "user_files_preserved": true,
+      "host_registration_files": "pass",
+      "launcher_workflow_export": "pass"
+    },
+    {
+      "entry_point": "agent-flow-install.mjs",
+      "architecture_mode": "local",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "user_files_preserved": true,
+      "host_registration_files": "pass",
+      "launcher_workflow_export": "pass"
+    },
+    {
+      "entry_point": "agent-flow-install.mjs",
+      "architecture_mode": "pending",
+      "fresh": "pass",
+      "reinstall": "pass",
+      "user_files_preserved": true,
+      "host_registration_files": "pass",
+      "launcher_workflow_export": "pass"
+    }
+  ],
+  "normalized_package_members_compared_to_v0.3.19": {
+    "npm": "identical",
+    "wheel": "identical",
+    "sdist_added": [
+      "tests/test_python_gate_environment.py",
+      "skills/agent-flow/SKILL.md",
+      "skills/agent-flow/agents/openai.yaml"
+    ]
+  },
+  "wheel_version": "agent-flow 0.3.20",
+  "wheel_workflow_export": "pass",
+  "limits": [
+    "Synthetic fixture installation; real host trust/startup and Homebrew upgrade untested.",
+    "Paired real-model release gate is recorded separately."
+  ]
+}

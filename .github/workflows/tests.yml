@@ -242,18 +242,8 @@ jobs:
             exit 1
           fi
           echo "frozen contracts: ${#contracts[@]}"
-          set +e
           PYTHONPATH=src python3 -m pytest "${contracts[@]}" \
-            -q -p no:cacheprovider -o addopts="" -n auto 2>&1 | tee frozen.log
-          status=${PIPESTATUS[0]}
-          set -e
-          python3 - <<'PYTEST_REPORT'
-          from pathlib import Path
-          for line in Path("frozen.log").read_text().splitlines():
-              if line.startswith(("FAILED ", "ERROR ")):
-                  print("::error title=Frozen regression::" + line.replace("%", "%25"))
-          PYTEST_REPORT
-          exit "$status"
+            -q -p no:cacheprovider -o addopts="" -n auto
 
   # 테스트 스위트와 병렬로 도는 별도 job이다. PR의 base kit과 head kit에
   # `evals/phase_budget.py`를 각각 돌려(모델 호출 없음, 결정적) phase별 필수 skill과

@@ -1,0 +1,7 @@
+{
+  "status": "PASS",
+  "installed_launcher_project_gate": "uv run --locked python -m ruff check .",
+  "project_python_requirement": ">=3.12,<3.13",
+  "foreign_active_virtualenv_ignored": true,
+  "exit_code": 0
+}

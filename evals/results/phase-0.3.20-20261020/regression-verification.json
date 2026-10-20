@@ -1,0 +1,24 @@
+{
+  "project_python": "3.12.14",
+  "launcher_python": "3.13.5",
+  "base_commit": "5a9cbaef1411a48a181e0c9420a2957ce67b28b6",
+  "head_runtime_commit": "f7fc39b3cd3f3417cbef90b0111e752c2e8f34a7",
+  "base_result": "No module named ruff, exit 1",
+  "head_results": {
+    "project_venv_without_activation": "pass",
+    "uv_locked_project_with_foreign_active_venv": "pass"
+  },
+  "focused_verification": {
+    "profile_runtime_and_CI_guards": 39,
+    "additional_evidence_and_order_guards": 10,
+    "runner_ownership_timeout_and_observation_guards": 4,
+    "final_new_environment_and_evidence_cases": 18,
+    "CI_profile_fixture_and_conflicting_check_guards": 3
+  },
+  "limits": [
+    "Focused guard selections overlap; counts must not be summed as unique tests.",
+    "Full suite is run on GitHub CI.",
+    "Existing shared temporary directories contain stale .git entries; clean user-owned TMPDIR used for local guards."
+  ],
+  "CI_fixture_adjustment": "Preserve every-active-profile approval assertion and conflicting identical-command rejection; use actual Next.js pnpm test in the mixed-stack fixture."
+}

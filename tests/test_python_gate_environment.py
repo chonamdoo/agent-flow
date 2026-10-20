@@ -74,3 +74,18 @@ def test_architecture_lint_keeps_kit_python_in_uv_project(tmp_path):
 ])
 def test_uv_wrapper_does_not_turn_arguments_or_collection_into_test_evidence(command):
     assert not is_test_command_execution(command, ("pytest",), "tests/test_x.py::test_bug")
+
+
+def test_identical_project_commands_cannot_silently_drop_a_distinct_ci_check(tmp_path):
+    profiles = tmp_path / ".agent-flow/profiles"
+    profiles.mkdir(parents=True)
+    for profile_id in ("python", "nextjs"):
+        (profiles / f"{profile_id}.yaml").write_text(json.dumps({
+            "id": profile_id,
+            "gates": [{
+                "id": "test", "command": ["pytest", "-q"],
+                "execution": "ci", "ci_check": f"{profile_id}-ci",
+            }],
+        }))
+    with pytest.raises(ValueError, match="conflicting gate ci_check"):
+        profile_gate_commands(["python", "nextjs"], root=tmp_path, execution="ci")
