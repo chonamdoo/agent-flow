@@ -45,6 +45,9 @@ class GateResult:
     stderr: str
     required: bool = True
     timed_out: bool = False
+    # The command could not start (missing or non-executable tool). That is an environment
+    # fact, not a failing check: the code cannot fix it, so it must not route to a fix loop.
+    unavailable: bool = False
 
 
 def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int | None = None) -> GateResult:
@@ -101,6 +104,7 @@ def _run_gate(
             stdout="",
             stderr=str(exc),
             required=command.required,
+            unavailable=True,
         )
     return GateResult(
         gate_id=command.gate_id,
