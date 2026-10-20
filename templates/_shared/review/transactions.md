@@ -44,8 +44,6 @@ across adapters.
 ```text
 ## Transactions review findings
 
-verdict: approve | request-changes
-
 ### Must-fix
 - <severity:high> [path:line] <statement>. Risk: <data loss / phantom commit>.
 
