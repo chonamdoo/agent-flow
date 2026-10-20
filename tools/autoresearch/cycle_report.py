@@ -2,7 +2,7 @@
 
 Reads phase_eval run directories (or results.jsonl files) and prints Markdown:
 
-- author rows per case × kit: passes on all axes, each axis, mean turns, uncached input and output tokens,
+- author rows per case × kit: passes on all axes, each axis, mean turns, total and uncached input and output tokens,
   cost, recorded overclaims and how many rows could have shown one, plus a one-sided Fisher exact p-value
   against the baseline kit and, with --evidence, how many plan-related tool calls each run made;
 - review rows per kit × reviewer provider: request-changes on defect variants, false request-changes on clean
@@ -107,14 +107,19 @@ def _mean(values: list[float]) -> str:
     return f"{statistics.mean(values):,.1f}" if values else "n/a"
 
 
+def _input(usage: dict) -> int:
+    # Cache hits swing between Codex trials, so uncached input alone can move by a third on the same kit.
+    return usage.get("input") or (usage.get("uncached_input") or 0) + (usage.get("cached_input") or 0)
+
+
 def author_table(rows: list[dict], baseline: str = "before") -> list[str]:
     groups: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
     for row in rows:
         if row.get("scenario") == "author":
             groups[(row["stack"], row.get("provider") or "claude", row["kit"])].append(row)
-    lines = ["| case | provider | kit | pass | behavior | plan | norm | p vs baseline | turns | tool calls | uncached in | output "
-             "| cost | overclaims (eligible) | plan lookups |",
-             "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|"]
+    lines = ["| case | provider | kit | pass | behavior | plan | norm | p vs baseline | turns | tool calls | input | uncached in "
+             "| output | cost | overclaims (eligible) | plan lookups |",
+             "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|"]
     for (stack, provider, kit), group in sorted(groups.items()):
         oracle = [row.get("oracle") if isinstance(row.get("oracle"), dict) else {} for row in group]
         usage = [row.get("usage") or {} for row in group]
@@ -132,6 +137,7 @@ def author_table(rows: list[dict], baseline: str = "before") -> list[str]:
             f"| {sum(bool(o.get('plan')) for o in oracle)} | {sum(bool(o.get('norm')) for o in oracle)} | {p_value} "
             f"| {_mean([row['turns'] for row in group if row.get('turns') is not None])} "
             f"| {_mean([run['tool_calls'] for run in runs])} "
+            f"| {statistics.mean(_input(u) for u in usage):,.0f} "
             f"| {statistics.mean(u.get('uncached_input') or 0 for u in usage):,.0f} "
             f"| {statistics.mean(u.get('output') or 0 for u in usage):,.0f} "
             f"| {f'${sum(costs):.2f}' if costs else 'n/a'} "
