@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import venv
@@ -129,4 +130,4 @@ def test_runner_uses_checkout_environment_with_leader_profile_declarations(tmp_p
     assert result["passed"] is True, result
     # The persisted gate ledger deliberately makes checkout paths relative.
     assert result["stdout"].strip() == ".venv"
-    assert result["command"][0] == str(python.relative_to(checkout))
+    assert shlex.split(result["command"])[0] == str(python.relative_to(checkout))
