@@ -58,6 +58,9 @@ EXCLUDED_PREFIXES = (
 KIT_INDEPENDENT_FILES = {"test-evidence.md"}
 SCORING_MODULES = ("agent_flow.core.review_evidence", "agent_flow.multi_review", "agent_flow.subprocess_pool")
 ANCHOR_SCENARIOS = (("author", ""), ("review", "defect"), ("review", "clean"))
+# Distinct trials each anchor needs. One sample per combination misses intermittent failures:
+# at a 5% per-unit miss rate, 36 anchors catch one with ~84% probability, 72 with ~97.5%.
+ANCHOR_TRIALS = 2
 # Reusing the previous kit's rows as a changed cell's `before` compares a fresh `after` with an
 # older measurement. Fresh previous-kit anchors must show the same outcomes, and their token use
 # must stay within this factor of what the previous record measured for the same cells.
@@ -361,8 +364,9 @@ def _outcome_failures(rows: list[dict], combos: list[tuple[str, str]], kit: str,
             matching = [row for row in rows if row.get("kit") == kit and row["scenario"] == scenario
                         and row["stack"] == stack and row["mode"] == mode and (row.get("variant") or "") == variant]
             name = f"{scenario}/{stack}/{mode}/{variant or '-'}"
-            if not matching:
-                failures.append(f"no {label} for {name}")
+            trials = {row.get("trial") for row in matching}
+            if len(trials) < ANCHOR_TRIALS:
+                failures.append(f"{label} for {name} has {len(trials)} of {ANCHOR_TRIALS} trials")
             for row in matching:
                 where = f"{label} {name} t{row['trial']}"
                 if _invalid(row):
