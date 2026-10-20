@@ -350,7 +350,7 @@ phases:
   - id: final-review
     architecture_decision: required
     skills:
-      required: [code-generation-discipline, code-review, architecture-reviewer, clean-architecture-core]
+      required: [code-generation-discipline, tdd, code-review, architecture-reviewer, clean-architecture-core]
     description: |
       Final review. Requires at least two independent reviewer subprocesses
       from the Claude/Codex pool before approve. Profiles add stack-specific

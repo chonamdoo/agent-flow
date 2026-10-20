@@ -221,7 +221,10 @@ agent-review(Gallon)의 "Findings get checked too"를 재는 사례다. author p
 하나는 맞는 지적(개수 표기가 줄 수를 셈)이고, 다른 하나는 PRD의 "over US$60"만 인용해 slice-plan
 Product Decision(정확히 60.00은 무료배송)을 뒤집으라는 틀린 지적이다. behavior는 기존 테스트와 맞는 지적의
 수정, plan은 틀린 지적을 적용하지 않았는지를 hidden 테스트로 잰다. 2026-10-20 Claude author 3회는 모두
-behavior·norm 통과, plan 실패였다(세 번 모두 slice-plan.md를 열지 않음). 릴리스 행렬 밖의 개선 루프용이다.
+behavior·norm 통과, plan 실패였다(세 번 모두 slice-plan.md를 열지 않음). `tools/autoresearch` model 트랙이
+`code-generation-discipline`에 "slice plan을 먼저 전부 읽고 결정을 나열해 그대로 구현하고, 끝내기 전에 diff와
+대조한다" 한 줄을 더해 3/3이 됐고, commerce 3/3·backend 2/2(이전 2/2)로 회귀가 없었다. 릴리스 행렬 밖의
+개선 루프용이다.
 
 ```bash
 python evals/phase_eval.py --kit after=<kit> --stacks fixloop --modes clean --scenario author \
