@@ -88,3 +88,38 @@ def test_the_behavior_judge_reads_the_status_through_markdown():
     assert _status("Status: **green**") == "green"
     assert _status("status: `blocked`") == "blocked"
     assert _status("no verdict here") is None
+
+
+def test_contradictory_status_lines_are_no_status():
+    import sys
+
+    sys.path.insert(0, str(REPO / "evals"))
+    from skill_behavior import _status
+
+    assert _status("Status: green\n...\nStatus: request-changes") is None
+    assert _status("Status: blocked\n\nstatus: `blocked`") == "blocked"
+
+
+def test_executor_group_is_killed_after_the_run(tmp_path):
+    import sys
+
+    sys.path.insert(0, str(REPO / "evals"))
+    import skill_behavior
+
+    marker = tmp_path / "alive"
+    script = tmp_path / "claude"
+    # Fake CLI: leaves a background child that would write the marker after it returns.
+    script.write_text(f"#!/bin/sh\n(sleep 2; touch {marker}) >/dev/null 2>&1 &\necho '{{}}'\n", encoding="utf-8")
+    script.chmod(0o755)
+    import os
+    import time
+
+    old = os.environ["PATH"]
+    os.environ["PATH"] = f"{tmp_path}:{old}"
+    try:
+        result = skill_behavior.run_claude("x", tmp_path, model=None, budget=0.1, timeout=30)
+    finally:
+        os.environ["PATH"] = old
+    assert result.returncode == 0
+    time.sleep(3)
+    assert not marker.exists()

@@ -18,8 +18,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -42,8 +44,9 @@ def _digest_tree(root: Path) -> dict[str, str]:
 
 
 def _status(text: str) -> str | None:
-    found = STATUS.findall(text)
-    return found[-1].lower() if found else None
+    # Two different statuses give the runner contradictory routing: that is no status, not the last one.
+    found = {value.lower() for value in STATUS.findall(text)}
+    return found.pop() if len(found) == 1 else None
 
 
 def _port_free(port: int) -> bool:
@@ -122,7 +125,18 @@ def run_claude(prompt: str, cwd: Path, *, model: str | None, budget: float, time
         argv += ["--max-turns", str(max_turns)]
     if model:
         argv += ["--model", model]
-    return subprocess.run(argv, cwd=cwd, input=prompt, capture_output=True, text=True, timeout=timeout)
+    # Own session, and the whole group is killed afterwards: a server the executor left running would
+    # otherwise answer the next case's requests on the same port.
+    process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(prompt, timeout=timeout)
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
 def behavior(skill: str, config: str, task: dict, criteria: list[dict], args: argparse.Namespace,
