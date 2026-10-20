@@ -131,6 +131,9 @@
     {"id": "backend-llm-para-ko", "profile": "python", "split": "heldout", "kind": "paraphrase", "lang": "ko",
      "task": "LLM이 주문 조회 함수를 호출할 수 있게 한다",
      "required": ["llm-tool"]},
+    {"id": "backend-api-para-route-en", "profile": "python", "split": "heldout", "kind": "paraphrase", "lang": "en",
+     "task": "The Python API answers POST /api/cart/quote with the cart totals",
+     "required": ["backend-api"]},
     {"id": "backend-negative-csv-en", "profile": "python", "split": "dev", "kind": "negative", "lang": "en",
      "task": "Refactor the CSV export helper",
      "absent": ["backend-api", "llm-tool"]}

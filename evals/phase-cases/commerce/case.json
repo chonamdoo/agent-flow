@@ -1,0 +1,12 @@
+{
+  "stack": "commerce",
+  "profile": "nextjs,python",
+  "task": "Add the cart summary for the shop: the Python API under api/ answers POST /api/cart/quote (request {\"lines\": [{\"product_id\", \"quantity\"}]}) from an injected product catalog with each line's prices, the subtotal, discount, shipping and estimated total as two-decimal money strings, and the Next.js app loads that quote through an injected postJson(path, body) transport and exposes the cart view state the cart page renders — loading, error, empty and loaded — with display-ready prices and the free-shipping message.",
+  "test_command": ["sh", "-c", "node --test 'tests/*.test.ts' && PYTHONPATH=api/src python3 -m unittest discover -s api/tests -t api"],
+  "hidden_test_command": ["sh", "-c", "node --test 'tests/hidden/*.test.ts' && PYTHONPATH=api/src python3 -m unittest discover -s api/tests/hidden -t api"],
+  "modes": {
+    "clean": {
+      "install": ["--architecture-mode", "clean"]
+    }
+  }
+}

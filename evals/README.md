@@ -199,6 +199,20 @@ workflow의 각 phase가 필요한 skill을 정확히 받는지, 쓰지 않는 �
 쓰지 않는지를 잰다. 두 도구 모두 비교할 kit를 인자로 받는다. 비교 기준 kit는
 `git archive <ref> | tar -x -C <dir>`로 만든다.
 
+### `phase-cases/commerce` — 릴리스 행렬 밖의 어려운 사례
+
+한 저장소의 Python API(`api/`)와 Next.js 웹을 함께 바꾸는 장바구니 요약 과제다(`--profile nextjs,python`).
+규칙은 Olive Young Global 장바구니·상품 화면에서 관측한 표시 규칙(할인율 내림, 무료배송 기준 포함, 두 자리
+금액, 수량 1–5)을 브랜드 없이 옮겼다. 할인율 내림·기준 금액에서의 무료배송·수량 기준 개수 표기·할인 표기는
+slice-plan의 Product Decisions에만 있어 계획을 읽지 않은 구현은 hidden 테스트에서 떨어진다. 참조 구현은
+세 축을 모두 통과하고, 그 규칙만 무시한 변형은 behavior는 통과하고 plan에서 실패한다. author·clean만 있고
+`phase-eval-thresholds.json`의 행렬에는 넣지 않았다. 릴리스 판정이 아니라 개선 루프용이다.
+
+```bash
+python evals/phase_eval.py --kit before=<kit> --kit after=<kit> --stacks commerce --modes clean \
+  --scenario author --trials 3 --author-provider codex --codex-model <model> --output <new dir>
+```
+
 ### `phase_budget.py` — 결정적, 모델 없음
 
 profile × architecture mode × 변경 조건(변경 없음, profile 기본 경로, 계층 경로,
