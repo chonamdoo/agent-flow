@@ -193,7 +193,7 @@ Codex(구독)는 달러 대신 사용 한도를 쓴다. 토큰은 Claude와 비�
 ## 함정 (실제로 겪은 것)
 
 - **게이트 전에 stack 도구를 확인한다(2026-10-20)**: v0.3.20 게이트 1차는 컨테이너에 Dart/Flutter가 없어서 app unit이 모두
-  준비 단계에서 무효가 됐다. 18 unit째에 발견해 중단하고, Flutter를 설치한 뒤 처음부터 다시 쟀다. 게이트 전에는
+  준비 단계에서 무효가 됐다. 39 unit째(그중 app 18 unit 무효)에 발견해 중단하고, Flutter를 설치한 뒤 처음부터 다시 쟀다. 게이트 전에는
   `--stacks app --modes clean --trials 1 --review-trials 1`로 6 unit만 돌려 네 stack 모두 준비가 통과하는지 본다.
 - **게이트 중 디스크**: web·rn fixture가 unit마다 약 400MB라 168 unit이면 60GB를 넘는다. 끝난 unit의 `node_modules`·`.next`만
   지우는 정리 스크립트를 함께 띄운다(v0.3.19 기록과 같은 방식, 소스·증거·측정값은 건드리지 않는다).
