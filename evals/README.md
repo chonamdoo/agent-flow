@@ -219,6 +219,23 @@ base에서 측정에 성공한 profile·mode 조합이 하나도 없거나, 어�
 전에 재던 phase를 못 재면 실패한다. PR에서는
 `.github/workflows/tests.yml`의 `phase-budget` job이 base와 head를 병렬로 재고 이 비교를 돌린다.
 
+### `skill_routing.py` — 결정적, 모델 없음
+
+`routing-cases.json`의 과제 문장마다 kit의 resolver가 `green` phase에서 required로 올리는
+skill을 잰다. 사례는 정확한 어휘(`exact`), 바꿔 말하기(`paraphrase`), 비슷하지만 무관한
+문장(`negative`)으로 나뉘고, `dev`/`heldout`으로 갈린다. 어휘를 `dev`로 고쳤다면 `heldout`
+결과로 과적합 여부를 본다. 모든 사례는 profile별 같은 중립 파일을 바꾼 것으로 두어
+경로 선택자가 아니라 과제 문장만 차이를 만든다.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python evals/skill_routing.py --kit <kit> --output routing.json
+python evals/skill_routing.py --compare before.json after.json
+```
+
+PR CI의 `skill-routing` job이 base와 head를 재고 비교한다. base에서 통과한 사례가 head에서
+실패하거나 측정되지 않으면 실패한다. 원래 실패하던 사례는 보고만 한다. 모델이 그 skill을
+실제로 읽거나 적용하는지는 이 측정으로 알 수 없다.
+
 ### `phase_eval.py` — 실제 모델, 수동·비차단
 
 `phase-cases/{web,rn,app,backend}` × `clean`/`local`/`team`마다 두 kit를 설치하고
