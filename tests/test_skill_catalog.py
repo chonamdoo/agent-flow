@@ -1227,7 +1227,7 @@ _PRESENTATION_PROFILES = {
 }
 
 _PRESENTATION_CHANGES = {
-    "android-clean-presentation-architecture": "feature/chat/presentation/src/main/java/io/levvels/samantha/feature/chat/presentation/ChatViewModel.kt",
+    "android-clean-presentation-architecture": "feature/chat/presentation/src/main/java/com/example/sample/feature/chat/presentation/ChatViewModel.kt",
     "flutter-clean-presentation-architecture": "lib/features/chat/presentation/chat/chat_notifier.dart",
     "react-clean-presentation-architecture": "src/features/chat/presentation/ChatContainer.tsx",
     "react-native-clean-presentation-architecture": "src/features/chat/presentation/ChatScreen.tsx",
@@ -1235,7 +1235,7 @@ _PRESENTATION_CHANGES = {
 }
 
 _DATA_LAYER_CHANGES = {
-    "android-clean-presentation-architecture": "core/data/chat/src/main/java/io/levvels/samantha/core/data/chat/ChatRepositoryImpl.kt",
+    "android-clean-presentation-architecture": "core/data/chat/src/main/java/com/example/sample/core/data/chat/ChatRepositoryImpl.kt",
     "flutter-clean-presentation-architecture": "lib/core/data/chat/chat_repository_impl.dart",
     "react-clean-presentation-architecture": "src/core/data/chat/ChatRepositoryImpl.ts",
     "react-native-clean-presentation-architecture": "src/core/data/chat/ChatRepositoryImpl.ts",
