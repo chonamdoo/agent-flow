@@ -1,6 +1,8 @@
 # Release notes
 
-## v0.3.20 (준비 중)
+## v0.3.20 (2026-10-20)
+
+v0.3.19 이후의 변경이다. [v0.3.20](https://github.com/chonamdoo/agent-flow/releases/tag/v0.3.20)로 배포했다.
 
 - Python 프로젝트의 기본 `pytest`·`mypy`·`ruff` 게이트는 Agent Flow 설치 Python과
   분리한다. `uv.lock`이 있으면 `uv run --locked python -m <도구>`로 잠긴 프로젝트
@@ -12,9 +14,44 @@
   유지하며 architecture-lint는 계속 설치된 Agent Flow Python으로 실행한다.
 - `pytest` 전체 검사는 계속 CI 전용이다. 기존 설치는 active run이 끝난 뒤 leader에서
   새 installer로 갱신해야 이 게이트 실행 방식이 적용된다.
-
 - Python 소스 배포본에서도 `agent-flow` 스킬을 포함해, sdist로 만든 wheel에서
-  진입 스킬이 빠지는 문제를 고친다.
+  진입 스킬이 빠지는 문제를 고친다. [#377](https://github.com/chonamdoo/agent-flow/pull/377)
+- development·bugfix workflow의 `qa` phase는 스스로 쓴 `status: green`만으로 넘어가지 않는다. 같은
+  phase에서 검증 명령(development)이나 재현 명령(bugfix)이 exit 0으로 관측돼야 하고, 관측할 수 없는
+  checkout은 `unavailable`로 남긴다. `blocked`·`error`·읽을 수 없는 status는 코드를 되돌려 수정 회차를
+  쓰지 않고 run을 멈춘다. [#378](https://github.com/chonamdoo/agent-flow/pull/378)
+- 필수 gate의 실행 파일이 없으면(`xcodebuild`, emulator 도구 등) 실패로 기록해 fix-loop로 보내지 않고
+  `unavailable`로 기록해 run을 `blocked`로 멈춘다. 선택 gate는 판정에 영향을 주지 않고, timeout은 계속
+  `error`로 간다. [#382](https://github.com/chonamdoo/agent-flow/pull/382)
+- 웹·앱·백엔드 QA 절차를 담은 `qa` 스킬을 추가한다. [#384](https://github.com/chonamdoo/agent-flow/pull/384)
+- multi-review·final-review 리뷰어가 작성 phase와 같은 `tdd`·`codebase-design` 규칙을 받는다. 테스트
+  규율과 모듈 설계를 작성 때와 같은 잣대로 리뷰한다. [#385](https://github.com/chonamdoo/agent-flow/pull/385)
+- 리뷰 관점 템플릿 17개가 판정 줄을 한 번만 요구한다. 형식 예시와 최종 지시가 판정 줄을 각각 요구해
+  리뷰어 출력의 약 5분의 1이 판정 두 개로 무효 처리되던 문제를 고친다.
+  [#389](https://github.com/chonamdoo/agent-flow/pull/389)
+- `code-generation-discipline`: phase prompt가 slice plan을 가리키면 계획 전체를 읽고 기록된 결정을 나열해
+  그대로 구현하고, 끝내기 전에 diff와 대조한다. 계획이 확정된 Spec Item과 모순되면 Spec Item을 따르고
+  충돌을 산출물에 남긴다. 테스트 먼저 phase에서는 결정을 실패하는 테스트로 옮기고 구현은 다음 phase에
+  맡긴다. [#386](https://github.com/chonamdoo/agent-flow/pull/386)
+- 작업 문구로 skill을 고를 때 한글 term은 조사·활용 앞에서만 맞춘다. "화면 상태"가 "화면 상태바"에
+  걸려 상태바 색 변경이 프레젠테이션 skill을 요구하던 문제를 고친다. 앱 셸(401·토큰 만료), 프레젠테이션
+  (loading·error·empty state), 백엔드 API(HTTP 메서드+경로), LLM 도구, Next.js 인증(로그인 여부)의 흔한
+  표현도 해당 skill로 라우팅한다. [#392](https://github.com/chonamdoo/agent-flow/pull/392)
+
+유지보수·평가:
+
+- 같은 의도를 다르게 쓴 작업 문장이 같은 스킬로 라우팅되는지 결정적으로 측정하고(`skill_routing.py`),
+  평가 사례의 식별자가 배포되는 prompt에 들어가지 않게 막는다.
+  [#379](https://github.com/chonamdoo/agent-flow/pull/379)
+- 릴리스 측정에서 모델 입력이 같은 셀은 직전 릴리스 기록을 재사용할 수 있고, 판정이 확정되면 측정을
+  멈춘다. [#380](https://github.com/chonamdoo/agent-flow/pull/380)
+- Python API + Next.js 장바구니 커머스 평가 사례를 릴리스 행렬 밖에 추가한다.
+  [#381](https://github.com/chonamdoo/agent-flow/pull/381)
+- autoresearch 방식의 제안·채점·유지/되돌림 루프(`tools/autoresearch/loop.py`)와 릴리스 기준 개선 사이클
+  기록(`maintainer/improvement-history/`)을 추가한다. [#383](https://github.com/chonamdoo/agent-flow/pull/383),
+  [#388](https://github.com/chonamdoo/agent-flow/pull/388)
+- 테스트 fixture의 실제 회사 패키지명·앱 이름을 중립 이름으로 바꾸고, 종료된 하위 프로세스 확인 테스트의
+  경쟁 조건을 고친다. [#390](https://github.com/chonamdoo/agent-flow/pull/390), [#391](https://github.com/chonamdoo/agent-flow/pull/391)
 
 ## v0.3.19 (2026-10-20)
 
