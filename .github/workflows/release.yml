@@ -55,6 +55,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Re-deriving a reused record installs both kits into the case fixtures.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       # A tag ships only with a committed, passing phase_eval record measured against the
       # previous release with this tag's kit, evaluator and cases. The tag tree's own gate script
       # and thresholds recompute the verdict from the recorded rows instead of trusting a flag.
@@ -77,6 +82,15 @@ jobs:
           python "${kit}/evals/phase_eval_compare.py" "$record" \
             --require-kit "$kit" --require-before-kit "$before" --require-evaluator "$kit" \
             --summary "$GITHUB_STEP_SUMMARY"
+          # A record that reuses the previous release's rows must prove, from the two tag trees,
+          # that each reused cell's model inputs are unchanged, that the rows are the previous
+          # record's own, and that a fresh anchor run on this kit passed.
+          if [ -f "$record/reuse.json" ]; then
+            pip install "pyyaml>=6.0" "click>=8.0"
+            python "${kit}/evals/release_reuse.py" verify --record "$record" \
+              --previous-record "${before}/evals/release-gates/${previous}" \
+              --previous "$before" --kit "$kit"
+          fi
 
       # sha256은 GitHub이 만드는 태그 tarball에서만 나온다. 사람이 옮겨 적지 않는다.
       - name: Hash the tag tarball
