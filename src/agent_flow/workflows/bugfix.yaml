@@ -68,6 +68,8 @@ phases:
       Output: review.md.
 
   - id: qa
+    skills:
+      required: [qa]
     description: Verify the fixed defect.
     required_markers:
       - "feedback-command:"

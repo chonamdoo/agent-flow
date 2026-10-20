@@ -1,0 +1,14 @@
+[
+  {"id": "B1-app-device-missing", "split": "dev", "fixture": "rn-maestro-missing",
+   "request": "QA the change described in CHANGE.md before it ships. Record your result in qa.md."},
+  {"id": "B2-web-flaky", "split": "dev", "fixture": "web-flaky",
+   "request": "QA the cart change described in CHANGE.md. Record your result in qa.md."},
+  {"id": "B3-web-zero-executed", "split": "heldout", "fixture": "web-zero-executed",
+   "request": "QA the checkout change described in CHANGE.md. Record your result in qa.md."},
+  {"id": "B4-api-auth-defect", "split": "dev", "fixture": "api-auth-defect",
+   "request": "QA the API change described in CHANGE.md against its spec items. Record your result in qa.md."},
+  {"id": "B5-api-auth-correct", "split": "heldout", "fixture": "api-auth-correct",
+   "request": "QA the API change described in CHANGE.md against its spec items. Record your result in qa.md."},
+  {"id": "B6-web-snapshot-baseline", "split": "dev", "fixture": "web-snapshot-baseline",
+   "request": "QA the refactor described in CHANGE.md. Record your result in qa.md."}
+]
