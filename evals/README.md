@@ -336,6 +336,11 @@ python evals/phase_eval_compare.py <new dir> --summary <new dir>/gate.md \
   --export evals/release-gates/v<버전>
 ```
 
+`--fail-fast`를 주면 `--fail-fast-kit`(기본 `after`)에서 판정이 이미 확정된 순간 남은 unit을
+시작하지 않고 exit 1로 끝낸다. 확정 조건은 둘이다: 심은 결함을 하나라도 놓친 리뷰(결함 탐지
+하한이 1.0일 때), 무효 unit 수가 무효율 상한을 넘은 경우. 이유는 출력 폴더의 `fail-fast.json`에
+남는다. 일찍 멈춘 측정은 unit이 빠져 있어 비교기가 거부하므로 릴리스 기록이 되지 않는다.
+
 4개 stack × 3개 mode × 2개 kit에 author 3회, review-defect·review-clean 각 2회,
 총 168 unit을 유지한다. reviewer provider 선택은 unit 수나 품질·토큰 기준값을 줄이지 않는다.
 빈 reviewer 목록, 미지원 provider, 중복 reviewer는 프로젝트 준비와 CLI 실행 전에 거부한다.

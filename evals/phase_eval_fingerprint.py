@@ -12,6 +12,7 @@ EVALUATOR_FILES = (
     "phase_eval_web_verification.py",
     "phase_eval_fingerprint.py",
     "claim_audit.py",
+    "phase_eval_fail_fast.py",
 )
 
 
