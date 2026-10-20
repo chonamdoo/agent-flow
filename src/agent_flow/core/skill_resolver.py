@@ -1107,14 +1107,16 @@ def skill_prompt_block(
             for index, delivery in enumerate(resolution.delivery, 1)
             for item in delivery.documents
         }
+        planned_reads = {delivery.documents[0].document.path for delivery in resolution.delivery if not delivery.inline}
         for skill in resolution.required:
             if skill.exists:
                 body = body_numbers.get(str(skill.path))
                 if role == "author" and str(skill.path) in compact_paths and body is not None:
                     lines.append(f"- `{skill.name}` ({skill.source}) — body {body} in the required-read plan.")
-                elif role == "reviewer" and body is not None:
-                    # 읽기 계획이 같은 body를 절대경로와 digest로 이미 준다. 여기 절대경로를 또 적으면
-                    # 같은 파일을 가리키는 줄이 둘이 된다. 출처 표시에는 상대경로만 남긴다.
+                elif role == "reviewer" and str(skill.path) in planned_reads:
+                    # 읽기 계획의 `Read` 줄이 같은 파일을 절대경로와 digest로 이미 준다. 여기 절대경로를 또
+                    # 적으면 같은 파일을 가리키는 줄이 둘이 된다. inline body는 읽기 계획에 경로가 없으므로
+                    # 이 분기에 오지 않고 절대경로를 그대로 받는다.
                     summary = f" — {skill.summary}" if skill.summary else ""
                     lines.append(f"- `{skill.name}` ({skill.source}) — `{skill.display_path(project_root)}`{summary}")
                 else:
