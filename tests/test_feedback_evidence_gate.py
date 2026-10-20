@@ -539,3 +539,43 @@ def test_diagnosing_bugs_run_creates_worktree_and_stops_at_feedback_loop(
     assert continued.returncode == 0, continued.stderr
     assert '"reason": "route_blocked"' in continued.stdout
     assert "missing completion markers" not in continued.stdout
+
+
+@pytest.mark.parametrize(("workflow", "back"), [("development", "fix-loop"), ("bugfix", "implement-fix")])
+def test_local_qa_phases_require_an_observed_green_command(workflow: str, back: str) -> None:
+    """QA가 자기신고 `status: green`만으로 handoff에 가면, 확인한 사람과 주장한 사람이 같아진다."""
+    definition = load_phase_workflow_definition(REPO, workflow)
+    qa = next(phase for phase in definition.phases if phase.id == "qa")
+    assert {FEEDBACK_GREEN_EXIT_MARKER, FEEDBACK_RUN_EVIDENCE_MARKER, "feedback-command:"} <= set(
+        marker.strip() for marker in qa.required_markers
+    )
+    # 환경 문제(도구·기기 부재)는 코드를 고쳐 풀리지 않는다. 수정 루프 라운드를 쓰지 않고 멈춘다.
+    assert qa.routes["request-changes"] == back
+    assert {qa.routes[key] for key in ("blocked", "error", "default")} == {"block"}
+
+
+def test_a_hand_written_green_qa_without_the_observed_command_is_rejected(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    _observe(root, "npm run lint", 0)
+    text = "status: green\n" + _feedback_gate(command="npm test", exit_marker="feedback-green-exit: 0")
+    missing = missing_feedback_evidence_markers(
+        root, text, required_markers=(FEEDBACK_GREEN_EXIT_MARKER, FEEDBACK_RUN_EVIDENCE_MARKER), cwd_root=root,
+    )
+    assert any("was not observed during this phase" in item for item in missing)
+    _observe(root, "npm test", 0)
+    assert missing_feedback_evidence_markers(
+        root, text, required_markers=(FEEDBACK_GREEN_EXIT_MARKER, FEEDBACK_RUN_EVIDENCE_MARKER), cwd_root=root,
+    ) == []
+
+
+def test_a_failing_qa_routed_to_a_later_fix_phase_that_loops_back_needs_no_green_proof() -> None:
+    """development는 fix-loop가 qa 뒤에 놓이지만 review로 돌아간다. 실패한 QA가 성공 증거에 막히면 안 된다."""
+    definition = load_phase_workflow_definition(REPO, "development")
+    runner = object.__new__(Runner)
+    runner.phases = list(definition.phases)
+    qa = next(phase for phase in runner.phases if phase.id == "qa")
+    assert runner._feedback_recoverable_statuses(qa) == ("request-changes", "blocked", "error")
+    # 앞으로만 가는 route는 여전히 면제되지 않는다.
+    forward = Phase(id="forward-only", description="", routes={"error": "handoff"})
+    runner.phases = [*runner.phases[:-1], forward, runner.phases[-1]]
+    assert runner._feedback_recoverable_statuses(forward) == ()
