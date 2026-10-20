@@ -2,7 +2,7 @@
 name: react-clean-presentation-architecture
 description: Use when creating, modifying, or reviewing a React Clean Architecture presentation layer with Context Provider DI, state-holder hooks, uiState modeling, UiModel mapping, and state-based presentation code review.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [uistate, ui state, state holder, container component, presentation hook, screen state, presentation layer]
+taskTerms: [uistate, ui state, state holder, container component, presentation hook, screen state, presentation layer, view model, viewmodel, 뷰모델, ui 상태]
 pathGlobs: ["**/*UiState.ts", "**/*UiState.tsx", "**/presentation/**"]
 requires: [clean-architecture-core, react-clean-architecture]
 ---

@@ -51,6 +51,7 @@ from phase_eval_environment import (
 )
 from phase_eval_fingerprint import evaluator_sha256
 from phase_eval_web_verification import verify_web_review
+import claim_audit
 
 CASES = HERE / "phase-cases"
 MODES = ("clean", "local", "team")
@@ -804,6 +805,12 @@ def run_author(kit_name: str, kit: Path, case_dir: Path, mode: str, trial: int, 
     row["norm_scope"] = "case-specific fixture contract; general architecture correctness is unverified"
     row["oracle"] = _oracle(case_dir, "author", "--project", str(project), "--mode", mode)
     row["architecture_lint"] = _architecture_lint(project, prepared.get("profile", "auto"))
+    artifact = claim_audit.author_artifact(project)
+    row["claims"] = (
+        claim_audit.parse_completion_gate(artifact.read_text(encoding="utf-8", errors="replace"))
+        if artifact is not None else None
+    )
+    row["overclaims"] = claim_audit.overclaims(row["claims"], row)
     return row
 
 

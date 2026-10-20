@@ -219,6 +219,23 @@ base에서 측정에 성공한 profile·mode 조합이 하나도 없거나, 어�
 전에 재던 phase를 못 재면 실패한다. PR에서는
 `.github/workflows/tests.yml`의 `phase-budget` job이 base와 head를 병렬로 재고 이 비교를 돌린다.
 
+### `skill_routing.py` — 결정적, 모델 없음
+
+`routing-cases.json`의 과제 문장마다 kit의 resolver가 `green` phase에서 required로 올리는
+skill을 잰다. 사례는 정확한 어휘(`exact`), 바꿔 말하기(`paraphrase`), 비슷하지만 무관한
+문장(`negative`)으로 나뉘고, `dev`/`heldout`으로 갈린다. 어휘를 `dev`로 고쳤다면 `heldout`
+결과로 과적합 여부를 본다. 모든 사례는 profile별 같은 중립 파일을 바꾼 것으로 두어
+경로 선택자가 아니라 과제 문장만 차이를 만든다.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python evals/skill_routing.py --kit <kit> --output routing.json
+python evals/skill_routing.py --compare before.json after.json
+```
+
+PR CI의 `skill-routing` job이 base와 head를 재고 비교한다. base에서 통과한 사례가 head에서
+실패하거나 측정되지 않으면 실패한다. 원래 실패하던 사례는 보고만 한다. 모델이 그 skill을
+실제로 읽거나 적용하는지는 이 측정으로 알 수 없다.
+
 ### `phase_eval.py` — 실제 모델, 수동·비차단
 
 `phase-cases/{web,rn,app,backend}` × `clean`/`local`/`team`마다 두 kit를 설치하고
@@ -338,6 +355,18 @@ raw에는 로컬 경로와 입력 내용이 있으므로 공개 전 별도 검�
 코드 판정은 분리하고, 그런 실패 호출의 관측 사용량도 남긴다. evidence 저장 자체가
 실패하면 출력을 해석하기 전에 멈춘다. 이때 리뷰어 행의 사용량은 `null`이고, author
 행에는 `usage` 필드가 없다.
+
+### `claim_audit.py` — 자기신고와 관측의 대조
+
+`phase_eval.py`의 author 행은 green artifact의 Completion Gate를 `claims`로, 관측 증거와
+어긋나는 주장을 `overclaims`로 남긴다. 읽었다고 했는데 관측된 미읽음이 있거나, 구조 계약을
+적용했다고 했는데 norm oracle이 실패했거나, 완료했다고 했는데 behavior oracle이 실패한 경우다.
+관측하지 못한 증거(`required_unobserved`)로는 판정하지 않는다. Gate가 없는 행은 과대보고가
+아니라 `without_gate`로 따로 센다. 릴리스 판정에는 아직 쓰지 않고 보고만 한다.
+
+```bash
+python evals/claim_audit.py <phase_eval output dir>
+```
 
 ### `phase_eval_compare.py` — 릴리스 차단 검사
 
