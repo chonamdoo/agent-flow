@@ -356,6 +356,18 @@ raw에는 로컬 경로와 입력 내용이 있으므로 공개 전 별도 검�
 실패하면 출력을 해석하기 전에 멈춘다. 이때 리뷰어 행의 사용량은 `null`이고, author
 행에는 `usage` 필드가 없다.
 
+### `claim_audit.py` — 자기신고와 관측의 대조
+
+`phase_eval.py`의 author 행은 green artifact의 Completion Gate를 `claims`로, 관측 증거와
+어긋나는 주장을 `overclaims`로 남긴다. 읽었다고 했는데 관측된 미읽음이 있거나, 구조 계약을
+적용했다고 했는데 norm oracle이 실패했거나, 완료했다고 했는데 behavior oracle이 실패한 경우다.
+관측하지 못한 증거(`required_unobserved`)로는 판정하지 않는다. Gate가 없는 행은 과대보고가
+아니라 `without_gate`로 따로 센다. 릴리스 판정에는 아직 쓰지 않고 보고만 한다.
+
+```bash
+python evals/claim_audit.py <phase_eval output dir>
+```
+
 ### `phase_eval_compare.py` — 릴리스 차단 검사
 
 릴리스 전에 이전 릴리스 kit(`before`)과 새 kit(`after`)를 같은 `phase_eval.py` 실행에서
