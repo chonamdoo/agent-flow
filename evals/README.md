@@ -251,6 +251,12 @@ half up과 정확히 반 센트에서 다르다. 보이는 테스트는 어느 �
 지적 범위를 넘는 수정이 문서화된 계약을 깨는지 잰다. plan은 세금 기대값·SPEC-4와 숫자 문자열 수량 hidden 테스트를
 함께 본다.
 
+`phase-cases/refactor-ts`는 다른 phase·stack의 위험 사례다(TypeScript, full-feature refactor). 돈 형식이 index 루프에 두 번
+쓰인 green 코드와 "row mapper와 단일 formatter로 정리하라"는 slice plan을 준다. 환불 주문의 음수 분기는 중복처럼 보이지만
+`ddd-design.md`만 그 규칙(`-US$12.50`)을 적고 보이는 테스트는 다루지 않는다. behavior는 보이는 테스트와 정리 여부(코드에서
+index 루프 없음, `US$` 1회), plan은 환불 부호 hidden 테스트다. 2026-10-20 Claude before·after6 모두 5/5(주석 속 `US$`를 세던
+oracle을 고친 뒤)였다.
+
 ```bash
 python evals/phase_eval.py --kit after=<kit> --stacks fixloop --modes clean --scenario author \
   --trials 3 --author-provider claude --review-providers claude --output <new dir>
