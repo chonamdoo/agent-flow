@@ -2,7 +2,7 @@
 name: android-appshell-error-handling
 description: Defines Android app-shell common-error handling where feature ViewModels notify common errors and AppShell owns global UI, root navigation, Navigation3 back stack resets, SessionExpired handling, and Retrofit CallAdapter error mapping. Use when implementing or reviewing Android Kotlin Compose app-wide error handling.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [app shell, appshell, global error, common error, error mapping, session expired, snackbar host, dialog host]
+taskTerms: [app shell, appshell, global error, common error, error mapping, session expired, snackbar host, dialog host, "401", unauthorized response, token rejected, token is rejected, 토큰 만료, 토큰이 만료]
 pathGlobs: ["**/*AppShell*.kt", "**/*CommonError*Host.kt"]
 requires: [app-shell-error-contract]
 ---
