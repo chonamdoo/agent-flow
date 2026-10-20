@@ -51,7 +51,6 @@ Review for architectural soundness independent of stack-specific patterns: modul
 - ...
 
 ### Overall
-verdict: approve | request-changes
 ```
 
 Keep total under 200 lines. Cite paths as `path/to/file:line`.

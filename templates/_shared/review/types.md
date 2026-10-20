@@ -53,8 +53,6 @@ different stack.
 ```text
 ## Types review findings
 
-verdict: approve | request-changes
-
 ### Must-fix
 - <severity:high> [path:line] <statement>. Compiler/analyzer or runtime risk.
 
