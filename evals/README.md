@@ -213,6 +213,27 @@ python evals/phase_eval.py --kit before=<kit> --kit after=<kit> --stacks commerc
   --scenario author --trials 3 --author-provider codex --codex-model <model> --output <new dir>
 ```
 
+### `phase-cases/webtdd`·`webcoupled`·`webshallow` — 리뷰어 규범의 효과 측정
+
+web 주문 목록 fixture(clean mode)를 그대로 두고, 결함 변형에 tdd·codebase-design에만 적힌 결함 하나씩을 넣었다.
+production 코드는 세 사례 모두 정상이고 결함은 테스트·설계에만 있다. 릴리스 행렬 밖이라 `--stacks`로만 잰다.
+
+| 사례 | 결함 변형 |
+|---|---|
+| `webtdd` | 표시 순서 테스트의 기대값을 같은 `sortOrdersForDisplay`로 다시 계산한다(tautological) |
+| `webcoupled` | 내부 순위 표 `STATUS_RANK`를 export해 그 값을 테스트하고, 표시 순서 동작 테스트는 뺐다(implementation-coupled) |
+| `webshallow` | 저장소 호출을 그대로 넘기기만 하는 `OrdersService` 층을 더했다(shallow pass-through) |
+
+```bash
+python evals/phase_eval.py --kit with=<kit> --kit without=<kit> --stacks webtdd,webcoupled,webshallow \
+  --modes clean --scenario review --review-providers codex --review-trials 3 --output <dir>
+```
+
+2026-10-20 Codex `gpt-6.1-sol`, 3회: 리뷰어에게 tdd·codebase-design을 주는 kit(#385)와 빼는 kit 모두 결함 변형을
+3/3 request-changes로 판정했고 결함 패턴도 모두 맞았다. 정상 변형에서 각 kit가 1회씩 한 각도의 지적으로
+request-changes를 냈다(fixture의 AbortError 처리 지적). 리뷰어는 skill보다 slice-plan의 테스트 요구에서 결함을 찾았다.
+이 세 결함으로는 #385의 효과가 측정되지 않는다.
+
 ### `phase_budget.py` — 결정적, 모델 없음
 
 profile × architecture mode × 변경 조건(변경 없음, profile 기본 경로, 계층 경로,

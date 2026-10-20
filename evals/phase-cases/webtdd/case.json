@@ -1,0 +1,34 @@
+{
+  "stack": "webtdd",
+  "profile": "nextjs",
+  "task": "Add the orders list for the account area of the Next.js app: load the signed-in user's orders from GET /api/orders (response {\"orders\": [{\"order_id\", \"state\", \"placed_at\", \"total_cents\"}]}) through an injected getJson(path) transport, and expose the view state the orders screen renders — loading, error, empty and loaded — with the orders sorted for display.",
+  "test_command": [
+    "node",
+    "--test",
+    "tests/*.test.ts"
+  ],
+  "modes": {
+    "clean": {
+      "install": [
+        "--architecture-mode",
+        "clean"
+      ]
+    }
+  },
+  "review": {
+    "clean": {
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "tautological-test",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:orders\\.test\\.ts|display order|sortOrdersForDisplay|expected))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:tautolog|same (algorithm|function|sort|implementation|comparator)|recomput|by construction|cannot (fail|catch|detect)|can'?t (fail|catch)|always pass|independent (source|expected|oracle)|literal|derives? (the )?expected|mirror))"
+          }
+        ]
+      },
+      "clean": {
+        "expect": "approve"
+      }
+    }
+  }
+}

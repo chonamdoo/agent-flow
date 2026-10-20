@@ -1,0 +1,34 @@
+{
+  "stack": "webshallow",
+  "profile": "nextjs",
+  "task": "Add the orders list for the account area of the Next.js app: load the signed-in user's orders from GET /api/orders (response {\"orders\": [{\"order_id\", \"state\", \"placed_at\", \"total_cents\"}]}) through an injected getJson(path) transport, and expose the view state the orders screen renders — loading, error, empty and loaded — with the orders sorted for display.",
+  "test_command": [
+    "node",
+    "--test",
+    "tests/*.test.ts"
+  ],
+  "modes": {
+    "clean": {
+      "install": [
+        "--architecture-mode",
+        "clean"
+      ]
+    }
+  },
+  "review": {
+    "clean": {
+      "defect": {
+        "expect": "request-changes",
+        "defects": [
+          {
+            "id": "shallow-pass-through",
+            "pattern": "(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:OrdersService))(?=(?:(?!\\n[ \\t]*\\n)[\\s\\S]){0,320}?(?:pass-?through|shallow|wrapper|forward|delegat|adds? (nothing|no)|no (behavio|value|logic)|indirection|delet|redundant|unnecessary|thin))"
+          }
+        ]
+      },
+      "clean": {
+        "expect": "approve"
+      }
+    }
+  }
+}
