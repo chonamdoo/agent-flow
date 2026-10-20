@@ -160,8 +160,18 @@ before·after를 각각 2회 이상 돌린다. 실행 중 Agent Flow가 실패�
 phase_eval 릴리스 행렬(held-out·위험 사례 포함, Claude·Codex 모두)도 before 이상일 때만 kit 변경을 유지한다. 검사를
 지우거나 PRD를 줄여 통과시키지 않는다. 과제 자체(PRD·검사·fixture)를 고치는 변경은 평가기 변경과 같이 draft로 올린다.
 
-비용·시간(2026-10-20): `ui_task.py run`은 검사 20개 기준 1회 약 10초(`--repeat 3` 약 30초)이고 모델 비용이 없다. 기준
-클론 작성은 Claude 서브에이전트 1회(약 6분, 약 11만 토큰). full-feature 1회의 비용·시간은 첫 실행 후 이 절에 채운다.
+플랫폼: managed reviewer subprocess의 write-sandbox는 macOS `sandbox-exec`만 있다(`docs/USAGE.md`). Linux 컨테이너에서는
+multi-review가 fail closed로 멈추므로(13/24 phase), 리뷰·gates·commit까지 보려면 macOS host에서 돌린다. Linux에서 돌리면
+그 직전까지의 phase와 빌드 점수만 얻는다. 권한 우회 headless(`claude -p --dangerously-skip-permissions`)는 쓰지 않고, 별도
+원격 세션(`create_session`)이나 사람이 연 세션에서 controller로 진행한다.
+
+비용·시간(2026-10-20):
+- `ui_task.py run`: 검사 20개 기준 1회 약 10초(`--repeat 3` 약 30초), 모델 비용 없음.
+- 기준 클론 작성: Claude 서브에이전트 1회(약 6분, 약 11만 토큰).
+- full-feature 1회(Linux 원격 세션, Claude Opus controller, 전체 PRD): 프로젝트 준비 약 4분, 실행 18분 17초(domain-grill →
+  multi-review에서 정지, 13/24 phase), 채점 약 9분. 세션 비용 약 $9.7(출력 약 10.8만 토큰, 캐시 읽기 약 2,700만 토큰,
+  준비·채점 포함). reviewer subprocess는 sandbox 때문에 돌지 않아 그 비용은 0이다. 기록:
+  `maintainer/improvement-history/ui-task-runs/2026-10-20-beauty-store/`(브랜치 `eval/beauty-store-fullfeature-run`).
 
 ## 비용·시간 참고치 (2026-10-20)
 

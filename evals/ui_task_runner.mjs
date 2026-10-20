@@ -26,6 +26,7 @@ const [, , acceptancePath, baseUrl, ...rest] = process.argv;
 const only = rest[0] === "--only" ? rest[1] : null;
 const spec = JSON.parse(readFileSync(acceptancePath, "utf8"));
 const STEP_TIMEOUT = spec.stepTimeoutMs ?? 4000;
+const PAUSE_LEAD_MS = 50;
 
 function locator(page, target) {
   const t = typeof target === "string" ? { testid: target } : target;
@@ -76,10 +77,14 @@ async function runStep(page, step, base) {
   const target = step[kind];
   switch (kind) {
     case "goto":
-      await page.goto(new URL(target, base).toString(), { waitUntil: "domcontentloaded" });
+      // Wait for the network to go quiet so a server-rendered page has hydrated before the first interaction;
+      // otherwise a select or keystroke can land on markup React has not taken over yet and be lost.
+      await page.goto(new URL(target, base).toString(), { waitUntil: "networkidle" });
       return;
     case "pause":
-      await page.clock.pauseAt(await page.evaluate(() => Date.now()));
+      // Pausing at "now" races the still-running clock ("Cannot fast-forward to the past"); a small step ahead
+      // cannot reach any timer a check depends on, since checks start their timed actions after pausing.
+      await page.clock.pauseAt((await page.evaluate(() => Date.now())) + PAUSE_LEAD_MS);
       return;
     case "tick":
       await page.clock.runFor(target);
@@ -109,7 +114,7 @@ async function runStep(page, step, base) {
       await locator(page, target).uncheck({ timeout: STEP_TIMEOUT });
       return;
     case "reload":
-      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.reload({ waitUntil: "networkidle" });
       return;
     case "expectVisible":
       await poll(async () => (await locator(page, target).isVisible()) || "not visible", `${describe(target)} visible`);
