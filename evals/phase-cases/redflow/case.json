@@ -1,0 +1,12 @@
+{
+  "stack": "redflow",
+  "profile": "python",
+  "author_phase": "red",
+  "task": "Add a volume discount to the cart quote: a subtotal of US$100.00 or more gets 10% off, the discount rounded down to the cent. The quote gains a \"discount\" money string (\"0.00\" when none) and the total becomes subtotal minus discount plus shipping; shipping is still decided on the subtotal before the discount.",
+  "test_command": ["python3", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+  "modes": {
+    "clean": {
+      "install": ["--architecture-mode", "clean"]
+    }
+  }
+}
