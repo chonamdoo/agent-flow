@@ -38,8 +38,6 @@ main-thread boundaries.
 ```text
 ## Main-thread review findings
 
-verdict: approve | request-changes
-
 ### Must-fix
 - <severity:high> [path:line] <statement>. Risk: <UI corruption / crash>.
 

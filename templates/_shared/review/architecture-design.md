@@ -56,7 +56,6 @@ framework-specific evidence.
 - <severity:low> ...
 
 ### Overall
-verdict: approve | request-changes
 ```
 
 Cite paths as `path/to/file:line`. If a category is empty, write `none`.

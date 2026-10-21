@@ -54,8 +54,6 @@ build.
 ```text
 ## Rebuild review findings
 
-verdict: approve | request-changes
-
 ### Must-fix
 - <severity:high> [path:line] <statement>. Symptom: <overflow / leak / stale context / jank>.
 

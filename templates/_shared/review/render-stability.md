@@ -65,8 +65,6 @@ during render.
 ```text
 ## Render-stability review findings
 
-verdict: approve | request-changes
-
 ### Must-fix
 - <severity:high> [path:line] <statement>. Symptom: <loop / hydration mismatch / jank>.
 
