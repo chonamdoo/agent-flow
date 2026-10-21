@@ -42,7 +42,7 @@ STEP_KINDS = frozenset({
     "expectAttr", "expectSelectedLabel", "expectValue", "expectUrl", "expectSorted",
 })
 STEP_OPTIONS = frozenset({"nth", "value", "key", "label", "equals", "contains", "matches", "notContains", "eq", "min",
-                          "max", "name", "order", "delay", "hasText", "last"})
+                          "max", "name", "order", "delay", "hasText", "last", "by"})
 TARGETLESS = frozenset({"goto", "pause", "tick", "reload", "expectUrl"})
 SPEC_RE = re.compile(r"^(SPEC-\d+):", re.MULTILINE)
 
@@ -95,7 +95,7 @@ def validate(prd: str, acceptance: dict) -> list[str]:
                 continue
             if kinds[0] in TARGETLESS:
                 continue
-            for testid in step_testids(step[kinds[0]]):
+            for testid in step_testids(step[kinds[0]]) + list(step.get("by", [])):
                 if not any(p.match(testid) for p in patterns):
                     problems.append(f"{cid} step {index}: test id {testid!r} is not in the prd.md contract")
     problems += [f"{spec}: no acceptance check" for spec in specs if spec not in covered]

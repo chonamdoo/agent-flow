@@ -70,6 +70,7 @@ def test_validate_reports_each_kind_of_problem() -> None:
         check("a", "SPEC-9", {"hover": "search-input"}),
         check("c", "SPEC-1", {"expectText": {"testid": "cart-badge", "within": {"testid": "side-panel"}}}),
         check("d", "SPEC-1"),
+        check("e", "SPEC-1", {"expectSorted": "cart-badge", "by": ["search-input", "card-price"], "order": "asc"}),
     ]}
     problems = ui_task.validate(PRD, acceptance)
     assert "a step 0: test id 'buy-now' is not in the prd.md contract" in problems
@@ -78,6 +79,7 @@ def test_validate_reports_each_kind_of_problem() -> None:
     assert any(p.startswith("a step 0: unknown or ambiguous step") for p in problems)
     assert "c step 0: test id 'side-panel' is not in the prd.md contract" in problems
     assert "d: no steps" in problems
+    assert "e step 0: test id 'card-price' is not in the prd.md contract" in problems
     assert "SPEC-2: no acceptance check" in problems
 
 
