@@ -1,0 +1,1520 @@
+{
+ "version": 1,
+ "observed": "2026-10-20",
+ "store": "Store",
+ "constants": {
+  "freeShippingThreshold": 60.0,
+  "flatShipping": 25.0,
+  "maxQty": 10,
+  "pageSizes": [
+   24,
+   36,
+   48
+  ]
+ },
+ "categories": [
+  {
+   "id": "100",
+   "name": "Skincare",
+   "children": [
+    {
+     "id": "110",
+     "name": "Toners",
+     "children": [
+      {
+       "id": "111",
+       "name": "Mists"
+      },
+      {
+       "id": "112",
+       "name": "Pads"
+      }
+     ]
+    },
+    {
+     "id": "120",
+     "name": "Serums",
+     "children": [
+      {
+       "id": "121",
+       "name": "Ampoules"
+      }
+     ]
+    },
+    {
+     "id": "130",
+     "name": "Cleansers"
+    }
+   ]
+  },
+  {
+   "id": "200",
+   "name": "Makeup",
+   "children": [
+    {
+     "id": "210",
+     "name": "Lips",
+     "children": [
+      {
+       "id": "211",
+       "name": "Tints"
+      }
+     ]
+    },
+    {
+     "id": "220",
+     "name": "Face"
+    }
+   ]
+  },
+  {
+   "id": "300",
+   "name": "Hair & Body",
+   "children": [
+    {
+     "id": "310",
+     "name": "Shampoo"
+    },
+    {
+     "id": "320",
+     "name": "Body Lotion"
+    }
+   ]
+  },
+  {
+   "id": "400",
+   "name": "Tools"
+  }
+ ],
+ "products": [
+  {
+   "id": "P001",
+   "name": "Product A Hydrating Toner Mist",
+   "brand": "Brand 1",
+   "categoryId": "111",
+   "originalPrice": 20.0,
+   "salePrice": 16.0,
+   "popularity": 493,
+   "rating": 3.7,
+   "reviewCount": 879,
+   "options": [
+    {
+     "id": "P001-1",
+     "name": "100ml",
+     "originalPrice": 20.0,
+     "salePrice": 16.0,
+     "stock": 50
+    },
+    {
+     "id": "P001-2",
+     "name": "200ml",
+     "originalPrice": 30.0,
+     "salePrice": 24.0,
+     "stock": 3
+    },
+    {
+     "id": "P001-3",
+     "name": "Refill set",
+     "originalPrice": 34.0,
+     "salePrice": 27.2,
+     "stock": 0
+    }
+   ]
+  },
+  {
+   "id": "P002",
+   "name": "Product B Calming Toner Mist",
+   "brand": "Brand 2",
+   "categoryId": "111",
+   "originalPrice": 18.0,
+   "salePrice": 18.0,
+   "popularity": 68,
+   "rating": 3.9,
+   "reviewCount": 92,
+   "options": []
+  },
+  {
+   "id": "P003",
+   "name": "Product C Daily Toner Mist",
+   "brand": "Brand 3",
+   "categoryId": "111",
+   "originalPrice": 30.0,
+   "salePrice": 21.0,
+   "popularity": 158,
+   "rating": 3.7,
+   "reviewCount": 162,
+   "options": []
+  },
+  {
+   "id": "P004",
+   "name": "Product D Mild Toner Mist",
+   "brand": "Brand 8",
+   "categoryId": "111",
+   "originalPrice": 15.99,
+   "salePrice": 11.19,
+   "popularity": 417,
+   "rating": 4.0,
+   "reviewCount": 796,
+   "options": []
+  },
+  {
+   "id": "P005",
+   "name": "Product E Calming Toner Mist",
+   "brand": "Brand 6",
+   "categoryId": "111",
+   "originalPrice": 22.99,
+   "salePrice": 19.54,
+   "popularity": 817,
+   "rating": 4.8,
+   "reviewCount": 209,
+   "options": [
+    {
+     "id": "P005-1",
+     "name": "50ml",
+     "originalPrice": 22.99,
+     "salePrice": 19.54,
+     "stock": 50
+    },
+    {
+     "id": "P005-2",
+     "name": "100ml",
+     "originalPrice": 28.99,
+     "salePrice": 24.64,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P006",
+   "name": "Product F Deep Toner Mist",
+   "brand": "Brand 4",
+   "categoryId": "111",
+   "originalPrice": 12.99,
+   "salePrice": 12.99,
+   "popularity": 477,
+   "rating": 4.9,
+   "reviewCount": 174,
+   "options": []
+  },
+  {
+   "id": "P007",
+   "name": "Product G Brightening Toner Mist",
+   "brand": "Brand 2",
+   "categoryId": "111",
+   "originalPrice": 24.99,
+   "salePrice": 19.99,
+   "popularity": 946,
+   "rating": 3.7,
+   "reviewCount": 97,
+   "options": []
+  },
+  {
+   "id": "P008",
+   "name": "Product H Glow Toner Mist",
+   "brand": "Brand 4",
+   "categoryId": "111",
+   "originalPrice": 22.99,
+   "salePrice": 22.99,
+   "popularity": 7,
+   "rating": 4.4,
+   "reviewCount": 411,
+   "options": []
+  },
+  {
+   "id": "P009",
+   "name": "Product I Glow Toner Mist",
+   "brand": "Brand 3",
+   "categoryId": "111",
+   "originalPrice": 42.99,
+   "salePrice": 34.39,
+   "popularity": 689,
+   "rating": 3.8,
+   "reviewCount": 402,
+   "options": [
+    {
+     "id": "P009-1",
+     "name": "50ml",
+     "originalPrice": 42.99,
+     "salePrice": 34.39,
+     "stock": 50
+    },
+    {
+     "id": "P009-2",
+     "name": "100ml",
+     "originalPrice": 48.99,
+     "salePrice": 39.19,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P010",
+   "name": "Product J Barrier Toner Mist",
+   "brand": "Brand 8",
+   "categoryId": "111",
+   "originalPrice": 18.5,
+   "salePrice": 15.72,
+   "popularity": 432,
+   "rating": 4.2,
+   "reviewCount": 455,
+   "options": []
+  },
+  {
+   "id": "P011",
+   "name": "Product K Hydrating Toner Mist",
+   "brand": "Brand 4",
+   "categoryId": "111",
+   "originalPrice": 22,
+   "salePrice": 22.0,
+   "popularity": 66,
+   "rating": 4.6,
+   "reviewCount": 655,
+   "options": []
+  },
+  {
+   "id": "P012",
+   "name": "Product L Barrier Toner Mist",
+   "brand": "Brand 3",
+   "categoryId": "111",
+   "originalPrice": 42.99,
+   "salePrice": 42.99,
+   "popularity": 51,
+   "rating": 3.8,
+   "reviewCount": 865,
+   "options": []
+  },
+  {
+   "id": "P013",
+   "name": "Product M Deep Toner Mist",
+   "brand": "Brand 3",
+   "categoryId": "111",
+   "originalPrice": 18.5,
+   "salePrice": 14.8,
+   "popularity": 295,
+   "rating": 3.6,
+   "reviewCount": 833,
+   "options": [
+    {
+     "id": "P013-1",
+     "name": "50ml",
+     "originalPrice": 18.5,
+     "salePrice": 14.8,
+     "stock": 50
+    },
+    {
+     "id": "P013-2",
+     "name": "100ml",
+     "originalPrice": 24.5,
+     "salePrice": 19.6,
+     "stock": 50
+    },
+    {
+     "id": "P013-3",
+     "name": "200ml",
+     "originalPrice": 30.5,
+     "salePrice": 24.4,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P014",
+   "name": "Product N Deep Toner Mist",
+   "brand": "Brand 8",
+   "categoryId": "111",
+   "originalPrice": 24.5,
+   "salePrice": 17.15,
+   "popularity": 554,
+   "rating": 4.6,
+   "reviewCount": 388,
+   "options": []
+  },
+  {
+   "id": "P015",
+   "name": "Product O Deep Toner Pad",
+   "brand": "Brand 2",
+   "categoryId": "112",
+   "originalPrice": 36.5,
+   "salePrice": 36.5,
+   "popularity": 274,
+   "rating": 4.9,
+   "reviewCount": 487,
+   "options": []
+  },
+  {
+   "id": "P016",
+   "name": "Product P Calming Toner Pad",
+   "brand": "Brand 7",
+   "categoryId": "112",
+   "originalPrice": 36,
+   "salePrice": 25.2,
+   "popularity": 574,
+   "rating": 4.6,
+   "reviewCount": 599,
+   "options": []
+  },
+  {
+   "id": "P017",
+   "name": "Product Q Deep Toner Pad",
+   "brand": "Brand 3",
+   "categoryId": "112",
+   "originalPrice": 32,
+   "salePrice": 32.0,
+   "popularity": 633,
+   "rating": 3.6,
+   "reviewCount": 310,
+   "options": [
+    {
+     "id": "P017-1",
+     "name": "50ml",
+     "originalPrice": 32,
+     "salePrice": 32.0,
+     "stock": 50
+    },
+    {
+     "id": "P017-2",
+     "name": "100ml",
+     "originalPrice": 38,
+     "salePrice": 38.0,
+     "stock": 50
+    },
+    {
+     "id": "P017-3",
+     "name": "200ml",
+     "originalPrice": 44,
+     "salePrice": 44.0,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P018",
+   "name": "Product R Glow Toner Pad",
+   "brand": "Brand 6",
+   "categoryId": "112",
+   "originalPrice": 36.5,
+   "salePrice": 36.5,
+   "popularity": 55,
+   "rating": 4.7,
+   "reviewCount": 290,
+   "options": []
+  },
+  {
+   "id": "P019",
+   "name": "Product S Deep Toner Pad",
+   "brand": "Brand 3",
+   "categoryId": "112",
+   "originalPrice": 32.99,
+   "salePrice": 26.39,
+   "popularity": 66,
+   "rating": 3.9,
+   "reviewCount": 896,
+   "options": []
+  },
+  {
+   "id": "P020",
+   "name": "Product T Barrier Toner Pad",
+   "brand": "Brand 6",
+   "categoryId": "112",
+   "originalPrice": 12,
+   "salePrice": 12.0,
+   "popularity": 779,
+   "rating": 4.4,
+   "reviewCount": 52,
+   "options": []
+  },
+  {
+   "id": "P021",
+   "name": "Product U Barrier Toner Pad",
+   "brand": "Brand 7",
+   "categoryId": "112",
+   "originalPrice": 42.99,
+   "salePrice": 30.09,
+   "popularity": 107,
+   "rating": 3.8,
+   "reviewCount": 317,
+   "options": [
+    {
+     "id": "P021-1",
+     "name": "50ml",
+     "originalPrice": 42.99,
+     "salePrice": 30.09,
+     "stock": 50
+    },
+    {
+     "id": "P021-2",
+     "name": "100ml",
+     "originalPrice": 48.99,
+     "salePrice": 34.29,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P022",
+   "name": "Product V Deep Toner Pad",
+   "brand": "Brand 3",
+   "categoryId": "112",
+   "originalPrice": 18.5,
+   "salePrice": 12.95,
+   "popularity": 348,
+   "rating": 4.9,
+   "reviewCount": 477,
+   "options": []
+  },
+  {
+   "id": "P023",
+   "name": "Product W Deep Toner Pad",
+   "brand": "Brand 7",
+   "categoryId": "112",
+   "originalPrice": 28,
+   "salePrice": 28.0,
+   "popularity": 752,
+   "rating": 3.9,
+   "reviewCount": 476,
+   "options": []
+  },
+  {
+   "id": "P024",
+   "name": "Product X Deep Toner Pad",
+   "brand": "Brand 1",
+   "categoryId": "112",
+   "originalPrice": 24.5,
+   "salePrice": 22.05,
+   "popularity": 440,
+   "rating": 4.1,
+   "reviewCount": 889,
+   "options": []
+  },
+  {
+   "id": "P025",
+   "name": "Product Y Glow Ampoule",
+   "brand": "Brand 3",
+   "categoryId": "121",
+   "originalPrice": 42,
+   "salePrice": 35.7,
+   "popularity": 147,
+   "rating": 3.7,
+   "reviewCount": 530,
+   "options": [
+    {
+     "id": "P025-1",
+     "name": "50ml",
+     "originalPrice": 42,
+     "salePrice": 35.7,
+     "stock": 50
+    },
+    {
+     "id": "P025-2",
+     "name": "100ml",
+     "originalPrice": 48,
+     "salePrice": 40.8,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P026",
+   "name": "Product Z Daily Ampoule",
+   "brand": "Brand 3",
+   "categoryId": "121",
+   "originalPrice": 12,
+   "salePrice": 9.6,
+   "popularity": 603,
+   "rating": 4.4,
+   "reviewCount": 679,
+   "options": []
+  },
+  {
+   "id": "P027",
+   "name": "Product AA Calming Ampoule",
+   "brand": "Brand 5",
+   "categoryId": "121",
+   "originalPrice": 28,
+   "salePrice": 19.6,
+   "popularity": 30,
+   "rating": 4.1,
+   "reviewCount": 107,
+   "options": []
+  },
+  {
+   "id": "P028",
+   "name": "Product AB Hydrating Ampoule",
+   "brand": "Brand 6",
+   "categoryId": "121",
+   "originalPrice": 18,
+   "salePrice": 15.3,
+   "popularity": 681,
+   "rating": 5.0,
+   "reviewCount": 528,
+   "options": []
+  },
+  {
+   "id": "P029",
+   "name": "Product AC Daily Ampoule",
+   "brand": "Brand 4",
+   "categoryId": "121",
+   "originalPrice": 15.99,
+   "salePrice": 11.19,
+   "popularity": 343,
+   "rating": 3.8,
+   "reviewCount": 263,
+   "options": [
+    {
+     "id": "P029-1",
+     "name": "50ml",
+     "originalPrice": 15.99,
+     "salePrice": 11.19,
+     "stock": 50
+    },
+    {
+     "id": "P029-2",
+     "name": "100ml",
+     "originalPrice": 21.99,
+     "salePrice": 15.39,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P030",
+   "name": "Product AD Hydrating Ampoule",
+   "brand": "Brand 7",
+   "categoryId": "121",
+   "originalPrice": 32.99,
+   "salePrice": 28.04,
+   "popularity": 616,
+   "rating": 3.8,
+   "reviewCount": 123,
+   "options": []
+  },
+  {
+   "id": "P031",
+   "name": "Product AE Hydrating Ampoule",
+   "brand": "Brand 6",
+   "categoryId": "121",
+   "originalPrice": 28,
+   "salePrice": 25.2,
+   "popularity": 808,
+   "rating": 4.4,
+   "reviewCount": 859,
+   "options": []
+  },
+  {
+   "id": "P032",
+   "name": "Product AF Glow Ampoule",
+   "brand": "Brand 4",
+   "categoryId": "121",
+   "originalPrice": 24.5,
+   "salePrice": 19.6,
+   "popularity": 819,
+   "rating": 4.4,
+   "reviewCount": 123,
+   "options": []
+  },
+  {
+   "id": "P033",
+   "name": "Product AG Daily Ampoule",
+   "brand": "Brand 2",
+   "categoryId": "121",
+   "originalPrice": 28.5,
+   "salePrice": 22.8,
+   "popularity": 86,
+   "rating": 4.1,
+   "reviewCount": 662,
+   "options": [
+    {
+     "id": "P033-1",
+     "name": "50ml",
+     "originalPrice": 28.5,
+     "salePrice": 22.8,
+     "stock": 50
+    },
+    {
+     "id": "P033-2",
+     "name": "100ml",
+     "originalPrice": 34.5,
+     "salePrice": 27.6,
+     "stock": 50
+    },
+    {
+     "id": "P033-3",
+     "name": "200ml",
+     "originalPrice": 40.5,
+     "salePrice": 32.4,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P034",
+   "name": "Product AH Calming Ampoule",
+   "brand": "Brand 7",
+   "categoryId": "121",
+   "originalPrice": 18,
+   "salePrice": 18.0,
+   "popularity": 555,
+   "rating": 4.2,
+   "reviewCount": 528,
+   "options": []
+  },
+  {
+   "id": "P035",
+   "name": "Product AI Mild Ampoule",
+   "brand": "Brand 7",
+   "categoryId": "121",
+   "originalPrice": 24.5,
+   "salePrice": 19.6,
+   "popularity": 369,
+   "rating": 4.6,
+   "reviewCount": 799,
+   "options": []
+  },
+  {
+   "id": "P036",
+   "name": "Product AJ Calming Ampoule",
+   "brand": "Brand 3",
+   "categoryId": "121",
+   "originalPrice": 24.5,
+   "salePrice": 24.5,
+   "popularity": 517,
+   "rating": 4.0,
+   "reviewCount": 838,
+   "options": []
+  },
+  {
+   "id": "P037",
+   "name": "Product AK Mild Cleansing Foam",
+   "brand": "Brand 6",
+   "categoryId": "130",
+   "originalPrice": 18.99,
+   "salePrice": 15.19,
+   "popularity": 819,
+   "rating": 4.6,
+   "reviewCount": 495,
+   "options": [
+    {
+     "id": "P037-1",
+     "name": "50ml",
+     "originalPrice": 18.99,
+     "salePrice": 15.19,
+     "stock": 50
+    },
+    {
+     "id": "P037-2",
+     "name": "100ml",
+     "originalPrice": 24.99,
+     "salePrice": 19.99,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P038",
+   "name": "Product AL Barrier Cleansing Foam",
+   "brand": "Brand 3",
+   "categoryId": "130",
+   "originalPrice": 28,
+   "salePrice": 19.6,
+   "popularity": 959,
+   "rating": 4.7,
+   "reviewCount": 402,
+   "options": []
+  },
+  {
+   "id": "P039",
+   "name": "Product AM Deep Cleansing Foam",
+   "brand": "Brand 2",
+   "categoryId": "130",
+   "originalPrice": 18.5,
+   "salePrice": 15.72,
+   "popularity": 298,
+   "rating": 4.7,
+   "reviewCount": 847,
+   "options": []
+  },
+  {
+   "id": "P040",
+   "name": "Product AN Daily Cleansing Foam",
+   "brand": "Brand 3",
+   "categoryId": "130",
+   "originalPrice": 28.5,
+   "salePrice": 19.95,
+   "popularity": 449,
+   "rating": 4.0,
+   "reviewCount": 783,
+   "options": []
+  },
+  {
+   "id": "P041",
+   "name": "Product AO Barrier Cleansing Foam",
+   "brand": "Brand 8",
+   "categoryId": "130",
+   "originalPrice": 18,
+   "salePrice": 14.4,
+   "popularity": 760,
+   "rating": 4.2,
+   "reviewCount": 259,
+   "options": [
+    {
+     "id": "P041-1",
+     "name": "50ml",
+     "originalPrice": 18,
+     "salePrice": 14.4,
+     "stock": 50
+    },
+    {
+     "id": "P041-2",
+     "name": "100ml",
+     "originalPrice": 24,
+     "salePrice": 19.2,
+     "stock": 50
+    },
+    {
+     "id": "P041-3",
+     "name": "200ml",
+     "originalPrice": 30,
+     "salePrice": 24.0,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P042",
+   "name": "Product AP Clear Cleansing Foam",
+   "brand": "Brand 1",
+   "categoryId": "130",
+   "originalPrice": 32.99,
+   "salePrice": 26.39,
+   "popularity": 895,
+   "rating": 4.4,
+   "reviewCount": 128,
+   "options": []
+  },
+  {
+   "id": "P043",
+   "name": "Product AQ Glow Cleansing Foam",
+   "brand": "Brand 7",
+   "categoryId": "130",
+   "originalPrice": 15.5,
+   "salePrice": 13.95,
+   "popularity": 468,
+   "rating": 5.0,
+   "reviewCount": 833,
+   "options": []
+  },
+  {
+   "id": "P044",
+   "name": "Product AR Barrier Cleansing Foam",
+   "brand": "Brand 3",
+   "categoryId": "130",
+   "originalPrice": 42,
+   "salePrice": 33.6,
+   "popularity": 778,
+   "rating": 4.6,
+   "reviewCount": 80,
+   "options": []
+  },
+  {
+   "id": "P045",
+   "name": "Product AS Barrier Cleansing Foam",
+   "brand": "Brand 8",
+   "categoryId": "130",
+   "originalPrice": 28,
+   "salePrice": 23.8,
+   "popularity": 889,
+   "rating": 4.5,
+   "reviewCount": 309,
+   "options": [
+    {
+     "id": "P045-1",
+     "name": "50ml",
+     "originalPrice": 28,
+     "salePrice": 23.8,
+     "stock": 50
+    },
+    {
+     "id": "P045-2",
+     "name": "100ml",
+     "originalPrice": 34,
+     "salePrice": 28.9,
+     "stock": 50
+    },
+    {
+     "id": "P045-3",
+     "name": "200ml",
+     "originalPrice": 40,
+     "salePrice": 34.0,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P046",
+   "name": "Product AT Clear Cleansing Foam",
+   "brand": "Brand 5",
+   "categoryId": "130",
+   "originalPrice": 28.99,
+   "salePrice": 28.99,
+   "popularity": 654,
+   "rating": 5.0,
+   "reviewCount": 482,
+   "options": []
+  },
+  {
+   "id": "P047",
+   "name": "Product AU Barrier Cleansing Foam",
+   "brand": "Brand 2",
+   "categoryId": "130",
+   "originalPrice": 36.99,
+   "salePrice": 31.44,
+   "popularity": 174,
+   "rating": 4.4,
+   "reviewCount": 182,
+   "options": []
+  },
+  {
+   "id": "P048",
+   "name": "Product AV Brightening Cleansing Foam",
+   "brand": "Brand 7",
+   "categoryId": "130",
+   "originalPrice": 24,
+   "salePrice": 21.6,
+   "popularity": 691,
+   "rating": 3.8,
+   "reviewCount": 57,
+   "options": []
+  },
+  {
+   "id": "P049",
+   "name": "Product AW Daily Cleansing Foam",
+   "brand": "Brand 7",
+   "categoryId": "130",
+   "originalPrice": 12.5,
+   "salePrice": 8.75,
+   "popularity": 347,
+   "rating": 3.8,
+   "reviewCount": 724,
+   "options": [
+    {
+     "id": "P049-1",
+     "name": "50ml",
+     "originalPrice": 12.5,
+     "salePrice": 8.75,
+     "stock": 50
+    },
+    {
+     "id": "P049-2",
+     "name": "100ml",
+     "originalPrice": 18.5,
+     "salePrice": 12.95,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P050",
+   "name": "Product AX Soft Cleansing Foam",
+   "brand": "Brand 1",
+   "categoryId": "130",
+   "originalPrice": 28.99,
+   "salePrice": 26.09,
+   "popularity": 254,
+   "rating": 4.2,
+   "reviewCount": 814,
+   "options": []
+  },
+  {
+   "id": "P051",
+   "name": "Product AY Soft Cleansing Foam",
+   "brand": "Brand 3",
+   "categoryId": "130",
+   "originalPrice": 28.5,
+   "salePrice": 22.8,
+   "popularity": 20,
+   "rating": 4.8,
+   "reviewCount": 234,
+   "options": []
+  },
+  {
+   "id": "P052",
+   "name": "Product AZ Calming Cleansing Foam",
+   "brand": "Brand 5",
+   "categoryId": "130",
+   "originalPrice": 42.5,
+   "salePrice": 34.0,
+   "popularity": 750,
+   "rating": 4.5,
+   "reviewCount": 638,
+   "options": []
+  },
+  {
+   "id": "P053",
+   "name": "Product BA Calming Lip Tint",
+   "brand": "Brand 6",
+   "categoryId": "211",
+   "originalPrice": 22.99,
+   "salePrice": 22.99,
+   "popularity": 960,
+   "rating": 3.9,
+   "reviewCount": 198,
+   "options": [
+    {
+     "id": "P053-1",
+     "name": "50ml",
+     "originalPrice": 22.99,
+     "salePrice": 22.99,
+     "stock": 50
+    },
+    {
+     "id": "P053-2",
+     "name": "100ml",
+     "originalPrice": 28.99,
+     "salePrice": 28.99,
+     "stock": 50
+    },
+    {
+     "id": "P053-3",
+     "name": "200ml",
+     "originalPrice": 34.99,
+     "salePrice": 34.99,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P054",
+   "name": "Product BB Clear Lip Tint",
+   "brand": "Brand 7",
+   "categoryId": "211",
+   "originalPrice": 12,
+   "salePrice": 9.6,
+   "popularity": 14,
+   "rating": 4.0,
+   "reviewCount": 601,
+   "options": []
+  },
+  {
+   "id": "P055",
+   "name": "Product BC Calming Lip Tint",
+   "brand": "Brand 6",
+   "categoryId": "211",
+   "originalPrice": 12.5,
+   "salePrice": 10.0,
+   "popularity": 894,
+   "rating": 4.0,
+   "reviewCount": 706,
+   "options": []
+  },
+  {
+   "id": "P056",
+   "name": "Product BD Soft Lip Tint",
+   "brand": "Brand 2",
+   "categoryId": "211",
+   "originalPrice": 12.5,
+   "salePrice": 8.75,
+   "popularity": 445,
+   "rating": 4.9,
+   "reviewCount": 63,
+   "options": []
+  },
+  {
+   "id": "P057",
+   "name": "Product BE Daily Lip Tint",
+   "brand": "Brand 4",
+   "categoryId": "211",
+   "originalPrice": 22.5,
+   "salePrice": 22.5,
+   "popularity": 504,
+   "rating": 4.9,
+   "reviewCount": 109,
+   "options": [
+    {
+     "id": "P057-1",
+     "name": "50ml",
+     "originalPrice": 22.5,
+     "salePrice": 22.5,
+     "stock": 50
+    },
+    {
+     "id": "P057-2",
+     "name": "100ml",
+     "originalPrice": 28.5,
+     "salePrice": 28.5,
+     "stock": 50
+    },
+    {
+     "id": "P057-3",
+     "name": "200ml",
+     "originalPrice": 34.5,
+     "salePrice": 34.5,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P058",
+   "name": "Product BF Calming Lip Tint",
+   "brand": "Brand 4",
+   "categoryId": "211",
+   "originalPrice": 18,
+   "salePrice": 18.0,
+   "popularity": 472,
+   "rating": 3.8,
+   "reviewCount": 43,
+   "options": []
+  },
+  {
+   "id": "P059",
+   "name": "Product BG Daily Lip Tint",
+   "brand": "Brand 4",
+   "categoryId": "211",
+   "originalPrice": 28,
+   "salePrice": 19.6,
+   "popularity": 319,
+   "rating": 4.8,
+   "reviewCount": 61,
+   "options": []
+  },
+  {
+   "id": "P060",
+   "name": "Product BH Hydrating Lip Tint",
+   "brand": "Brand 3",
+   "categoryId": "211",
+   "originalPrice": 22.99,
+   "salePrice": 18.39,
+   "popularity": 598,
+   "rating": 4.7,
+   "reviewCount": 290,
+   "options": []
+  },
+  {
+   "id": "P061",
+   "name": "Product BI Deep Lip Tint",
+   "brand": "Brand 1",
+   "categoryId": "211",
+   "originalPrice": 36.99,
+   "salePrice": 31.44,
+   "popularity": 777,
+   "rating": 4.2,
+   "reviewCount": 819,
+   "options": [
+    {
+     "id": "P061-1",
+     "name": "50ml",
+     "originalPrice": 36.99,
+     "salePrice": 31.44,
+     "stock": 50
+    },
+    {
+     "id": "P061-2",
+     "name": "100ml",
+     "originalPrice": 42.99,
+     "salePrice": 36.54,
+     "stock": 50
+    },
+    {
+     "id": "P061-3",
+     "name": "200ml",
+     "originalPrice": 48.99,
+     "salePrice": 41.64,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P062",
+   "name": "Product BJ Glow Cushion",
+   "brand": "Brand 3",
+   "categoryId": "220",
+   "originalPrice": 32.5,
+   "salePrice": 27.62,
+   "popularity": 520,
+   "rating": 4.2,
+   "reviewCount": 460,
+   "options": []
+  },
+  {
+   "id": "P063",
+   "name": "Product BK Calming Cushion",
+   "brand": "Brand 4",
+   "categoryId": "220",
+   "originalPrice": 12.5,
+   "salePrice": 10.62,
+   "popularity": 163,
+   "rating": 4.2,
+   "reviewCount": 291,
+   "options": []
+  },
+  {
+   "id": "P064",
+   "name": "Product BL Hydrating Cushion",
+   "brand": "Brand 7",
+   "categoryId": "220",
+   "originalPrice": 12.99,
+   "salePrice": 12.99,
+   "popularity": 446,
+   "rating": 3.9,
+   "reviewCount": 117,
+   "options": []
+  },
+  {
+   "id": "P065",
+   "name": "Product BM Barrier Cushion",
+   "brand": "Brand 3",
+   "categoryId": "220",
+   "originalPrice": 15.99,
+   "salePrice": 12.79,
+   "popularity": 641,
+   "rating": 4.9,
+   "reviewCount": 333,
+   "options": [
+    {
+     "id": "P065-1",
+     "name": "50ml",
+     "originalPrice": 15.99,
+     "salePrice": 12.79,
+     "stock": 50
+    },
+    {
+     "id": "P065-2",
+     "name": "100ml",
+     "originalPrice": 21.99,
+     "salePrice": 17.59,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P066",
+   "name": "Product BN Mild Cushion",
+   "brand": "Brand 6",
+   "categoryId": "220",
+   "originalPrice": 28,
+   "salePrice": 22.4,
+   "popularity": 6,
+   "rating": 4.0,
+   "reviewCount": 329,
+   "options": []
+  },
+  {
+   "id": "P067",
+   "name": "Product BO Soft Cushion",
+   "brand": "Brand 2",
+   "categoryId": "220",
+   "originalPrice": 28.99,
+   "salePrice": 20.29,
+   "popularity": 668,
+   "rating": 3.9,
+   "reviewCount": 38,
+   "options": []
+  },
+  {
+   "id": "P068",
+   "name": "Product BP Glow Cushion",
+   "brand": "Brand 8",
+   "categoryId": "220",
+   "originalPrice": 12,
+   "salePrice": 12.0,
+   "popularity": 19,
+   "rating": 4.5,
+   "reviewCount": 35,
+   "options": []
+  },
+  {
+   "id": "P069",
+   "name": "Product BQ Calming Shampoo",
+   "brand": "Brand 1",
+   "categoryId": "310",
+   "originalPrice": 36,
+   "salePrice": 36.0,
+   "popularity": 133,
+   "rating": 4.3,
+   "reviewCount": 513,
+   "options": [
+    {
+     "id": "P069-1",
+     "name": "50ml",
+     "originalPrice": 36,
+     "salePrice": 36.0,
+     "stock": 50
+    },
+    {
+     "id": "P069-2",
+     "name": "100ml",
+     "originalPrice": 42,
+     "salePrice": 42.0,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P070",
+   "name": "Product BR Daily Shampoo",
+   "brand": "Brand 4",
+   "categoryId": "310",
+   "originalPrice": 22,
+   "salePrice": 19.8,
+   "popularity": 402,
+   "rating": 4.5,
+   "reviewCount": 666,
+   "options": []
+  },
+  {
+   "id": "P071",
+   "name": "Product BS Daily Shampoo",
+   "brand": "Brand 3",
+   "categoryId": "310",
+   "originalPrice": 42.5,
+   "salePrice": 29.75,
+   "popularity": 656,
+   "rating": 3.8,
+   "reviewCount": 612,
+   "options": []
+  },
+  {
+   "id": "P072",
+   "name": "Product BT Deep Shampoo",
+   "brand": "Brand 1",
+   "categoryId": "310",
+   "originalPrice": 32.5,
+   "salePrice": 27.62,
+   "popularity": 365,
+   "rating": 4.3,
+   "reviewCount": 572,
+   "options": []
+  },
+  {
+   "id": "P073",
+   "name": "Product BU Mild Shampoo",
+   "brand": "Brand 6",
+   "categoryId": "310",
+   "originalPrice": 12.99,
+   "salePrice": 10.39,
+   "popularity": 975,
+   "rating": 3.7,
+   "reviewCount": 196,
+   "options": [
+    {
+     "id": "P073-1",
+     "name": "50ml",
+     "originalPrice": 12.99,
+     "salePrice": 10.39,
+     "stock": 50
+    },
+    {
+     "id": "P073-2",
+     "name": "100ml",
+     "originalPrice": 18.99,
+     "salePrice": 15.19,
+     "stock": 50
+    },
+    {
+     "id": "P073-3",
+     "name": "200ml",
+     "originalPrice": 24.99,
+     "salePrice": 19.99,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P074",
+   "name": "Product BV Calming Shampoo",
+   "brand": "Brand 1",
+   "categoryId": "310",
+   "originalPrice": 22.99,
+   "salePrice": 18.39,
+   "popularity": 434,
+   "rating": 4.7,
+   "reviewCount": 814,
+   "options": []
+  },
+  {
+   "id": "P075",
+   "name": "Product BW Hydrating Body Lotion",
+   "brand": "Brand 1",
+   "categoryId": "320",
+   "originalPrice": 42.99,
+   "salePrice": 38.69,
+   "popularity": 535,
+   "rating": 3.7,
+   "reviewCount": 406,
+   "options": []
+  },
+  {
+   "id": "P076",
+   "name": "Product BX Calming Body Lotion",
+   "brand": "Brand 6",
+   "categoryId": "320",
+   "originalPrice": 12,
+   "salePrice": 10.8,
+   "popularity": 116,
+   "rating": 4.9,
+   "reviewCount": 803,
+   "options": []
+  },
+  {
+   "id": "P077",
+   "name": "Product BY Glow Body Lotion",
+   "brand": "Brand 6",
+   "categoryId": "320",
+   "originalPrice": 42,
+   "salePrice": 42.0,
+   "popularity": 456,
+   "rating": 4.3,
+   "reviewCount": 709,
+   "options": [
+    {
+     "id": "P077-1",
+     "name": "50ml",
+     "originalPrice": 42,
+     "salePrice": 42.0,
+     "stock": 50
+    },
+    {
+     "id": "P077-2",
+     "name": "100ml",
+     "originalPrice": 48,
+     "salePrice": 48.0,
+     "stock": 50
+    }
+   ]
+  },
+  {
+   "id": "P078",
+   "name": "Product BZ Soft Body Lotion",
+   "brand": "Brand 6",
+   "categoryId": "320",
+   "originalPrice": 15.99,
+   "salePrice": 12.79,
+   "popularity": 425,
+   "rating": 4.9,
+   "reviewCount": 612,
+   "options": []
+  },
+  {
+   "id": "P079",
+   "name": "Product CA Barrier Body Lotion",
+   "brand": "Brand 5",
+   "categoryId": "320",
+   "originalPrice": 15.99,
+   "salePrice": 12.79,
+   "popularity": 955,
+   "rating": 4.3,
+   "reviewCount": 772,
+   "options": []
+  }
+ ],
+ "popularSearches": [
+  "toner",
+  "sunscreen",
+  "serum",
+  "cleanser",
+  "lip tint",
+  "cushion",
+  "ampoule",
+  "pad",
+  "mist",
+  "shampoo"
+ ],
+ "hero": [
+  {
+   "id": "H1",
+   "title": "New season skincare",
+   "color": "#d8e6d0"
+  },
+  {
+   "id": "H2",
+   "title": "Lip colour week",
+   "color": "#f2d4d7"
+  },
+  {
+   "id": "H3",
+   "title": "Hair care picks",
+   "color": "#d6e1f0"
+  },
+  {
+   "id": "H4",
+   "title": "Free shipping over $60",
+   "color": "#f4ead2"
+  }
+ ],
+ "rails": [
+  {
+   "id": "best-sellers",
+   "title": "Best Sellers",
+   "ranked": true,
+   "productIds": [
+    "P073",
+    "P053",
+    "P038",
+    "P079",
+    "P007",
+    "P042",
+    "P055",
+    "P045",
+    "P032",
+    "P037",
+    "P005",
+    "P031"
+   ]
+  },
+  {
+   "id": "new-arrivals",
+   "title": "New Arrivals",
+   "ranked": false,
+   "productIds": [
+    "P070",
+    "P071",
+    "P072",
+    "P073",
+    "P074",
+    "P075",
+    "P076",
+    "P077",
+    "P078",
+    "P079"
+   ]
+  }
+ ],
+ "locations": [
+  {
+   "id": "GLOBAL",
+   "name": "Global (Select Location)",
+   "shippable": false,
+   "currency": null
+  },
+  {
+   "id": "US",
+   "name": "United States",
+   "shippable": true,
+   "currency": "USD"
+  },
+  {
+   "id": "CA",
+   "name": "Canada",
+   "shippable": true,
+   "currency": "CAD"
+  },
+  {
+   "id": "AU",
+   "name": "Australia",
+   "shippable": true,
+   "currency": "AUD"
+  },
+  {
+   "id": "JP",
+   "name": "Japan",
+   "shippable": true,
+   "currency": "JPY"
+  }
+ ],
+ "currencies": [
+  "USD",
+  "CAD",
+  "AUD",
+  "JPY",
+  "EUR"
+ ]
+}

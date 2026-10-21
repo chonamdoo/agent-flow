@@ -1,0 +1,32 @@
+# Green phase — Store
+
+Implemented slices 1–7 in order with the FSD layout from ddd-design.md:
+- shared: `shared/lib/money.ts`, `shared/lib/storage.ts`
+- entities: `entities/catalog/model/catalog.ts` (typed fixture, category tree/path/subtree, price display, max quantity), `entities/catalog/ui/ProductCard.tsx` (+ `PriceView`)
+- features: `features/cart/model/{cart.ts,CartProvider.tsx}`, `features/shipping-prefs/model/PrefsProvider.tsx`, `features/shipping-prefs/ui/PrefsDialog.tsx`, `features/search/model/{search.ts,useRecentSearches.ts}`, `features/search/ui/SearchBox.tsx`, `features/listing/model/listing.ts`
+- widgets: header, hero-carousel, rail, category-listing, product-detail, cart-view
+- app: `layout.tsx` (Providers + Header), `providers.tsx`, `page.tsx`, `category/[categoryId]`, `product/[productId]`, `cart`, `search` (+ `SearchQuery.tsx`), `checkout` placeholder, `globals.css`
+
+Decisions kept from the plan: storage keys `store.cart`/`store.recent`/`store.prefs`, read after mount; money `$x.xx`;
+currency is a preference only; checkout → `/checkout` placeholder. Products without options have no `stock` in the fixture,
+so their max quantity is 10 (`min(10, stock)` with stock unbounded) — recorded as an interpretation of SPEC-5.
+
+Commands (all through `agent-flow run-command --`):
+- `npm test` → exit 0 — Test Files 11 passed (11), Tests 50 passed (50)
+- `npm test -- <spec stem>` for each of spec1-header-search … spec11-persistence → exit 0 each
+- `npm run lint` (tsc --noEmit) → exit 0
+- `npm run build` → exit 0 (routes /, /cart, /category/[categoryId], /checkout, /product/[productId], /search)
+
+## Completion Gate
+skills_checked: true
+profile-skill-selection: applied
+active-profiles: nextjs
+changed-file-skill-resolution: applied
+required-profile-skills: checked
+missing-required-profile-skills: none
+skill-availability: pass
+skill-use-evidence: verified
+architecture-contract: applied
+project-local-skills: checked
+project-local-skills-used: code-generation-discipline, tdd, codebase-design, react-app-shell-error-handling, react-development-guide, typescript-development-guide, react-fsd-architecture, app-shell-error-contract, write-for-work
+project-local-skill-docs: applied

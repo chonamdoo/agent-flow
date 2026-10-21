@@ -1,0 +1,83 @@
+{"details": {"phase": "domain-grill", "phase_index": 0}, "event": "phase_entered", "ts": "2026-10-20T20:59:37.527430+00:00"}
+{"details": {"payload_bytes": 7117, "payload_path": "context/tool_outputs/prompt-domain-grill-8893eb222cc3.txt", "payload_sha256": "8893eb222cc3914dae80bfd42471f1ace1ef964bc81ccb7955b01fef041dcde6", "phase": "domain-grill"}, "event": "prompt_rendered", "ts": "2026-10-20T20:59:42.531587+00:00"}
+{"details": {"phase": "domain-grill", "reason": "missing_phase_artifact", "required_artifact": "artifacts/domain-grill.md", "status": "awaiting_host"}, "event": "validation_failed", "ts": "2026-10-20T20:59:43.808203+00:00"}
+{"details": {"phase": "domain-grill", "phase_index": 0}, "event": "phase_entered", "ts": "2026-10-20T21:00:25.753159+00:00"}
+{"details": {"phase": "domain-grill", "reason": "phase_approval_required", "required_artifact": "artifacts/domain-grill.md", "status": "blocked"}, "event": "validation_failed", "ts": "2026-10-20T21:00:25.959079+00:00"}
+{"details": {"phase": "domain-grill", "phase_index": 0}, "event": "phase_entered", "ts": "2026-10-20T21:00:33.984944+00:00"}
+{"details": {"blocked": false, "invalidated": [], "phase": "domain-grill", "route_key": "none", "to_phase": "product-brief"}, "event": "phase_exited", "ts": "2026-10-20T21:00:34.239668+00:00"}
+{"details": {"phase": "product-brief", "phase_index": 1}, "event": "phase_entered", "ts": "2026-10-20T21:00:34.355287+00:00"}
+{"details": {"payload_bytes": 4804, "payload_path": "context/tool_outputs/prompt-product-brief-357870587fb7.txt", "payload_sha256": "357870587fb747cde148157d86ad6ee44cb84a24be82c992fdd22260bd59ec8d", "phase": "product-brief"}, "event": "prompt_rendered", "ts": "2026-10-20T21:00:35.788528+00:00"}
+{"details": {"phase": "product-brief", "reason": "missing_phase_artifact", "required_artifact": "artifacts/product-brief.md", "status": "awaiting_host"}, "event": "validation_failed", "ts": "2026-10-20T21:00:37.052609+00:00"}
+{"details": {"phase": "product-brief", "phase_index": 1}, "event": "phase_entered", "ts": "2026-10-20T21:00:51.134905+00:00"}
+{"details": {"blocked": false, "invalidated": [], "phase": "product-brief", "route_key": "none", "to_phase": "prd"}, "event": "phase_exited", "ts": "2026-10-20T21:00:51.275895+00:00"}
+{"details": {"phase": "prd", "phase_index": 2}, "event": "phase_entered", "ts": "2026-10-20T21:00:51.355704+00:00"}
+{"details": {"payload_bytes": 8146, "payload_path": "context/tool_outputs/prompt-prd-c489f87dc704.txt", "payload_sha256": "c489f87dc704bafc45fd30db2422e9a9346ad6dc1d4d0641d143cb9af06fdf35", "phase": "prd"}, "event": "prompt_rendered", "ts": "2026-10-20T21:00:52.674048+00:00"}
+{"details": {"phase": "prd", "reason": "missing_phase_artifact", "required_artifact": "artifacts/prd.md", "status": "awaiting_host"}, "event": "validation_failed", "ts": "2026-10-20T21:00:53.981751+00:00"}
+{"details": {"phase": "prd", "phase_index": 2}, "event": "phase_entered", "ts": "2026-10-20T21:01:55.980056+00:00"}
+{"details": {"phase": "prd", "reason": "missing_completion_markers", "required_artifact": "artifacts/prd.md", "status": "blocked"}, "event": "validation_failed", "ts": "2026-10-20T21:01:56.148172+00:00"}
+{"details": {"phase": "prd", "phase_index": 2}, "event": "phase_entered", "ts": "2026-10-20T21:02:20.036415+00:00"}
+{"details": {"phase": "prd", "reason": "phase_approval_required", "required_artifact": "artifacts/prd.md", "status": "blocked"}, "event": "validation_failed", "ts": "2026-10-20T21:02:20.229098+00:00"}
+{"details": {"phase": "prd", "phase_index": 2}, "event": "phase_entered", "ts": "2026-10-20T21:02:28.561731+00:00"}
+{"details": {"blocked": false, "invalidated": [], "phase": "prd", "route_key": "none", "to_phase": "slice-plan"}, "event": "phase_exited", "ts": "2026-10-20T21:02:28.783792+00:00"}
+{"details": {"phase": "slice-plan", "phase_index": 3}, "event": "phase_entered", "ts": "2026-10-20T21:02:28.889183+00:00"}
+{"details": {"payload_bytes": 11556, "payload_path": "context/tool_outputs/prompt-slice-plan-23d936148410.txt", "payload_sha256": "23d936148410b05ea1c465e79e4cb6e2cddfecad4c8b3910e07c75693a2def2e", "phase": "slice-plan"}, "event": "prompt_rendered", "ts": "2026-10-20T21:02:30.229038+00:00"}
+{"details": {"phase": "slice-plan", "reason": "missing_phase_artifact", "required_artifact": "artifacts/slice-plan.md", "status": "awaiting_host"}, "event": "validation_failed", "ts": "2026-10-20T21:02:31.491932+00:00"}
+{"details": {"phase": "slice-plan", "phase_index": 3}, "event": "phase_entered", "ts": "2026-10-20T21:03:05.276343+00:00"}
+{"details": {"blocked": false, "invalidated": [], "phase": "slice-plan", "route_key": "none", "to_phase": "plan-review"}, "event": "phase_exited", "ts": "2026-10-20T21:03:05.458326+00:00"}
+{"details": {"phase": "plan-review", "phase_index": 4}, "event": "phase_entered", "ts": "2026-10-20T21:03:05.571600+00:00"}
+{"details": {"payload_bytes": 12153, "payload_path": "context/tool_outputs/prompt-plan-review-b3723d4be306.txt", "payload_sha256": "b3723d4be306fd7047d2abe443eee76c2fb501d72aeea47a4fe503a4323139b2", "phase": "plan-review"}, "event": "prompt_rendered", "ts": "2026-10-20T21:03:06.983603+00:00"}
+{"details": {"phase": "plan-review", "reason": "missing_phase_artifact", "required_artifact": "artifacts/plan-review.md", "status": "awaiting_host"}, "event": "validation_failed", "ts": "2026-10-20T21:03:08.387023+00:00"}
+{"details": {"phase": "plan-review", "phase_index": 4}, "event": "phase_entered", "ts": "2026-10-20T21:03:20.776011+00:00"}
+{"details": {"blocked": false, "invalidated": [], "phase": "plan-review", "route_key": "approve", "to_phase": "ddd-design"}, "event": "phase_exited", "ts": "2026-10-20T21:03:20.915046+00:00"}
+{"details": {"phase": "ddd-design", "phase_index": 5}, "event": "phase_entered", "ts": "2026-10-20T21:03:21.025424+00:00"}
+{"details": {"payload_bytes": 14821, "payload_path": "context/tool_outputs/prompt-ddd-design-197207e797bc.txt", "payload_sha256": "197207e797bc3bc4bcd634053de8b4feb61eebb02da3010de0834c682f8f47c0", "phase": "ddd-design"}, "event": "prompt_rendered", "ts": "2026-10-20T21:03:22.333533+00:00"}
+{"details": {"phase": "ddd-design", "reason": "missing_phase_artifact", "required_artifact": "artifacts/ddd-design.md", "status": "awaiting_host"}, "event": "validation_failed", "ts": "2026-10-20T21:03:23.675736+00:00"}
+{"details": {"phase": "ddd-design", "phase_index": 5}, "event": "phase_entered", "ts": "2026-10-20T21:04:36.374001+00:00"}
+{"details": {"blocked": false, "invalidated": [], "phase": "ddd-design", "route_key": "none", "to_phase": "worktree"}, "event": "phase_exited", "ts": "2026-10-20T21:04:36.604368+00:00"}
+{"details": {"phase": "worktree", "phase_index": 6}, "event": "phase_entered", "ts": "2026-10-20T21:04:36.731880+00:00"}
+{"details": {"payload_bytes": 11618, "payload_path": "context/tool_outputs/prompt-worktree-f9f8fda38211.txt", "payload_sha256": "f9f8fda38211d9cdbd5fd1448ede41f9d9fa1263980b61a90730acaf7b8dc426", "phase": "worktree"}, "event": "prompt_rendered", "ts": "2026-10-20T21:04:38.143533+00:00"}
+{"details": {"phase": "worktree", "reason": "missing_phase_artifact", "required_artifact": "artifacts/worktree.md", "status": "awaiting_host"}, "event": "validation_failed", "ts": "2026-10-20T21:04:39.556745+00:00"}
+{"details": {"phase": "worktree", "phase_index": 6}, "event": "phase_entered", "ts": "2026-10-20T21:05:30.338775+00:00"}
+{"details": {"blocked": false, "invalidated": [], "phase": "worktree", "route_key": "none", "to_phase": "run-start"}, "event": "phase_exited", "ts": "2026-10-20T21:05:30.510288+00:00"}
+{"details": {"phase": "run-start", "phase_index": 7}, "event": "phase_entered", "ts": "2026-10-20T21:05:30.602725+00:00"}
+{"details": {"payload_bytes": 11097, "payload_path": "context/tool_outputs/prompt-run-start-2b385e5badb9.txt", "payload_sha256": "2b385e5badb96f4d17b385f2bd6e4cc51293ff3f87e63ed8580d3d64e24df3a2", "phase": "run-start"}, "event": "prompt_rendered", "ts": "2026-10-20T21:05:31.886623+00:00"}
+{"details": {"phase": "run-start", "reason": "missing_phase_artifact", "required_artifact": "artifacts/run-start.md", "status": "awaiting_host"}, "event": "validation_failed", "ts": "2026-10-20T21:05:33.060716+00:00"}
+{"details": {"phase": "run-start", "phase_index": 7}, "event": "phase_entered", "ts": "2026-10-20T21:05:43.783247+00:00"}
+{"details": {"blocked": false, "invalidated": [], "phase": "run-start", "route_key": "none", "to_phase": "red"}, "event": "phase_exited", "ts": "2026-10-20T21:05:44.595431+00:00"}
+{"details": {"phase": "red", "phase_index": 8}, "event": "phase_entered", "ts": "2026-10-20T21:05:44.742977+00:00"}
+{"details": {"payload_bytes": 17158, "payload_path": "context/tool_outputs/prompt-red-6f1c4c9af656.txt", "payload_sha256": "6f1c4c9af65616fc565c87ad1c77f32a8c2ebef5b1bad6b612904a20f7b9e0d6", "phase": "red"}, "event": "prompt_rendered", "ts": "2026-10-20T21:05:46.376570+00:00"}
+{"details": {"phase": "red", "reason": "missing_phase_artifact", "required_artifact": "artifacts/red.log", "status": "awaiting_host"}, "event": "validation_failed", "ts": "2026-10-20T21:05:47.843006+00:00"}
+{"details": {"phase": "red", "phase_index": 8}, "event": "phase_entered", "ts": "2026-10-20T21:09:44.697735+00:00"}
+{"details": {"phase": "red", "reason": "skill_scope_grew", "required_artifact": "artifacts/red.log", "status": "blocked"}, "event": "validation_failed", "ts": "2026-10-20T21:09:44.937844+00:00"}
+{"details": {"phase": "red", "phase_index": 8}, "event": "phase_entered", "ts": "2026-10-20T21:10:51.087838+00:00"}
+{"details": {"phase": "red", "reason": "missing_completion_markers", "required_artifact": "artifacts/red.log", "status": "blocked"}, "event": "validation_failed", "ts": "2026-10-20T21:10:51.306109+00:00"}
+{"details": {"phase": "red", "phase_index": 8}, "event": "phase_entered", "ts": "2026-10-20T21:11:00.280862+00:00"}
+{"details": {"blocked": false, "invalidated": [], "phase": "red", "route_key": "none", "to_phase": "green"}, "event": "phase_exited", "ts": "2026-10-20T21:11:00.537774+00:00"}
+{"details": {"phase": "green", "phase_index": 9}, "event": "phase_entered", "ts": "2026-10-20T21:11:00.632389+00:00"}
+{"details": {"payload_bytes": 16211, "payload_path": "context/tool_outputs/prompt-green-2e83ef6a2f98.txt", "payload_sha256": "2e83ef6a2f986f5d0afe90a112afc34f4ea49cd5369d0ec86ec866a6c6400443", "phase": "green"}, "event": "prompt_rendered", "ts": "2026-10-20T21:11:02.114871+00:00"}
+{"details": {"phase": "green", "reason": "missing_phase_artifact", "required_artifact": "artifacts/green.log", "status": "awaiting_host"}, "event": "validation_failed", "ts": "2026-10-20T21:11:03.340683+00:00"}
+{"details": {"phase": "green", "phase_index": 9}, "event": "phase_entered", "ts": "2026-10-20T21:15:40.668999+00:00"}
+{"details": {"phase": "green", "reason": "skill_scope_grew", "required_artifact": "artifacts/green.log", "status": "blocked"}, "event": "validation_failed", "ts": "2026-10-20T21:15:40.815256+00:00"}
+{"details": {"phase": "green", "phase_index": 9}, "event": "phase_entered", "ts": "2026-10-20T21:15:52.312668+00:00"}
+{"details": {"blocked": false, "invalidated": [], "phase": "green", "route_key": "none", "to_phase": "refactor"}, "event": "phase_exited", "ts": "2026-10-20T21:15:52.557479+00:00"}
+{"details": {"phase": "refactor", "phase_index": 10}, "event": "phase_entered", "ts": "2026-10-20T21:15:52.672876+00:00"}
+{"details": {"payload_bytes": 16532, "payload_path": "context/tool_outputs/prompt-refactor-534d9dcfa5c2.txt", "payload_sha256": "534d9dcfa5c2b86c64fa0c1713416caa536c2716e90b4c7f71363d2fbae4ab3c", "phase": "refactor"}, "event": "prompt_rendered", "ts": "2026-10-20T21:15:54.103062+00:00"}
+{"details": {"phase": "refactor", "reason": "missing_phase_artifact", "required_artifact": "artifacts/refactor.md", "status": "awaiting_host"}, "event": "validation_failed", "ts": "2026-10-20T21:15:55.244371+00:00"}
+{"details": {"phase": "refactor", "phase_index": 10}, "event": "phase_entered", "ts": "2026-10-20T21:16:18.073170+00:00"}
+{"details": {"phase": "refactor", "reason": "missing_completion_markers", "required_artifact": "artifacts/refactor.md", "status": "blocked"}, "event": "validation_failed", "ts": "2026-10-20T21:16:18.344871+00:00"}
+{"details": {"phase": "refactor", "phase_index": 10}, "event": "phase_entered", "ts": "2026-10-20T21:16:33.224963+00:00"}
+{"details": {"blocked": false, "invalidated": [], "phase": "refactor", "route_key": "default", "to_phase": "comment-authoring"}, "event": "phase_exited", "ts": "2026-10-20T21:16:33.641199+00:00"}
+{"details": {"phase": "comment-authoring", "phase_index": 11}, "event": "phase_entered", "ts": "2026-10-20T21:16:33.763400+00:00"}
+{"details": {"payload_bytes": 13617, "payload_path": "context/tool_outputs/prompt-comment-authoring-36331699ad1d.txt", "payload_sha256": "36331699ad1d992307713c7a7e6c73676a751199be9cd290f6859e5baa7d0e3f", "phase": "comment-authoring"}, "event": "prompt_rendered", "ts": "2026-10-20T21:16:35.064110+00:00"}
+{"details": {"phase": "comment-authoring", "reason": "missing_phase_artifact", "required_artifact": "artifacts/comment-authoring.md", "status": "awaiting_host"}, "event": "validation_failed", "ts": "2026-10-20T21:16:36.296182+00:00"}
+{"details": {"phase": "comment-authoring", "phase_index": 11}, "event": "phase_entered", "ts": "2026-10-20T21:16:55.171822+00:00"}
+{"details": {"blocked": false, "invalidated": [], "phase": "comment-authoring", "route_key": "default", "to_phase": "multi-review"}, "event": "phase_exited", "ts": "2026-10-20T21:16:55.335225+00:00"}
+{"details": {"phase": "multi-review", "phase_index": 12}, "event": "phase_entered", "ts": "2026-10-20T21:16:55.599321+00:00"}
+{"details": {"payload_bytes": 17969, "payload_path": "context/tool_outputs/prompt-multi-review-reviewer-base-claude-de2e5b6f8786.txt", "payload_sha256": "de2e5b6f878604469af29b74ee57f0440c5ceb69a8d1c685034c9965f344f9fe", "phase": "multi-review"}, "event": "prompt_rendered", "ts": "2026-10-20T21:16:57.290107+00:00"}
+{"details": {"payload_bytes": 17969, "payload_path": "context/tool_outputs/prompt-multi-review-reviewer-base-codex-de2e5b6f8786.txt", "payload_sha256": "de2e5b6f878604469af29b74ee57f0440c5ceb69a8d1c685034c9965f344f9fe", "phase": "multi-review"}, "event": "prompt_rendered", "ts": "2026-10-20T21:16:57.356413+00:00"}
+{"details": {"phase": "multi-review", "phase_index": 12}, "event": "phase_entered", "ts": "2026-10-20T21:17:31.420007+00:00"}
+{"details": {"payload_bytes": 17969, "payload_path": "context/tool_outputs/prompt-multi-review-reviewer-base-claude-de2e5b6f8786.txt", "payload_sha256": "de2e5b6f878604469af29b74ee57f0440c5ceb69a8d1c685034c9965f344f9fe", "phase": "multi-review"}, "event": "prompt_rendered", "ts": "2026-10-20T21:17:32.065703+00:00"}
+{"details": {"payload_bytes": 17969, "payload_path": "context/tool_outputs/prompt-multi-review-reviewer-base-codex-de2e5b6f8786.txt", "payload_sha256": "de2e5b6f878604469af29b74ee57f0440c5ceb69a8d1c685034c9965f344f9fe", "phase": "multi-review"}, "event": "prompt_rendered", "ts": "2026-10-20T21:17:32.135587+00:00"}
+{"details": {"phase": "multi-review", "phase_index": 12}, "event": "phase_entered", "ts": "2026-10-20T21:17:52.927860+00:00"}
+{"details": {"payload_bytes": 17969, "payload_path": "context/tool_outputs/prompt-multi-review-reviewer-base-claude-de2e5b6f8786.txt", "payload_sha256": "de2e5b6f878604469af29b74ee57f0440c5ceb69a8d1c685034c9965f344f9fe", "phase": "multi-review"}, "event": "prompt_rendered", "ts": "2026-10-20T21:17:53.559502+00:00"}
+{"details": {"payload_bytes": 17969, "payload_path": "context/tool_outputs/prompt-multi-review-reviewer-base-codex-de2e5b6f8786.txt", "payload_sha256": "de2e5b6f878604469af29b74ee57f0440c5ceb69a8d1c685034c9965f344f9fe", "phase": "multi-review"}, "event": "prompt_rendered", "ts": "2026-10-20T21:17:53.645212+00:00"}

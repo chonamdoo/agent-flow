@@ -2,7 +2,7 @@
 name: react-native-clean-presentation-architecture
 description: Use when a project selects Clean Architecture for React Native presentation. Apply Context Provider DI and state-holder hooks where warranted by shared dependencies or coupled screen states; review uiState, UiModel mapping, navigation effects, and state-based behavior without imposing them on simple local-state screens.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
-taskTerms: [uistate, ui state, state holder, screen state, navigation effect, presentation layer, view model, viewmodel, 뷰모델, ui 상태, view state, loading state, error state, empty state, 로딩 상태, 에러 상태, 빈 상태]
+taskTerms: [uistate, ui state, state holder, screen state, navigation effect, presentation layer, view model, viewmodel, 뷰모델, ui 상태, view state, loading state, error state, empty state, 로딩 상태, 에러 상태, 빈 상태, skeleton, loading flag, display model, display-ready, 화면용 모델, 표시용 모델, 로딩 플래그, 불러오는 중, 뷰 모델, 화면 모델, list state, data state, loading/error, 로딩/에러, view-model, state hook, 상태 훅]
 pathGlobs: ["**/*UiState.ts", "**/*UiState.tsx", "**/presentation/**"]
 requires: [clean-architecture-core, react-native-clean-architecture]
 ---

@@ -1,0 +1,190 @@
+native agent-flow skill instructions provisioned: .agents/skills/agent-flow/SKILL.md, .agents/skills/agent-flow/agents/openai.yaml, .omp/skills/agent-flow/SKILL.md, .omp/skills/agent-flow/agents/openai.yaml — discovery와 현재 세션의 skill/hook 로드·trust·실행은 별개입니다.
+host hook registrations provisioned: .claude/settings.json, .Codex/hooks.json, .codex/hooks.json, .omp/extensions/agent-flow-hooks.ts — 이 checkout(/root/.agent-flow/worktrees/store-2ebbfa61be15/feat-implement-the-store-in-docs-source-prd.md-all-five-screens-and-the-header-every-spec-item-spec-1-spec-9-and-the-exact-data-testid-contract-reading-fixtures-catalog.json)에서 열린 host 세션을 다시 시작해야 hook이 로드됩니다.
+worktree setup copied: .agent-flow/project.yaml
+worktree: feat-implement-the-store-in-docs-source-prd.md-all-five-screens-and-the-header-every-spec-item-spec-1-spec-9-and-the-exact-data-testid-contract-reading-fixtures-catalog.json /root/.agent-flow/worktrees/store-2ebbfa61be15/feat-implement-the-store-in-docs-source-prd.md-all-five-screens-and-the-header-every-spec-item-spec-1-spec-9-and-the-exact-data-testid-contract-reading-fixtures-catalog.json
+▶ run started : 20261020-205937
+▶ task        : Implement the Store in docs/source-prd.md: all five screens and the header, every Spec Item (SPEC-1..SPEC-9) and the exact data-testid contract, reading fixtures/catalog.json
+▶ host adapter: claude
+▶ available  : claude, codex
+▶ profile    : nextjs
+▶ architecture: default
+▶ workflow   : full-feature (24 phases)
+
+  [run]  domain-grill — Interview the user in rounds until the domain problem is clear.
+# agent-flow phase: domain-grill
+
+**Description**: Interview the user in rounds until the domain problem is clear.
+
+**Task**: Implement the Store in docs/source-prd.md: all five screens and the header, every Spec Item (SPEC-1..SPEC-9) and the exact data-testid contract, reading fixtures/catalog.json
+**Run id**: 20261020-205937
+**Project root**: /root/.agent-flow/worktrees/store-2ebbfa61be15/feat-implement-the-store-in-docs-source-prd.md-all-five-screens-and-the-header-every-spec-item-spec-1-spec-9-and-the-exact-data-testid-contract-reading-fixtures-catalog.json
+**Artifact target** (write this when the phase is complete):
+  `/root/store/.git/agent-flow/worktrees/feat-implement-the-store-in-docs-source-prd.md-all-five-screens-and-the-header-every-spec-item-spec-1-spec-9-and-the-exact-data-testid-contract-reading-fixtures-catalog.json/.agent-flow/runs/20261020-205937/artifacts/domain-grill.md`
+
+## Phase prompt
+
+Run `.agent-flow/skills/grill-with-docs/SKILL.md` exactly as written.
+Resolve its `/grilling` and `/domain-modeling` references from
+`.agent-flow/skills/grilling/SKILL.md` and
+`.agent-flow/skills/domain-modeling/SKILL.md`.
+
+Before asking anything, reuse decisions that already exist: an earlier
+interview result that the task or the repository points to, the
+repository glossary (`GLOSSARY.md`, or the files `GLOSSARY-MAP.md` names),
+and the decisions in `docs/adr/`. Ask only the decisions that are still
+open, one round at a time, then end your turn and wait for the answers.
+
+Record where each decision came from under `## Decision Sources`, one line
+per decision: `- <decision>: <source>`, where the source is the task, a
+file path, `GLOSSARY.md`, `docs/adr/<file>`, or `user round <n>`. This
+section is your record, not proof that the user agreed.
+
+Even when no question is left open, show the user a summary of the
+decisions and ask them to confirm it. A document is not the user's
+agreement. The runner pauses after this phase; run the printed
+`approval_command` only after the user replies to that summary with
+approval.
+
+Write the session result to domain-grill.md. When shared understanding is
+reached, end with a `## Completion Gate` section. Replace every
+placeholder below with the actual value; a copied placeholder fails the
+gate:
+
+    ## Completion Gate
+    domain-grill: <complete>
+    shared_understanding: <reached>
+    context_docs_checked: <true>
+    context_docs_updated: <true|not_needed>
+
+If no context doc update is needed, use `context_docs_updated: not_needed`
+and explain why in the artifact.
+
+
+## Active profile: `nextjs`
+
+This is the parsed profile YAML — use these values directly, don't ask the user to look them up:
+
+```yaml
+id: nextjs
+capabilities:
+- react-web
+- webview-json-rpc
+branching:
+  strategy: trunk
+  base: main
+  integration: main
+  worktree: required
+  naming:
+    prefix: feat/
+    slug_style: kebab-case
+    slug_source: feature title
+    max_slug_length: 60
+gates:
+- id: architecture-lint
+  command:
+  - agent-flow
+  - architecture-lint
+  - --profile
+  - nextjs
+  required: true
+  phase: pre-commit
+- id: build
+  command:
+  - npm
+  - run
+  - build
+  required: true
+  phase: pre-push
+- id: test
+  command:
+  - npm
+  - test
+  required: true
+  phase: pre-commit
+- id: lint
+  command:
+  - npm
+  - run
+  - lint
+  required: false
+  phase: pre-commit
+review_angles:
+- id: architecture-design
+  prompt: templates/_shared/review/architecture-design.md
+- id: render-stability
+  prompt: templates/_shared/review/render-stability.md
+- id: a11y
+  prompt: templates/_shared/review/a11y.md
+architecture:
+  platform: react
+artifacts:
+  prd: optional
+  adr: optional
+  slice_plan: required
+vocabulary:
+  prd: spec
+  adr: decision-log
+commit_convention:
+  style: conventional
+  co_author: skip
+pr:
+  target_branch: main
+  merge_strategy: squash
+```
+
+## Completion gate
+
+Do not write the artifact as complete until the phase genuinely satisfies these markers. The runner blocks advancement when any marker is missing. The artifact must include a `## Completion Gate` heading followed by the marker lines.
+
+Required marker lines:
+
+- `## Decision Sources`
+- `domain-grill: complete`
+- `shared_understanding: reached`
+- `context_docs_checked: true`
+- `context_docs_updated: true|not_needed`
+
+## Required skills for this phase
+
+Prefer what these files say over what you already know. Where a skill and your prior knowledge disagree, the skill wins — it is this project's norm, not the general one.
+
+This phase has no skill read gate. Nothing below is machine-checked — skim the change first, then read the ones that actually apply:
+
+Use the resolved phase/profile selection. Read each planned body once; later references reuse the same body/digest, including inline content. Do not rescan the full skill index or workflow/run metadata. Names below are provenance only:
+
+- `grill-with-docs` (bundled) — body 1 in the required-read plan.
+- `grilling` (bundled) — body 2 in the required-read plan.
+- `domain-modeling` (bundled) — body 3 in the required-read plan.
+
+## Selected architecture contract
+
+Mode: `stack`. Snapshot SHA-256: `1796b5c0917ce4df138b74e6007ee0c8bce2877543bf8759bd768341095d150f`.
+Use this selection for project architecture; shared security, correctness, review independence, and workflow completion duties still apply.
+
+## Required-read plan
+
+- Read `/root/store/.agent-flow/skills/grill-with-docs/SKILL.md` (SHA-256: `e23cc879b5fc79647de1e13052dc691785736e0a7e3dd12ede39e12e69326db5`). Body 1.
+- Read `/root/store/.agent-flow/skills/grilling/SKILL.md` (SHA-256: `1e3aebd75c112e3f7861adc75185a2b8b64ab421277b79290420b4dc768f82f5`). Body 2.
+- Read `/root/store/.agent-flow/skills/domain-modeling/SKILL.md` (SHA-256: `d646174dc62eba9b44d55a4da5684c77dad3c6b1bffd6bae1e931e4c5c4b165a`). Body 3.
+
+## Normative provenance and inline bodies
+
+All paths, digests, and routes below are provenance only, not additional read instructions. Each plan entry satisfies every selection route for that exact body; all selected obligations still apply.
+
+
+## Host-specific guidance
+- Multi-review angles are launched by agent-flow as independent OS-confined
+  subprocesses. Aggregate their per-angle artifacts; do not replace them with
+  in-session Task sub-agents.
+- Use `TodoWrite` for slice tracking during `implement` phase. Mark each
+  TDD red→green→refactor step in_progress / completed.
+- For long-running phases, prefer parallel reads (multiple `Read` calls in
+  one message) over sequential.
+- Cite file:line references using the `path/to/file:42` format.
+
+
+### Host-session isolation boundary
+This controller session is not counted as an isolated worker. Every child reviewer is launched separately through the verified provider sandbox; never substitute controller-session work for a failed child process.
+
+## When complete
+After writing the artifact, run `agent-flow status` from `/root/.agent-flow/worktrees/store-2ebbfa61be15/feat-implement-the-store-in-docs-source-prd.md-all-five-screens-and-the-header-every-spec-item-spec-1-spec-9-and-the-exact-data-testid-contract-reading-fixtures-catalog.json` and follow the printed `next_command`.
