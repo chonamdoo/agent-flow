@@ -180,7 +180,7 @@ def _fixture_tooling(project: Path, case: dict, scenario: str) -> dict:
             "path": _project_tool_path(project), "readiness_scope": "controller executable discovery"}
 
 
-def _author_execution_contract(prompt: str, project: Path, tooling: dict) -> str:
+def _author_execution_contract(prompt: str, project: Path, tooling: dict, phase_id: str = "green") -> str:
     tool_lines = "\n".join(
         f"- {name}: {shlex.join([path, '-c', 'exit 0'] if name == 'sh' else [path, '--version'])}"
         for name, path in tooling["tools"].items()
@@ -189,11 +189,11 @@ def _author_execution_contract(prompt: str, project: Path, tooling: dict) -> str
     path = tooling.get("path", _project_tool_path(project))
     return prompt + (
         "\n\n## Evaluation execution scope\n"
-        "This is a phase-only evaluation of the rendered green task. Keep every implementation, "
+        f"This is a phase-only evaluation of the rendered {phase_id} task. Keep every implementation, "
         "required-skill, plan, and phase-artifact requirement above. The controller owns workflow lifecycle. "
         "The fixture was installed with --no-hooks; do not install or enable hooks, and do not run "
         "Agent Flow status, continue, advance, next, run, or start. Those commands and any instruction "
-        "above to follow next_command are outside this evaluation; finish after writing the green artifact. "
+        f"above to follow next_command are outside this evaluation; finish after writing the {phase_id} artifact. "
         "Production hook enforcement remains unchanged.\n"
         f"Project launcher for applicable non-lifecycle checks: {shlex.quote(tooling['launcher'])}\n"
         f"Native child readiness commands:\n{tool_lines}\n"
@@ -251,7 +251,8 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
         _overlay(case_dir / "author" / fixture_mode / "pre", project)
     else:
         _overlay(case_dir / "review" / fixture_mode / variant, project)
-    run_dir = create_run(project, "full-feature", case["task"], run_id=f"eval-{scenario}")
+    workflow = case.get("workflow", "full-feature")
+    run_dir = create_run(project, workflow, case["task"], run_id=f"eval-{scenario}")
     artifacts = case_dir / "author" / fixture_mode / "artifacts"
     _overlay(artifacts, run_dir)
     if scenario == "review":
@@ -266,7 +267,7 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
 
         # runner의 prd 완료 경로와 같은 함수로 원장을 굳힌다. kit마다 자기 코드로 쓴다.
         capture_design_ledger(run_dir, "prd", prd.read_text(encoding="utf-8"))
-    runner = Runner(project, workflow="full-feature", run_dir=run_dir)
+    runner = Runner(project, workflow=workflow, run_dir=run_dir)
     adapter = HostedAdapter(host)
     adapter._profile_id = runner.profile_id
     adapter._profile_snapshot = runner.profile
@@ -276,16 +277,24 @@ def prepare(kit: Path, case_dir: Path, mode: str, scenario: str, variant: str, p
     adapter._changed_files = changed_files(project, runner.profile) if takes_profile else changed_files(project)
     adapter._task_text = case["task"]
     if scenario == "author":
-        phase = next(p for p in runner.phases if p.id == "green")
+        # A case may evaluate another author phase (fix-loop) with the artifacts that phase receives.
+        author_phase = case.get("author_phase", "green")
+        phase = next(p for p in runner.phases if p.id == author_phase)
         resolution_kwargs = (
             {"run_dir": run_dir} if "run_dir" in inspect.signature(adapter.phase_resolution).parameters else {}
         )
         resolution = adapter.phase_resolution(phase, project, skill_host=host, **resolution_kwargs)
         prompt = adapter.render_envelope(phase, run_dir, project, skill_host=host, resolution=resolution)
+        if case.get("author_inputs"):
+            # In a real run the controller carries the previous phase's outcome into this one; a phase-only
+            # author starts fresh, so name the run artifacts that outcome lives in.
+            paths = "\n".join(f"- {(run_dir / name).relative_to(project)}" for name in case["author_inputs"])
+            prompt += f"\n\n## Earlier phase output in this run\n{paths}\n"
         return {
-            "prompt": _author_execution_contract(prompt, project, tooling) + READ_EVIDENCE_PROMPT,
+            "prompt": _author_execution_contract(prompt, project, tooling, author_phase) + READ_EVIDENCE_PROMPT,
             "profile": case["profile"],
-            "execution_scope": "phase-only green; controller owns lifecycle; hooks disabled",
+            "author_phase": author_phase,
+            "execution_scope": f"phase-only {author_phase}; controller owns lifecycle; hooks disabled",
             "tooling": tooling,
             "fixture_environment": fixture_environment,
             "required": [
@@ -797,7 +806,8 @@ def run_author(kit_name: str, kit: Path, case_dir: Path, mode: str, trial: int, 
     )
     touched = "\n".join(result.get("tool_inputs", []))
     row["plan_artifacts_touched"] = sorted(
-        name for name in ("slice-plan.md", "ddd-design.md", "prd.md", "design-spec.md") if name in touched
+        name for name in ("slice-plan.md", "ddd-design.md", "prd.md", "design-spec.md", "multi-review.md")
+        if name in touched
     )
     row["failed_reads"] = sorted(result.get("failed_reads", []))
     row.update({k: result.get(k) for k in ("usage", "cost_usd", "turns", "seconds", "rc", "error",
@@ -806,7 +816,7 @@ def run_author(kit_name: str, kit: Path, case_dir: Path, mode: str, trial: int, 
     row["norm_scope"] = "case-specific fixture contract; general architecture correctness is unverified"
     row["oracle"] = _oracle(case_dir, "author", "--project", str(project), "--mode", mode)
     row["architecture_lint"] = _architecture_lint(project, prepared.get("profile", "auto"))
-    artifact = claim_audit.author_artifact(project)
+    artifact = claim_audit.author_artifact(project, prepared.get("author_phase", "green"))
     row["claims"] = (
         claim_audit.parse_completion_gate(artifact.read_text(encoding="utf-8", errors="replace"))
         if artifact is not None else None

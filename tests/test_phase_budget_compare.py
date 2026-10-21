@@ -195,7 +195,7 @@ def test_an_author_skill_that_stops_reaching_reviewers_fails(tmp_path):
     before = _with_reviewer_skills(_result(), ["code-generation-discipline", "tdd", "code-review"])
     after = _with_reviewer_skills(_result(), ["code-generation-discipline", "code-review"])
     failures = _run(tmp_path, before, after)
-    assert any("author skills no longer reaching a reviewer" in item and "claude/tdd" in item for item in failures)
+    assert any("author skills new since base that no reviewer receives" in item and "claude/tdd" in item for item in failures)
 
 
 def test_an_existing_review_gap_is_reported_but_does_not_fail(tmp_path):

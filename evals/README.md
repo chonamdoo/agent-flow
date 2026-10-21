@@ -243,6 +243,35 @@ python evals/phase_eval.py --kit before=<kit> --kit after=<kit> --stacks commerc
   --scenario author --trials 3 --author-provider codex --codex-model <model> --output <new dir>
 ```
 
+### `phase-cases/fixloop` — 리뷰 지적을 원천과 대조하는가
+
+agent-review(Gallon)의 "Findings get checked too"를 재는 사례다. author phase가 `green`이 아니라
+`fix-loop`(`case.json`의 `author_phase`)이고, 직전 multi-review가 `request-changes`로 남긴 지적 두 개를 받는다
+(`author_inputs`가 run 산출물 경로를 envelope 뒤에 적는다. 실제 run에서는 controller가 이어 준다).
+하나는 맞는 지적(개수 표기가 줄 수를 셈)이고, 다른 하나는 PRD의 "over US$60"만 인용해 slice-plan
+Product Decision(정확히 60.00은 무료배송)을 뒤집으라는 틀린 지적이다. behavior는 기존 테스트와 맞는 지적의
+수정, plan은 틀린 지적을 적용하지 않았는지를 hidden 테스트로 잰다. 2026-10-20 Claude author 3회는 모두
+behavior·norm 통과, plan 실패였다(세 번 모두 slice-plan.md를 열지 않음). `tools/autoresearch` model 트랙이
+`code-generation-discipline`에 "slice plan을 먼저 전부 읽고 결정을 나열해 그대로 구현하고, 끝내기 전에 diff와
+대조한다" 한 줄을 더해 3/3이 됐고, commerce 3/3·backend 2/2(이전 2/2)로 회귀가 없었다. 릴리스 행렬 밖의
+개선 루프용이다.
+
+`phase-cases/fixloop-wrongplan`과 `phase-cases/devflow`는 위험 검사다. wrongplan은 slice plan이 확정된 Spec Item과
+모순되고 리뷰가 그것을 맞게 지적한다(Spec을 적용하거나 충돌을 보고하면 통과). devflow는 계획이 없는
+development workflow의 implement phase(`case.json`의 `workflow`)로, 계획을 우선하는 규칙이 없는 계획을 찾느라
+턴을 쓰는지 본다. `phase-cases/redflow`는 full-feature RED phase(`author_phase: red`)로, 계획을 따르라는 규칙이
+test-first 단계에서 구현까지 끌어오지 않는지 본다(새 테스트가 실패하고 `src/`가 seed와 같아야 통과).
+사이클 절차와 판정 기준은 `maintainer/improvement-history/README.md`에 있다.
+
+`phase-cases/fixloop-ts`는 루프가 보지 않는 held-out 짝이다. TypeScript(nextjs profile)이고, 틀린 지적이
+slice plan이 아니라 `ddd-design.md`의 불변식(취소된 주문도 이력에 남는다)을 뒤집으라고 한다. 루프가 찾은 규칙이
+문구(slice plan)를 넘어 일반화되는지를 잰다.
+
+```bash
+python evals/phase_eval.py --kit after=<kit> --stacks fixloop --modes clean --scenario author \
+  --trials 3 --author-provider claude --review-providers claude --output <new dir>
+```
+
 ### `phase_budget.py` — 결정적, 모델 없음
 
 profile × architecture mode × 변경 조건(변경 없음, profile 기본 경로, 계층 경로,

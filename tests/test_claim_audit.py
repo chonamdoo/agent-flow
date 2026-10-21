@@ -86,3 +86,14 @@ def test_the_author_artifact_is_found_whatever_its_extension(tmp_path):
     artifact.write_text(GATE, encoding="utf-8")
     assert audit.author_artifact(tmp_path) == artifact
     assert audit.author_artifact(tmp_path / "empty") is None
+
+
+def test_the_artifact_of_another_phase_is_found_in_either_run_layout(tmp_path):
+    full = tmp_path / "full" / ".agent-flow" / "runs" / "r" / "artifacts" / "fix-loop.md"
+    development = tmp_path / "dev" / ".agent-flow" / "runs" / "r" / "implement.md"
+    for path in (full, development):
+        path.parent.mkdir(parents=True)
+        path.write_text("## Completion Gate\nskills_checked: true\n", encoding="utf-8")
+    assert audit.author_artifact(tmp_path / "full", "fix-loop") == full
+    assert audit.author_artifact(tmp_path / "dev", "implement") == development
+    assert audit.author_artifact(tmp_path / "full") is None

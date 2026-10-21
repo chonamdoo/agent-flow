@@ -28,6 +28,8 @@ FORBIDDEN_API_DOMAIN_IMPORTS = ("http", "json", "shop.cart.http", "urllib", "fla
 IMPORT_RE = re.compile(r"""(?:import|export)\s[^'"]*?from\s+['"]([^'"]+)['"]|import\s+['"]([^'"]+)['"]""")
 
 Check = Dict[str, object]
+# node --test prints TAP (`# pass N`) when piped and the spec reporter (`ℹ pass N`) on a TTY or when chosen.
+NODE_PASS = re.compile(r"^(?:#|ℹ) pass (\d+)", re.MULTILINE)
 
 
 def _check(check_id: str, ok: bool, detail: str) -> Check:
@@ -51,7 +53,7 @@ def _run(project: Path, argv: List[str]) -> Check:
     except (OSError, subprocess.TimeoutExpired) as error:
         return {"ok": False, "detail": f"{error}"}
     output = result.stdout + result.stderr
-    node_passed = sum(int(n) for n in re.findall(r"^# pass (\d+)", output, re.MULTILINE))
+    node_passed = sum(int(n) for n in NODE_PASS.findall(output))
     python_ran = sum(int(n) for n in re.findall(r"^Ran (\d+) tests? in ", output, re.MULTILINE))
     # Both runners must have executed tests; an empty suite on either side is not a pass.
     ok = result.returncode == 0 and node_passed > 0 and python_ran > 0

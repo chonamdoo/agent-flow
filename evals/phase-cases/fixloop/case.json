@@ -1,0 +1,15 @@
+{
+  "stack": "fixloop",
+  "profile": "python",
+  "author_phase": "fix-loop",
+  "author_inputs": ["multi-review.md"],
+  "task": "Add the cart quote to the shop API: build_cart_quote_handler(catalog) answers a POST body {\"lines\": [{\"product_id\", \"quantity\"}]} with the subtotal, shipping and total as two-decimal money strings, whether shipping is free, and the item count label.",
+  "test_command": ["python3", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+  "fix_test_command": ["python3", "-m", "unittest", "discover", "-s", "tests/hidden_fix", "-t", "."],
+  "hidden_test_command": ["python3", "-m", "unittest", "discover", "-s", "tests/hidden_plan", "-t", "."],
+  "modes": {
+    "clean": {
+      "install": ["--architecture-mode", "clean"]
+    }
+  }
+}
