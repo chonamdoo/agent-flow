@@ -1,0 +1,63 @@
+{
+  "status": "PASS",
+  "source_commit": "388c1638c498971dcc1fb99b746068b7adb25186",
+  "before_commit": "af4205df215e696dfcced9110d783fecf44372f0",
+  "kit_digests_recomputed_from_trees": {
+    "before": "17614a5cf998cdce7021495a6600a7cb65b9a4b04f03b9e02241f11733d0ff66",
+    "after": "a3c35be24343565a1ea9076e8484611efc9016db8536f1820ec6bc617b885e63"
+  },
+  "evaluator_sha256": "e836cdcba6e5b394adb5643831d7484615082f51c69cf293d4e0ee3d710db783",
+  "units": 168,
+  "unique_units": 168,
+  "native_calls": 616,
+  "requested_model_flags": {
+    "gpt-6.1-sol": 616
+  },
+  "sandbox_flags": {
+    "read-only": 544,
+    "workspace-write": 72
+  },
+  "native_exit_codes": {
+    "0": 616
+  },
+  "provider_error_events": {},
+  "usage_totals_all_observed_calls": {
+    "review/before": {
+      "input": 50836880,
+      "cached_input": 40700032,
+      "output": 365949,
+      "uncached_input": 10136848
+    },
+    "review/after": {
+      "input": 53584063,
+      "cached_input": 44217600,
+      "output": 397956,
+      "uncached_input": 9366463
+    },
+    "author/before": {
+      "input": 14665444,
+      "cached_input": 13236608,
+      "output": 167149,
+      "uncached_input": 1428836
+    },
+    "author/after": {
+      "input": 14217415,
+      "cached_input": 12781056,
+      "output": 172634,
+      "uncached_input": 1436359
+    }
+  },
+  "raw_results_sha256": "216e9accecf22555648703a20fc14cf4bd3af7dc7bcf0af0f1da381293ce6cc9",
+  "compact_results_sha256": "dd6bafd290f878adad2d57e3e102f6b86286348bb118758a5ae44451ed5c749d",
+  "missing_receipts": [],
+  "pre_model_unit_errors": [],
+  "failures": [],
+  "model_observation_limit": "Requested model flags checked; native stream model identity not inferred.",
+  "private_native_archive": {
+    "file": "native-evidence.tar.gz",
+    "sha256": "1c35b68bb9ff144ed12cd91e8765bc440d73bac84ac55e66504fc1ab525b4971",
+    "bytes": 32428400
+  },
+  "compact_rows_match_raw_metrics": true,
+  "public_record_contains_local_path_prefix": false
+}
