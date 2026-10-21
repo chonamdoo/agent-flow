@@ -7,7 +7,9 @@ decisions name production files; the red phase may only add failing tests.
     python oracle.py norm --project <dir> --mode clean
 
 Prints {"behavior", "plan", "norm", "checks"} as JSON. behavior: the visible tests are kept, a new test
-exists, and the suite fails (red observed). plan: production code under src/ is byte-identical to the seed.
+exists, the suite fails (red observed), and the same tests pass once the reference implementation is applied in
+a scratch copy, so a broken test or an assertion unrelated to the slice is not counted as red. plan: production
+code under src/ is byte-identical to the seed.
 Python >= 3.9, stdlib only.
 """
 
@@ -15,8 +17,10 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List
 
@@ -52,8 +56,25 @@ def behavior_check(project: Path, mode: str) -> Check:
         return _check("red-observed", False, f"{error}")
     output = result.stdout + result.stderr
     failed = re.search(r"^FAILED \((?:failures|errors)=", output, re.MULTILINE) is not None
-    ok = not missing and bool(added) and result.returncode != 0 and failed
-    return _check("red-observed", ok, f"exit={result.returncode} failed={failed} added={added} missing={missing}")
+    green = _passes_with_reference(project, mode)
+    ok = not missing and bool(added) and result.returncode != 0 and failed and green is True
+    return _check("red-observed", ok,
+                  f"exit={result.returncode} failed={failed} added={added} missing={missing} reference={green}")
+
+
+def _passes_with_reference(project: Path, mode: str) -> object:
+    """True when the authored tests pass after the reference implementation is copied over a scratch project."""
+    reference = CASE_DIR / "reference" / mode
+    with tempfile.TemporaryDirectory() as scratch:
+        copy = Path(scratch) / "project"
+        shutil.copytree(project, copy, symlinks=True, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+        shutil.copytree(reference, copy, dirs_exist_ok=True)
+        try:
+            result = _run_process(list(CASE["test_command"]), cwd=copy, env=environment_for_project(copy),
+                                  timeout=TEST_TIMEOUT_S)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return f"error: {error}"
+        return result.returncode == 0
 
 
 def plan_check(project: Path, mode: str) -> Check:
