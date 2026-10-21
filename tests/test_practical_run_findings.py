@@ -126,7 +126,6 @@ TASK = (
 )
 
 
-@_finding("F9", "task-derived branch slug ignores profile branching.naming.max_slug_length")
 def test_task_derived_branch_respects_the_profile_slug_limit(tmp_path, monkeypatch):
     """반증: nextjs profile이 60을 선언해도 task 원문 길이(≈168자, `.md`/`.json` 포함)가 브랜치가 된다.
 

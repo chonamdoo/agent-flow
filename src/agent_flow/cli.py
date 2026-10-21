@@ -155,6 +155,7 @@ from agent_flow.core.worktrees import (
     DEFAULT_SLUG_MAX_LENGTH,
     describe_slug,
     delegated_slug,
+    task_slug,
     run_declared_worktree_actions,
     CleanupTransactionResult,
     abort_pending_worktree_cleanup,
@@ -2923,6 +2924,31 @@ def _slug_naming_for_active_host(root: Path) -> tuple[list[str], int]:
     return empty
 
 
+def _profile_slug_max_length(root: Path) -> int:
+    """profile이 선언한 이름 길이 제한. host 이름 짓기 명령이 없어도 task에서 지은 이름에 건다."""
+    try:
+        _profile_id, profile = resolve_profile(_find_kit_root(), root)
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+        return DEFAULT_SLUG_MAX_LENGTH
+    sources = [profile]
+    nested = profile.get("profiles")
+    if isinstance(nested, list):
+        sources.extend(item for item in nested if isinstance(item, dict))
+    for source in sources:
+        limit = ((source.get("branching") or {}).get("naming") or {}).get("max_slug_length")
+        if isinstance(limit, int) and limit >= 1:
+            return limit
+    return DEFAULT_SLUG_MAX_LENGTH
+
+
+def _fit_task_name(*, root: Path, task: str, slug: str) -> str:
+    """task를 이름으로 쓰되, 점이 남거나 profile 제한보다 길면 그때만 다듬은 slug를 쓴다."""
+    limit = _profile_slug_max_length(root)
+    if "." not in slug and len(slug) <= limit:
+        return task
+    return task_slug(task, limit)
+
+
 def _derive_worktree_selector(*, root: Path, task: str) -> str:
     """task에서 worktree 이름을 정한다. 위임 실패는 경고로 드러낸다."""
     try:
@@ -2930,7 +2956,7 @@ def _derive_worktree_selector(*, root: Path, task: str) -> str:
     except ValueError:
         return task
     if quality.kind == "ascii":
-        return task
+        return _fit_task_name(root=root, task=task, slug=quality.slug)
     command, max_length = _slug_naming_for_active_host(root)
     if command:
         delegated = delegated_slug(task=task, command=command, max_length=max_length)
@@ -2938,7 +2964,7 @@ def _derive_worktree_selector(*, root: Path, task: str) -> str:
             print(f"worktree 이름을 활성 host가 지었다: feat-{delegated}")
             return delegated
     _warn_if_slug_does_not_represent_the_task(task)
-    return task
+    return _fit_task_name(root=root, task=task, slug=quality.slug)
 
 
 def _warn_if_slug_does_not_represent_the_task(task: str) -> None:

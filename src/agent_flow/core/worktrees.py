@@ -6412,6 +6412,18 @@ def _truncate_slug(slug: str, max_length: int) -> str:
     return "-".join(parts)[:max_length].strip("-")
 
 
+def task_slug(task: str, max_length: int = DEFAULT_SLUG_MAX_LENGTH) -> str:
+    """task 문장에서 지은 이름. 파일명의 점(`prd.md`)은 구분자로 바꾸고 profile 길이 제한으로 자른다.
+
+    사용자가 `--worktree`로 준 이름은 이 함수를 거치지 않는다. 그 이름은 사용자가 고른 것이다.
+    """
+    quality = describe_slug(task)
+    if quality.kind == "digest":
+        return quality.slug
+    slug = re.sub(r"[-._]+", "-", quality.slug.replace(".", "-")).strip("-")
+    return _truncate_slug(slug, max_length) or quality.slug
+
+
 def _safe_component(value: str) -> str:
     return describe_slug(value).slug
 
