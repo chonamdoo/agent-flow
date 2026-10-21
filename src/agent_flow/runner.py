@@ -389,6 +389,19 @@ def _review_sandbox_problem() -> str | None:
     return None
 
 
+def _review_sandbox_warning(phases: list[Phase], current: Phase | None) -> str | None:
+    """시작 배너의 경고. 리뷰 phase가 아직 멀어도 알리지 않으면 앞 phase를 다 돈 뒤에야 fail closed로 멈춘다.
+
+    cursor 뒤만 보지 않는다 — fix-loop 같은 phase도 route로 앞의 리뷰 phase에 되돌아간다.
+    현재 phase가 리뷰면 `available` 줄이 이미 같은 이유를 말했다.
+    """
+    review_phases = [phase.id for phase in phases if phase.multi_review]
+    if not review_phases or (current is not None and current.multi_review):
+        return None
+    problem = _review_sandbox_problem()
+    return f"{', '.join(review_phases)} cannot launch reviewers: {problem}" if problem else None
+
+
 def _phase_available_clis(clis: list[CliInfo], phase: Phase | None) -> list[CliInfo]:
     if phase is None or not phase.multi_review:
         return clis
@@ -591,12 +604,9 @@ class Runner:
             cli_summary = "none (generic fallback)"
         print(f"▶ host adapter: {adapter.name}")
         print(f"▶ available  : {cli_summary}")
-        # 리뷰 phase가 아직 멀어도 시작할 때 알린다. 알리지 않으면 앞 phase를 다 돈 뒤에야
-        # multi-review에서 fail closed로 멈춘다.
-        review_phases = [phase.id for phase in self.phases[cursor.phase_index:] if phase.multi_review]
-        sandbox_problem = _review_sandbox_problem() if review_phases else None
-        if sandbox_problem:
-            print(f"▶ warning    : {', '.join(review_phases)} cannot launch reviewers: {sandbox_problem}")
+        review_warning = _review_sandbox_warning(self.phases, banner_phase)
+        if review_warning:
+            print(f"▶ warning    : {review_warning}")
         print(f"▶ profile    : {self.profile_id}")
         print(f"▶ architecture: {self.architecture}")
         print(f"▶ workflow   : {self.workflow_name} ({len(self.phases)} phases)\n")

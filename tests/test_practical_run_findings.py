@@ -221,3 +221,20 @@ def test_review_availability_reports_missing_sandbox_off_macos(monkeypatch):
         f"{review.id} reports reviewers {launchable} as available although "
         "no provider write-sandbox backend exists on this platform"
     )
+
+
+def test_start_banner_warns_once_about_every_review_phase_off_macos(monkeypatch):
+    """F1: fix-loop에서 재개해도 route로 되돌아갈 리뷰 phase를 알리고, 현재 phase가 리뷰면 중복해 말하지 않는다."""
+    from agent_flow.runner import _review_sandbox_warning
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    phases = _phases_from_definition(_full_feature())
+    fix_loop = next(phase for phase in phases if phase.id == "fix-loop")
+    review = next(phase for phase in phases if phase.multi_review)
+
+    warning = _review_sandbox_warning(phases, fix_loop)
+
+    assert warning is not None and review.id in warning
+    assert _review_sandbox_warning(phases, review) is None
+    monkeypatch.setattr("agent_flow.runner._review_sandbox_problem", lambda: None)
+    assert _review_sandbox_warning(phases, fix_loop) is None

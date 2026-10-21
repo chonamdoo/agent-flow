@@ -152,3 +152,26 @@ def test_slug_without_letters_falls_back_to_a_digest():
 def test_a_single_dot_inside_a_word_survives():
     """불변: 구분자 접기가 `v1.2` 같은 진짜 값을 망가뜨리면 안 된다."""
     assert describe_slug("v1.2 release").slug == "v1.2-release"
+
+
+def test_task_slug_drops_dots_keeps_underscores_and_fits_the_limit():
+    from agent_flow.core.worktrees import describe_slug, task_slug
+
+    assert task_slug("fix_login_flow.py bug", 60) == "fix_login_flow-py-bug"
+    assert task_slug("foo.lock", 60) == "foo-lock"
+    long_a = "Implement the Store in docs/source-prd.md: all five screens and the header, reading a.json"
+    long_b = "Implement the Store in docs/source-prd.md: all five screens and the header, reading b.json"
+    names = {task_slug(long_a, 60), task_slug(long_b, 60)}
+    # 앞 60자가 같은 두 task가 같은 브랜치가 되면 두 번째 run이 첫 task의 worktree를 안내받는다.
+    assert len(names) == 2
+    for name in names:
+        assert len(name) <= 60 and "." not in name and describe_slug(name).slug == name
+
+
+def test_task_slug_never_truncates_to_a_letterless_name():
+    from agent_flow.core.worktrees import describe_slug, task_slug
+
+    name = task_slug("1-2-3-4-5 fix things", 4)
+    # 글자 없는 앞부분은 이름 규칙이 그 앞부분의 digest로 바꾸므로, 같은 숫자로 시작하는 task끼리 이름이 겹친다.
+    assert name.startswith("task-") and describe_slug(name).slug == name
+    assert name != task_slug("1-2-3-4-5 other work", 4)
