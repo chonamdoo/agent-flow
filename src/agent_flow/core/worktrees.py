@@ -6396,7 +6396,8 @@ def delegated_slug(
         return None
     if quality.kind != "ascii":
         return None
-    return _truncate_slug(quality.slug, max_length)
+    # host가 `login.api`처럼 점을 남겨도 task에서 지은 이름과 같은 규칙으로 다듬는다.
+    return task_slug(candidate, max_length)
 
 
 def _truncate_slug(slug: str, max_length: int) -> str:

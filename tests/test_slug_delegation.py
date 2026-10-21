@@ -187,3 +187,14 @@ def test_missing_length_declaration_falls_back_to_the_default(tmp_path, monkeypa
 
     CLI._derive_worktree_selector(root=tmp_path, task="로그인 화면 Figma 구현")
     assert seen.get("max_length") == DEFAULT_SLUG_MAX_LENGTH
+
+
+def test_delegated_name_with_dots_is_normalized_like_a_task_name(tmp_path):
+    """불변: host가 낸 이름도 task에서 지은 이름처럼 점 없이 제한 안에 든다."""
+    from agent_flow.core.worktrees import delegated_slug
+
+    script = tmp_path / "namer"
+    script.write_text("#!/bin/sh\necho login.api.screen\n", encoding="utf-8")
+    script.chmod(0o755)
+
+    assert delegated_slug(task="로그인 API 화면", command=[str(script)], max_length=60) == "login-api-screen"
