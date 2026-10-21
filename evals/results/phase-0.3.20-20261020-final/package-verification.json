@@ -1,0 +1,18 @@
+{
+  "release": "v0.3.20",
+  "candidate_commit": "388c1638c498971dcc1fb99b746068b7adb25186",
+  "source": "git archive of the candidate commit (tracked files only)",
+  "artifacts": {
+    "npm": {"file": "agent-flow-kit-0.3.20.tgz", "sha256": "1b125e0b405fb5356c5221d19ba950ae664ec966fb4470357f58c2adb197261e", "files": 388, "entry_skill": "package/skills/agent-flow/SKILL.md"},
+    "wheel": {"file": "agent_flow-0.3.20-py3-none-any.whl", "sha256": "932fe6551aca8437b05f03f2203f805ce5cb7c4d033b9f0fca09d332f8faf60b", "files": 329, "skills": 77, "entry_skill": "agent_flow/skills/agent-flow/SKILL.md"},
+    "sdist": {"file": "agent_flow-0.3.20.tar.gz", "sha256": "1e66ab59ec279c27523244b8652af0259029f6f8092e59dec5e40c4dda4d87ce", "files": 1363, "entry_skill": "agent_flow-0.3.20/skills/agent-flow/SKILL.md"}
+  },
+  "checks": {
+    "wheel_built_from_sdist_keeps_entry_skill": true,
+    "wheel_rebuilt_from_extracted_sdist_sha256_equal": true,
+    "installed_wheel_cli_version": "agent-flow 0.3.20",
+    "node_installer_nextjs": {"clean": {"fresh": 0, "reinstall": 0}, "local": {"fresh": 0, "reinstall": 0, "note": "with --architecture-skill skills/architecture/SKILL.md from the web case overlay; without it the installer refuses as designed (exit 1)"}, "pending": {"fresh": 0, "reinstall": 0}},
+    "installed_kit_source_digest_equals_gate_after_kit": "a3c35be24343565a1ea9076e8484611efc9016db8536f1820ec6bc617b885e63"
+  },
+  "not_checked": ["host trust/startup in a real Claude or Codex session", "Homebrew upgrade (Formula is updated by release.yml after the tag)"]
+}
