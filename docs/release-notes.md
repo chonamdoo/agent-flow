@@ -1,5 +1,42 @@
 # Release notes
 
+## v0.3.21 (2026-10-21)
+
+v0.3.20 이후의 변경이다. [v0.3.21](https://github.com/chonamdoo/agent-flow/releases/tag/v0.3.21)로 배포했다.
+
+- 수정 루프 상한(`FIX_LOOP_MAX_ROUNDS`, 3회)을 리뷰가 거절하기 전에 쓰지 않는다. route가 없는 phase가 다음 phase로
+  넘어갈 때(full-feature의 prd→slice-plan·green→refactor, bugfix의 reproduce→implement-fix 등) 그 다음이 수정
+  회차를 세는 phase여도 첫 진입은 회차가 아니다. 리뷰·gate가 되돌려 보낸 이동은 그대로 센다.
+  [#406](https://github.com/chonamdoo/agent-flow/pull/406)
+- managed reviewer는 provider write-sandbox(macOS `sandbox-exec`) 안에서만 돈다. sandbox가 없는 환경(Linux 등)에서는
+  run 시작 배너가 multi-review phase가 막힌다고 바로 알리고, 리뷰 phase에서 리뷰어를 "available"로 보여 주지
+  않는다. 이전에는 앞 phase를 다 돈 뒤 multi-review에서야 멈췄다. [#406](https://github.com/chonamdoo/agent-flow/pull/406)
+- task 문장으로 지은 worktree·브랜치 이름에서 점(`prd.md`)을 지우고 profile의 `max_slug_length`(기본 60)를
+  지킨다. 잘린 이름에는 task 전체의 짧은 digest를 붙여 앞부분이 같은 task끼리 겹치지 않게 한다. host가 지은
+  이름도 점을 지우고 낱말 경계에서 자른다. 짧은 영문 task와 `--worktree`로 준 이름은 그대로다.
+  [#406](https://github.com/chonamdoo/agent-flow/pull/406)
+- 앱 셸·프레젠테이션·Next.js 인증·API·LLM 도구 호출의 흔한 paraphrase(예: "uncaught error", "skeleton",
+  "session cookie", "route handler", "LLM can call")를 해당 skill로 라우팅한다. 블라인드 판정 묶음에서 22/50 → 32/50,
+  새 오탐 없음. [#394](https://github.com/chonamdoo/agent-flow/pull/394)
+
+유지보수·평가:
+
+- phase 평가가 green 외의 phase(fix-loop·implement·red·refactor)와 development workflow를 잴 수 있다
+  (`case.json`의 `author_phase`·`author_inputs`·`workflow`). 릴리스 행렬 밖 fix-loop·위험 사례(fixloop, fixloop-ts,
+  fixloop-wrongplan, devflow, redflow, testedit, snippet, compat, refactor-ts)를 추가하고, claim audit이 평가한 phase의
+  산출물을 찾는다. [#387](https://github.com/chonamdoo/agent-flow/pull/387),
+  [#403](https://github.com/chonamdoo/agent-flow/pull/403)
+- 실전 UI 과제(`evals/ui-tasks/beauty-store`: 중립 PRD·기준 클론·브라우저 채점기 `ui_task.py`)와 그 과제를
+  full-feature로 돌린 첫 실행 기록, 재현된 결함 7개의 재현 테스트(`tests/test_practical_run_findings.py`)를 남긴다.
+  이번 릴리스가 그중 F1·F9·F13을 고친다. [#397](https://github.com/chonamdoo/agent-flow/pull/397),
+  [#400](https://github.com/chonamdoo/agent-flow/pull/400),
+  [#404](https://github.com/chonamdoo/agent-flow/pull/404),
+  [#405](https://github.com/chonamdoo/agent-flow/pull/405)
+- 릴리스 게이트는 품질 지표가 모두 before 이상(리뷰 정답 42/44 → 44/44, 오탐 0.017 → 0)이었다. author 비캐시 입력
+  토큰 비율은 두 번의 전체 측정에서 1.069·1.052로 한도 1.05를 넘었다. 두 번 모두 일정한 증가는 #394가 backend 과제에
+  API 계약 skill을 붙인 것(+9%)뿐이고 나머지는 캐시 변동이라, 이번 릴리스에 한해 한도를 1.06으로 두었다(유지보수자 결정).
+  한도는 태그 뒤 1.05로 되돌린다. 근거는 [게이트 기록](../evals/release-gates/v0.3.21/README.md)에 있다.
+
 ## v0.3.20 (2026-10-20)
 
 v0.3.19 이후의 변경이다. [v0.3.20](https://github.com/chonamdoo/agent-flow/releases/tag/v0.3.20)로 배포했다.

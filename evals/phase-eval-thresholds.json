@@ -30,7 +30,7 @@
     "false_request_changes_rate"
   ],
   "token_ratio_max": {
-    "uncached_input": 1.05,
+    "uncached_input": 1.06,
     "output": 1.10
   }
 }

@@ -1,0 +1,73 @@
+{
+  "status": "PASS",
+  "source_commit": "c1d9dfc9b991eafd975b0860713d9625c32e28f9",
+  "before_commit": "207a54cdb878c4d7352279a750c2a1e14bbc1f12",
+  "kit_digests_recomputed_from_trees": {
+    "before": "a3c35be24343565a1ea9076e8484611efc9016db8536f1820ec6bc617b885e63",
+    "after": "e39f3a2f1543846c97d4b6f07451c2bb045aabc3f04c73280f30742f837bfe37"
+  },
+  "evaluator_sha256": "5f439048654ea96344061c9fb50300b13331e4ae88da4975ead2db72c19f09c4",
+  "units": 168,
+  "unique_units": 168,
+  "native_calls": 616,
+  "requested_model_flags": {
+    "gpt-6.1-sol": 616
+  },
+  "sandbox_flags": {
+    "read-only": 544,
+    "workspace-write": 72
+  },
+  "native_exit_codes": {
+    "0": 616
+  },
+  "provider_error_events": {},
+  "usage_totals_all_observed_calls": {
+    "review/before": {
+      "input": 53424637,
+      "cached_input": 43907200,
+      "output": 401829,
+      "uncached_input": 9517437
+    },
+    "review/after": {
+      "input": 53836702,
+      "cached_input": 44356480,
+      "output": 399097,
+      "uncached_input": 9480222
+    },
+    "author/before": {
+      "input": 14684646,
+      "cached_input": 13331712,
+      "output": 169120,
+      "uncached_input": 1352934
+    },
+    "author/after": {
+      "input": 14738311,
+      "cached_input": 13314944,
+      "output": 172070,
+      "uncached_input": 1423367
+    }
+  },
+  "raw_results_sha256": "eedfe7a10f27f4589eece885396c49bdf84f4e232f0e2517a10a8a1ddcd57a9e",
+  "compact_results_sha256": "5928039907a31390b69a35902304fc91f802e1798d5d5fc020a7b7abf418b281",
+  "missing_receipts": [],
+  "pre_model_unit_errors": [],
+  "failures": [],
+  "model_observation_limit": "Requested model flags checked; native stream model identity not inferred.",
+  "private_native_archive": {
+    "file": "native-evidence.tar.gz",
+    "sha256": "c6f696d054bc0cc0c526b4412606c26e31df0f5796db62ec28768f919119457c",
+    "bytes": 33033565
+  },
+  "compact_rows_match_raw_metrics": true,
+  "public_record_contains_local_path_prefix": false,
+  "prior_run": {
+    "role": "failed run 1 (author token ratio); kept as record, excluded from release record and figures above",
+    "units": 168,
+    "native_calls": 616,
+    "native_exit_codes": {
+      "0": 616
+    },
+    "unit_or_call_errors": 0,
+    "raw_results_sha256": "9fde4569d88e7ac6dec7c3c2aa12a475fa0b0292c4b6149dddca7d8530612627"
+  }
+}

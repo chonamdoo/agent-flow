@@ -1,0 +1,19 @@
+{
+  "release": "v0.3.21",
+  "candidate_commit": "03a369bf5bb0adee7598f5de27d4f70a25e4f544",
+  "source": "git archive of the candidate commit (tracked files only)",
+  "gate_after_kit": {"commit": "c1d9dfc9b991eafd975b0860713d9625c32e28f9", "kit_source_digest": "e39f3a2f1543846c97d4b6f07451c2bb045aabc3f04c73280f30742f837bfe37", "note": "candidate = c1d9dfc + version files, release notes and ledger (outside the kit digest roots); same kit digest"},
+  "artifacts": {
+    "npm": {"file": "agent-flow-kit-0.3.21.tgz", "sha256": "912aa5ef725c39d3af23770303b5b385304b0fbb1d2f24a726e1f077b76f1f42", "files": 388, "entry_skill": "package/skills/agent-flow/SKILL.md"},
+    "wheel": {"file": "agent_flow-0.3.21-py3-none-any.whl", "sha256": "f392a16a9c45ea75bb17fb0ea3c3c4c65f60c8a48cf76f5eccdca51d22d652f6", "files": 329, "skills": 77, "entry_skill": "agent_flow/skills/agent-flow/SKILL.md"},
+    "sdist": {"file": "agent_flow-0.3.21.tar.gz", "sha256": "d3d60de5b94ae60a24c46d0988dbff603ade8523b6003762a35786ca8bc01728", "files": 1608, "entry_skill": "agent_flow-0.3.21/skills/agent-flow/SKILL.md"}
+  },
+  "checks": {
+    "wheel_built_from_sdist_keeps_entry_skill": true,
+    "wheel_rebuilt_from_extracted_sdist_sha256_equal": true,
+    "installed_wheel_cli_version": "agent-flow 0.3.21",
+    "node_installer_nextjs": {"clean": {"fresh": 0, "reinstall": 0}, "local": {"fresh": 0, "reinstall": 0, "note": "with --architecture-skill skills/architecture/SKILL.md from the web case overlay; without it the installer refuses as designed (exit 1)"}, "pending": {"fresh": 0, "reinstall": 0}},
+    "installed_kit_source_digest_equals_gate_after_kit": "e39f3a2f1543846c97d4b6f07451c2bb045aabc3f04c73280f30742f837bfe37"
+  },
+  "not_checked": ["host trust/startup in a real Claude or Codex session", "Homebrew upgrade (Formula is updated by release.yml after the tag)"]
+}
