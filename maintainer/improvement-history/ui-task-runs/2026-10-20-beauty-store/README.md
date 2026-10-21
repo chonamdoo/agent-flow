@@ -12,6 +12,7 @@ Agent Flow's `full-feature` workflow, from an empty Next.js project.
   scoring sessions gave 18/20 and 19/20. All misses are two checks that race hydration in the scorer (failures.md F14);
   with a scratch scorer copy that waits for `networkidle` and pauses the clock at a future time, the same build scores
   20/20 twice. Reference clone: 20/20 in both sessions.
+  That scorer change is now in `evals/ui_task_runner.mjs` (`goto`/`reload` wait for `networkidle`, `PAUSE_LEAD_MS`).
 - Wall clock: run 18 min 17 s (20:59:36 → 21:17:53 UTC); see `timeline.md`.
 
 ## Setup
@@ -59,17 +60,16 @@ not pushed.
 ## How to rerun
 
 ```bash
-git fetch origin eval/ui-task-beauty-store
-git worktree add ../task origin/eval/ui-task-beauty-store
-T=../task/evals/ui-tasks/beauty-store
+# from the repository root (the task is on main since PR #397)
+R=$(pwd); T=$R/evals/ui-tasks/beauty-store
 # project as in Setup, then:
 node bin/agent-flow-kit.mjs install --root ~/store --profile nextjs --architecture-mode stack
 cd ~/store && .agent-flow/bin/agent-flow run "Implement the Store in docs/source-prd.md: all five screens and the header, every Spec Item (SPEC-1..SPEC-9) and the exact data-testid contract, reading fixtures/catalog.json" --workflow full-feature
 # follow each next_command; on Linux expect the stop at multi-review (F1). Use macOS to get further.
 # score from the run's worktree:
 npm run build && npx next start -p 3417 &
-python3 ../task/evals/ui_task.py run $T --url http://127.0.0.1:3417 --repeat 3 --summary score.md --json score.json
-python3 ../task/evals/ui_task.py run $T --static $T/reference --repeat 3
+python3 $R/evals/ui_task.py run $T --url http://127.0.0.1:3417 --repeat 3 --summary score.md --json score.json
+python3 $R/evals/ui_task.py run $T --static $T/reference --repeat 3
 ```
 
 Playwright resolves from `/opt/node-tools/node_modules/playwright`; Chromium from `/opt/pw-browsers`.
