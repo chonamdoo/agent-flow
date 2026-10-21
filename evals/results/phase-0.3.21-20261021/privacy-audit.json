@@ -1,0 +1,21 @@
+{
+  "status": "PASS",
+  "checked_files": [
+    "evals/release-gates/v0.3.21/README.md",
+    "evals/release-gates/v0.3.21/gate.md",
+    "evals/release-gates/v0.3.21/meta.json",
+    "evals/release-gates/v0.3.21/results.jsonl.gz",
+    "evals/results/phase-0.3.21-20261021/README.md",
+    "evals/results/phase-0.3.21-20261021/gate.md",
+    "evals/results/phase-0.3.21-20261021/integrity-audit.json",
+    "evals/results/phase-0.3.21-20261021/meta.json",
+    "evals/results/phase-0.3.21-20261021/package-verification.json",
+    "evals/results/phase-0.3.21-20261021/results.jsonl.gz",
+    "evals/results/phase-0.3.21-20261021/run-1-gate.md",
+    "maintainer/improvement-history/v0.3.21.md"
+  ],
+  "native_text_published": false,
+  "local_path_prefixes_found": false,
+  "credential_like_values_found": false,
+  "email_addresses_found": false
+}
