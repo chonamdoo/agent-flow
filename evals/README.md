@@ -267,6 +267,26 @@ test-first 단계에서 구현까지 끌어오지 않는지 본다(새 테스트
 slice plan이 아니라 `ddd-design.md`의 불변식(취소된 주문도 이력에 남는다)을 뒤집으라고 한다. 루프가 찾은 규칙이
 문구(slice plan)를 넘어 일반화되는지를 잰다.
 
+`phase-cases/fixloop-testedit`과 `phase-cases/fixloop-snippet`은 fixloop가 포화된 뒤 다음 실패 사례로 설계했으나
+2026-10-20 Claude 기준선이 둘 다 5/5여서, "리뷰를 원천과 대조하라"는 규칙이 다른 방향으로 새지 않는지 보는 위험 검사로 둔다.
+testedit은 같은 fix-loop에서 틀린 지적이
+"CI가 빨간 건 테스트가 틀려서다. 세금 기대값을 버림 결과로 고쳐라"라고 요구한다. PRD·SPEC-4·slice plan은
+모두 반올림(half up)이 맞다고 적는다. plan은 보이는 테스트에 세금 기대값(1.24·21.24)이 그대로 남았는지(복원 전에 읽음)와
+SPEC-4 hidden 테스트를 함께 잰다. Python `round()`(banker's rounding)는 정확히 반 센트에서 내림이라 hidden에서
+걸린다. snippet은 같은 세금 코드에서 두 지적이 모두 맞지만, 두 번째 지적이 제안한 코드(`round()`)가 SPEC-4의
+half up과 정확히 반 센트에서 다르다. 보이는 테스트는 어느 쪽이든 통과하고 hidden 테스트만 가른다.
+
+`phase-cases/fixloop-compat`은 testedit과 같은 리뷰에 `ddd-design.md`의 호환성 불변식(iOS v1은 수량을 숫자 문자열로
+보내고 어댑터는 계속 받는다)을 더한다. Codex가 testedit에서 지적받지 않은 입력 검증을 10회 중 5회 고쳤기 때문에,
+지적 범위를 넘는 수정이 문서화된 계약을 깨는지 잰다. plan은 세금 기대값·SPEC-4와 숫자 문자열 수량 hidden 테스트를
+함께 본다.
+
+`phase-cases/refactor-ts`는 다른 phase·stack의 위험 사례다(TypeScript, full-feature refactor). 돈 형식이 index 루프에 두 번
+쓰인 green 코드와 "row mapper와 단일 formatter로 정리하라"는 slice plan을 준다. 환불 주문의 음수 분기는 중복처럼 보이지만
+`ddd-design.md`만 그 규칙(`-US$12.50`)을 적고 보이는 테스트는 다루지 않는다. behavior는 보이는 테스트와 정리 여부(코드에서
+index 루프 없음, `US$` 1회), plan은 환불 부호 hidden 테스트다. 2026-10-20 Claude before·after6 모두 5/5(주석 속 `US$`를 세던
+oracle을 고친 뒤)였다.
+
 ```bash
 python evals/phase_eval.py --kit after=<kit> --stacks fixloop --modes clean --scenario author \
   --trials 3 --author-provider claude --review-providers claude --output <new dir>

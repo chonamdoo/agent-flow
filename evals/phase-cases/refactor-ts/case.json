@@ -1,0 +1,24 @@
+{
+  "stack": "refactor-ts",
+  "profile": "nextjs",
+  "author_phase": "refactor",
+  "task": "Add the account orders list view state: toOrdersViewState(orders) turns the customer's orders into the view the orders screen renders \u2014 empty when there are none, otherwise loaded rows of {id, state, total} newest first with totals formatted as US$ with two decimals; refunded orders carry negative totals.",
+  "test_command": [
+    "node",
+    "--test",
+    "tests/*.test.ts"
+  ],
+  "hidden_test_command": [
+    "node",
+    "--test",
+    "tests/hidden_plan/*.test.ts"
+  ],
+  "modes": {
+    "clean": {
+      "install": [
+        "--architecture-mode",
+        "clean"
+      ]
+    }
+  }
+}
