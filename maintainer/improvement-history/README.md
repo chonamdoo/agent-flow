@@ -78,9 +78,10 @@
     `design_value_check.py`, `markers.py`), 승인 경로, 평가기와 사례
   - 이 영역을 바꾸는 이슈(#413~#416 등)는 구현 PR까지 만들고 merge하지 않는다. 기존 "workflow 계약 변경은 merge 말고
     보고만"과 같은 규칙이다.
-- **실행 환경**: Linux 클라우드 컨테이너에서는 multi-review가 fail closed로 멈춘다(「실전 UI 과제」의 플랫폼 항목).
-  multi-review 이후 phase나 리뷰어 fan-out을 재는 이슈는 macOS 호스트가 필요하다. 사람의 설정이 필요한 이슈(GitHub
-  branch protection 등)는 유지보수자 몫이다. 둘 다 건너뛰고 상태 파일과 보고에 남긴다.
+- **실행 환경**: Linux 클라우드 컨테이너에서는 runner의 multi-review가 fail closed로 멈춘다(「실전 UI 과제」의 플랫폼
+  항목). runner로 multi-review 이후 phase까지 재는 이슈(full-feature end-to-end 등)는 macOS 호스트가 필요하다.
+  `phase_eval`은 CLI를 직접 띄우므로 review 시나리오도 Linux에서 돈다. 사람의 설정이 필요한 이슈(GitHub branch
+  protection 등)는 유지보수자 몫이다. 할 수 없는 이슈는 건너뛰고 상태 파일과 보고에 남긴다.
 
 ## 환경 준비
 
