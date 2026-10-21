@@ -1,0 +1,37 @@
+{
+  "outcomes": [
+    {
+      "argv_digest": "4267d073ebcffe05",
+      "artifact": "multi-review-generalist-claude.md",
+      "artifact_sha256": "9a9faae37bf8fa07d48b9ff0e5db40d6f02ceafb228255d8bddf148d3ad51133",
+      "effort": "unspecified",
+      "job_id": "claude-generalist",
+      "model": "unspecified",
+      "prompt_digest": "b24cf702ed0864b4",
+      "provider": "claude",
+      "required": false,
+      "status": "error",
+      "verdict": null
+    },
+    {
+      "argv_digest": "20669e2c4c4f6cda",
+      "artifact": "multi-review-generalist-codex.md",
+      "artifact_sha256": "a474f4022a244083e4dc236aaed20a8651ef5ce28d7fe4fedeaa6cbbeab16e54",
+      "effort": "unspecified",
+      "job_id": "codex-generalist",
+      "model": "unspecified",
+      "prompt_digest": "b24cf702ed0864b4",
+      "provider": "codex",
+      "required": false,
+      "status": "error",
+      "verdict": null
+    }
+  ],
+  "phase_id": "multi-review",
+  "produced_by": {
+    "nonce": "9a1e98e757dd39bb4bda90f87c4a2615",
+    "phase_entered_at": "2026-10-20T21:16:55.330759+00:00",
+    "run_id": "20261020-205937"
+  },
+  "schema_version": 1
+}
