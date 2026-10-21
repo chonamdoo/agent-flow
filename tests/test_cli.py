@@ -1157,16 +1157,18 @@ class CliTest(unittest.TestCase):
             CliInfo("omp", ("omp",), ("-p",)),
         ]
         self.assertEqual(_phase_available_clis(clis, Phase("implement", "")), clis)
-        self.assertEqual(
-            [
-                cli.name
-                for cli in _phase_available_clis(
-                    clis,
-                    Phase("final-review", "", multi_review=True),
-                )
-            ],
-            ["claude", "codex"],
-        )
+        # Where the provider write-sandbox exists, only claude and codex can review.
+        with mock.patch("agent_flow.runner._review_sandbox_problem", return_value=None):
+            self.assertEqual(
+                [
+                    cli.name
+                    for cli in _phase_available_clis(
+                        clis,
+                        Phase("final-review", "", multi_review=True),
+                    )
+                ],
+                ["claude", "codex"],
+            )
 
     def test_reviewer_cli_args_defer_writes_to_outer_sandbox_and_disable_sessions(self) -> None:
         from agent_flow.cli_detect import CliInfo

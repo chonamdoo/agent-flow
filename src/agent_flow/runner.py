@@ -108,6 +108,7 @@ from agent_flow.core.worktrees import (
     run_worktree_cleanup_transaction,
     worktree_run_activation,
 )
+from agent_flow.providers.subprocess import verify_provider_sandbox_backend
 from agent_flow.core.worktree_isolation import (
     STATUS_DRIFT_KIND,
     FileLeaseUnavailable,
@@ -379,9 +380,22 @@ class PhaseTransition:
         )
 
 
+def _review_sandbox_problem() -> str | None:
+    """Why managed reviewers cannot launch here, or None. They run only inside the provider write-sandbox."""
+    try:
+        verify_provider_sandbox_backend()
+    except WorktreeIsolationError as error:
+        return str(error)
+    return None
+
+
 def _phase_available_clis(clis: list[CliInfo], phase: Phase | None) -> list[CliInfo]:
     if phase is None or not phase.multi_review:
         return clis
+    # A reviewer CLI on PATH cannot review without the sandbox; listing it would promise a review that
+    # fails closed only when the run reaches this phase.
+    if _review_sandbox_problem() is not None:
+        return []
     return [cli for cli in clis if cli.name in REVIEW_CLI_NAMES]
 
 
@@ -568,11 +582,21 @@ class Runner:
         elif banner_phase is not None and banner_phase.multi_review:
             # review phase는 host fallback이 없다. "generic fallback"이라고 적으면
             # 없는 우회로를 안내한다.
-            cli_summary = "none (review blocked: install claude or codex)"
+            sandbox_problem = _review_sandbox_problem()
+            cli_summary = (
+                f"none (review blocked: {sandbox_problem})" if sandbox_problem
+                else "none (review blocked: install claude or codex)"
+            )
         else:
             cli_summary = "none (generic fallback)"
         print(f"▶ host adapter: {adapter.name}")
         print(f"▶ available  : {cli_summary}")
+        # 리뷰 phase가 아직 멀어도 시작할 때 알린다. 알리지 않으면 앞 phase를 다 돈 뒤에야
+        # multi-review에서 fail closed로 멈춘다.
+        review_phases = [phase.id for phase in self.phases[cursor.phase_index:] if phase.multi_review]
+        sandbox_problem = _review_sandbox_problem() if review_phases else None
+        if sandbox_problem:
+            print(f"▶ warning    : {', '.join(review_phases)} cannot launch reviewers: {sandbox_problem}")
         print(f"▶ profile    : {self.profile_id}")
         print(f"▶ architecture: {self.architecture}")
         print(f"▶ workflow   : {self.workflow_name} ({len(self.phases)} phases)\n")

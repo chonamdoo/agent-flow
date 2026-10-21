@@ -198,7 +198,6 @@ def test_unauthenticated_codex_is_not_assigned_reviewer_jobs(tmp_path, monkeypat
     assert "codex" not in distribution.by_cli, sorted(distribution.by_cli)
 
 
-@_finding("F1", "no early report that managed reviewers cannot launch off macOS")
 def test_review_availability_reports_missing_sandbox_off_macos(monkeypatch):
     """반증: Linux에서 claude/codex가 리뷰 가능으로 보이다가 12 phase 뒤 sandbox 검사에서야 막힌다.
 
