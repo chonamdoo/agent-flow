@@ -17,7 +17,7 @@ import cycle_report  # noqa: E402
 def _author(stack: str, kit: str, trial: int, passed: bool, provider: str = "claude", **extra) -> dict:
     return {"scenario": "author", "stack": stack, "mode": "clean", "kit": kit, "trial": trial, "provider": provider,
             "oracle": {"behavior": True, "plan": passed, "norm": True}, "turns": 20 if provider == "claude" else None,
-            "usage": {"uncached_input": 1000, "output": 100}, "cost_usd": 0.25 if provider == "claude" else None,
+            "usage": {"uncached_input": 1000, "cached_input": 9000, "output": 100}, "cost_usd": 0.25 if provider == "claude" else None,
             "overclaims": [], **extra}
 
 
@@ -52,7 +52,7 @@ def test_author_table_keeps_providers_apart_and_compares_within_one():
     rows += [_author("fixloop", kit, t, True, "codex") for kit in ("before", "after") for t in range(1, 9)]
     rows.append(_author("devflow", "after", 1, True, required_unread=["tdd"]))
     table = "\n".join(cycle_report.author_table(rows, "before"))
-    assert "| fixloop | claude | after | 7/8 | 8 | 7 | 8 | 0.020 | 20.0 | 10.0 |" in table
+    assert "| fixloop | claude | after | 7/8 | 8 | 7 | 8 | 0.020 | 20.0 | 10.0 | 10,000 | 1,000 |" in table
     assert "| fixloop | claude | before | 2/8 | 8 | 2 | 8 | — |" in table
     assert "| fixloop | codex | after | 8/8 | 8 | 8 | 8 | 1.000 | n/a | n/a |" in table
     assert "| n/a | 0 (0) | — |" in table  # Codex reports no dollar cost
