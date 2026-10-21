@@ -6396,20 +6396,50 @@ def delegated_slug(
         return None
     if quality.kind != "ascii":
         return None
-    return _truncate_slug(quality.slug, max_length)
+    # host가 `login.api`처럼 점을 남겨도 점은 구분자로 바꾼다. host 이름은 이미 요약이라 digest는 붙이지 않는다.
+    name = _truncate_slug(_dotless_slug(quality.slug), max_length)
+    # 자른 결과를 이름 규칙이 다시 바꾸면(글자 없는 앞부분 등) 알린 이름과 실제 브랜치가 갈라진다.
+    # 그런 이름은 쓰지 않고 task에서 짓는 쪽으로 돌린다.
+    if not re.search(r"[a-z]", name) or describe_slug(name).slug != name:
+        return None
+    return name
 
 
 def _truncate_slug(slug: str, max_length: int) -> str:
-    """길이 제한은 되도록 단어 경계에서 건다. 첫 낱말이 이미 길면 잘라 쓴다."""
+    """길이 제한은 되도록 단어 경계(`-`, `_`)에서 건다. 첫 낱말이 이미 길면 잘라 쓴다."""
     if len(slug) <= max_length:
         return slug
-    parts: list[str] = []
-    for part in slug.split("-"):
-        candidate = "-".join([*parts, part])
-        if parts and len(candidate) > max_length:
+    kept = ""
+    for part in re.split(r"(?<=[-_])", slug):
+        if kept and len((kept + part).rstrip("-_")) > max_length:
             break
-        parts.append(part)
-    return "-".join(parts)[:max_length].strip("-")
+        kept += part
+    return kept[:max_length].strip("-_")
+
+
+def _dotless_slug(slug: str) -> str:
+    """밑줄은 이름 규칙이 허용하므로 그대로 두고 점만 구분자로 바꾼다."""
+    return re.sub(r"[-.]*\.[-.]*", "-", slug).strip("-._")
+
+
+def task_slug(task: str, max_length: int = DEFAULT_SLUG_MAX_LENGTH) -> str:
+    """task 문장에서 지은 이름. 파일명의 점(`prd.md`)은 구분자로 바꾸고 profile 길이 제한으로 자른다.
+
+    사용자가 `--worktree`로 준 이름은 이 함수를 거치지 않는다. 그 이름은 사용자가 고른 것이다.
+    """
+    quality = describe_slug(task)
+    if quality.kind == "digest":
+        return quality.slug
+    slug = _dotless_slug(quality.slug)
+    if len(slug) <= max_length:
+        return slug
+    # 앞부분이 같은 두 task가 같은 이름이 되지 않게, 자른 이름에는 task 전체의 digest를 붙인다.
+    digest = hashlib.sha1(task.strip().lower().encode("utf-8")).hexdigest()
+    head = _truncate_slug(slug, max(1, max_length - 7)).strip("-._")
+    # 자른 앞부분에 글자가 없으면 이름 규칙이 그것을 다른 digest로 바꾼다. 그때는 task 전체 digest를 쓴다.
+    if not re.search(r"[a-z]", head):
+        return f"task-{digest[:8]}"
+    return f"{head}-{digest[:6]}"
 
 
 def _safe_component(value: str) -> str:

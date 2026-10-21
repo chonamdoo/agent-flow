@@ -126,7 +126,6 @@ TASK = (
 )
 
 
-@_finding("F9", "task-derived branch slug ignores profile branching.naming.max_slug_length")
 def test_task_derived_branch_respects_the_profile_slug_limit(tmp_path, monkeypatch):
     """반증: nextjs profile이 60을 선언해도 task 원문 길이(≈168자, `.md`/`.json` 포함)가 브랜치가 된다.
 
@@ -145,7 +144,6 @@ def test_task_derived_branch_respects_the_profile_slug_limit(tmp_path, monkeypat
     assert len(slug) <= 60 and "." not in slug, f"{len(slug)} chars: {slug}"
 
 
-@_finding("F13", "a forward move into a fix collector (prd -> slice-plan) is counted as fix_round 1")
 def test_forward_prd_to_slice_plan_is_not_a_fix_round(tmp_path):
     """반증: 정상 전진이 fix 라운드로 세이면 FIX_LOOP_MAX_ROUNDS를 소모하고 지표가 거짓이 된다."""
     run_dir = tmp_path / ".agent-flow" / "runs" / "r1"
@@ -199,7 +197,6 @@ def test_unauthenticated_codex_is_not_assigned_reviewer_jobs(tmp_path, monkeypat
     assert "codex" not in distribution.by_cli, sorted(distribution.by_cli)
 
 
-@_finding("F1", "no early report that managed reviewers cannot launch off macOS")
 def test_review_availability_reports_missing_sandbox_off_macos(monkeypatch):
     """반증: Linux에서 claude/codex가 리뷰 가능으로 보이다가 12 phase 뒤 sandbox 검사에서야 막힌다.
 
@@ -224,3 +221,20 @@ def test_review_availability_reports_missing_sandbox_off_macos(monkeypatch):
         f"{review.id} reports reviewers {launchable} as available although "
         "no provider write-sandbox backend exists on this platform"
     )
+
+
+def test_start_banner_warns_once_about_every_review_phase_off_macos(monkeypatch):
+    """F1: fix-loop에서 재개해도 route로 되돌아갈 리뷰 phase를 알리고, 현재 phase가 리뷰면 중복해 말하지 않는다."""
+    from agent_flow.runner import _review_sandbox_warning
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    phases = _phases_from_definition(_full_feature())
+    fix_loop = next(phase for phase in phases if phase.id == "fix-loop")
+    review = next(phase for phase in phases if phase.multi_review)
+
+    warning = _review_sandbox_warning(phases, fix_loop)
+
+    assert warning is not None and review.id in warning
+    assert _review_sandbox_warning(phases, review) is None
+    monkeypatch.setattr("agent_flow.runner._review_sandbox_problem", lambda: None)
+    assert _review_sandbox_warning(phases, fix_loop) is None

@@ -108,6 +108,7 @@ from agent_flow.core.worktrees import (
     run_worktree_cleanup_transaction,
     worktree_run_activation,
 )
+from agent_flow.providers.subprocess import verify_provider_sandbox_backend
 from agent_flow.core.worktree_isolation import (
     STATUS_DRIFT_KIND,
     FileLeaseUnavailable,
@@ -379,9 +380,35 @@ class PhaseTransition:
         )
 
 
+def _review_sandbox_problem() -> str | None:
+    """Why managed reviewers cannot launch here, or None. They run only inside the provider write-sandbox."""
+    try:
+        verify_provider_sandbox_backend()
+    except WorktreeIsolationError as error:
+        return str(error)
+    return None
+
+
+def _review_sandbox_warning(phases: list[Phase], current: Phase | None) -> str | None:
+    """시작 배너의 경고. 리뷰 phase가 아직 멀어도 알리지 않으면 앞 phase를 다 돈 뒤에야 fail closed로 멈춘다.
+
+    cursor 뒤만 보지 않는다 — fix-loop 같은 phase도 route로 앞의 리뷰 phase에 되돌아간다.
+    현재 phase가 리뷰면 `available` 줄이 이미 같은 이유를 말했다.
+    """
+    review_phases = [phase.id for phase in phases if phase.multi_review]
+    if not review_phases or (current is not None and current.multi_review):
+        return None
+    problem = _review_sandbox_problem()
+    return f"{', '.join(review_phases)} cannot launch reviewers: {problem}" if problem else None
+
+
 def _phase_available_clis(clis: list[CliInfo], phase: Phase | None) -> list[CliInfo]:
     if phase is None or not phase.multi_review:
         return clis
+    # A reviewer CLI on PATH cannot review without the sandbox; listing it would promise a review that
+    # fails closed only when the run reaches this phase.
+    if _review_sandbox_problem() is not None:
+        return []
     return [cli for cli in clis if cli.name in REVIEW_CLI_NAMES]
 
 
@@ -568,11 +595,18 @@ class Runner:
         elif banner_phase is not None and banner_phase.multi_review:
             # review phase는 host fallback이 없다. "generic fallback"이라고 적으면
             # 없는 우회로를 안내한다.
-            cli_summary = "none (review blocked: install claude or codex)"
+            sandbox_problem = _review_sandbox_problem()
+            cli_summary = (
+                f"none (review blocked: {sandbox_problem})" if sandbox_problem
+                else "none (review blocked: install claude or codex)"
+            )
         else:
             cli_summary = "none (generic fallback)"
         print(f"▶ host adapter: {adapter.name}")
         print(f"▶ available  : {cli_summary}")
+        review_warning = _review_sandbox_warning(self.phases, banner_phase)
+        if review_warning:
+            print(f"▶ warning    : {review_warning}")
         print(f"▶ profile    : {self.profile_id}")
         print(f"▶ architecture: {self.architecture}")
         print(f"▶ workflow   : {self.workflow_name} ({len(self.phases)} phases)\n")
@@ -1331,9 +1365,12 @@ class Runner:
                 )
         assert self.run_dir is not None
         meta = read_meta(self.run_dir)
+        # A phase without routes just steps to the next one (key "none"). When that next phase is a collector
+        # (prd -> slice-plan, green -> refactor), the move is its first entry, not a fix round; counting it would
+        # spend one of FIX_LOOP_MAX_ROUNDS before any review has rejected anything.
         fix_round = (
             _fix_loop_round_counts(meta).get(to_phase, 0) + 1
-            if not blocked and to_phase in self._fix_collector_targets()
+            if not blocked and decision.route_key != "none" and to_phase in self._fix_collector_targets()
             else 0
         )
         ci_repair_state = self._ci_transition_state(phase, decision, meta)
