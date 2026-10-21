@@ -212,6 +212,56 @@ skill을 만들거나 고칠 때의 기준은 [chonamdoo/work-skills](https://gi
    overclaims, 비용, PR 링크. [index.md](index.md)에 한 줄 추가. 보관 원자료는 `tar -xzf` 후 `cycle_report.py`에
    그대로 넣으면 같은 표가 나온다(`evidence-stats.json`에 도구 호출·plan lookups가 남는다).
 
+## 실전 UI 과제
+
+phase_eval의 작은 fixture로는 안 드러나는 실패(긴 PRD, 여러 화면, 타이머·상태 저장)를 보려고, 공개 사이트에서
+관찰한 구조·흐름·상호작용으로 만든 과제를 Agent Flow `full-feature` workflow로 처음부터 만들게 하고 브라우저 검사로
+채점한다. 과제는 `evals/ui-tasks/<task>/`에 있다(`beauty-store`: 2026-10-20 관찰, 과제 v1, 5개 화면, Spec Item 9개,
+검사 20개). 형식과 도구는 `evals/README.md`의 "실전 UI 과제"를 본다.
+
+원본 사이트: 다시 관찰하는 것은 원본 구조가 크게 바뀌어 PRD의 화면·흐름이 더는 맞지 않을 때만이다. REA 캡처·스크린샷·
+스크립트는 scratchpad 같은 로컬에만 두고 커밋하지 않는다. 다시 관찰하면 PRD의 과제 버전과 관찰 날짜를 올리고,
+`acceptance.json`·`reference/`를 같이 고쳐 기준 클론이 다시 100%인지 확인한다. 평소 회차는 원본을 보지 않는다.
+
+```bash
+T=evals/ui-tasks/beauty-store
+python evals/ui_task.py validate $T
+python evals/ui_task.py run $T --static $T/reference --repeat 3        # 기준 클론: 모든 검사 통과여야 한다
+
+# 새 중립 프로젝트에서 full-feature 실행(kit = 측정할 agent-flow 트리)
+P=$(mktemp -d)/store && mkdir -p $P && cd $P && git init -q && git commit -q --allow-empty -m init
+mkdir -p docs fixtures && cp <repo>/$T/prd.md docs/source-prd.md && cp <repo>/$T/fixtures/catalog.json fixtures/
+<kit>/bin/agent-flow install . <installer 옵션>
+<kit>/bin/agent-flow run "docs/source-prd.md의 Store를 구현한다(Spec Item·test-id 계약을 그대로 따른다)" --workflow full-feature
+# pause(domain-grill·prd·merge-approval)마다 agent-flow continue. push-pr 이후는 원격이 없으면 commit에서 멈춘다.
+
+# 채점: 정적 산출물은 --static, 서버가 필요한 앱은 띄운 뒤 --url
+python <repo>/evals/ui_task.py run <repo>/$T --url http://127.0.0.1:3000 --repeat 3 --summary ui.md --json ui.json
+```
+
+작은 회차: 전체 PRD를 한 번에 돌리면 수 시간이 걸리고 실패 원인이 섞인다. 회차마다 slice 하나(예: SPEC-6–8 장바구니,
+SPEC-4 목록)만 과제로 주고 `--spec`으로 그 Spec Item만 채점한다. kit 후보를 비교할 때는 같은 slice·같은 provider로
+before·after를 각각 2회 이상 돌린다. 실행 중 Agent Flow가 실패하거나 헤맨 지점(잘못된 phase 전이, 같은 수정 반복,
+검사와 다른 test-id, 타이머·저장을 빠뜨린 구현)은 phase 로그를 직접 확인해 기록하고, 재현되는 실패는 phase_eval 사례로
+줄여 draft PR로 올린다.
+
+채택 규칙: 자율 운영 규칙과 같다. 같은 slice에서 after의 통과 검사 수가 before보다 많고, 다른 Spec Item 회귀가 없고,
+phase_eval 릴리스 행렬(held-out·위험 사례 포함, Claude·Codex 모두)도 before 이상일 때만 kit 변경을 유지한다. 검사를
+지우거나 PRD를 줄여 통과시키지 않는다. 과제 자체(PRD·검사·fixture)를 고치는 변경은 평가기 변경과 같이 draft로 올린다.
+
+플랫폼: managed reviewer subprocess의 write-sandbox는 macOS `sandbox-exec`만 있다(`docs/USAGE.md`). Linux 컨테이너에서는
+multi-review가 fail closed로 멈추므로(13/24 phase), 리뷰·gates·commit까지 보려면 macOS host에서 돌린다. Linux에서 돌리면
+그 직전까지의 phase와 빌드 점수만 얻는다. 권한 우회 headless(`claude -p --dangerously-skip-permissions`)는 쓰지 않고, 별도
+원격 세션(`create_session`)이나 사람이 연 세션에서 controller로 진행한다.
+
+비용·시간(2026-10-20):
+- `ui_task.py run`: 검사 20개 기준 1회 약 10초(`--repeat 3` 약 30초), 모델 비용 없음.
+- 기준 클론 작성: Claude 서브에이전트 1회(약 6분, 약 11만 토큰).
+- full-feature 1회(Linux 원격 세션, Claude Opus controller, 전체 PRD): 프로젝트 준비 약 4분, 실행 18분 17초(domain-grill →
+  multi-review에서 정지, 13/24 phase), 채점 약 9분. 세션 비용 약 $9.7(출력 약 10.8만 토큰, 캐시 읽기 약 2,700만 토큰,
+  준비·채점 포함). reviewer subprocess는 sandbox 때문에 돌지 않아 그 비용은 0이다. 기록:
+  `maintainer/improvement-history/ui-task-runs/2026-10-20-beauty-store/`(브랜치 `eval/beauty-store-fullfeature-run`).
+
 ## 비용·시간 참고치 (2026-10-20)
 
 | 단위 | Claude 1회 | 시간(동시 4–6) |

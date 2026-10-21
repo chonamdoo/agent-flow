@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Store</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-row">
+      <a class="logo" href="/" data-link>Store</a>
+      <div class="search" id="search-box">
+        <input data-testid="search-input" id="search-input" type="text" placeholder="Search products"
+               autocomplete="off" aria-label="Search">
+        <div data-testid="search-layer" id="search-layer" class="search-layer" hidden>
+          <section data-testid="recent-searches" id="recent-searches" hidden>
+            <h3>Recent searches</h3>
+            <ul id="recent-list" class="term-list"></ul>
+          </section>
+          <section data-testid="popular-searches" id="popular-searches">
+            <h3>Popular searches</h3>
+            <ol id="popular-list" class="term-list"></ol>
+          </section>
+          <div id="suggestions"></div>
+        </div>
+      </div>
+      <a data-testid="cart-link" class="cart-link" href="/cart" data-link>
+        Cart <span data-testid="cart-badge" id="cart-badge" class="badge" hidden>0</span>
+      </a>
+    </div>
+    <nav class="category-nav" id="category-nav"></nav>
+  </header>
+  <main id="main"><p class="muted">Loading…</p></main>
+  <script src="/app.js"></script>
+</body>
+</html>
