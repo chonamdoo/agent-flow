@@ -46,6 +46,16 @@ def test_runner_step_kinds_match_validator() -> None:
     assert set(re.findall(r'case "(\w+)":', runner)) == ui_task.STEP_KINDS
 
 
+def test_runner_step_options_match_validator() -> None:
+    # The runner takes the one key that is not an option as the step kind, so an option the validator accepts but
+    # the runner does not list would be read as an unknown step whenever it comes first in the JSON object.
+    ui_task = load_module()
+    runner = (ROOT / "evals" / "ui_task_runner.mjs").read_text(encoding="utf-8")
+    options = re.search(r"Object\.keys\(step\)\.filter\(\(key\) => !\[(.*?)\]\.includes", runner, re.DOTALL)
+    assert options is not None
+    assert set(re.findall(r'"(\w+)"', options.group(1))) == ui_task.STEP_OPTIONS
+
+
 @pytest.mark.parametrize("task", sorted(p.name for p in TASKS.iterdir() if (p / "acceptance.json").is_file()))
 def test_shipped_tasks_validate(task: str) -> None:
     ui_task = load_module()

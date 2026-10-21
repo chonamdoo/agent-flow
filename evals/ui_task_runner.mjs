@@ -106,7 +106,7 @@ function compareText(actual, step) {
 
 async function runStep(page, step, base) {
   const [kind] = Object.keys(step).filter((key) => !["nth", "value", "key", "label", "equals", "contains", "matches",
-    "notContains", "eq", "min", "max", "name", "order", "delay", "hasText", "last"].includes(key));
+    "notContains", "eq", "min", "max", "name", "order", "delay", "hasText", "last", "by"].includes(key));
   const target = step[kind];
   switch (kind) {
     case "goto":

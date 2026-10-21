@@ -35,7 +35,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 RUNNER = Path(__file__).resolve().parent / "ui_task_runner.mjs"
-# Mirrors the `case` labels in ui_task_runner.mjs; tests/test_ui_task.py keeps the two in step.
+# Mirror the `case` labels and the option list in ui_task_runner.mjs' runStep; tests/test_ui_task.py keeps them in step.
 STEP_KINDS = frozenset({
     "goto", "pause", "tick", "click", "focus", "fill", "type", "press", "select", "check", "uncheck", "reload",
     "expectVisible", "expectHidden", "expectCount", "expectText", "expectMoney", "expectDisabled", "expectEnabled",
