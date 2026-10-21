@@ -32,6 +32,10 @@ v0.3.20 이후의 변경이다. [v0.3.21](https://github.com/chonamdoo/agent-flo
   [#400](https://github.com/chonamdoo/agent-flow/pull/400),
   [#404](https://github.com/chonamdoo/agent-flow/pull/404),
   [#405](https://github.com/chonamdoo/agent-flow/pull/405)
+- 릴리스 게이트는 품질 지표가 모두 before 이상(리뷰 정답 42/44 → 44/44, 오탐 0.017 → 0)이었다. author 비캐시 입력
+  토큰 비율은 두 번의 전체 측정에서 1.069·1.052로 한도 1.05를 넘었다. 두 번 모두 일정한 증가는 #394가 backend 과제에
+  API 계약 skill을 붙인 것(+9%)뿐이고 나머지는 캐시 변동이라, 이번 릴리스에 한해 한도를 1.06으로 두었다(유지보수자 결정).
+  한도는 태그 뒤 1.05로 되돌린다. 근거는 [게이트 기록](../evals/release-gates/v0.3.21/README.md)에 있다.
 
 ## v0.3.20 (2026-10-20)
 
