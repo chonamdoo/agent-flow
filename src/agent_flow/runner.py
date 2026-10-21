@@ -1331,9 +1331,12 @@ class Runner:
                 )
         assert self.run_dir is not None
         meta = read_meta(self.run_dir)
+        # A phase without routes just steps to the next one (key "none"). When that next phase is a collector
+        # (prd -> slice-plan, green -> refactor), the move is its first entry, not a fix round; counting it would
+        # spend one of FIX_LOOP_MAX_ROUNDS before any review has rejected anything.
         fix_round = (
             _fix_loop_round_counts(meta).get(to_phase, 0) + 1
-            if not blocked and to_phase in self._fix_collector_targets()
+            if not blocked and decision.route_key != "none" and to_phase in self._fix_collector_targets()
             else 0
         )
         ci_repair_state = self._ci_transition_state(phase, decision, meta)

@@ -145,7 +145,6 @@ def test_task_derived_branch_respects_the_profile_slug_limit(tmp_path, monkeypat
     assert len(slug) <= 60 and "." not in slug, f"{len(slug)} chars: {slug}"
 
 
-@_finding("F13", "a forward move into a fix collector (prd -> slice-plan) is counted as fix_round 1")
 def test_forward_prd_to_slice_plan_is_not_a_fix_round(tmp_path):
     """반증: 정상 전진이 fix 라운드로 세이면 FIX_LOOP_MAX_ROUNDS를 소모하고 지표가 거짓이 된다."""
     run_dir = tmp_path / ".agent-flow" / "runs" / "r1"
