@@ -49,7 +49,6 @@ A `request-changes` verdict requires concrete evidence at `path:line`: the compe
 - <severity:low> ...
 
 ## Overall
-verdict: approve | request-changes
 ```
 
 Cite paths as `path/to/file:line`. Emit exactly one unfenced final verdict line: `verdict: approve` or `verdict: request-changes`.

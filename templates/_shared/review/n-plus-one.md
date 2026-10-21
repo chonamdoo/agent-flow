@@ -33,8 +33,6 @@ hot paths.
 ```text
 ## N+1 review findings
 
-verdict: approve | request-changes
-
 ### Must-fix
 - <severity:high> [path:line] <trigger and query/cardinality evidence, or explicitly labeled static risk>. Impact: <latency/resource/contract consequence>.
 
