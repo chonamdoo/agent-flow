@@ -6397,20 +6397,24 @@ def delegated_slug(
     if quality.kind != "ascii":
         return None
     # host가 `login.api`처럼 점을 남겨도 점은 구분자로 바꾼다. host 이름은 이미 요약이라 digest는 붙이지 않는다.
-    return _truncate_slug(_dotless_slug(quality.slug), max_length)
+    name = _truncate_slug(_dotless_slug(quality.slug), max_length)
+    # 자른 결과를 이름 규칙이 다시 바꾸면(글자 없는 앞부분 등) 알린 이름과 실제 브랜치가 갈라진다.
+    # 그런 이름은 쓰지 않고 task에서 짓는 쪽으로 돌린다.
+    if not re.search(r"[a-z]", name) or describe_slug(name).slug != name:
+        return None
+    return name
 
 
 def _truncate_slug(slug: str, max_length: int) -> str:
-    """길이 제한은 되도록 단어 경계에서 건다. 첫 낱말이 이미 길면 잘라 쓴다."""
+    """길이 제한은 되도록 단어 경계(`-`, `_`)에서 건다. 첫 낱말이 이미 길면 잘라 쓴다."""
     if len(slug) <= max_length:
         return slug
-    parts: list[str] = []
-    for part in slug.split("-"):
-        candidate = "-".join([*parts, part])
-        if parts and len(candidate) > max_length:
+    kept = ""
+    for part in re.split(r"(?<=[-_])", slug):
+        if kept and len((kept + part).rstrip("-_")) > max_length:
             break
-        parts.append(part)
-    return "-".join(parts)[:max_length].strip("-")
+        kept += part
+    return kept[:max_length].strip("-_")
 
 
 def _dotless_slug(slug: str) -> str:

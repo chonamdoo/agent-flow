@@ -198,3 +198,17 @@ def test_delegated_name_with_dots_is_normalized_like_a_task_name(tmp_path):
     script.chmod(0o755)
 
     assert delegated_slug(task="로그인 API 화면", command=[str(script)], max_length=60) == "login-api-screen"
+
+
+def test_long_snake_case_host_name_is_cut_on_a_word_boundary(tmp_path):
+    """불변: 밑줄 이름도 낱말 경계에서 자르고, 알린 이름이 실제 브랜치 이름과 같다."""
+    from agent_flow.core.worktrees import describe_slug, delegated_slug
+
+    script = tmp_path / "namer"
+    script.write_text("#!/bin/sh\necho implement_login_screen_with_figma_tokens_and_dark_mode_supp_x_v2\n",
+                      encoding="utf-8")
+    script.chmod(0o755)
+
+    name = delegated_slug(task="로그인 화면", command=[str(script)], max_length=60)
+    assert name == "implement_login_screen_with_figma_tokens_and_dark_mode_supp"
+    assert describe_slug(name).slug == name
