@@ -7,12 +7,26 @@
 // data-testid, so any framework that follows the task's test-id contract can be scored. Started by evals/ui_task.py,
 // which also serves static builds; it can be run directly against an app that is already running.
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
+import path from "node:path";
 
 const require = createRequire(import.meta.url);
 
+function globalNodeModules() {
+  try {
+    return execFileSync("npm", ["root", "-g"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return null;
+  }
+}
+
 function loadPlaywright() {
-  for (const name of ["playwright", "/opt/node-tools/node_modules/playwright", "playwright-core"]) {
+  // createRequire only searches node_modules above this file, so a global `npm i -g playwright` needs its own path.
+  const globalRoot = globalNodeModules();
+  const names = ["playwright", "/opt/node-tools/node_modules/playwright", "playwright-core"];
+  if (globalRoot) names.push(path.join(globalRoot, "playwright"), path.join(globalRoot, "playwright-core"));
+  for (const name of names) {
     try {
       return require(name);
     } catch {
@@ -39,6 +53,25 @@ function locator(page, target) {
 
 const describe = (target) => (typeof target === "string" ? target : JSON.stringify(target));
 const money = (text) => Number(String(text).replace(/[^0-9.\-]/g, ""));
+
+const firstAmount = (text) => Number((String(text).match(/-?[0-9][0-9,]*(?:\.[0-9]+)?/) ?? ["NaN"])[0].replace(/,/g, ""));
+
+async function sortKeys(items, by) {
+  const keys = [];
+  for (const item of await items.all()) {
+    let key = null;
+    for (const testid of by) {
+      const child = item.getByTestId(testid);
+      if (await child.count()) {
+        key = firstAmount(await child.first().innerText());
+        break;
+      }
+    }
+    if (key === null || Number.isNaN(key)) throw new Error(`item ${keys.length} has no amount in ${by.join(", ")}`);
+    keys.push(key);
+  }
+  return keys;
+}
 
 // Inputs report their value, so a quantity shown in an <input> and one shown as text are read the same way.
 async function textOf(loc) {
@@ -73,7 +106,7 @@ function compareText(actual, step) {
 
 async function runStep(page, step, base) {
   const [kind] = Object.keys(step).filter((key) => !["nth", "value", "key", "label", "equals", "contains", "matches",
-    "notContains", "eq", "min", "max", "name", "order", "delay", "hasText", "last"].includes(key));
+    "notContains", "eq", "min", "max", "name", "order", "delay", "hasText", "last", "by"].includes(key));
   const target = step[kind];
   switch (kind) {
     case "goto":
@@ -162,7 +195,10 @@ async function runStep(page, step, base) {
         "url");
       return;
     case "expectSorted": {
-      const values = (await page.getByTestId(target).filter({ visible: true }).allInnerTexts()).map(money);
+      // With `by`, each visible target is keyed by the first amount in its first `by` child that is present, so every
+      // card is compared (a range "$min - $max" sorts by its min) instead of only the cards that show one price.
+      const values = step.by ? await sortKeys(page.getByTestId(target).filter({ visible: true }), step.by)
+        : (await page.getByTestId(target).filter({ visible: true }).allInnerTexts()).map(money);
       for (let i = 1; i < values.length; i += 1) {
         if (step.order === "desc" ? values[i] > values[i - 1] : values[i] < values[i - 1]) {
           throw new Error(`${target} not ${step.order ?? "asc"} at ${i}: ${values.slice(Math.max(0, i - 2), i + 1)}`);

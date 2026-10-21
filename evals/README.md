@@ -202,7 +202,7 @@ baseline 만점만으로 스킬의 개선 효과를 주장하지 않는다.
 | 파일 | 내용 |
 |---|---|
 | `ui-tasks/<task>/prd.md` | 과제 버전·관찰 날짜, 화면·상수, test-id 계약, Spec Item(`SPEC-n`) |
-| `ui-tasks/<task>/acceptance.json` | Spec Item마다 브라우저 검사. 요소는 `data-testid`로만 찾는다 |
+| `ui-tasks/<task>/acceptance.json` | Spec Item마다 브라우저 검사. 요소는 `data-testid`로만 찾는다. 검사를 바꾸면 `version`을 올린다 |
 | `ui-tasks/<task>/fixtures/` | `generate.py`가 같은 seed로 다시 만드는 `catalog.json` |
 | `ui-tasks/<task>/reference/` | 의존성 없는 정적 기준 클론(바닐라 HTML/JS) |
 | `ui_task.py` | 과제 검증(`validate`)과 채점(`run`) |
@@ -220,7 +220,9 @@ python evals/ui_task.py run evals/ui-tasks/beauty-store --static <build-dir> --s
 
 `--repeat N`이면 검사는 N번 모두 통과해야 통과다. 종료 코드는 모든 검사가 통과할 때만 0이다. 타이머
 동작(debounce, 자동 넘김)은 실제 대기 없이 `pause`·`tick`으로 잰다. 픽셀 비교는 하지 않는다.
-Node와 Playwright(`npm i -g playwright`, Chromium)가 필요하다. `tests/test_ui_task.py`가 과제 검증,
+`expectSorted`에 `by`를 주면 대상(예: `product-card`)마다 `by`에서 처음 있는 자식의 첫 금액으로 순서를 잰다. 그래서 가격 범위만
+보이는 카드도 빠지지 않는다.
+Node와 Playwright(`npm i -g playwright`, Chromium)가 필요하다. 실행기는 `npm root -g`도 찾는다. `tests/test_ui_task.py`가 과제 검증,
 서버, fixture 재현성을 확인하고, 브라우저가 있으면 기준 클론이 모든 검사를 통과하는지도 확인한다.
 
 ## phase skill 전달 평가

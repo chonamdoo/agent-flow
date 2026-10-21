@@ -46,6 +46,16 @@ def test_runner_step_kinds_match_validator() -> None:
     assert set(re.findall(r'case "(\w+)":', runner)) == ui_task.STEP_KINDS
 
 
+def test_runner_step_options_match_validator() -> None:
+    # The runner takes the one key that is not an option as the step kind, so an option the validator accepts but
+    # the runner does not list would be read as an unknown step whenever it comes first in the JSON object.
+    ui_task = load_module()
+    runner = (ROOT / "evals" / "ui_task_runner.mjs").read_text(encoding="utf-8")
+    options = re.search(r"Object\.keys\(step\)\.filter\(\(key\) => !\[(.*?)\]\.includes", runner, re.DOTALL)
+    assert options is not None
+    assert set(re.findall(r'"(\w+)"', options.group(1))) == ui_task.STEP_OPTIONS
+
+
 @pytest.mark.parametrize("task", sorted(p.name for p in TASKS.iterdir() if (p / "acceptance.json").is_file()))
 def test_shipped_tasks_validate(task: str) -> None:
     ui_task = load_module()
@@ -70,6 +80,7 @@ def test_validate_reports_each_kind_of_problem() -> None:
         check("a", "SPEC-9", {"hover": "search-input"}),
         check("c", "SPEC-1", {"expectText": {"testid": "cart-badge", "within": {"testid": "side-panel"}}}),
         check("d", "SPEC-1"),
+        check("e", "SPEC-1", {"expectSorted": "cart-badge", "by": ["search-input", "card-price"], "order": "asc"}),
     ]}
     problems = ui_task.validate(PRD, acceptance)
     assert "a step 0: test id 'buy-now' is not in the prd.md contract" in problems
@@ -78,6 +89,7 @@ def test_validate_reports_each_kind_of_problem() -> None:
     assert any(p.startswith("a step 0: unknown or ambiguous step") for p in problems)
     assert "c step 0: test id 'side-panel' is not in the prd.md contract" in problems
     assert "d: no steps" in problems
+    assert "e step 0: test id 'card-price' is not in the prd.md contract" in problems
     assert "SPEC-2: no acceptance check" in problems
 
 
