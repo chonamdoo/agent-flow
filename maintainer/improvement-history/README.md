@@ -9,9 +9,52 @@
 - 자동화 여부(2026-10-20 확인): 저장소 workflow에는 Anthropic·OpenAI 자격 증명이 없고 `release.yml`은 `v*` 태그
   push에서 brew formula만 갱신한다. Claude Code 클라우드 세션의 예약 작업은 시간 기반·수동 실행뿐이라 GitHub 릴리스
   이벤트로 세션을 깨우려면 claude.ai 자격 증명을 저장소에 둬야 한다. 그렇게 하지 않는다.
-- 현재 방식: 릴리스 직후 유지보수자가 요청한다("v0.3.21 릴리스했어, 개선 사이클 돌려줘").
+- 현재 방식: 릴리스 직후 유지보수자가 "v<버전> 개선 사이클 돌려"라고 요청한다. 그 요청을 받으면 아래
+  [자율 운영 규칙](#자율-운영-규칙)을 읽고 그대로 진행한다. 질문하지 않는다.
 - 긴 측정: 백그라운드 명령은 2시간 제한이 있다. 세션 스스로 깨어나도록 예약 메시지(`send_later`)를 걸고, 측정은
   `setsid`로 띄워 세션 명령과 분리한다. 회차마다 커밋한다.
+
+## 자율 운영 규칙
+
+2026-10-20 유지보수자가 v0.3.20 사이클 중에 준 지시를 그대로 옮긴다. "v<버전> 개선 사이클 돌려"라는 요청은
+이 절 전체에 대한 위임이다. 아래의 "나"는 유지보수자다.
+
+> 지금부터 나한테 묻지 말고 오토리서치 방식으로 스스로 판단해서 계속 개선해. 밤새(최대 24시간) 돌아도 되고 비용 상한 없음.
+>
+> 진행 방식:
+> - 측정 → 실패 원인 분석(로그 직접 확인) → 수정안 → 재측정을 반복. 결정은 전부 네가 내리고, 근거는 기록에 남겨.
+> - 애매하면 시행 수 늘리고, 회귀가 있으면 원인 찾아 문구 수정 후 재검증(after6, after7 …). 회귀를 못 없애면 skill 변경 빼고 케이스만 PR.
+> - 채택 기준: 통과 수 증가만 유지, 삭제로 짧게 만들기 금지, held-out·위험 케이스 포함 Claude·Codex 모두 before 이상일 때만.
+> - 검증 끝난 개선은 PR 본문·표 갱신 → CI green → squash merge까지 직접.
+>
+> 개선이 멈추면 끝내지 말고 전략을 바꿔서 계속:
+> - Codex로 새 케이스(testedit·snippet 등) 측정해서 Codex가 실패하는 지점 찾기
+> - 더 어려운 실패 케이스 설계: 다른 phase(red·refactor·review·qa), 다른 stack(TS·RN·Flutter), 증거가 다른 산출물(ddd-design·design-spec)에 있는 경우, 지적이 여러 개 섞인 경우
+> - skill_routing heldout 실패(6/13), paraphrase 실패 분석
+> - 병렬 리뷰(claude+codex)의 결함 검출·오탐·판정 무효율·provider 불일치 개선
+> - "개선 없는 회차 5번 연속 멈춤"은 빼고, 전략을 바꿔도 3가지 연속 실패하면 그때 멈추고 보고
+>
+> 운영:
+> - 백그라운드 2시간 제한은 예약 작업으로 스스로 깨어나서 이어가기. container 재시작되면 멈춘 지점부터 재개.
+> - Codex 구독 한도 걸리면 Claude 작업 먼저 하고 대기 후 재개.
+> - 회차마다 커밋·push, 2–3시간마다 진행 요약만 보고(질문 없이).
+> - maintainer/improvement-history/v0.3.20.md·index.md는 계속 갱신(시도한 것 전부, 유지/폐기 이유, 수치, 비용).
+>
+> 릴리스:
+> - 개선이 정리되면 릴리스 노트·v0.3.20 기록 PR 올리고 168 unit 게이트(Codex, author 3/review 2, 동시성 8) 실행. 게이트도 필요하면 고쳐서 통과시키되 평가기·기준값 변경은 하지 말고 보고만.
+>
+> 남겨둘 안전장치(이것만 내 확인):
+> - 태그 push는 게이트 결과 보여주고 내 확인 후
+> - 새 실패 케이스 PR은 draft로(채택은 내가 검토)
+> - 평가기·릴리스 정책·workflow 계약 변경은 merge 말고 보고만
+
+다음 버전에 적용할 때:
+
+- `v0.3.20`은 그 사이클의 버전으로 읽는다(`v<버전>.md`).
+- "skill_routing heldout 실패(6/13)"는 그 시점의 routing 측정값으로 바꿔 읽는다.
+- 진행 상태는 scratch 디렉터리의 상태 파일에 적는다. 예약 check-in이 그 파일을 읽고 재개한다.
+  - 상태 파일에는 경로, 대기열, 현재 단계, 로그를 둔다.
+  - 새 컨테이너에서는 이 런북의 환경 준비부터 다시 한다.
 
 ## 환경 준비
 
@@ -27,6 +70,16 @@ npm install -g @openai/codex@0.163.0
 codex login --device-auth          # 출력된 URL·일회용 코드를 사람이 브라우저에서 ChatGPT 계정으로 입력
 codex login status                 # "Logged in using ChatGPT"
 codex exec --skip-git-repo-check "Reply with exactly: pong"   # 응답 확인
+
+# Flutter/Dart(릴리스 게이트의 app stack): 컨테이너에 기본으로 없다. 없으면 app unit 42개가 모두
+# "evaluation tool unavailable: dart"로 무효가 되어 게이트가 반드시 실패한다.
+curl -sS https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json -o /tmp/fl.json
+python3 -c "import json;d=json.load(open('/tmp/fl.json'));h=d['current_release']['stable'];r=[x for x in d['releases'] if x['hash']==h][0];print(r['archive'],r['sha256'])"
+curl -sS -o /tmp/flutter.tar.xz https://storage.googleapis.com/flutter_infra_release/releases/<archive>
+echo "<sha256>  /tmp/flutter.tar.xz" | sha256sum -c - && tar -xJf /tmp/flutter.tar.xz -C /opt
+git config --global --add safe.directory /opt/flutter
+ln -sf /opt/flutter/bin/flutter /usr/local/bin/flutter && ln -sf /opt/flutter/bin/dart /usr/local/bin/dart
+flutter config --no-analytics && dart --disable-analytics && flutter precache --universal
 ```
 
 - 클라우드 환경의 Network access에 `auth.openai.com`(로그인), `chatgpt.com`(구독 호출), `api.openai.com`을 허용해야
@@ -49,6 +102,42 @@ git worktree add --detach $S/kit-after <후보 sha>       # 후보
 
 평가기(`evals/phase_eval.py`와 사례)는 실행하는 checkout의 것을 쓴다. 릴리스 행렬 밖 사례(fixloop 등)를 쓰려면 그
 사례가 있는 checkout에서 실행한다.
+
+## skill 수정 기준 (work-skills)
+
+skill을 만들거나 고칠 때의 기준은 [chonamdoo/work-skills](https://github.com/chonamdoo/work-skills)다. 로컬 클론은
+`/home/user/chonamdoo/work-skills`를 쓰고, 없으면 `git clone --depth 1 https://github.com/chonamdoo/work-skills`로 받는다.
+
+- **무엇인가**: agent-flow `skills/`의 원본이 아니다. `work-to-skill` skill 하나(`skills/work-to-skill/SKILL.md`), 행동 검증
+  기준(`references/validation.md`), 패키지 구조 검사(`tests/test_package.py`)로 된 **작성 규칙**이다. agent-flow는 이미 이를
+  따른다: `code-generation-discipline`이 `work-to-skill`을 조건부 작성 지침으로 가리키고, `evals/skill_behavior.py`가 그
+  검증 방식을, `tests/test_qa_skill_package.py`가 그 구조 검사를 옮겨 왔다.
+- **원본과 반영**: agent-flow skill의 원본은 agent-flow 저장소다. 고치는 곳도 agent-flow `skills/`이고 work-skills로 옮길
+  것은 없다. mattpocock/skills에서 가져온 skill은 `skills/UPSTREAM.md`의 pin·의도적 차이를 지킨다. work-skills 쓰기
+  권한은 필요 없다. `work-to-skill` 자체를 고칠 때만 work-skills에 PR을 내며, 그때는 쓰기 권한(세션에 `access: push`로
+  연결)과 그 저장소 절차(`python -m unittest discover -s tests -v`, 태그 릴리스, `Formula/work-to-skill.rb` SHA 갱신 PR)를 따른다.
+- **고치기 전**: `work-to-skill`의 *Establish the assignment*, *Build the smallest useful package*, *Validate and hand off*와
+  `references/validation.md`를 읽는다.
+
+적용 규칙:
+
+1. **좁은 수정**: 요청한 동작만 바꾸고, 무관한 범위·예외·참조·frontmatter·호출 정책은 그대로 둔다. 실제 diff로 의도하지
+   않은 범위 변화가 없는지 본다.
+2. **메타데이터**: `name`·`description` 외 필드(`requires`, `taskTerms`, `workflowPhases`, `delivery`)는 agent-flow가 실제로
+   읽는 host 요구일 때만 더하거나 바꾼다.
+3. **근거 분리**: A(작성 품질: 구조·범위·diff 검사)와 B(그 skill로 한 실제 작업: `phase_eval`·`skill_behavior.py`)를 나눠
+   적는다. 형식 검사나 다른 모델의 동의는 B를 대신하지 못한다. 좁은 문구 수정은 구조·범위 검사만으로 충분할 수 있으나,
+   돌리지 않은 행동 검사는 unverified로 적는다.
+4. **개선 주장**: 같은 조건의 baseline(이전 버전) 대비로만 주장한다. 문구를 고르거나 고치는 데 쓴 사례의 결과는
+   development 근거다. 독립적인 개선 주장에는 그 과정에서 보지 않은 held-out 사례가 필요하다.
+5. **기준(oracle) 수정**: 출력을 본 뒤 채점 기준을 고쳤다면 이유를 기록하고, 영향받는 결과를 모든 kit에 같은 기준으로
+   다시 채점한다. 기준을 고쳐도 development 사례가 held-out이 되지는 않는다.
+6. **라우팅 어휘(`taskTerms`, profile `task_terms`)**: `skill_routing`(dev·heldout·새 blind set)에 더해, 릴리스 게이트
+   fixture의 라우팅이 바뀌는지 본다. `evals/phase-cases/*/case.json`의 `task`와 `author/clean/artifacts/prd.md`를 사례로 만들어
+   base·후보 kit에서 `skill_routing.py --cases`로 재고 required 집합을 비교한다. 새 skill이 붙으면 맞는 라우팅인지 판단한다.
+   맞으면 게이트 토큰 변화로 PR에 적고, 틀리면 표현을 좁힌다. 대상 사용자만 가리키는 단어(`signed-in`, `anonymous user`)는
+   단독으로 넣지 않고 보호·행동 표현(`only signed-in`, `redirect anonymous`)으로 묶는다(v0.3.20 #396·#394).
+7. **보고**: 바뀐 파일, 실제로 돌린 검사와 증거, 돌리지 못한 행동 검사, 설치·배포 여부를 적는다.
 
 ## 순서
 
@@ -188,6 +277,14 @@ Codex(구독)는 달러 대신 사용 한도를 쓴다. 토큰은 Claude와 비�
 위 표 구성으로 Claude 한 사이클은 약 $35–45, 리뷰 검사가 가장 비싸다.
 
 ## 함정 (실제로 겪은 것)
+
+- **게이트 전에 stack 도구를 확인한다(2026-10-20)**: v0.3.20 게이트 1차는 컨테이너에 Dart/Flutter가 없어서 app unit이 모두
+  준비 단계에서 무효가 됐다. 39 unit째(그중 app 18 unit 무효)에 발견해 중단하고, Flutter를 설치한 뒤 처음부터 다시 쟀다. 게이트 전에는
+  `--stacks app --modes clean --trials 1 --review-trials 1`로 6 unit만 돌려 네 stack 모두 준비가 통과하는지 본다.
+- **게이트 중 디스크**: web·rn fixture가 unit마다 약 400MB라 168 unit이면 60GB를 넘는다. 끝난 unit의 `node_modules`·`.next`만
+  지우는 정리 스크립트를 함께 띄운다(v0.3.19 기록과 같은 방식, 소스·증거·측정값은 건드리지 않는다).
+- **kit 변경 동결**: 게이트가 측정하는 커밋 뒤에 kit 지문 범위(skills·src·templates 등)나 평가기·사례를 바꾸는 PR을 merge하면
+  `release.yml`이 기록을 거부한다. 그런 PR은 태그 뒤로 미룬다(v0.3.20에서는 #394).
 
 - **사례 하나로 매긴 점수와 "짧아짐" tie-break**: 루프가 측정되지 않는 지침 네 문단을 지웠다. model 트랙에서는 이
   tie-break를 없앴다(#383). 채택 전 held-out·회귀 검사를 생략하지 않는다.
