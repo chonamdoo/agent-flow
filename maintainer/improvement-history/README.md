@@ -231,9 +231,10 @@ python evals/ui_task.py run $T --static $T/reference --repeat 3        # 기준 
 # 새 중립 프로젝트에서 full-feature 실행(kit = 측정할 agent-flow 트리)
 P=$(mktemp -d)/store && mkdir -p $P && cd $P && git init -q && git commit -q --allow-empty -m init
 mkdir -p docs fixtures && cp <repo>/$T/prd.md docs/source-prd.md && cp <repo>/$T/fixtures/catalog.json fixtures/
-<kit>/bin/agent-flow install . <installer 옵션>
-<kit>/bin/agent-flow run "docs/source-prd.md의 Store를 구현한다(Spec Item·test-id 계약을 그대로 따른다)" --workflow full-feature
-# pause(domain-grill·prd·merge-approval)마다 agent-flow continue. push-pr 이후는 원격이 없으면 commit에서 멈춘다.
+node <kit>/bin/agent-flow-kit.mjs install --root $P --profile nextjs --architecture-mode stack
+.agent-flow/bin/agent-flow run "docs/source-prd.md의 Store를 구현한다(Spec Item·test-id 계약을 그대로 따른다)" --workflow full-feature
+# pause(domain-grill·prd·merge-approval)마다 .agent-flow/bin/agent-flow continue(출력의 next_command를 따른다).
+# push-pr 이후는 원격이 없으면 commit에서 멈춘다.
 
 # 채점: 정적 산출물은 --static, 서버가 필요한 앱은 띄운 뒤 --url
 python <repo>/evals/ui_task.py run <repo>/$T --url http://127.0.0.1:3000 --repeat 3 --summary ui.md --json ui.json
@@ -260,7 +261,8 @@ multi-review가 fail closed로 멈추므로(13/24 phase), 리뷰·gates·commit�
 - full-feature 1회(Linux 원격 세션, Claude Opus controller, 전체 PRD): 프로젝트 준비 약 4분, 실행 18분 17초(domain-grill →
   multi-review에서 정지, 13/24 phase), 채점 약 9분. 세션 비용 약 $9.7(출력 약 10.8만 토큰, 캐시 읽기 약 2,700만 토큰,
   준비·채점 포함). reviewer subprocess는 sandbox 때문에 돌지 않아 그 비용은 0이다. 기록:
-  `maintainer/improvement-history/ui-task-runs/2026-10-20-beauty-store/`(브랜치 `eval/beauty-store-fullfeature-run`).
+  `maintainer/improvement-history/ui-task-runs/2026-10-20-beauty-store/`(`failures.md` F1–F14). 재현되는 결함은
+  `tests/test_practical_run_findings.py`에 `xfail(strict=True)`로 있다. 고치면 XPASS가 실패하므로 그 mark를 지운다.
 
 ## 비용·시간 참고치 (2026-10-20)
 
