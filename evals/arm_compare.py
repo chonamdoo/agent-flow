@@ -69,6 +69,11 @@ UI_CASES = {"oyg": {"task": "oy-global-fullstack", "layer": "prd", "profile": "n
 UI_TASK = ("Build the global beauty commerce site that `prd.md` describes: a web frontend and its backend. Follow "
            "`contract/interface.md` (how the build is started, routes, test ids) and `contract/openapi.yaml` (the API), "
            "and use only the data in `fixtures/`. Commit your work.")
+# controller에 넘기는 환경변수. 이 harness를 돌리는 Claude 세션의 변수(CLAUDE_CODE_SESSION_ID 등)를 물려주면
+# controller가 그 세션 id로 기록되고, 조건마다 다른 설정이 섞인다. 인증과 프록시에 필요한 것만 넘긴다.
+CONTROLLER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy",
+                  "http_proxy", "no_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
+                  "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CODEX_HOME", "OPENAI_API_KEY")
 CLAUDE_TOOLS = ("Bash", "Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "TodoWrite", "Task")
 ARMS = ("A", "B", "C", "Cp")
 WORKFLOWS = {"B": "development", "C": "full-feature"}
@@ -442,6 +447,10 @@ def controller_argv(prompt: str, model: str, budget: float | None) -> list[str]:
     return argv + (["--max-budget-usd", f"{budget:g}"] if budget else [])
 
 
+def controller_env(parent: dict[str, str]) -> dict[str, str]:
+    return {**{key: parent[key] for key in CONTROLLER_ENV if key in parent}, "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1"}
+
+
 def _stream_summary(stream: Path) -> dict:
     session, result = None, {}
     for row in run_usage._jsonl(stream):
@@ -465,7 +474,7 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
     meta = json.loads((run / "arm.json").read_text(encoding="utf-8"))
     prompt = (run / "prompt.md").read_text(encoding="utf-8")
     stream = run / "controller.jsonl"
-    env = {**os.environ, "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1"}
+    env = controller_env(os.environ)
     started = time.monotonic()
     with stream.open("wb") as out, (run / "controller.stderr").open("wb") as err:
         proc = subprocess.Popen(controller_argv(prompt, model, budget), cwd=meta["project"], env=env, stdout=out,

@@ -211,3 +211,9 @@ def test_drive_reads_the_session_and_cost_from_the_stream(tmp_path):
     (projects / "-x-project" / "s-1.jsonl").write_text("{}\n", encoding="utf-8")
     assert arm_compare.session_transcript("s-1", projects) == projects / "-x-project" / "s-1.jsonl"
     assert arm_compare.session_transcript(None, projects) is None
+
+
+def test_the_controller_does_not_inherit_the_operators_session():
+    env = arm_compare.controller_env({"PATH": "/bin", "HOME": "/root", "CLAUDE_CODE_SESSION_ID": "operator",
+                                      "CLAUDE_CODE_REMOTE": "true", "CLAUDE_EFFORT": "low", "HTTPS_PROXY": "http://p"})
+    assert env == {"PATH": "/bin", "HOME": "/root", "HTTPS_PROXY": "http://p", "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1"}
