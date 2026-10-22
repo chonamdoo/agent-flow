@@ -249,18 +249,30 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
     return meta
 
 
+def _common_dir(path: Path) -> Path | None:
+    out = c_prime._sh(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], path).stdout.strip()
+    return Path(out).resolve() if out else None
+
+
 def linked_worktrees(project: Path) -> list[Path]:
-    """Linked worktrees git lists for the project (`--porcelain -z`, so no path is split on a newline)."""
+    """Linked worktrees git lists for the project (`--porcelain -z`, so no path is split on a newline).
+
+    A listed path counts only while it still belongs to this repository. A stale registration can name a path that
+    another project's worktree now occupies (a project moved aside and re-prepared at the same path makes the runner
+    create its worktree there again), and grading it would credit that project's work to this run.
+    """
     listing = c_prime._sh(["git", "worktree", "list", "--porcelain", "-z"], project).stdout
     paths = [Path(field.split(" ", 1)[1]) for field in listing.split("\0") if field.startswith("worktree ")]
-    return [path for path in paths if path.resolve() != project.resolve() and path.is_dir()]
+    common = _common_dir(project)
+    return [path for path in paths if path.resolve() != project.resolve() and path.is_dir()
+            and _common_dir(path) == common]
 
 
 def runner_worktrees(project: Path) -> list[Path]:
     """Linked worktrees the runner owns: they have run state in `<git-common-dir>/agent-flow/worktrees/<name>/`."""
-    state = Path(c_prime._sh(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], project).stdout.strip())
+    state = _common_dir(project)
     return [path for path in linked_worktrees(project)
-            if (state / "agent-flow" / "worktrees" / path.name / ".agent-flow" / "runs").is_dir()]
+            if state is not None and (state / "agent-flow" / "worktrees" / path.name / ".agent-flow" / "runs").is_dir()]
 
 
 def select_checkout(project: Path, arm: str) -> tuple[Path, dict]:

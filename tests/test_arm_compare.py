@@ -342,6 +342,27 @@ def test_an_undecidable_worktree_is_a_harness_error(tmp_path):
     assert chosen == project and info["checkout_error"] == "0 runner worktrees among 1 linked worktrees"
 
 
+def test_a_worktree_path_reused_by_a_later_project_is_not_graded(tmp_path):
+    # An attempt moved aside and re-prepared at the same path: the rerun's runner recreates its worktree where the
+    # attempt's stale registration still points.
+    project, worktree = tmp_path / "C-1" / "project", tmp_path / "wt" / "feat-x"
+    _git_init(project)
+    arm_compare._git(["worktree", "add", "-q", "-b", "feat/x", str(worktree)], project)
+    (project / ".git" / "agent-flow" / "worktrees" / "feat-x" / ".agent-flow" / "runs" / "r1").mkdir(parents=True)
+    attempt = tmp_path / "harness-error-C-1"
+    attempt.mkdir()
+    (tmp_path / "C-1").rename(attempt / "C-1")
+    import shutil
+    shutil.rmtree(worktree)
+    rerun = tmp_path / "C-1" / "project"
+    _git_init(rerun)
+    arm_compare._git(["worktree", "add", "-q", "-b", "feat/x", str(worktree)], rerun)
+    (rerun / ".git" / "agent-flow" / "worktrees" / "feat-x" / ".agent-flow" / "runs" / "r1").mkdir(parents=True)
+    chosen, info = arm_compare.select_checkout(attempt / "C-1" / "project", "C")
+    assert chosen == attempt / "C-1" / "project" and info["linked_worktrees"] == 0
+    assert arm_compare.select_checkout(rerun, "C")[0] == worktree
+
+
 def test_a_gate_deferred_to_ci_is_recorded_as_never_run(tmp_path):
     project, checkout = tmp_path / "project", tmp_path / "wt"
     ledger = project / ".git" / "agent-flow" / "worktrees" / "w" / ".agent-flow" / "runs" / "r1" / "artifacts"
