@@ -2416,6 +2416,7 @@ class Runner:
                 recoverable_statuses=self._feedback_recoverable_statuses(phase),
                 since=_meta_timestamp(meta.get("phase_entered_at")),
                 cwd_root=self.project_root,
+                profile=self.profile,
             )
         )
         missing.extend(

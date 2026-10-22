@@ -542,3 +542,74 @@ def test_case_sensitive_red_reference_round_trip(tmp_path):
         root, text=wrong_case, profile=ANDROID_PROFILE,
         code_baseline=baseline, cwd_root=root,
     ) is None
+
+
+STRICT_PROFILE = {**PYTHON_PROFILE, "execution": {"observation": "strict"}}
+
+
+@pytest.mark.parametrize("self_report", ("verified", "unavailable"))
+def test_strict_observation_does_not_accept_a_self_report_without_observation(tmp_path, self_report):
+    """반증: hook이 실리지 않은 세션은 `unavailable` 한 줄로 red를 통과했다(#414)."""
+    root = _project(tmp_path)
+    text = GATE + f"test-run-evidence: {self_report}\n"
+    missing = missing_test_evidence_markers(root, "red", text, profile=STRICT_PROFILE)
+    assert len(missing) == 1 and "agent-flow run-command" in missing[0]
+
+
+def test_strict_observation_passes_once_the_run_command_result_is_recorded(tmp_path):
+    root = _project(tmp_path)
+    text = GATE + "test-run-evidence: verified\n"
+    _observe(root, "pytest tests/test_x.py::test_bug", exit_code=1)
+    assert missing_test_evidence_markers(root, "red", text, profile=STRICT_PROFILE) == \
+        missing_test_evidence_markers(root, "red", text, profile=PYTHON_PROFILE)
+    assert not any("strict observation" in marker
+                   for marker in missing_test_evidence_markers(root, "red", text, profile=STRICT_PROFILE))
+
+
+def test_observation_mode_rejects_an_unknown_value(tmp_path):
+    root = _project(tmp_path)
+    with pytest.raises(ValueError, match="execution.observation"):
+        missing_test_evidence_markers(root, "red", GATE + "test-run-evidence: unavailable\n",
+                                      profile={**PYTHON_PROFILE, "execution": {"observation": "strcit"}})
+
+
+def test_project_override_can_turn_strict_observation_on(tmp_path):
+    from agent_flow.core.profiles import load_profile_payload, observation_mode
+
+    profiles = tmp_path / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    override = profiles / "generic.local.yaml"
+    override.write_text("execution:\n  observation: strict\n", encoding="utf-8")
+    assert observation_mode(load_profile_payload("generic", tmp_path)) == "strict"
+    override.write_text("execution:\n  observation: off\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid profile override execution"):
+        load_profile_payload("generic", tmp_path)
+    assert observation_mode(load_profile_payload("generic", tmp_path / "elsewhere")) == "self-report"
+
+
+def test_a_base_profile_with_an_unknown_observation_value_fails_when_loaded(tmp_path):
+    from agent_flow.core.profiles import load_profile_payload
+
+    profiles = tmp_path / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "custom.yaml").write_text("id: custom\nexecution:\n  observation: strcit\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="execution.observation"):
+        load_profile_payload("custom", tmp_path)
+    (profiles / "custom.yaml").write_text("id: custom\nexecution: strict\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="execution must be a mapping"):
+        load_profile_payload("custom", tmp_path)
+
+
+def test_one_strict_profile_makes_a_multi_profile_run_strict(tmp_path):
+    """반증: union이 execution을 옮기지 않아 profile을 하나 더 켜면 strict가 꺼졌다."""
+    from agent_flow.core.phase_workflow import find_kit_root
+    from agent_flow.core.profile_resolution import load_profile_union
+    from agent_flow.core.profiles import observation_mode
+
+    profiles = tmp_path / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "python.local.yaml").write_text("execution:\n  observation: strict\n", encoding="utf-8")
+    _, union = load_profile_union(find_kit_root(), ["python", "nextjs"], explicit_fallback=False, project_root=tmp_path)
+    assert observation_mode(union) == "strict"
+    _, plain = load_profile_union(find_kit_root(), ["python", "nextjs"], explicit_fallback=False, project_root=tmp_path / "x")
+    assert observation_mode(plain) == "self-report"

@@ -75,6 +75,7 @@ from agent_flow.core.profiles import (
     active_profile_ids,
     detect_profile,
     load_profile_payload,
+    observation_mode,
 )
 from agent_flow.core.local_skills import (
     changed_files,
@@ -3961,6 +3962,16 @@ def _print_host_connection(project_root: Path, checkout: Path, active: ActiveRun
         return
     for line in lines:
         print(line)
+    try:
+        mode = observation_mode(resolve_profile(_find_kit_root(), project_root)[1])
+    except (OSError, ValueError) as exc:
+        print(f"observation: unavailable ({exc!r})")
+        return
+    if mode == "strict":
+        print("observation: strict — 이 checkout의 명령이 관측되지 않으면 `unavailable` 신고로 통과하지 않습니다")
+    else:
+        print("observation: self-report — 이 checkout의 명령이 관측되지 않으면 "
+              "`test-run-evidence: unavailable` 신고를 받습니다(profile execution.observation: strict로 끕니다)")
 
 
 def _spec_run_context(run_dir: Path) -> dict:

@@ -24,6 +24,7 @@ from agent_flow.core.local_skills import merged_profile_payload
 from agent_flow.core.phase_workflow import package_root
 from agent_flow.core.profiles import (
     load_profile_yaml,
+    observation_mode,
     resolve_project_profile_payload,
     runtime_profile_selection,
     project_profile_path,
@@ -125,6 +126,7 @@ def load_single_profile(
         raise ValueError(f"profile id mismatch: {profile_id}")
     if project_root is not None:
         raw = resolve_project_profile_payload(raw, profile_id=profile_id, root=project_root)
+    observation_mode(raw)
     return profile_id, raw
 
 
@@ -184,6 +186,10 @@ def load_profile_union(
     for key in ("skills", "skill_sources"):
         if key in merged:
             union[key] = merged[key]
+    # 한 profile이라도 strict를 선언했으면 run 전체가 strict다. 빼면 profile을 하나 더 켜는
+    # 것만으로 자기신고 축퇴가 되살아난다.
+    if any(observation_mode(profile) == "strict" for _, profile in deduped):
+        union["execution"] = {"observation": "strict"}
     for key in ("branching", "pr", "commit_convention"):
         declarations = [
             (profile_id, profile[key])

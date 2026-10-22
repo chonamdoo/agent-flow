@@ -42,6 +42,7 @@ from agent_flow.core.markers import (
     completion_gate_marker_values,
     completion_gate_marker_values_exact,
 )
+from agent_flow.core.profiles import observation_mode
 from agent_flow.core.route_verdicts import route_key
 
 COMMANDS_RUN_LOG = Path(".agent-flow") / "commands-run.jsonl"
@@ -58,6 +59,11 @@ TEST_EVIDENCE_PHASES = frozenset({"red", "implement-fix", "implement", "fix-loop
 TEST_RUN_EVIDENCE_MARKER = "test-run-evidence: verified|unavailable"
 REGRESSION_SEAM_MARKER = "regression-seam: test|feedback-only"
 FEEDBACK_COMMAND_MARKER = "feedback-command:"
+STRICT_OBSERVATION_HINT = (
+    "strict observation: no command from this checkout was observed; run it with "
+    "agent-flow run-command -- <argv>; in a bound active checkout use the run_command_prefix "
+    "reported after agent-flow continue"
+)
 FEEDBACK_RED_EXIT_MARKER = "feedback-red-exit:"
 FEEDBACK_GREEN_EXIT_MARKER = "feedback-green-exit:"
 FEEDBACK_RUN_EVIDENCE_MARKER = "feedback-run-evidence: verified|unavailable"
@@ -450,6 +456,8 @@ def missing_test_evidence_markers(
         return []
     evidence = read_command_evidence(project_root, since=since, cwd_root=cwd_root)
     if not _observation_reaches_checkout(evidence, project_root, cwd_root=cwd_root):
+        if observation_mode(profile) == "strict":
+            return [f"test-run-evidence: verified ({STRICT_OBSERVATION_HINT})"]
         if values.get("test-run-evidence") not in {"verified", "unavailable"}:
             return [TEST_RUN_EVIDENCE_MARKER]
         return []
@@ -596,6 +604,7 @@ def missing_feedback_evidence_markers(
     recoverable_statuses: Sequence[str] = (),
     since: float | None = None,
     cwd_root: Path | None = None,
+    profile: dict | None = None,
 ) -> list[str]:
     required = {marker.strip() for marker in required_markers}
     if FEEDBACK_RUN_EVIDENCE_MARKER not in required:
@@ -638,6 +647,8 @@ def missing_feedback_evidence_markers(
     evidence = read_command_evidence(project_root, since=since, cwd_root=cwd_root)
     reported_evidence = values.get("feedback-run-evidence", "").lower()
     if not evidence.available or not evidence.runs:
+        if observation_mode(profile) == "strict":
+            return [f"feedback-run-evidence: verified ({STRICT_OBSERVATION_HINT})"]
         if reported_evidence not in {"verified", "unavailable"}:
             return [FEEDBACK_RUN_EVIDENCE_MARKER]
         return []

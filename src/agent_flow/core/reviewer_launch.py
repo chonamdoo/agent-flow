@@ -22,7 +22,7 @@ REVIEW_CLI_NAMES: tuple[str, ...] = ("claude", "codex")
 REVIEWER_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
 # `execution` 바로 아래에서 소비되는 키. 그 밖의 키는 거부한다 — `reviewer:`처럼
 # 한 글자 틀린 선언을 통과시키면 선언 전체가 조용히 버려진다.
-_EXECUTION_KEYS = frozenset({"reviewers"})
+_EXECUTION_KEYS = frozenset({"reviewers", "observation"})
 _RULE_KEYS = frozenset({"match", "candidates"})
 _MATCH_KEYS = frozenset({"phase", "angle"})
 _CANDIDATE_KEYS = frozenset({"provider", "model", "effort"})
@@ -68,7 +68,7 @@ def reviewer_launch_rules(
     unknown = _unknown_keys(execution, _EXECUTION_KEYS, where="profile execution")
     if unknown:
         raise ReviewerLaunchError(
-            "profile execution supports only reviewers: "
+            "profile execution supports only reviewers, observation: "
             f"remove {', '.join(unknown)}"
         )
     reviewers = execution.get("reviewers")
