@@ -7,10 +7,10 @@
   - A: 과제 문장 + test 명령 + 완료 선언 규칙. kit 없음.
   - B: `development` workflow. 에이전트가 runner를 돌리고, 사용자 역할도 맡는다.
   - C: `full-feature` workflow. B와 같은 방식이다.
-  - C′: `c_prime.py` RULES_VERSION 4. runner 없이 같은 절차 문장만 준다.
+  - C′: `c_prime.py` RULES_VERSION 4. runner 없이 같은 절차 문장만 준다. multi-review·architecture-review·fix-loop가 빠지므로 C − C′는 코드 강제만의 효과가 아니라 강제 + 독립 리뷰 + 재작업 + 추가 계산의 합이다.
 - 모델: 모든 조건이 Claude Opus 5.5(`claude-opus-5-5`) 서브에이전트다. 같은 컨테이너에서 돌렸다(Linux, Landlock ABI 7).
   - B·C의 리뷰어는 Claude와 Codex 0.163.0 subprocess다.
-- kit: `experiment/epic-409` f1d4e5f(#443 merge 직후). prompt fingerprint는 `results.jsonl`의 `prompt_sha256`에 있다(조건 안에서 5회 모두 같다).
+- kit: `results.jsonl`의 `kit_commit`은 dd2e6c5(trial 1)와 a19920a(trial 2~5)다. 두 commit은 f1d4e5f(#443 merge 직후) 위에 `evals/`·`tests/`만 더한 것이라, 에이전트가 설치한 kit 트리는 20회 모두 같다. 작업 트리 dirty 여부는 기록하지 않았다. prompt fingerprint는 `results.jsonl`의 `prompt_sha256`에 있다(조건 안에서 5회 모두 같다).
 - 실행: 4개 조건을 1회씩 묶은 wave 5개. 파일럿(wave 1)도 trial 1로 센다. 파일럿 뒤에 바꾼 것은 채점 쪽뿐이고 에이전트가 보는 입력은 바꾸지 않았다.
 - 오염 방지
   - 에이전트가 설치에 쓰는 kit 사본에는 `evals/`가 없다.
@@ -31,7 +31,7 @@
 | C′ | 5/5 | 250초 | 20k | 2.4M | $1.37 | - |
 
 - 리뷰어 subprocess는 사용량을 내지 않는다. 그래서 위 비용에는 B·C 리뷰어 비용이 빠져 있다.
-- Fisher 단측 p는 모든 조건이 1.000이다. 성공률 차이는 없다.
+- Fisher 단측 p(조건이 A보다 나은가)는 모든 조건이 1.000이다. 이것은 "차이가 없다"는 증거가 아니다. n=5에서 5/5의 95% 하한은 약 48%이고, 비열등성은 검정하지 않았다.
 
 ## 해석
 
