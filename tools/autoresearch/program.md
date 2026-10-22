@@ -46,3 +46,16 @@ missed a decision written only in the slice plan; a failing `norm` check means i
 contract. Improve how the skill makes an author read and apply the plan and the contract, in general terms.
 Only more passing runs keep an edit here. Do not delete text to shorten a skill: these few cases
 cannot show what a removed rule protects in other phases and stacks.
+
+## Track: subtract
+
+Editable: the same skill bodies as the model track, but **only by deleting whole lines**. Any added
+or reworded line, a new file, or a frontmatter change is rejected. Delete text that a model already
+does without being told; keep anything that names a project-specific contract. A deletion is kept
+only when the evaluated runs stay within the fixed non-inferiority margin and a second measurement
+agrees.
+
+## Everywhere
+
+Hooks, runner judgment code, the approval path, workflow YAML, the evaluator, cases and tests are
+invariants. An edit that touches them is invalid in every track.

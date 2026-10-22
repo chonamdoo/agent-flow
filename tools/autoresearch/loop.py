@@ -17,7 +17,15 @@ routing: score = development cases passing in `evals/skill_routing.py`; no case 
 best commit may fail; held-out cases are recorded for every iteration but never decide.
 model:   score = author runs passing behavior, plan and norm in `evals/phase_eval.py` (Claude author
 only), then plan passes, then fewer uncached input tokens; the observed required-read rate may not
-drop. Model runs are noisy: keep decisions need a strictly higher pass count.
+drop and overclaims may not rise. Model runs are noisy: keep decisions need a strictly higher pass count.
+subtract: the model evaluator, but the edit may only delete whole lines of the named skills' bodies.
+A deletion is kept when it is non-inferior (pass rate within the margins fixed in
+`noninferiority.json`, no read-rate drop, no overclaim rise) and the surface got smaller. The track
+refuses to start while a margin is unset (#420), and every keep needs a confirmation measurement.
+
+Paths in `FORBIDDEN_PATHS` (hooks, runner judgment code, the approval path, workflow YAML, the
+evaluator, cases and tests) are invariants, not optimization targets: an edit touching one is
+invalid in every track.
 
 Each scored state is fingerprinted (`surface_key`); an edit that recreates the best or an already
 scored state is recorded as `no-op`/`duplicate` without evaluation. A measurement with an invalid
@@ -34,6 +42,7 @@ import importlib.util
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -55,6 +64,14 @@ PROPOSER_FAILED = "proposer failed"
 CONDITIONS_CHANGED = "measurement conditions changed"
 COND_FIELD = re.compile(r"(?:^|; )cond=([0-9a-f]{16})")
 KEY_FIELD = re.compile(r"(?:^|; )key=([0-9a-f]{64})")
+# 어떤 트랙에서도 최적화 대상이 아니다. 판정·승인·평가를 바꾸는 편집은 점수를 올리는 대신 측정을 무너뜨린다(#420).
+FORBIDDEN_PATHS = (
+    "scripts/hooks/*", "src/agent_flow/core/*evidence*", "src/agent_flow/core/design_value_check.py",
+    "src/agent_flow/core/markers.py", "src/agent_flow/artifact.py", "src/agent_flow/runner.py",
+    "src/agent_flow/workflows/*", "evals/*", "tests/*", "tools/*",
+)
+NONINFERIORITY = HERE / "noninferiority.json"
+NOT_CONFIRMED = "not confirmed"
 ROUTING_GUARDS = (
     "tests/test_profile_routing.py::test_tanstack_form_capability_routes_only_for_react_web",
     "tests/test_profile_routing.py::test_react_capabilities_route_by_intent_not_all_tsx",
@@ -101,6 +118,9 @@ def changed_files(tree: Path) -> list[str]:
 def surface_violations(tree: Path, track: str, skills: list[str]) -> list[str]:
     problems = []
     for path in changed_files(tree):
+        if any(fnmatch.fnmatch(path, pattern) for pattern in FORBIDDEN_PATHS):
+            problems.append(f"{path}: forbidden path (an invariant, not an optimization target)")
+            continue
         if track == "routing":
             if not (fnmatch.fnmatch(path, "skills/*/SKILL.md") or fnmatch.fnmatch(path, "src/agent_flow/profiles/*.yaml")):
                 problems.append(f"{path}: outside the routing surface")
@@ -114,13 +134,26 @@ def surface_violations(tree: Path, track: str, skills: list[str]) -> list[str]:
         else:
             allowed = [f"skills/{name}/SKILL.md" for name in skills] + [f"skills/{name}/references/*.md" for name in skills]
             if not any(fnmatch.fnmatch(path, pattern) for pattern in allowed):
-                problems.append(f"{path}: outside the model surface")
+                problems.append(f"{path}: outside the {track} surface")
                 continue
+            if not (tree / path).is_file():
+                problems.append(f"{path}: deleted a file of the {track} surface")
+                continue
+            if track == "subtract":
+                # 삭제만 받는다. 고친 줄은 추가 1·삭제 1이므로 문구 바꾸기도 여기서 막힌다. 줄 접두사가 아니라
+                # numstat 개수로 센다: `++`로 시작하는 추가 줄과 binary diff(`-`)가 접두사 검사를 빠져나간다.
+                if not git(tree, "ls-files", "--", path):
+                    problems.append(f"{path}: a new file in the subtract track")
+                    continue
+                added = git(tree, "diff", "--numstat", "--", path).split("\t", 1)[0]
+                if added != "0":
+                    problems.append(f"{path}: added text in the subtract track ({added} lines)")
+                    continue
             if path.endswith("SKILL.md"):
                 before = git(tree, "show", f"HEAD:{path}").split("---", 2)[1]
                 after = (tree / path).read_text(encoding="utf-8").split("---", 2)[1]
                 if before != after:
-                    problems.append(f"{path}: frontmatter is frozen in the model track")
+                    problems.append(f"{path}: frontmatter is frozen in the {track} track")
     return problems
 
 
@@ -240,6 +273,9 @@ def score_model(tree: Path, work: Path, args: argparse.Namespace) -> dict:
     return {"score": (passed, plan, -tokens), "dev": passed, "dev_total": len(rows), "heldout": "-",
             "heldout_total": "-", "read_rate": min(rates) if rates else None,
             "cost": sum(row.get("cost_usd") or 0 for row in rows),
+            "overclaims": sum(bool(row.get("overclaims")) for row in valid),
+            # 완료 선언 자체가 사라지면 overclaim은 0이 된다. 그 감소를 개선으로 세지 않도록 따로 센다.
+            "claims_missing": sum(row.get("claims") is None for row in valid),
             "feedback": f"{passed}/{len(rows)} runs passed every axis; failed checks:\n" + ("\n".join(checks) or "- none")}
 
 
@@ -276,7 +312,20 @@ def evaluate(tree: Path, work: Path, args: argparse.Namespace) -> dict:
     return {**outcome, "conditions": measured_under}
 
 
-def better(candidate: dict, best: dict, track: str, candidate_bytes: int, best_bytes: int) -> tuple[bool, str]:
+def load_margins(path: Path = NONINFERIORITY) -> dict[str, float] | None:
+    """Non-inferiority margins, or None while any is unset. The subtract track does not run without them."""
+    try:
+        margins = json.loads(path.read_text(encoding="utf-8")).get("margins") or {}
+    except (OSError, ValueError):
+        return None
+    if not margins or any(not isinstance(value, (int, float)) or isinstance(value, bool)
+                          or not math.isfinite(value) or value < 0 for value in margins.values()):
+        return None
+    return margins
+
+
+def better(candidate: dict, best: dict, track: str, candidate_bytes: int, best_bytes: int,
+           margins: dict[str, float] | None = None) -> tuple[bool, str]:
     if "error" in candidate:
         return False, "evaluation error"
     if candidate.get("conditions") != best.get("conditions"):
@@ -285,6 +334,10 @@ def better(candidate: dict, best: dict, track: str, candidate_bytes: int, best_b
         lost = [cid for cid, ok in best["passing"].items() if ok and not candidate["passing"].get(cid)]
         if lost:
             return False, f"regressed {lost}"
+        # held-out은 결정에 쓰지 않지만 거부권은 있다. dev 천장에서 삭제만 keep되던 실측이 이유다(#420).
+        if isinstance(best.get("heldout"), int) and isinstance(candidate.get("heldout"), int) \
+                and candidate["heldout"] < best["heldout"]:
+            return False, f"held-out dropped: {candidate['heldout']} < {best['heldout']}"
         if candidate["score"] > best["score"]:
             return True, "improved"
         if candidate["score"] == best["score"] and candidate_bytes < best_bytes:
@@ -294,6 +347,20 @@ def better(candidate: dict, best: dict, track: str, candidate_bytes: int, best_b
         return False, f"run count changed: {candidate.get('dev_total')} vs {best.get('dev_total')}"
     if best.get("read_rate") is not None and (candidate.get("read_rate") or 0) < best["read_rate"]:
         return False, "required-read rate dropped"
+    if (candidate.get("overclaims") or 0) > (best.get("overclaims") or 0):
+        return False, "overclaims rose"
+    if (candidate.get("claims_missing") or 0) > (best.get("claims_missing") or 0):
+        return False, "completion claims disappeared"
+    if track == "subtract":
+        if margins is None:
+            return False, "non-inferiority margins are not fixed"
+        total = candidate.get("dev_total") or 0
+        drop = (best["score"][0] - candidate["score"][0]) / total if total else 1.0
+        if drop > margins.get("pass_rate_drop", 0):
+            return False, f"inferior: pass rate dropped {drop:.3f} > {margins.get('pass_rate_drop', 0)}"
+        if candidate_bytes >= best_bytes:
+            return False, "not smaller"
+        return True, "non-inferior, smaller"
     passed, plan, _ = candidate["score"]
     best_passed, best_plan, _ = best["score"]
     # Model runs are noisy; a token change alone is not evidence. Only more passing runs keep an edit.
@@ -394,7 +461,7 @@ def resume(tree: Path, results: Path, current: str | None = None) -> tuple[float
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--track", choices=("routing", "model"), required=True)
+    parser.add_argument("--track", choices=("routing", "model", "subtract"), required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--root", type=Path, default=Path.home() / ".cache" / "agent-flow-autoresearch")
     parser.add_argument("--iterations", type=int, default=10)
@@ -409,9 +476,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--concurrency", type=int, default=3)
     parser.add_argument("--model", help="Claude model for evaluated author runs")
+    parser.add_argument("--confirm", action=argparse.BooleanOptionalAction, default=None,
+                        help="re-measure a keep once before committing to it (default: on for subtract)")
     args = parser.parse_args(argv)
-    if args.track == "model" and not args.skills:
-        parser.error("--skills is required for the model track")
+    if args.track in ("model", "subtract") and not args.skills:
+        parser.error(f"--skills is required for the {args.track} track")
+    margins = load_margins()
+    if args.track == "subtract" and margins is None:
+        parser.error(f"non-inferiority margins are not fixed in {NONINFERIORITY} (#420); the subtract track waits for them")
+    confirm = args.confirm if args.confirm is not None else args.track == "subtract"
 
     tree = prepare_worktree(args.root, args.tag)
     work = args.root / args.tag
@@ -433,7 +506,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     spent += best.get("cost", 0.0)
     floor = ""
-    if args.track == "model" and recorded is not None and recorded > best["score"]:
+    if args.track in ("model", "subtract") and recorded is not None and recorded > best["score"]:
         # 같은 조건에서 이미 그 점수를 냈다. 재측정의 나쁜 운을 기준으로 삼지 않는다.
         best = {**best, "score": recorded, "dev": recorded[0]}
         floor = "; floor=recorded"
@@ -482,10 +555,21 @@ def main(argv: list[str] | None = None) -> int:
         spent += outcome.get("cost", 0.0)
         candidate_bytes = surface_bytes(tree, args.track, args.skills)
         keep, reason = (False, f"guard: {failed_guards[0]}") if failed_guards else \
-            better(outcome, best, args.track, candidate_bytes, best_bytes)
+            better(outcome, best, args.track, candidate_bytes, best_bytes, margins)
+        if keep and confirm:
+            # 한 번의 측정이 우연히 이긴 것일 수 있다. keep은 두 번째 측정도 같은 판정을 낼 때만 한다.
+            again = evaluate(tree, work, args)
+            spent += again.get("cost", 0.0)
+            outcome = {**outcome, "cost": outcome.get("cost", 0.0) + again.get("cost", 0.0)}
+            confirmed, second = better(again, best, args.track, candidate_bytes, best_bytes, margins)
+            if not confirmed:
+                keep, reason = False, f"{NOT_CONFIRMED}: {second}"
+                # 확인 측정이 무효면 이 표면은 아직 판정받지 않았다. 지문을 남기지 않아 다시 잴 수 있게 한다.
+                if "error" in again or second == CONDITIONS_CHANGED or again.get("dev_total") != best.get("dev_total"):
+                    outcome = {**outcome, "confirmation_invalid": True}
         # 평가 오류, run 수 불일치, 조건 변경으로 끝난 표면은 점수가 없다. 다시 잴 수 있게 지문을 남기지 않는다.
         evaluated = not failed_guards and "error" not in outcome and reason != CONDITIONS_CHANGED \
-            and outcome.get("dev_total") == best.get("dev_total")
+            and outcome.get("dev_total") == best.get("dev_total") and not outcome.get("confirmation_invalid")
         if evaluated:
             seen[key] = str(iteration)
         record(results, str(iteration), commit, "keep" if keep else "discard", outcome,
