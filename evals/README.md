@@ -562,13 +562,15 @@ python evals/c_prime.py --kit . --smoke --output <새 폴더>     # devflow 과�
 
 C′는 full-feature가 author에게 건네는 phase 프롬프트를 순서대로 이어 붙인 한 장짜리 절차다. runner 판정(증거 검사·마커·gate 라우팅·라운드 상한)은 쓰지 않는다. C − C′는 코드 강제의 효과, C′ − A는 절차 문장의 효과다. 고정한 규칙(`RULES_VERSION`)은 다음과 같다.
 
-- **phase**: full-feature 정상 경로에서 runner 소유 `gates`, runner의 checkout phase(`worktree`, `run-start`: runner만 만드는 binding을 확인하므로 runner 없이는 멈출 수밖에 없다. 첫 smoke가 실제로 그렇게 멈췄다. #429가 runner로 옮긴다), 조건부 수정 phase(`fix-loop`, `pr-comment-fix`, `pr-ci-fix`), multi-review phase(`multi-review`, `architecture-review`)를 뺀다. 리뷰 효과는 C에 남긴다. 프롬프트 수준 리뷰를 넣은 C′+R은 별도 조건이고 여기서 만들지 않는다.
+- **phase**: full-feature 정상 경로에서 runner 소유 `gates`, runner의 checkout phase(`worktree`, `run-start`: runner만 만드는 binding을 확인하므로 runner 없이는 멈출 수밖에 없다. 첫 smoke가 실제로 그렇게 멈췄다. #429가 runner로 옮긴다), 조건부 수정 phase(`fix-loop`, `pr-comment-fix`, `pr-ci-fix`), multi-review phase(`multi-review`, `architecture-review`)를 뺀다. 리뷰 효과는 C에 남긴다. 프롬프트 수준 리뷰를 넣은 C′+R은 별도 조건이고 여기서 만들지 않는다. 대신 절차 머리에 "이 checkout과 현재 branch가 profile이 요구하는 격리 worktree다"를 적는다. 두 번째 smoke가 `git worktree add`를 시도했다.
 - **runner 명령 필터**: run id, project root, `## When complete`(status·next_command), 그리고 `agent-flow` 명령·승인 토큰·`run_command_prefix`를 담은 줄을 지운다. artifact 위치는 `cprime/` 아래로 바꾸고 절대경로는 상대경로로 바꾼다.
 - **pause와 승인**: 기다리지 않는다. full-feature가 사용자 승인으로 멈추는 phase(domain-grill, prd, merge-approval)에서는 artifact에 `approval: agent`를 적게 한다. 에이전트가 대신 승인한 사실이 산출물에 남는다(#413).
 - **중복 절**: 앞 phase와 똑같은 절(profile YAML, 같은 skill 본문)은 첫 phase를 가리키는 한 줄로 바꾼다. 승인 안내는 접지 않는다.
 - **완료 선언**: #424의 arm 공통 규칙(`EVAL-STATUS: complete|blocked: …`)을 붙인다.
 
 같은 kit·과제면 같은 프롬프트가 나온다. SHA-256을 출력하고 `<output>.json`에 fingerprint로 남긴다. 생성은 프로젝트의 임시 사본에서 하므로 원래 프로젝트에 run 상태가 남지 않는다.
+
+smoke는 Codex `workspace-write`로 돈다. 이 sandbox는 `.git`을 읽기 전용으로 두므로, 설치 뒤 gitdir를 프로젝트 밖으로 옮기고 `--add-dir`로 연다. 호스트 전역 git 설정은 끈다(`GIT_CONFIG_GLOBAL=/dev/null`, 서명 설정이 sandbox 밖 자원을 부른다). 평가기의 Python을 PATH 앞에 둔다. 결과에는 hidden test 3종, agent commit 수, 완료 선언, 오염 여부(hidden test 경로를 읽었는지)를 적는다. 2026-10-22 smoke(RULES_VERSION 4, Codex 0.163.0): 173초, hidden 3/3 통과, commit 1, `declared-complete`, 오염 없음.
 
 ### `release_reuse.py` — 바뀌지 않은 셀의 재사용
 

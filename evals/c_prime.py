@@ -13,7 +13,8 @@ Fixed rules (`RULES_VERSION` changes when any of them does):
   can only stop — the first smoke did exactly that; #429 moves them into the runner), the conditional fix phases
   (`fix-loop`, `pr-comment-fix`, `pr-ci-fix`) and the multi-review phases (`multi-review`,
   `architecture-review`). Review stays C's effect; a prompt-level review arm would be C′+R, a
-  separate condition not built here.
+  separate condition not built here. In their place the prompt says the current checkout and branch
+  are the isolated worktree the profile requires (the second smoke tried `git worktree add` instead).
 - Runner talk is removed: the run id, the project root, `## When complete` (status / next_command),
   and every line naming an `agent-flow` command, an approval token or `run_command_prefix`.
   Artifact targets become paths under `cprime/`.
@@ -40,7 +41,7 @@ import tempfile
 import time
 from pathlib import Path
 
-RULES_VERSION = 3
+RULES_VERSION = 4
 EXCLUDED_PHASES = frozenset({"gates", "worktree", "run-start", "fix-loop", "pr-comment-fix", "pr-ci-fix",
                              "multi-review", "architecture-review"})
 RUNNER_LINE = re.compile(r"agent-flow\s+[a-z]|--approve\b|approval_command|run_command_prefix|next_command|"
@@ -111,7 +112,9 @@ def _build(kit: Path, project: Path, task: str, stop_after: str | None) -> str:
     seen: dict[str, str] = {}
     parts = [f"# Procedure\n\nWork through these phases in order for this task: {task}\n"
              "Write each phase's artifact under `cprime/` before starting the next phase. Every artifact "
-             "path a phase names (`artifacts/…`, `prd.md`, `slice-plan.md`, …) is relative to `cprime/`."]
+             "path a phase names (`artifacts/…`, `prd.md`, `slice-plan.md`, …) is relative to `cprime/`.\n"
+             "This checkout, on its current branch, is the isolated worktree the profile requires: work and "
+             "commit here, and do not create another worktree or branch."]
     for phase in runner.phases:
         if phase.id in EXCLUDED_PHASES:
             continue
@@ -134,8 +137,9 @@ def _build(kit: Path, project: Path, task: str, stop_after: str | None) -> str:
 SMOKE_CASE = Path(__file__).resolve().parent / "phase-cases" / "devflow"
 
 
-def _sh(args: list[str], cwd: Path, **kwargs) -> subprocess.CompletedProcess:
+def _sh(args: list[str], cwd: Path, extra_env: dict[str, str] | None = None, **kwargs) -> subprocess.CompletedProcess:
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(extra_env or {})
     return subprocess.run(args, cwd=cwd, capture_output=True, text=True, env=env, **kwargs)
 
 
@@ -175,21 +179,31 @@ def smoke(kit: Path, work: Path, stop_after: str, timeout: int) -> dict:
     project = work / "project"
     shutil.copytree(SMOKE_CASE / "seed", project)
     shutil.copytree(SMOKE_CASE / "author" / "clean" / "pre", project, dirs_exist_ok=True)
-    for args in (["git", "init", "-q"], ["git", "add", "-A"],
-                 ["git", "-c", "user.name=eval", "-c", "user.email=eval@example.com", "commit", "-qm", "seed"]):
+    for args in (["git", "init", "-q"], ["git", "config", "user.name", "eval"],
+                 ["git", "config", "user.email", "eval@example.com"], ["git", "add", "-A"],
+                 ["git", "commit", "-qm", "seed"]):
         _sh(args, project, check=True)
     installed = _sh(["node", str(kit / "bin" / "agent-flow-kit.mjs"), "install", "--root", str(project),
                      "--profile", case["profile"], *case["modes"]["clean"]["install"], "--no-hooks"], project)
     if installed.returncode != 0:
         return {"error": f"install failed: {(installed.stderr or installed.stdout)[-400:]}"}
     _sh(["git", "add", "-A"], project, check=True)
-    _sh(["git", "-c", "user.name=eval", "-c", "user.email=eval@example.com", "commit", "-qm", "install", "--allow-empty"], project, check=True)
+    _sh(["git", "commit", "-qm", "install", "--allow-empty"], project, check=True)
+    installed_head = _sh(["git", "rev-parse", "HEAD"], project, check=True).stdout.strip()
     # A·B·C와 같은 출발점: profile이 요구하는 feature branch 위에서 시작한다.
     _sh(["git", "checkout", "-qb", "feat/cprime-smoke"], project, check=True)
     prompt = build(kit, project, case["task"], stop_after)
+    # Codex의 workspace-write는 `.git`을 읽기 전용으로 둔다. 설치가 끝난 뒤 gitdir를 밖으로 옮기고
+    # `--add-dir`로 연다(설치기는 분리된 gitdir에서 leader를 찾지 못한다).
+    gitdir = work / "gitdir"
+    _sh(["git", "init", "-q", f"--separate-git-dir={gitdir}"], project, check=True)
     started = time.time()
-    run = _sh(["codex", "exec", "--ephemeral", "--sandbox", "workspace-write", "--cd", str(project), "--json",
-               "--skip-git-repo-check", "-"], project, input=prompt, timeout=timeout)
+    (work / "prompt.md").write_text(prompt, encoding="utf-8")
+    # 호스트 전역 git 설정(서명 등)은 sandbox 밖 자원을 부를 수 있다. 평가기의 Python(pytest 포함)을 PATH 앞에 둔다.
+    run = _sh(["codex", "exec", "--ephemeral", "--sandbox", "workspace-write", "--add-dir", str(gitdir),
+               "--cd", str(project), "--json", "--skip-git-repo-check", "-"], project, input=prompt, timeout=timeout,
+              extra_env={"GIT_CONFIG_GLOBAL": os.devnull,
+                         "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"})
     (work / "codex.jsonl").write_text(run.stdout, encoding="utf-8")
     # 채점 전에 test 패키지를 seed 상태로 되돌린다. agent가 `tests/__init__.py`에서 바로 종료하면 discover가
     # 아무것도 돌리지 않고 0으로 끝난다. 그래서 통과는 "실제로 1개 이상 돌았고 OK"로만 센다.
@@ -205,8 +219,10 @@ def smoke(kit: Path, work: Path, stop_after: str, timeout: int) -> dict:
                 if item.get("type") == "command_execution"]
     contaminated = any(marker in command for command in commands for marker in ("phase-cases", "hidden_fix", "hidden_plan"))
     message = _codex_final_message(run.stdout)
+    commits = _sh(["git", "rev-list", "--count", f"{installed_head}..HEAD"], project).stdout.strip()
     return {"exit": run.returncode, "contaminated": contaminated, "seconds": round(time.time() - started), "prompt_sha256":
             hashlib.sha256(prompt.encode("utf-8")).hexdigest(), "hidden_tests": hidden,
+            "commits": int(commits) if commits.isdigit() else None,
             "declaration": classify(message), "artifacts": sorted(p.name for p in (project / "cprime").rglob("*.md"))
             if (project / "cprime").is_dir() else []}
 
