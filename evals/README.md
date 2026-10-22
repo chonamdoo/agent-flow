@@ -560,7 +560,7 @@ python evals/c_prime.py --kit . --project <kit을 설치한 프로젝트> --task
 python evals/c_prime.py --kit . --smoke --output <새 폴더>     # devflow 과제로 Codex 1회, hidden test 채점
 ```
 
-C′는 full-feature가 author에게 건네는 phase 프롬프트를 순서대로 이어 붙인 한 장짜리 절차다. runner 판정(증거 검사·마커·gate 라우팅·라운드 상한)은 쓰지 않는다. C − C′는 코드 강제의 효과, C′ − A는 절차 문장의 효과다. 고정한 규칙(`RULES_VERSION`)은 다음과 같다.
+C′는 full-feature가 author에게 건네는 phase 프롬프트를 순서대로 이어 붙인 한 장짜리 절차다. runner 판정(증거 검사·마커·gate 라우팅·라운드 상한)은 쓰지 않는다. C − C′는 코드 강제에 C′가 빼는 리뷰·수정 phase(multi-review, architecture-review, fix-loop)의 효과가 더해진 값이고, C′ − A는 절차 문장의 효과다. 고정한 규칙(`RULES_VERSION`)은 다음과 같다.
 
 - **phase**: full-feature 정상 경로에서 runner 소유 `gates`, runner의 checkout phase(`worktree`, `run-start`: runner만 만드는 binding을 확인하므로 runner 없이는 멈출 수밖에 없다. 첫 smoke가 실제로 그렇게 멈췄다. #429가 runner로 옮긴다), 조건부 수정 phase(`fix-loop`, `pr-comment-fix`, `pr-ci-fix`), multi-review phase(`multi-review`, `architecture-review`)를 뺀다. 리뷰 효과는 C에 남긴다. 프롬프트 수준 리뷰를 넣은 C′+R은 별도 조건이고 여기서 만들지 않는다. 대신 절차 머리에 "이 checkout과 현재 branch가 profile이 요구하는 격리 worktree다"를 적는다. 두 번째 smoke가 `git worktree add`를 시도했다.
 - **runner 명령 필터**: run id, project root, `## When complete`(status·next_command), 그리고 `agent-flow` 명령·승인 토큰·`run_command_prefix`를 담은 줄을 지운다. artifact 위치는 `cprime/` 아래로 바꾸고 절대경로는 상대경로로 바꾼다.

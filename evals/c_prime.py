@@ -2,9 +2,11 @@
 
     python evals/c_prime.py --kit <kit> --project <installed project> --task "<task>" --output prompt.md
 
-C − C′ is the effect of code enforcement (evidence checks, markers, gate routing, round caps);
-C′ − A is the effect of the procedure text. So C′ keeps every phase prompt the runner would hand
-the author, in order, and removes only what talks to the runner. Model calls: none.
+C − C′ is the effect of what the runner adds: code enforcement (evidence checks, markers, gate
+routing, round caps) together with the review and fix phases C′ leaves out (multi-review,
+architecture-review, fix-loop), so it is not enforcement alone. C′ − A is the effect of the
+procedure text. C′ keeps every other phase prompt the runner would hand the author, in order, and
+removes what talks to the runner. Model calls: none.
 
 Fixed rules (`RULES_VERSION` changes when any of them does):
 
