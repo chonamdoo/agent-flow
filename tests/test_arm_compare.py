@@ -174,3 +174,76 @@ def test_scoring_twice_leaves_the_artifact_and_its_fingerprint_unchanged(tmp_pat
     second = arm_compare.score(run, None)
     assert first["artifact_sha256"] == second["artifact_sha256"]
     assert not (run / "project" / "tests" / "hidden_fix").exists()
+
+
+def test_the_ui_task_seeds_only_the_layer_and_the_pinned_fixtures(tmp_path):
+    run = tmp_path / "A-oyg"
+    meta = arm_compare.prepare(ROOT, "A", "oyg", 1, run)
+    project = run / "project"
+    names = sorted(str(path.relative_to(project)) for path in project.rglob("*")
+                   if path.is_file() and ".git" not in path.parts)
+    assert names == ["contract/interface.md", "contract/openapi.yaml", "fixtures/catalog.json",
+                     "fixtures/commerce.json", "prd.md"]
+    assert meta["case_kind"] == "ui" and meta["layer"] == "prd"
+    prompt = (run / "prompt.md").read_text(encoding="utf-8")
+    assert "prd.md" in prompt and "EVAL-STATUS" in prompt and "agent-flow" not in prompt
+    with pytest.raises(SystemExit):
+        arm_compare.score(run, None)
+
+
+def test_every_arm_gets_the_same_headless_controller_without_a_bypass_flag():
+    a = arm_compare.controller_argv("task A", "claude-opus-5-5", 30.0)
+    c = arm_compare.controller_argv("task C", "claude-opus-5-5", 30.0)
+    assert a[3:] == c[3:] and a[:2] == ["claude", "-p"]
+    assert not any("dangerously" in item or item == "bypassPermissions" for item in a)
+    assert a[a.index("--permission-mode") + 1] == "auto"
+    assert a[a.index("--max-budget-usd") + 1] == "30"
+    assert a[a.index("--add-dir") + 1] == str(arm_compare.AGENT_FLOW_WORKTREES)
+
+
+def test_drive_reads_the_session_and_cost_from_the_stream(tmp_path):
+    stream = tmp_path / "controller.jsonl"
+    stream.write_text(json.dumps({"type": "system", "subtype": "init", "session_id": "s-1"}) + "\n" +
+                      json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 1.25, "num_turns": 4,
+                                  "is_error": False}) + "\n", encoding="utf-8")
+    summary = arm_compare._stream_summary(stream)
+    assert summary["session_id"] == "s-1" and summary["cost_usd"] == 1.25
+    projects = tmp_path / "projects"
+    (projects / "-x-project").mkdir(parents=True)
+    (projects / "-x-project" / "s-1.jsonl").write_text("{}\n", encoding="utf-8")
+    assert arm_compare.session_transcript("s-1", projects) == projects / "-x-project" / "s-1.jsonl"
+    assert arm_compare.session_transcript(None, projects) is None
+
+
+def test_the_controller_does_not_inherit_the_operators_session():
+    env = arm_compare.controller_env({"PATH": "/bin", "HOME": "/root", "CLAUDE_CODE_SESSION_ID": "operator",
+                                      "CLAUDE_CODE_REMOTE": "true", "CLAUDE_EFFORT": "low", "HTTPS_PROXY": "http://p"})
+    assert env == {"PATH": "/bin", "HOME": "/root", "HTTPS_PROXY": "http://p", "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1"}
+
+
+def test_running_the_runners_approval_command_is_self_approval():
+    for command in (".agent-flow/bin/agent-flow continue --root /p --worktree w --approve abc123",
+                    "agent-flow spec approve SPEC-1 --run-dir r"):
+        assert arm_compare.SELF_APPROVAL.search(command)
+    assert not arm_compare.SELF_APPROVAL.search(".agent-flow/bin/agent-flow continue --root /p --worktree w")
+    prompt = arm_compare.driver_prompt("Add a discount", "full-feature")
+    assert "evaluator approves" in prompt and "do not run its approval command" in prompt
+
+
+def test_the_harness_runs_only_the_runners_own_approval_command(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(arm_compare.c_prime, "_sh", lambda argv, cwd, **_: calls.append(argv) or
+                        type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    status = {"approval_command": "agent-flow continue --root /p --worktree w --approve abc", "worktree": str(tmp_path)}
+    assert arm_compare.approve_phase(tmp_path, status)
+    assert calls[-1] == [str(tmp_path / ".agent-flow" / "bin" / "agent-flow"), "continue", "--root", "/p",
+                         "--worktree", "w", "--approve", "abc"]
+    assert not arm_compare.approve_phase(tmp_path, {"approval_command": "rm -rf /", "worktree": str(tmp_path)})
+    assert not arm_compare.approve_phase(tmp_path, {"approval_command": None, "worktree": str(tmp_path)})
+
+
+def test_the_ui_task_installs_the_kit_with_a_declared_architecture(tmp_path):
+    run = tmp_path / "C-oyg"
+    arm_compare.prepare(ROOT, "C", "oyg", 1, run)
+    kit = json.loads((run / "project" / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+    assert kit["architecture"]["mode"] == "clean"
