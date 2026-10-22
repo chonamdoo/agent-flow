@@ -1,0 +1,5 @@
+# 빌드 context에는 의존성 목록과 bin/·build/만 들어간다. 자격 증명이나 작업 트리가 실수로 이미지에 들어갈 길을 막는다.
+*
+!pyproject.toml
+!tools/eval-env/bin/
+!tools/eval-env/build/

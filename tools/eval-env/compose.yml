@@ -1,0 +1,31 @@
+# 평가 서비스(#423). 저장소 루트에서 실행한다:
+#   docker compose -f tools/eval-env/compose.yml run --rm check
+#   docker compose -f tools/eval-env/compose.yml run --rm skill_routing
+# 인증이 필요한 서비스는 compose.auth.yml을 겹친다(읽기 전용 mount):
+#   docker compose -f tools/eval-env/compose.yml -f tools/eval-env/compose.auth.yml run --rm phase_eval --help
+x-eval: &eval
+  image: agent-flow-eval:local
+  build:
+    context: ../..
+    dockerfile: tools/eval-env/Dockerfile
+  working_dir: /repo
+  volumes:
+    - ../..:/repo
+    - ${EVAL_SCRATCH:-../../.eval-scratch}:/scratch
+
+services:
+  check:
+    <<: *eval
+    entrypoint: ["eval-env-check"]
+    command: []
+  skill_routing:
+    <<: *eval
+    command: ["python3", "evals/skill_routing.py", "--kit", ".", "--output", "/scratch/skill-routing.json"]
+  phase_eval:
+    <<: *eval
+    entrypoint: ["eval-env-check", "--then", "python3", "evals/phase_eval.py"]
+    command: ["--help"]
+  ui_task:
+    <<: *eval
+    entrypoint: ["eval-env-check", "--then", "python3", "evals/ui_task.py"]
+    command: ["--help"]
