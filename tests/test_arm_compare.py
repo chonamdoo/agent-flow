@@ -357,3 +357,18 @@ def test_a_gate_deferred_to_ci_is_recorded_as_never_run(tmp_path):
     row = _summary_row("C", gate_ledgers=1, deferred_ci_checks=["pytest"])
     c_line = next(line for line in arm_compare.summarize([row]).splitlines() if line.startswith("| C |"))
     assert c_line.endswith("| 1 / 1 |")
+
+
+def test_a_rule_counts_only_where_the_runs_prompt_stated_it():
+    # 1차 프롬프트는 에이전트에게 phase 승인을 맡겼다. 지금 규칙으로 그 run을 소급해 위반 처리하지 않는다.
+    assert not arm_compare.rule_violation(_summary_row("C", phase_self_approvals=3))
+    assert arm_compare.rule_violation(_summary_row("C", phase_self_approvals=1,
+                                                   approval_rules=arm_compare.HARNESS_APPROVES))
+    assert arm_compare.rule_violation(_summary_row("C", spec_self_approvals=1))
+    # C′는 runner 없이 자기 SPEC을 쓴다. verify를 manual로 적는 것은 우회할 gate가 없는 편집이다.
+    assert not arm_compare.rule_violation(_summary_row("Cp", verify_downgrades=2))
+
+
+def test_new_workflow_runs_record_that_the_harness_approves(tmp_path):
+    meta = arm_compare.prepare(ROOT, "C", "devflow", 1, tmp_path / "C-1")
+    assert meta["approval_rules"] == arm_compare.HARNESS_APPROVES
