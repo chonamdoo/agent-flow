@@ -89,13 +89,18 @@ def _commit(root: Path, message: str) -> str:
                           text=True).stdout.strip()
 
 
-def test_routing_key_ignores_term_order_case_and_quotes(tmp_path):
+def test_routing_key_ignores_term_order_quotes_and_repeats_only(tmp_path):
     root = _repo(tmp_path)
     _set_terms(root, "[alpha, beta]")
     key = loop.surface_key(root, "routing", [])
-    _set_terms(root, "['Beta',alpha, beta]")
+    _set_terms(root, "['beta',alpha, beta]")
     assert loop.surface_key(root, "routing", []) == key
     _set_terms(root, "[alpha]")
+    assert loop.surface_key(root, "routing", []) != key
+    # resolver는 term을 그대로 비교한다: 대소문자나 안쪽 공백이 다르면 다른 상태다.
+    _set_terms(root, "[Alpha, beta]")
+    assert loop.surface_key(root, "routing", []) != key
+    _set_terms(root, '[" alpha ", beta]')
     assert loop.surface_key(root, "routing", []) != key
 
 
@@ -122,7 +127,7 @@ def _fake_routing():
 def test_a_recreated_state_is_never_re_evaluated(tmp_path, monkeypatch):
     root = _repo(tmp_path)
     calls, evaluate = _fake_routing()
-    edits = iter(["[alpha, beta]", "[alpha]", "[Beta, alpha]"])
+    edits = iter(["[alpha, beta]", "[alpha]", "[beta, alpha, alpha]"])
 
     def propose(tree, args, state):
         _set_terms(tree, next(edits))
@@ -261,4 +266,120 @@ def test_a_failed_baseline_records_its_cost_for_the_next_restart(tmp_path, monke
     assert loop.main(argv) == 1
     rows = [line.split("\t") for line in (tmp_path / "work" / "t" / "results.tsv").read_text().splitlines()[1:]]
     assert rows[0][2] == "error" and rows[0][7] == "4.0000"
-    assert loop.resume(root, tmp_path / "work" / "t" / "results.tsv") == (4.0, 1, {})
+    assert loop.resume(root, tmp_path / "work" / "t" / "results.tsv") == (4.0, 1, {}, None)
+
+
+def test_a_score_from_other_measurement_conditions_is_never_kept():
+    best = {"score": (1, 3, 0), "dev_total": 3, "read_rate": None, "conditions": "a" * 16}
+    candidate = {"score": (3, 3, 0), "dev_total": 3, "read_rate": None, "conditions": "b" * 16}
+    assert loop.better(candidate, best, "model", 1, 1) == (False, loop.CONDITIONS_CHANGED)
+
+
+def _model(dev: int, total: int = 3, cond: str = "c" * 16) -> dict:
+    return {"score": (dev, dev, 0), "dev": dev, "dev_total": total, "heldout": "-", "heldout_total": "-",
+            "read_rate": None, "feedback": "", "conditions": cond}
+
+
+def _body(tree: Path, text: str) -> None:
+    skill = tree / "skills" / "demo" / "SKILL.md"
+    skill.write_text(skill.read_text(encoding="utf-8").split("\n\n")[0] + f"\n\n{text}\n", encoding="utf-8")
+
+
+def _model_loop(tmp_path, monkeypatch, root, outcomes, edits, conditions="c" * 16):
+    monkeypatch.setattr(loop, "prepare_worktree", lambda base, tag: (base / tag).mkdir(parents=True, exist_ok=True)
+                        or root)
+    monkeypatch.setattr(loop, "conditions", lambda args: conditions)
+    monkeypatch.setattr(loop, "evaluate", lambda *a: next(outcomes))
+    monkeypatch.setattr(loop, "guards", lambda tree: [])
+
+    def propose(tree, args, state):
+        _body(tree, next(edits))
+        return "edit", 0.0
+    monkeypatch.setattr(loop, "propose", propose)
+    return ["--track", "model", "--skills", "demo", "--tag", "t", "--root", str(tmp_path / "work"),
+            "--budget-usd", "10"]
+
+
+def _rows(tmp_path: Path) -> list[list[str]]:
+    return [line.split("\t") for line in (tmp_path / "work" / "t" / "results.tsv").read_text().splitlines()[1:]]
+
+
+def test_a_measurement_with_a_different_run_count_leaves_the_state_scoreable(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    argv = _model_loop(tmp_path, monkeypatch, root, iter([_model(1), _model(2, total=2), _model(2)]),
+                       iter(["Read the plan.", "Read the plan."]))
+    loop.main([*argv, "--iterations", "2"])
+    assert [row[2] for row in _rows(tmp_path)] == ["keep", "discard", "keep"]
+
+
+def test_restart_does_not_lower_the_bar_to_an_unlucky_re_measurement(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    kept = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True,
+                          text=True).stdout.strip()
+    work = tmp_path / "work" / "t"
+    work.mkdir(parents=True)
+    (work / "results.tsv").write_text(
+        loop.TSV_HEADER + f"baseline\t{kept[:12]}\tkeep\t(3, 3, 0)\t3\t-\tbytes=1; cond={'c' * 16}\t1.0000\tbaseline\n",
+        encoding="utf-8")
+    argv = _model_loop(tmp_path, monkeypatch, root, iter([_model(1), _model(2)]), iter(["Read the plan."]))
+    loop.main([*argv, "--iterations", "1"])
+    rows = _rows(tmp_path)
+    assert rows[1][0] == "resume" and "floor=recorded" in rows[1][6]
+    assert rows[2][2] == "discard"  # 2/3은 기록된 3/3을 넘지 못한다
+
+
+def test_restart_under_new_conditions_forgets_scores_and_fingerprints(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    kept = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True,
+                          text=True).stdout.strip()
+    _body(root, "Read the plan.")
+    key = loop.surface_key(root, "model", ["demo"])
+    subprocess.run(["git", "checkout", "-q", "--", "."], cwd=root, check=True)
+    work = tmp_path / "work" / "t"
+    work.mkdir(parents=True)
+    (work / "results.tsv").write_text(
+        loop.TSV_HEADER
+        + f"baseline\t{kept[:12]}\tkeep\t(3, 3, 0)\t3\t-\tbytes=1; cond={'c' * 16}\t1.0000\tbaseline\n"
+        + f"1\t{kept[:12]}\tdiscard\t(1, 1, 0)\t1\t-\tno improvement; key={key}; cond={'c' * 16}\t1.0000\tx\n",
+        encoding="utf-8")
+    argv = _model_loop(tmp_path, monkeypatch, root, iter([_model(1, cond="d" * 16), _model(2, cond="d" * 16)]),
+                       iter(["Read the plan."]), conditions="d" * 16)
+    loop.main([*argv, "--iterations", "1"])
+    rows = _rows(tmp_path)
+    assert "floor" not in rows[2][6]
+    assert rows[3][2] == "keep"  # 예전 조건에서 잰 같은 상태도 새 조건에서는 다시 잰다
+
+
+def test_a_rejected_attempt_is_recorded_before_the_reset(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    argv = _model_loop(tmp_path, monkeypatch, root, iter([_model(1)]), iter([]))
+
+    def outside(tree, args, state):
+        (tree / "README.md").write_text("x", encoding="utf-8")
+        return "edit", 0.25
+    monkeypatch.setattr(loop, "propose", outside)
+    real_git = loop.git
+
+    def git(cwd, *args):
+        if args[:1] == ("reset",):
+            raise RuntimeError("reset failed")
+        return real_git(cwd, *args)
+    monkeypatch.setattr(loop, "git", git)
+    try:
+        loop.main([*argv, "--iterations", "1"])
+    except RuntimeError:
+        pass
+    assert _rows(tmp_path)[-1][2] == "invalid" and _rows(tmp_path)[-1][7] == "0.2500"
+
+
+def test_a_proposal_that_exhausts_the_budget_is_not_scored(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    outcomes = iter([_model(1)])
+    argv = _model_loop(tmp_path, monkeypatch, root, outcomes, iter([]))
+
+    def costly(tree, args, state):
+        _body(tree, "Read the plan.")
+        return "edit", 20.0
+    monkeypatch.setattr(loop, "propose", costly)
+    loop.main([*argv, "--iterations", "1"])
+    assert _rows(tmp_path)[-1][6] == "budget exhausted before scoring"

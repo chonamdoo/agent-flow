@@ -23,7 +23,7 @@ evaluator, the cases or this file.
 - Simpler is better. Removing words that do nothing is a win; adding a long rule for a small gain is not.
 - Do not repeat an attempt the log shows was discarded unless you change the idea. The loop fingerprints
   the editable files: an edit that recreates the best or an already scored state is rejected unscored
-  (`duplicate` or `no-op`) and counts as a wasted turn. Reordering or re-casing routing terms is the same state.
+  (`duplicate` or `no-op`) and counts as a wasted turn. Reordering or repeating routing terms is the same state.
 - Keep the language of the file you edit (English or Korean).
 
 ## Track: routing
