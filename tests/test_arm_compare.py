@@ -240,3 +240,10 @@ def test_the_harness_runs_only_the_runners_own_approval_command(tmp_path, monkey
                          "--worktree", "w", "--approve", "abc"]
     assert not arm_compare.approve_phase(tmp_path, {"approval_command": "rm -rf /", "worktree": str(tmp_path)})
     assert not arm_compare.approve_phase(tmp_path, {"approval_command": None, "worktree": str(tmp_path)})
+
+
+def test_the_ui_task_installs_the_kit_with_a_declared_architecture(tmp_path):
+    run = tmp_path / "C-oyg"
+    arm_compare.prepare(ROOT, "C", "oyg", 1, run)
+    kit = json.loads((run / "project" / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+    assert kit["architecture"]["mode"] == "clean"

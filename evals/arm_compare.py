@@ -68,7 +68,10 @@ from cycle_report import fisher_greater  # noqa: E402
 CASES = HERE / "phase-cases"
 UI_TASKS = HERE / "ui-tasks"
 # 브라우저로 채점하는 과제. 평가기는 비공개 저장소에 있고 `score --evaluator`로 넘긴다(#428).
-UI_CASES = {"oyg": {"task": "oy-global-fullstack", "layer": "prd", "profile": "node"}}
+# devflow와 같은 Clean 아키텍처로 설치한다. 빈 프로젝트에 모드를 주지 않으면 `pending`으로 설치되고, run 도중에
+# 모드를 고르면 runner가 새 run을 요구해 진행이 막힌다(OYG C-1 네 번째 시도, harness 오류).
+UI_CASES = {"oyg": {"task": "oy-global-fullstack", "layer": "prd", "profile": "node",
+                    "install": ["--architecture-mode", "clean"]}}
 UI_TASK = ("Build the global beauty commerce site that `prd.md` describes: a web frontend and its backend. Follow "
            "`contract/interface.md` (how the build is started, routes, test ids) and `contract/openapi.yaml` (the API), "
            "and use only the data in `fixtures/`. Commit your work.")
@@ -207,7 +210,7 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
         case_dir = CASES / case_name
         case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
     else:
-        case = {"task": UI_TASK, "profile": ui["profile"], "modes": {"clean": {"install": []}}}
+        case = {"task": UI_TASK, "profile": ui["profile"], "modes": {"clean": {"install": ui["install"]}}}
     output.mkdir(parents=True)
     agent_kit = sanitized_kit(kit, output / "kit")
     project = output / "project"
