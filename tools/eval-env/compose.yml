@@ -5,6 +5,7 @@
 #   docker compose -f tools/eval-env/compose.yml -f tools/eval-env/compose.auth.yml run --rm phase_eval --help
 x-eval: &eval
   image: agent-flow-eval:local
+  platform: linux/amd64
   build:
     context: ../..
     dockerfile: tools/eval-env/Dockerfile

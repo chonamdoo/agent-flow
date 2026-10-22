@@ -15,6 +15,7 @@ from __future__ import annotations
 import ctypes
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,10 @@ TOOLS = {
     "playwright": ["playwright", "--version"],
 }
 CHILD_SHELL = ("agent-flow", "dart", "flutter", "claude", "codex")
+# 이미지가 ENV로 기대 버전을 준다. 다른 CLI가 PATH 앞에 끼어들면 버전 문자열로 잡는다.
+EXPECTED = {"claude": "EVAL_EXPECT_CLAUDE", "codex": "EVAL_EXPECT_CODEX", "playwright": "EVAL_EXPECT_PLAYWRIGHT",
+            "flutter": "EVAL_EXPECT_FLUTTER"}
+AUTH_FILES = (".codex/auth.json", ".claude/.credentials.json")
 # landlock_create_ruleset는 x86_64와 aarch64 모두 444번이다.
 LANDLOCK_CREATE_RULESET = 444
 LANDLOCK_CREATE_RULESET_VERSION = 1
@@ -55,6 +60,9 @@ def check() -> list[str]:
         print(f"{name}: {line[0] if line else '?'}")
         if result.returncode != 0:
             failures.append(f"{name}: exit {result.returncode}")
+        expected = os.environ.get(EXPECTED.get(name, ""), "")
+        if expected and expected not in (line[0] if line else ""):
+            failures.append(f"{name}: expected version {expected}, got {line[0] if line else 'nothing'}")
     print(f"PATH={os.environ.get('PATH', '')}")
     for name in CHILD_SHELL:
         found = subprocess.run(["sh", "-c", f"command -v {name}"], capture_output=True, text=True).stdout.strip()
@@ -67,9 +75,16 @@ def check() -> list[str]:
         print(f"HOME={home} (writable)")
     except OSError as exc:
         failures.append(f"HOME {home} is not writable: {exc}")
+    # 설정 파일이 없다는 것은 꺼졌다는 뜻이 아니다. dart가 있으면 꺼짐이 기록돼 있어야 한다.
     telemetry = home / ".dart-tool" / "dart-flutter-telemetry.config"
-    if telemetry.is_file() and "reporting=1" in telemetry.read_text(encoding="utf-8"):
-        failures.append(f"Dart/Flutter analytics is on ({telemetry})")
+    if shutil.which("dart"):
+        text = telemetry.read_text(encoding="utf-8") if telemetry.is_file() else ""
+        if "reporting=0" not in text:
+            failures.append(f"Dart/Flutter analytics is not recorded as off in {telemetry}; run dart --disable-analytics")
+    for relative in AUTH_FILES:
+        path = home / relative
+        if path.exists() and not os.access(path, os.R_OK):
+            failures.append(f"{path} is mounted but not readable by uid {os.getuid()}; mount a readable copy")
     abi = landlock_abi()
     print(f"landlock ABI: {abi if abi is not None else 'unavailable'}")
     return failures

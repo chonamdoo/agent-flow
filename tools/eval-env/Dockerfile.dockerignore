@@ -1,5 +1,6 @@
-# 빌드 context에는 의존성 목록과 bin/·build/만 들어간다. 자격 증명이나 작업 트리가 실수로 이미지에 들어갈 길을 막는다.
+# 빌드 context에는 아래 파일만 들어간다. 폴더째 열면 그 안에 잘못 둔 .env·.npmrc까지 이미지에 들어간다.
 *
-!pyproject.toml
-!tools/eval-env/bin/
-!tools/eval-env/build/
+!tools/eval-env/requirements.lock
+!tools/eval-env/bin/agent-flow
+!tools/eval-env/bin/eval-env-check
+!tools/eval-env/build/with-proxy-ca

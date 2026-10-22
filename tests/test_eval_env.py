@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -30,9 +31,15 @@ def test_the_image_copies_no_credentials():
     for keyword, rest in _instructions():
         if keyword in {"COPY", "ADD"}:
             assert not CREDENTIAL_PATH.search(rest), rest
-    ignore = (ENV / "Dockerfile.dockerignore").read_text(encoding="utf-8").splitlines()
-    # 빌드 context는 전부 막고 필요한 것만 연다. 자격 증명 파일이 context에 들어갈 길이 없다.
-    assert [line for line in ignore if line and not line.startswith("#")][0] == "*"
+            # 폴더째 복사하면 그 안에 잘못 둔 .env·.npmrc까지 이미지에 들어간다. 파일 이름만 적는다.
+            sources = [part for part in rest.split()[:-1] if not part.startswith("--")]
+            assert all((ROOT / source).is_file() for source in sources), rest
+    ignore = [line for line in (ENV / "Dockerfile.dockerignore").read_text(encoding="utf-8").splitlines()
+              if line and not line.startswith("#")]
+    # 빌드 context는 전부 막고 이름을 적은 파일만 연다.
+    assert ignore[0] == "*"
+    for line in ignore[1:]:
+        assert line.startswith("!") and not any(char in line for char in "*?[") and (ROOT / line[1:]).is_file(), line
 
 
 def test_no_secret_is_baked_into_env_or_arg():
@@ -44,8 +51,8 @@ def test_no_secret_is_baked_into_env_or_arg():
 
 def test_tool_versions_are_pinned():
     rows = _instructions()
-    base = next(rest for keyword, rest in rows if keyword == "FROM")
-    assert re.fullmatch(r"node:\d+\.\d+\.\d+-\w+", base), base
+    base = next(rest for keyword, rest in rows if keyword == "FROM").split()[-1]
+    assert re.fullmatch(r"node:\d+\.\d+\.\d+-\w+@sha256:[0-9a-f]{64}", base), base
     args = dict(re.findall(r"ARG ([A-Z0-9_]+)=(\S+)", DOCKERFILE.read_text(encoding="utf-8")))
     for name in ("CLAUDE_CODE_VERSION", "CODEX_VERSION", "PLAYWRIGHT_VERSION", "FLUTTER_VERSION"):
         assert re.fullmatch(r"\d+\.\d+\.\d+", args[name]), name
@@ -89,3 +96,58 @@ def test_the_tree_is_not_a_shipped_kit_asset():
     js_roots = re.search(r"const KIT_SOURCE_DIGEST_ROOTS = \[(.*?)\];",
                          (ROOT / "bin" / "agent-flow-kit.mjs").read_text(encoding="utf-8"), re.S).group(1)
     assert "tools" not in js_roots
+
+
+def test_python_dependencies_are_locked_to_what_pyproject_asks_for():
+    import tomllib
+    lock = {line.split("==")[0].lower(): line.split("==")[1] for line in
+            (ENV / "requirements.lock").read_text(encoding="utf-8").splitlines() if line and not line.startswith("#")}
+    assert all(re.fullmatch(r"\d+(\.\d+)*", version) for version in lock.values())
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    for requirement in [*project["dependencies"], *project["optional-dependencies"]["dev"]]:
+        assert re.split(r"[<>=!~ ]", requirement, maxsplit=1)[0].lower() in lock, requirement
+
+
+def _check(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
+    import os
+    import sys
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for name, output in (("claude", "2.1.308 (Claude Code)"), ("codex", "codex-cli 0.163.0"), ("node", "v22"),
+                         ("flutter", "Flutter 3.47.7"), ("dart", "Dart 3"), ("playwright", "Version 1.56.1"),
+                         ("agent-flow", "")):
+        tool = bin_dir / name
+        tool.write_text(f"#!/bin/sh\necho '{output}'\n", encoding="utf-8")
+        tool.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    return subprocess.run([sys.executable, str(ENV / "bin" / "eval-env-check")], capture_output=True, text=True,
+                          env={"PATH": f"{bin_dir}:{os.path.dirname(sys.executable)}:/usr/bin:/bin", "HOME": str(home), **env})
+
+
+def test_the_startup_check_rejects_a_wrong_cli_version_and_unrecorded_analytics(tmp_path):
+    telemetry = tmp_path / "home" / ".dart-tool" / "dart-flutter-telemetry.config"
+    telemetry.parent.mkdir(parents=True)
+    telemetry.write_text("reporting=0\n", encoding="utf-8")
+    assert _check(tmp_path, {"EVAL_EXPECT_CODEX": "0.163.0"}).returncode == 0
+    wrong = _check(tmp_path, {"EVAL_EXPECT_CODEX": "0.170.0"})
+    assert wrong.returncode == 1 and "expected version 0.170.0" in wrong.stderr
+    telemetry.unlink()
+    missing = _check(tmp_path, {})
+    assert missing.returncode == 1 and "analytics is not recorded as off" in missing.stderr
+
+
+def test_the_startup_check_reports_an_unreadable_auth_mount(tmp_path):
+    import os
+    if os.getuid() == 0:
+        import pytest
+        pytest.skip("root reads any file")
+    telemetry = tmp_path / "home" / ".dart-tool" / "dart-flutter-telemetry.config"
+    telemetry.parent.mkdir(parents=True)
+    telemetry.write_text("reporting=0\n", encoding="utf-8")
+    auth = tmp_path / "home" / ".codex" / "auth.json"
+    auth.parent.mkdir()
+    auth.write_text("{}", encoding="utf-8")
+    auth.chmod(0)
+    result = _check(tmp_path, {})
+    assert result.returncode == 1 and "not readable" in result.stderr
