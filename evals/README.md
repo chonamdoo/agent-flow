@@ -553,6 +553,23 @@ python evals/skill_retirement.py --skill-task-report <dir>/report.json   # 기�
 
 평가가 없는(unverified) skill: `agent-flow`, `agent-flow-concise-output`, `agent-flow-diagnosing-bugs`, `agents-md-improver`, `android-appshell-error-handling`, `android-clean-architecture`, `android-clean-presentation-architecture`, `android-code-review`, `android-debugging`, `android-guides`, `android-module-creator`, `android-sdui-architecture`, `app-shell-error-contract`, `architecture-reviewer`, `backend-api-contract`, `code-review`, `codebase-design`, `comment-checker`, `dart-development-guide`, `datadog-rum-sourcemaps`, `ddd-architecture`, `diagnosing-bugs`, `domain-modeling`, `flutter-clean-architecture`, `flutter-clean-presentation-architecture`, `flutter-development-guide`, `full-feature-workflow`, `ga4-ecommerce-events`, `grill-with-docs`, `grilling`, `ios-app-shell-error-handling`, `ios-clean-architecture`, `ios-clean-presentation-architecture`, `kotlin-backend-hexagonal-architecture`, `nextjs-api-routing`, `nextjs-auth-session`, `plan-reviewer`, `product-brief`, `push-watch`, `python-development-guide`, `qa`, `react-app-shell-error-handling`, `react-clean-architecture`, `react-clean-presentation-architecture`, `react-development-guide`, `react-fsd-architecture`, `react-native-app-shell-error-handling`, `react-native-clean-architecture`, `react-native-clean-presentation-architecture`, `react-native-development-guide`, `react-native-feature-architecture`, `react-native-operational-adoption`, `react-runtime-i18n`, `react-scroll-restoration`, `react-tailwind-v4`, `react-tanstack-form`, `react-tanstack-query`, `react-zod-validation`, `resolving-merge-conflicts`, `security-audit`, `solid-architecture-review`, `tdd`, `to-prd`, `typescript-development-guide`, `webview-json-rpc-bridge`, `write-for-work`.
 
+### `c_prime.py` — #410 조건 C′ 프롬프트 생성기(#427)
+
+```bash
+python evals/c_prime.py --kit . --project <kit을 설치한 프로젝트> --task "<과제>" --output prompt.md [--stop-after commit]
+python evals/c_prime.py --kit . --smoke --output <새 폴더>     # devflow 과제로 Codex 1회, hidden test 채점
+```
+
+C′는 full-feature가 author에게 건네는 phase 프롬프트를 순서대로 이어 붙인 한 장짜리 절차다. runner 판정(증거 검사·마커·gate 라우팅·라운드 상한)은 쓰지 않는다. C − C′는 코드 강제의 효과, C′ − A는 절차 문장의 효과다. 고정한 규칙(`RULES_VERSION`)은 다음과 같다.
+
+- **phase**: full-feature 정상 경로에서 runner 소유 `gates`, runner의 checkout phase(`worktree`, `run-start`: runner만 만드는 binding을 확인하므로 runner 없이는 멈출 수밖에 없다. 첫 smoke가 실제로 그렇게 멈췄다. #429가 runner로 옮긴다), 조건부 수정 phase(`fix-loop`, `pr-comment-fix`, `pr-ci-fix`), multi-review phase(`multi-review`, `architecture-review`)를 뺀다. 리뷰 효과는 C에 남긴다. 프롬프트 수준 리뷰를 넣은 C′+R은 별도 조건이고 여기서 만들지 않는다.
+- **runner 명령 필터**: run id, project root, `## When complete`(status·next_command), 그리고 `agent-flow` 명령·승인 토큰·`run_command_prefix`를 담은 줄을 지운다. artifact 위치는 `cprime/` 아래로 바꾸고 절대경로는 상대경로로 바꾼다.
+- **pause와 승인**: 기다리지 않는다. full-feature가 사용자 승인으로 멈추는 phase(domain-grill, prd, merge-approval)에서는 artifact에 `approval: agent`를 적게 한다. 에이전트가 대신 승인한 사실이 산출물에 남는다(#413).
+- **중복 절**: 앞 phase와 똑같은 절(profile YAML, 같은 skill 본문)은 첫 phase를 가리키는 한 줄로 바꾼다. 승인 안내는 접지 않는다.
+- **완료 선언**: #424의 arm 공통 규칙(`EVAL-STATUS: complete|blocked: …`)을 붙인다.
+
+같은 kit·과제면 같은 프롬프트가 나온다. SHA-256을 출력하고 `<output>.json`에 fingerprint로 남긴다. 생성은 프로젝트의 임시 사본에서 하므로 원래 프로젝트에 run 상태가 남지 않는다.
+
 ### `release_reuse.py` — 바뀌지 않은 셀의 재사용
 
 릴리스가 모델에게 보이는 것을 하나도 바꾸지 않았어도 168 unit을 다시 재지 않도록, 셀마다 모델 입력
