@@ -439,11 +439,14 @@ def _grade_phase_case(meta: dict, checkout: Path) -> dict:
 def controller_argv(prompt: str, model: str, budget: float | None) -> list[str]:
     """One headless controller for every arm, started in the run's project so the project's hooks load (#409 P3).
 
-    Permissions come from an allowlist, not a bypass flag (the runbook forbids `--dangerously-skip-permissions`).
+    Permissions come from auto mode and an allowlist, not a bypass flag (the runbook forbids
+    `--dangerously-skip-permissions`).
     Only project and local settings load, so nothing from the operator's own setup reaches one arm and not another.
     """
     argv = ["claude", "-p", prompt, "--model", model, "--output-format", "stream-json", "--verbose",
-            "--permission-mode", "acceptEdits", "--allowedTools", ",".join(CLAUDE_TOOLS),
+            # acceptEdits는 runner가 산출물을 쓰는 `.git/agent-flow/**`를 보호 경로로 막고 allow 규칙으로도 열리지 않는다
+            # (OYG C-1 두 번째 시도). auto는 행동마다 분류기가 판정하는 모드로, 1차 pilot의 서브에이전트도 이 모드였다.
+            "--permission-mode", "auto", "--allowedTools", ",".join(CLAUDE_TOOLS),
             "--setting-sources", "project,local",
             # runner는 작업을 ~/.agent-flow/worktrees 아래 worktree로 옮기고, hook은 세션 cwd가 그 안에 있어야 다음
             # phase로 넘긴다. 허용 디렉터리 밖으로 cd하면 headless 세션이 cwd를 프로젝트로 되돌리므로 모든 조건에 같은

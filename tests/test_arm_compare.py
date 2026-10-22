@@ -195,7 +195,8 @@ def test_every_arm_gets_the_same_headless_controller_without_a_bypass_flag():
     a = arm_compare.controller_argv("task A", "claude-opus-5-5", 30.0)
     c = arm_compare.controller_argv("task C", "claude-opus-5-5", 30.0)
     assert a[3:] == c[3:] and a[:2] == ["claude", "-p"]
-    assert not any("dangerously" in item for item in a)
+    assert not any("dangerously" in item or item == "bypassPermissions" for item in a)
+    assert a[a.index("--permission-mode") + 1] == "auto"
     assert a[a.index("--max-budget-usd") + 1] == "30"
     assert a[a.index("--add-dir") + 1] == str(arm_compare.AGENT_FLOW_WORKTREES)
 
