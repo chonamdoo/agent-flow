@@ -201,3 +201,33 @@ def test_an_unreadable_subagent_folder_makes_the_controller_unmeasured(tmp_path:
     monkeypatch.setattr(run_usage, "subagent_transcripts", lambda path: ([], "unreadable"))
     controller = run_usage.report(run, [transcript], "success")["tokens_controller"]
     assert controller["status"] == "unmeasured" and controller["usage"]["output"] is None
+
+
+def test_a_subagent_folder_that_cannot_be_listed_is_unreadable(tmp_path: Path, monkeypatch) -> None:
+    import os
+    transcript = _write_jsonl(tmp_path / "session.jsonl", [])
+    folder = tmp_path / "session" / "subagents"
+    folder.mkdir(parents=True)
+    _write_jsonl(folder / "agent-a1.jsonl", [])
+
+    def refuse(path):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(os, "scandir", refuse)
+    assert run_usage.subagent_transcripts(transcript) == ([], "unreadable")
+
+
+def test_a_mode_000_subagent_folder_is_unreadable(tmp_path: Path) -> None:
+    import os
+    import pytest
+    if os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 directory")
+    transcript = _write_jsonl(tmp_path / "session.jsonl", [])
+    folder = tmp_path / "session" / "subagents"
+    folder.mkdir(parents=True)
+    _write_jsonl(folder / "agent-a1.jsonl", [])
+    folder.chmod(0)
+    try:
+        assert run_usage.subagent_transcripts(transcript) == ([], "unreadable")
+    finally:
+        folder.chmod(0o755)

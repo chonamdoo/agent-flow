@@ -39,6 +39,7 @@ import argparse
 import bisect
 import hashlib
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -156,7 +157,10 @@ def subagent_transcripts(transcript: Path) -> tuple[list[Path], str]:
     if not folder.exists():
         return [], "none"
     try:
-        files = sorted(folder.glob("agent-*.jsonl"))
+        # Path.glob은 나열 오류를 삼키고 빈 목록을 준다. scandir는 권한 오류를 그대로 올린다.
+        with os.scandir(folder) as entries:
+            files = sorted(folder / entry.name for entry in entries
+                           if entry.name.startswith("agent-") and entry.name.endswith(".jsonl"))
         for path in files:
             with path.open("rb"):
                 pass
