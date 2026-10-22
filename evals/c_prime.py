@@ -200,10 +200,19 @@ def smoke(kit: Path, work: Path, stop_after: str, timeout: int) -> dict:
     started = time.time()
     (work / "prompt.md").write_text(prompt, encoding="utf-8")
     # 호스트 전역 git 설정(서명 등)은 sandbox 밖 자원을 부를 수 있다. 평가기의 Python(pytest 포함)을 PATH 앞에 둔다.
-    run = _sh(["codex", "exec", "--ephemeral", "--sandbox", "workspace-write", "--add-dir", str(gitdir),
-               "--cd", str(project), "--json", "--skip-git-repo-check", "-"], project, input=prompt, timeout=timeout,
-              extra_env={"GIT_CONFIG_GLOBAL": os.devnull,
-                         "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"})
+    argv = ["codex", "exec", "--ephemeral", "--sandbox", "workspace-write", "--add-dir", str(gitdir),
+            "--cd", str(project), "--json", "--skip-git-repo-check", "-"]
+    try:
+        run = _sh(argv, project, input=prompt, timeout=timeout,
+                  extra_env={"GIT_CONFIG_GLOBAL": os.devnull,
+                             "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"})
+        timed_out = False
+    except subprocess.TimeoutExpired as expired:
+        # 시간 초과도 실패한 시행이다. 그때까지의 trace를 남기고 같은 방식으로 채점한다.
+        partial = expired.stdout or ""
+        partial = partial.decode("utf-8", "replace") if isinstance(partial, bytes) else partial
+        run = subprocess.CompletedProcess(argv, None, partial, "")
+        timed_out = True
     (work / "codex.jsonl").write_text(run.stdout, encoding="utf-8")
     # 채점 전에 test 패키지를 seed 상태로 되돌린다. agent가 `tests/__init__.py`에서 바로 종료하면 discover가
     # 아무것도 돌리지 않고 0으로 끝난다. 그래서 통과는 "실제로 1개 이상 돌았고 OK"로만 센다.
@@ -220,7 +229,7 @@ def smoke(kit: Path, work: Path, stop_after: str, timeout: int) -> dict:
     contaminated = any(marker in command for command in commands for marker in ("phase-cases", "hidden_fix", "hidden_plan"))
     message = _codex_final_message(run.stdout)
     commits = _sh(["git", "rev-list", "--count", f"{installed_head}..HEAD"], project).stdout.strip()
-    return {"exit": run.returncode, "contaminated": contaminated, "seconds": round(time.time() - started), "prompt_sha256":
+    return {"exit": run.returncode, "timed_out": timed_out, "contaminated": contaminated, "seconds": round(time.time() - started), "prompt_sha256":
             hashlib.sha256(prompt.encode("utf-8")).hexdigest(), "hidden_tests": hidden,
             "commits": int(commits) if commits.isdigit() else None,
             "declaration": classify(message), "artifacts": sorted(p.name for p in (project / "cprime").rglob("*.md"))
