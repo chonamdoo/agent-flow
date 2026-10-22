@@ -662,16 +662,23 @@ def test_changed_configured_legacy_custom_blocks_when_neither_digest_matches(
     } == before
 
 
-def _skills_inspection_run(tmp_path, monkeypatch):
+def _skills_inspection_run(tmp_path, monkeypatch, *, review_phase=False):
     kit = tmp_path / "kit"
     source = kit / "workflows" / "custom.yaml"
     source.parent.mkdir(parents=True)
+    # green은 작성 phase라 필수 본문을 inline으로 받고 읽음을 묻지 않는다(#416). 읽음 자기신고의
+    # 시간창을 보는 테스트는 그 신고가 남은 review phase를 쓴다.
+    review = (
+        "  - id: review\n"
+        "    skills:\n      required: [pinned-guide]\n"
+        "    required_markers: ['decision: reviewed']\n"
+    ) if review_phase else ""
     source.write_text(
         "id: custom\nphases:\n"
         "  - id: explore\n"
         "  - id: green\n"
         "    skills:\n      required: [pinned-guide]\n"
-        "    required_markers: ['decision: reviewed']\n",
+        "    required_markers: ['decision: reviewed']\n" + review,
         encoding="utf-8",
     )
     project = tmp_path / "project"
@@ -993,8 +1000,11 @@ def test_cli_skills_inspection_uses_current_checkout_not_newest_sibling_run(
         prompt = capsys.readouterr().out
         assert "Edited checkout guide." in prompt
         assert str(edited) in prompt
-        assert str(installed) in prompt
-        assert str(private) in prompt
+        # green은 작성 phase라 필수 본문을 받는다(#416). 번들 skill은 경로 대신 본문으로 확인한다:
+        # checkout 사본의 본문이 들어가고 leader 사본의 본문은 들어가지 않는다.
+        assert "Use the checkout-specific policy, not the leader policy." in prompt
+        assert "Keep the leader-installed policy." in prompt
+        assert "description: Inspection guide." not in prompt
         assert str(project / "skills" / "pinned-guide" / "SKILL.md") not in prompt
         assert main(["skills", "markers", *options, "--artifact", str(incomplete)]) == 0
         missing = json.loads(capsys.readouterr().out)
@@ -1012,8 +1022,11 @@ def test_cli_skills_inspection_uses_current_checkout_not_newest_sibling_run(
     envelope = adapter.render_envelope(phase, own_run, own.path)
     assert "Edited checkout guide." in envelope
     assert str(edited) in envelope
-    assert str(installed) in envelope
-    assert str(private) in envelope
+    # green은 작성 phase라 필수 본문을 받는다(#416). 번들 skill은 경로 대신 본문으로 확인한다:
+    # checkout 사본의 본문이 들어가고 leader 사본의 본문은 들어가지 않는다.
+    assert "Use the checkout-specific policy, not the leader policy." in envelope
+    assert "Keep the leader-installed policy." in envelope
+    assert "description: Inspection guide." not in envelope
     find_active_run(own_state).print_status(config_root=project, project_root=own.path)
     status = json.loads(next(
         line.removeprefix("status_json: ")
@@ -1057,7 +1070,7 @@ def test_cli_skills_markers_since_override_and_fresh_do_not_inherit_run_time(
     from agent_flow.cli import main
     from agent_flow.core.local_skills import record_skill_read
 
-    project, kit, source, run, artifact = _skills_inspection_run(tmp_path, monkeypatch)
+    project, kit, source, run, artifact = _skills_inspection_run(tmp_path, monkeypatch, review_phase=True)
     meta = read_meta(run)
     meta["phase_entered_at"] = "2999-01-01T00:00:00+00:00"
     write_meta(run, meta)
@@ -1067,7 +1080,7 @@ def test_cli_skills_markers_since_override_and_fresh_do_not_inherit_run_time(
         encoding="utf-8",
     )
     args = [
-        "skills", "markers", "--root", str(project), "--phase", "green",
+        "skills", "markers", "--root", str(project), "--phase", "review",
         "--artifact", str(artifact),
     ]
     assert main(args) == 0

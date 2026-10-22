@@ -365,7 +365,8 @@ class CliTest(unittest.TestCase):
 
         그 강제가 hook을 로드하지 않은 host 세션을 영원히 막았기 때문에, 계약을
         자기신고로 낮췄다. 지키는 것은 이제 "관측 상태와 무관하게 자기신고가
-        결정한다"이다.
+        결정한다"이다. 자기신고가 남은 자리는 본문을 inline으로 받지 않는 review phase다 —
+        작성 phase(green)는 본문을 받으므로 읽음을 묻지 않는다(#416).
         """
         with tempfile.TemporaryDirectory() as temp_dir:
             root = _write_resolver_skills(temp_dir)
@@ -381,13 +382,13 @@ class CliTest(unittest.TestCase):
 
             # hook이 없으면 관측 자체가 불가능하다. 자기신고로 통과시킨다.
             self.assertEqual(
-                missing_local_skill_markers(gate, root, "green", phase_skills=phase_skills), []
+                missing_local_skill_markers(gate, root, "review", phase_skills=phase_skills), []
             )
 
             # alpha만 관측돼도 자기신고가 verified면 더 이상 막지 않는다.
             record_skill_read(root, root / "skills" / "alpha-guide" / "SKILL.md")
             self.assertEqual(
-                missing_local_skill_markers(gate, root, "green", phase_skills=phase_skills), []
+                missing_local_skill_markers(gate, root, "review", phase_skills=phase_skills), []
             )
 
             # 자기신고가 없으면 관측이 전부 채워져 있어도 막는다.
@@ -395,11 +396,20 @@ class CliTest(unittest.TestCase):
             missing = missing_local_skill_markers(
                 gate.replace("skill-use-evidence: verified\n", ""),
                 root,
-                "green",
+                "review",
                 phase_skills=phase_skills,
             )
             self.assertEqual(len(missing), 1)
             self.assertTrue(missing[0].startswith("skill-use-evidence: verified|unavailable"))
+
+            # 작성 phase는 같은 신고가 없어도 통과한다. 본문을 이미 받았다.
+            self.assertEqual(
+                missing_local_skill_markers(
+                    gate.replace("skill-use-evidence: verified\n", ""), root, "green",
+                    phase_skills=phase_skills,
+                ),
+                [],
+            )
 
     def test_no_required_skills_never_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -190,11 +190,15 @@ def _stale_log(root: Path, *, at: float) -> None:
     )
 
 
-def _phase_markers(root: Path, gate: str, *, since: float | None = None) -> list[str]:
+def _phase_markers(
+    root: Path, gate: str, *, since: float | None = None, phase: str = "review",
+) -> list[str]:
+    # 자기신고 L2가 남은 자리는 본문을 inline으로 받지 않는 강제 phase다. 작성 phase는 본문을
+    # 프롬프트로 받으므로 읽음을 묻지 않는다(#416) — 그 계약은 아래 별도 테스트가 본다.
     return missing_local_skill_markers(
         gate,
         root,
-        "implement",
+        phase,
         phase_skills=PhaseSkills(required=("alpha",)),
         profile={},
         since=since,
@@ -219,6 +223,17 @@ def test_missing_self_report_still_blocks(tmp_path):
     missing = _phase_markers(root, _gate("skills-checked: true"))
 
     assert [item for item in missing if item.startswith("skill-use-evidence")]
+
+
+def test_authoring_phase_does_not_ask_for_a_read_it_received_inline(tmp_path):
+    """#416: 작성 phase는 필수 본문을 프롬프트로 받는다. 받은 것을 읽었다고 신고하게 하지 않는다."""
+    root = _project(tmp_path)
+    _installed_skill(root)
+
+    missing = _phase_markers(root, _gate("skills-checked: true"), phase="implement")
+
+    assert not [item for item in missing if item.startswith("skill-use-evidence")]
+    assert missing == []
 
 
 def test_blocker_points_at_the_session_when_the_phase_recorded_nothing(tmp_path):

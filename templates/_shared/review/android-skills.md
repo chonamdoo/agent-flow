@@ -47,8 +47,8 @@ phase's applicable `n/a` markers rather than reviewing unrelated Kotlin as Andro
 Use the standard review angle output and `code-generation-discipline`
 **Missing Required Skills** for Calibration evidence.
 
-The run's own `skill-availability` and `skill-use-evidence` markers already
-record which required skills were resolved and opened, so this angle adds no
-marker of its own.
+The run's own `skill-availability` marker and the runner's delivery record
+already show which required skills were resolved and delivered, so this angle
+adds no marker of its own.
 
 Emit exactly one unfenced final verdict line: `verdict: approve` or `verdict: request-changes`.

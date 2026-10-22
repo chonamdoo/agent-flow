@@ -347,8 +347,10 @@ quality went up, but it did not reproduce. With the same prompt giving a differe
 different day, there was nothing to hand to a team.
 
 **Self-reported checklists.** Markers asked "did you check X in this phase," and the agent
-filled in the marker without checking. That is why the hooks now observe the actual run and the
-runner reads the log itself.
+filled in the marker without checking. That is why test and feedback commands are now observed
+(hooks, or the runner's own `run-command` wrapper) and the runner reads that log itself. Required
+skills are no longer asked about: authoring phases receive their bodies in the prompt, and review
+phases rely on the runner's record of what reached each reviewer.
 
 **A single reviewer.** One review phase was not enough. When the session that wrote the code
 reviews it, it passes. Independent sub-agents now run as separate processes, and the controller

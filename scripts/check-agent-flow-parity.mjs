@@ -449,7 +449,8 @@ for (const rel of fullFeatureWorkflowCopies) {
   assertFile(rel);
   assertContains(rel, "id: domain-grill");
   assertContains(rel, "context_docs_updated: true|not_needed");
-  assertContains(rel, "skills_checked: true");
+  // 작성 phase는 skill 본문을 inline으로 받고 리뷰는 전달 기록이 증거다. 읽음 자기신고는 되돌아오면 안 된다(#416).
+  assertNotContains(rel, "skills_checked: true");
   assertContains(rel, "id: comment-authoring");
   assertContains(rel, "comment-authoring: applied");
   assertContains(rel, "comment-checker: checked|unavailable|n/a");
@@ -483,7 +484,7 @@ assertContains("skills/comment-authoring-discipline/SKILL.md", "only when code a
 assertNotContains("skills/code-generation-discipline/SKILL.md", "Every new or modified code block must include Korean " + "comments");
 if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/prompts/multi-review.md", "Reviewers are installed Claude and Codex CLIs only");
-  assertContains(".agent-flow/prompts/multi-review.md", "skills_checked: true");
+  assertNotContains(".agent-flow/prompts/multi-review.md", "skills_checked: true");
   assertNotContains(".agent-flow/prompts/multi-review.md", "Gemini sub-agent");
   assertContains(".agent-flow/prompts/multi-review.md", "reviewer-source: sub-agent");
   assertContains(".agent-flow/prompts/multi-review.md", "Never use OMP or controller-session work");

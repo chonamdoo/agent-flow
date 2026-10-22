@@ -350,8 +350,12 @@ def test_a_multiline_description_stays_on_one_line(tmp_path):
     assert skill_summary(path) == "First line second line."
 
 
-@pytest.mark.parametrize("phase_id,enforced", [("green", True), ("commit", False)])
-def test_prompt_enforcement_claim_matches_the_gate(tmp_path, phase_id, enforced):
+@pytest.mark.parametrize(
+    "phase_id,enforced,asks_read",
+    # green은 강제 phase지만 본문을 inline으로 받아 읽음을 묻지 않는다(#416).
+    [("review", True, True), ("green", True, False), ("commit", False, False)],
+)
+def test_prompt_enforcement_claim_matches_the_gate(tmp_path, phase_id, enforced, asks_read):
     """불변: 프롬프트의 약속과 실제 강제 조건이 같은 값을 쓴다.
 
     약속의 내용은 "`skill-use-evidence`를 적어야 통과한다"다. 그러니 프롬프트가
@@ -366,10 +370,10 @@ def test_prompt_enforcement_claim_matches_the_gate(tmp_path, phase_id, enforced)
         "", REPO, phase_id, phase_skills=phase_skills, profile=profile
     )
     assert bool(missing) is enforced
-    assert any(item.startswith("skill-use-evidence") for item in missing) is enforced
+    assert any(item.startswith("skill-use-evidence") for item in missing) is asks_read
     if not block:
         pytest.skip("no skills resolved for this phase")
-    assert ("skill-use-evidence" in block) is enforced
+    assert ("skill-use-evidence" in block) is asks_read
 
 
 def _project_with_one_installed_skill(tmp_path: Path) -> Path:
@@ -410,10 +414,11 @@ def test_the_prompt_claim_survives_only_while_the_gate_backs_it(tmp_path):
         "project-local-skill-docs: applied\n"
         "missing-required-profile-skills: none\n"
     )
+    # 자기신고가 남은 phase에서 본다. 작성 phase는 본문을 inline으로 받아 읽음을 묻지 않는다(#416).
     missing = missing_local_skill_markers(
-        gate, root, "implement", phase_skills=phase_skills, profile={}
+        gate, root, "review", phase_skills=phase_skills, profile={}
     )
-    block = local_skill_prompt_block(root, "implement", phase_skills=phase_skills, profile={})
+    block = local_skill_prompt_block(root, "review", phase_skills=phase_skills, profile={})
 
     assert "- `alpha`" in block, block
     blocks_unopened_skills = any(
@@ -429,6 +434,22 @@ def test_the_prompt_claim_survives_only_while_the_gate_backs_it(tmp_path):
     assert not blocks_unopened_skills
     assert "takes your word for it" in block
     assert "does not check which files you actually opened" in block
+
+
+def test_authoring_prompt_delivers_the_body_instead_of_asking_about_a_read(tmp_path):
+    """#416: 작성 phase는 필수 본문을 받는다. 받은 것을 읽었다고 신고하라는 문장이 남으면 안 된다."""
+    from agent_flow.core.local_skills import local_skill_prompt_block, missing_local_skill_markers
+
+    root = _project_with_one_installed_skill(tmp_path)
+    phase_skills = PhaseSkills(required=("alpha",))
+    block = local_skill_prompt_block(root, "implement", phase_skills=phase_skills, profile={})
+    missing = missing_local_skill_markers("", root, "implement", phase_skills=phase_skills, profile={})
+
+    assert "# alpha" in block, block
+    assert "skill-use-evidence" not in block
+    assert "takes your word for it" not in block
+    assert not any(item.startswith("skill-use-evidence") for item in missing)
+    assert "project-local-skills: checked" in missing
 
 
 # --- P8 -----------------------------------------------------------------

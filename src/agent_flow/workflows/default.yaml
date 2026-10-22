@@ -206,7 +206,6 @@ phases:
       Behavior changes follow red → green → refactor per slice. Behavior-preserving
       work keeps applicable regression tests green and records the unchanged contract.
     required_markers:
-      - "skills_checked: true"
       - "profile-skill-selection: applied"
       - "active-profiles:"
       - "changed-file-skill-resolution: applied"
@@ -290,7 +289,6 @@ phases:
       Before writing implement.md, append:
 
           ## Completion Gate
-          skills_checked: true
           profile-skill-selection: applied
           active-profiles: <profile list>
           changed-file-skill-resolution: applied
@@ -357,7 +355,6 @@ phases:
       specialists on top.
     multi_review: true
     required_markers:
-      - "skills_checked: true"
       - "profile-skill-selection: applied"
       - "active-profiles:"
       - "changed-file-skill-resolution: applied"
@@ -418,8 +415,7 @@ phases:
       should-fix / note) and source angle. Cite paths as `path/to/file:line`.
       Apply agent-flow-concise-output: one finding per line, concise
       prose, no emoji, and parser verdict markers unchanged.
-      Apply code-generation-discipline's Before Starting skill resolution and
-      record `skills_checked: true`.
+      Apply code-generation-discipline's Before Starting skill resolution.
       If the selected architecture contract, including its required references,
       is not assessed, or any applicable must-avoid or required checklist
       condition fails, the overall verdict is `verdict: request-changes`.
@@ -448,7 +444,6 @@ phases:
       Include the Completion Gate before the final Overall section:
 
           ## Completion Gate
-          skills_checked: true
           profile-skill-selection: applied
           active-profiles: <profile list>
           changed-file-skill-resolution: applied
@@ -498,7 +493,6 @@ phases:
       required: [code-generation-discipline, clean-architecture-core]
     description: Address review findings. Tests stay green.
     required_markers:
-      - "skills_checked: true"
       - "profile-skill-selection: applied"
       - "active-profiles:"
       - "changed-file-skill-resolution: applied"
@@ -535,7 +529,6 @@ phases:
       End with:
 
           ## Completion Gate
-          skills_checked: true
           profile-skill-selection: applied
           active-profiles: <profile list>
           changed-file-skill-resolution: applied
