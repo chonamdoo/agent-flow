@@ -95,3 +95,15 @@ def test_a_subagent_handback_is_the_final_message():
             {"type": "assistant", "message": {"content": [
                 {"type": "tool_use", "name": "SubagentHandback", "input": {"message": "Done.\n\nEVAL-STATUS: complete"}}]}}]
     assert arm_compare.final_message(rows).endswith("EVAL-STATUS: complete")
+
+
+def test_the_runner_command_quotes_the_task_for_the_shell():
+    import shlex
+    task = 'A subtotal of US$100.00 gets a "discount"'
+    prompt = arm_compare.driver_prompt(task, "full-feature")
+    command = next(line.strip() for line in prompt.splitlines() if line.strip().startswith(".agent-flow/bin/agent-flow run"))
+    assert shlex.split(command)[2] == task
+
+
+def test_missing_usage_is_null_not_zero():
+    assert arm_compare._usage_totals([])["usage"] == {"input": None, "uncached_input": None, "cached_input": None, "output": None}

@@ -28,6 +28,7 @@ import argparse
 import hashlib
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -107,7 +108,7 @@ def driver_prompt(task: str, workflow: str) -> str:
 
 Use Agent Flow, installed in this project, to do this task with the `{workflow}` workflow. Start it with:
 
-    .agent-flow/bin/agent-flow run "{task}" --workflow {workflow}
+    .agent-flow/bin/agent-flow run {shlex.quote(task)} --workflow {workflow}
 
 Do each phase the runner prints and continue with the command it prints. You are also the user: when a
 phase asks the user to decide or approve, answer from the task text, approve, and run the printed approval
@@ -201,6 +202,9 @@ def _usage_totals(rows: list[dict]) -> dict:
     total = run_usage._empty()
     for message in messages:
         run_usage._add(total, message["usage"])
+    if not messages:
+        # 관측된 사용량이 없으면 0이 아니라 null이다. 0으로 두면 평균에서 공짜 run처럼 섞인다.
+        total = {key: None for key in total}
     stamps = [stamp for stamp in (run_usage._timestamp(row.get("timestamp")) for row in rows) if stamp]
     return {"usage": total, "api_calls": len(messages),
             "models": sorted({message["model"] for message in messages if message["model"]}),
