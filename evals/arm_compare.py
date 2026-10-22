@@ -49,6 +49,8 @@ WORKFLOWS = {"B": "development", "C": "full-feature"}
 KIT_TREES = ("bin", "lib", "templates", "bootstrap", "skills", "scripts", ".Codex", ".claude", "src", "docs")
 KIT_FILES = ("package.json", "pyproject.toml", "README.md")
 HIDDEN_MARKERS = ("hidden_fix", "hidden_plan", "phase-cases", "author/clean/hidden")
+# 에이전트가 스스로 SPEC 검증을 바꾸거나 승인한 호출. 증거 gate를 우회한 run을 결과와 따로 드러낸다.
+SELF_APPROVAL = re.compile(r"agent-flow\S*\s+spec\s+(approve|confirm)\b")
 BRANCH = "feat/arm-compare"
 HANDBACK = "SubagentHandback"
 
@@ -248,6 +250,7 @@ def score(run: Path, transcript: Path | None) -> dict:
               "oracle": all(hidden.values()), "commits": int(commits) if commits.isdigit() else None,
               "final_message": message, "declaration": completion.classify(message if rows else None),
               "contaminated": any(marker in item for item in tool_inputs(rows) for marker in HIDDEN_MARKERS),
+              "spec_self_approvals": sum(bool(SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
               "transcript": str(transcript) if transcript else None, **_usage_totals(rows),
               **(_runner_trace(project, checkout) if meta["arm"] in WORKFLOWS else {}),
               "scored_at": datetime.now().isoformat(timespec="seconds")}
