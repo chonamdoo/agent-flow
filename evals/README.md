@@ -468,6 +468,33 @@ raw에는 로컬 경로와 입력 내용이 있으므로 공개 전 별도 검�
 python evals/claim_audit.py <phase_eval output dir>
 ```
 
+### `run_usage.py` — controller 토큰의 phase별 귀속(#411)
+
+runner는 controller 세션의 토큰을 보지 못한다. 그 토큰은 host CLI의 transcript에만 있다. 이 도구는 run이
+끝난 뒤 transcript와 run의 `context/events.jsonl`을 시각으로 맞춰 phase별 토큰을 적는다. run 상태를 바꾸지
+않고 모델을 부르지 않는다. 평가기 지문(`phase_eval_fingerprint.py`)에 들지 않으므로 릴리스 게이트 재사용에
+영향이 없다.
+
+```bash
+python evals/run_usage.py report --run-dir <run dir> --transcript <host transcript> \
+  --outcome success|blocked|failed --output <usage.json>     # usage.md도 옆에 쓴다
+python evals/run_usage.py summarize <usage.json>...           # 성공 run 1건당 controller 토큰
+```
+
+| 대상 | 상태 | 근거 |
+|---|---|---|
+| Claude Code transcript(`~/.claude/projects/<project>/<session>.jsonl`) | 측정 | 응답 하나가 같은 `message.id`로 여러 줄에 같은 usage를 반복한다. id마다 한 번 센다. 2026-10-22 클라우드 세션에서 확인 |
+| Codex rollout(`~/.codex/sessions/.../rollout-*.jsonl`) | 측정(합성 사례만 검증) | `token_count`의 누적 `total_token_usage` 증가분을 센다. 필드 이름은 Codex CLI 0.163.0 바이너리에서 확인했고, 실제 rollout으로는 아직 확인하지 못했다 |
+| runner 리뷰어 subprocess | `unmeasured` | 일반 텍스트만 출력하고 usage를 내지 않는다. `review-metrics-*.json`에서 리뷰 wave 수와 job 수만 적는다 |
+| gates | 해당 없음 | 모델이 아니라 명령을 실행한다 |
+
+- 관측하지 못한 값은 0이 아니라 `null`이다. run 하나라도 `null`이면 `summarize`의 합계도 `null`이다.
+- 첫 이벤트 전 메시지는 `pre-run`, runner가 마지막 phase를 나간 뒤(`to_phase: complete`)는 `post-run`이다.
+  둘 다 controller 합계에서 뺀다.
+- 성공 1건당 토큰은 전체 run(차단·실패 포함)의 controller 토큰 ÷ `outcome: success` run 수다.
+- 실청구 비용(달러)은 아직 적지 않는다. Claude Code transcript의 `cost-state`는 세션 누적값이고 드물게 기록되어
+  phase에 나눌 수 없다.
+
 ### `release_reuse.py` — 바뀌지 않은 셀의 재사용
 
 릴리스가 모델에게 보이는 것을 하나도 바꾸지 않았어도 168 unit을 다시 재지 않도록, 셀마다 모델 입력
