@@ -155,3 +155,27 @@ def test_a_recognised_transcript_without_usage_is_unmeasured(tmp_path: Path) -> 
 
     assert result["tokens_controller"]["status"] == "unmeasured"
     assert run_usage.summarize([result])["controller_per_success"]["input"] is None
+
+
+def test_cache_writes_are_kept_apart_from_fresh_input(tmp_path: Path) -> None:
+    run = _run_dir(tmp_path)
+    row = _claude("m1", "2026-10-22T10:05:00+00:00", uncached=10, creation=300, cached=1_000, output=40)
+    row["message"]["usage"]["cache_creation"] = {"ephemeral_5m_input_tokens": 100, "ephemeral_1h_input_tokens": 200}
+    transcript = _write_jsonl(tmp_path / "session.jsonl", [row])
+    report = run_usage.report(run, [transcript], "success")
+    controller = report["tokens_controller"]
+    # 예전 합계는 그대로다: uncached = fresh input + cache write.
+    assert controller["usage"] == {"input": 1_310, "uncached_input": 310, "cached_input": 1_000, "output": 40}
+    assert controller["usage_components"] == {"fresh_input": 10, "cache_write": 300, "cache_write_5m": 100,
+                                              "cache_write_1h": 200, "cache_read": 1_000, "output": 40}
+    assert run_usage.summarize([report])["controller_components_total"]["cache_write"] == 300
+
+
+def test_codex_reports_no_cache_writes_so_they_are_null(tmp_path: Path) -> None:
+    rows = [{"type": "turn_context", "payload": {"model": "gpt-x"}, "timestamp": "2026-10-22T10:01:00+00:00"},
+            {"type": "event_msg", "timestamp": "2026-10-22T10:02:00+00:00", "payload": {
+                "type": "token_count", "info": {"total_token_usage": {
+                    "input_tokens": 500, "cached_input_tokens": 200, "output_tokens": 30}}}}]
+    message = run_usage.codex_messages(rows)[0]
+    assert message["components"] == {"fresh_input": 300, "cache_write": None, "cache_write_5m": None,
+                                     "cache_write_1h": None, "cache_read": 200, "output": 30}

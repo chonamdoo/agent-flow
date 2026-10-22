@@ -21,6 +21,11 @@ latest `phase_entered`, or the target of the latest unblocked `phase_exited`. Me
 first event go to `pre-run`. After the runner exits the last phase (`to_phase: complete`) the run
 is over, and later messages go to `post-run`.
 
+`usage` keeps the historical four numbers (`uncached_input` = fresh input + cache writes). `usage_components` splits
+them so any price table can be applied later: `fresh_input`, `cache_write` (with its `cache_write_5m`/`cache_write_1h`
+TTL split when the transcript reports it), `cache_read` and `output`. A part the provider does not report is `null`:
+Codex rollouts report no cache writes, so their `cache_write` is `null`, not 0.
+
 Anything that cannot be observed is `null` with a reason, never 0. Runner reviewer subprocesses
 print plain text without usage, so their tokens are `unmeasured`; `review-metrics-*.json` still
 supplies how many reviewer jobs ran. Gates run commands, not models, so they use no model tokens.
@@ -37,6 +42,7 @@ from pathlib import Path
 
 SCHEMA_VERSION = 1
 USAGE_KEYS = ("input", "uncached_input", "cached_input", "output")
+COMPONENT_KEYS = ("fresh_input", "cache_write", "cache_write_5m", "cache_write_1h", "cache_read", "output")
 PRE_RUN = "pre-run"
 POST_RUN = "post-run"
 OUTCOMES = ("success", "blocked", "failed")
@@ -93,10 +99,16 @@ def claude_messages(rows: list[dict]) -> list[dict]:
         input_tokens = _count(usage, "input_tokens")
         creation = _count(usage, "cache_creation_input_tokens")
         uncached = input_tokens + creation if input_tokens is not None and creation is not None else None
+        by_ttl = usage.get("cache_creation") if isinstance(usage.get("cache_creation"), dict) else {}
         messages[message_id] = {
             "at": at,
             "model": message.get("model") if isinstance(message.get("model"), str) else None,
             "usage": _usage(uncached, _count(usage, "cache_read_input_tokens"), _count(usage, "output_tokens")),
+            "components": {"fresh_input": input_tokens, "cache_write": creation,
+                           "cache_write_5m": _count(by_ttl, "ephemeral_5m_input_tokens"),
+                           "cache_write_1h": _count(by_ttl, "ephemeral_1h_input_tokens"),
+                           "cache_read": _count(usage, "cache_read_input_tokens"),
+                           "output": _count(usage, "output_tokens")},
         }
     return list(messages.values())
 
@@ -127,7 +139,11 @@ def codex_messages(rows: list[dict]) -> list[dict]:
             continue
         cached = delta["cached_input_tokens"]
         uncached = delta["input_tokens"] - cached if cached <= delta["input_tokens"] else None
-        messages.append({"at": at, "model": model, "usage": _usage(uncached, cached, delta["output_tokens"])})
+        # rollout에는 cache write가 없다. 0이 아니라 null이다.
+        messages.append({"at": at, "model": model, "usage": _usage(uncached, cached, delta["output_tokens"]),
+                         "components": {"fresh_input": uncached, "cache_write": None, "cache_write_5m": None,
+                                        "cache_write_1h": None, "cache_read": cached,
+                                        "output": delta["output_tokens"]}})
     return messages
 
 
@@ -163,13 +179,21 @@ def phase_at(timeline: list[tuple[datetime, str]], at: datetime) -> str:
     return timeline[index - 1][1] if index else PRE_RUN
 
 
-def _add(total: dict[str, int | None], usage: dict[str, int | None]) -> None:
-    for key in USAGE_KEYS:
-        total[key] = total[key] + usage[key] if total[key] is not None and usage[key] is not None else None
+def _add(total: dict[str, int | None], usage: dict[str, int | None], keys: tuple[str, ...] = USAGE_KEYS) -> None:
+    for key in keys:
+        total[key] = total[key] + usage[key] if total[key] is not None and usage.get(key) is not None else None
 
 
-def _empty() -> dict[str, int | None]:
-    return {key: 0 for key in USAGE_KEYS}
+def _empty(keys: tuple[str, ...] = USAGE_KEYS) -> dict[str, int | None]:
+    return {key: 0 for key in keys}
+
+
+def add_components(total: dict[str, int | None], components: dict[str, int | None]) -> None:
+    _add(total, components, COMPONENT_KEYS)
+
+
+def empty_components() -> dict[str, int | None]:
+    return _empty(COMPONENT_KEYS)
 
 
 def reviewer_usage(run_dir: Path) -> dict:
@@ -201,6 +225,8 @@ def report(run_dir: Path, transcripts: list[Path], outcome: str | None) -> dict:
     timeline = phase_timeline(_jsonl(events))
     by_phase: dict[str, dict] = {}
     controller = _empty()
+    controller_parts = empty_components()
+    parts_by_phase: dict[str, dict] = {}
     sources = []
     for path in transcripts:
         rows = _jsonl(path)
@@ -218,8 +244,10 @@ def report(run_dir: Path, transcripts: list[Path], outcome: str | None) -> dict:
             entry = by_phase.setdefault(phase, {"messages": 0, "usage": _empty()})
             entry["messages"] += 1
             _add(entry["usage"], message["usage"])
+            add_components(parts_by_phase.setdefault(phase, empty_components()), message["components"])
             if phase not in (PRE_RUN, POST_RUN):
                 _add(controller, message["usage"])
+                add_components(controller_parts, message["components"])
     # 형식만 알아보고 usage가 하나도 없으면 측정이 아니다. 0토큰으로 적으면 누락이 무사용으로 보인다.
     measured = any(source["format"] and source["messages"] for source in sources)
     return {
@@ -229,10 +257,12 @@ def report(run_dir: Path, transcripts: list[Path], outcome: str | None) -> dict:
         "outcome": outcome,
         "transcripts": sources,
         "tokens_by_phase": by_phase,
+        "usage_components_by_phase": parts_by_phase,
         "tokens_controller": {
             "status": "measured" if measured else "unmeasured",
             "reason": None if measured else "no supported host transcript",
             "usage": controller if measured else {key: None for key in USAGE_KEYS},
+            "usage_components": controller_parts if measured else {key: None for key in COMPONENT_KEYS},
         },
         "tokens_reviewers": reviewer_usage(run_dir),
         "tokens_gates": {"status": "not_applicable", "reason": "gates run commands, not models"},
@@ -242,11 +272,14 @@ def report(run_dir: Path, transcripts: list[Path], outcome: str | None) -> dict:
 def summarize(reports: list[dict]) -> dict:
     """Totals across runs and tokens per successful run. A run with an unmeasured part makes the total unmeasured."""
     totals = _empty()
+    parts = empty_components()
     counts = {key: 0 for key in (*OUTCOMES, "unknown")}
     reviewers_measured = True
     for item in reports:
         counts[item.get("outcome") if item.get("outcome") in OUTCOMES else "unknown"] += 1
         _add(totals, item["tokens_controller"]["usage"])
+        # 구성요소가 없는 예전 보고서는 합계를 null로 만든다. 없는 값을 0으로 채우지 않는다.
+        add_components(parts, item["tokens_controller"].get("usage_components") or {})
         reviewers_measured = reviewers_measured and item["tokens_reviewers"]["status"] == "measured"
     successes = counts["success"]
     per_success = {
@@ -257,6 +290,7 @@ def summarize(reports: list[dict]) -> dict:
         "runs": len(reports),
         "outcomes": counts,
         "controller_total": totals,
+        "controller_components_total": parts,
         "controller_per_success": per_success,
         "reviewers": "measured" if reviewers_measured and reports else "unmeasured",
     }

@@ -72,6 +72,8 @@ def test_score_runs_hidden_tests_after_the_agent_and_flags_hidden_reads(bare, tm
     assert result["oracle"] is False and result["hidden_tests"]["fix"] is False
     assert result["declaration"] == "declared-complete" and result["contaminated"] is False
     assert result["usage"] == {"input": 166, "uncached_input": 16, "cached_input": 150, "output": 23}
+    assert result["usage_components"] == {"fresh_input": 11, "cache_write": 5, "cache_write_5m": None,
+                                          "cache_write_1h": None, "cache_read": 150, "output": 23}
     assert result["seconds"] == 100
     dirty = _transcript(tmp_path / "dirty.jsonl", tool_input={"file_path": "/x/evals/phase-cases/devflow/author/clean/hidden/t.py"},
                         final="EVAL-STATUS: complete")

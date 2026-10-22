@@ -315,13 +315,16 @@ def tool_inputs(rows: list[dict]) -> list[str]:
 def _usage_totals(rows: list[dict]) -> dict:
     messages = run_usage.claude_messages(rows)
     total = run_usage._empty()
+    parts = run_usage.empty_components()
     for message in messages:
         run_usage._add(total, message["usage"])
+        run_usage.add_components(parts, message["components"])
     if not messages:
         # 관측된 사용량이 없으면 0이 아니라 null이다. 0으로 두면 평균에서 공짜 run처럼 섞인다.
         total = {key: None for key in total}
+        parts = {key: None for key in parts}
     stamps = [stamp for stamp in (run_usage._timestamp(row.get("timestamp")) for row in rows) if stamp]
-    return {"usage": total, "api_calls": len(messages),
+    return {"usage": total, "usage_components": parts, "api_calls": len(messages),
             "models": sorted({message["model"] for message in messages if message["model"]}),
             "seconds": round((max(stamps) - min(stamps)).total_seconds()) if stamps else None}
 
