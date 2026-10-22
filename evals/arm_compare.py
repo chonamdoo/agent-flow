@@ -243,13 +243,38 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
     return meta
 
 
-def worked_checkout(project: Path) -> Path:
-    """The checkout the agent's work ended in: the newest linked worktree (B, C), else the project."""
-    listing = c_prime._sh(["git", "worktree", "list", "--porcelain"], project).stdout
-    linked = [Path(line.split(" ", 1)[1]) for line in listing.splitlines()
-              if line.startswith("worktree ") and Path(line.split(" ", 1)[1]).resolve() != project.resolve()]
-    linked = [path for path in linked if path.is_dir()]
-    return max(linked, key=lambda path: path.stat().st_mtime) if linked else project
+def linked_worktrees(project: Path) -> list[Path]:
+    """Linked worktrees git lists for the project (`--porcelain -z`, so no path is split on a newline)."""
+    listing = c_prime._sh(["git", "worktree", "list", "--porcelain", "-z"], project).stdout
+    paths = [Path(field.split(" ", 1)[1]) for field in listing.split("\0") if field.startswith("worktree ")]
+    return [path for path in paths if path.resolve() != project.resolve() and path.is_dir()]
+
+
+def runner_worktrees(project: Path) -> list[Path]:
+    """Linked worktrees the runner owns: they have run state in `<git-common-dir>/agent-flow/worktrees/<name>/`."""
+    state = Path(c_prime._sh(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], project).stdout.strip())
+    return [path for path in linked_worktrees(project)
+            if (state / "agent-flow" / "worktrees" / path.name / ".agent-flow" / "runs").is_dir()]
+
+
+def select_checkout(project: Path, arm: str) -> tuple[Path, dict]:
+    """Which checkout to grade, chosen from run state, never from modification times.
+
+    A workflow arm's work is in the worktree its runner created; an agent can add worktrees of its own
+    (`git worktree add` came up in the C′ smoke, #444), and the newest one need not be the one it worked in. The
+    other arms work in the project itself. When a workflow arm has linked worktrees but not exactly one with run
+    state, the choice is not decidable and the run is a harness error.
+    """
+    linked = linked_worktrees(project)
+    info = {"linked_worktrees": len(linked), "checkout_selected_by": None, "checkout_error": None}
+    if arm not in WORKFLOWS:
+        return project, {**info, "checkout_selected_by": "project"}
+    owned = runner_worktrees(project)
+    if len(owned) == 1:
+        return owned[0], {**info, "checkout_selected_by": "runner-state"}
+    if not linked:
+        return project, {**info, "checkout_selected_by": "project"}
+    return project, {**info, "checkout_error": f"{len(owned)} runner worktrees among {len(linked)} linked worktrees"}
 
 
 def _transcript_rows(path: Path | None) -> list[dict]:
@@ -454,7 +479,8 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
           harness_error: str | None = None) -> dict:
     meta = json.loads((run / "arm.json").read_text(encoding="utf-8"))
     project = Path(meta["project"])
-    checkout = worked_checkout(project)
+    checkout, chosen = select_checkout(project, meta["arm"])
+    harness_error = harness_error or chosen["checkout_error"]
     if transcript is None and (run / "drive.json").is_file():
         recorded = json.loads((run / "drive.json").read_text(encoding="utf-8")).get("transcript")
         transcript = Path(recorded) if recorded else None
@@ -482,7 +508,7 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
               "transcript": str(transcript) if transcript else None, **_measured_usage(rows, read), **read,
               "controller_cost_usd": drive.get("cost_usd"), "drive_exit": drive.get("exit"),
               "drive_timed_out": drive.get("timed_out"), "drive_is_error": drive.get("is_error"),
-              "harness_error": harness_error,
+              "harness_error": harness_error, **chosen,
               **(_runner_trace(project, checkout) if meta["arm"] in WORKFLOWS else {}),
               "scored_at": datetime.now().isoformat(timespec="seconds")}
     (run / "result.json").write_text(json.dumps(result, indent=1, default=str) + "\n", encoding="utf-8")
@@ -553,13 +579,10 @@ MAX_HARNESS_APPROVALS = 30
 
 def runner_status(project: Path) -> dict | None:
     """What `agent-flow continue` reports for the run's worktree, read by the harness, not by the agent."""
-    listing = c_prime._sh(["git", "worktree", "list", "--porcelain"], project).stdout
-    worktrees = [Path(line.split(" ", 1)[1]) for line in listing.splitlines()
-                 if line.startswith("worktree ") and Path(line.split(" ", 1)[1]).resolve() != project.resolve()]
-    worktrees = [path for path in worktrees if path.is_dir()]
-    if not worktrees:
+    owned = runner_worktrees(project)
+    if len(owned) != 1:
         return None
-    worktree = max(worktrees, key=lambda path: path.stat().st_mtime)
+    worktree = owned[0]
     shown = c_prime._sh([str(project / ".agent-flow" / "bin" / "agent-flow"), "continue", "--root", str(project),
                          "--worktree", worktree.name], worktree)
     for line in (shown.stdout or "").splitlines():

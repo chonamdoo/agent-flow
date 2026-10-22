@@ -308,3 +308,35 @@ def test_the_cost_estimate_uses_each_token_kind_at_its_own_price():
     assert arm_compare.message_cost("claude-opus-5-5", parts) == 4.0 + 5.0 + 8.0 + 0.20 + 20.0
     assert arm_compare.message_cost("claude-unknown", parts) is None
     assert arm_compare.message_cost("claude-opus-5-5", {**parts, "cache_write_5m": None}) is None
+
+
+def _git_init(path):
+    path.mkdir(parents=True)
+    for args in (["init", "-q", "-b", "main"], ["config", "user.name", "t"], ["config", "user.email", "t@e"],
+                 ["config", "commit.gpgsign", "false"], ["commit", "-q", "--allow-empty", "-m", "seed"]):
+        arm_compare._git(args, path)
+
+
+def test_the_runner_worktree_is_graded_even_when_a_newer_one_exists(tmp_path):
+    import os, time
+    project = tmp_path / "project"
+    _git_init(project)
+    worked = tmp_path / "wt" / "feat-x"
+    arm_compare._git(["worktree", "add", "-q", "-b", "feat/x", str(worked)], project)
+    (project / ".git" / "agent-flow" / "worktrees" / "feat-x" / ".agent-flow" / "runs" / "r1").mkdir(parents=True)
+    (worked / "work.txt").write_text("done\n", encoding="utf-8")
+    later = tmp_path / "wt" / "scratch"
+    arm_compare._git(["worktree", "add", "-q", "-b", "scratch", str(later)], project)
+    future = time.time() + 60
+    os.utime(later, (future, future))
+    chosen, info = arm_compare.select_checkout(project, "C")
+    assert chosen == worked and info["checkout_selected_by"] == "runner-state" and info["linked_worktrees"] == 2
+    assert arm_compare.select_checkout(project, "A")[0] == project
+
+
+def test_an_undecidable_worktree_is_a_harness_error(tmp_path):
+    project = tmp_path / "project"
+    _git_init(project)
+    arm_compare._git(["worktree", "add", "-q", "-b", "a", str(tmp_path / "wt" / "a")], project)
+    chosen, info = arm_compare.select_checkout(project, "C")
+    assert chosen == project and info["checkout_error"] == "0 runner worktrees among 1 linked worktrees"
