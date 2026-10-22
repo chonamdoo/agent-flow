@@ -546,6 +546,12 @@ def _phase_approval_identity(run_path: Path, meta: Mapping[str, Any]) -> dict[st
         "phase_entered_at": entered_at,
         "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
     }
+    # 범위 확인은 보여 준 경로 목록에 묶인다. 목록 밖 파일이 늘면 같은 토큰으로 넘어가지 못한다.
+    out_of_plan = request.get("out_of_plan_files")
+    if out_of_plan is not None:
+        if not isinstance(out_of_plan, list) or not all(isinstance(item, str) for item in out_of_plan):
+            return None
+        identity["out_of_plan_files"] = out_of_plan
     identity["token"] = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()

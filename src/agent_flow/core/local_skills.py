@@ -302,6 +302,28 @@ def _planned_skill_paths(
     return tuple(dict.fromkeys(paths))
 
 
+# 범위 대조가 보는 phase. 구현이 끝나고 리뷰 직전에 남은 diff 전체를 한 번 본다(#415).
+SCOPE_CONFIRMATION_PHASES = frozenset({"comment-authoring"})
+
+
+def out_of_plan_paths(
+    project_root: Path, run_dir: Path, changed: Sequence[str],
+    definition: PhaseWorkflowDefinition | None = None,
+) -> tuple[str, ...] | None:
+    """slice-plan의 `- Files:` 밖에서 바뀐 경로. 계획에 파일 목록이 없으면 대조할 수 없어 None이다.
+
+    판정이 아니라 대조다. 목록 밖 변경이 범위 초과인지는 사람이 정한다 — 파일 목록은 탐색
+    범위이지 행동 변경 허가가 아니고(#222), 같은 파일 안의 범위 확대도 여기서는 보이지 않는다.
+    """
+    planned = set(_planned_skill_paths(project_root, run_dir, definition))
+    if not planned:
+        return None
+    return tuple(sorted(
+        path for path in dict.fromkeys(changed)
+        if path not in planned and not path.startswith(".agent-flow/")
+    ))
+
+
 def phase_skill_paths(
     project_root: Path, phase_id: str, changed_files: Sequence[str], run_dir: Path | None = None,
     *, workflow_definition: PhaseWorkflowDefinition | None = None,
