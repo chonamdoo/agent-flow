@@ -717,7 +717,9 @@ def test_skills_cli_keeps_non_stack_selections_available(
     assert captured.err == ""
     if command == "markers":
         missing = json.loads(captured.out)
-        assert "skills_checked: true" in missing
+        assert "profile-skill-selection: applied" in missing
+        # 작성 phase는 필수 본문을 받으므로 읽었다는 자기신고 marker를 묻지 않는다(#416).
+        assert "skills_checked: true" not in missing
         assert ("presentation-skill: android|flutter|react|react-native|ios|n/a" in missing) == (
             mode == "clean"
         )

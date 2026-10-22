@@ -13,6 +13,7 @@ from agent_flow.cli import main
 from agent_flow.core.architecture_policy import ArchitectureMode, architecture_snapshot
 from agent_flow.core.local_skills import architecture_contract_required, changed_files
 from agent_flow.core.phase_workflow import load_phase_workflow_definition
+from agent_flow.core.profile_routing import IMPLEMENTATION_PHASES
 from agent_flow.core.skill_resolver import (
     SkillResolution,
     active_host_roots,
@@ -203,7 +204,13 @@ def test_clean_install_delivers_and_enforces_platform_contract(
         prompt = adapter.render_envelope(phase, runner.run_dir, project, skill_host=host)
         for name in obligations:
             # multi-review controller는 이름만 받는다. 본문 경로는 아래 reviewer job이 받는다.
-            expected = f"`{name}`" if phase.multi_review else str(required[name].path)
+            # 작성 phase는 본문 자체를 받는다(#416).
+            if phase.multi_review:
+                expected = f"`{name}`"
+            elif phase.id in IMPLEMENTATION_PHASES:
+                expected = required[name].path.read_text(encoding="utf-8")
+            else:
+                expected = str(required[name].path)
             assert expected in prompt
         _assert_application_gate(runner, phase, resolution, obligations)
     jobs, _ = _reviewer_jobs(_phase(runner, "review"), runner.run_dir, project, adapter, providers=(host,))
@@ -286,7 +293,8 @@ def test_pending_install_keeps_discipline_but_refuses_structural_decisions(
     assert resolution.architecture_snapshot is not None
     assert resolution.architecture_snapshot.digest in author
     for skill in resolution.available_required:
-        assert str(skill.path) in author
+        # 작성 phase는 경로가 아니라 본문을 받는다(#416).
+        assert skill.path.read_text(encoding="utf-8") in author
     jobs, _ = _reviewer_jobs(_phase(runner, "review"), runner.run_dir, project, adapter, providers=(host,))
     assert not {"clean-architecture", "architecture-design"} & {job.angle_id for job in jobs}
     assert {"generalist", "types"} <= {job.angle_id for job in jobs}

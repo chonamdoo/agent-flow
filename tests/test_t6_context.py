@@ -69,10 +69,14 @@ def yaml_profile(root):
     return path
 
 
-def resolve(root, context=None, **kwargs):
-    """Resolve implementation-phase skills with the context-test defaults."""
+def resolve(root, context=None, phase_id="review", **kwargs):
+    """Resolve read-plan phase skills with the context-test defaults.
+
+    Authoring phases receive ordinary required bodies inline (#416), so the read-plan,
+    alias and route mechanics are pinned on a review phase, which still delivers by path.
+    """
     return resolve_phase_skills(
-        project_root=root, phase_id="implement", host="codex",
+        project_root=root, phase_id=phase_id, host="codex",
         context=context, **kwargs,
     )
 
@@ -136,6 +140,18 @@ def test_required_references_keep_digests_and_all_phase_profile_dependency_route
     assert {route.kind for route in first_routes} >= {"phase-required", "profile", "dependency"}
     assert any("api" in route.detail for route in first_routes)
     assert any("security" in route.detail for route in first_routes)
+
+
+def test_authoring_phase_receives_ordinary_required_bodies_inline(tmp_path):
+    """#416: an authoring phase gets the body itself, so it has nothing to open or report."""
+    payload = "Every mutation requires authorization.\n"
+    path = skill(tmp_path, "first", payload)
+    result = resolve(tmp_path, phase_id="implement", phase_skills=PhaseSkills(required=("first",)))
+    prompt = skill_prompt_block(tmp_path, result)
+    assert payload in prompt
+    assert str(path) not in required_read_paths(prompt)
+    assert result.required_delivered_inline
+    assert not resolve(tmp_path, phase_skills=PhaseSkills(required=("first",))).required_delivered_inline
 
 
 @pytest.mark.parametrize("role", ["author", "reviewer"])

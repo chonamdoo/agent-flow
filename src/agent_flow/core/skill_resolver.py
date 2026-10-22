@@ -207,6 +207,14 @@ class SkillResolution:
         )
 
     @property
+    def required_delivered_inline(self) -> bool:
+        """설치된 필수 skill 본문이 모두 프롬프트에 들어갔는가. 그렇다면 "읽었다"는 신고는 물을 것이 없다(#416)."""
+        inline = {item.document.path for group in self.delivery if group.inline for item in group.documents}
+        return bool(self.available_required) and all(
+            str(skill.path) in inline for skill in self.available_required
+        )
+
+    @property
     def missing(self) -> tuple[ResolvedSkill, ...]:
         return tuple(skill for skill in self.required if not skill.exists)
 
@@ -812,7 +820,9 @@ def resolve_phase_skills(
         document = ContractDocument(str(skill.path), hashlib.sha256(content).hexdigest(), len(content))
         normative_documents.append(NormativeDocument(
             document, content, tuple(route for route in routes if route.skill == skill.name),
-            inline=skill.name == contract_name,
+            # 작성 phase는 본문을 직접 건넨다. 파일 경로만 주고 읽었다는 신고를 받던 자리다(#416).
+            # 리뷰 phase는 runner가 reviewer 전달을 기록하므로 그대로 둔다.
+            inline=skill.name == contract_name or phase_id in IMPLEMENTATION_PHASES,
         ))
     if snapshot.contract is not None:
         metadata = parse_skill_metadata(
@@ -1079,7 +1089,11 @@ def skill_prompt_block(
             "review. Verify the author's completion evidence without writing it; a read "
             "marker alone does not establish rule compliance:"
             if role == "reviewer" else
-            "First skim the files this phase actually changes, then read every one of "
+            "First skim the files this phase actually changes, then apply every one of "
+            "these before you write or judge code. The runner delivers their bodies below, "
+            "so there is nothing to open and no read to report:"
+            if enforced and resolution.required_delivered_inline
+            else "First skim the files this phase actually changes, then read every one of "
             "these before you write or judge code. The completion gate takes your word "
             "for it — it blocks this phase until the artifact records a "
             "`skill-use-evidence` value, and it does not check which files you actually "
@@ -1197,10 +1211,13 @@ def skill_prompt_block(
             if delivery.inline:
                 lines.extend((f"### Normative body {index}", "", delivery.content.decode("utf-8"), ""))
             continue
-        if not delivery.inline and all(item.document.path in compact_paths for item in delivery.documents):
+        compact = all(item.document.path in compact_paths for item in delivery.documents)
+        if not delivery.inline and compact:
             continue
         lines.append(f"### Normative body {index}")
-        for item in delivery.documents:
+        # 번들 skill은 이름 목록이 이미 출처다. 본문을 넣으면서 경로·digest·route를 또 적으면 읽기 대신
+        # 내용을 건네는 이득을 그 줄들이 다시 먹는다.
+        for item in () if compact else delivery.documents:
             document = item.document
             lines.append(f"- `{document.path}` — SHA-256: `{document.sha256}`. Bytes: {document.bytes}.")
             lines.extend(f"  - route: {route.kind} / {route.skill} / {route.detail}" for route in item.routes)

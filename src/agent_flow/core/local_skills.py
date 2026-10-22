@@ -469,7 +469,9 @@ def missing_local_skill_markers(
     if values.get("skill-availability") not in {"pass", "degraded", "n/a"}:
         missing.append(AVAILABILITY_MARKER)
 
-    # L2: 강제는 자기신고 하나로 한다. 관측은 진단에만 쓴다.
+    # L2: 작성 phase는 필수 본문을 프롬프트로 받는다(`required_delivered_inline`). 전달이 보장되므로
+    #     읽음을 묻지 않는다. 리뷰 phase는 runner의 reviewer 전달 기록이 증거다. 둘 다 아닐 때만
+    #     아래의 자기신고 하나로 강제한다. 관측은 진단에만 쓴다.
     #
     #     관측으로 강제하면 read hook이 로드되지 않은 host 세션이 영원히 막힌다.
     #     그 세션은 skill을 실제로 읽어도 기록을 남기지 못하는데, 다른 세션이 로그
@@ -516,7 +518,9 @@ def missing_local_skill_markers(
         # 적용 범위는 reviewer 쪽 기록이 기준이다. controller host에 없어도 reviewer가 받아
         # 적용한 skill은 적용 목록에 들어간다.
         applied += sorted(name for name in reviewer_delivery.delivered if name not in applied)
-    elif values.get("skill-use-evidence") not in {"verified", "unavailable"}:
+    elif not resolution.required_delivered_inline and values.get("skill-use-evidence") not in {
+        "verified", "unavailable",
+    }:
         missing.append(USE_EVIDENCE_MARKER)
         # 진단은 marker 이름에 붙이지 않는다. 이 리스트는 runner가 "이 marker들을
         # artifact에 적어라"로 그대로 보여 주는 자리이고(`runner.py`가 `', '.join`으로
@@ -667,7 +671,9 @@ def _marker_instruction(
     availability = "degraded" if resolution.missing else "pass"
     if not enforced or role == "reviewer":
         return ""
-    read_claims = () if delivered_to_reviewers else ("skill-use-evidence: verified|unavailable",)
+    read_claims = () if delivered_to_reviewers or resolution.required_delivered_inline else (
+        "skill-use-evidence: verified|unavailable",
+    )
     applied_claim = () if delivered_to_reviewers else (APPLIED_MARKER,)
     # 게이트가 요구하는 마커는 전부 여기 적는다. 하나라도 빠지면 계약대로 쓴
     # artifact가 반드시 한 번 거부되고, 그 순간 이 블록 전체가 신뢰를 잃는다.
