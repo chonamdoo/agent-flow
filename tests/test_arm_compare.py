@@ -219,3 +219,24 @@ def test_the_controller_does_not_inherit_the_operators_session():
     env = arm_compare.controller_env({"PATH": "/bin", "HOME": "/root", "CLAUDE_CODE_SESSION_ID": "operator",
                                       "CLAUDE_CODE_REMOTE": "true", "CLAUDE_EFFORT": "low", "HTTPS_PROXY": "http://p"})
     assert env == {"PATH": "/bin", "HOME": "/root", "HTTPS_PROXY": "http://p", "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1"}
+
+
+def test_running_the_runners_approval_command_is_self_approval():
+    for command in (".agent-flow/bin/agent-flow continue --root /p --worktree w --approve abc123",
+                    "agent-flow spec approve SPEC-1 --run-dir r"):
+        assert arm_compare.SELF_APPROVAL.search(command)
+    assert not arm_compare.SELF_APPROVAL.search(".agent-flow/bin/agent-flow continue --root /p --worktree w")
+    prompt = arm_compare.driver_prompt("Add a discount", "full-feature")
+    assert "evaluator approves" in prompt and "do not run its approval command" in prompt
+
+
+def test_the_harness_runs_only_the_runners_own_approval_command(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(arm_compare.c_prime, "_sh", lambda argv, cwd, **_: calls.append(argv) or
+                        type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    status = {"approval_command": "agent-flow continue --root /p --worktree w --approve abc", "worktree": str(tmp_path)}
+    assert arm_compare.approve_phase(tmp_path, status)
+    assert calls[-1] == [str(tmp_path / ".agent-flow" / "bin" / "agent-flow"), "continue", "--root", "/p",
+                         "--worktree", "w", "--approve", "abc"]
+    assert not arm_compare.approve_phase(tmp_path, {"approval_command": "rm -rf /", "worktree": str(tmp_path)})
+    assert not arm_compare.approve_phase(tmp_path, {"approval_command": None, "worktree": str(tmp_path)})

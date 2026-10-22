@@ -24,7 +24,10 @@ rates and counted apart.
 - B, C: the kit is installed with its hooks; the agent drives `agent-flow run --workflow development|full-feature`
   and answers the runner's decisions from the task text. It is not the human approver: `spec approve`/`spec confirm`
   and turning a SPEC's `verify` into `manual` are off limits, because they let the worker pass its own evidence
-  gate (C-4 and C-5 of the first round did). There is no git remote, so the run ends at the first phase that needs one.
+  gate (C-4 and C-5 of the first round did). Phase approvals come from the harness: when the runner pauses a phase
+  for the user, `drive` runs the runner's own approval command and resumes the same session
+  (`drive.json` `harness_approvals`); an agent that runs it itself counts as a self-approval. There is no git
+  remote, so the run ends at the first phase that needs one.
 - C′: `c_prime.build()` of the same project, stopping after `commit` (#427).
 
 Success follows `completion.summarize` (#424): the hidden fix, plan and visible tests all pass (each ran at
@@ -83,7 +86,7 @@ KIT_TREES = ("bin", "lib", "templates", "bootstrap", "skills", "scripts", ".Code
 KIT_FILES = ("package.json", "pyproject.toml", "README.md")
 HIDDEN_MARKERS = ("hidden_fix", "hidden_plan", "phase-cases", "author/clean/hidden")
 # 에이전트가 스스로 SPEC 검증을 바꾸거나 승인한 호출. 증거 gate를 우회한 run을 결과와 따로 드러낸다.
-SELF_APPROVAL = re.compile(r"agent-flow\S*\s+spec\s+(approve|confirm)\b")
+SELF_APPROVAL = re.compile(r"agent-flow\S*\s+(spec\s+(approve|confirm)\b|continue\b[^\n]*--approve\b)")
 VERIFY_DOWNGRADE = re.compile(r"verify:\s*[\"']?manual\b")
 MANUAL_APPROVALS = "spec-manual-approvals.json"
 ISOLATION = ("instructed", "enforced")
@@ -145,11 +148,13 @@ Use Agent Flow, installed in this project, to do this task with the `{workflow}`
 
     .agent-flow/bin/agent-flow run {shlex.quote(task)} --workflow {workflow}
 
-Do each phase the runner prints and continue with the command it prints. When a phase asks the user to
-decide, answer from the task text and run the printed command. You are not the human approver: do not run
-`agent-flow spec approve` or `agent-flow spec confirm`, and do not change a SPEC's `verify` to `manual`. If the
-runner cannot go on without one of those, stop and declare `blocked` with the reason. There is no git remote:
-when the runner reaches a phase that needs one (push or pull request), stop there.
+Do each phase the runner prints and continue with the command it prints. When a phase asks the user a
+question, answer it from the task text. You are not the human approver: the evaluator approves phases. When the
+runner pauses a phase for user approval, do not run its approval command; summarize the artifact and end your
+turn. The evaluator approves it and resumes you. Do not run `agent-flow spec approve` or
+`agent-flow spec confirm`, and do not change a SPEC's `verify` to `manual`; if the runner cannot go on without
+one of those, declare `blocked` with the reason. There is no git remote: when the runner reaches a phase that needs one (push
+or pull request), stop there.
 
 {DECLARATION}"""
 
@@ -467,7 +472,8 @@ def _stream_summary(stream: Path) -> dict:
         elif row.get("type") == "result":
             result = row
     return {"session_id": session, "cost_usd": result.get("total_cost_usd"), "is_error": result.get("is_error"),
-            "num_turns": result.get("num_turns"), "result_subtype": result.get("subtype")}
+            "num_turns": result.get("num_turns"), "result_subtype": result.get("subtype"),
+            "final_text": result.get("result") if isinstance(result.get("result"), str) else None}
 
 
 def session_transcript(session_id: str | None, projects: Path = Path.home() / ".claude" / "projects") -> Path | None:
@@ -477,32 +483,101 @@ def session_transcript(session_id: str | None, projects: Path = Path.home() / ".
     return found[0] if found else None
 
 
+RESUME_AFTER_APPROVAL = ("The evaluator approved phase `{phase}` as the user. Continue the Agent Flow run with the "
+                         "next command the runner prints.")
+MAX_HARNESS_APPROVALS = 30
+
+
+def runner_status(project: Path) -> dict | None:
+    """What `agent-flow continue` reports for the run's worktree, read by the harness, not by the agent."""
+    listing = c_prime._sh(["git", "worktree", "list", "--porcelain"], project).stdout
+    worktrees = [Path(line.split(" ", 1)[1]) for line in listing.splitlines()
+                 if line.startswith("worktree ") and Path(line.split(" ", 1)[1]).resolve() != project.resolve()]
+    worktrees = [path for path in worktrees if path.is_dir()]
+    if not worktrees:
+        return None
+    worktree = max(worktrees, key=lambda path: path.stat().st_mtime)
+    shown = c_prime._sh([str(project / ".agent-flow" / "bin" / "agent-flow"), "continue", "--root", str(project),
+                         "--worktree", worktree.name], worktree)
+    for line in (shown.stdout or "").splitlines():
+        if line.startswith("status_json: "):
+            try:
+                status = json.loads(line.split(": ", 1)[1])
+            except ValueError:
+                return None
+            return {**status, "worktree": str(worktree)} if isinstance(status, dict) else None
+    return None
+
+
+def approve_phase(project: Path, status: dict) -> bool:
+    """Runs the runner's own approval command as the user would. The agent never runs it (#409 P4)."""
+    command = status.get("approval_command")
+    if not isinstance(command, str) or not command.startswith("agent-flow continue ") or "--approve" not in command:
+        return False
+    argv = [str(project / ".agent-flow" / "bin" / "agent-flow"), *shlex.split(command)[1:]]
+    return c_prime._sh(argv, Path(status["worktree"])).returncode == 0
+
+
+def _controller_once(argv: list[str], project: Path, stream, err, timeout: float) -> tuple[int, bool]:
+    proc = subprocess.Popen(argv, cwd=project, env=controller_env(os.environ), stdout=stream, stderr=err,
+                            stdin=subprocess.DEVNULL, start_new_session=True)
+    try:
+        proc.wait(timeout=max(timeout, 1))
+        return proc.returncode, False
+    except subprocess.TimeoutExpired:
+        # 프로세스 그룹째 끊는다. runner가 띄운 리뷰어 subprocess도 같이 멈춘다.
+        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+        return proc.returncode, True
+
+
 def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
-    """Runs the controller on `prompt.md` and records where its transcript is and what it cost."""
+    """Runs the controller on `prompt.md`; at a phase approval the harness approves and resumes the same session.
+
+    Time and budget limits cover the whole run, every resumption included.
+    """
     meta = json.loads((run / "arm.json").read_text(encoding="utf-8"))
+    project = Path(meta["project"])
     prompt = (run / "prompt.md").read_text(encoding="utf-8")
     stream = run / "controller.jsonl"
-    env = controller_env(os.environ)
     started = time.monotonic()
+    approvals: list[str] = []
+    session, spent, exit_code, timed_out, summary = None, 0.0, None, False, {}
     with stream.open("wb") as out, (run / "controller.stderr").open("wb") as err:
-        proc = subprocess.Popen(controller_argv(prompt, model, budget), cwd=meta["project"], env=env, stdout=out,
-                                stderr=err, stdin=subprocess.DEVNULL, start_new_session=True)
-        timed_out = False
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            # 프로세스 그룹째 끊는다. runner가 띄운 리뷰어 subprocess도 같이 멈춘다.
-            timed_out = True
-            os.killpg(proc.pid, signal.SIGTERM)
-            try:
-                proc.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait()
-    summary = _stream_summary(stream)
-    transcript = session_transcript(summary["session_id"])
-    record = {"model": model, "timeout_seconds": timeout, "budget_usd": budget, "exit": proc.returncode,
-              "timed_out": timed_out, "seconds": round(time.monotonic() - started), **summary,
+        message = prompt
+        while True:
+            remaining = None if budget is None else budget - spent
+            if remaining is not None and remaining <= 0:
+                break
+            # 재개한 세션의 total_cost_usd는 세션 누계다(확인함). CLI 상한에 누계가 쓰이는지는 모르므로 상한은 전체 예산으로
+            # 두고, 누계가 예산을 넘으면 더 재개하지 않는다.
+            argv = controller_argv(message, model, budget)
+            if session:
+                argv += ["--resume", session]
+            exit_code, timed_out = _controller_once(argv, project, out, err, timeout - (time.monotonic() - started))
+            out.flush()
+            summary = _stream_summary(stream)
+            session = summary["session_id"] or session
+            spent = summary["cost_usd"] or spent
+            if timed_out or meta["arm"] not in WORKFLOWS or len(approvals) >= MAX_HARNESS_APPROVALS:
+                break
+            # 완료를 선언한 run은 건드리지 않는다. `continue`는 상태를 다시 검증하므로 필요할 때만 부른다.
+            if completion.classify(summary.get("final_text")) == completion.COMPLETE:
+                break
+            status = runner_status(project)
+            if not status or status.get("reason") != "phase_approval_required" or not approve_phase(project, status):
+                break
+            approvals.append(str(status.get("current_phase")))
+            message = RESUME_AFTER_APPROVAL.format(phase=status.get("current_phase"))
+    transcript = session_transcript(session)
+    summary.pop("final_text", None)
+    record = {"model": model, "timeout_seconds": timeout, "budget_usd": budget, "exit": exit_code,
+              "timed_out": timed_out, "seconds": round(time.monotonic() - started), **summary, "session_id": session,
+              "cost_usd": spent or None, "harness_approvals": approvals,
               "transcript": str(transcript) if transcript else None,
               "argv_sha256": hashlib.sha256(json.dumps(controller_argv(prompt, model, budget)).encode()).hexdigest(),
               "cli_version": c_prime._sh(["claude", "--version"], run).stdout.strip() or None}
