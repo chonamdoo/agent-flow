@@ -197,6 +197,7 @@ def test_every_arm_gets_the_same_headless_controller_without_a_bypass_flag():
     assert a[3:] == c[3:] and a[:2] == ["claude", "-p"]
     assert not any("dangerously" in item for item in a)
     assert a[a.index("--max-budget-usd") + 1] == "30"
+    assert a[a.index("--add-dir") + 1] == str(arm_compare.AGENT_FLOW_WORKTREES)
 
 
 def test_drive_reads_the_session_and_cost_from_the_stream(tmp_path):

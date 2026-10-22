@@ -74,6 +74,7 @@ UI_TASK = ("Build the global beauty commerce site that `prd.md` describes: a web
 CONTROLLER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy",
                   "http_proxy", "no_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CODEX_HOME", "OPENAI_API_KEY")
+AGENT_FLOW_WORKTREES = Path.home() / ".agent-flow" / "worktrees"
 CLAUDE_TOOLS = ("Bash", "Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "TodoWrite", "Task")
 ARMS = ("A", "B", "C", "Cp")
 WORKFLOWS = {"B": "development", "C": "full-feature"}
@@ -443,7 +444,11 @@ def controller_argv(prompt: str, model: str, budget: float | None) -> list[str]:
     """
     argv = ["claude", "-p", prompt, "--model", model, "--output-format", "stream-json", "--verbose",
             "--permission-mode", "acceptEdits", "--allowedTools", ",".join(CLAUDE_TOOLS),
-            "--setting-sources", "project,local"]
+            "--setting-sources", "project,local",
+            # runner는 작업을 ~/.agent-flow/worktrees 아래 worktree로 옮기고, hook은 세션 cwd가 그 안에 있어야 다음
+            # phase로 넘긴다. 허용 디렉터리 밖으로 cd하면 headless 세션이 cwd를 프로젝트로 되돌리므로 모든 조건에 같은
+            # 디렉터리를 연다(A에는 영향이 없다).
+            "--add-dir", str(AGENT_FLOW_WORKTREES)]
     return argv + (["--max-budget-usd", f"{budget:g}"] if budget else [])
 
 
