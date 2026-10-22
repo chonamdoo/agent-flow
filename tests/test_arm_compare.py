@@ -107,3 +107,46 @@ def test_the_runner_command_quotes_the_task_for_the_shell():
 
 def test_missing_usage_is_null_not_zero():
     assert arm_compare._usage_totals([])["usage"] == {"input": None, "uncached_input": None, "cached_input": None, "output": None}
+
+
+def test_the_driver_is_not_the_human_approver():
+    prompt = arm_compare.driver_prompt("Add a discount", "full-feature")
+    assert "do not run" in prompt and "spec approve" in prompt and "spec confirm" in prompt
+    assert "approve, and run the printed approval" not in prompt
+
+
+def test_human_only_approvals_fail_the_run_and_are_read_from_disk(tmp_path):
+    project, checkout = tmp_path / "project", tmp_path / "wt"
+    record = project / ".git" / "agent-flow" / "worktrees" / "w" / ".agent-flow" / "runs" / "r1"
+    record.mkdir(parents=True)
+    (record / arm_compare.MANUAL_APPROVALS).write_text(
+        json.dumps({"approvals": [{"spec_id": "SPEC-1"}, {"spec_id": "SPEC-2"}]}), encoding="utf-8")
+    assert arm_compare.manual_spec_approvals(project, checkout) == 2
+    assert arm_compare.VERIFY_DOWNGRADE.search(json.dumps({"command": "sed -i 's/^verify: test:.*$/verify: manual/' prd.md"}))
+
+    def row(arm, **extra):
+        return {"arm": arm, "task_kind": "normal", "oracle": True, "contaminated": False,
+                "final_message": "EVAL-STATUS: complete", "declaration": "declared-complete",
+                "usage": {"input": 1, "uncached_input": 1, "cached_input": 0, "output": 1}, "seconds": 1, **extra}
+    table = arm_compare.summarize([row("A"), row("C"), row("C", manual_spec_approvals=2), row("C", verify_downgrades=1)])
+    c_line = next(line for line in table.splitlines() if line.startswith("| C |"))
+    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed |")
+
+
+def test_the_artifact_fingerprint_ignores_runner_state_and_tracks_edits(bare):
+    project = bare / "project"
+    before = arm_compare.artifact_sha256(project)
+    runs = project / ".agent-flow" / "runs" / "r1"
+    runs.mkdir(parents=True)
+    (runs / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    assert arm_compare.artifact_sha256(project) == before
+    (project / "NOTE.md").write_text("new\n", encoding="utf-8")
+    assert arm_compare.artifact_sha256(project) != before
+    (project / "NOTE.md").unlink()
+
+
+def test_isolation_is_recorded_and_checked(tmp_path):
+    meta = arm_compare.prepare(ROOT, "A", "devflow", 1, tmp_path / "A-9", isolation="enforced")
+    assert meta["isolation"] == "enforced"
+    with pytest.raises(ValueError):
+        arm_compare.prepare(ROOT, "A", "devflow", 1, tmp_path / "A-10", isolation="trust-me")
