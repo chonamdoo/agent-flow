@@ -241,3 +241,24 @@ def test_a_state_whose_evaluation_failed_can_be_scored_again(tmp_path, monkeypat
 
     rows = [line.split("\t") for line in (tmp_path / "work" / "t" / "results.tsv").read_text().splitlines()[1:]]
     assert [row[2] for row in rows] == ["keep", "discard", "keep"]
+
+
+def test_routing_key_keeps_a_quoted_phrase_with_a_comma_apart(tmp_path):
+    root = _repo(tmp_path)
+    _set_terms(root, '["alpha, beta"]')
+    phrase = loop.surface_key(root, "routing", [])
+    _set_terms(root, '["alpha", "beta"]')
+    assert loop.surface_key(root, "routing", []) != phrase
+
+
+def test_a_failed_baseline_records_its_cost_for_the_next_restart(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    monkeypatch.setattr(loop, "prepare_worktree", lambda base, tag: (base / tag).mkdir(parents=True, exist_ok=True)
+                        or root)
+    monkeypatch.setattr(loop, "evaluate", lambda *a: {"error": "1/3 invalid runs", "cost": 4.0})
+    argv = ["--track", "routing", "--tag", "t", "--root", str(tmp_path / "work"), "--budget-usd", "5"]
+
+    assert loop.main(argv) == 1
+    rows = [line.split("\t") for line in (tmp_path / "work" / "t" / "results.tsv").read_text().splitlines()[1:]]
+    assert rows[0][2] == "error" and rows[0][7] == "4.0000"
+    assert loop.resume(root, tmp_path / "work" / "t" / "results.tsv") == (4.0, 1, {})

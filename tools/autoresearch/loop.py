@@ -40,6 +40,8 @@ import sys
 import time
 from pathlib import Path
 
+import yaml
+
 REPO = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 PROGRAM = HERE / "program.md"
@@ -148,8 +150,13 @@ def surface_key(tree: Path, track: str, skills: list[str]) -> str:
             for line in text.splitlines():
                 if ROUTING_LINE.match(line):
                     key, _, value = line.partition(":")
-                    terms = {term.strip().strip("'\"").lower() for term in value.strip().strip("[]").split(",")}
-                    line = f"{key.strip()}:{sorted(terms - {''})}"
+                    # 따옴표 안의 쉼표는 구 하나다. resolver처럼 YAML로 읽어야 다른 상태를 같은 지문으로 접지 않는다.
+                    try:
+                        parsed = yaml.safe_load(value)
+                    except yaml.YAMLError:
+                        parsed = None
+                    if isinstance(parsed, list) and all(isinstance(term, str) for term in parsed):
+                        line = f"{key.strip()}:{sorted({term.strip().lower() for term in parsed} - {''})}"
                 lines.append(line)
             text = "\n".join(lines)
         digest.update(text.encode("utf-8") + b"\0")
@@ -366,6 +373,10 @@ def main(argv: list[str] | None = None) -> int:
     label = "baseline" if first == 1 else "resume"
     best = evaluate(tree, work, args)
     if "error" in best:
+        # 무효로 끝난 측정도 돈은 썼다. 기록하지 않으면 재시작이 예산을 적게 복원하고 같은 측정을 다시 산다.
+        # keep이 아니고 지문도 남기지 않으므로 resume은 이 행을 비용으로만 센다.
+        record(results, label, git(tree, "rev-parse", "HEAD"), "error", {}, best["error"][:200],
+               best.get("cost", 0.0), label)
         print(f"{label} evaluation failed: {best['error']}", file=sys.stderr)
         return 1
     spent += best.get("cost", 0.0)
