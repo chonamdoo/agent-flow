@@ -150,3 +150,27 @@ def test_isolation_is_recorded_and_checked(tmp_path):
     assert meta["isolation"] == "enforced"
     with pytest.raises(ValueError):
         arm_compare.prepare(ROOT, "A", "devflow", 1, tmp_path / "A-10", isolation="trust-me")
+
+
+def _uses(*inputs):
+    return [{"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": name, "input": data} for name, data in inputs]}}]
+
+
+def test_verify_downgrades_read_the_written_text_not_the_serialized_input():
+    upgrade = ("Edit", {"file_path": "prd.md", "old_string": "verify: manual", "new_string": "verify: test:tests/t.py"})
+    quoted = ("Edit", {"file_path": "prd.md", "old_string": "verify: test:x", "new_string": 'verify: "manual"'})
+    sed = ("Bash", {"command": "sed -i 's/^verify: test:.*$/verify: manual/' prd.md"})
+    multi = ("MultiEdit", {"file_path": "prd.md", "edits": [{"old_string": "verify: test:a", "new_string": "verify: manual"}]})
+    read = ("Read", {"file_path": "verify: manual"})
+    assert arm_compare.verify_downgrades(_uses(upgrade, read)) == 0
+    assert arm_compare.verify_downgrades(_uses(quoted, sed, multi)) == 3
+
+
+def test_scoring_twice_leaves_the_artifact_and_its_fingerprint_unchanged(tmp_path):
+    run = tmp_path / "A-1"
+    arm_compare.prepare(ROOT, "A", "devflow", 1, run)
+    first = arm_compare.score(run, None)
+    second = arm_compare.score(run, None)
+    assert first["artifact_sha256"] == second["artifact_sha256"]
+    assert not (run / "project" / "tests" / "hidden_fix").exists()
