@@ -887,6 +887,21 @@ def _validate_override_review_angles(angles: object, *, source: Path) -> None:
                 raise ValueError(f"{context}.{field} must be a list of non-empty strings: {source}")
 
 
+# `execution.observation`이 여는 값. `self-report`가 기본이다: hook이 없는 host와 run-command를
+# 쓸 수 없는 unbound 세션에서 관측 불가를 위반으로 들면 red/fix phase가 통째로 막힌다.
+# `strict`는 그 축퇴를 끄고, 이 checkout의 명령이 관측되지 않으면 `unavailable` 신고 대신
+# `agent-flow run-command` 실행을 요구한다(#414).
+OBSERVATION_MODES: tuple[str, ...] = ("self-report", "strict")
+
+
+def observation_mode(profile: Mapping[str, Any] | None) -> str:
+    execution = profile.get("execution") if isinstance(profile, Mapping) else None
+    mode = execution.get("observation", "self-report") if isinstance(execution, Mapping) else "self-report"
+    if mode not in OBSERVATION_MODES:
+        raise ValueError(f"profile execution.observation must be one of {', '.join(OBSERVATION_MODES)}: {mode!r}")
+    return mode
+
+
 def _validate_override_execution(override: dict[str, Any], *, source: Path) -> None:
     """reviewer launch 선언은 그것을 해석하는 파서로 검사한다.
 
@@ -902,7 +917,8 @@ def _validate_override_execution(override: dict[str, Any], *, source: Path) -> N
         raise ValueError(f"profile override execution must be a mapping: {source}")
     try:
         validate_reviewer_launch_declaration(execution)
-    except ReviewerLaunchError as exc:
+        observation_mode({"execution": execution})
+    except (ReviewerLaunchError, ValueError) as exc:
         raise ValueError(f"invalid profile override execution: {source}: {exc}") from exc
 
 

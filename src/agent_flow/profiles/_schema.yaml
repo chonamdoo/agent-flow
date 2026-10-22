@@ -125,6 +125,11 @@ optional:
   # `-c model_reasoning_effort="<level>"`. reviewer pool은 claude/codex뿐이다 —
   # omp는 run을 host할 수는 있어도 reviewer provider가 아니다.
   execution:
+    # 이 checkout의 명령이 한 번도 관측되지 않았을 때 테스트·feedback 실행 증거를 어떻게 받는가.
+    # `self-report`(기본)는 `unavailable` 자기신고를 받는다 — hook이 없는 host나 run-command를
+    # 쓸 수 없는 unbound 세션에서 관측 불가를 위반으로 들면 red/fix phase가 통째로 막힌다.
+    # `strict`는 그 축퇴를 끄고 `agent-flow run-command -- <argv>` 실행을 요구한다.
+    observation: "self-report | strict"
     reviewers:
       # 먼저 일치하는 rule 하나만 쓴다. 선언 순서가 우선순위다.
       - match:

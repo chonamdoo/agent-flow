@@ -534,6 +534,15 @@ exit code eligible as RED; an interrupted or unstarted command leaves no complet
 When all observed test or feedback results have unknown exit codes, the evidence check requires
 an actual wrapper result. A self-reported failing exit does not resolve that missing observation.
 
+When no command from this checkout has been observed at all (no hook loaded in this session),
+the check accepts a `test-run-evidence: unavailable` or `feedback-run-evidence: unavailable`
+self-report by default (`execution.observation: self-report`). The default stays because a
+host without hooks, or an unbound session in a protected worktree that cannot use the wrapper,
+would otherwise be blocked in every red and fix phase. Set `execution.observation: strict` in
+`.agent-flow/profiles/<profile-id>.local.yaml` to turn the self-report off: the phase then
+requires an observed result, which the wrapper above can always produce from a bound session.
+`status` prints the current mode on its `observation:` line.
+
 A machine-readable copy follows on one `host_connection_json:` line.
 
 ### worktree

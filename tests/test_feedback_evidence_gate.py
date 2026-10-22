@@ -579,3 +579,17 @@ def test_a_failing_qa_routed_to_a_later_fix_phase_that_loops_back_needs_no_green
     forward = Phase(id="forward-only", description="", routes={"error": "handoff"})
     runner.phases = [*runner.phases[:-1], forward, runner.phases[-1]]
     assert runner._feedback_recoverable_statuses(forward) == ()
+
+
+def test_strict_observation_does_not_accept_unavailable_feedback_evidence(tmp_path: Path) -> None:
+    """반증: 관측이 없으면 `feedback-run-evidence: unavailable`이 그대로 통과했다(#414)."""
+    root = _project(tmp_path)
+    required = (FEEDBACK_RED_EXIT_MARKER, FEEDBACK_RUN_EVIDENCE_MARKER)
+    unavailable = _feedback_gate(
+        command="scripts/reproduce.sh", exit_marker="feedback-red-exit: 1", evidence="unavailable",
+    )
+    missing = missing_feedback_evidence_markers(
+        root, unavailable, required_markers=required, cwd_root=root,
+        profile={"execution": {"observation": "strict"}},
+    )
+    assert len(missing) == 1 and "agent-flow run-command" in missing[0]

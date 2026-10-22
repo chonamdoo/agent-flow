@@ -454,3 +454,24 @@ def _in_child(code: str) -> str:
     )
     assert completed.returncode == 0, completed.stderr
     return completed.stdout.strip()
+
+
+def test_status_reports_whether_the_run_can_degrade_to_a_self_report(tmp_path: Path, monkeypatch, capsys):
+    """#414: 관측이 없을 때 `unavailable` 신고로 통과할 수 있는 run인지 status가 말한다."""
+    from agent_flow.core.phase_workflow import find_kit_root
+    from agent_flow.core.profile_resolution import resolve_profile
+
+    project = _project_with_run(tmp_path)
+    _as_claude_session(tmp_path, monkeypatch)
+    assert main(["status", "--root", str(project)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert [line.split(" ", 2)[1] for line in lines if line.startswith("observation:")] == ["self-report"]
+
+    profile_id, _ = resolve_profile(find_kit_root(), project)
+    override = project / ".agent-flow" / "profiles" / f"{profile_id}.local.yaml"
+    override.parent.mkdir(parents=True, exist_ok=True)
+    override.write_text("execution:\n  observation: strict\n", encoding="utf-8")
+    assert main(["status", "--root", str(project)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert [line.split(" ", 2)[1] for line in lines if line.startswith("observation:")] == ["strict"]
+    assert sum(line.startswith("status_json:") for line in lines) == 1
