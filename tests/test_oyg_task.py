@@ -60,3 +60,11 @@ def test_openapi_contract_parses_and_names_every_api_path_the_prd_uses():
     prd = (TASK / "prd.md").read_text(encoding="utf-8")
     for path in re.findall(r"`(/api/[a-z/]+)`", prd):
         assert path in spec["paths"], path
+
+
+def test_prefs_update_may_omit_the_currency_it_defaults():
+    spec = yaml.safe_load((TASK / "contract" / "openapi.yaml").read_text(encoding="utf-8"))
+    body = spec["paths"]["/api/prefs"]["put"]["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    request = spec["components"]["schemas"][body.rsplit("/", 1)[-1]]
+    assert request["required"] == ["country"]
+    assert spec["components"]["schemas"]["Prefs"]["required"] == ["country", "currency"]

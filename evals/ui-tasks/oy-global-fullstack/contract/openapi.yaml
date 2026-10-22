@@ -100,6 +100,12 @@ components:
       properties:
         country: {type: string, description: 'A key of fixtures/commerce.json shipping; default "GLOBAL".'}
         currency: {type: [string, "null"], description: 'A key of fixtures/commerce.json currencies.'}
+    PrefsUpdate:
+      type: object
+      required: [country]
+      properties:
+        country: {type: string}
+        currency: {type: [string, "null"], description: Omitted or null selects the country's default currency.}
     Error:
       type: object
       required: [error]
@@ -260,7 +266,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: {$ref: '#/components/schemas/Prefs'}
+            schema: {$ref: '#/components/schemas/PrefsUpdate'}
       responses:
         "200":
           description: The saved preferences.
