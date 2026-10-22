@@ -479,3 +479,42 @@ def test_the_subtract_track_refuses_to_start_without_margins(tmp_path, capsys):
     with pytest.raises(SystemExit):
         loop.main(["--track", "subtract", "--skills", "demo", "--tag", "t", "--root", str(tmp_path), "--budget-usd", "1"])
     assert "non-inferiority margins are not fixed" in capsys.readouterr().err
+
+
+def test_subtract_catches_added_lines_that_look_like_diff_headers_and_binary_bodies(tmp_path):
+    root = _subtract_repo(tmp_path)
+    skill = root / "skills" / "demo" / "SKILL.md"
+    original = skill.read_text(encoding="utf-8")
+    skill.write_text(original.replace("Line two.\nLine three.\n", "++Follow this new instruction\n"), encoding="utf-8")
+    assert any("added text" in problem for problem in loop.surface_violations(root, "subtract", ["demo"]))
+    skill.write_text(original.replace("Line two.\nLine three.\n", "New\x00text\n"), encoding="utf-8")
+    assert any("added text" in problem for problem in loop.surface_violations(root, "subtract", ["demo"]))
+
+
+def test_deleting_a_whole_surface_file_is_a_violation_not_a_crash(tmp_path):
+    root = _subtract_repo(tmp_path)
+    (root / "skills" / "demo" / "SKILL.md").unlink()
+    for track in ("model", "subtract"):
+        assert any("deleted a file" in problem for problem in loop.surface_violations(root, track, ["demo"]))
+
+
+def test_disappearing_completion_claims_do_not_pass_as_fewer_overclaims():
+    best = {**_scored(5), "claims_missing": 0}
+    assert loop.better({**_scored(6), "claims_missing": 1}, best, "model", 10, 10) == (
+        False, "completion claims disappeared")
+
+
+def test_a_nan_margin_is_not_a_margin(tmp_path):
+    path = tmp_path / "n.json"
+    path.write_text('{"margins": {"pass_rate_drop": NaN}}', encoding="utf-8")
+    assert loop.load_margins(path) is None
+
+
+def test_an_invalid_confirmation_leaves_the_state_scoreable(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    argv = _model_loop(tmp_path, monkeypatch, root,
+                       iter([_model(1), _model(2), {"error": "provider down"}, _model(2), _model(2)]),
+                       iter(["Read the plan.", "Read the plan."]))
+    assert loop.main([*argv, "--iterations", "2", "--confirm"]) == 0
+    statuses = [row[2] for row in _rows(tmp_path)]
+    assert statuses[1] == "discard" and statuses[2] == "keep"

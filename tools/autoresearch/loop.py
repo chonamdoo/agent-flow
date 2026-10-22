@@ -42,6 +42,7 @@ import importlib.util
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -135,15 +136,18 @@ def surface_violations(tree: Path, track: str, skills: list[str]) -> list[str]:
             if not any(fnmatch.fnmatch(path, pattern) for pattern in allowed):
                 problems.append(f"{path}: outside the {track} surface")
                 continue
+            if not (tree / path).is_file():
+                problems.append(f"{path}: deleted a file of the {track} surface")
+                continue
             if track == "subtract":
-                # 삭제만 받는다. 고친 줄은 `-`와 `+` 한 쌍이므로 문구 바꾸기도 여기서 막힌다.
+                # 삭제만 받는다. 고친 줄은 추가 1·삭제 1이므로 문구 바꾸기도 여기서 막힌다. 줄 접두사가 아니라
+                # numstat 개수로 센다: `++`로 시작하는 추가 줄과 binary diff(`-`)가 접두사 검사를 빠져나간다.
                 if not git(tree, "ls-files", "--", path):
                     problems.append(f"{path}: a new file in the subtract track")
                     continue
-                added = [line for line in git(tree, "diff", "-U0", "--", path).splitlines()
-                         if line.startswith("+") and not line.startswith("+++")]
-                if added:
-                    problems.append(f"{path}: added text in the subtract track: {added[0][:80]}")
+                added = git(tree, "diff", "--numstat", "--", path).split("\t", 1)[0]
+                if added != "0":
+                    problems.append(f"{path}: added text in the subtract track ({added} lines)")
                     continue
             if path.endswith("SKILL.md"):
                 before = git(tree, "show", f"HEAD:{path}").split("---", 2)[1]
@@ -270,6 +274,8 @@ def score_model(tree: Path, work: Path, args: argparse.Namespace) -> dict:
             "heldout_total": "-", "read_rate": min(rates) if rates else None,
             "cost": sum(row.get("cost_usd") or 0 for row in rows),
             "overclaims": sum(bool(row.get("overclaims")) for row in valid),
+            # 완료 선언 자체가 사라지면 overclaim은 0이 된다. 그 감소를 개선으로 세지 않도록 따로 센다.
+            "claims_missing": sum(row.get("claims") is None for row in valid),
             "feedback": f"{passed}/{len(rows)} runs passed every axis; failed checks:\n" + ("\n".join(checks) or "- none")}
 
 
@@ -312,8 +318,8 @@ def load_margins(path: Path = NONINFERIORITY) -> dict[str, float] | None:
         margins = json.loads(path.read_text(encoding="utf-8")).get("margins") or {}
     except (OSError, ValueError):
         return None
-    if not margins or any(not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0
-                          for value in margins.values()):
+    if not margins or any(not isinstance(value, (int, float)) or isinstance(value, bool)
+                          or not math.isfinite(value) or value < 0 for value in margins.values()):
         return None
     return margins
 
@@ -343,6 +349,8 @@ def better(candidate: dict, best: dict, track: str, candidate_bytes: int, best_b
         return False, "required-read rate dropped"
     if (candidate.get("overclaims") or 0) > (best.get("overclaims") or 0):
         return False, "overclaims rose"
+    if (candidate.get("claims_missing") or 0) > (best.get("claims_missing") or 0):
+        return False, "completion claims disappeared"
     if track == "subtract":
         if margins is None:
             return False, "non-inferiority margins are not fixed"
@@ -498,7 +506,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     spent += best.get("cost", 0.0)
     floor = ""
-    if args.track == "model" and recorded is not None and recorded > best["score"]:
+    if args.track in ("model", "subtract") and recorded is not None and recorded > best["score"]:
         # 같은 조건에서 이미 그 점수를 냈다. 재측정의 나쁜 운을 기준으로 삼지 않는다.
         best = {**best, "score": recorded, "dev": recorded[0]}
         floor = "; floor=recorded"
@@ -556,9 +564,12 @@ def main(argv: list[str] | None = None) -> int:
             confirmed, second = better(again, best, args.track, candidate_bytes, best_bytes, margins)
             if not confirmed:
                 keep, reason = False, f"{NOT_CONFIRMED}: {second}"
+                # 확인 측정이 무효면 이 표면은 아직 판정받지 않았다. 지문을 남기지 않아 다시 잴 수 있게 한다.
+                if "error" in again or second == CONDITIONS_CHANGED or again.get("dev_total") != best.get("dev_total"):
+                    outcome = {**outcome, "confirmation_invalid": True}
         # 평가 오류, run 수 불일치, 조건 변경으로 끝난 표면은 점수가 없다. 다시 잴 수 있게 지문을 남기지 않는다.
         evaluated = not failed_guards and "error" not in outcome and reason != CONDITIONS_CHANGED \
-            and outcome.get("dev_total") == best.get("dev_total")
+            and outcome.get("dev_total") == best.get("dev_total") and not outcome.get("confirmation_invalid")
         if evaluated:
             seen[key] = str(iteration)
         record(results, str(iteration), commit, "keep" if keep else "discard", outcome,
