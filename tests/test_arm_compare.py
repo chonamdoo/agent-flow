@@ -342,6 +342,21 @@ def test_an_undecidable_worktree_is_a_harness_error(tmp_path):
     assert chosen == project and info["checkout_error"] == "0 runner worktrees among 1 linked worktrees"
 
 
+def test_a_moved_run_is_graded_on_its_own_project(tmp_path):
+    first = tmp_path / "A-1"
+    arm_compare.prepare(ROOT, "A", "devflow", 1, first)
+    kept = tmp_path / "harness-error-A-1"
+    first.rename(kept)
+    rerun = arm_compare.prepare(ROOT, "A", "devflow", 1, first)
+    (first / "project" / "work.txt").write_text("rerun\n", encoding="utf-8")
+    arm_compare._git(["add", "work.txt"], first / "project")
+    arm_compare._git(["-c", "user.name=t", "-c", "user.email=t@e", "commit", "-qm", "rerun work"], first / "project")
+    result = arm_compare.score(kept, None, harness_error="moved aside")
+    assert result["project"] == str((kept / "project").resolve()) and result["project_recorded"] == rerun["project"]
+    assert result["commits"] == 0
+    assert "project_recorded" not in arm_compare.score(first, None)
+
+
 def test_a_worktree_path_reused_by_a_later_project_is_not_graded(tmp_path):
     # An attempt moved aside and re-prepared at the same path: the rerun's runner recreates its worktree where the
     # attempt's stale registration still points.

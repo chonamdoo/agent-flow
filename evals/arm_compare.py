@@ -532,7 +532,11 @@ def _grade_ui(checkout: Path, transcript: Path | None, evaluator: Path, repeat: 
 def score(run: Path, transcript: Path | None, evaluator: Path | None = None, repeat: int = 3,
           harness_error: str | None = None) -> dict:
     meta = json.loads((run / "arm.json").read_text(encoding="utf-8"))
-    project = Path(meta["project"])
+    # `prepare` puts the project in the run directory and records its absolute path. A run moved aside (a harness
+    # error kept for the record) would otherwise be graded on whatever now sits at the recorded path.
+    project = run / "project" if (run / "project").is_dir() else Path(meta["project"])
+    if project.resolve() != Path(meta["project"]).resolve():
+        meta = {**meta, "project": str(project.resolve()), "project_recorded": meta["project"]}
     checkout, chosen = select_checkout(project, meta["arm"])
     harness_error = harness_error or chosen["checkout_error"]
     if transcript is None and (run / "drive.json").is_file():
