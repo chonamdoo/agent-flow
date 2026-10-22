@@ -2347,9 +2347,12 @@ def test_multi_review_rejects_non_linked_cwd_before_spawn(
 
     # 지켜야 하는 불변식은 "spawn하지 않는다"다. 거부 사유는 플랫폼이 정한다 —
     # write-sandbox가 없는 OS에서는 cwd를 관측하기 전에 backend가 먼저 막는다.
+    # reviewer는 macOS sandbox-exec나 Linux Landlock(#422) 아래서만 뜬다. backend가 없으면 그쪽이 먼저 막는다.
+    from agent_flow.providers.landlock_launch import MIN_ABI
+    from agent_flow.providers.subprocess import _landlock_abi
     expected_error = (
         "external providers require a verified linked worktree cwd"
-        if sys.platform == "darwin"
+        if sys.platform == "darwin" or (sys.platform.startswith("linux") and _landlock_abi() >= MIN_ABI)
         else "no verified provider write-sandbox backend for this operating system"
     )
     assert len(execution.results) == 1
