@@ -19,12 +19,20 @@ model:   score = author runs passing behavior, plan and norm in `evals/phase_eva
 only), then plan passes, then fewer uncached input tokens; the observed required-read rate may not
 drop. Model runs are noisy: keep decisions need a strictly higher pass count.
 
+Each scored state is fingerprinted (`surface_key`); an edit that recreates the best or an already
+scored state is recorded as `no-op`/`duplicate` without evaluation. A measurement with an invalid
+run counts as an evaluation error, not as failures. Re-running the same tag resumes: spending and
+iteration numbers come from `results.tsv`, and the worktree returns to the last kept commit.
+
 Not shipped: like tools/skill-noop, this tree is outside `scripts/` and the kit digest roots.
 """
 from __future__ import annotations
 
 import argparse
+import ast
+import importlib.util
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -34,6 +42,8 @@ import sys
 import time
 from pathlib import Path
 
+import yaml
+
 REPO = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 PROGRAM = HERE / "program.md"
@@ -41,6 +51,10 @@ TSV_HEADER = "iteration\tcommit\tstatus\tscore\tdev\theldout\textra\tcost_usd\td
 HIDDEN_FROM_PROPOSER = ("evals", "tests", "maintainer", "tools")
 ROUTING_LINE = re.compile(r"^\s*(taskTerms|task_terms):")
 CONTAMINATION_GUARD = "tests/test_eval_case_isolation.py"
+PROPOSER_FAILED = "proposer failed"
+CONDITIONS_CHANGED = "measurement conditions changed"
+COND_FIELD = re.compile(r"(?:^|; )cond=([0-9a-f]{16})")
+KEY_FIELD = re.compile(r"(?:^|; )key=([0-9a-f]{64})")
 ROUTING_GUARDS = (
     "tests/test_profile_routing.py::test_tanstack_form_capability_routes_only_for_react_web",
     "tests/test_profile_routing.py::test_react_capabilities_route_by_intent_not_all_tsx",
@@ -110,12 +124,50 @@ def surface_violations(tree: Path, track: str, skills: list[str]) -> list[str]:
     return problems
 
 
-def surface_bytes(tree: Path, track: str, skills: list[str]) -> int:
+def surface_paths(tree: Path, track: str, skills: list[str]) -> list[Path]:
     if track == "routing":
         paths = list(tree.glob("skills/*/SKILL.md")) + list(tree.glob("src/agent_flow/profiles/*.yaml"))
     else:
         paths = [path for name in skills for path in (tree / "skills" / name).rglob("*.md")]
-    return sum(path.stat().st_size for path in paths)
+    return sorted(paths)
+
+
+def surface_bytes(tree: Path, track: str, skills: list[str]) -> int:
+    return sum(path.stat().st_size for path in surface_paths(tree, track, skills))
+
+
+def surface_key(tree: Path, track: str, skills: list[str]) -> str:
+    """Fingerprint of the whole editable surface, not of the diff.
+
+    Two candidates with the same key score the same, so the second is never evaluated. The key is
+    the surface state rather than the edit: after a keep, re-trying an idea discarded against the
+    old best is a different state and still gets evaluated. Routing reads each term list as YAML and
+    compares it as a set, so order, quoting style and duplicates do not change the key; spacing and
+    case inside a term do. Model text is compared byte for byte (Markdown whitespace can carry
+    meaning); a paraphrase gets a new key.
+    """
+    digest = hashlib.sha256()
+    for path in surface_paths(tree, track, skills):
+        digest.update(path.relative_to(tree).as_posix().encode("utf-8") + b"\0")
+        text = path.read_text(encoding="utf-8")
+        if track == "routing":
+            lines = []
+            for line in text.splitlines():
+                if ROUTING_LINE.match(line):
+                    key, _, value = line.partition(":")
+                    # 따옴표 안의 쉼표는 구 하나다. resolver처럼 YAML로 읽어야 다른 상태를 같은 지문으로 접지 않는다.
+                    try:
+                        parsed = yaml.safe_load(value)
+                    except yaml.YAMLError:
+                        parsed = None
+                    if isinstance(parsed, list) and all(isinstance(term, str) for term in parsed):
+                        # 순서와 중복만 접는다. resolver는 term의 공백과 대소문자를 그대로 비교하므로
+                        # 그 둘을 정규화하면 점수가 다른 상태를 같은 지문으로 버린다.
+                        line = f"{key.strip()}:{sorted(set(parsed))}"
+                lines.append(line)
+            text = "\n".join(lines)
+        digest.update(text.encode("utf-8") + b"\0")
+    return digest.hexdigest()
 
 
 # --------------------------------------------------------------------------- evaluation
@@ -144,6 +196,11 @@ def score_routing(tree: Path, work: Path) -> dict:
     if process.returncode != 0:
         return {"error": process.stderr[-600:]}
     payload = json.loads(output.read_text(encoding="utf-8"))
+    # 프로필 worker가 죽으면 그 프로필의 사례가 통째로 빠진다. 다음 후보가 인프라 회복만으로
+    # "improved"가 되지 않도록 측정 자체를 무효로 둔다.
+    broken = [entry["profile"] for entry in payload["profiles"] if "worker_error" in entry or "install_error" in entry]
+    if broken:
+        return {"error": f"routing profiles did not run: {', '.join(broken)}"}
     corpus = json.loads((REPO / "evals" / "routing-cases.json").read_text(encoding="utf-8"))
     split = {case["id"]: case["split"] for case in corpus["cases"]}
     texts = {case["id"]: case["task"] for case in corpus["cases"]}
@@ -169,6 +226,11 @@ def score_model(tree: Path, work: Path, args: argparse.Namespace) -> dict:
         return {"error": (process.stderr or process.stdout)[-600:]}
     rows = [json.loads(line) for line in results.read_text(encoding="utf-8").splitlines() if line.strip()]
     valid = [row for row in rows if not row.get("error") and isinstance(row.get("oracle"), dict)]
+    # 무효 행(timeout·provider 오류)을 실패로 세면 baseline과 후보의 인프라 운이 승패를 정한다.
+    # 한 행이라도 무효면 이 측정은 판정에 쓰지 않는다.
+    if process.returncode != 0 or len(valid) != len(rows) or not rows:
+        return {"error": f"{len(rows) - len(valid)}/{len(rows)} invalid runs, exit {process.returncode}",
+                "cost": sum(row.get("cost_usd") or 0 for row in rows)}
     passed = sum(all(row["oracle"].get(axis) for axis in ("behavior", "plan", "norm")) for row in valid)
     plan = sum(bool(row["oracle"].get("plan")) for row in valid)
     tokens = sum((row.get("usage") or {}).get("uncached_input") or 0 for row in valid)
@@ -181,13 +243,44 @@ def score_model(tree: Path, work: Path, args: argparse.Namespace) -> dict:
             "feedback": f"{passed}/{len(rows)} runs passed every axis; failed checks:\n" + ("\n".join(checks) or "- none")}
 
 
+def conditions(args: argparse.Namespace) -> str:
+    """Digest of what decides a score besides the candidate: evaluator code, cases, CLI, run settings.
+
+    The evaluator runs from this repository's working tree, and a CLI can update itself overnight.
+    A score measured under other conditions is not comparable, so a keep across them would credit
+    the edit with the evaluator's change.
+    """
+    root = REPO / "evals"
+    if args.track == "routing":
+        paths = [root / "skill_routing.py", root / "routing-cases.json"]
+        settings: list[str] = []
+    else:
+        spec = importlib.util.spec_from_file_location("phase_eval_fingerprint", root / "phase_eval_fingerprint.py")
+        assert spec is not None and spec.loader is not None
+        fingerprint = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fingerprint)
+        paths = [root / name for name in fingerprint.EVALUATOR_FILES if (root / name).is_file()]
+        paths += sorted(path for path in (root / "phase-cases").rglob("*") if path.is_file())
+        version = run(["claude", "--version"], REPO, timeout=60).stdout.strip()
+        settings = [version, str(args.model), str(args.trials), args.stacks, args.modes]
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(path.relative_to(REPO).as_posix().encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
+    digest.update("\0".join(settings).encode("utf-8"))
+    return digest.hexdigest()[:16]
+
+
 def evaluate(tree: Path, work: Path, args: argparse.Namespace) -> dict:
-    return score_routing(tree, work) if args.track == "routing" else score_model(tree, work, args)
+    measured_under = conditions(args)
+    outcome = score_routing(tree, work) if args.track == "routing" else score_model(tree, work, args)
+    return {**outcome, "conditions": measured_under}
 
 
 def better(candidate: dict, best: dict, track: str, candidate_bytes: int, best_bytes: int) -> tuple[bool, str]:
     if "error" in candidate:
         return False, "evaluation error"
+    if candidate.get("conditions") != best.get("conditions"):
+        return False, CONDITIONS_CHANGED
     if track == "routing":
         lost = [cid for cid, ok in best["passing"].items() if ok and not candidate["passing"].get(cid)]
         if lost:
@@ -197,6 +290,8 @@ def better(candidate: dict, best: dict, track: str, candidate_bytes: int, best_b
         if candidate["score"] == best["score"] and candidate_bytes < best_bytes:
             return True, "same score, shorter"
         return False, "no improvement"
+    if candidate.get("dev_total") != best.get("dev_total"):
+        return False, f"run count changed: {candidate.get('dev_total')} vs {best.get('dev_total')}"
     if best.get("read_rate") is not None and (candidate.get("read_rate") or 0) < best["read_rate"]:
         return False, "required-read rate dropped"
     passed, plan, _ = candidate["score"]
@@ -223,7 +318,10 @@ def propose(tree: Path, args: argparse.Namespace, state: str) -> tuple[str, floa
     try:
         payload = json.loads(process.stdout)
     except json.JSONDecodeError:
-        return f"proposer failed: {(process.stderr or process.stdout)[-200:]}", 0.0
+        return f"{PROPOSER_FAILED}: {(process.stderr or process.stdout)[-200:]}", 0.0
+    if payload.get("is_error"):
+        # 예산·turn 상한으로 끊긴 세션의 편집은 반쯤 쓴 것일 수 있다. 평가하지 않는다.
+        return f"{PROPOSER_FAILED}: {payload.get('subtype') or 'is_error'}", float(payload.get("total_cost_usd") or 0)
     text = payload.get("result") or ""
     match = re.search(r"DESCRIPTION:\s*(.+)", text)
     return (match.group(1).strip() if match else text.strip().splitlines()[-1:][0] if text.strip() else "no description"), \
@@ -235,8 +333,14 @@ def state_text(args: argparse.Namespace, best: dict, results: Path) -> str:
     lines = [f"Track: {args.track}", f"Best score: {best['dev']}/{best['dev_total']} (higher is better)"]
     if args.track == "model":
         lines.append(f"Editable skills: {', '.join(args.skills)}")
-    lines += ["", best["feedback"], "", "Recent attempts (iteration, status, description):"]
-    lines += [f"- {row.split(chr(9))[0]} {row.split(chr(9))[2]}: {row.split(chr(9))[-1]}" for row in history] or ["- none"]
+    lines += ["", best["feedback"], "", "Recent attempts (iteration, status, reason, description):"]
+    for row in history:
+        cells = row.split("\t")
+        # extra 열의 첫 조각이 판정 사유다(invalid의 범위 위반, duplicate의 원본 회차 등).
+        reason = cells[6].split(";")[0].strip() if len(cells) > 6 else ""
+        lines.append(f"- {cells[0]} {cells[2]} ({reason}): {cells[-1]}")
+    if not history:
+        lines.append("- none")
     return "\n".join(lines)
 
 
@@ -247,6 +351,43 @@ def record(results: Path, iteration: str, commit: str, status: str, outcome: dic
         handle.write("\t".join(map(str, [iteration, commit[:12], status, score, outcome.get("dev", ""),
                                           outcome.get("heldout", ""), extra, f"{cost:.4f}",
                                           description.replace("\t", " ").replace("\n", " ")])) + "\n")
+
+
+def resume(tree: Path, results: Path, current: str | None = None) -> tuple[float, int, dict[str, str], tuple | None]:
+    """Spent cost, next iteration number and seen surface keys from an earlier run of the same tag.
+
+    A run can die between committing a candidate and resetting it (a timeout or a container
+    restart). Restarting must not measure that unjudged commit as the new baseline, so the
+    worktree goes back to the last kept commit. Spending resumes from the log so a restart does
+    not reset the budget.
+
+    The last keep's recorded score comes back too: re-measuring the best on a noisy track can draw a
+    lower value, and a candidate would then win against that unlucky draw. Seen keys and the
+    recorded score are dropped when the measurement conditions changed since that keep; the run
+    then starts over from a fresh baseline, as the runbook requires after a model change.
+    """
+    rows = [row.split("\t") for row in results.read_text(encoding="utf-8").splitlines()[1:] if row.strip()]
+    spent = sum(float(row[7]) for row in rows if len(row) > 7 and re.fullmatch(r"\d+(\.\d+)?", row[7]))
+    numbers = [int(row[0]) for row in rows if row and row[0].isdigit()]
+    seen = {}
+    for row in rows:
+        match = KEY_FIELD.search(row[6]) if len(row) > 6 else None
+        if match:
+            seen.setdefault(match.group(1), row[0])
+    kept = [row for row in rows if len(row) > 6 and row[2] == "keep"]
+    recorded = None
+    if kept:
+        git(tree, "reset", "-q", "--hard", git(tree, "rev-parse", kept[-1][1]))
+        git(tree, "clean", "-qfd")
+        match = COND_FIELD.search(kept[-1][6])
+        if current is not None and (match is None or match.group(1) != current):
+            seen = {}
+        else:
+            try:
+                recorded = ast.literal_eval(kept[-1][3])
+            except (ValueError, SyntaxError):
+                recorded = None
+    return spent, max(numbers, default=0) + 1, seen, recorded if isinstance(recorded, tuple) else None
 
 
 # --------------------------------------------------------------------------- loop
@@ -277,30 +418,59 @@ def main(argv: list[str] | None = None) -> int:
     results = work / "results.tsv"
     if not results.exists():
         results.write_text(TSV_HEADER, encoding="utf-8")
-    spent = 0.0
+    spent, first, seen, recorded = resume(tree, results, conditions(args))
+    if spent >= args.budget_usd:
+        print(f"budget already spent: ${spent:.2f} of ${args.budget_usd:.2f}; log {results}")
+        return 0
+    label = "resume" if results.read_text(encoding="utf-8").count("\n") > 1 else "baseline"
     best = evaluate(tree, work, args)
     if "error" in best:
-        print(f"baseline evaluation failed: {best['error']}", file=sys.stderr)
+        # 무효로 끝난 측정도 돈은 썼다. 기록하지 않으면 재시작이 예산을 적게 복원하고 같은 측정을 다시 산다.
+        # keep이 아니고 지문도 남기지 않으므로 resume은 이 행을 비용으로만 센다.
+        record(results, label, git(tree, "rev-parse", "HEAD"), "error", {}, best["error"][:200],
+               best.get("cost", 0.0), label)
+        print(f"{label} evaluation failed: {best['error']}", file=sys.stderr)
         return 1
     spent += best.get("cost", 0.0)
+    floor = ""
+    if args.track == "model" and recorded is not None and recorded > best["score"]:
+        # 같은 조건에서 이미 그 점수를 냈다. 재측정의 나쁜 운을 기준으로 삼지 않는다.
+        best = {**best, "score": recorded, "dev": recorded[0]}
+        floor = "; floor=recorded"
     best_commit = git(tree, "rev-parse", "HEAD")
     best_bytes = surface_bytes(tree, args.track, args.skills)
-    record(results, "baseline", best_commit, "keep", best, f"bytes={best_bytes}", best.get("cost", 0.0), "baseline")
-    print(f"baseline {best['dev']}/{best['dev_total']} heldout {best['heldout']}/{best['heldout_total']}", flush=True)
+    best_key = surface_key(tree, args.track, args.skills)
+    seen.setdefault(best_key, label)
+    record(results, label, best_commit, "keep", best,
+           f"bytes={best_bytes}; key={best_key}" + (f"; cond={best['conditions']}" if best.get("conditions") else "") + floor, best.get("cost", 0.0), label)
+    print(f"{label} {best['dev']}/{best['dev_total']} heldout {best['heldout']}/{best['heldout_total']}", flush=True)
 
     idle = 0
-    for iteration in range(1, args.iterations + 1):
+    for iteration in range(first, first + args.iterations):
         if spent >= args.budget_usd or idle >= args.patience:
             break
         description, cost = propose(tree, args, state_text(args, best, results))
         spent += cost
-        problems = surface_violations(tree, args.track, args.skills)
-        if not changed_files(tree):
-            problems = problems or ["no edit"]
+        problems = [description] if description.startswith(PROPOSER_FAILED) else []
+        problems = problems or surface_violations(tree, args.track, args.skills)
+        if not problems and spent >= args.budget_usd:
+            problems = ["budget exhausted before scoring"]
+        if not problems and not changed_files(tree):
+            problems = ["no edit"]
+        status = "invalid"
+        if not problems:
+            key = surface_key(tree, args.track, args.skills)
+            if key == best_key:
+                problems = ["no-op: same surface as the best"]
+            elif key in seen:
+                # 같은 표면은 같은 점수를 낸다. 다시 재면 비용만 들고, 노이즈가 있는 track에서는
+                # 같은 후보를 한 번 더 뽑는 셈이라 우연한 keep 확률만 늘어난다.
+                problems, status = [f"duplicate of #{seen[key]}"], "duplicate"
         if problems:
+            # 되돌리기 전에 기록한다. reset이 실패해도 proposer 비용은 장부에 남아야 한다.
+            record(results, str(iteration), best_commit, status, {}, "; ".join(problems)[:200], cost, description)
             git(tree, "reset", "-q", "--hard", best_commit)
             git(tree, "clean", "-qfd")
-            record(results, str(iteration), best_commit, "invalid", {}, "; ".join(problems)[:200], cost, description)
             idle += 1
             continue
         git(tree, "add", "-A")
@@ -313,16 +483,26 @@ def main(argv: list[str] | None = None) -> int:
         candidate_bytes = surface_bytes(tree, args.track, args.skills)
         keep, reason = (False, f"guard: {failed_guards[0]}") if failed_guards else \
             better(outcome, best, args.track, candidate_bytes, best_bytes)
+        # 평가 오류, run 수 불일치, 조건 변경으로 끝난 표면은 점수가 없다. 다시 잴 수 있게 지문을 남기지 않는다.
+        evaluated = not failed_guards and "error" not in outcome and reason != CONDITIONS_CHANGED \
+            and outcome.get("dev_total") == best.get("dev_total")
+        if evaluated:
+            seen[key] = str(iteration)
         record(results, str(iteration), commit, "keep" if keep else "discard", outcome,
-               f"{reason}; bytes={candidate_bytes}", cost + outcome.get("cost", 0.0), description)
+               f"{reason}; bytes={candidate_bytes}" + (f"; key={key}" if evaluated else "")
+               + (f"; cond={outcome['conditions']}" if outcome.get("conditions") else ""),
+               cost + outcome.get("cost", 0.0), description)
         print(f"#{iteration} {'keep' if keep else 'discard'} ({reason}) {outcome.get('dev', '-')}/"
               f"{outcome.get('dev_total', '-')} heldout {outcome.get('heldout', '-')} spent ${spent:.2f}: {description}",
               flush=True)
         if keep:
-            best, best_commit, best_bytes, idle = outcome, commit, candidate_bytes, 0
+            best, best_commit, best_bytes, best_key, idle = outcome, commit, candidate_bytes, key, 0
         else:
             git(tree, "reset", "-q", "--hard", best_commit)
             idle += 1
+        if reason == CONDITIONS_CHANGED:
+            print("measurement conditions changed; re-run the same tag to measure a fresh baseline", flush=True)
+            break
     print(f"best {best['dev']}/{best['dev_total']} heldout {best['heldout']}/{best['heldout_total']} at {best_commit[:12]} "
           f"on branch autoresearch/{args.tag}; spent ${spent:.2f}; log {results}")
     return 0
