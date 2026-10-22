@@ -216,12 +216,16 @@ def load_external_case(case_dir: Path) -> dict:
 
 
 def _seed_external_project(case: dict, case_dir: Path, project: Path) -> None:
-    """The seed repository at its pinned commit with no remote, then the task files in one commit."""
+    """The seed repository at its pinned commit with no remote, then the task files in one commit.
+
+    The clone's reflog names where it came from, and a seed inside the private checkout would tell the agent where the
+    checks live, so the reflog is emptied along with the remote.
+    """
     seed = case["seed"]
     c_prime._sh(["git", "clone", "-q", "--no-checkout", seed["repository"], str(project)], project.parent, check=True)
     for args in (["checkout", "-q", "-B", "main", seed["commit"]], ["remote", "remove", "origin"],
                  ["config", "user.name", "eval"], ["config", "user.email", "eval@example.com"],
-                 ["config", "commit.gpgsign", "false"]):
+                 ["config", "commit.gpgsign", "false"], ["reflog", "expire", "--expire=all", "--all"]):
         _git(args, project)
     for target, source in case["files"].items():
         (project / target).parent.mkdir(parents=True, exist_ok=True)

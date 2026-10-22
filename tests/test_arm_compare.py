@@ -450,6 +450,9 @@ def test_an_external_case_seeds_its_repository_and_task_files_only(tmp_path):
     recorded = (run / "arm.json").read_text(encoding="utf-8")
     assert meta["case"] == "mobile" and meta["case_kind"] == "external" and str(case_dir) not in recorded
     assert meta["case_sha256"] == hashlib.sha256((case_dir / "case.json").read_bytes()).hexdigest()
+    leaks = [path for path in (project / ".git").rglob("*") if path.is_file()
+             and str(tmp_path / "seed-repo").encode() in path.read_bytes()]
+    assert leaks == []
 
 
 def test_an_external_case_is_graded_by_its_own_evaluator_and_keys(tmp_path):
