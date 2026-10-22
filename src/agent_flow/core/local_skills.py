@@ -291,6 +291,7 @@ def _planned_skill_paths(
             entry = entry.strip()
             if entry.startswith("`") and entry.endswith("`"):
                 entry = entry[1:-1]
+            entry = entry.removeprefix("./")
             if (
                 not entry or entry.startswith("/") or entry.endswith("/")
                 or any(char in entry for char in "*?[]\\:")
@@ -308,7 +309,7 @@ SCOPE_CONFIRMATION_PHASES = frozenset({"comment-authoring"})
 
 def out_of_plan_paths(
     project_root: Path, run_dir: Path, changed: Sequence[str],
-    definition: PhaseWorkflowDefinition | None = None,
+    definition: PhaseWorkflowDefinition | None = None, *, checkout: Path | None = None,
 ) -> tuple[str, ...] | None:
     """slice-plan의 `- Files:` 밖에서 바뀐 경로. 계획에 파일 목록이 없으면 대조할 수 없어 None이다.
 
@@ -318,8 +319,14 @@ def out_of_plan_paths(
     planned = set(_planned_skill_paths(project_root, run_dir, definition))
     if not planned:
         return None
+    # git은 저장소 기준 경로를 준다. 프로젝트가 하위 폴더면 계획의 프로젝트 기준 경로와 맞춘다.
+    prefix = ""
+    if checkout is not None:
+        result = git_safe("rev-parse", "--show-prefix", cwd=checkout, timeout_s=5, optional_locks=False)
+        prefix = result.stdout.strip() if result.ok else ""
+    relative = [path.removeprefix(prefix) if prefix and path.startswith(prefix) else path for path in changed]
     return tuple(sorted(
-        path for path in dict.fromkeys(changed)
+        path for path in dict.fromkeys(relative)
         if path not in planned and not path.startswith(".agent-flow/")
     ))
 

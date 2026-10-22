@@ -1002,13 +1002,10 @@ class Runner:
         assert self.run_dir is not None
         outside = out_of_plan_paths(
             self.config_root, self.run_dir, changed_files(self.project_root, self.profile),
-            getattr(self, "workflow", None),
+            getattr(self, "workflow", None), checkout=self.project_root,
         )
         confirmed = set(read_meta(self.run_dir).get("scope_confirmed_files") or ())
         return tuple(path for path in outside or () if path not in confirmed)
-
-    def _needs_approval(self, phase: Phase) -> bool:
-        return phase.pause_after or bool(self._unconfirmed_out_of_plan_files(phase))
 
     def _pause_for_approval(self, phase: Phase) -> bool:
         out_of_plan = self._unconfirmed_out_of_plan_files(phase)
@@ -1447,9 +1444,12 @@ class Runner:
                 _validate_ci_observation(observation)
                 if observation.get("observation_sequence") != transition.ci_repair_state["observation_sequence"]:
                     raise WorktreeIsolationError("CI observation changed while planning; observe and plan again")
-            if self._needs_approval(phase) and (
+            unconfirmed = self._unconfirmed_out_of_plan_files(phase)
+            if (phase.pause_after or unconfirmed) and (
                 not isinstance(meta.get("phase_approval"), dict)
                 or pending_phase_approval(self.run_dir) is not None
+                # 승인 뒤에 생긴 목록 밖 경로는 그 승인이 보여 준 적 없는 변경이다.
+                or not set(unconfirmed) <= set(meta["phase_approval"].get("out_of_plan_files") or ())
             ):
                 raise WorktreeIsolationError("phase artifact approval is missing or stale")
             self._capture_design_ledger(phase)

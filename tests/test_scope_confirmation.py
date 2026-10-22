@@ -92,3 +92,24 @@ def test_a_plan_without_file_lists_cannot_be_compared(tmp_path, monkeypatch):
 def test_runtime_state_is_not_a_scope_change(tmp_path, monkeypatch):
     project, run_dir, _, _ = _comment_authoring_run(tmp_path, monkeypatch, "full-feature")
     assert out_of_plan_paths(project, run_dir, [".agent-flow/runs/x/meta.json", "src/app.py"]) == ()
+
+
+def test_a_path_added_after_confirmation_cannot_ride_the_old_approval(tmp_path, monkeypatch):
+    project, run_dir, runner, index = _comment_authoring_run(tmp_path, monkeypatch, "full-feature")
+    (project / "src" / "other.py").write_text("y = 2\n", encoding="utf-8")
+    phase = runner.phases[index]
+    assert runner._pause_for_approval(phase)
+    approve_phase_artifact(run_dir, token=pending_phase_approval(run_dir)["token"])
+    (project / "src" / "late.py").write_text("z = 1\n", encoding="utf-8")
+    with pytest.raises(WorktreeIsolationError, match="approval is missing or stale"):
+        runner._commit_transition(runner._plan_transition(index, phase))
+
+
+def test_a_project_in_a_repository_subdirectory_compares_project_relative_paths(tmp_path, monkeypatch):
+    project, run_dir, runner, _ = _comment_authoring_run(tmp_path, monkeypatch, "full-feature",
+                                                         files="src/app.py, ./src/other.py")
+    nested = project / "sub"
+    nested.mkdir()
+    assert out_of_plan_paths(project, run_dir, ["sub/src/app.py", "sub/.agent-flow/x", "src/other.py"],
+                             checkout=nested) == ()
+    assert out_of_plan_paths(project, run_dir, ["src/other.py", "src/third.py"]) == ("src/third.py",)
