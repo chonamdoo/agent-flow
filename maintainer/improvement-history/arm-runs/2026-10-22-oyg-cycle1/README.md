@@ -13,7 +13,9 @@
   - 설정: `--permission-mode auto`, 프로젝트 hook 로드, 허용 목록 env, 제한 2시간, 상한 $30.
   - kit commit은 7회 모두 930b0b5다.
 - 순서: C-1을 먼저 돌렸다. 나머지 6회는 `order.txt`의 순서(seed 20261022로 섞음)로 한 번에 하나씩 돌렸다.
-- 채점 코드: #452 head(dc766fb)의 `arm_compare.py score`/`summarize`다. 성공 규칙은 사전등록 그대로다.
+- 채점 코드: #452의 `arm_compare.py score`/`summarize`다. 성공 규칙은 사전등록 그대로다.
+  - A·C 7회는 dc766fb로, harness 오류 5회는 ec58206으로 채점했다.
+  - 그 사이 두 commit(7df515a, ec58206)은 어느 project와 worktree를 채점할지만 바꾼다. 옮기지 않은 7회에서는 같은 checkout을 고른다는 것을 확인했다〔measured〕.
   - 성공 = S=1 ∧ 완료 선언 ∧ 규칙 위반 없음 ∧ `run_status == ok`.
   - C-1은 #452 이전 harness(ee5bce8)로도 채점했다. 평가기 점수(S·G·API·V·E)와 실패 검사 목록이 같았다〔measured〕.
 
@@ -51,6 +53,10 @@ API 검사는 7회 모두 통과했다. 실패는 모두 화면 동작이다.
 ### harness 오류로 뺀 시도 (분모 밖)
 
 C-1을 처음 돌릴 때 harness 결함으로 끊긴 5회다. 고친 뒤 C-1을 다시 돌렸다. 각각 `score --harness-error`로 이유를 남겼다.
+
+- 이 시도들의 기록에는 각 시도 자신의 transcript, 사용량, phase 이력만 있다.
+- 시도마다 runner worktree는 남기지 않았다(같은 경로를 다음 시도가 다시 썼다). 그래서 평가기는 채점할 build가 없었다. `ui.error`가 그 실패를 기록하고, S·G·build 지문은 비어 있다.
+- 처음 올린 기록(bfdfe0a)에는 C-1 rerun의 리뷰 40회, build 지문, G가 이 행들에 잘못 들어가 있었다(#453 Codex 지적). harness가 옮겨 둔 run을 기록된 옛 경로, 곧 rerun의 project로 채점했기 때문이다. #452 ec58206·7df515a로 고치고 다시 채점했다.
 
 | 기록 | 이유 | 고친 곳 |
 |---|---|---|
