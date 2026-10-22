@@ -12,15 +12,17 @@ For each skill under `skills/`:
 
 - `unverified`: no isolated behavior case names it. phase_eval delivers skills in bundles, so it
   does not count here.
-- `retire-candidate`: on every case that names the skill, the latest baseline (no skill) is at
-  the ceiling with at least `--min-n` trials, and the skill configuration did not score higher.
+- `retire-candidate`: on every case that names the skill, the latest run that measured both the
+  baseline (no skill) and a skill configuration has the baseline at the ceiling, the skill
+  configuration no higher, and both with at least `--min-n` valid trials.
   A candidate is not removed automatically: the ablation in #417 decides.
-- `keep`: on some case the skill configuration scored above the baseline.
+- `keep`: on some case the skill configuration scored above the baseline in that same run, both
+  with at least `--min-n` valid trials.
 - `inconclusive`: anything else (baseline below the ceiling without a measured gain, too few trials).
 
-A `run.py` row counts only when its `resolution` is true (the trials are interpretable). Early
-summaries carry neither `case` nor `resolution`: they are attributed to the file's single case and
-count only when every host run succeeded. Rows that still cannot be attributed are skipped and counted.
+Baseline and skill scores are compared only within one result file or report (same host, model and
+kit), never across runs. A `run.py` row counts unless its `resolution` is false; early summaries
+without `case` are attributed to the file's single case. Pass `--skill-task-report` oldest first.
 """
 from __future__ import annotations
 
@@ -50,71 +52,78 @@ def skill_task_cases(case_root: Path = ROOT / "skill-task-cases") -> dict[str, t
 
 
 def run_measurements(paths: list[Path]) -> tuple[list[dict], int]:
-    """One entry per (file, case, config) with an interpretable score; the count of skipped rows."""
+    """One entry per (file, case, config) with an interpretable score; the count of skipped rows.
+
+    `run.py` names its files by start time, so the file name orders them. It writes `resolution`
+    only for cases that need a balanced config matrix; elsewhere `n` already counts valid trials.
+    """
     entries, skipped = [], 0
-    for path in sorted(paths):
+    for path in sorted(paths, key=lambda item: item.name):
         payload = json.loads(path.read_text(encoding="utf-8"))
-        trials = payload.get("rows", [])
-        # 초기 요약에는 case도 resolution도 없다. 파일의 trial이 한 case뿐이면 그 case로 보고,
-        # 모든 host 실행이 성공했을 때만 해석 가능한 결과로 센다.
-        only_case = {trial.get("case") for trial in trials}
-        fallback_case = next(iter(only_case)) if len(only_case) == 1 else None
-        all_ok = bool(trials) and all(trial.get("host_ok") for trial in trials)
+        # 초기 요약에는 case가 없다. 파일의 trial이 한 case뿐일 때만 그 case로 본다.
+        cases = {trial.get("case") for trial in payload.get("rows", [])}
+        fallback_case = next(iter(cases)) if len(cases) == 1 else None
         for row in payload.get("summary", []):
             case = row.get("case", fallback_case)
-            resolved = row.get("resolution", all_ok if "case" not in row else None) is True
-            if case is None or not resolved or row.get("both") is None:
+            if case is None or row.get("resolution", True) is not True or row.get("both") is None:
                 skipped += 1
                 continue
-            entries.append({"source": path.stem, "host": payload.get("host"), "case": case,
-                            "config": row["config"], "score": row["both"], "n": row.get("n", 0)})
+            entries.append({"source": path.stem, "order": ("run", path.name), "host": payload.get("host"),
+                            "case": case, "config": row["config"], "score": row["both"], "n": row.get("n", 0)})
     return entries, skipped
 
 
 def skill_task_measurements(paths: list[Path]) -> list[dict]:
+    """`report.json` has no timestamp, so the order the reports are given is their chronology."""
     entries = []
-    for path in paths:
+    for index, path in enumerate(paths):
         payload = json.loads(path.read_text(encoding="utf-8"))
         grouped: dict[tuple[str, str], list[bool]] = defaultdict(list)
         for row in payload.get("results", []):
             if row.get("host_ok"):
                 grouped[(row["case"], row["config"])].append(bool((row.get("score") or {}).get("passed")))
-        source = str((payload.get("metadata") or {}).get("started_at") or path.parent.name)
-        host = (payload.get("metadata") or {}).get("host", "codex")
-        entries.extend({"source": source, "host": host, "case": case, "config": config,
-                        "score": sum(passed) / len(passed), "n": len(passed)}
+        entries.extend({"source": f"report{index + 1}", "order": ("skill_tasks", index), "host": "codex",
+                        "case": case, "config": config, "score": sum(passed) / len(passed), "n": len(passed)}
                        for (case, config), passed in grouped.items())
     return entries
 
 
+def _case_verdict(case_entries: list[dict], min_n: int) -> str:
+    """Compare a baseline only with skill configurations from the same run: same host, model and kit."""
+    by_source: dict[tuple, dict[str, dict]] = defaultdict(dict)
+    for entry in case_entries:
+        by_source[entry["order"]][entry["config"]] = entry
+    paired = [configs for _, configs in sorted(by_source.items())
+              if "baseline" in configs and len(configs) > 1]
+    if not paired:
+        return "inconclusive"
+    configs = paired[-1]
+    base = configs["baseline"]
+    best = max((entry for config, entry in configs.items() if config != "baseline"), key=lambda entry: entry["score"])
+    if base["n"] < min_n or best["n"] < min_n:
+        return "inconclusive"
+    if best["score"] > base["score"]:
+        return "keep"
+    return "ceiling" if base["score"] >= 1.0 else "inconclusive"
+
+
 def classify(skills: list[str], case_skills: dict[str, tuple[str, ...]], entries: list[dict],
              *, min_n: int = 5) -> dict[str, dict]:
-    latest: dict[tuple[str, str], dict] = {}
-    for entry in sorted(entries, key=lambda item: item["source"]):
-        latest[(entry["case"], entry["config"])] = entry
-    trends: dict[str, list[str]] = defaultdict(list)
-    for entry in sorted(entries, key=lambda item: item["source"]):
-        if entry["config"] == "baseline":
-            trends[entry["case"]].append(f"{entry['source']}:{entry['score']:.2f}")
+    by_case: dict[str, list[dict]] = defaultdict(list)
+    for entry in entries:
+        by_case[entry["case"]].append(entry)
+    trends = {
+        case: [f"{entry['source']}:{entry['score']:.2f}"
+               for entry in sorted(items, key=lambda item: item["order"]) if entry["config"] == "baseline"]
+        for case, items in by_case.items()
+    }
     table = {}
     for skill in skills:
         cases = sorted(case for case, names in case_skills.items() if skill in names)
         if not cases:
             table[skill] = {"status": "unverified", "cases": []}
             continue
-        verdicts = []
-        for case in cases:
-            base = latest.get((case, "baseline"))
-            with_skill = [entry for (name, config), entry in latest.items() if name == case and config != "baseline"]
-            best = max((entry["score"] for entry in with_skill), default=None)
-            if base is None:
-                verdicts.append("inconclusive")
-            elif best is not None and best > base["score"]:
-                verdicts.append("keep")
-            elif base["score"] >= 1.0 and base["n"] >= min_n:
-                verdicts.append("ceiling")
-            else:
-                verdicts.append("inconclusive")
+        verdicts = [_case_verdict(by_case.get(case, []), min_n) for case in cases]
         status = ("keep" if "keep" in verdicts else
                   "retire-candidate" if all(verdict == "ceiling" for verdict in verdicts) else "inconclusive")
         table[skill] = {"status": status, "cases": cases,

@@ -542,8 +542,10 @@ python evals/skill_retirement.py --skill-task-report <dir>/report.json   # 기�
 
 모델이나 host가 바뀌면 `--plan`이 출력하는 baseline 명령을 다시 돌린다. 그다음 결과를 이 스크립트에 넘긴다. `run.py` 결과(`evals/results/2026*.json`)는 기본으로 읽는다. 모델을 부르지 않는다.
 
-- `retire-candidate`: 그 skill을 쓰는 모든 사례에서 최신 baseline(skill 없음)이 천장(n≥5)이고, skill 구성이 더 높지 않다. 자동으로 지우지 않는다. 삭제는 #417 ablation이 정한다.
-- `keep`: 어떤 사례에서 skill 구성이 baseline보다 높다.
+비교는 같은 결과 파일·report 안에서만 한다(같은 host·모델·kit). 다른 run의 baseline과 skill 점수를 섞지 않는다. `report.json`에는 시각이 없으므로 `--skill-task-report`는 오래된 것부터 넘긴다.
+
+- `retire-candidate`: 그 skill을 쓰는 모든 사례에서, baseline(skill 없음)과 skill 구성을 함께 잰 최신 run의 baseline이 천장이다. skill 구성은 더 높지 않고, 두 쪽 모두 유효 시행이 `--min-n`(기본 5) 이상이다. 자동으로 지우지 않는다. 삭제는 #417 ablation이 정한다.
+- `keep`: 어떤 사례에서 같은 run의 skill 구성이 baseline보다 높다. 두 쪽 모두 `--min-n` 이상이어야 한다.
 - `inconclusive`: baseline이 천장이 아닌데 이득이 측정되지 않았거나 시행이 부족하다. `skill_tasks.py`의 `report.json`을 넘기지 않아도 여기에 든다.
 - `unverified`: skill을 단독으로 재는 행동 사례가 없다. phase_eval은 skill을 묶음으로 전달하므로 여기서 세지 않는다.
 
