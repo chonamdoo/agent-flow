@@ -484,7 +484,7 @@ python evals/run_usage.py summarize <usage.json>...           # 성공 run 1건�
 | 대상 | 상태 | 근거 |
 |---|---|---|
 | Claude Code transcript(`~/.claude/projects/<project>/<session>.jsonl`) | 측정 | 응답 하나가 같은 `message.id`로 여러 줄에 같은 usage를 반복한다. id마다 한 번 센다. 2026-10-22 클라우드 세션에서 확인 |
-| Codex rollout(`~/.codex/sessions/.../rollout-*.jsonl`) | 측정(합성 사례만 검증) | `token_count`의 누적 `total_token_usage` 증가분을 센다. 필드 이름은 Codex CLI 0.163.0 바이너리에서 확인했고, 실제 rollout으로는 아직 확인하지 못했다 |
+| Codex rollout(`~/.codex/sessions/.../rollout-*.jsonl`) | 측정 | `token_count`의 누적 `total_token_usage` 증가분을 센다. `input_tokens`가 cached를 포함하므로 uncached = input − cached다. 2026-10-22 Codex CLI 0.163.0 실제 rollout으로 확인: input 14,141, cached 12,288, output 5 → uncached 1,853, CLI가 보고한 `tokens used 1,858`과 같다 |
 | runner 리뷰어 subprocess | `unmeasured` | 일반 텍스트만 출력하고 usage를 내지 않는다. `review-metrics-*.json`에서 리뷰 wave 수와 job 수만 적는다 |
 | gates | 해당 없음 | 모델이 아니라 명령을 실행한다 |
 
