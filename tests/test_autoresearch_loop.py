@@ -383,3 +383,99 @@ def test_a_proposal_that_exhausts_the_budget_is_not_scored(tmp_path, monkeypatch
     monkeypatch.setattr(loop, "propose", costly)
     loop.main([*argv, "--iterations", "1"])
     assert _rows(tmp_path)[-1][6] == "budget exhausted before scoring"
+
+
+# --------------------------------------------------------------------------- #420 subtract track and guards
+
+def test_forbidden_paths_are_invalid_in_every_track(tmp_path):
+    root = _repo(tmp_path)
+    for relative in ("scripts/hooks/guard.sh", "src/agent_flow/runner.py", "src/agent_flow/workflows/full-feature.yaml",
+                     "evals/phase_eval.py", "src/agent_flow/core/command_evidence.py"):
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x\n", encoding="utf-8")
+    for track in ("routing", "model", "subtract"):
+        problems = loop.surface_violations(root, track, ["demo"])
+        assert len(problems) == 5 and all("forbidden path" in problem for problem in problems)
+
+
+def _subtract_repo(tmp_path: Path) -> Path:
+    root = _repo(tmp_path)
+    skill = root / "skills" / "demo" / "SKILL.md"
+    skill.write_text(skill.read_text(encoding="utf-8") + "Line two.\nLine three.\n", encoding="utf-8")
+    _commit(root, "body")
+    return root
+
+
+def test_subtract_surface_accepts_only_deleted_lines(tmp_path):
+    root = _subtract_repo(tmp_path)
+    skill = root / "skills" / "demo" / "SKILL.md"
+    skill.write_text(skill.read_text(encoding="utf-8").replace("Line two.\n", ""), encoding="utf-8")
+    assert loop.surface_violations(root, "subtract", ["demo"]) == []
+
+    skill.write_text(skill.read_text(encoding="utf-8").replace("Line three.", "Line 3."), encoding="utf-8")
+    assert any("added text" in problem for problem in loop.surface_violations(root, "subtract", ["demo"]))
+
+    subprocess.run(["git", "checkout", "-q", "--", "."], cwd=root, check=True)
+    (root / "skills" / "demo" / "references").mkdir()
+    (root / "skills" / "demo" / "references" / "new.md").write_text("new\n", encoding="utf-8")
+    assert any("new file" in problem for problem in loop.surface_violations(root, "subtract", ["demo"]))
+
+
+def _scored(passed: int, total: int = 10, overclaims: int = 0, read_rate: float = 1.0) -> dict:
+    return {"score": (passed, passed, -1000), "dev": passed, "dev_total": total, "overclaims": overclaims,
+            "read_rate": read_rate, "conditions": "c" * 16}
+
+
+def test_subtract_keeps_a_smaller_surface_only_within_the_margin():
+    best, margins = _scored(9), {"pass_rate_drop": 0.1}
+    assert loop.better(_scored(8), best, "subtract", 90, 100, margins) == (True, "non-inferior, smaller")
+    keep, reason = loop.better(_scored(7), best, "subtract", 90, 100, margins)
+    assert not keep and reason.startswith("inferior")
+    assert loop.better(_scored(9), best, "subtract", 100, 100, margins) == (False, "not smaller")
+    assert loop.better(_scored(9), best, "subtract", 90, 100, None) == (False, "non-inferiority margins are not fixed")
+
+
+def test_overclaims_rising_blocks_a_keep_in_model_and_subtract():
+    best = _scored(5)
+    assert loop.better(_scored(6, overclaims=1), best, "model", 10, 10) == (False, "overclaims rose")
+    assert loop.better(_scored(5, overclaims=1), best, "subtract", 9, 10, {"pass_rate_drop": 0.1}) == (
+        False, "overclaims rose")
+
+
+def test_routing_held_out_drop_vetoes_a_dev_gain():
+    best = {**_routing({"a": True, "b": False}), "heldout": 10}
+    keep, reason = loop.better({**_routing({"a": True, "b": True}), "heldout": 9}, best, "routing", 10, 10)
+    assert not keep and reason.startswith("held-out dropped")
+
+
+def test_unset_margins_keep_the_subtract_track_from_starting(tmp_path):
+    unset = tmp_path / "n.json"
+    unset.write_text('{"margins": {"pass_rate_drop": null}}', encoding="utf-8")
+    assert loop.load_margins(unset) is None
+    unset.write_text('{"margins": {"pass_rate_drop": 0.05}}', encoding="utf-8")
+    assert loop.load_margins(unset) == {"pass_rate_drop": 0.05}
+    assert loop.load_margins() is None  # 저장소의 기본값은 아직 정해지지 않았다.
+
+
+def test_a_keep_that_the_confirmation_measurement_does_not_repeat_is_discarded(tmp_path, monkeypatch):
+    """반증: 한 번 우연히 이긴 측정이 그대로 keep됐다. 두 번째 측정이 같은 판정을 내야 keep이다."""
+    root = _repo(tmp_path)
+    argv = _model_loop(tmp_path, monkeypatch, root, iter([_model(1), _model(2), _model(1)]), iter(["Read the plan."]))
+    assert loop.main([*argv, "--iterations", "1", "--confirm"]) == 0
+    rows = _rows(tmp_path)
+    assert rows[-1][2] == "discard" and rows[-1][6].startswith("not confirmed")
+
+
+def test_a_keep_the_confirmation_repeats_stays(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    argv = _model_loop(tmp_path, monkeypatch, root, iter([_model(1), _model(2), _model(2)]), iter(["Read the plan."]))
+    assert loop.main([*argv, "--iterations", "1", "--confirm"]) == 0
+    assert _rows(tmp_path)[-1][2] == "keep"
+
+
+def test_the_subtract_track_refuses_to_start_without_margins(tmp_path, capsys):
+    import pytest
+    with pytest.raises(SystemExit):
+        loop.main(["--track", "subtract", "--skills", "demo", "--tag", "t", "--root", str(tmp_path), "--budget-usd", "1"])
+    assert "non-inferiority margins are not fixed" in capsys.readouterr().err
