@@ -533,6 +533,24 @@ agent-flow arm의 runner 상태(완료·차단)는 이 선언과 따로 보고�
 python evals/completion.py <rows.jsonl>   # 행: {"arm", "task_kind": "normal"|"impossible", "oracle", "final_message"}
 ```
 
+### `skill_retirement.py` — 모델 교체 시 skill 은퇴 후보(#418)
+
+```bash
+python evals/skill_retirement.py --plan --host claude --model <새 모델>   # 다시 잴 baseline 명령
+python evals/skill_retirement.py --skill-task-report <dir>/report.json   # 기록으로 분류
+```
+
+모델이나 host가 바뀌면 `--plan`이 출력하는 baseline 명령을 다시 돌린다. 그다음 결과를 이 스크립트에 넘긴다. `run.py` 결과(`evals/results/2026*.json`)는 기본으로 읽는다. 모델을 부르지 않는다.
+
+- `retire-candidate`: 그 skill을 쓰는 모든 사례에서 최신 baseline(skill 없음)이 천장(n≥5)이고, skill 구성이 더 높지 않다. 자동으로 지우지 않는다. 삭제는 #417 ablation이 정한다.
+- `keep`: 어떤 사례에서 skill 구성이 baseline보다 높다.
+- `inconclusive`: baseline이 천장이 아닌데 이득이 측정되지 않았거나 시행이 부족하다. `skill_tasks.py`의 `report.json`을 넘기지 않아도 여기에 든다.
+- `unverified`: skill을 단독으로 재는 행동 사례가 없다. phase_eval은 skill을 묶음으로 전달하므로 여기서 세지 않는다.
+
+2026-10-22 기록 기준: 77개 중 retire-candidate 1개(`comment-authoring-discipline`, comment_norm·no_narration baseline 1.00), keep 3개, inconclusive 7개, unverified 66개.
+
+평가가 없는(unverified) skill: `agent-flow`, `agent-flow-concise-output`, `agent-flow-diagnosing-bugs`, `agents-md-improver`, `android-appshell-error-handling`, `android-clean-architecture`, `android-clean-presentation-architecture`, `android-code-review`, `android-debugging`, `android-guides`, `android-module-creator`, `android-sdui-architecture`, `app-shell-error-contract`, `architecture-reviewer`, `backend-api-contract`, `code-review`, `codebase-design`, `comment-checker`, `dart-development-guide`, `datadog-rum-sourcemaps`, `ddd-architecture`, `diagnosing-bugs`, `domain-modeling`, `flutter-clean-architecture`, `flutter-clean-presentation-architecture`, `flutter-development-guide`, `full-feature-workflow`, `ga4-ecommerce-events`, `grill-with-docs`, `grilling`, `ios-app-shell-error-handling`, `ios-clean-architecture`, `ios-clean-presentation-architecture`, `kotlin-backend-hexagonal-architecture`, `nextjs-api-routing`, `nextjs-auth-session`, `plan-reviewer`, `product-brief`, `push-watch`, `python-development-guide`, `qa`, `react-app-shell-error-handling`, `react-clean-architecture`, `react-clean-presentation-architecture`, `react-development-guide`, `react-fsd-architecture`, `react-native-app-shell-error-handling`, `react-native-clean-architecture`, `react-native-clean-presentation-architecture`, `react-native-development-guide`, `react-native-feature-architecture`, `react-native-operational-adoption`, `react-runtime-i18n`, `react-scroll-restoration`, `react-tailwind-v4`, `react-tanstack-form`, `react-tanstack-query`, `react-zod-validation`, `resolving-merge-conflicts`, `security-audit`, `solid-architecture-review`, `tdd`, `to-prd`, `typescript-development-guide`, `webview-json-rpc-bridge`, `write-for-work`.
+
 ### `release_reuse.py` — 바뀌지 않은 셀의 재사용
 
 릴리스가 모델에게 보이는 것을 하나도 바꾸지 않았어도 168 unit을 다시 재지 않도록, 셀마다 모델 입력
