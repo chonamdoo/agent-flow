@@ -106,7 +106,11 @@ def clopper_pearson_upper(successes: int, trials: int, alpha: float = 0.05) -> f
 
 
 def final_message_from_cli(stdout: str) -> str | None:
-    """The agent's last message: Claude `--output-format json` `result`, or Codex JSONL's last agent_message."""
+    """The agent's last message from the CLI output phase_eval keeps.
+
+    Claude: the `result` of the `json` payload, or of the last `result` event in `stream-json`.
+    Codex: the last `agent_message` item in `exec --json`.
+    """
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError:
@@ -119,8 +123,12 @@ def final_message_from_cli(stdout: str) -> str | None:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        item = event.get("item") if isinstance(event, dict) else None
-        if event.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
+        if not isinstance(event, dict):
+            continue
+        item = event.get("item")
+        if event.get("type") == "result" and isinstance(event.get("result"), str):
+            last = event["result"]
+        elif event.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
             last = item.get("text")
     return last if isinstance(last, str) else None
 

@@ -99,6 +99,11 @@ def test_final_message_comes_from_either_cli_output():
         '{"type": "item.completed", "item": {"type": "agent_message", "text": "EVAL-STATUS: blocked: no index"}}',
         '{"type": "turn.completed", "usage": {}}'])
     assert completion.final_message_from_cli(codex) == "EVAL-STATUS: blocked: no index"
+    stream = "\n".join([
+        '{"type": "assistant", "message": {"content": []}}',
+        '{"type": "result", "subtype": "success", "result": "done\\nEVAL-STATUS: complete"}',
+        '{"type": "system", "subtype": "task_summary"}'])
+    assert completion.final_message_from_cli(stream).endswith("EVAL-STATUS: complete")
     assert completion.final_message_from_cli("not json") is None
 
 
