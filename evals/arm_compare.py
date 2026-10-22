@@ -225,8 +225,12 @@ def _seed_external_project(case: dict, case_dir: Path, project: Path) -> None:
     c_prime._sh(["git", "clone", "-q", "--no-checkout", seed["repository"], str(project)], project.parent, check=True)
     for args in (["checkout", "-q", "-B", "main", seed["commit"]], ["remote", "remove", "origin"],
                  ["config", "user.name", "eval"], ["config", "user.email", "eval@example.com"],
-                 ["config", "commit.gpgsign", "false"], ["reflog", "expire", "--expire=all", "--all"]):
+                 ["config", "commit.gpgsign", "false"]):
         _git(args, project)
+    # A later version of a task can start from an earlier version's reference build (`git format-patch` output).
+    for patch in seed.get("patches", []):
+        _git(["am", "-q", str((case_dir / patch).resolve())], project)
+    _git(["reflog", "expire", "--expire=all", "--all"], project)
     for target, source in case["files"].items():
         (project / target).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(case_dir / source, project / target)

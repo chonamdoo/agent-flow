@@ -462,3 +462,23 @@ def test_an_external_case_is_graded_by_its_own_evaluator_and_keys(tmp_path):
     result = arm_compare.score(run, None, evaluator)
     assert result["oracle"] is True and result["contaminated"] is False
     assert result["ui"] == {"S": 1, "H": 1.0, "R": True, "B": True, "error": None}
+
+
+def test_an_external_case_can_start_from_patches_of_an_earlier_build(tmp_path):
+    case_dir, _ = _external_case(tmp_path)
+    seed = tmp_path / "seed-repo"
+    (seed / "cart.txt").write_text("cart v0\n", encoding="utf-8")
+    arm_compare._git(["add", "cart.txt"], seed)
+    arm_compare._git(["commit", "-qm", "v0 cart"], seed)
+    patch = arm_compare._git(["format-patch", "-1", "HEAD", "-o", str(case_dir / "reference")], seed)
+    arm_compare._git(["reset", "-q", "--hard", "HEAD~1"], seed)
+    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
+    case["seed"]["patches"] = [str(Path(patch).relative_to(case_dir))]
+    (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+    run = tmp_path / "runs" / "A-1"
+    arm_compare.prepare(ROOT, "A", "ignored", 1, run, case_dir=case_dir)
+    project = run / "project"
+    assert (project / "cart.txt").read_text(encoding="utf-8") == "cart v0\n"
+    assert arm_compare._git(["log", "--format=%s", "-3"], project).splitlines() == ["task", "v0 cart", "app"]
+    assert [path for path in (project / ".git").rglob("*") if path.is_file()
+            and str(case_dir).encode() in path.read_bytes()] == []
