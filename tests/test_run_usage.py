@@ -179,3 +179,25 @@ def test_codex_reports_no_cache_writes_so_they_are_null(tmp_path: Path) -> None:
     message = run_usage.codex_messages(rows)[0]
     assert message["components"] == {"fresh_input": 300, "cache_write": None, "cache_write_5m": None,
                                      "cache_write_1h": None, "cache_read": 200, "output": 30}
+
+
+def test_subagent_transcripts_of_the_session_count_toward_the_run(tmp_path: Path) -> None:
+    run = _run_dir(tmp_path)
+    transcript = _write_jsonl(tmp_path / "session.jsonl", [
+        _claude("m1", "2026-10-22T10:05:00+00:00", uncached=10, creation=0, cached=100, output=5)])
+    folder = tmp_path / "session" / "subagents"
+    folder.mkdir(parents=True)
+    _write_jsonl(folder / "agent-a1.jsonl", [
+        _claude("s1", "2026-10-22T10:06:00+00:00", uncached=3, creation=0, cached=50, output=40)])
+    report = run_usage.report(run, [transcript], "success")
+    assert report["tokens_controller"]["usage"]["output"] == 45
+    assert [source.get("subagent_of") for source in report["transcripts"]] == [None, "session.jsonl"]
+
+
+def test_an_unreadable_subagent_folder_makes_the_controller_unmeasured(tmp_path: Path, monkeypatch) -> None:
+    run = _run_dir(tmp_path)
+    transcript = _write_jsonl(tmp_path / "session.jsonl", [
+        _claude("m1", "2026-10-22T10:05:00+00:00", uncached=10, creation=0, cached=100, output=5)])
+    monkeypatch.setattr(run_usage, "subagent_transcripts", lambda path: ([], "unreadable"))
+    controller = run_usage.report(run, [transcript], "success")["tokens_controller"]
+    assert controller["status"] == "unmeasured" and controller["usage"]["output"] is None

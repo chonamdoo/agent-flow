@@ -37,7 +37,9 @@ manual SPEC approval the runner recorded on disk (the disk check does not depend
 `artifact_sha256` fingerprints the checkout as the agent left it, before the hidden tests are copied in, so a
 later re-score can tell whether it graded the same tree. `isolation` records whether keeping the agent away
 from the hidden tests was only instructed (subagents on a shared filesystem) or enforced by a sandbox. Tokens
-come from the agent's own transcript (`run_usage.claude_messages`). Runner reviewer subprocesses print no usage, so their tokens are not in it;
+come from the agent's own transcript (`run_usage.claude_messages`) and its sub-agent transcripts
+(`<session>/subagents/agent-*.jsonl`), which every transcript scan reads too; `transcript_cost_estimate_usd` prices
+them at list price next to the CLI's own `controller_cost_usd`, so a gap shows usage the transcripts missed. Runner reviewer subprocesses print no usage, so their tokens are not in it;
 `reviewer_jobs` counts them.
 """
 from __future__ import annotations
@@ -254,6 +256,44 @@ def _transcript_rows(path: Path | None) -> list[dict]:
     return run_usage._jsonl(path) if path is not None and path.is_file() else []
 
 
+def session_rows(path: Path | None) -> tuple[list[dict], list[dict], dict]:
+    """(main transcript rows, main + sub-agent rows, what was read).
+
+    The final message comes from the main transcript only; every scan (contamination, self-approval, verify
+    downgrades) and the token totals use the sub-agent transcripts too (`run_usage.subagent_transcripts`).
+    """
+    main = _transcript_rows(path)
+    versions = sorted({row["version"] for row in main if isinstance(row.get("version"), str)})
+    if path is None or not path.is_file():
+        return main, main, {"subagent_files": 0, "subagents": "none", "cli_versions": versions}
+    files, state = run_usage.subagent_transcripts(path)
+    rows = list(main)
+    for item in files:
+        rows += run_usage._jsonl(item)
+    return main, rows, {"subagent_files": len(files), "subagents": "unmeasured" if state == "unreadable" else state,
+                        "cli_versions": versions}
+
+
+# USD per million tokens, list prices. Source: the claude-api skill bundled with Claude Code 2.1.308 (model table
+# cached 2026-10-06; cache writes 1.25x input for the 5-minute TTL and 2x for the 1-hour TTL, reads 0.05x on Opus 5.5).
+PRICES = {"claude-opus-5-5": {"fresh_input": 4.0, "cache_write_5m": 5.0, "cache_write_1h": 8.0, "cache_read": 0.20,
+                              "output": 20.0}}
+
+
+def message_cost(model: str | None, parts: dict) -> float | None:
+    """List-price cost of one response, or None when the model is unpriced or a part is missing."""
+    price = PRICES.get(model or "")
+    if price is None or any(parts.get(key) is None for key in ("fresh_input", "cache_read", "output", "cache_write")):
+        return None
+    writes = {"cache_write_5m": parts.get("cache_write_5m"), "cache_write_1h": parts.get("cache_write_1h")}
+    if any(value is None for value in writes.values()):
+        if parts["cache_write"]:
+            return None
+        writes = {key: 0 for key in writes}
+    tokens = {"fresh_input": parts["fresh_input"], "cache_read": parts["cache_read"], "output": parts["output"], **writes}
+    return sum(tokens[key] * price[key] for key in tokens) / 1_000_000
+
+
 def final_message(rows: list[dict]) -> str | None:
     last = None
     for row in rows:
@@ -316,17 +356,31 @@ def _usage_totals(rows: list[dict]) -> dict:
     messages = run_usage.claude_messages(rows)
     total = run_usage._empty()
     parts = run_usage.empty_components()
+    costs = []
     for message in messages:
         run_usage._add(total, message["usage"])
         run_usage.add_components(parts, message["components"])
+        costs.append(message_cost(message["model"], message["components"]))
     if not messages:
         # 관측된 사용량이 없으면 0이 아니라 null이다. 0으로 두면 평균에서 공짜 run처럼 섞인다.
         total = {key: None for key in total}
         parts = {key: None for key in parts}
+    estimate = round(sum(costs), 4) if costs and None not in costs else None
     stamps = [stamp for stamp in (run_usage._timestamp(row.get("timestamp")) for row in rows) if stamp]
-    return {"usage": total, "usage_components": parts, "api_calls": len(messages),
+    return {"usage": total, "usage_components": parts, "transcript_cost_estimate_usd": estimate,
+            "api_calls": len(messages),
             "models": sorted({message["model"] for message in messages if message["model"]}),
             "seconds": round((max(stamps) - min(stamps)).total_seconds()) if stamps else None}
+
+
+def _measured_usage(rows: list[dict], read: dict) -> dict:
+    totals = _usage_totals(rows)
+    if read.get("subagents") == "unmeasured":
+        # 읽지 못한 sub-agent 기록이 있으면 합계가 작게 나온다. 0이나 부분합 대신 null로 둔다(#411).
+        totals.update({"usage": {key: None for key in totals["usage"]},
+                       "usage_components": {key: None for key in totals["usage_components"]},
+                       "transcript_cost_estimate_usd": None})
+    return totals
 
 
 def _runner_trace(project: Path, checkout: Path) -> dict:
@@ -404,7 +458,7 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
     if transcript is None and (run / "drive.json").is_file():
         recorded = json.loads((run / "drive.json").read_text(encoding="utf-8")).get("transcript")
         transcript = Path(recorded) if recorded else None
-    rows = _transcript_rows(transcript)
+    main_rows, rows, read = session_rows(transcript)
     commits = c_prime._sh(["git", "rev-list", "--count", f"{meta['start_commit']}..HEAD"], checkout).stdout.strip()
     artifact = artifact_sha256(checkout)
     if meta.get("case_kind") == "ui":
@@ -417,15 +471,15 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
     else:
         graded = _grade_phase_case(meta, checkout)
         graded["contaminated"] = any(marker in item for item in tool_inputs(rows) for marker in HIDDEN_MARKERS)
-    message = final_message(rows)
+    message = final_message(main_rows)
     drive = json.loads((run / "drive.json").read_text(encoding="utf-8")) if (run / "drive.json").is_file() else {}
     result = {"isolation": "instructed", **meta, "task_kind": "normal", "checkout": str(checkout), **graded,
               "commits": int(commits) if commits.isdigit() else None,
-              "final_message": message, "declaration": completion.classify(message if rows else None),
+              "final_message": message, "declaration": completion.classify(message if main_rows else None),
               "spec_self_approvals": sum(bool(SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
               "verify_downgrades": verify_downgrades(rows),
               "manual_spec_approvals": manual_spec_approvals(project, checkout), "artifact_sha256": artifact,
-              "transcript": str(transcript) if transcript else None, **_usage_totals(rows),
+              "transcript": str(transcript) if transcript else None, **_measured_usage(rows, read), **read,
               "controller_cost_usd": drive.get("cost_usd"), "drive_exit": drive.get("exit"),
               "drive_timed_out": drive.get("timed_out"), "drive_is_error": drive.get("is_error"),
               "harness_error": harness_error,

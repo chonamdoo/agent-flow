@@ -11,7 +11,10 @@ afterwards. It changes no run state and calls no model.
 Supported transcripts:
 - Claude Code session JSONL (`~/.claude/projects/<project>/<session>.jsonl`). One API response is
   written as several lines that share `message.id` and repeat the same usage; each id counts once.
-  Sidechain (sub-agent) messages count toward the same phase.
+  Sub-agents (the `Task` tool) are not in that file: Claude Code 2.1.308 writes each one to
+  `<project>/<session>/subagents/agent-*.jsonl` (checked on macOS and on Linux, where the main file held no
+  `isSidechain` rows). Their messages are read with the session and count toward the same phase. A subagent
+  folder that exists but cannot be read makes the controller `unmeasured`, never a smaller total.
 - Codex rollout JSONL (`~/.codex/sessions/.../rollout-*.jsonl`). `token_count` events carry a
   cumulative `total_token_usage`; the tool counts its increase, so repeated events add nothing. A
   total that drops means the counter restarted, and the new total counts in full.
@@ -147,6 +150,21 @@ def codex_messages(rows: list[dict]) -> list[dict]:
     return messages
 
 
+def subagent_transcripts(transcript: Path) -> tuple[list[Path], str]:
+    """The session's sub-agent transcripts and whether they could be read: `none`, `read` or `unreadable`."""
+    folder = transcript.with_suffix("") / "subagents"
+    if not folder.exists():
+        return [], "none"
+    try:
+        files = sorted(folder.glob("agent-*.jsonl"))
+        for path in files:
+            with path.open("rb"):
+                pass
+    except OSError:
+        return [], "unreadable"
+    return files, "read"
+
+
 def transcript_format(rows: list[dict]) -> str | None:
     if any(row.get("type") == "session_meta" or row.get("type") == "event_msg" for row in rows):
         return "codex"
@@ -228,7 +246,15 @@ def report(run_dir: Path, transcripts: list[Path], outcome: str | None) -> dict:
     controller_parts = empty_components()
     parts_by_phase: dict[str, dict] = {}
     sources = []
+    expanded: list[tuple[Path, str | None]] = []
+    unreadable = []
     for path in transcripts:
+        expanded.append((path, None))
+        extra, state = subagent_transcripts(path)
+        if state == "unreadable":
+            unreadable.append(path.name)
+        expanded += [(item, path.name) for item in extra]
+    for path, parent in expanded:
         rows = _jsonl(path)
         kind = transcript_format(rows)
         messages = claude_messages(rows) if kind == "claude" else codex_messages(rows) if kind == "codex" else []
@@ -238,6 +264,7 @@ def report(run_dir: Path, transcripts: list[Path], outcome: str | None) -> dict:
             "format": kind,
             "messages": len(messages),
             "models": sorted({message["model"] for message in messages if message["model"]}),
+            **({"subagent_of": parent} if parent else {}),
         })
         for message in messages:
             phase = phase_at(timeline, message["at"])
@@ -249,7 +276,7 @@ def report(run_dir: Path, transcripts: list[Path], outcome: str | None) -> dict:
                 _add(controller, message["usage"])
                 add_components(controller_parts, message["components"])
     # 형식만 알아보고 usage가 하나도 없으면 측정이 아니다. 0토큰으로 적으면 누락이 무사용으로 보인다.
-    measured = any(source["format"] and source["messages"] for source in sources)
+    measured = any(source["format"] and source["messages"] for source in sources) and not unreadable
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": meta.get("run_id"),
@@ -260,7 +287,8 @@ def report(run_dir: Path, transcripts: list[Path], outcome: str | None) -> dict:
         "usage_components_by_phase": parts_by_phase,
         "tokens_controller": {
             "status": "measured" if measured else "unmeasured",
-            "reason": None if measured else "no supported host transcript",
+            "reason": None if measured else (f"unreadable subagent folder for {', '.join(unreadable)}" if unreadable
+                                             else "no supported host transcript"),
             "usage": controller if measured else {key: None for key in USAGE_KEYS},
             "usage_components": controller_parts if measured else {key: None for key in COMPONENT_KEYS},
         },

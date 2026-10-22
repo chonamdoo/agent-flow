@@ -265,3 +265,46 @@ def test_the_ui_task_installs_the_kit_with_a_declared_architecture(tmp_path):
     arm_compare.prepare(ROOT, "C", "oyg", 1, run)
     kit = json.loads((run / "project" / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
     assert kit["architecture"]["mode"] == "clean"
+
+
+def _session_with_subagent(tmp_path, sub_input):
+    main = _transcript(tmp_path / "s1.jsonl", tool_input={"file_path": "src/shop/cart/domain.py"},
+                       final="Done.\n\nEVAL-STATUS: complete")
+    folder = tmp_path / "s1" / "subagents"
+    folder.mkdir(parents=True)
+    rows = [{"type": "assistant", "isSidechain": True, "timestamp": "2026-10-22T07:00:30Z",
+             "message": {"id": "sub-1", "model": "claude-x", "content": [
+                 {"type": "tool_use", "name": "Bash", "input": sub_input},
+                 {"type": "text", "text": "Sub-agent done.\n\nEVAL-STATUS: blocked: not mine to say"}],
+                 "usage": {"input_tokens": 7, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+                           "output_tokens": 70}}}]
+    (folder / "agent-abc.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    return main
+
+
+def test_subagent_tokens_count_and_its_last_words_are_not_the_final_message(bare, tmp_path):
+    transcript = _session_with_subagent(tmp_path, {"command": "ls"})
+    result = arm_compare.score(bare, transcript)
+    assert result["usage"]["output"] == 23 + 70
+    assert result["subagent_files"] == 1 and result["subagents"] == "read"
+    assert result["declaration"] == "declared-complete"
+
+
+def test_a_hidden_path_read_only_by_a_subagent_is_contamination(bare, tmp_path):
+    transcript = _session_with_subagent(tmp_path, {"command": "cat /x/evals/phase-cases/devflow/author/clean/hidden/t.py"})
+    assert arm_compare.score(bare, transcript)["contaminated"] is True
+
+
+def test_an_unreadable_subagent_folder_leaves_usage_unmeasured(bare, tmp_path, monkeypatch):
+    transcript = _session_with_subagent(tmp_path, {"command": "ls"})
+    monkeypatch.setattr(arm_compare.run_usage, "subagent_transcripts", lambda path: ([], "unreadable"))
+    result = arm_compare.score(bare, transcript)
+    assert result["subagents"] == "unmeasured" and result["usage"]["output"] is None
+
+
+def test_the_cost_estimate_uses_each_token_kind_at_its_own_price():
+    parts = {"fresh_input": 1_000_000, "cache_write": 2_000_000, "cache_write_5m": 1_000_000,
+             "cache_write_1h": 1_000_000, "cache_read": 1_000_000, "output": 1_000_000}
+    assert arm_compare.message_cost("claude-opus-5-5", parts) == 4.0 + 5.0 + 8.0 + 0.20 + 20.0
+    assert arm_compare.message_cost("claude-unknown", parts) is None
+    assert arm_compare.message_cost("claude-opus-5-5", {**parts, "cache_write_5m": None}) is None
