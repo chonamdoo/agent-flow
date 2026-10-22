@@ -63,7 +63,22 @@
 - 과제 1개, 조건당 n=5다. 차이가 없다는 결과가 효과가 없다는 증명은 아니다(천장).
 - controller가 사용자 역할을 하므로 사람 시간은 잴 수 없다(#410 코멘트).
 - B·C는 hook이 없는 환경에서 돌았다. hook guard(쓰기 경계 등)가 빠진 C이고, 위 3·4번은 그 결과다.
+- runner가 실행한 required test gate는 0개다. python profile의 required `test` gate(`pytest -q`)는 `execution: ci`라서, runner는 `deferred_ci_checks`에 `pytest`를 적기만 하고 돌리지 않는다. harness에는 remote가 없어 CI도 돌지 않는다.
+  - gates phase에 도달한 C-1, C-2, C-4, C-5는 local gate 3개(`type`, `architecture-lint`, `lint`)를 돌렸다. 그중 required는 `architecture-lint` 하나다.
+  - C-3은 gates phase에 도달하지 않았다. B(`development`)에는 gates phase가 없다.
+  - test 실행 증거는 runner gate가 아니라 에이전트가 phase 안에서 돌린 test다. hidden test 채점은 이와 별개다.
 - 같은 컨테이너(4 CPU)에서 wave마다 4개를 동시에 돌렸다. 시간 비교는 wave 안에서만 공정하다.
 - B·C 프롬프트의 runner 명령은 과제를 셸 따옴표로 감싸지 않았다(`US$100.00`의 `$1`이 셸 변수로 해석될 수 있다).
   - 20회 모두 runner가 기록한 task는 원문 그대로였다. 에이전트가 명령을 그대로 복사하지 않고 직접 따옴표를 처리했다.
   - 이후 run을 위해 `shlex.quote`로 고쳤다. 그래서 B·C의 `prompt_sha256`가 이번 기록과 달라진다.
+
+## 재채점 (2026-10-22, 저장된 `results.jsonl` 20행)
+
+| 채점 규칙 | A | B | C | C′ |
+|---|---|---|---|---|
+| 1차 기록(위 표) | 5/5 | 5/5 | 4/5 | 5/5 |
+| #449: 사람 승인 우회(spec approve·verify 하향·디스크 승인)를 규칙 위반으로 실패 처리 | 5/5 | 5/5 | 2/5 | 5/5 |
+| 사전등록 정의: 완료 선언 필수, 오염·인프라 오류·끊긴 run도 분모 | 5/5 | 5/5 | 2/5 | 5/5 |
+
+- 사전등록 정의로 바꿔도 수치는 같다. 완료 선언이 없거나 측정되지 않은 run이 없고(C-3만 `blocked`), 오염 run이 0이기 때문이다.
+- C의 실패 셋은 C-3(blocked, hook 부재로 증거 기록 실패), C-4와 C-5(규칙 위반)이다.

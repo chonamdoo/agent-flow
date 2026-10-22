@@ -155,3 +155,79 @@ def test_a_recognised_transcript_without_usage_is_unmeasured(tmp_path: Path) -> 
 
     assert result["tokens_controller"]["status"] == "unmeasured"
     assert run_usage.summarize([result])["controller_per_success"]["input"] is None
+
+
+def test_cache_writes_are_kept_apart_from_fresh_input(tmp_path: Path) -> None:
+    run = _run_dir(tmp_path)
+    row = _claude("m1", "2026-10-22T10:05:00+00:00", uncached=10, creation=300, cached=1_000, output=40)
+    row["message"]["usage"]["cache_creation"] = {"ephemeral_5m_input_tokens": 100, "ephemeral_1h_input_tokens": 200}
+    transcript = _write_jsonl(tmp_path / "session.jsonl", [row])
+    report = run_usage.report(run, [transcript], "success")
+    controller = report["tokens_controller"]
+    # 예전 합계는 그대로다: uncached = fresh input + cache write.
+    assert controller["usage"] == {"input": 1_310, "uncached_input": 310, "cached_input": 1_000, "output": 40}
+    assert controller["usage_components"] == {"fresh_input": 10, "cache_write": 300, "cache_write_5m": 100,
+                                              "cache_write_1h": 200, "cache_read": 1_000, "output": 40}
+    assert run_usage.summarize([report])["controller_components_total"]["cache_write"] == 300
+
+
+def test_codex_reports_no_cache_writes_so_they_are_null(tmp_path: Path) -> None:
+    rows = [{"type": "turn_context", "payload": {"model": "gpt-x"}, "timestamp": "2026-10-22T10:01:00+00:00"},
+            {"type": "event_msg", "timestamp": "2026-10-22T10:02:00+00:00", "payload": {
+                "type": "token_count", "info": {"total_token_usage": {
+                    "input_tokens": 500, "cached_input_tokens": 200, "output_tokens": 30}}}}]
+    message = run_usage.codex_messages(rows)[0]
+    assert message["components"] == {"fresh_input": 300, "cache_write": None, "cache_write_5m": None,
+                                     "cache_write_1h": None, "cache_read": 200, "output": 30}
+
+
+def test_subagent_transcripts_of_the_session_count_toward_the_run(tmp_path: Path) -> None:
+    run = _run_dir(tmp_path)
+    transcript = _write_jsonl(tmp_path / "session.jsonl", [
+        _claude("m1", "2026-10-22T10:05:00+00:00", uncached=10, creation=0, cached=100, output=5)])
+    folder = tmp_path / "session" / "subagents"
+    folder.mkdir(parents=True)
+    _write_jsonl(folder / "agent-a1.jsonl", [
+        _claude("s1", "2026-10-22T10:06:00+00:00", uncached=3, creation=0, cached=50, output=40)])
+    report = run_usage.report(run, [transcript], "success")
+    assert report["tokens_controller"]["usage"]["output"] == 45
+    assert [source.get("subagent_of") for source in report["transcripts"]] == [None, "session.jsonl"]
+
+
+def test_an_unreadable_subagent_folder_makes_the_controller_unmeasured(tmp_path: Path, monkeypatch) -> None:
+    run = _run_dir(tmp_path)
+    transcript = _write_jsonl(tmp_path / "session.jsonl", [
+        _claude("m1", "2026-10-22T10:05:00+00:00", uncached=10, creation=0, cached=100, output=5)])
+    monkeypatch.setattr(run_usage, "subagent_transcripts", lambda path: ([], "unreadable"))
+    controller = run_usage.report(run, [transcript], "success")["tokens_controller"]
+    assert controller["status"] == "unmeasured" and controller["usage"]["output"] is None
+
+
+def test_a_subagent_folder_that_cannot_be_listed_is_unreadable(tmp_path: Path, monkeypatch) -> None:
+    import os
+    transcript = _write_jsonl(tmp_path / "session.jsonl", [])
+    folder = tmp_path / "session" / "subagents"
+    folder.mkdir(parents=True)
+    _write_jsonl(folder / "agent-a1.jsonl", [])
+
+    def refuse(path):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(os, "scandir", refuse)
+    assert run_usage.subagent_transcripts(transcript) == ([], "unreadable")
+
+
+def test_a_mode_000_subagent_folder_is_unreadable(tmp_path: Path) -> None:
+    import os
+    import pytest
+    if os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 directory")
+    transcript = _write_jsonl(tmp_path / "session.jsonl", [])
+    folder = tmp_path / "session" / "subagents"
+    folder.mkdir(parents=True)
+    _write_jsonl(folder / "agent-a1.jsonl", [])
+    folder.chmod(0)
+    try:
+        assert run_usage.subagent_transcripts(transcript) == ([], "unreadable")
+    finally:
+        folder.chmod(0o755)

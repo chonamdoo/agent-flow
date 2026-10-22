@@ -117,6 +117,22 @@ AL은 holdout마다 10회로 탐색한다.
   - 격리가 `instructed`인지 `enforced`인지 적는다.
 - 결과 문서의 주장에는 measured, verified, inferred, assumed 표시를 단다.
 
+## 과제별 required gate의 실행 위치 (v1 초안 메모, 2026-10-22)
+
+runner의 `gates` phase는 `execution: ci`인 gate를 돌리지 않고 `deferred_ci_checks`에 적기만 한다. harness에는 remote가 없으므로 그 gate는 끝내 실행되지 않는다. 결과의 `deferred_ci_checks`와 요약 표의 마지막 열이 이를 보인다.
+
+| 과제 | profile | required gate | `execution` |
+|---|---|---|---|
+| devflow | python | `architecture-lint` | local |
+| devflow | python | `test` (`pytest -q`) | **ci**: runner가 실행하지 않음 |
+| OYG | node | `architecture-lint` | local |
+| OYG | node | `test` (`npm test`) | local |
+| mobile-cart | android | `architecture-lint` | local |
+| mobile-cart | android | `build` (`./gradlew assembleDebug`) | local |
+| mobile-cart | android | `test` (`./gradlew test`) | local |
+
+C 조건의 "gate가 통과했다"를 test까지 돌았다는 뜻으로 읽지 않는다. 과제마다 이 표를 보고 해석한다.
+
 ## 남은 준비
 
 - [ ] AL 조건 프롬프트와 harness 재검사(`arm_compare.py`)

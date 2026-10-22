@@ -37,7 +37,9 @@ manual SPEC approval the runner recorded on disk (the disk check does not depend
 `artifact_sha256` fingerprints the checkout as the agent left it, before the hidden tests are copied in, so a
 later re-score can tell whether it graded the same tree. `isolation` records whether keeping the agent away
 from the hidden tests was only instructed (subagents on a shared filesystem) or enforced by a sandbox. Tokens
-come from the agent's own transcript (`run_usage.claude_messages`). Runner reviewer subprocesses print no usage, so their tokens are not in it;
+come from the agent's own transcript (`run_usage.claude_messages`) and its sub-agent transcripts
+(`<session>/subagents/agent-*.jsonl`), which every transcript scan reads too; `transcript_cost_estimate_usd` prices
+them at list price next to the CLI's own `controller_cost_usd`, so a gap shows usage the transcripts missed. Runner reviewer subprocesses print no usage, so their tokens are not in it;
 `reviewer_jobs` counts them.
 """
 from __future__ import annotations
@@ -89,7 +91,12 @@ KIT_TREES = ("bin", "lib", "templates", "bootstrap", "skills", "scripts", ".Code
 KIT_FILES = ("package.json", "pyproject.toml", "README.md")
 HIDDEN_MARKERS = ("hidden_fix", "hidden_plan", "phase-cases", "author/clean/hidden")
 # 에이전트가 스스로 SPEC 검증을 바꾸거나 승인한 호출. 증거 gate를 우회한 run을 결과와 따로 드러낸다.
-SELF_APPROVAL = re.compile(r"agent-flow\S*\s+(spec\s+(approve|confirm)\b|continue\b[^\n]*--approve\b)")
+SPEC_SELF_APPROVAL = re.compile(r"agent-flow\S*\s+spec\s+(approve|confirm)\b")
+PHASE_SELF_APPROVAL = re.compile(r"agent-flow\S*\s+continue\b[^\n]*--approve\b")
+SELF_APPROVAL = re.compile(f"{SPEC_SELF_APPROVAL.pattern}|{PHASE_SELF_APPROVAL.pattern}")
+# 그 run이 받은 프롬프트의 승인 규칙. 1차(#447) 프롬프트는 에이전트에게 phase 승인을 맡겼다.
+HARNESS_APPROVES = "harness-approves-phases"
+AGENT_APPROVES = "agent-approves-phases"
 VERIFY_DOWNGRADE = re.compile(r"verify:\s*[\"']?manual\b")
 MANUAL_APPROVALS = "spec-manual-approvals.json"
 ISOLATION = ("instructed", "enforced")
@@ -236,22 +243,98 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
             "cprime_rules": c_prime.RULES_VERSION if arm == "Cp" else None, "isolation": isolation,
+            "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None,
             "case_kind": "ui" if ui else "phase-case", **({"ui_task": ui["task"], "layer": ui["layer"]} if ui else {})}
     (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
     return meta
 
 
-def worked_checkout(project: Path) -> Path:
-    """The checkout the agent's work ended in: the newest linked worktree (B, C), else the project."""
-    listing = c_prime._sh(["git", "worktree", "list", "--porcelain"], project).stdout
-    linked = [Path(line.split(" ", 1)[1]) for line in listing.splitlines()
-              if line.startswith("worktree ") and Path(line.split(" ", 1)[1]).resolve() != project.resolve()]
-    linked = [path for path in linked if path.is_dir()]
-    return max(linked, key=lambda path: path.stat().st_mtime) if linked else project
+def _common_dir(path: Path) -> Path | None:
+    out = c_prime._sh(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], path).stdout.strip()
+    return Path(out).resolve() if out else None
+
+
+def linked_worktrees(project: Path) -> list[Path]:
+    """Linked worktrees git lists for the project (`--porcelain -z`, so no path is split on a newline).
+
+    A listed path counts only while it still belongs to this repository. A stale registration can name a path that
+    another project's worktree now occupies (a project moved aside and re-prepared at the same path makes the runner
+    create its worktree there again), and grading it would credit that project's work to this run.
+    """
+    listing = c_prime._sh(["git", "worktree", "list", "--porcelain", "-z"], project).stdout
+    paths = [Path(field.split(" ", 1)[1]) for field in listing.split("\0") if field.startswith("worktree ")]
+    common = _common_dir(project)
+    return [path for path in paths if path.resolve() != project.resolve() and path.is_dir()
+            and _common_dir(path) == common]
+
+
+def runner_worktrees(project: Path) -> list[Path]:
+    """Linked worktrees the runner owns: they have run state in `<git-common-dir>/agent-flow/worktrees/<name>/`."""
+    state = _common_dir(project)
+    return [path for path in linked_worktrees(project)
+            if state is not None and (state / "agent-flow" / "worktrees" / path.name / ".agent-flow" / "runs").is_dir()]
+
+
+def select_checkout(project: Path, arm: str) -> tuple[Path, dict]:
+    """Which checkout to grade, chosen from run state, never from modification times.
+
+    A workflow arm's work is in the worktree its runner created; an agent can add worktrees of its own
+    (`git worktree add` came up in the C′ smoke, #444), and the newest one need not be the one it worked in. The
+    other arms work in the project itself. When a workflow arm has linked worktrees but not exactly one with run
+    state, the choice is not decidable and the run is a harness error.
+    """
+    linked = linked_worktrees(project)
+    info = {"linked_worktrees": len(linked), "checkout_selected_by": None, "checkout_error": None}
+    if arm not in WORKFLOWS:
+        return project, {**info, "checkout_selected_by": "project"}
+    owned = runner_worktrees(project)
+    if len(owned) == 1:
+        return owned[0], {**info, "checkout_selected_by": "runner-state"}
+    if not linked:
+        return project, {**info, "checkout_selected_by": "project"}
+    return project, {**info, "checkout_error": f"{len(owned)} runner worktrees among {len(linked)} linked worktrees"}
 
 
 def _transcript_rows(path: Path | None) -> list[dict]:
     return run_usage._jsonl(path) if path is not None and path.is_file() else []
+
+
+def session_rows(path: Path | None) -> tuple[list[dict], list[dict], dict]:
+    """(main transcript rows, main + sub-agent rows, what was read).
+
+    The final message comes from the main transcript only; every scan (contamination, self-approval, verify
+    downgrades) and the token totals use the sub-agent transcripts too (`run_usage.subagent_transcripts`).
+    """
+    main = _transcript_rows(path)
+    versions = sorted({row["version"] for row in main if isinstance(row.get("version"), str)})
+    if path is None or not path.is_file():
+        return main, main, {"subagent_files": 0, "subagents": "none", "cli_versions": versions}
+    files, state = run_usage.subagent_transcripts(path)
+    rows = list(main)
+    for item in files:
+        rows += run_usage._jsonl(item)
+    return main, rows, {"subagent_files": len(files), "subagents": "unmeasured" if state == "unreadable" else state,
+                        "cli_versions": versions}
+
+
+# USD per million tokens, list prices. Source: the claude-api skill bundled with Claude Code 2.1.308 (model table
+# cached 2026-10-06; cache writes 1.25x input for the 5-minute TTL and 2x for the 1-hour TTL, reads 0.05x on Opus 5.5).
+PRICES = {"claude-opus-5-5": {"fresh_input": 4.0, "cache_write_5m": 5.0, "cache_write_1h": 8.0, "cache_read": 0.20,
+                              "output": 20.0}}
+
+
+def message_cost(model: str | None, parts: dict) -> float | None:
+    """List-price cost of one response, or None when the model is unpriced or a part is missing."""
+    price = PRICES.get(model or "")
+    if price is None or any(parts.get(key) is None for key in ("fresh_input", "cache_read", "output", "cache_write")):
+        return None
+    writes = {"cache_write_5m": parts.get("cache_write_5m"), "cache_write_1h": parts.get("cache_write_1h")}
+    if any(value is None for value in writes.values()):
+        if parts["cache_write"]:
+            return None
+        writes = {key: 0 for key in writes}
+    tokens = {"fresh_input": parts["fresh_input"], "cache_read": parts["cache_read"], "output": parts["output"], **writes}
+    return sum(tokens[key] * price[key] for key in tokens) / 1_000_000
 
 
 def final_message(rows: list[dict]) -> str | None:
@@ -315,15 +398,57 @@ def tool_inputs(rows: list[dict]) -> list[str]:
 def _usage_totals(rows: list[dict]) -> dict:
     messages = run_usage.claude_messages(rows)
     total = run_usage._empty()
+    parts = run_usage.empty_components()
+    costs = []
     for message in messages:
         run_usage._add(total, message["usage"])
+        run_usage.add_components(parts, message["components"])
+        costs.append(message_cost(message["model"], message["components"]))
     if not messages:
         # 관측된 사용량이 없으면 0이 아니라 null이다. 0으로 두면 평균에서 공짜 run처럼 섞인다.
         total = {key: None for key in total}
+        parts = {key: None for key in parts}
+    estimate = round(sum(costs), 4) if costs and None not in costs else None
     stamps = [stamp for stamp in (run_usage._timestamp(row.get("timestamp")) for row in rows) if stamp]
-    return {"usage": total, "api_calls": len(messages),
+    return {"usage": total, "usage_components": parts, "transcript_cost_estimate_usd": estimate,
+            "api_calls": len(messages),
             "models": sorted({message["model"] for message in messages if message["model"]}),
             "seconds": round((max(stamps) - min(stamps)).total_seconds()) if stamps else None}
+
+
+def _measured_usage(rows: list[dict], read: dict) -> dict:
+    totals = _usage_totals(rows)
+    if read.get("subagents") == "unmeasured":
+        # 읽지 못한 sub-agent 기록이 있으면 합계가 작게 나온다. 0이나 부분합 대신 null로 둔다(#411).
+        totals.update({"usage": {key: None for key in totals["usage"]},
+                       "usage_components": {key: None for key in totals["usage_components"]},
+                       "transcript_cost_estimate_usd": None})
+    return totals
+
+
+def gate_record(project: Path, checkout: Path) -> dict:
+    """What the runner's `gates` phase ran locally and what it only deferred to CI.
+
+    A profile gate with `execution: ci` (python's required `test`) is written to `deferred_ci_checks` and not run;
+    the harness has no remote, so a deferred gate is never run at all. Read from each run's canonical
+    `artifacts/gate-results.json`; the last one written is the run's final gate ledger.
+    """
+    roots = [project / ".git" / "agent-flow", checkout / ".agent-flow" / "runs"]
+    ledgers = sorted({path for root in roots if root.is_dir() for path in root.rglob("artifacts/gate-results.json")},
+                     key=lambda path: path.stat().st_mtime_ns)
+    if not ledgers:
+        return {"gate_ledgers": 0, "local_gates": None, "deferred_ci_checks": None, "required_local_gates_ran": None}
+    try:
+        payload = json.loads(ledgers[-1].read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"gate_ledgers": len(ledgers), "local_gates": None, "deferred_ci_checks": None,
+                "required_local_gates_ran": None}
+    results = [item for item in payload.get("results") or [] if isinstance(item, dict)]
+    return {"gate_ledgers": len(ledgers),
+            "local_gates": [[item.get("gate_id"), bool(item.get("required")), bool(item.get("passed"))]
+                            for item in results],
+            "deferred_ci_checks": list(payload.get("deferred_ci_checks") or []),
+            "required_local_gates_ran": sum(bool(item.get("required")) for item in results)}
 
 
 def _runner_trace(project: Path, checkout: Path) -> dict:
@@ -373,7 +498,18 @@ def artifact_sha256(checkout: Path) -> str:
 
 
 def rule_violation(row: dict) -> bool:
-    return bool(row.get("spec_self_approvals") or row.get("verify_downgrades") or row.get("manual_spec_approvals"))
+    """A human-only approval, judged against the rules this run's prompt stated.
+
+    Only the runner arms' prompts forbid `spec approve`/`spec confirm` and a `verify: manual` downgrade (A has no
+    SPECs, and C′ writes its own SPECs with no evidence gate to get past). Running the runner's phase approval
+    command breaks the rule only for runs whose prompt left phase approvals to the harness; the first round's
+    prompt told the agent to approve (`approval_rules` absent, read as AGENT_APPROVES).
+    """
+    if row.get("arm") not in WORKFLOWS:
+        return False
+    phase_rule = row.get("approval_rules") or AGENT_APPROVES
+    return bool(row.get("spec_self_approvals") or row.get("verify_downgrades") or row.get("manual_spec_approvals")
+                or (phase_rule == HARNESS_APPROVES and row.get("phase_self_approvals")))
 
 
 def _tests_pass(command: list[str], cwd: Path) -> bool:
@@ -393,14 +529,20 @@ def _grade_ui(checkout: Path, transcript: Path | None, evaluator: Path, repeat: 
     return json.loads(out.read_text(encoding="utf-8"))
 
 
-def score(run: Path, transcript: Path | None, evaluator: Path | None = None, repeat: int = 3) -> dict:
+def score(run: Path, transcript: Path | None, evaluator: Path | None = None, repeat: int = 3,
+          harness_error: str | None = None) -> dict:
     meta = json.loads((run / "arm.json").read_text(encoding="utf-8"))
-    project = Path(meta["project"])
-    checkout = worked_checkout(project)
+    # `prepare` puts the project in the run directory and records its absolute path. A run moved aside (a harness
+    # error kept for the record) would otherwise be graded on whatever now sits at the recorded path.
+    project = run / "project" if (run / "project").is_dir() else Path(meta["project"])
+    if project.resolve() != Path(meta["project"]).resolve():
+        meta = {**meta, "project": str(project.resolve()), "project_recorded": meta["project"]}
+    checkout, chosen = select_checkout(project, meta["arm"])
+    harness_error = harness_error or chosen["checkout_error"]
     if transcript is None and (run / "drive.json").is_file():
         recorded = json.loads((run / "drive.json").read_text(encoding="utf-8")).get("transcript")
         transcript = Path(recorded) if recorded else None
-    rows = _transcript_rows(transcript)
+    main_rows, rows, read = session_rows(transcript)
     commits = c_prime._sh(["git", "rev-list", "--count", f"{meta['start_commit']}..HEAD"], checkout).stdout.strip()
     artifact = artifact_sha256(checkout)
     if meta.get("case_kind") == "ui":
@@ -413,17 +555,21 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
     else:
         graded = _grade_phase_case(meta, checkout)
         graded["contaminated"] = any(marker in item for item in tool_inputs(rows) for marker in HIDDEN_MARKERS)
-    message = final_message(rows)
+    message = final_message(main_rows)
     drive = json.loads((run / "drive.json").read_text(encoding="utf-8")) if (run / "drive.json").is_file() else {}
     result = {"isolation": "instructed", **meta, "task_kind": "normal", "checkout": str(checkout), **graded,
               "commits": int(commits) if commits.isdigit() else None,
-              "final_message": message, "declaration": completion.classify(message if rows else None),
-              "spec_self_approvals": sum(bool(SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
+              "final_message": message, "declaration": completion.classify(message if main_rows else None),
+              "spec_self_approvals": sum(bool(SPEC_SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
+              "phase_self_approvals": sum(bool(PHASE_SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
               "verify_downgrades": verify_downgrades(rows),
               "manual_spec_approvals": manual_spec_approvals(project, checkout), "artifact_sha256": artifact,
-              "transcript": str(transcript) if transcript else None, **_usage_totals(rows),
+              "transcript": str(transcript) if transcript else None, **_measured_usage(rows, read), **read,
               "controller_cost_usd": drive.get("cost_usd"), "drive_exit": drive.get("exit"),
+              "drive_timed_out": drive.get("timed_out"), "drive_is_error": drive.get("is_error"),
+              "harness_error": harness_error, **chosen,
               **(_runner_trace(project, checkout) if meta["arm"] in WORKFLOWS else {}),
+              **(gate_record(project, checkout) if meta["arm"] in WORKFLOWS else {}),
               "scored_at": datetime.now().isoformat(timespec="seconds")}
     (run / "result.json").write_text(json.dumps(result, indent=1, default=str) + "\n", encoding="utf-8")
     return result
@@ -493,13 +639,10 @@ MAX_HARNESS_APPROVALS = 30
 
 def runner_status(project: Path) -> dict | None:
     """What `agent-flow continue` reports for the run's worktree, read by the harness, not by the agent."""
-    listing = c_prime._sh(["git", "worktree", "list", "--porcelain"], project).stdout
-    worktrees = [Path(line.split(" ", 1)[1]) for line in listing.splitlines()
-                 if line.startswith("worktree ") and Path(line.split(" ", 1)[1]).resolve() != project.resolve()]
-    worktrees = [path for path in worktrees if path.is_dir()]
-    if not worktrees:
+    owned = runner_worktrees(project)
+    if len(owned) != 1:
         return None
-    worktree = max(worktrees, key=lambda path: path.stat().st_mtime)
+    worktree = owned[0]
     shown = c_prime._sh([str(project / ".agent-flow" / "bin" / "agent-flow"), "continue", "--root", str(project),
                          "--worktree", worktree.name], worktree)
     for line in (shown.stdout or "").splitlines():
@@ -588,28 +731,57 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
     return record
 
 
+def run_status(row: dict) -> str:
+    """Why a run cannot count as an ordinary attempt, or `ok`.
+
+    - harness-error: the harness itself was broken (marked with `score --harness-error`). The attempt was re-run
+      under the fixed harness, so it leaves the denominator and is listed apart.
+    - contaminated, infra-error (the controller or the evaluator failed), timed-out: assigned attempts. They stay in
+      the denominator and count as failures (PREREGISTRATION.md, "제외").
+    """
+    if row.get("harness_error"):
+        return "harness-error"
+    if row.get("contaminated"):
+        return "contaminated"
+    if row.get("drive_timed_out"):
+        return "timed-out"
+    if row.get("drive_is_error") or (row.get("drive_exit") not in (None, 0)) or (row.get("ui") or {}).get("error"):
+        return "infra-error"
+    return "ok"
+
+
 def _succeeded(row: dict) -> bool:
-    return bool(row["oracle"]) and row["declaration"] != completion.BLOCKED and not rule_violation(row)
+    """PREREGISTRATION.md: S=1 and a completion declaration and no rule violation and not contaminated."""
+    return (bool(row["oracle"]) and row["declaration"] == completion.COMPLETE and not rule_violation(row)
+            and run_status(row) == "ok")
 
 
 def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+STATUS_COLUMNS = ("contaminated", "infra-error", "timed-out")
+
+
 def summarize(results: list[dict]) -> str:
-    clean = [row for row in results if not row.get("contaminated")]
-    table = completion.summarize(clean)
-    lines = ["| arm | runs | success | one-sided Fisher p vs A | overclaim (upper 95%) | declared complete/blocked/"
-             "undeclared/unmeasured | contaminated | output tokens (mean) | input uncached+cached (mean) | "
-             "seconds (mean) | reviewer jobs (mean) | rule violations | isolation |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
-    base = [row for row in clean if row["arm"] == "A"]
+    """Every assigned run is in its arm's denominator; only harness errors are listed apart (with their reasons)."""
+    assigned = [row for row in results if run_status(row) != "harness-error"]
+    table = completion.summarize(assigned)
+    lines = ["| arm | assigned runs | success | one-sided Fisher p vs A | overclaim (upper 95%) | declared complete/blocked/"
+             "undeclared/unmeasured | contaminated / infra error / timed out (counted as failures) | "
+             "harness errors (excluded) | output tokens (mean) | input uncached+cached (mean) | "
+             "seconds (mean) | reviewer jobs (mean) | rule violations | isolation | "
+             "runs that ran gates / deferred a gate to CI (never run) |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    base = [row for row in assigned if row["arm"] == "A"]
     base_success = sum(_succeeded(row) for row in base)
+    reasons: list[str] = []
     for arm in ARMS:
-        group = [row for row in clean if row["arm"] == arm]
-        dirty = sum(row.get("contaminated", False) for row in results if row["arm"] == arm)
-        if not group and not dirty:
+        group = [row for row in assigned if row["arm"] == arm]
+        excluded = [row for row in results if row["arm"] == arm and run_status(row) == "harness-error"]
+        if not group and not excluded:
             continue
+        reasons += [f"{arm}-{row.get('trial')}: {row['harness_error']}" for row in excluded]
         item = table.get((arm, "normal"), {})
         success = sum(_succeeded(row) for row in group)
         p = (f"{fisher_greater(base_success, len(base), success, len(group)):.3f}"
@@ -622,13 +794,19 @@ def summarize(results: list[dict]) -> str:
             f"{completion._cell(item.get('overclaim'))} ({completion._cell(upper)})",
             "/".join(str(states.get(state, 0)) for state in
                      (completion.COMPLETE, completion.BLOCKED, completion.UNDECLARED, completion.UNMEASURED)),
-            str(dirty), _fmt(_mean([u["output"] for u in usage if u["output"] is not None])),
+            " / ".join(str(sum(run_status(row) == status for row in group)) for status in STATUS_COLUMNS),
+            str(len(excluded)), _fmt(_mean([u["output"] for u in usage if u["output"] is not None])),
             _fmt(_mean([u["uncached_input"] + u["cached_input"] for u in usage
                         if u["uncached_input"] is not None and u["cached_input"] is not None])),
             _fmt(_mean([row["seconds"] for row in group if row.get("seconds") is not None])),
             _fmt(_mean([row["reviewer_jobs"] for row in group if "reviewer_jobs" in row])),
             str(sum(rule_violation(row) for row in group)),
-            "/".join(sorted({row.get("isolation", "instructed") for row in group})) + " |"]))
+            "/".join(sorted({row.get("isolation", "instructed") for row in group})),
+            (f"{sum(bool(row.get('gate_ledgers')) for row in group)} / "
+             f"{sum(bool(row.get('deferred_ci_checks')) for row in group)}" if arm in WORKFLOWS else "-") + " |"]))
+    if reasons:
+        lines += ["", "Harness errors (re-run under the fixed harness, not in the denominator):", ""]
+        lines += [f"- {reason}" for reason in reasons]
     return "\n".join(lines) + "\n"
 
 
@@ -656,6 +834,8 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("--transcript", type=Path)
     sc.add_argument("--evaluator", type=Path, help="the private evaluator's score.py, for UI tasks")
     sc.add_argument("--repeat", type=int, default=3)
+    sc.add_argument("--harness-error", metavar="REASON",
+                    help="the harness itself broke this run; it is re-run and listed apart from the denominator")
     summ = sub.add_parser("summarize")
     summ.add_argument("results", type=Path, nargs="+")
     args = parser.parse_args(argv)
@@ -665,7 +845,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "drive":
         print(json.dumps(drive(args.run.resolve(), args.model, args.timeout, args.budget), indent=1))
     elif args.command == "score":
-        result = score(args.run.resolve(), args.transcript, args.evaluator, args.repeat)
+        result = score(args.run.resolve(), args.transcript, args.evaluator, args.repeat, args.harness_error)
         print(json.dumps({key: result.get(key) for key in ("arm", "hidden_tests", "oracle", "declaration",
                                                              "contaminated", "commits", "usage", "seconds",
                                                              "artifact_sha256")}))

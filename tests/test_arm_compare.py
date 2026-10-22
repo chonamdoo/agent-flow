@@ -72,22 +72,40 @@ def test_score_runs_hidden_tests_after_the_agent_and_flags_hidden_reads(bare, tm
     assert result["oracle"] is False and result["hidden_tests"]["fix"] is False
     assert result["declaration"] == "declared-complete" and result["contaminated"] is False
     assert result["usage"] == {"input": 166, "uncached_input": 16, "cached_input": 150, "output": 23}
+    assert result["usage_components"] == {"fresh_input": 11, "cache_write": 5, "cache_write_5m": None,
+                                          "cache_write_1h": None, "cache_read": 150, "output": 23}
     assert result["seconds"] == 100
     dirty = _transcript(tmp_path / "dirty.jsonl", tool_input={"file_path": "/x/evals/phase-cases/devflow/author/clean/hidden/t.py"},
                         final="EVAL-STATUS: complete")
     assert arm_compare.score(bare, dirty)["contaminated"] is True
 
 
-def test_summary_leaves_contaminated_runs_out_and_compares_with_a():
-    def row(arm, oracle, contaminated=False):
-        return {"arm": arm, "task_kind": "normal", "oracle": oracle, "contaminated": contaminated,
-                "final_message": "EVAL-STATUS: complete", "declaration": "declared-complete",
-                "usage": {"input": 1, "uncached_input": 1, "cached_input": 0, "output": 10}, "seconds": 5}
-    rows = [row("A", False), row("A", False), row("C", True), row("C", True), row("C", True, contaminated=True)]
+def _summary_row(arm, oracle=True, *, declaration="declared-complete", final="EVAL-STATUS: complete", **extra):
+    return {"arm": arm, "task_kind": "normal", "oracle": oracle, "contaminated": False, "final_message": final,
+            "declaration": declaration, "usage": {"input": 1, "uncached_input": 1, "cached_input": 0, "output": 10},
+            "seconds": 5, **extra}
+
+
+def test_success_needs_a_completion_declaration_and_a_clean_run():
+    # PREREGISTRATION.md: S=1 and a completion declaration and no rule violation and not contaminated.
+    assert arm_compare._succeeded(_summary_row("C"))
+    assert not arm_compare._succeeded(_summary_row("C", declaration="undeclared", final="Done."))
+    assert not arm_compare._succeeded(_summary_row("C", declaration="unmeasured", final=None))
+    assert not arm_compare._succeeded(_summary_row("C", contaminated=True))
+    assert not arm_compare._succeeded(_summary_row("C", drive_timed_out=True))
+
+
+def test_summary_keeps_every_assigned_run_in_the_denominator():
+    rows = [_summary_row("A", False), _summary_row("A", False),
+            _summary_row("C"), _summary_row("C"), _summary_row("C", contaminated=True),
+            _summary_row("C", declaration="undeclared", final="Done."), _summary_row("C", drive_exit=1),
+            _summary_row("C", harness_error="session env leaked into the controller", trial=9)]
     table = arm_compare.summarize(rows)
     c_line = next(line for line in table.splitlines() if line.startswith("| C |"))
-    assert "| 2 | 2/2 |" in c_line and "| 1 |" in c_line
-    assert "0.167" in c_line
+    # 다섯 배정 run 중 성공 둘. 오염·인프라 오류·무선언은 분모에 남고 실패다. harness 오류만 따로 센다.
+    assert "| C | 5 | 2/5 |" in c_line
+    assert "| 1 / 1 / 0 |" in c_line and "| 1 / 1 / 0 | 1 |" in c_line
+    assert "C-9: session env leaked into the controller" in table
 
 
 def test_a_subagent_handback_is_the_final_message():
@@ -130,7 +148,7 @@ def test_human_only_approvals_fail_the_run_and_are_read_from_disk(tmp_path):
                 "usage": {"input": 1, "uncached_input": 1, "cached_input": 0, "output": 1}, "seconds": 1, **extra}
     table = arm_compare.summarize([row("A"), row("C"), row("C", manual_spec_approvals=2), row("C", verify_downgrades=1)])
     c_line = next(line for line in table.splitlines() if line.startswith("| C |"))
-    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed |")
+    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed | 0 / 0 |")
 
 
 def test_the_artifact_fingerprint_ignores_runner_state_and_tracks_edits(bare):
@@ -247,3 +265,146 @@ def test_the_ui_task_installs_the_kit_with_a_declared_architecture(tmp_path):
     arm_compare.prepare(ROOT, "C", "oyg", 1, run)
     kit = json.loads((run / "project" / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
     assert kit["architecture"]["mode"] == "clean"
+
+
+def _session_with_subagent(tmp_path, sub_input):
+    main = _transcript(tmp_path / "s1.jsonl", tool_input={"file_path": "src/shop/cart/domain.py"},
+                       final="Done.\n\nEVAL-STATUS: complete")
+    folder = tmp_path / "s1" / "subagents"
+    folder.mkdir(parents=True)
+    rows = [{"type": "assistant", "isSidechain": True, "timestamp": "2026-10-22T07:00:30Z",
+             "message": {"id": "sub-1", "model": "claude-x", "content": [
+                 {"type": "tool_use", "name": "Bash", "input": sub_input},
+                 {"type": "text", "text": "Sub-agent done.\n\nEVAL-STATUS: blocked: not mine to say"}],
+                 "usage": {"input_tokens": 7, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+                           "output_tokens": 70}}}]
+    (folder / "agent-abc.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    return main
+
+
+def test_subagent_tokens_count_and_its_last_words_are_not_the_final_message(bare, tmp_path):
+    transcript = _session_with_subagent(tmp_path, {"command": "ls"})
+    result = arm_compare.score(bare, transcript)
+    assert result["usage"]["output"] == 23 + 70
+    assert result["subagent_files"] == 1 and result["subagents"] == "read"
+    assert result["declaration"] == "declared-complete"
+
+
+def test_a_hidden_path_read_only_by_a_subagent_is_contamination(bare, tmp_path):
+    transcript = _session_with_subagent(tmp_path, {"command": "cat /x/evals/phase-cases/devflow/author/clean/hidden/t.py"})
+    assert arm_compare.score(bare, transcript)["contaminated"] is True
+
+
+def test_an_unreadable_subagent_folder_leaves_usage_unmeasured(bare, tmp_path, monkeypatch):
+    transcript = _session_with_subagent(tmp_path, {"command": "ls"})
+    monkeypatch.setattr(arm_compare.run_usage, "subagent_transcripts", lambda path: ([], "unreadable"))
+    result = arm_compare.score(bare, transcript)
+    assert result["subagents"] == "unmeasured" and result["usage"]["output"] is None
+
+
+def test_the_cost_estimate_uses_each_token_kind_at_its_own_price():
+    parts = {"fresh_input": 1_000_000, "cache_write": 2_000_000, "cache_write_5m": 1_000_000,
+             "cache_write_1h": 1_000_000, "cache_read": 1_000_000, "output": 1_000_000}
+    assert arm_compare.message_cost("claude-opus-5-5", parts) == 4.0 + 5.0 + 8.0 + 0.20 + 20.0
+    assert arm_compare.message_cost("claude-unknown", parts) is None
+    assert arm_compare.message_cost("claude-opus-5-5", {**parts, "cache_write_5m": None}) is None
+
+
+def _git_init(path):
+    path.mkdir(parents=True)
+    for args in (["init", "-q", "-b", "main"], ["config", "user.name", "t"], ["config", "user.email", "t@e"],
+                 ["config", "commit.gpgsign", "false"], ["commit", "-q", "--allow-empty", "-m", "seed"]):
+        arm_compare._git(args, path)
+
+
+def test_the_runner_worktree_is_graded_even_when_a_newer_one_exists(tmp_path):
+    import os, time
+    project = tmp_path / "project"
+    _git_init(project)
+    worked = tmp_path / "wt" / "feat-x"
+    arm_compare._git(["worktree", "add", "-q", "-b", "feat/x", str(worked)], project)
+    (project / ".git" / "agent-flow" / "worktrees" / "feat-x" / ".agent-flow" / "runs" / "r1").mkdir(parents=True)
+    (worked / "work.txt").write_text("done\n", encoding="utf-8")
+    later = tmp_path / "wt" / "scratch"
+    arm_compare._git(["worktree", "add", "-q", "-b", "scratch", str(later)], project)
+    future = time.time() + 60
+    os.utime(later, (future, future))
+    chosen, info = arm_compare.select_checkout(project, "C")
+    assert chosen == worked and info["checkout_selected_by"] == "runner-state" and info["linked_worktrees"] == 2
+    assert arm_compare.select_checkout(project, "A")[0] == project
+
+
+def test_an_undecidable_worktree_is_a_harness_error(tmp_path):
+    project = tmp_path / "project"
+    _git_init(project)
+    arm_compare._git(["worktree", "add", "-q", "-b", "a", str(tmp_path / "wt" / "a")], project)
+    chosen, info = arm_compare.select_checkout(project, "C")
+    assert chosen == project and info["checkout_error"] == "0 runner worktrees among 1 linked worktrees"
+
+
+def test_a_moved_run_is_graded_on_its_own_project(tmp_path):
+    first = tmp_path / "A-1"
+    arm_compare.prepare(ROOT, "A", "devflow", 1, first)
+    kept = tmp_path / "harness-error-A-1"
+    first.rename(kept)
+    rerun = arm_compare.prepare(ROOT, "A", "devflow", 1, first)
+    (first / "project" / "work.txt").write_text("rerun\n", encoding="utf-8")
+    arm_compare._git(["add", "work.txt"], first / "project")
+    arm_compare._git(["-c", "user.name=t", "-c", "user.email=t@e", "commit", "-qm", "rerun work"], first / "project")
+    result = arm_compare.score(kept, None, harness_error="moved aside")
+    assert result["project"] == str((kept / "project").resolve()) and result["project_recorded"] == rerun["project"]
+    assert result["commits"] == 0
+    assert "project_recorded" not in arm_compare.score(first, None)
+
+
+def test_a_worktree_path_reused_by_a_later_project_is_not_graded(tmp_path):
+    # An attempt moved aside and re-prepared at the same path: the rerun's runner recreates its worktree where the
+    # attempt's stale registration still points.
+    project, worktree = tmp_path / "C-1" / "project", tmp_path / "wt" / "feat-x"
+    _git_init(project)
+    arm_compare._git(["worktree", "add", "-q", "-b", "feat/x", str(worktree)], project)
+    (project / ".git" / "agent-flow" / "worktrees" / "feat-x" / ".agent-flow" / "runs" / "r1").mkdir(parents=True)
+    attempt = tmp_path / "harness-error-C-1"
+    attempt.mkdir()
+    (tmp_path / "C-1").rename(attempt / "C-1")
+    import shutil
+    shutil.rmtree(worktree)
+    rerun = tmp_path / "C-1" / "project"
+    _git_init(rerun)
+    arm_compare._git(["worktree", "add", "-q", "-b", "feat/x", str(worktree)], rerun)
+    (rerun / ".git" / "agent-flow" / "worktrees" / "feat-x" / ".agent-flow" / "runs" / "r1").mkdir(parents=True)
+    chosen, info = arm_compare.select_checkout(attempt / "C-1" / "project", "C")
+    assert chosen == attempt / "C-1" / "project" and info["linked_worktrees"] == 0
+    assert arm_compare.select_checkout(rerun, "C")[0] == worktree
+
+
+def test_a_gate_deferred_to_ci_is_recorded_as_never_run(tmp_path):
+    project, checkout = tmp_path / "project", tmp_path / "wt"
+    ledger = project / ".git" / "agent-flow" / "worktrees" / "w" / ".agent-flow" / "runs" / "r1" / "artifacts"
+    ledger.mkdir(parents=True)
+    (ledger / "gate-results.json").write_text(json.dumps({
+        "status": "green", "execution": "local", "deferred_ci_checks": ["pytest"],
+        "results": [{"gate_id": "architecture-lint", "required": True, "passed": True},
+                    {"gate_id": "lint", "required": False, "passed": False}]}), encoding="utf-8")
+    record = arm_compare.gate_record(project, checkout)
+    assert record == {"gate_ledgers": 1, "local_gates": [["architecture-lint", True, True], ["lint", False, False]],
+                      "deferred_ci_checks": ["pytest"], "required_local_gates_ran": 1}
+    assert arm_compare.gate_record(tmp_path / "none", checkout)["local_gates"] is None
+    row = _summary_row("C", gate_ledgers=1, deferred_ci_checks=["pytest"])
+    c_line = next(line for line in arm_compare.summarize([row]).splitlines() if line.startswith("| C |"))
+    assert c_line.endswith("| 1 / 1 |")
+
+
+def test_a_rule_counts_only_where_the_runs_prompt_stated_it():
+    # 1차 프롬프트는 에이전트에게 phase 승인을 맡겼다. 지금 규칙으로 그 run을 소급해 위반 처리하지 않는다.
+    assert not arm_compare.rule_violation(_summary_row("C", phase_self_approvals=3))
+    assert arm_compare.rule_violation(_summary_row("C", phase_self_approvals=1,
+                                                   approval_rules=arm_compare.HARNESS_APPROVES))
+    assert arm_compare.rule_violation(_summary_row("C", spec_self_approvals=1))
+    # C′는 runner 없이 자기 SPEC을 쓴다. verify를 manual로 적는 것은 우회할 gate가 없는 편집이다.
+    assert not arm_compare.rule_violation(_summary_row("Cp", verify_downgrades=2))
+
+
+def test_new_workflow_runs_record_that_the_harness_approves(tmp_path):
+    meta = arm_compare.prepare(ROOT, "C", "devflow", 1, tmp_path / "C-1")
+    assert meta["approval_rules"] == arm_compare.HARNESS_APPROVES
