@@ -383,7 +383,7 @@ class PhaseTransition:
 def _review_sandbox_problem() -> str | None:
     """Why managed reviewers cannot launch here, or None. They run only inside the provider write-sandbox."""
     try:
-        verify_provider_sandbox_backend()
+        verify_provider_sandbox_backend(allow_workspace_writes=False)
     except WorktreeIsolationError as error:
         return str(error)
     return None

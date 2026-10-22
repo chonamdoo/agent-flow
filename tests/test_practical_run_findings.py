@@ -210,8 +210,10 @@ def test_review_availability_reports_missing_sandbox_off_macos(monkeypatch):
     from agent_flow.providers.subprocess import verify_provider_sandbox_backend
 
     monkeypatch.setattr(sys, "platform", "linux")
+    # Landlock이 없는 Linux다. 있으면 reviewer는 Landlock backend로 뜬다(#422).
+    monkeypatch.setattr("agent_flow.providers.subprocess._landlock_abi", lambda: 0)
     with pytest.raises(WorktreeIsolationError):
-        verify_provider_sandbox_backend()
+        verify_provider_sandbox_backend(allow_workspace_writes=False)
     review = next(phase for phase in _phases_from_definition(_full_feature()) if phase.multi_review)
     clis = [CliInfo("claude", ("claude",), ("-p",)), CliInfo("codex", ("codex",), ("exec",))]
 
@@ -228,6 +230,7 @@ def test_start_banner_warns_once_about_every_review_phase_off_macos(monkeypatch)
     from agent_flow.runner import _review_sandbox_warning
 
     monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("agent_flow.providers.subprocess._landlock_abi", lambda: 0)
     phases = _phases_from_definition(_full_feature())
     fix_loop = next(phase for phase in phases if phase.id == "fix-loop")
     review = next(phase for phase in phases if phase.multi_review)
