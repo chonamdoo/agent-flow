@@ -19,12 +19,18 @@ model:   score = author runs passing behavior, plan and norm in `evals/phase_eva
 only), then plan passes, then fewer uncached input tokens; the observed required-read rate may not
 drop. Model runs are noisy: keep decisions need a strictly higher pass count.
 
+Each scored state is fingerprinted (`surface_key`); an edit that recreates the best or an already
+scored state is recorded as `no-op`/`duplicate` without evaluation. A measurement with an invalid
+run counts as an evaluation error, not as failures. Re-running the same tag resumes: spending and
+iteration numbers come from `results.tsv`, and the worktree returns to the last kept commit.
+
 Not shipped: like tools/skill-noop, this tree is outside `scripts/` and the kit digest roots.
 """
 from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -41,6 +47,8 @@ TSV_HEADER = "iteration\tcommit\tstatus\tscore\tdev\theldout\textra\tcost_usd\td
 HIDDEN_FROM_PROPOSER = ("evals", "tests", "maintainer", "tools")
 ROUTING_LINE = re.compile(r"^\s*(taskTerms|task_terms):")
 CONTAMINATION_GUARD = "tests/test_eval_case_isolation.py"
+PROPOSER_FAILED = "proposer failed"
+KEY_FIELD = re.compile(r"(?:^|; )key=([0-9a-f]{64})")
 ROUTING_GUARDS = (
     "tests/test_profile_routing.py::test_tanstack_form_capability_routes_only_for_react_web",
     "tests/test_profile_routing.py::test_react_capabilities_route_by_intent_not_all_tsx",
@@ -110,12 +118,42 @@ def surface_violations(tree: Path, track: str, skills: list[str]) -> list[str]:
     return problems
 
 
-def surface_bytes(tree: Path, track: str, skills: list[str]) -> int:
+def surface_paths(tree: Path, track: str, skills: list[str]) -> list[Path]:
     if track == "routing":
         paths = list(tree.glob("skills/*/SKILL.md")) + list(tree.glob("src/agent_flow/profiles/*.yaml"))
     else:
         paths = [path for name in skills for path in (tree / "skills" / name).rglob("*.md")]
-    return sum(path.stat().st_size for path in paths)
+    return sorted(paths)
+
+
+def surface_bytes(tree: Path, track: str, skills: list[str]) -> int:
+    return sum(path.stat().st_size for path in surface_paths(tree, track, skills))
+
+
+def surface_key(tree: Path, track: str, skills: list[str]) -> str:
+    """Fingerprint of the whole editable surface, not of the diff.
+
+    Two candidates with the same key score the same, so the second is never evaluated. The key is
+    the surface state rather than the edit: after a keep, re-trying an idea discarded against the
+    old best is a different state and still gets evaluated. Routing matches lower-cased terms as a
+    set, so term order, case, quoting and duplicates do not change the key. Model text is compared
+    byte for byte (Markdown whitespace can carry meaning); a paraphrase gets a new key.
+    """
+    digest = hashlib.sha256()
+    for path in surface_paths(tree, track, skills):
+        digest.update(path.relative_to(tree).as_posix().encode("utf-8") + b"\0")
+        text = path.read_text(encoding="utf-8")
+        if track == "routing":
+            lines = []
+            for line in text.splitlines():
+                if ROUTING_LINE.match(line):
+                    key, _, value = line.partition(":")
+                    terms = {term.strip().strip("'\"").lower() for term in value.strip().strip("[]").split(",")}
+                    line = f"{key.strip()}:{sorted(terms - {''})}"
+                lines.append(line)
+            text = "\n".join(lines)
+        digest.update(text.encode("utf-8") + b"\0")
+    return digest.hexdigest()
 
 
 # --------------------------------------------------------------------------- evaluation
@@ -144,6 +182,11 @@ def score_routing(tree: Path, work: Path) -> dict:
     if process.returncode != 0:
         return {"error": process.stderr[-600:]}
     payload = json.loads(output.read_text(encoding="utf-8"))
+    # 프로필 worker가 죽으면 그 프로필의 사례가 통째로 빠진다. 다음 후보가 인프라 회복만으로
+    # "improved"가 되지 않도록 측정 자체를 무효로 둔다.
+    broken = [entry["profile"] for entry in payload["profiles"] if "worker_error" in entry or "install_error" in entry]
+    if broken:
+        return {"error": f"routing profiles did not run: {', '.join(broken)}"}
     corpus = json.loads((REPO / "evals" / "routing-cases.json").read_text(encoding="utf-8"))
     split = {case["id"]: case["split"] for case in corpus["cases"]}
     texts = {case["id"]: case["task"] for case in corpus["cases"]}
@@ -169,6 +212,11 @@ def score_model(tree: Path, work: Path, args: argparse.Namespace) -> dict:
         return {"error": (process.stderr or process.stdout)[-600:]}
     rows = [json.loads(line) for line in results.read_text(encoding="utf-8").splitlines() if line.strip()]
     valid = [row for row in rows if not row.get("error") and isinstance(row.get("oracle"), dict)]
+    # 무효 행(timeout·provider 오류)을 실패로 세면 baseline과 후보의 인프라 운이 승패를 정한다.
+    # 한 행이라도 무효면 이 측정은 판정에 쓰지 않는다.
+    if process.returncode != 0 or len(valid) != len(rows) or not rows:
+        return {"error": f"{len(rows) - len(valid)}/{len(rows)} invalid runs, exit {process.returncode}",
+                "cost": sum(row.get("cost_usd") or 0 for row in rows)}
     passed = sum(all(row["oracle"].get(axis) for axis in ("behavior", "plan", "norm")) for row in valid)
     plan = sum(bool(row["oracle"].get("plan")) for row in valid)
     tokens = sum((row.get("usage") or {}).get("uncached_input") or 0 for row in valid)
@@ -197,6 +245,8 @@ def better(candidate: dict, best: dict, track: str, candidate_bytes: int, best_b
         if candidate["score"] == best["score"] and candidate_bytes < best_bytes:
             return True, "same score, shorter"
         return False, "no improvement"
+    if candidate.get("dev_total") != best.get("dev_total"):
+        return False, f"run count changed: {candidate.get('dev_total')} vs {best.get('dev_total')}"
     if best.get("read_rate") is not None and (candidate.get("read_rate") or 0) < best["read_rate"]:
         return False, "required-read rate dropped"
     passed, plan, _ = candidate["score"]
@@ -223,7 +273,10 @@ def propose(tree: Path, args: argparse.Namespace, state: str) -> tuple[str, floa
     try:
         payload = json.loads(process.stdout)
     except json.JSONDecodeError:
-        return f"proposer failed: {(process.stderr or process.stdout)[-200:]}", 0.0
+        return f"{PROPOSER_FAILED}: {(process.stderr or process.stdout)[-200:]}", 0.0
+    if payload.get("is_error"):
+        # 예산·turn 상한으로 끊긴 세션의 편집은 반쯤 쓴 것일 수 있다. 평가하지 않는다.
+        return f"{PROPOSER_FAILED}: {payload.get('subtype') or 'is_error'}", float(payload.get("total_cost_usd") or 0)
     text = payload.get("result") or ""
     match = re.search(r"DESCRIPTION:\s*(.+)", text)
     return (match.group(1).strip() if match else text.strip().splitlines()[-1:][0] if text.strip() else "no description"), \
@@ -235,8 +288,14 @@ def state_text(args: argparse.Namespace, best: dict, results: Path) -> str:
     lines = [f"Track: {args.track}", f"Best score: {best['dev']}/{best['dev_total']} (higher is better)"]
     if args.track == "model":
         lines.append(f"Editable skills: {', '.join(args.skills)}")
-    lines += ["", best["feedback"], "", "Recent attempts (iteration, status, description):"]
-    lines += [f"- {row.split(chr(9))[0]} {row.split(chr(9))[2]}: {row.split(chr(9))[-1]}" for row in history] or ["- none"]
+    lines += ["", best["feedback"], "", "Recent attempts (iteration, status, reason, description):"]
+    for row in history:
+        cells = row.split("\t")
+        # extra 열의 첫 조각이 판정 사유다(invalid의 범위 위반, duplicate의 원본 회차 등).
+        reason = cells[6].split(";")[0].strip() if len(cells) > 6 else ""
+        lines.append(f"- {cells[0]} {cells[2]} ({reason}): {cells[-1]}")
+    if not history:
+        lines.append("- none")
     return "\n".join(lines)
 
 
@@ -247,6 +306,29 @@ def record(results: Path, iteration: str, commit: str, status: str, outcome: dic
         handle.write("\t".join(map(str, [iteration, commit[:12], status, score, outcome.get("dev", ""),
                                           outcome.get("heldout", ""), extra, f"{cost:.4f}",
                                           description.replace("\t", " ").replace("\n", " ")])) + "\n")
+
+
+def resume(tree: Path, results: Path) -> tuple[float, int, dict[str, str]]:
+    """Spent cost, next iteration number and seen surface keys from an earlier run of the same tag.
+
+    A run can die between committing a candidate and resetting it (a timeout or a container
+    restart). Restarting must not measure that unjudged commit as the new baseline, so the
+    worktree goes back to the last kept commit. Spending resumes from the log so a restart does
+    not reset the budget.
+    """
+    rows = [row.split("\t") for row in results.read_text(encoding="utf-8").splitlines()[1:] if row.strip()]
+    spent = sum(float(row[7]) for row in rows if len(row) > 7 and re.fullmatch(r"\d+(\.\d+)?", row[7]))
+    numbers = [int(row[0]) for row in rows if row and row[0].isdigit()]
+    seen = {}
+    for row in rows:
+        match = KEY_FIELD.search(row[6]) if len(row) > 6 else None
+        if match:
+            seen.setdefault(match.group(1), row[0])
+    kept = [row[1] for row in rows if len(row) > 2 and row[2] == "keep"]
+    if kept:
+        git(tree, "reset", "-q", "--hard", git(tree, "rev-parse", kept[-1]))
+        git(tree, "clean", "-qfd")
+    return spent, max(numbers, default=0) + 1, seen
 
 
 # --------------------------------------------------------------------------- loop
@@ -277,30 +359,46 @@ def main(argv: list[str] | None = None) -> int:
     results = work / "results.tsv"
     if not results.exists():
         results.write_text(TSV_HEADER, encoding="utf-8")
-    spent = 0.0
+    spent, first, seen = resume(tree, results)
+    if spent >= args.budget_usd:
+        print(f"budget already spent: ${spent:.2f} of ${args.budget_usd:.2f}; log {results}")
+        return 0
+    label = "baseline" if first == 1 else "resume"
     best = evaluate(tree, work, args)
     if "error" in best:
-        print(f"baseline evaluation failed: {best['error']}", file=sys.stderr)
+        print(f"{label} evaluation failed: {best['error']}", file=sys.stderr)
         return 1
     spent += best.get("cost", 0.0)
     best_commit = git(tree, "rev-parse", "HEAD")
     best_bytes = surface_bytes(tree, args.track, args.skills)
-    record(results, "baseline", best_commit, "keep", best, f"bytes={best_bytes}", best.get("cost", 0.0), "baseline")
-    print(f"baseline {best['dev']}/{best['dev_total']} heldout {best['heldout']}/{best['heldout_total']}", flush=True)
+    best_key = surface_key(tree, args.track, args.skills)
+    seen.setdefault(best_key, label)
+    record(results, label, best_commit, "keep", best, f"bytes={best_bytes}; key={best_key}", best.get("cost", 0.0), label)
+    print(f"{label} {best['dev']}/{best['dev_total']} heldout {best['heldout']}/{best['heldout_total']}", flush=True)
 
     idle = 0
-    for iteration in range(1, args.iterations + 1):
+    for iteration in range(first, first + args.iterations):
         if spent >= args.budget_usd or idle >= args.patience:
             break
         description, cost = propose(tree, args, state_text(args, best, results))
         spent += cost
-        problems = surface_violations(tree, args.track, args.skills)
-        if not changed_files(tree):
-            problems = problems or ["no edit"]
+        problems = [description] if description.startswith(PROPOSER_FAILED) else []
+        problems = problems or surface_violations(tree, args.track, args.skills)
+        if not problems and not changed_files(tree):
+            problems = ["no edit"]
+        status = "invalid"
+        if not problems:
+            key = surface_key(tree, args.track, args.skills)
+            if key == best_key:
+                problems = ["no-op: same surface as the best"]
+            elif key in seen:
+                # 같은 표면은 같은 점수를 낸다. 다시 재면 비용만 들고, 노이즈가 있는 track에서는
+                # 같은 후보를 한 번 더 뽑는 셈이라 우연한 keep 확률만 늘어난다.
+                problems, status = [f"duplicate of #{seen[key]}"], "duplicate"
         if problems:
             git(tree, "reset", "-q", "--hard", best_commit)
             git(tree, "clean", "-qfd")
-            record(results, str(iteration), best_commit, "invalid", {}, "; ".join(problems)[:200], cost, description)
+            record(results, str(iteration), best_commit, status, {}, "; ".join(problems)[:200], cost, description)
             idle += 1
             continue
         git(tree, "add", "-A")
@@ -313,13 +411,18 @@ def main(argv: list[str] | None = None) -> int:
         candidate_bytes = surface_bytes(tree, args.track, args.skills)
         keep, reason = (False, f"guard: {failed_guards[0]}") if failed_guards else \
             better(outcome, best, args.track, candidate_bytes, best_bytes)
+        # 평가 오류로 끝난 표면은 다음에 다시 잴 수 있게 지문을 남기지 않는다.
+        evaluated = not failed_guards and "error" not in outcome
+        if evaluated:
+            seen[key] = str(iteration)
         record(results, str(iteration), commit, "keep" if keep else "discard", outcome,
-               f"{reason}; bytes={candidate_bytes}", cost + outcome.get("cost", 0.0), description)
+               f"{reason}; bytes={candidate_bytes}" + (f"; key={key}" if evaluated else ""),
+               cost + outcome.get("cost", 0.0), description)
         print(f"#{iteration} {'keep' if keep else 'discard'} ({reason}) {outcome.get('dev', '-')}/"
               f"{outcome.get('dev_total', '-')} heldout {outcome.get('heldout', '-')} spent ${spent:.2f}: {description}",
               flush=True)
         if keep:
-            best, best_commit, best_bytes, idle = outcome, commit, candidate_bytes, 0
+            best, best_commit, best_bytes, best_key, idle = outcome, commit, candidate_bytes, key, 0
         else:
             git(tree, "reset", "-q", "--hard", best_commit)
             idle += 1
