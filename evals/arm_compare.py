@@ -393,7 +393,8 @@ def _grade_ui(checkout: Path, transcript: Path | None, evaluator: Path, repeat: 
     return json.loads(out.read_text(encoding="utf-8"))
 
 
-def score(run: Path, transcript: Path | None, evaluator: Path | None = None, repeat: int = 3) -> dict:
+def score(run: Path, transcript: Path | None, evaluator: Path | None = None, repeat: int = 3,
+          harness_error: str | None = None) -> dict:
     meta = json.loads((run / "arm.json").read_text(encoding="utf-8"))
     project = Path(meta["project"])
     checkout = worked_checkout(project)
@@ -423,6 +424,8 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
               "manual_spec_approvals": manual_spec_approvals(project, checkout), "artifact_sha256": artifact,
               "transcript": str(transcript) if transcript else None, **_usage_totals(rows),
               "controller_cost_usd": drive.get("cost_usd"), "drive_exit": drive.get("exit"),
+              "drive_timed_out": drive.get("timed_out"), "drive_is_error": drive.get("is_error"),
+              "harness_error": harness_error,
               **(_runner_trace(project, checkout) if meta["arm"] in WORKFLOWS else {}),
               "scored_at": datetime.now().isoformat(timespec="seconds")}
     (run / "result.json").write_text(json.dumps(result, indent=1, default=str) + "\n", encoding="utf-8")
@@ -588,28 +591,56 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
     return record
 
 
+def run_status(row: dict) -> str:
+    """Why a run cannot count as an ordinary attempt, or `ok`.
+
+    - harness-error: the harness itself was broken (marked with `score --harness-error`). The attempt was re-run
+      under the fixed harness, so it leaves the denominator and is listed apart.
+    - contaminated, infra-error (the controller or the evaluator failed), timed-out: assigned attempts. They stay in
+      the denominator and count as failures (PREREGISTRATION.md, "제외").
+    """
+    if row.get("harness_error"):
+        return "harness-error"
+    if row.get("contaminated"):
+        return "contaminated"
+    if row.get("drive_timed_out"):
+        return "timed-out"
+    if row.get("drive_is_error") or (row.get("drive_exit") not in (None, 0)) or (row.get("ui") or {}).get("error"):
+        return "infra-error"
+    return "ok"
+
+
 def _succeeded(row: dict) -> bool:
-    return bool(row["oracle"]) and row["declaration"] != completion.BLOCKED and not rule_violation(row)
+    """PREREGISTRATION.md: S=1 and a completion declaration and no rule violation and not contaminated."""
+    return (bool(row["oracle"]) and row["declaration"] == completion.COMPLETE and not rule_violation(row)
+            and run_status(row) == "ok")
 
 
 def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+STATUS_COLUMNS = ("contaminated", "infra-error", "timed-out")
+
+
 def summarize(results: list[dict]) -> str:
-    clean = [row for row in results if not row.get("contaminated")]
-    table = completion.summarize(clean)
-    lines = ["| arm | runs | success | one-sided Fisher p vs A | overclaim (upper 95%) | declared complete/blocked/"
-             "undeclared/unmeasured | contaminated | output tokens (mean) | input uncached+cached (mean) | "
+    """Every assigned run is in its arm's denominator; only harness errors are listed apart (with their reasons)."""
+    assigned = [row for row in results if run_status(row) != "harness-error"]
+    table = completion.summarize(assigned)
+    lines = ["| arm | assigned runs | success | one-sided Fisher p vs A | overclaim (upper 95%) | declared complete/blocked/"
+             "undeclared/unmeasured | contaminated / infra error / timed out (counted as failures) | "
+             "harness errors (excluded) | output tokens (mean) | input uncached+cached (mean) | "
              "seconds (mean) | reviewer jobs (mean) | rule violations | isolation |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
-    base = [row for row in clean if row["arm"] == "A"]
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    base = [row for row in assigned if row["arm"] == "A"]
     base_success = sum(_succeeded(row) for row in base)
+    reasons: list[str] = []
     for arm in ARMS:
-        group = [row for row in clean if row["arm"] == arm]
-        dirty = sum(row.get("contaminated", False) for row in results if row["arm"] == arm)
-        if not group and not dirty:
+        group = [row for row in assigned if row["arm"] == arm]
+        excluded = [row for row in results if row["arm"] == arm and run_status(row) == "harness-error"]
+        if not group and not excluded:
             continue
+        reasons += [f"{arm}-{row.get('trial')}: {row['harness_error']}" for row in excluded]
         item = table.get((arm, "normal"), {})
         success = sum(_succeeded(row) for row in group)
         p = (f"{fisher_greater(base_success, len(base), success, len(group)):.3f}"
@@ -622,13 +653,17 @@ def summarize(results: list[dict]) -> str:
             f"{completion._cell(item.get('overclaim'))} ({completion._cell(upper)})",
             "/".join(str(states.get(state, 0)) for state in
                      (completion.COMPLETE, completion.BLOCKED, completion.UNDECLARED, completion.UNMEASURED)),
-            str(dirty), _fmt(_mean([u["output"] for u in usage if u["output"] is not None])),
+            " / ".join(str(sum(run_status(row) == status for row in group)) for status in STATUS_COLUMNS),
+            str(len(excluded)), _fmt(_mean([u["output"] for u in usage if u["output"] is not None])),
             _fmt(_mean([u["uncached_input"] + u["cached_input"] for u in usage
                         if u["uncached_input"] is not None and u["cached_input"] is not None])),
             _fmt(_mean([row["seconds"] for row in group if row.get("seconds") is not None])),
             _fmt(_mean([row["reviewer_jobs"] for row in group if "reviewer_jobs" in row])),
             str(sum(rule_violation(row) for row in group)),
             "/".join(sorted({row.get("isolation", "instructed") for row in group})) + " |"]))
+    if reasons:
+        lines += ["", "Harness errors (re-run under the fixed harness, not in the denominator):", ""]
+        lines += [f"- {reason}" for reason in reasons]
     return "\n".join(lines) + "\n"
 
 
@@ -656,6 +691,8 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("--transcript", type=Path)
     sc.add_argument("--evaluator", type=Path, help="the private evaluator's score.py, for UI tasks")
     sc.add_argument("--repeat", type=int, default=3)
+    sc.add_argument("--harness-error", metavar="REASON",
+                    help="the harness itself broke this run; it is re-run and listed apart from the denominator")
     summ = sub.add_parser("summarize")
     summ.add_argument("results", type=Path, nargs="+")
     args = parser.parse_args(argv)
@@ -665,7 +702,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "drive":
         print(json.dumps(drive(args.run.resolve(), args.model, args.timeout, args.budget), indent=1))
     elif args.command == "score":
-        result = score(args.run.resolve(), args.transcript, args.evaluator, args.repeat)
+        result = score(args.run.resolve(), args.transcript, args.evaluator, args.repeat, args.harness_error)
         print(json.dumps({key: result.get(key) for key in ("arm", "hidden_tests", "oracle", "declaration",
                                                              "contaminated", "commits", "usage", "seconds",
                                                              "artifact_sha256")}))

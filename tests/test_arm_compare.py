@@ -78,16 +78,32 @@ def test_score_runs_hidden_tests_after_the_agent_and_flags_hidden_reads(bare, tm
     assert arm_compare.score(bare, dirty)["contaminated"] is True
 
 
-def test_summary_leaves_contaminated_runs_out_and_compares_with_a():
-    def row(arm, oracle, contaminated=False):
-        return {"arm": arm, "task_kind": "normal", "oracle": oracle, "contaminated": contaminated,
-                "final_message": "EVAL-STATUS: complete", "declaration": "declared-complete",
-                "usage": {"input": 1, "uncached_input": 1, "cached_input": 0, "output": 10}, "seconds": 5}
-    rows = [row("A", False), row("A", False), row("C", True), row("C", True), row("C", True, contaminated=True)]
+def _summary_row(arm, oracle=True, *, declaration="declared-complete", final="EVAL-STATUS: complete", **extra):
+    return {"arm": arm, "task_kind": "normal", "oracle": oracle, "contaminated": False, "final_message": final,
+            "declaration": declaration, "usage": {"input": 1, "uncached_input": 1, "cached_input": 0, "output": 10},
+            "seconds": 5, **extra}
+
+
+def test_success_needs_a_completion_declaration_and_a_clean_run():
+    # PREREGISTRATION.md: S=1 and a completion declaration and no rule violation and not contaminated.
+    assert arm_compare._succeeded(_summary_row("C"))
+    assert not arm_compare._succeeded(_summary_row("C", declaration="undeclared", final="Done."))
+    assert not arm_compare._succeeded(_summary_row("C", declaration="unmeasured", final=None))
+    assert not arm_compare._succeeded(_summary_row("C", contaminated=True))
+    assert not arm_compare._succeeded(_summary_row("C", drive_timed_out=True))
+
+
+def test_summary_keeps_every_assigned_run_in_the_denominator():
+    rows = [_summary_row("A", False), _summary_row("A", False),
+            _summary_row("C"), _summary_row("C"), _summary_row("C", contaminated=True),
+            _summary_row("C", declaration="undeclared", final="Done."), _summary_row("C", drive_exit=1),
+            _summary_row("C", harness_error="session env leaked into the controller", trial=9)]
     table = arm_compare.summarize(rows)
     c_line = next(line for line in table.splitlines() if line.startswith("| C |"))
-    assert "| 2 | 2/2 |" in c_line and "| 1 |" in c_line
-    assert "0.167" in c_line
+    # 다섯 배정 run 중 성공 둘. 오염·인프라 오류·무선언은 분모에 남고 실패다. harness 오류만 따로 센다.
+    assert "| C | 5 | 2/5 |" in c_line
+    assert "| 1 / 1 / 0 |" in c_line and "| 1 / 1 / 0 | 1 |" in c_line
+    assert "C-9: session env leaked into the controller" in table
 
 
 def test_a_subagent_handback_is_the_final_message():
