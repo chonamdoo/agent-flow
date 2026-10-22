@@ -174,3 +174,40 @@ def test_scoring_twice_leaves_the_artifact_and_its_fingerprint_unchanged(tmp_pat
     second = arm_compare.score(run, None)
     assert first["artifact_sha256"] == second["artifact_sha256"]
     assert not (run / "project" / "tests" / "hidden_fix").exists()
+
+
+def test_the_ui_task_seeds_only_the_layer_and_the_pinned_fixtures(tmp_path):
+    run = tmp_path / "A-oyg"
+    meta = arm_compare.prepare(ROOT, "A", "oyg", 1, run)
+    project = run / "project"
+    names = sorted(str(path.relative_to(project)) for path in project.rglob("*")
+                   if path.is_file() and ".git" not in path.parts)
+    assert names == ["contract/interface.md", "contract/openapi.yaml", "fixtures/catalog.json",
+                     "fixtures/commerce.json", "prd.md"]
+    assert meta["case_kind"] == "ui" and meta["layer"] == "prd"
+    prompt = (run / "prompt.md").read_text(encoding="utf-8")
+    assert "prd.md" in prompt and "EVAL-STATUS" in prompt and "agent-flow" not in prompt
+    with pytest.raises(SystemExit):
+        arm_compare.score(run, None)
+
+
+def test_every_arm_gets_the_same_headless_controller_without_a_bypass_flag():
+    a = arm_compare.controller_argv("task A", "claude-opus-5-5", 30.0)
+    c = arm_compare.controller_argv("task C", "claude-opus-5-5", 30.0)
+    assert a[3:] == c[3:] and a[:2] == ["claude", "-p"]
+    assert not any("dangerously" in item for item in a)
+    assert a[a.index("--max-budget-usd") + 1] == "30"
+
+
+def test_drive_reads_the_session_and_cost_from_the_stream(tmp_path):
+    stream = tmp_path / "controller.jsonl"
+    stream.write_text(json.dumps({"type": "system", "subtype": "init", "session_id": "s-1"}) + "\n" +
+                      json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 1.25, "num_turns": 4,
+                                  "is_error": False}) + "\n", encoding="utf-8")
+    summary = arm_compare._stream_summary(stream)
+    assert summary["session_id"] == "s-1" and summary["cost_usd"] == 1.25
+    projects = tmp_path / "projects"
+    (projects / "-x-project").mkdir(parents=True)
+    (projects / "-x-project" / "s-1.jsonl").write_text("{}\n", encoding="utf-8")
+    assert arm_compare.session_transcript("s-1", projects) == projects / "-x-project" / "s-1.jsonl"
+    assert arm_compare.session_transcript(None, projects) is None

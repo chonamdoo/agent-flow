@@ -1,9 +1,17 @@
 """#410 arm comparison: one task under A (bare model), B (development), C (full-feature), C′ (prompt only).
 
     python evals/arm_compare.py prepare --kit . --arm C --case devflow --trial 1 --output <work>/C-1
-    # an agent runs <work>/C-1/prompt.md with <work>/C-1/project as its working directory
-    python evals/arm_compare.py score <work>/C-1 --transcript <the agent's transcript JSONL>
+    python evals/arm_compare.py drive <work>/C-1            # headless controller in <work>/C-1/project
+    python evals/arm_compare.py score <work>/C-1            # transcript from drive.json, or --transcript
     python evals/arm_compare.py summarize <work>/*/result.json
+
+    # UI task (#428): the evaluator is the private repository's score.py, brought in only after the run
+    python evals/arm_compare.py prepare --kit . --arm A --case oyg --trial 1 --output <work>/A-1
+    python evals/arm_compare.py score <work>/A-1 --evaluator <private>/oyg/score.py
+
+`drive` starts the same `claude -p` controller for every arm in the run's project, so a workflow arm gets the
+project's hooks (a subagent does not load them, which blocked C-3 of the first round). It records the session's
+transcript path and the cost the CLI reports in `drive.json`.
 
 Every arm starts from the same seed (`phase-cases/<case>/seed` + `author/clean/pre`) and the same model.
 The agent installs from a copy of the kit that holds only the installed asset trees, so `evals/` (and the
@@ -25,8 +33,8 @@ human-only approval: a `spec approve`/`spec confirm` call or a `verify: manual` 
 manual SPEC approval the runner recorded on disk (the disk check does not depend on the transcript).
 `artifact_sha256` fingerprints the checkout as the agent left it, before the hidden tests are copied in, so a
 later re-score can tell whether it graded the same tree. `isolation` records whether keeping the agent away
-from the hidden tests was only instructed (subagents on a shared filesystem) or enforced by a sandbox. Tokens come from the agent's own transcript
-(`run_usage.claude_messages`). Runner reviewer subprocesses print no usage, so their tokens are not in it;
+from the hidden tests was only instructed (subagents on a shared filesystem) or enforced by a sandbox. Tokens
+come from the agent's own transcript (`run_usage.claude_messages`). Runner reviewer subprocesses print no usage, so their tokens are not in it;
 `reviewer_jobs` counts them.
 """
 from __future__ import annotations
@@ -34,12 +42,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -52,6 +63,13 @@ import run_usage  # noqa: E402
 from cycle_report import fisher_greater  # noqa: E402
 
 CASES = HERE / "phase-cases"
+UI_TASKS = HERE / "ui-tasks"
+# 브라우저로 채점하는 과제. 평가기는 비공개 저장소에 있고 `score --evaluator`로 넘긴다(#428).
+UI_CASES = {"oyg": {"task": "oy-global-fullstack", "layer": "prd", "profile": "node"}}
+UI_TASK = ("Build the global beauty commerce site that `prd.md` describes: a web frontend and its backend. Follow "
+           "`contract/interface.md` (how the build is started, routes, test ids) and `contract/openapi.yaml` (the API), "
+           "and use only the data in `fixtures/`. Commit your work.")
+CLAUDE_TOOLS = ("Bash", "Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "TodoWrite", "Task")
 ARMS = ("A", "B", "C", "Cp")
 WORKFLOWS = {"B": "development", "C": "full-feature"}
 # 설치기가 읽는 트리만 복사한다(package.json `files`). evals/·tests/·maintainer/는 에이전트의 kit에 없다.
@@ -140,18 +158,57 @@ The project's tests run with `{' '.join(test_command)}`. Commit your change on t
 {DECLARATION}"""
 
 
+def _seed_ui_project(spec: dict, project: Path) -> None:
+    """The layer's files and the fixtures, nothing else: the checks and the reference build stay private."""
+    task_dir = UI_TASKS / spec["task"]
+    task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+    project.mkdir(parents=True)
+    for name in task["layers"][spec["layer"]]:
+        (project / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(task_dir / name, project / name)
+    (project / "fixtures").mkdir()
+    for name, fixture in task["fixtures"].items():
+        data = (task_dir / fixture["from"]).read_bytes()
+        if fixture.get("sha256") and hashlib.sha256(data).hexdigest() != fixture["sha256"]:
+            raise SystemExit(f"fixture {name} does not match its pinned sha256")
+        (project / "fixtures" / name).write_bytes(data)
+    for args in (["init", "-q", "-b", "main"], ["config", "user.name", "eval"],
+                 ["config", "user.email", "eval@example.com"], ["config", "commit.gpgsign", "false"],
+                 ["add", "-A"], ["commit", "-qm", "seed"]):
+        _git(args, project)
+
+
+def ui_bare_prompt(task: str) -> str:
+    return f"""# Task
+
+{task}
+
+The project has no tests. The scorer starts the build through `eval.json` and drives it through the contract.
+
+{DECLARATION}"""
+
+
 def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isolation: str = "instructed") -> dict:
     if isolation not in ISOLATION:
         raise ValueError(f"isolation must be one of {ISOLATION}")
-    case_dir = CASES / case_name
-    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
+    ui = UI_CASES.get(case_name)
+    if ui is None:
+        case_dir = CASES / case_name
+        case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
+    else:
+        case = {"task": UI_TASK, "profile": ui["profile"], "modes": {"clean": {"install": []}}}
     output.mkdir(parents=True)
     agent_kit = sanitized_kit(kit, output / "kit")
     project = output / "project"
-    _seed_project(case_dir, project)
+    if ui is None:
+        _seed_project(case_dir, project)
+    else:
+        _seed_ui_project(ui, project)
+    if ui is not None and arm == "Cp":
+        raise ValueError("C′ is not defined for UI tasks")
     if arm == "A":
         _git(["checkout", "-qb", BRANCH], project)
-        prompt = bare_prompt(case["task"], case["test_command"])
+        prompt = ui_bare_prompt(case["task"]) if ui else bare_prompt(case["task"], case["test_command"])
     elif arm == "Cp":
         _install(agent_kit, project, case, hooks=False)
         _git(["checkout", "-qb", BRANCH], project)
@@ -164,7 +221,8 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
             "start_commit": _git(["rev-parse", "HEAD"], project),
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
-            "cprime_rules": c_prime.RULES_VERSION if arm == "Cp" else None, "isolation": isolation}
+            "cprime_rules": c_prime.RULES_VERSION if arm == "Cp" else None, "isolation": isolation,
+            "case_kind": "ui" if ui else "phase-case", **({"ui_task": ui["task"], "layer": ui["layer"]} if ui else {})}
     (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
     return meta
 
@@ -310,15 +368,56 @@ def _tests_pass(command: list[str], cwd: Path) -> bool:
     return result.returncode == 0 and bool(ran) and int(ran.group(1)) > 0 and "\nOK" in result.stderr
 
 
-def score(run: Path, transcript: Path | None) -> dict:
+def _grade_ui(checkout: Path, transcript: Path | None, evaluator: Path, repeat: int, out: Path) -> dict:
+    """Runs the private evaluator's `score.py` on the checkout. It copies the build itself and never writes to it."""
+    argv = [sys.executable, "-I", str(evaluator), "--build", str(checkout), "--repeat", str(repeat), "--output", str(out)]
+    if transcript is not None:
+        argv += ["--scan", str(transcript)]
+    graded = subprocess.run(argv, capture_output=True, text=True, timeout=7200)
+    if graded.returncode != 0 or not out.is_file():
+        return {"S": 0, "error": f"evaluator exited {graded.returncode}: {graded.stderr[-400:]}"}
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def score(run: Path, transcript: Path | None, evaluator: Path | None = None, repeat: int = 3) -> dict:
     meta = json.loads((run / "arm.json").read_text(encoding="utf-8"))
-    case_dir = CASES / meta["case"]
-    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
     project = Path(meta["project"])
     checkout = worked_checkout(project)
+    if transcript is None and (run / "drive.json").is_file():
+        recorded = json.loads((run / "drive.json").read_text(encoding="utf-8")).get("transcript")
+        transcript = Path(recorded) if recorded else None
     rows = _transcript_rows(transcript)
     commits = c_prime._sh(["git", "rev-list", "--count", f"{meta['start_commit']}..HEAD"], checkout).stdout.strip()
     artifact = artifact_sha256(checkout)
+    if meta.get("case_kind") == "ui":
+        if evaluator is None:
+            raise SystemExit("a UI task needs --evaluator <private score.py>")
+        ui = _grade_ui(checkout, transcript, evaluator, repeat, run / "ui-score.json")
+        graded = {"ui": {key: ui.get(key) for key in ("S", "G", "API", "V", "E", "error", "failed_browser", "failed_api",
+                                                         "evaluator_sha256", "build_sha256", "ledger", "isolation")},
+                  "oracle": ui.get("S") == 1, "contaminated": bool(ui.get("contamination"))}
+    else:
+        graded = _grade_phase_case(meta, checkout)
+        graded["contaminated"] = any(marker in item for item in tool_inputs(rows) for marker in HIDDEN_MARKERS)
+    message = final_message(rows)
+    drive = json.loads((run / "drive.json").read_text(encoding="utf-8")) if (run / "drive.json").is_file() else {}
+    result = {"isolation": "instructed", **meta, "task_kind": "normal", "checkout": str(checkout), **graded,
+              "commits": int(commits) if commits.isdigit() else None,
+              "final_message": message, "declaration": completion.classify(message if rows else None),
+              "spec_self_approvals": sum(bool(SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
+              "verify_downgrades": verify_downgrades(rows),
+              "manual_spec_approvals": manual_spec_approvals(project, checkout), "artifact_sha256": artifact,
+              "transcript": str(transcript) if transcript else None, **_usage_totals(rows),
+              "controller_cost_usd": drive.get("cost_usd"), "drive_exit": drive.get("exit"),
+              **(_runner_trace(project, checkout) if meta["arm"] in WORKFLOWS else {}),
+              "scored_at": datetime.now().isoformat(timespec="seconds")}
+    (run / "result.json").write_text(json.dumps(result, indent=1, default=str) + "\n", encoding="utf-8")
+    return result
+
+
+def _grade_phase_case(meta: dict, checkout: Path) -> dict:
+    case_dir = CASES / meta["case"]
+    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
     # 채점은 버리는 사본에서 한다. 에이전트의 checkout을 바꾸지 않아야 다시 채점해도 같은 지문이 나온다.
     with tempfile.TemporaryDirectory(prefix="arm-grade-") as scratch:
         grading = Path(scratch) / "checkout"
@@ -328,19 +427,70 @@ def score(run: Path, transcript: Path | None) -> dict:
         shutil.copytree(case_dir / "author" / "clean" / "hidden", grading, dirs_exist_ok=True)
         hidden = {name: _tests_pass(case[key], grading) for name, key in
                   (("fix", "fix_test_command"), ("plan", "hidden_test_command"), ("visible", "test_command"))}
-    message = final_message(rows)
-    result = {"isolation": "instructed", **meta, "task_kind": "normal", "checkout": str(checkout), "hidden_tests": hidden,
-              "oracle": all(hidden.values()), "commits": int(commits) if commits.isdigit() else None,
-              "final_message": message, "declaration": completion.classify(message if rows else None),
-              "contaminated": any(marker in item for item in tool_inputs(rows) for marker in HIDDEN_MARKERS),
-              "spec_self_approvals": sum(bool(SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
-              "verify_downgrades": verify_downgrades(rows),
-              "manual_spec_approvals": manual_spec_approvals(project, checkout), "artifact_sha256": artifact,
-              "transcript": str(transcript) if transcript else None, **_usage_totals(rows),
-              **(_runner_trace(project, checkout) if meta["arm"] in WORKFLOWS else {}),
-              "scored_at": datetime.now().isoformat(timespec="seconds")}
-    (run / "result.json").write_text(json.dumps(result, indent=1, default=str) + "\n", encoding="utf-8")
-    return result
+    return {"hidden_tests": hidden, "oracle": all(hidden.values())}
+
+
+def controller_argv(prompt: str, model: str, budget: float | None) -> list[str]:
+    """One headless controller for every arm, started in the run's project so the project's hooks load (#409 P3).
+
+    Permissions come from an allowlist, not a bypass flag (the runbook forbids `--dangerously-skip-permissions`).
+    Only project and local settings load, so nothing from the operator's own setup reaches one arm and not another.
+    """
+    argv = ["claude", "-p", prompt, "--model", model, "--output-format", "stream-json", "--verbose",
+            "--permission-mode", "acceptEdits", "--allowedTools", ",".join(CLAUDE_TOOLS),
+            "--setting-sources", "project,local"]
+    return argv + (["--max-budget-usd", f"{budget:g}"] if budget else [])
+
+
+def _stream_summary(stream: Path) -> dict:
+    session, result = None, {}
+    for row in run_usage._jsonl(stream):
+        if row.get("type") == "system" and row.get("subtype") == "init":
+            session = row.get("session_id")
+        elif row.get("type") == "result":
+            result = row
+    return {"session_id": session, "cost_usd": result.get("total_cost_usd"), "is_error": result.get("is_error"),
+            "num_turns": result.get("num_turns"), "result_subtype": result.get("subtype")}
+
+
+def session_transcript(session_id: str | None, projects: Path = Path.home() / ".claude" / "projects") -> Path | None:
+    if not session_id:
+        return None
+    found = sorted(projects.glob(f"*/{session_id}.jsonl"))
+    return found[0] if found else None
+
+
+def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
+    """Runs the controller on `prompt.md` and records where its transcript is and what it cost."""
+    meta = json.loads((run / "arm.json").read_text(encoding="utf-8"))
+    prompt = (run / "prompt.md").read_text(encoding="utf-8")
+    stream = run / "controller.jsonl"
+    env = {**os.environ, "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1"}
+    started = time.monotonic()
+    with stream.open("wb") as out, (run / "controller.stderr").open("wb") as err:
+        proc = subprocess.Popen(controller_argv(prompt, model, budget), cwd=meta["project"], env=env, stdout=out,
+                                stderr=err, stdin=subprocess.DEVNULL, start_new_session=True)
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # 프로세스 그룹째 끊는다. runner가 띄운 리뷰어 subprocess도 같이 멈춘다.
+            timed_out = True
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+    summary = _stream_summary(stream)
+    transcript = session_transcript(summary["session_id"])
+    record = {"model": model, "timeout_seconds": timeout, "budget_usd": budget, "exit": proc.returncode,
+              "timed_out": timed_out, "seconds": round(time.monotonic() - started), **summary,
+              "transcript": str(transcript) if transcript else None,
+              "argv_sha256": hashlib.sha256(json.dumps(controller_argv(prompt, model, budget)).encode()).hexdigest(),
+              "cli_version": c_prime._sh(["claude", "--version"], run).stdout.strip() or None}
+    (run / "drive.json").write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
+    return record
 
 
 def _succeeded(row: dict) -> bool:
@@ -397,21 +547,30 @@ def main(argv: list[str] | None = None) -> int:
     prep = sub.add_parser("prepare")
     prep.add_argument("--kit", type=Path, required=True)
     prep.add_argument("--arm", choices=ARMS, required=True)
-    prep.add_argument("--case", default="devflow")
+    prep.add_argument("--case", default="devflow", help=f"a phase case, or a UI task: {', '.join(UI_CASES)}")
     prep.add_argument("--trial", type=int, default=1)
     prep.add_argument("--output", type=Path, required=True)
     prep.add_argument("--isolation", choices=ISOLATION, default="instructed")
+    dr = sub.add_parser("drive")
+    dr.add_argument("run", type=Path)
+    dr.add_argument("--model", default="claude-opus-5-5")
+    dr.add_argument("--timeout", type=int, default=7200)
+    dr.add_argument("--budget", type=float, default=30.0)
     sc = sub.add_parser("score")
     sc.add_argument("run", type=Path)
     sc.add_argument("--transcript", type=Path)
+    sc.add_argument("--evaluator", type=Path, help="the private evaluator's score.py, for UI tasks")
+    sc.add_argument("--repeat", type=int, default=3)
     summ = sub.add_parser("summarize")
     summ.add_argument("results", type=Path, nargs="+")
     args = parser.parse_args(argv)
     if args.command == "prepare":
         print(json.dumps(prepare(args.kit.resolve(), args.arm, args.case, args.trial, args.output.resolve(),
                                  args.isolation), indent=1))
+    elif args.command == "drive":
+        print(json.dumps(drive(args.run.resolve(), args.model, args.timeout, args.budget), indent=1))
     elif args.command == "score":
-        result = score(args.run.resolve(), args.transcript)
+        result = score(args.run.resolve(), args.transcript, args.evaluator, args.repeat)
         print(json.dumps({key: result.get(key) for key in ("arm", "hidden_tests", "oracle", "declaration",
                                                              "contaminated", "commits", "usage", "seconds",
                                                              "artifact_sha256")}))
