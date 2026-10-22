@@ -19,7 +19,7 @@ from agent_flow.providers.subprocess import (
 )
 
 LANDLOCK = pytest.mark.skipif(
-    not sys.platform.startswith("linux") or landlock_launch.abi_version() < 1,
+    not sys.platform.startswith("linux") or landlock_launch.abi_version() < landlock_launch.MIN_ABI,
     reason="Linux Landlock is required",
 )
 
@@ -106,9 +106,11 @@ def test_launcher_refuses_bad_arguments_before_running_anything(args):
     assert "provider not started" in run.stderr
 
 
-def test_launcher_fails_closed_without_landlock(tmp_path, monkeypatch):
+@pytest.mark.parametrize("abi", [0, 1, 2])
+def test_launcher_fails_closed_without_truncate_handling(tmp_path, monkeypatch, abi):
+    # ABI 1·2는 truncate를 막지 못한다. scratch 밖 파일을 비울 수 있는 커널에서는 띄우지 않는다.
     executed = []
-    monkeypatch.setattr(landlock_launch, "abi_version", lambda libc=None: 0)
+    monkeypatch.setattr(landlock_launch, "abi_version", lambda libc=None: abi)
     monkeypatch.setattr(landlock_launch.os, "execv", lambda *args: executed.append(args))
 
     with pytest.raises(SystemExit) as exit_info:
@@ -123,6 +125,9 @@ def test_read_only_runs_need_landlock_on_linux(monkeypatch):
     monkeypatch.setattr("agent_flow.providers.subprocess._landlock_abi", lambda: 0)
 
     with pytest.raises(WorktreeIsolationError, match="Landlock is unavailable"):
+        verify_provider_sandbox_backend(allow_workspace_writes=False)
+    monkeypatch.setattr("agent_flow.providers.subprocess._landlock_abi", lambda: 2)
+    with pytest.raises(WorktreeIsolationError, match="cannot block truncation"):
         verify_provider_sandbox_backend(allow_workspace_writes=False)
     # Landlock은 허용한 디렉터리 아래 경로를 다시 막지 못한다. 쓰는 run은 여전히 backend가 없다.
     monkeypatch.setattr("agent_flow.providers.subprocess._landlock_abi", lambda: 7)

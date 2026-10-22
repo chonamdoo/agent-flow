@@ -673,7 +673,7 @@ Hook registration is not proof that a host executes hooks. `agent-flow status` s
 registration, trust, and observed execution per host ([Host connection](#host-connection)), and
 `tools/host-smoke` exercises the real host CLIs ([Real host smoke](#real-host-smoke)). Managed
 provider confinement has two verified backends. macOS `sandbox-exec` confines every provider run.
-On Linux, Landlock (ABI 1 or later, no privileges needed) confines read-only runs, which are the
+On Linux, Landlock (ABI 3 or later, Linux 6.2+; no privileges needed) confines read-only runs, which are the
 multi-review reviewers: writes are allowed only to the run's private scratch and `/dev/null`, for the
 reviewer and every process it starts. Linux runs that write the workspace, Linux without Landlock, and
 other operating systems fail closed instead of receiving the same isolation claim

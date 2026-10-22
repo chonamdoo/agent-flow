@@ -2,7 +2,8 @@
 
     python -I landlock_launch.py --write <scratch> -- <provider argv...>
 
-Reads stay allowed. Every write-class filesystem access is handled by the ruleset, and only
+Needs Landlock ABI 3 (Linux 6.2): ABI 1 and 2 cannot handle truncation. Reads stay allowed.
+Every write-class filesystem access is handled by the ruleset, and only
 `--write` directories (all write rights) and `/dev/null` (file writes) are allowed. The rules hold
 for the provider and every process it starts; `PR_SET_NO_NEW_PRIVS` keeps a setuid child from
 shedding them. Any failure exits 126 before the provider runs: no confinement, no launch.
@@ -40,6 +41,8 @@ MAKE_BLOCK = 1 << 11
 MAKE_SYM = 1 << 12
 REFER = 1 << 13  # ABI 2
 TRUNCATE = 1 << 14  # ABI 3
+# ABI 1·2는 truncate를 막지 못한다. 그 커널에서는 scratch 밖 파일을 비울 수 있으므로 쓰지 않는다.
+MIN_ABI = 3
 
 
 class _RulesetAttr(ctypes.Structure):
@@ -80,8 +83,8 @@ def _fail(message: str) -> None:
 def confine(writable: list[str]) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     abi = abi_version(libc)
-    if abi < 1:
-        _fail("Landlock is unavailable")
+    if abi < MIN_ABI:
+        _fail(f"Landlock ABI {abi} is below {MIN_ABI}" if abi else "Landlock is unavailable")
     handled = write_access(abi)
     attr = _RulesetAttr(handled)
     ruleset = libc.syscall(SYS_LANDLOCK_CREATE_RULESET, ctypes.byref(attr), ctypes.c_size_t(ctypes.sizeof(attr)),

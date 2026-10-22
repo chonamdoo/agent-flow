@@ -502,9 +502,15 @@ def verify_provider_sandbox_backend(*, allow_workspace_writes: bool = True) -> P
     """
 
     if sys.platform.startswith("linux") and not allow_workspace_writes:
-        if _landlock_abi() < 1:
+        from agent_flow.providers.landlock_launch import MIN_ABI
+
+        abi = _landlock_abi()
+        if abi < MIN_ABI:
             raise WorktreeIsolationError(
                 "no verified provider write-sandbox backend: Landlock is unavailable on this kernel"
+                if abi < 1
+                else f"no verified provider write-sandbox backend: Landlock ABI {abi} cannot block truncation "
+                f"(needs {MIN_ABI}, Linux 6.2)"
             )
         if not _LANDLOCK_LAUNCHER.is_file():
             raise WorktreeIsolationError("the Landlock provider launcher is missing from this installation")

@@ -12,7 +12,7 @@ Managed providers run under a write sandbox; until now the only verified backend
 
 ## Decision
 
-On Linux with Landlock ABI ≥ 1, `verify_provider_sandbox_backend(allow_workspace_writes=False)` returns `providers/landlock_launch.py`. The provider argv becomes `python -I landlock_launch.py --write <scratch> -- <argv>`; the launcher handles every write-class access the ABI knows (`REFER` from ABI 2, `TRUNCATE` from ABI 3), allows only the scratch (all write rights) and `/dev/null` (file writes), sets `PR_SET_NO_NEW_PRIVS`, restricts itself, and `exec`s the provider. Any failure exits 126 before the provider starts.
+On Linux with Landlock ABI ≥ 3 (Linux 6.2; ABI 1 and 2 cannot handle truncation, so a reviewer could empty any file), `verify_provider_sandbox_backend(allow_workspace_writes=False)` returns `providers/landlock_launch.py`. The provider argv becomes `python -I landlock_launch.py --write <scratch> -- <argv>`; the launcher handles every write-class access the ABI knows (including `REFER` and `TRUNCATE`), allows only the scratch (all write rights) and `/dev/null` (file writes), sets `PR_SET_NO_NEW_PRIVS`, restricts itself, and `exec`s the provider. Any failure exits 126 before the provider starts.
 
 Runs that write the workspace stay fail closed on Linux. Landlock cannot re-deny a path beneath an allowed directory, so it cannot express the macOS profile's protected paths inside the checkout (`.git` pointer, `.agent-flow`, host state folders).
 
@@ -21,7 +21,12 @@ Runs that write the workspace stay fail closed on Linux. Landlock cannot re-deny
 - Linux hosts with Landlock run `multi-review` reviewers; the start banner and `available` line stop reporting them as blocked.
 - The confinement is per process tree, not a container. Host authentication and the ADR 0004 configuration model are unchanged.
 - Escape tests (`tests/test_landlock_launch.py`) run for real on Linux CI: writes, creates, truncation, symlink and rename escapes, `mkdir`, `.git` pointer and host-state writes, and child processes are denied; reads and `/dev/null` stay allowed.
-- Kernels without Landlock (some sandboxed kernels such as gVisor) keep failing closed with "Landlock is unavailable on this kernel".
+- Kernels without Landlock (some sandboxed kernels such as gVisor) or below ABI 3 keep failing closed.
+
+## Known Limits
+
+- Landlock does not restrict metadata: a reviewer can still `chmod`, `utime` or `setxattr` paths outside the scratch. macOS `file-write*` denies these. File contents, creation, removal, renames and links stay denied. For the leader, the multi-review snapshot comparison still runs after reviewers finish; sibling checkouts have no after-the-fact check. Closing this needs a seccomp filter that also blocks `chmod` inside the scratch, which the provider CLIs may need. That decision is deferred.
+- Descriptors inherited at `exec` keep their access. The only one passed on purpose is the provider-lease slot (an empty lock file, `O_RDWR`). Writing to it changes nothing the runner reads, but `flock(LOCK_UN)` on it releases the slot early. This is the same on macOS.
 
 ## Alternatives Considered
 
