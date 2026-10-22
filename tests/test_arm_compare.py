@@ -1,6 +1,7 @@
 """#410 arm comparison harness: same seed per arm, no hidden tests in the agent's kit, honest scoring."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -408,3 +409,76 @@ def test_a_rule_counts_only_where_the_runs_prompt_stated_it():
 def test_new_workflow_runs_record_that_the_harness_approves(tmp_path):
     meta = arm_compare.prepare(ROOT, "C", "devflow", 1, tmp_path / "C-1")
     assert meta["approval_rules"] == arm_compare.HARNESS_APPROVES
+
+
+def _external_case(tmp_path):
+    seed = tmp_path / "seed-repo"
+    _git_init(seed)
+    (seed / "app.txt").write_text("seed app\n", encoding="utf-8")
+    arm_compare._git(["add", "app.txt"], seed)
+    arm_compare._git(["commit", "-qm", "app"], seed)
+    case_dir = tmp_path / "private" / "mobile"
+    (case_dir / "task").mkdir(parents=True)
+    (case_dir / "task" / "prd.md").write_text("# PRD\n", encoding="utf-8")
+    (case_dir / "checks").mkdir()
+    (case_dir / "checks" / "Hidden.kt").write_text("secret check\n", encoding="utf-8")
+    evaluator = case_dir / "score.py"
+    evaluator.write_text(
+        "import json, sys\n"
+        "args = sys.argv[1:]\n"
+        "assert '--repeat' not in args\n"
+        "out = args[args.index('--output') + 1]\n"
+        "json.dump({'S': 1, 'H': 1.0, 'R': True, 'B': True, 'contamination': [], 'extra': 'x'}, open(out, 'w'))\n",
+        encoding="utf-8")
+    (case_dir / "case.json").write_text(json.dumps({
+        "name": "mobile", "seed": {"repository": str(seed), "commit": arm_compare._git(["rev-parse", "HEAD"], seed)},
+        "files": {"prd.md": "task/prd.md"}, "task": "Build the cart.", "bare_note": "Run ./gradlew test.",
+        "profile": "android", "install": [], "score_keys": ["S", "H", "R", "B"]}), encoding="utf-8")
+    return case_dir, evaluator
+
+
+def test_an_external_case_seeds_its_repository_and_task_files_only(tmp_path):
+    case_dir, _ = _external_case(tmp_path)
+    run = tmp_path / "runs" / "A-1"
+    meta = arm_compare.prepare(ROOT, "A", "ignored", 1, run, case_dir=case_dir)
+    project = run / "project"
+    assert (project / "app.txt").is_file() and (project / "prd.md").read_text(encoding="utf-8") == "# PRD\n"
+    assert not (project / "checks").exists() and not (project / "score.py").exists()
+    assert arm_compare._git(["remote"], project) == ""
+    prompt = (run / "prompt.md").read_text(encoding="utf-8")
+    assert "Build the cart." in prompt and "Run ./gradlew test." in prompt and "EVAL-STATUS" in prompt
+    recorded = (run / "arm.json").read_text(encoding="utf-8")
+    assert meta["case"] == "mobile" and meta["case_kind"] == "external" and str(case_dir) not in recorded
+    assert meta["case_sha256"] == hashlib.sha256((case_dir / "case.json").read_bytes()).hexdigest()
+    leaks = [path for path in (project / ".git").rglob("*") if path.is_file()
+             and str(tmp_path / "seed-repo").encode() in path.read_bytes()]
+    assert leaks == []
+
+
+def test_an_external_case_is_graded_by_its_own_evaluator_and_keys(tmp_path):
+    case_dir, evaluator = _external_case(tmp_path)
+    run = tmp_path / "runs" / "A-1"
+    arm_compare.prepare(ROOT, "A", "ignored", 1, run, case_dir=case_dir)
+    result = arm_compare.score(run, None, evaluator)
+    assert result["oracle"] is True and result["contaminated"] is False
+    assert result["ui"] == {"S": 1, "H": 1.0, "R": True, "B": True, "error": None}
+
+
+def test_an_external_case_can_start_from_patches_of_an_earlier_build(tmp_path):
+    case_dir, _ = _external_case(tmp_path)
+    seed = tmp_path / "seed-repo"
+    (seed / "cart.txt").write_text("cart v0\n", encoding="utf-8")
+    arm_compare._git(["add", "cart.txt"], seed)
+    arm_compare._git(["commit", "-qm", "v0 cart"], seed)
+    patch = arm_compare._git(["format-patch", "-1", "HEAD", "-o", str(case_dir / "reference")], seed)
+    arm_compare._git(["reset", "-q", "--hard", "HEAD~1"], seed)
+    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
+    case["seed"]["patches"] = [str(Path(patch).relative_to(case_dir))]
+    (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+    run = tmp_path / "runs" / "A-1"
+    arm_compare.prepare(ROOT, "A", "ignored", 1, run, case_dir=case_dir)
+    project = run / "project"
+    assert (project / "cart.txt").read_text(encoding="utf-8") == "cart v0\n"
+    assert arm_compare._git(["log", "--format=%s", "-3"], project).splitlines() == ["task", "v0 cart", "app"]
+    assert [path for path in (project / ".git").rglob("*") if path.is_file()
+            and str(case_dir).encode() in path.read_bytes()] == []

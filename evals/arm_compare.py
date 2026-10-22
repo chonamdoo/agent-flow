@@ -79,8 +79,10 @@ UI_TASK = ("Build the global beauty commerce site that `prd.md` describes: a web
            "and use only the data in `fixtures/`. Commit your work.")
 # controller에 넘기는 환경변수. 이 harness를 돌리는 Claude 세션의 변수(CLAUDE_CODE_SESSION_ID 등)를 물려주면
 # controller가 그 세션 id로 기록되고, 조건마다 다른 설정이 섞인다. 인증과 프록시에 필요한 것만 넘긴다.
-CONTROLLER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy",
-                  "http_proxy", "no_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
+# ANDROID_HOME·JAVA_HOME은 Android 과제(mobile-cart)의 Gradle 빌드에 필요하다.
+CONTROLLER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "ANDROID_HOME", "JAVA_HOME", "HTTPS_PROXY",
+                  "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "NODE_EXTRA_CA_CERTS",
+                  "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CODEX_HOME", "OPENAI_API_KEY")
 AGENT_FLOW_WORKTREES = Path.home() / ".agent-flow" / "worktrees"
 CLAUDE_TOOLS = ("Bash", "Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "TodoWrite", "Task")
@@ -199,6 +201,53 @@ def _seed_ui_project(spec: dict, project: Path) -> None:
         _git(args, project)
 
 
+def load_external_case(case_dir: Path) -> dict:
+    """A case kept outside this repository (a holdout in the private evaluator repo): `<dir>/case.json`.
+
+    It names a seed repository at a pinned commit, the task files to place in the project, the task text and the
+    evaluator protocol. Only its name and sha256 go into the run record, never its path.
+    """
+    raw = (case_dir / "case.json").read_bytes()
+    case = json.loads(raw)
+    for key in ("name", "seed", "files", "task", "profile", "install", "score_keys"):
+        if key not in case:
+            raise SystemExit(f"external case is missing `{key}`")
+    return {**case, "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _seed_external_project(case: dict, case_dir: Path, project: Path) -> None:
+    """The seed repository at its pinned commit with no remote, then the task files in one commit.
+
+    The clone's reflog names where it came from, and a seed inside the private checkout would tell the agent where the
+    checks live, so the reflog is emptied along with the remote.
+    """
+    seed = case["seed"]
+    c_prime._sh(["git", "clone", "-q", "--no-checkout", seed["repository"], str(project)], project.parent, check=True)
+    for args in (["checkout", "-q", "-B", "main", seed["commit"]], ["remote", "remove", "origin"],
+                 ["config", "user.name", "eval"], ["config", "user.email", "eval@example.com"],
+                 ["config", "commit.gpgsign", "false"]):
+        _git(args, project)
+    # A later version of a task can start from an earlier version's reference build (`git format-patch` output).
+    for patch in seed.get("patches", []):
+        _git(["am", "-q", str((case_dir / patch).resolve())], project)
+    _git(["reflog", "expire", "--expire=all", "--all"], project)
+    for target, source in case["files"].items():
+        (project / target).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(case_dir / source, project / target)
+    _git(["add", "-A", *case["files"]], project)
+    _git(["commit", "-qm", "task"], project)
+
+
+def external_bare_prompt(case: dict) -> str:
+    return f"""# Task
+
+{case["task"]}
+
+{case.get("bare_note", "")}
+
+{DECLARATION}"""
+
+
 def ui_bare_prompt(task: str) -> str:
     return f"""# Task
 
@@ -209,9 +258,12 @@ The project has no tests. The scorer starts the build through `eval.json` and dr
 {DECLARATION}"""
 
 
-def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isolation: str = "instructed") -> dict:
+def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isolation: str = "instructed",
+            case_dir: Path | None = None) -> dict:
     if isolation not in ISOLATION:
         raise ValueError(f"isolation must be one of {ISOLATION}")
+    if case_dir is not None:
+        return _prepare_external(kit, arm, load_external_case(case_dir), case_dir, trial, output, isolation)
     ui = UI_CASES.get(case_name)
     if ui is None:
         case_dir = CASES / case_name
@@ -245,6 +297,34 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
             "cprime_rules": c_prime.RULES_VERSION if arm == "Cp" else None, "isolation": isolation,
             "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None,
             "case_kind": "ui" if ui else "phase-case", **({"ui_task": ui["task"], "layer": ui["layer"]} if ui else {})}
+    (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
+    return meta
+
+
+def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: int, output: Path,
+                      isolation: str) -> dict:
+    if arm not in ("A", *WORKFLOWS):
+        raise ValueError("an external case defines the A, B and C arms only")
+    output.mkdir(parents=True)
+    agent_kit = sanitized_kit(kit, output / "kit")
+    project = output / "project"
+    _seed_external_project(case, case_dir, project)
+    if arm == "A":
+        _git(["checkout", "-qb", BRANCH], project)
+        prompt = external_bare_prompt(case)
+    else:
+        _install(agent_kit, project, {"profile": case["profile"], "modes": {"clean": {"install": case["install"]}}},
+                 hooks=True)
+        prompt = driver_prompt(case["task"], WORKFLOWS[arm])
+    (output / "prompt.md").write_text(prompt, encoding="utf-8")
+    meta = {"arm": arm, "case": case["name"], "trial": trial, "project": str(project.resolve()),
+            "start_commit": _git(["rev-parse", "HEAD"], project),
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
+            "cprime_rules": None, "isolation": isolation,
+            "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None, "case_kind": "external",
+            "case_sha256": case["sha256"], "seed_commit": case["seed"]["commit"], "score_keys": case["score_keys"],
+            "evaluator_repeat": bool(case.get("evaluator_repeat"))}
     (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
     return meta
 
@@ -518,9 +598,13 @@ def _tests_pass(command: list[str], cwd: Path) -> bool:
     return result.returncode == 0 and bool(ran) and int(ran.group(1)) > 0 and "\nOK" in result.stderr
 
 
-def _grade_ui(checkout: Path, transcript: Path | None, evaluator: Path, repeat: int, out: Path) -> dict:
-    """Runs the private evaluator's `score.py` on the checkout. It copies the build itself and never writes to it."""
-    argv = [sys.executable, "-I", str(evaluator), "--build", str(checkout), "--repeat", str(repeat), "--output", str(out)]
+def _grade_ui(checkout: Path, transcript: Path | None, evaluator: Path, repeat: int | None, out: Path) -> dict:
+    """Runs the private evaluator's `score.py` on the checkout. It copies the build itself and never writes to it.
+
+    `repeat` is None for an evaluator that takes no `--repeat` (an external case says which it is).
+    """
+    argv = [sys.executable, "-I", str(evaluator), "--build", str(checkout),
+            *(["--repeat", str(repeat)] if repeat else []), "--output", str(out)]
     if transcript is not None:
         argv += ["--scan", str(transcript)]
     graded = subprocess.run(argv, capture_output=True, text=True, timeout=7200)
@@ -545,7 +629,14 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
     main_rows, rows, read = session_rows(transcript)
     commits = c_prime._sh(["git", "rev-list", "--count", f"{meta['start_commit']}..HEAD"], checkout).stdout.strip()
     artifact = artifact_sha256(checkout)
-    if meta.get("case_kind") == "ui":
+    if meta.get("case_kind") == "external":
+        if evaluator is None:
+            raise SystemExit("an external case needs --evaluator <its score.py>")
+        ui = _grade_ui(checkout, transcript, evaluator, repeat if meta.get("evaluator_repeat") else None,
+                       run / "ui-score.json")
+        graded = {"ui": {key: ui.get(key) for key in (*meta["score_keys"], "error")},
+                  "oracle": ui.get("S") == 1, "contaminated": bool(ui.get("contamination"))}
+    elif meta.get("case_kind") == "ui":
         if evaluator is None:
             raise SystemExit("a UI task needs --evaluator <private score.py>")
         ui = _grade_ui(checkout, transcript, evaluator, repeat, run / "ui-score.json")
@@ -824,6 +915,7 @@ def main(argv: list[str] | None = None) -> int:
     prep.add_argument("--trial", type=int, default=1)
     prep.add_argument("--output", type=Path, required=True)
     prep.add_argument("--isolation", choices=ISOLATION, default="instructed")
+    prep.add_argument("--case-dir", type=Path, help="a case kept outside this repository (`<dir>/case.json`)")
     dr = sub.add_parser("drive")
     dr.add_argument("run", type=Path)
     dr.add_argument("--model", default="claude-opus-5-5")
@@ -841,7 +933,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "prepare":
         print(json.dumps(prepare(args.kit.resolve(), args.arm, args.case, args.trial, args.output.resolve(),
-                                 args.isolation), indent=1))
+                                 args.isolation, args.case_dir.resolve() if args.case_dir else None), indent=1))
     elif args.command == "drive":
         print(json.dumps(drive(args.run.resolve(), args.model, args.timeout, args.budget), indent=1))
     elif args.command == "score":
