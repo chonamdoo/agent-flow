@@ -103,6 +103,11 @@
 
 ## 환경 준비
 
+**이미지 경로(#423)**: 아래 절차를 이미지로 고정한 `tools/eval-env/`가 있다. Docker를 쓸 수 있으면
+`docker build -f tools/eval-env/Dockerfile -t agent-flow-eval:local .` 뒤
+`docker compose -f tools/eval-env/compose.yml run --rm check`로 시작 점검을 하고, 평가는 compose 서비스로 돈다
+(프록시 뒤 빌드·인증 mount는 `tools/eval-env/README.md`). Docker가 없으면 아래 수동 절차를 쓴다.
+
 ```bash
 # 저장소와 Python 환경(평가기 실행용)
 git clone https://github.com/chonamdoo/agent-flow && cd agent-flow

@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""평가 컨테이너 시작 점검(#423). 실패하면 평가를 시작하지 않는다.
+
+    eval-env-check            점검만
+    eval-env-check --then CMD 점검이 통과하면 CMD를 exec한다(이미지 ENTRYPOINT)
+
+- 도구: claude, codex, node, python3, flutter, dart, playwright 버전
+- 자식 셸 PATH: `sh -c 'command -v ...'`로 agent-flow·dart·flutter를 찾는다(#350)
+- HOME 쓰기: $HOME에 실제로 파일을 써 본다(#352)
+- Dart·Flutter 분석: telemetry 설정이 꺼져 있어야 한다(#352)
+- Landlock ABI: landlock_create_ruleset(NULL, 0, VERSION)으로 묻는다. 없어도 실패가 아니라 기록만 한다(#422)
+"""
+from __future__ import annotations
+
+import ctypes
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+TOOLS = {
+    "claude": ["claude", "--version"],
+    "codex": ["codex", "--version"],
+    "node": ["node", "--version"],
+    "python3": ["python3", "--version"],
+    "flutter": ["flutter", "--version", "--suppress-analytics"],
+    "dart": ["dart", "--version"],
+    "playwright": ["playwright", "--version"],
+}
+CHILD_SHELL = ("agent-flow", "dart", "flutter", "claude", "codex")
+# 이미지가 ENV로 기대 버전을 준다. 다른 CLI가 PATH 앞에 끼어들면 버전 문자열로 잡는다.
+EXPECTED = {"claude": "EVAL_EXPECT_CLAUDE", "codex": "EVAL_EXPECT_CODEX", "playwright": "EVAL_EXPECT_PLAYWRIGHT",
+            "flutter": "EVAL_EXPECT_FLUTTER"}
+AUTH_FILES = (".codex/auth.json", ".claude/.credentials.json")
+# landlock_create_ruleset는 x86_64와 aarch64 모두 444번이다.
+LANDLOCK_CREATE_RULESET = 444
+LANDLOCK_CREATE_RULESET_VERSION = 1
+
+
+def landlock_abi() -> int | None:
+    if platform.system() != "Linux":
+        return None
+    libc = ctypes.CDLL(None, use_errno=True)
+    abi = libc.syscall(LANDLOCK_CREATE_RULESET, None, ctypes.c_size_t(0), ctypes.c_uint32(LANDLOCK_CREATE_RULESET_VERSION))
+    return abi if abi > 0 else None
+
+
+def check() -> list[str]:
+    failures = []
+    for name, argv in TOOLS.items():
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            failures.append(f"{name}: {exc}")
+            continue
+        line = (result.stdout or result.stderr).strip().splitlines()[:1]
+        print(f"{name}: {line[0] if line else '?'}")
+        if result.returncode != 0:
+            failures.append(f"{name}: exit {result.returncode}")
+        expected = os.environ.get(EXPECTED.get(name, ""), "")
+        if expected and expected not in (line[0] if line else ""):
+            failures.append(f"{name}: expected version {expected}, got {line[0] if line else 'nothing'}")
+    print(f"PATH={os.environ.get('PATH', '')}")
+    for name in CHILD_SHELL:
+        found = subprocess.run(["sh", "-c", f"command -v {name}"], capture_output=True, text=True).stdout.strip()
+        if not found:
+            failures.append(f"child shell cannot find {name}")
+    home = Path(os.environ.get("HOME", ""))
+    try:
+        with tempfile.NamedTemporaryFile(dir=home, prefix=".eval-env-check-"):
+            pass
+        print(f"HOME={home} (writable)")
+    except OSError as exc:
+        failures.append(f"HOME {home} is not writable: {exc}")
+    # 설정 파일이 없다는 것은 꺼졌다는 뜻이 아니다. dart가 있으면 꺼짐이 기록돼 있어야 한다.
+    telemetry = home / ".dart-tool" / "dart-flutter-telemetry.config"
+    if shutil.which("dart"):
+        text = telemetry.read_text(encoding="utf-8") if telemetry.is_file() else ""
+        if "reporting=0" not in text:
+            failures.append(f"Dart/Flutter analytics is not recorded as off in {telemetry}; run dart --disable-analytics")
+    for relative in AUTH_FILES:
+        path = home / relative
+        if path.exists() and not os.access(path, os.R_OK):
+            failures.append(f"{path} is mounted but not readable by uid {os.getuid()}; mount a readable copy")
+    abi = landlock_abi()
+    print(f"landlock ABI: {abi if abi is not None else 'unavailable'}")
+    return failures
+
+
+def main(argv: list[str]) -> int:
+    failures = check()
+    for failure in failures:
+        print(f"FAIL: {failure}", file=sys.stderr)
+    if failures:
+        return 1
+    if argv[:1] == ["--then"] and argv[1:]:
+        os.execvp(argv[1], argv[1:])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

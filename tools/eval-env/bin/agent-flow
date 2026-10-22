@@ -1,0 +1,3 @@
+#!/bin/sh
+# mount한 저장소(/repo/src)의 CLI를 그대로 부른다. 자식 셸도 PATH로 이 파일을 찾는다(#350).
+exec python3 -c 'import sys; from agent_flow.cli import main; sys.exit(main())' "$@"

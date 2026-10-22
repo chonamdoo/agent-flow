@@ -1,0 +1,12 @@
+# 평가기 의존성 고정(#423). pyproject.toml의 dependencies + dev를 테스트가 통과한 venv에서 풀었다.
+# pyproject의 하한을 올리면 이 파일도 같이 바꾼다(tests/test_eval_env.py가 대조한다).
+click==8.5.0
+execnet==2.1.2
+iniconfig==2.3.1
+packaging==26.3
+pluggy==1.7.0
+Pygments==2.21.0
+pytest==9.1.1
+pytest-split==0.11.0
+pytest-xdist==3.8.0
+PyYAML==6.0.3

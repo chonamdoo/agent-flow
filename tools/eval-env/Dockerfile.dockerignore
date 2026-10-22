@@ -1,0 +1,6 @@
+# 빌드 context에는 아래 파일만 들어간다. 폴더째 열면 그 안에 잘못 둔 .env·.npmrc까지 이미지에 들어간다.
+*
+!tools/eval-env/requirements.lock
+!tools/eval-env/bin/agent-flow
+!tools/eval-env/bin/eval-env-check
+!tools/eval-env/build/with-proxy-ca

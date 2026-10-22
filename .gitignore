@@ -22,3 +22,6 @@ CLAUDE.md
 .claude/
 .omp/
 .codegraph/
+
+# tools/eval-env scratch: 인증 파일 사본이 놓일 수 있다(#423)
+.eval-scratch/
