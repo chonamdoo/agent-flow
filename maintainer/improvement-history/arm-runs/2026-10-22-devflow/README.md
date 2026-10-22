@@ -63,6 +63,10 @@
 - 과제 1개, 조건당 n=5다. 차이가 없다는 결과가 효과가 없다는 증명은 아니다(천장).
 - controller가 사용자 역할을 하므로 사람 시간은 잴 수 없다(#410 코멘트).
 - B·C는 hook이 없는 환경에서 돌았다. hook guard(쓰기 경계 등)가 빠진 C이고, 위 3·4번은 그 결과다.
+- runner가 실행한 required test gate는 0개다. python profile의 required `test` gate(`pytest -q`)는 `execution: ci`라서, runner는 `deferred_ci_checks`에 `pytest`를 적기만 하고 돌리지 않는다. harness에는 remote가 없어 CI도 돌지 않는다.
+  - gates phase에 도달한 C-1, C-2, C-4, C-5는 local gate 3개(`type`, `architecture-lint`, `lint`)를 돌렸다. 그중 required는 `architecture-lint` 하나다.
+  - C-3은 gates phase에 도달하지 않았다. B(`development`)에는 gates phase가 없다.
+  - test 실행 증거는 runner gate가 아니라 에이전트가 phase 안에서 돌린 test다. hidden test 채점은 이와 별개다.
 - 같은 컨테이너(4 CPU)에서 wave마다 4개를 동시에 돌렸다. 시간 비교는 wave 안에서만 공정하다.
 - B·C 프롬프트의 runner 명령은 과제를 셸 따옴표로 감싸지 않았다(`US$100.00`의 `$1`이 셸 변수로 해석될 수 있다).
   - 20회 모두 runner가 기록한 task는 원문 그대로였다. 에이전트가 명령을 그대로 복사하지 않고 직접 따옴표를 처리했다.

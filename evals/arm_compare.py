@@ -408,6 +408,31 @@ def _measured_usage(rows: list[dict], read: dict) -> dict:
     return totals
 
 
+def gate_record(project: Path, checkout: Path) -> dict:
+    """What the runner's `gates` phase ran locally and what it only deferred to CI.
+
+    A profile gate with `execution: ci` (python's required `test`) is written to `deferred_ci_checks` and not run;
+    the harness has no remote, so a deferred gate is never run at all. Read from each run's canonical
+    `artifacts/gate-results.json`; the last one written is the run's final gate ledger.
+    """
+    roots = [project / ".git" / "agent-flow", checkout / ".agent-flow" / "runs"]
+    ledgers = sorted({path for root in roots if root.is_dir() for path in root.rglob("artifacts/gate-results.json")},
+                     key=lambda path: path.stat().st_mtime_ns)
+    if not ledgers:
+        return {"gate_ledgers": 0, "local_gates": None, "deferred_ci_checks": None, "required_local_gates_ran": None}
+    try:
+        payload = json.loads(ledgers[-1].read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"gate_ledgers": len(ledgers), "local_gates": None, "deferred_ci_checks": None,
+                "required_local_gates_ran": None}
+    results = [item for item in payload.get("results") or [] if isinstance(item, dict)]
+    return {"gate_ledgers": len(ledgers),
+            "local_gates": [[item.get("gate_id"), bool(item.get("required")), bool(item.get("passed"))]
+                            for item in results],
+            "deferred_ci_checks": list(payload.get("deferred_ci_checks") or []),
+            "required_local_gates_ran": sum(bool(item.get("required")) for item in results)}
+
+
 def _runner_trace(project: Path, checkout: Path) -> dict:
     # `glob`의 `**`는 `.agent-flow` 같은 숨은 폴더를 건너뛴다. rglob은 건너뛰지 않는다.
     roots = [project / ".git" / "agent-flow", checkout / ".agent-flow" / "runs"]
@@ -510,6 +535,7 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
               "drive_timed_out": drive.get("timed_out"), "drive_is_error": drive.get("is_error"),
               "harness_error": harness_error, **chosen,
               **(_runner_trace(project, checkout) if meta["arm"] in WORKFLOWS else {}),
+              **(gate_record(project, checkout) if meta["arm"] in WORKFLOWS else {}),
               "scored_at": datetime.now().isoformat(timespec="seconds")}
     (run / "result.json").write_text(json.dumps(result, indent=1, default=str) + "\n", encoding="utf-8")
     return result
@@ -710,8 +736,9 @@ def summarize(results: list[dict]) -> str:
     lines = ["| arm | assigned runs | success | one-sided Fisher p vs A | overclaim (upper 95%) | declared complete/blocked/"
              "undeclared/unmeasured | contaminated / infra error / timed out (counted as failures) | "
              "harness errors (excluded) | output tokens (mean) | input uncached+cached (mean) | "
-             "seconds (mean) | reviewer jobs (mean) | rule violations | isolation |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "seconds (mean) | reviewer jobs (mean) | rule violations | isolation | "
+             "runs that ran gates / deferred a gate to CI (never run) |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     base = [row for row in assigned if row["arm"] == "A"]
     base_success = sum(_succeeded(row) for row in base)
     reasons: list[str] = []
@@ -740,7 +767,9 @@ def summarize(results: list[dict]) -> str:
             _fmt(_mean([row["seconds"] for row in group if row.get("seconds") is not None])),
             _fmt(_mean([row["reviewer_jobs"] for row in group if "reviewer_jobs" in row])),
             str(sum(rule_violation(row) for row in group)),
-            "/".join(sorted({row.get("isolation", "instructed") for row in group})) + " |"]))
+            "/".join(sorted({row.get("isolation", "instructed") for row in group})),
+            (f"{sum(bool(row.get('gate_ledgers')) for row in group)} / "
+             f"{sum(bool(row.get('deferred_ci_checks')) for row in group)}" if arm in WORKFLOWS else "-") + " |"]))
     if reasons:
         lines += ["", "Harness errors (re-run under the fixed harness, not in the denominator):", ""]
         lines += [f"- {reason}" for reason in reasons]

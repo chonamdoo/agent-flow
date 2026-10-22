@@ -148,7 +148,7 @@ def test_human_only_approvals_fail_the_run_and_are_read_from_disk(tmp_path):
                 "usage": {"input": 1, "uncached_input": 1, "cached_input": 0, "output": 1}, "seconds": 1, **extra}
     table = arm_compare.summarize([row("A"), row("C"), row("C", manual_spec_approvals=2), row("C", verify_downgrades=1)])
     c_line = next(line for line in table.splitlines() if line.startswith("| C |"))
-    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed |")
+    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed | 0 / 0 |")
 
 
 def test_the_artifact_fingerprint_ignores_runner_state_and_tracks_edits(bare):
@@ -340,3 +340,20 @@ def test_an_undecidable_worktree_is_a_harness_error(tmp_path):
     arm_compare._git(["worktree", "add", "-q", "-b", "a", str(tmp_path / "wt" / "a")], project)
     chosen, info = arm_compare.select_checkout(project, "C")
     assert chosen == project and info["checkout_error"] == "0 runner worktrees among 1 linked worktrees"
+
+
+def test_a_gate_deferred_to_ci_is_recorded_as_never_run(tmp_path):
+    project, checkout = tmp_path / "project", tmp_path / "wt"
+    ledger = project / ".git" / "agent-flow" / "worktrees" / "w" / ".agent-flow" / "runs" / "r1" / "artifacts"
+    ledger.mkdir(parents=True)
+    (ledger / "gate-results.json").write_text(json.dumps({
+        "status": "green", "execution": "local", "deferred_ci_checks": ["pytest"],
+        "results": [{"gate_id": "architecture-lint", "required": True, "passed": True},
+                    {"gate_id": "lint", "required": False, "passed": False}]}), encoding="utf-8")
+    record = arm_compare.gate_record(project, checkout)
+    assert record == {"gate_ledgers": 1, "local_gates": [["architecture-lint", True, True], ["lint", False, False]],
+                      "deferred_ci_checks": ["pytest"], "required_local_gates_ran": 1}
+    assert arm_compare.gate_record(tmp_path / "none", checkout)["local_gates"] is None
+    row = _summary_row("C", gate_ledgers=1, deferred_ci_checks=["pytest"])
+    c_line = next(line for line in arm_compare.summarize([row]).splitlines() if line.startswith("| C |"))
+    assert c_line.endswith("| 1 / 1 |")
