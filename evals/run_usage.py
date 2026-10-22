@@ -13,7 +13,8 @@ Supported transcripts:
   written as several lines that share `message.id` and repeat the same usage; each id counts once.
   Sidechain (sub-agent) messages count toward the same phase.
 - Codex rollout JSONL (`~/.codex/sessions/.../rollout-*.jsonl`). `token_count` events carry a
-  cumulative `total_token_usage`; the tool counts its increase, so repeated events add nothing.
+  cumulative `total_token_usage`; the tool counts its increase, so repeated events add nothing. A
+  total that drops means the counter restarted, and the new total counts in full.
 
 A message is attributed to the phase the run was in at the message's timestamp: the phase of the
 latest `phase_entered`, or the target of the latest unblocked `phase_exited`. Messages before the
@@ -118,10 +119,12 @@ def codex_messages(rows: list[dict]) -> list[dict]:
         if at is None or any(value is None for value in current.values()):
             continue
         delta = {key: current[key] - previous[key] for key in previous}
-        if all(value == 0 for value in delta.values()) or any(value < 0 for value in delta.values()):
-            previous = current
-            continue
+        if any(value < 0 for value in delta.values()):
+            # 누적값이 줄었으면 카운터가 처음부터 다시 센 것이다. 그 뒤의 합계 전체가 새 사용량이다.
+            delta = dict(current)
         previous = current
+        if all(value == 0 for value in delta.values()):
+            continue
         cached = delta["cached_input_tokens"]
         uncached = delta["input_tokens"] - cached if cached <= delta["input_tokens"] else None
         messages.append({"at": at, "model": model, "usage": _usage(uncached, cached, delta["output_tokens"])})
@@ -217,7 +220,8 @@ def report(run_dir: Path, transcripts: list[Path], outcome: str | None) -> dict:
             _add(entry["usage"], message["usage"])
             if phase not in (PRE_RUN, POST_RUN):
                 _add(controller, message["usage"])
-    measured = any(source["format"] for source in sources)
+    # 형식만 알아보고 usage가 하나도 없으면 측정이 아니다. 0토큰으로 적으면 누락이 무사용으로 보인다.
+    measured = any(source["format"] and source["messages"] for source in sources)
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": meta.get("run_id"),

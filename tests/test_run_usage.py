@@ -125,3 +125,33 @@ def test_summary_divides_all_runs_by_successful_runs(tmp_path: Path) -> None:
     assert summary["outcomes"]["success"] == 1 and summary["outcomes"]["blocked"] == 1
     assert summary["controller_per_success"] == {
         "input": 200, "uncached_input": 20, "cached_input": 180, "output": 8}
+
+
+def test_codex_counter_restart_counts_the_new_total(tmp_path: Path) -> None:
+    run = _run_dir(tmp_path)
+
+    def tokens(at: str, total: int, output: int) -> dict:
+        return {"type": "event_msg", "timestamp": at, "payload": {"type": "token_count", "info": {
+            "total_token_usage": {"input_tokens": total, "cached_input_tokens": 0, "output_tokens": output}}}}
+
+    transcript = _write_jsonl(tmp_path / "rollout.jsonl", [
+        {"type": "session_meta", "timestamp": "2026-10-22T10:00:01Z", "payload": {}},
+        tokens("2026-10-22T10:01:00Z", 100, 10),
+        tokens("2026-10-22T10:02:00Z", 20, 2),  # 카운터가 다시 시작했다
+        tokens("2026-10-22T10:03:00Z", 50, 5),
+    ])
+
+    usage = run_usage.report(run, [transcript], None)["tokens_controller"]["usage"]
+
+    assert usage["input"] == 150 and usage["output"] == 15
+
+
+def test_a_recognised_transcript_without_usage_is_unmeasured(tmp_path: Path) -> None:
+    run = _run_dir(tmp_path)
+    transcript = _write_jsonl(tmp_path / "rollout.jsonl", [
+        {"type": "session_meta", "timestamp": "2026-10-22T10:00:01Z", "payload": {}}])
+
+    result = run_usage.report(run, [transcript], "success")
+
+    assert result["tokens_controller"]["status"] == "unmeasured"
+    assert run_usage.summarize([result])["controller_per_success"]["input"] is None
