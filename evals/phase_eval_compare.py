@@ -344,9 +344,10 @@ def _record_row(row: dict) -> dict:
         record["architecture_lint"] = {"status": lint.get("status")}
     if "angles" in row:
         # angle·verdict·usage는 angle 부분집합과 k-of-N을 다시 셀 때 필요하다(#425). 리뷰 원문은 남기지 않는다.
+        # 원본에 있는 키만 옮긴다. 이전 release의 compact 행을 재사용할 때 빈 키가 붙으면 같은 행이 아니게 된다.
         record["angles"] = [
-            {"angle": angle.get("angle"), "provider": angle.get("provider"), "verdict": angle.get("verdict"),
-             "usage": angle.get("usage"), "documents": [
+            {**{key: angle[key] for key in ("angle", "verdict", "usage") if key in angle},
+             "provider": angle.get("provider"), "documents": [
                 {"inline_in_prompt": document.get("inline_in_prompt"),
                  "read_path_observed": document.get("read_path_observed")}
                 for document in angle.get("documents") or []
