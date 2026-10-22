@@ -1001,8 +1001,7 @@ def test_premerge_ci_and_merge_completion_checkpoints(project, monkeypatch, caps
     runner = Runner(project, run_dir=path)
     index = next(i for i, phase in enumerate(runner.phases) if phase.id == "merge")
     meta = read_meta(path)
-    meta.update(phase_index=index, current_phase="merge", phase_entered_at="2026-08-21T00:00:00+00:00",
-                merge_approval_head=head)
+    meta.update(phase_index=index, current_phase="merge", phase_entered_at="2026-08-21T00:00:00+00:00")
     write_meta(path, meta)
     assert runner._missing_entry_spec_evidence("merge") == []
     if ci_state == "stale-head":

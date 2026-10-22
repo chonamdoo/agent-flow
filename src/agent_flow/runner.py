@@ -643,6 +643,12 @@ class Runner:
         phase_index = self._run_cursor(meta).phase_index
         while phase_index < len(self.phases):
             phase = self.phases[phase_index]
+            # worker가 merge하기 전에 대조한다. merge 뒤에는 되돌릴 수 없다.
+            if phase.id == "merge" and self._merge_head_reroute(phase_index) is not None:
+                transition = self._plan_transition(phase_index, phase)
+                self._commit_transition(transition)
+                phase_index = transition.to_index
+                continue
             meta = read_meta(self.run_dir)
             scope_reason = review_scope_block_reason(meta, phase.id)
             if scope_reason:
@@ -1345,6 +1351,9 @@ class Runner:
         되돌아간 merge-approval은 진입 증거(green PR, 게시된 HEAD)를 다시 요구하므로 CI도 다시 본다."""
         assert self.run_dir is not None
         approved = read_meta(self.run_dir).get("merge_approval_head")
+        # 이 변경 전에 승인된 run은 승인 head가 없다. 되돌리면 이미 merge한 run이 cleanup에 닿지 못한다.
+        if approved is None:
+            return None
         head = self._head_oid()
         if approved == head:
             return None
@@ -1353,8 +1362,7 @@ class Runner:
                 print(f"  [route] HEAD {head[:12]} is not the approved {str(approved)[:12]}; "
                       "returning to merge-approval")
                 return RouteDecision(index, False, "head-changed")
-        print("  [block] merge has no approved HEAD to compare")
-        return RouteDecision(current_index, True, "head-changed")
+        return None
 
     def _artifact_rel(self, phase: Phase) -> str:
         return phase.artifact or f"{phase.id}.md"

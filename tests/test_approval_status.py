@@ -217,3 +217,52 @@ def test_unchanged_head_keeps_the_existing_merge_flow(tmp_path, monkeypatch, wor
     resolve_run_subpath(run_dir, Path(merge.artifact)).write_text("Merged PR #1.\n", encoding="utf-8")
     transition = runner._plan_transition(index + 1, merge)
     assert transition.to_index == index + 2 and not transition.blocked
+
+
+@pytest.mark.parametrize("workflow", ["default", "full-feature"])
+def test_conflict_commit_returns_to_merge_approval_before_the_merge_worker_runs(tmp_path, monkeypatch, workflow):
+    """반증: merge 완료 때만 대조하면 worker가 승인 안 된 HEAD를 이미 merge한 뒤다(#426)."""
+    from agent_flow import runner as runner_module
+    from agent_flow.adapters.generic import GenericAdapter
+    from agent_flow.runner import ResumeMode
+
+    project, run_dir, runner, index, _ = _merge_approval_run(tmp_path, monkeypatch, workflow)
+    phase = runner.phases[index]
+    assert runner._pause_for_approval(phase)
+    approve_phase_artifact(run_dir, token=pending_phase_approval(run_dir)["token"])
+    runner._commit_transition(runner._plan_transition(index, phase))
+    new_head = _commit(project, "conflict resolution")
+
+    calls = []
+
+    def execute(target, **kwargs):
+        calls.append(target.id)
+        if target.id == "merge":
+            pytest.fail("an unapproved HEAD reached the merge worker")
+        artifact = resolve_run_subpath(run_dir, Path(target.artifact))
+        artifact.write_text("Merge the new HEAD.\n\nverdict: approve\n", encoding="utf-8")
+        return True
+
+    adapter = GenericAdapter()
+    monkeypatch.setattr(adapter, "execute", execute)
+    monkeypatch.setattr(runner_module, "detect_adapter", lambda: adapter)
+    monkeypatch.setattr(runner_module, "detect_available_clis", lambda: [])
+    monkeypatch.setattr(runner, "_missing_entry_spec_evidence", lambda *args, **kwargs: [])
+    monkeypatch.setattr(runner_module, "assert_managed_hooks_registered", lambda *a, **k: None)
+    runner.run(ResumeMode.RESUME)
+    assert calls == ["merge-approval"]
+    assert read_meta(run_dir)["current_phase"] == "merge-approval"
+    assert runner._pause_for_approval(phase)
+    assert pending_phase_approval(run_dir)["head_oid"] == new_head
+
+
+def test_run_approved_before_head_binding_is_not_rerouted(tmp_path, monkeypatch):
+    """승인 head가 없는 기존 run을 되돌리면 이미 merge한 run이 cleanup에 닿지 못한다."""
+    project, run_dir, runner, index, _ = _merge_approval_run(tmp_path, monkeypatch, "full-feature")
+    meta = read_meta(run_dir)
+    meta.update(phase_index=index + 1, current_phase="merge")
+    write_meta(run_dir, meta)
+    merge = runner.phases[index + 1]
+    resolve_run_subpath(run_dir, Path(merge.artifact)).write_text("Merged PR #1.\n", encoding="utf-8")
+    _commit(project, "later")
+    assert runner._plan_transition(index + 1, merge).to_index == index + 2
