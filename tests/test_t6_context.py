@@ -728,3 +728,14 @@ def test_reviewer_assignment_keeps_criteria_around_the_gate_pointer(body, kept):
     stripped = _without_completion_gate(body)
     assert kept in stripped
     assert "Completion gate below" not in stripped
+
+
+def test_an_inline_bundled_body_keeps_the_folder_its_references_resolve_from(tmp_path):
+    """#416: 번들 skill 본문을 inline으로 주면서 경로를 지우면 `references/` 링크를 열 수 없다."""
+    from agent_flow.core.local_skills import local_skill_prompt_block
+
+    repo = Path(__file__).resolve().parents[1]
+    block = local_skill_prompt_block(repo, "implement", phase_skills=PhaseSkills(required=("tdd",)), profile={})
+    line = next(line for line in block.splitlines() if line.startswith("- `tdd`"))
+    assert (repo / "skills" / "tdd").is_dir() and len(list((repo / "skills" / "tdd").iterdir())) > 1
+    assert "links resolve from" in line and "tdd" in line.split("resolve from", 1)[1]

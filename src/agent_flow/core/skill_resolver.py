@@ -1091,7 +1091,8 @@ def skill_prompt_block(
             if role == "reviewer" else
             "First skim the files this phase actually changes, then apply every one of "
             "these before you write or judge code. The runner delivers their bodies below, "
-            "so there is nothing to open and no read to report:"
+            "so there is no skill body to open and no read to report. Open a reference only "
+            "when a body links to it:"
             if enforced and resolution.required_delivered_inline
             else "First skim the files this phase actually changes, then read every one of "
             "these before you write or judge code. The completion gate takes your word "
@@ -1126,7 +1127,13 @@ def skill_prompt_block(
             if skill.exists:
                 body = body_numbers.get(str(skill.path))
                 if role == "author" and str(skill.path) in compact_paths and body is not None:
-                    lines.append(f"- `{skill.name}` ({skill.source}) — body {body} in the required-read plan.")
+                    # 본문은 inline이어도 skill 안의 `references/` 링크는 그 폴더 기준이다. 폴더를 남겨야 연다.
+                    # SKILL.md 하나뿐인 skill은 열 링크가 없으니 경로를 붙이지 않는다.
+                    linked = str(skill.path) not in planned_reads and any(
+                        entry.name != "SKILL.md" for entry in skill.path.parent.iterdir()
+                    )
+                    where = f"; links resolve from `{skill.path.parent}`" if linked else ""
+                    lines.append(f"- `{skill.name}` ({skill.source}) — body {body} in the required-read plan{where}.")
                 elif role == "reviewer" and str(skill.path) in planned_reads:
                     # 읽기 계획의 `Read` 줄이 같은 파일을 절대경로와 digest로 이미 준다. 여기 절대경로를 또
                     # 적으면 같은 파일을 가리키는 줄이 둘이 된다. inline body는 읽기 계획에 경로가 없으므로
