@@ -291,6 +291,7 @@ def _planned_skill_paths(
             entry = entry.strip()
             if entry.startswith("`") and entry.endswith("`"):
                 entry = entry[1:-1]
+            entry = entry.removeprefix("./")
             if (
                 not entry or entry.startswith("/") or entry.endswith("/")
                 or any(char in entry for char in "*?[]\\:")
@@ -300,6 +301,34 @@ def _planned_skill_paths(
                 continue
             paths.append(entry)
     return tuple(dict.fromkeys(paths))
+
+
+# 범위 대조가 보는 phase. 구현이 끝나고 리뷰 직전에 남은 diff 전체를 한 번 본다(#415).
+SCOPE_CONFIRMATION_PHASES = frozenset({"comment-authoring"})
+
+
+def out_of_plan_paths(
+    project_root: Path, run_dir: Path, changed: Sequence[str],
+    definition: PhaseWorkflowDefinition | None = None, *, checkout: Path | None = None,
+) -> tuple[str, ...] | None:
+    """slice-plan의 `- Files:` 밖에서 바뀐 경로. 계획에 파일 목록이 없으면 대조할 수 없어 None이다.
+
+    판정이 아니라 대조다. 목록 밖 변경이 범위 초과인지는 사람이 정한다 — 파일 목록은 탐색
+    범위이지 행동 변경 허가가 아니고(#222), 같은 파일 안의 범위 확대도 여기서는 보이지 않는다.
+    """
+    planned = set(_planned_skill_paths(project_root, run_dir, definition))
+    if not planned:
+        return None
+    # git은 저장소 기준 경로를 준다. 프로젝트가 하위 폴더면 계획의 프로젝트 기준 경로와 맞춘다.
+    prefix = ""
+    if checkout is not None:
+        result = git_safe("rev-parse", "--show-prefix", cwd=checkout, timeout_s=5, optional_locks=False)
+        prefix = result.stdout.strip() if result.ok else ""
+    relative = [path.removeprefix(prefix) if prefix and path.startswith(prefix) else path for path in changed]
+    return tuple(sorted(
+        path for path in dict.fromkeys(relative)
+        if path not in planned and not path.startswith(".agent-flow/")
+    ))
 
 
 def phase_skill_paths(

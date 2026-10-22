@@ -417,9 +417,6 @@ phases:
       - "comment-authoring: applied"
       - "comment-checker: checked|unavailable|n/a"
       - "comment-scope: final-pass-only"
-      - "refactor-scope: none"
-      - "performance-optimization: none"
-      - "module-split: none"
     required_markers_by_architecture: {}
     routes:
       default: multi-review
@@ -432,6 +429,8 @@ phases:
 
       Remove or rewrite WHAT/HOW comments that restate code. Do not refactor,
       optimize performance, split modules, rename broadly, or expand scope.
+      The runner compares the changed paths with the slice-plan `- Files:`
+      lists and pauses for user confirmation of any path outside them.
       Run comment-checker or the configured hook when available. Record
       `checked` when it ran, `unavailable` only when no project-local
       checker/hook command exists, and `n/a` only when the changed diff has no
@@ -444,9 +443,6 @@ phases:
           comment-authoring: applied
           comment-checker: checked|unavailable|n/a
           comment-scope: final-pass-only
-          refactor-scope: none
-          performance-optimization: none
-          module-split: none
 
   - id: multi-review
     architecture_decision: required

@@ -186,6 +186,8 @@ from agent_flow.core.local_skills import (
     declared_concern_ids,
     missing_local_skill_markers,
     phase_skill_resolution,
+    SCOPE_CONFIRMATION_PHASES,
+    out_of_plan_paths,
     phase_skill_paths,
     skill_markers_enforced,
 )
@@ -993,8 +995,21 @@ class Runner:
             report=report_path,
         )
 
+    def _unconfirmed_out_of_plan_files(self, phase: Phase) -> tuple[str, ...]:
+        """slice-plan 밖에서 바뀌었고 사용자가 아직 확인하지 않은 경로."""
+        if phase.id not in SCOPE_CONFIRMATION_PHASES:
+            return ()
+        assert self.run_dir is not None
+        outside = out_of_plan_paths(
+            self.config_root, self.run_dir, changed_files(self.project_root, self.profile),
+            getattr(self, "workflow", None), checkout=self.project_root,
+        )
+        confirmed = set(read_meta(self.run_dir).get("scope_confirmed_files") or ())
+        return tuple(path for path in outside or () if path not in confirmed)
+
     def _pause_for_approval(self, phase: Phase) -> bool:
-        if not phase.pause_after:
+        out_of_plan = self._unconfirmed_out_of_plan_files(phase)
+        if not phase.pause_after and not out_of_plan:
             return False
         assert self.run_dir is not None
         with exclusive_file_lease(self.run_dir.parent / ACTIVE_LOCK):
@@ -1004,14 +1019,23 @@ class Runner:
                 "phase_entered_at": meta.get("phase_entered_at"),
                 "artifact": self._artifact_rel(phase),
             }
+            if out_of_plan:
+                meta["phase_approval_request"]["out_of_plan_files"] = list(out_of_plan)
             write_meta(self.run_dir, meta)
             pending = pending_phase_approval(self.run_dir)
         if pending is None:
             return False
-        print(
-            f"  [approval] phase '{phase.id}' is paused for user review. Summarize the "
-            "artifact in chat; run approval_command only after the user approves it."
-        )
+        if out_of_plan:
+            print(
+                f"  [scope] changed outside slice-plan Files: {', '.join(out_of_plan)}. Show the user "
+                "these paths and why each changed; run approval_command only after the user accepts "
+                "them, otherwise revert them or update the plan through the SPEC delta flow."
+            )
+        else:
+            print(
+                f"  [approval] phase '{phase.id}' is paused for user review. Summarize the "
+                "artifact in chat; run approval_command only after the user approves it."
+            )
         self._print_structured_status(
             status="blocked",
             phase=phase,
@@ -1420,9 +1444,12 @@ class Runner:
                 _validate_ci_observation(observation)
                 if observation.get("observation_sequence") != transition.ci_repair_state["observation_sequence"]:
                     raise WorktreeIsolationError("CI observation changed while planning; observe and plan again")
-            if phase.pause_after and (
+            unconfirmed = self._unconfirmed_out_of_plan_files(phase)
+            if (phase.pause_after or unconfirmed) and (
                 not isinstance(meta.get("phase_approval"), dict)
                 or pending_phase_approval(self.run_dir) is not None
+                # 승인 뒤에 생긴 목록 밖 경로는 그 승인이 보여 준 적 없는 변경이다.
+                or not set(unconfirmed) <= set(meta["phase_approval"].get("out_of_plan_files") or ())
             ):
                 raise WorktreeIsolationError("phase artifact approval is missing or stale")
             self._capture_design_ledger(phase)
@@ -1765,6 +1792,12 @@ class Runner:
         if blocked:
             meta["phase_blocked_reason"] = "route_blocked"
         else:
+            approval = meta.get("phase_approval")
+            if isinstance(approval, dict) and approval.get("out_of_plan_files"):
+                # fix-loop로 다시 들어와도 이미 확인한 경로는 다시 묻지 않는다.
+                meta["scope_confirmed_files"] = sorted(
+                    {*(meta.get("scope_confirmed_files") or ()), *approval["out_of_plan_files"]}
+                )
             meta.pop(BASELINE_KEY, None)
             meta.pop("phase_approval_request", None)
             meta.pop("phase_approval", None)
