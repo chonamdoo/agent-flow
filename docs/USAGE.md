@@ -570,6 +570,11 @@ reports the same pause again. The agent summarizes the artifact in chat and runs
 given before the pause does not count. The `--approve` token identifies the run, phase
 attempt, and artifact bytes. Rewriting the artifact or re-entering the phase requires a new
 approval. The token binds an approval to content; it is not user authentication.
+A `merge-approval` token also binds the HEAD commit it was shown for: an approval covers one
+commit. A new commit while the pause waits requires a new approval. If HEAD differs from the
+approved commit when `merge` completes (a conflict-resolution commit, an agent push, an outside
+push), the runner routes back to `merge-approval`. That phase re-checks the published HEAD and
+its CI on entry, then pauses for approval of the new commit.
 
 ### The SPEC ledger
 

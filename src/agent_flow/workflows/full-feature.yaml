@@ -832,6 +832,9 @@ phases:
       conflicts, apply `.agent-flow/skills/resolving-merge-conflicts/SKILL.md` before
       completing. Record merge strategy, target branch, and merge commit.
       Output: artifacts/merge.md.
+      Merge approval covers only the approved HEAD commit. If resolving
+      conflicts creates a commit, push it and write the artifact without
+      merging; the runner routes back to merge-approval for CI and re-approval.
 
   - id: handoff
     description: Final handoff before Runner-owned transactional cleanup.

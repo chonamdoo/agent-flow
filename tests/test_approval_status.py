@@ -1,5 +1,6 @@
 import json
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,15 @@ from agent_flow.cli import main
 from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
 from agent_flow.core.worktree_isolation import WorktreeIsolationError, resolve_run_subpath
 from agent_flow.runner import Runner
+
+
+def _commit(project: Path, message: str) -> str:
+    if not (project / ".git").exists():
+        subprocess.run(["git", "init", "-q", str(project)], check=True)
+    subprocess.run(["git", "-C", str(project), "-c", "user.name=t", "-c", "user.email=t@example.com",
+                    "commit", "-q", "--allow-empty", "-m", message], check=True)
+    return subprocess.run(["git", "-C", str(project), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
 
 
 def _status_payload(output: str) -> dict:
@@ -93,6 +103,7 @@ def test_merge_approval_pauses_before_merge_until_the_displayed_artifact_is_appr
     `verdict: approve`만으로 merge에 들어갔다. merge 직전 승인은 runner pause가 막아야 한다."""
     project = tmp_path / "project"
     project.mkdir()
+    _commit(project, "reviewed")
     definition = load_phase_workflow_definition(find_kit_root(), workflow)
     ids = [phase.id for phase in definition.phases]
     assert "merge-approval" in ids
@@ -129,3 +140,80 @@ def test_merge_approval_pauses_before_merge_until_the_displayed_artifact_is_appr
     approve_phase_artifact(run_dir, token=pending_phase_approval(run_dir)["token"])
     runner._commit_transition(runner._plan_transition(index, phase))
     assert read_meta(run_dir)["current_phase"] == "merge"
+
+
+def _merge_approval_run(tmp_path, monkeypatch, workflow):
+    project = tmp_path / "project"
+    project.mkdir()
+    approved_head = _commit(project, "reviewed")
+    definition = load_phase_workflow_definition(find_kit_root(), workflow)
+    index = [phase.id for phase in definition.phases].index("merge-approval")
+    run_dir = create_run(project, workflow, "Merge the reviewed change.", workflow_definition=definition)
+    meta = read_meta(run_dir)
+    meta.update(phase_index=index, current_phase="merge-approval", phase_entered_at="2026-10-09T00:00:00+00:00")
+    write_meta(run_dir, meta)
+    runner = Runner(project, run_dir=run_dir)
+    monkeypatch.setattr(runner, "_emit_observation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runner, "_check_spec_transition", lambda *args, **kwargs: None)
+    phase = runner.phases[index]
+    artifact = resolve_run_subpath(run_dir, Path(phase.artifact))
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("Merge PR #1 at the published HEAD.\n\nverdict: approve\n", encoding="utf-8")
+    return project, run_dir, runner, index, approved_head
+
+
+@pytest.mark.parametrize("workflow", ["default", "full-feature"])
+def test_merge_approval_token_is_bound_to_the_head_it_was_shown_for(tmp_path, monkeypatch, workflow):
+    """반증: 승인 identity가 artifact 바이트뿐이면 승인 대기 중 생긴 commit도 같은 토큰으로 merge된다(#426)."""
+    project, run_dir, runner, index, approved_head = _merge_approval_run(tmp_path, monkeypatch, workflow)
+    phase = runner.phases[index]
+    assert runner._pause_for_approval(phase)
+    shown = pending_phase_approval(run_dir)
+    assert shown["head_oid"] == approved_head
+
+    _commit(project, "conflict resolution")
+    assert runner._pause_for_approval(phase)
+    with pytest.raises(ValueError, match="does not match"):
+        approve_phase_artifact(run_dir, token=shown["token"])
+    assert pending_phase_approval(run_dir)["token"] != shown["token"]
+
+
+@pytest.mark.parametrize("workflow", ["default", "full-feature"])
+def test_head_change_after_approval_cannot_leave_merge_without_reapproval(tmp_path, monkeypatch, workflow):
+    """반증: merge phase가 승인 뒤 충돌 해결 commit을 만들어도 merge.md만 쓰면 handoff로 넘어갔다(#426)."""
+    project, run_dir, runner, index, _ = _merge_approval_run(tmp_path, monkeypatch, workflow)
+    phase = runner.phases[index]
+    assert runner._pause_for_approval(phase)
+    approve_phase_artifact(run_dir, token=pending_phase_approval(run_dir)["token"])
+    runner._commit_transition(runner._plan_transition(index, phase))
+    assert read_meta(run_dir)["current_phase"] == "merge"
+
+    merge = runner.phases[index + 1]
+    resolve_run_subpath(run_dir, Path(merge.artifact)).write_text("Merged PR #1.\n", encoding="utf-8")
+    new_head = _commit(project, "conflict resolution")
+    transition = runner._plan_transition(index + 1, merge)
+    assert (transition.to_phase, transition.route_key, transition.blocked) == ("merge-approval", "head-changed", False)
+    runner._commit_transition(transition)
+    meta = read_meta(run_dir)
+    assert meta["current_phase"] == "merge-approval"
+    assert not resolve_run_subpath(run_dir, Path(phase.artifact)).exists()
+
+    resolve_run_subpath(run_dir, Path(phase.artifact)).write_text("Merge the new HEAD.\n\nverdict: approve\n",
+                                                                  encoding="utf-8")
+    assert runner._pause_for_approval(phase)
+    assert pending_phase_approval(run_dir)["head_oid"] == new_head
+
+
+@pytest.mark.parametrize("workflow", ["default", "full-feature"])
+def test_unchanged_head_keeps_the_existing_merge_flow(tmp_path, monkeypatch, workflow):
+    project, run_dir, runner, index, approved_head = _merge_approval_run(tmp_path, monkeypatch, workflow)
+    phase = runner.phases[index]
+    assert runner._pause_for_approval(phase)
+    approve_phase_artifact(run_dir, token=pending_phase_approval(run_dir)["token"])
+    runner._commit_transition(runner._plan_transition(index, phase))
+    assert read_meta(run_dir)["merge_approval_head"] == approved_head
+
+    merge = runner.phases[index + 1]
+    resolve_run_subpath(run_dir, Path(merge.artifact)).write_text("Merged PR #1.\n", encoding="utf-8")
+    transition = runner._plan_transition(index + 1, merge)
+    assert transition.to_index == index + 2 and not transition.blocked

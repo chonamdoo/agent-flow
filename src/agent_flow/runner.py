@@ -1004,6 +1004,8 @@ class Runner:
                 "phase_entered_at": meta.get("phase_entered_at"),
                 "artifact": self._artifact_rel(phase),
             }
+            if phase.id == "merge-approval":
+                meta["phase_approval_request"]["head_oid"] = self._head_oid()
             write_meta(self.run_dir, meta)
             pending = pending_phase_approval(self.run_dir)
         if pending is None:
@@ -1200,6 +1202,10 @@ class Runner:
 
         설계 원장과 RED 참조 게시도 ``_commit_transition``이 소유한다.
         """
+        if phase.id == "merge":
+            rerouted = self._merge_head_reroute(current_index)
+            if rerouted is not None:
+                return rerouted
         # route가 없는 phase는 판정 자체가 없다.
         if not phase.routes:
             return RouteDecision(current_index + 1, False, "none")
@@ -1327,6 +1333,29 @@ class Runner:
                 return RouteDecision(i, False, key)
         raise ValueError(f"phase {phase.id}: route target not found: {target}")
 
+    def _head_oid(self) -> str:
+        head = git_safe("rev-parse", "HEAD", cwd=self.project_root, timeout_s=5, optional_locks=False)
+        if not head.ok or not head.stdout.strip():
+            raise WorktreeIsolationError("cannot read HEAD to bind merge approval")
+        return head.stdout.strip().lower()
+
+    def _merge_head_reroute(self, current_index: int) -> RouteDecision | None:
+        """승인한 commit이 아닌 HEAD로 merge phase를 끝내지 않는다. 충돌 해결 commit이나
+        agent·외부 push로 HEAD가 바뀌었으면 merge-approval로 돌려 새 HEAD를 다시 승인받는다.
+        되돌아간 merge-approval은 진입 증거(green PR, 게시된 HEAD)를 다시 요구하므로 CI도 다시 본다."""
+        assert self.run_dir is not None
+        approved = read_meta(self.run_dir).get("merge_approval_head")
+        head = self._head_oid()
+        if approved == head:
+            return None
+        for index, candidate in enumerate(self.phases[:current_index]):
+            if candidate.id == "merge-approval":
+                print(f"  [route] HEAD {head[:12]} is not the approved {str(approved)[:12]}; "
+                      "returning to merge-approval")
+                return RouteDecision(index, False, "head-changed")
+        print("  [block] merge has no approved HEAD to compare")
+        return RouteDecision(current_index, True, "head-changed")
+
     def _artifact_rel(self, phase: Phase) -> str:
         return phase.artifact or f"{phase.id}.md"
 
@@ -1425,6 +1454,8 @@ class Runner:
                 or pending_phase_approval(self.run_dir) is not None
             ):
                 raise WorktreeIsolationError("phase artifact approval is missing or stale")
+            if phase.id == "merge-approval" and meta["phase_approval"].get("head_oid") != self._head_oid():
+                raise WorktreeIsolationError("HEAD changed after merge approval; approve the new HEAD")
             self._capture_design_ledger(phase)
             meta = read_meta(self.run_dir)
             if phase.id == "red" and self._has_artifact(phase):
@@ -1765,6 +1796,10 @@ class Runner:
         if blocked:
             meta["phase_blocked_reason"] = "route_blocked"
         else:
+            approval = meta.get("phase_approval")
+            if meta.get("current_phase") == "merge-approval" and isinstance(approval, dict):
+                # 승인 기록은 아래에서 지워지므로, merge phase가 대조할 승인 head를 따로 남긴다.
+                meta["merge_approval_head"] = approval.get("head_oid")
             meta.pop(BASELINE_KEY, None)
             meta.pop("phase_approval_request", None)
             meta.pop("phase_approval", None)
