@@ -82,6 +82,15 @@
   항목). runner로 multi-review 이후 phase까지 재는 이슈(full-feature end-to-end 등)는 macOS 호스트가 필요하다.
   `phase_eval`은 CLI를 직접 띄우므로 review 시나리오도 Linux에서 돈다. 사람의 설정이 필요한 이슈(GitHub branch
   protection 등)는 유지보수자 몫이다. 할 수 없는 이슈는 건너뛰고 상태 파일과 보고에 남긴다.
+- **실험 브랜치(#409)**: 에픽 #409 작업은 main에 들어가지 않는다.
+  - base는 `experiment/epic-409`다. main `b421c97`에 이 런북 개정(#421)을 더한 지점에서 시작한다.
+  - 하위 이슈 작업 브랜치는 이 브랜치에서 만들고, PR의 base도 이 브랜치로 둔다. main을 base로 PR을 열지 않는다.
+  - 위 규칙과 에픽 본문의 "merge"는 실험 브랜치로의 merge로 읽는다. merge 가능·구현 PR까지·draft만·보고만의
+    구분은 그대로 지킨다.
+  - main을 실험 브랜치에 merge하지 않는다. 측정 기준선(before kit)은 main `b421c97`로 고정한다. 기준을 옮겨야 하면
+    멈추고 보고한다.
+  - 실험 브랜치에서는 태그·릴리스·`evals/release-gates/` 기록을 만들지 않는다.
+  - 실험 결과를 main에 반영할지는 에픽이 끝난 뒤 유지보수자가 정한다.
 
 ## 환경 준비
 
