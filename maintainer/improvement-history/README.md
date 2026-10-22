@@ -90,7 +90,16 @@
   - main을 실험 브랜치에 merge하지 않는다. 측정 기준선(before kit)은 main `b421c97`로 고정한다. 기준을 옮겨야 하면
     멈추고 보고한다.
   - 실험 브랜치에서는 태그·릴리스·`evals/release-gates/` 기록을 만들지 않는다.
+  - 이 런북도 실험 브랜치에서만 고친다(실험 브랜치 대상 PR). 에픽 결과와 함께 main에 들어간다.
   - 실험 결과를 main에 반영할지는 에픽이 끝난 뒤 유지보수자가 정한다.
+- **168 unit 게이트(#409)**: PR마다 돌리지 않는다.
+  - 실험 브랜치를 main에 merge하기 전에 1회 돌린다. 회귀 위치를 좁혀야 하면 큰 단계가 끝난 뒤 중간 1회를 더
+    쓴다. 둘 다 사이클 상한(2회) 안이다.
+  - before kit은 main `b421c97`, after kit은 실험 브랜치 head다.
+  - PR마다 결정적 검사(`phase_budget`·`skill_routing`)와 바뀐 영역의 `phase_eval` 부분 측정은 그대로 한다
+    (`maintainer/verification-policy.md`).
+  - subtract 트랙(#420)의 keep은 잠정 keep이다. 최종 게이트에서 비열등을 확인해야 확정하고, 확인하지 못하면
+    되돌린다. 그래서 삭제 하나를 커밋 하나로 둔다.
 
 ## 환경 준비
 
