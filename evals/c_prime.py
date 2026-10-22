@@ -40,11 +40,11 @@ import tempfile
 import time
 from pathlib import Path
 
-RULES_VERSION = 2
+RULES_VERSION = 3
 EXCLUDED_PHASES = frozenset({"gates", "worktree", "run-start", "fix-loop", "pr-comment-fix", "pr-ci-fix",
                              "multi-review", "architecture-review"})
 RUNNER_LINE = re.compile(r"agent-flow\s+[a-z]|--approve\b|approval_command|run_command_prefix|next_command|"
-                         r"^\*\*(Run id|Project root)\*\*", re.I)
+                         r"^\*\*(Run id|Project root)\*\*|\brunner\b|record-command-run|blocks advancement", re.I)
 SECTION = re.compile(r"(?m)^(?=## )")
 DECLARATION = """## Completion declaration
 
@@ -98,6 +98,9 @@ def _build(kit: Path, project: Path, task: str, stop_after: str | None) -> str:
     run_dir = create_run(project, "full-feature", task, run_id="cprime")
     if stop_after is not None and stop_after not in {phase.id for phase in Runner(project, workflow="full-feature", run_dir=run_dir).phases}:
         raise ValueError(f"unknown phase for --stop-after: {stop_after}")
+    if stop_after in EXCLUDED_PHASES:
+        # 빠진 phase에서는 멈출 자리가 없다. 조용히 지나치면 그 뒤 phase가 전부 들어간다.
+        raise ValueError(f"--stop-after names a phase C′ leaves out: {stop_after}")
     runner = Runner(project, workflow="full-feature", run_dir=run_dir)
     adapter = HostedAdapter("claude")
     adapter._profile_id = runner.profile_id
@@ -107,7 +110,8 @@ def _build(kit: Path, project: Path, task: str, stop_after: str | None) -> str:
     adapter._task_text = task
     seen: dict[str, str] = {}
     parts = [f"# Procedure\n\nWork through these phases in order for this task: {task}\n"
-             "Write each phase's artifact under `cprime/` before starting the next phase."]
+             "Write each phase's artifact under `cprime/` before starting the next phase. Every artifact "
+             "path a phase names (`artifacts/…`, `prd.md`, `slice-plan.md`, …) is relative to `cprime/`."]
     for phase in runner.phases:
         if phase.id in EXCLUDED_PHASES:
             continue
@@ -133,6 +137,15 @@ SMOKE_CASE = Path(__file__).resolve().parent / "phase-cases" / "devflow"
 def _sh(args: list[str], cwd: Path, **kwargs) -> subprocess.CompletedProcess:
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     return subprocess.run(args, cwd=cwd, capture_output=True, text=True, env=env, **kwargs)
+
+
+def _event_item(line: str) -> dict:
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return {}
+    item = event.get("item") if isinstance(event, dict) else None
+    return item if isinstance(item, dict) else {}
 
 
 def _codex_final_message(stdout: str) -> str | None:
@@ -178,11 +191,21 @@ def smoke(kit: Path, work: Path, stop_after: str, timeout: int) -> dict:
     run = _sh(["codex", "exec", "--ephemeral", "--sandbox", "workspace-write", "--cd", str(project), "--json",
                "--skip-git-repo-check", "-"], project, input=prompt, timeout=timeout)
     (work / "codex.jsonl").write_text(run.stdout, encoding="utf-8")
+    # 채점 전에 test 패키지를 seed 상태로 되돌린다. agent가 `tests/__init__.py`에서 바로 종료하면 discover가
+    # 아무것도 돌리지 않고 0으로 끝난다. 그래서 통과는 "실제로 1개 이상 돌았고 OK"로만 센다.
+    shutil.copy2(SMOKE_CASE / "seed" / "tests" / "__init__.py", project / "tests" / "__init__.py")
     shutil.copytree(SMOKE_CASE / "author" / "clean" / "hidden", project, dirs_exist_ok=True)
-    hidden = {name: _sh(case[key], project, timeout=300).returncode == 0
-              for name, key in (("fix", "fix_test_command"), ("plan", "hidden_test_command"), ("visible", "test_command"))}
+    hidden = {}
+    for name, key in (("fix", "fix_test_command"), ("plan", "hidden_test_command"), ("visible", "test_command")):
+        result = _sh(case[key], project, timeout=300)
+        ran = re.search(r"^Ran (\d+) tests?", result.stderr, re.M)
+        hidden[name] = result.returncode == 0 and bool(ran) and int(ran.group(1)) > 0 and "\nOK" in result.stderr
+    # hidden test는 kit 저장소 안에 있어 sandbox가 읽기를 막지 못한다. 막을 수 없으니 드러낸다(#428의 비공개 평가기가 해법).
+    commands = [item.get("command") or "" for line in run.stdout.splitlines() for item in [_event_item(line)]
+                if item.get("type") == "command_execution"]
+    contaminated = any(marker in command for command in commands for marker in ("phase-cases", "hidden_fix", "hidden_plan"))
     message = _codex_final_message(run.stdout)
-    return {"exit": run.returncode, "seconds": round(time.time() - started), "prompt_sha256":
+    return {"exit": run.returncode, "contaminated": contaminated, "seconds": round(time.time() - started), "prompt_sha256":
             hashlib.sha256(prompt.encode("utf-8")).hexdigest(), "hidden_tests": hidden,
             "declaration": classify(message), "artifacts": sorted(p.name for p in (project / "cprime").rglob("*.md"))
             if (project / "cprime").is_dir() else []}

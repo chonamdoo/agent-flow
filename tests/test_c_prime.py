@@ -42,7 +42,8 @@ def test_runner_talk_is_removed_and_paths_are_relative(cprime, project):
     prompt = cprime.build(ROOT, project, "Add a hello endpoint")
     assert str(project) not in prompt and "af-cprime" not in prompt
     for pattern in (r"agent-flow\s+(status|continue|run|start|run-command|gates)", r"--approve", r"next_command",
-                    r"run_command_prefix", r"\*\*Run id\*\*", r"## When complete"):
+                    r"run_command_prefix", r"\*\*Run id\*\*", r"## When complete",
+                    r"(?i)\brunner\b", r"record-command-run", r"blocks advancement"):
         assert not re.search(pattern, prompt), pattern
 
 
@@ -68,3 +69,5 @@ def test_repeated_sections_point_back_and_stop_after_cuts_the_tail(cprime, proje
     assert re.findall(r"(?m)^# Phase: (\S+)$", short)[-1] == "commit"
     with pytest.raises(ValueError, match="unknown phase"):
         cprime.build(ROOT, project, "Add a hello endpoint", stop_after="nope")
+    with pytest.raises(ValueError, match="leaves out"):
+        cprime.build(ROOT, project, "Add a hello endpoint", stop_after="gates")
