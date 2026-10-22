@@ -118,7 +118,8 @@ def _assert_prompts(root: Path, run_dir: Path, mode: str, *, config_root: Path |
                 skill = next(skill for skill in resolution.required if skill.name == name)
                 assert skill.exists
                 if phase is implement:
-                    assert str(skill.path) in author
+                    # 작성 phase는 본문을 inline으로 받는다(#416). 경로가 아니라 본문이 전달 증거다.
+                    assert skill.path.read_text(encoding="utf-8").strip() in author
                 else:
                     assert all(str(skill.path) in job.prompt_for(host) for job in jobs)
         else:
