@@ -643,12 +643,6 @@ class Runner:
         phase_index = self._run_cursor(meta).phase_index
         while phase_index < len(self.phases):
             phase = self.phases[phase_index]
-            # worker가 merge하기 전에 대조한다. merge 뒤에는 되돌릴 수 없다.
-            if phase.id == "merge" and self._merge_head_reroute(phase_index) is not None:
-                transition = self._plan_transition(phase_index, phase)
-                self._commit_transition(transition)
-                phase_index = transition.to_index
-                continue
             meta = read_meta(self.run_dir)
             scope_reason = review_scope_block_reason(meta, phase.id)
             if scope_reason:
@@ -675,6 +669,13 @@ class Runner:
                 phase=phase,
                 leader_root=leader_root,
             )
+            # worker가 merge하기 전에 대조한다. merge 뒤에는 되돌릴 수 없다.
+            # leader 기준선 검증 뒤에 둔다. 되돌리는 전이가 기준선을 지워 오염 증거가 사라지면 안 된다.
+            if phase.id == "merge" and self._merge_head_reroute(phase_index) is not None:
+                transition = self._plan_transition(phase_index, phase)
+                self._commit_transition(transition)
+                phase_index = transition.to_index
+                continue
             policy_reason = (
                 self._architecture_policy_block_reason()
                 or self._architecture_decision_block_reason(phase)
