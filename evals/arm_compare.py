@@ -14,11 +14,18 @@ rates and counted apart.
 
 - A: the task, the test command and the completion declaration. No kit is installed.
 - B, C: the kit is installed with its hooks; the agent drives `agent-flow run --workflow development|full-feature`
-  and plays the user at pauses. There is no git remote, so the run ends at the first phase that needs one.
+  and answers the runner's decisions from the task text. It is not the human approver: `spec approve`/`spec confirm`
+  and turning a SPEC's `verify` into `manual` are off limits, because they let the worker pass its own evidence
+  gate (C-4 and C-5 of the first round did). There is no git remote, so the run ends at the first phase that needs one.
 - C′: `c_prime.build()` of the same project, stopping after `commit` (#427).
 
 Success follows `completion.summarize` (#424): the hidden fix, plan and visible tests all pass (each ran at
-least one test) and the run did not declare `blocked`. Tokens come from the agent's own transcript
+least one test), the run did not declare `blocked`, and it broke no evaluation rule. A rule violation is a
+human-only approval: a `spec approve`/`spec confirm` call or a `verify: manual` edit in the transcript, or a
+manual SPEC approval the runner recorded on disk (the disk check does not depend on the transcript).
+`artifact_sha256` fingerprints the checkout as the agent left it, before the hidden tests are copied in, so a
+later re-score can tell whether it graded the same tree. `isolation` records whether keeping the agent away
+from the hidden tests was only instructed (subagents on a shared filesystem) or enforced by a sandbox. Tokens come from the agent's own transcript
 (`run_usage.claude_messages`). Runner reviewer subprocesses print no usage, so their tokens are not in it;
 `reviewer_jobs` counts them.
 """
@@ -32,6 +39,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -52,6 +60,9 @@ KIT_FILES = ("package.json", "pyproject.toml", "README.md")
 HIDDEN_MARKERS = ("hidden_fix", "hidden_plan", "phase-cases", "author/clean/hidden")
 # 에이전트가 스스로 SPEC 검증을 바꾸거나 승인한 호출. 증거 gate를 우회한 run을 결과와 따로 드러낸다.
 SELF_APPROVAL = re.compile(r"agent-flow\S*\s+spec\s+(approve|confirm)\b")
+VERIFY_DOWNGRADE = re.compile(r"verify:\s*[\"']?manual\b")
+MANUAL_APPROVALS = "spec-manual-approvals.json"
+ISOLATION = ("instructed", "enforced")
 BRANCH = "feat/arm-compare"
 HANDBACK = "SubagentHandback"
 
@@ -110,10 +121,11 @@ Use Agent Flow, installed in this project, to do this task with the `{workflow}`
 
     .agent-flow/bin/agent-flow run {shlex.quote(task)} --workflow {workflow}
 
-Do each phase the runner prints and continue with the command it prints. You are also the user: when a
-phase asks the user to decide or approve, answer from the task text, approve, and run the printed approval
-command. There is no git remote: when the runner reaches a phase that needs one (push or pull request),
-stop there.
+Do each phase the runner prints and continue with the command it prints. When a phase asks the user to
+decide, answer from the task text and run the printed command. You are not the human approver: do not run
+`agent-flow spec approve` or `agent-flow spec confirm`, and do not change a SPEC's `verify` to `manual`. If the
+runner cannot go on without one of those, stop and declare `blocked` with the reason. There is no git remote:
+when the runner reaches a phase that needs one (push or pull request), stop there.
 
 {DECLARATION}"""
 
@@ -128,7 +140,9 @@ The project's tests run with `{' '.join(test_command)}`. Commit your change on t
 {DECLARATION}"""
 
 
-def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path) -> dict:
+def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isolation: str = "instructed") -> dict:
+    if isolation not in ISOLATION:
+        raise ValueError(f"isolation must be one of {ISOLATION}")
     case_dir = CASES / case_name
     case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
     output.mkdir(parents=True)
@@ -150,7 +164,7 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path) -> di
             "start_commit": _git(["rev-parse", "HEAD"], project),
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
-            "cprime_rules": c_prime.RULES_VERSION if arm == "Cp" else None}
+            "cprime_rules": c_prime.RULES_VERSION if arm == "Cp" else None, "isolation": isolation}
     (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
     return meta
 
@@ -183,6 +197,35 @@ def final_message(rows: list[dict]) -> str | None:
         if texts:
             last = "\n".join(texts)
     return last
+
+
+def _tool_uses(rows: list[dict]) -> list[dict]:
+    uses = []
+    for row in rows:
+        message = row.get("message")
+        if row.get("type") == "assistant" and isinstance(message, dict):
+            uses += [block for block in message.get("content") or []
+                     if isinstance(block, dict) and block.get("type") == "tool_use"]
+    return uses
+
+
+def verify_downgrades(rows: list[dict]) -> int:
+    """Tool calls whose written text sets a SPEC's verify to manual (an Edit that keeps or removes it does not count)."""
+    count = 0
+    for use in _tool_uses(rows):
+        data = use.get("input") if isinstance(use.get("input"), dict) else {}
+        edits = data.get("edits") if isinstance(data.get("edits"), list) else [data]
+        written = []
+        for edit in edits:
+            if not isinstance(edit, dict):
+                continue
+            new, old = edit.get("new_string"), edit.get("old_string")
+            if isinstance(new, str):
+                # 바꾼 뒤에 manual이 새로 생긴 경우만 하향이다. 원래 manual이던 것을 고치는 편집은 아니다.
+                written.append("" if isinstance(old, str) and VERIFY_DOWNGRADE.search(old) else new)
+        written += [data[key] for key in ("content", "command") if isinstance(data.get(key), str)]
+        count += any(VERIFY_DOWNGRADE.search(text) for text in written)
+    return count
 
 
 def tool_inputs(rows: list[dict]) -> list[str]:
@@ -230,6 +273,37 @@ def _runner_trace(project: Path, checkout: Path) -> dict:
     return {"phases_entered": entered, "reviewer_jobs": reviewer_jobs, "event_logs": len(events)}
 
 
+def manual_spec_approvals(project: Path, checkout: Path) -> int:
+    """Manual SPEC approvals the runner recorded for this project's runs, read from disk, not the transcript."""
+    roots = [project / ".git" / "agent-flow", checkout / ".agent-flow" / "runs"]
+    files = {path for root in roots if root.is_dir() for path in root.rglob(MANUAL_APPROVALS)}
+    count = 0
+    for path in files:
+        try:
+            approvals = json.loads(path.read_text(encoding="utf-8")).get("approvals")
+        except (OSError, ValueError, AttributeError):
+            # 읽을 수 없는 승인 기록도 승인 시도로 센다. 0으로 두면 위반이 깨끗한 run으로 보인다.
+            count += 1
+            continue
+        count += len(approvals) if isinstance(approvals, list) else 1
+    return count
+
+
+def artifact_sha256(checkout: Path) -> str:
+    """Manifest hash of the files git sees in the checkout (tracked and untracked, not ignored), runner run state aside."""
+    listing = c_prime._sh(["git", "ls-files", "-co", "--exclude-standard", "-z"], checkout).stdout
+    manifest = hashlib.sha256()
+    for name in sorted(item for item in listing.split("\0") if item and not item.startswith(".agent-flow/runs/")):
+        path = checkout / name
+        digest = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
+        manifest.update(f"{digest}  {name}\n".encode("utf-8"))
+    return manifest.hexdigest()
+
+
+def rule_violation(row: dict) -> bool:
+    return bool(row.get("spec_self_approvals") or row.get("verify_downgrades") or row.get("manual_spec_approvals"))
+
+
 def _tests_pass(command: list[str], cwd: Path) -> bool:
     result = c_prime._sh(command, cwd, timeout=300)
     ran = re.search(r"^Ran (\d+) tests?", result.stderr, re.M)
@@ -244,22 +318,33 @@ def score(run: Path, transcript: Path | None) -> dict:
     checkout = worked_checkout(project)
     rows = _transcript_rows(transcript)
     commits = c_prime._sh(["git", "rev-list", "--count", f"{meta['start_commit']}..HEAD"], checkout).stdout.strip()
-    # 채점 전에 test 패키지를 seed 상태로 되돌린다. 그래야 비운 `tests/__init__.py`로 discover를 건너뛸 수 없다.
-    shutil.copy2(case_dir / "seed" / "tests" / "__init__.py", checkout / "tests" / "__init__.py")
-    shutil.copytree(case_dir / "author" / "clean" / "hidden", checkout, dirs_exist_ok=True)
-    hidden = {name: _tests_pass(case[key], checkout)
-              for name, key in (("fix", "fix_test_command"), ("plan", "hidden_test_command"), ("visible", "test_command"))}
+    artifact = artifact_sha256(checkout)
+    # 채점은 버리는 사본에서 한다. 에이전트의 checkout을 바꾸지 않아야 다시 채점해도 같은 지문이 나온다.
+    with tempfile.TemporaryDirectory(prefix="arm-grade-") as scratch:
+        grading = Path(scratch) / "checkout"
+        shutil.copytree(checkout, grading, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+        # test 패키지를 seed 상태로 되돌린다. 그래야 비운 `tests/__init__.py`로 discover를 건너뛸 수 없다.
+        shutil.copy2(case_dir / "seed" / "tests" / "__init__.py", grading / "tests" / "__init__.py")
+        shutil.copytree(case_dir / "author" / "clean" / "hidden", grading, dirs_exist_ok=True)
+        hidden = {name: _tests_pass(case[key], grading) for name, key in
+                  (("fix", "fix_test_command"), ("plan", "hidden_test_command"), ("visible", "test_command"))}
     message = final_message(rows)
-    result = {**meta, "task_kind": "normal", "checkout": str(checkout), "hidden_tests": hidden,
+    result = {"isolation": "instructed", **meta, "task_kind": "normal", "checkout": str(checkout), "hidden_tests": hidden,
               "oracle": all(hidden.values()), "commits": int(commits) if commits.isdigit() else None,
               "final_message": message, "declaration": completion.classify(message if rows else None),
               "contaminated": any(marker in item for item in tool_inputs(rows) for marker in HIDDEN_MARKERS),
               "spec_self_approvals": sum(bool(SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
+              "verify_downgrades": verify_downgrades(rows),
+              "manual_spec_approvals": manual_spec_approvals(project, checkout), "artifact_sha256": artifact,
               "transcript": str(transcript) if transcript else None, **_usage_totals(rows),
               **(_runner_trace(project, checkout) if meta["arm"] in WORKFLOWS else {}),
               "scored_at": datetime.now().isoformat(timespec="seconds")}
     (run / "result.json").write_text(json.dumps(result, indent=1, default=str) + "\n", encoding="utf-8")
     return result
+
+
+def _succeeded(row: dict) -> bool:
+    return bool(row["oracle"]) and row["declaration"] != completion.BLOCKED and not rule_violation(row)
 
 
 def _mean(values: list[float]) -> float | None:
@@ -271,16 +356,17 @@ def summarize(results: list[dict]) -> str:
     table = completion.summarize(clean)
     lines = ["| arm | runs | success | one-sided Fisher p vs A | overclaim (upper 95%) | declared complete/blocked/"
              "undeclared/unmeasured | contaminated | output tokens (mean) | input uncached+cached (mean) | "
-             "seconds (mean) | reviewer jobs (mean) |", "|---|---|---|---|---|---|---|---|---|---|---|"]
+             "seconds (mean) | reviewer jobs (mean) | rule violations | isolation |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     base = [row for row in clean if row["arm"] == "A"]
-    base_success = sum(row["oracle"] and row["declaration"] != completion.BLOCKED for row in base)
+    base_success = sum(_succeeded(row) for row in base)
     for arm in ARMS:
         group = [row for row in clean if row["arm"] == arm]
         dirty = sum(row.get("contaminated", False) for row in results if row["arm"] == arm)
         if not group and not dirty:
             continue
         item = table.get((arm, "normal"), {})
-        success = sum(row["oracle"] and row["declaration"] != completion.BLOCKED for row in group)
+        success = sum(_succeeded(row) for row in group)
         p = (f"{fisher_greater(base_success, len(base), success, len(group)):.3f}"
              if arm != "A" and base and group else "-")
         states = item.get("states", {})
@@ -295,7 +381,9 @@ def summarize(results: list[dict]) -> str:
             _fmt(_mean([u["uncached_input"] + u["cached_input"] for u in usage
                         if u["uncached_input"] is not None and u["cached_input"] is not None])),
             _fmt(_mean([row["seconds"] for row in group if row.get("seconds") is not None])),
-            _fmt(_mean([row["reviewer_jobs"] for row in group if "reviewer_jobs" in row])) + " |"]))
+            _fmt(_mean([row["reviewer_jobs"] for row in group if "reviewer_jobs" in row])),
+            str(sum(rule_violation(row) for row in group)),
+            "/".join(sorted({row.get("isolation", "instructed") for row in group})) + " |"]))
     return "\n".join(lines) + "\n"
 
 
@@ -312,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
     prep.add_argument("--case", default="devflow")
     prep.add_argument("--trial", type=int, default=1)
     prep.add_argument("--output", type=Path, required=True)
+    prep.add_argument("--isolation", choices=ISOLATION, default="instructed")
     sc = sub.add_parser("score")
     sc.add_argument("run", type=Path)
     sc.add_argument("--transcript", type=Path)
@@ -319,11 +408,13 @@ def main(argv: list[str] | None = None) -> int:
     summ.add_argument("results", type=Path, nargs="+")
     args = parser.parse_args(argv)
     if args.command == "prepare":
-        print(json.dumps(prepare(args.kit.resolve(), args.arm, args.case, args.trial, args.output.resolve()), indent=1))
+        print(json.dumps(prepare(args.kit.resolve(), args.arm, args.case, args.trial, args.output.resolve(),
+                                 args.isolation), indent=1))
     elif args.command == "score":
         result = score(args.run.resolve(), args.transcript)
         print(json.dumps({key: result.get(key) for key in ("arm", "hidden_tests", "oracle", "declaration",
-                                                             "contaminated", "commits", "usage", "seconds")}))
+                                                             "contaminated", "commits", "usage", "seconds",
+                                                             "artifact_sha256")}))
     else:
         print(summarize([json.loads(path.read_text(encoding="utf-8")) for path in args.results]), end="")
     return 0
