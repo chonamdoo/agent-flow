@@ -546,6 +546,12 @@ def _phase_approval_identity(run_path: Path, meta: Mapping[str, Any]) -> dict[st
         "phase_entered_at": entered_at,
         "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
     }
+    # merge 승인은 commit에 묶인다. 승인 뒤 충돌 해결 commit이 생기면 같은 토큰으로 merge할 수 없다.
+    head_oid = request.get("head_oid")
+    if head_oid is not None:
+        if not isinstance(head_oid, str) or not head_oid:
+            return None
+        identity["head_oid"] = head_oid
     identity["token"] = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()

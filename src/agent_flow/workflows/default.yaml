@@ -696,6 +696,10 @@ phases:
       merge or rebase hits conflicts, apply
       `.agent-flow/skills/resolving-merge-conflicts/SKILL.md` before completing. Output:
       merge.md (merge commit hash, target branch).
+      Merge approval covers only the approved HEAD commit. If resolving
+      conflicts creates a commit, push it and stop without merging or writing
+      the artifact; the next continue routes back to merge-approval for CI and
+      re-approval.
 
   - id: cleanup
     description: Record cleanup handoff; Runner retires the checkout transactionally.
