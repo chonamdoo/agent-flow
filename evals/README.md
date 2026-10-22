@@ -649,6 +649,40 @@ author 필수 읽음률에서는 미관측 skill도 분모에 포함해 읽음 �
 바뀐 kit 지문이나 평가기 해시로 전체를 새로 측정한다. 같은 kit·평가기·case 조건으로 다시 돌려
 통과 결과를 고르거나, 실패한 unit만 골라 다시 돌리거나, 근거 없이 기준값을 낮춰 통과시키지 않는다.
 
+오탐률은 두 분모로 함께 적는다(#425).
+
+- `false_request_changes_rate`: request-changes를 낸 reviewer subprocess 수를 clean subprocess 수로 나눈다. angle이 많을수록 낮아 보인다. 기준 파일의 `no_rise`는 아직 이 지표를 본다.
+- `false_request_changes_row_rate`: 하나라도 request-changes를 낸 clean row 수를 clean row 수로 나눈다. 사용자가 리뷰 한 번에서 보는 단위다.
+- 보고서는 kit마다 row 개수와 정확한 95% 구간을 출력한다. 두 구간이 겹치면 "not conclusive"라고 적는다. n=20에서 한두 row 차이는 아무것도 결정하지 못한다.
+- 기준 파일을 row 단위로 바꾸는 일은 릴리스 정책 변경이라 이 PR에 넣지 않았다.
+
+`--export` 기록에는 angle별 `angle`·`verdict`·`usage`와 결함별 `defect_detectors`가 남는다. 리뷰 원문은 남기지 않는다. 이 필드가 있어야 아래 진단을 기록만으로 다시 계산할 수 있다.
+
+### `review_angle_subsets.py` — angle 부분집합·k-of-N 오프라인 진단(#425)
+
+```bash
+python evals/review_angle_subsets.py evals/results/phase-0.3.1*-2026* --kit after \
+  --subset generalist --subset generalist,types --k 2 --k 3
+```
+
+기록된 review row만 다시 센다. 모델을 부르지 않는다. 런타임 판정(reviewer 하나라도 request-changes면 request-changes)도 바꾸지 않는다.
+
+- 부분집합 S: 결함 탐지는 S 안의 angle이 detector인 경우만 센다. clean 오탐은 S 안의 angle이 request-changes를 낸 경우만 센다. 행당 uncached input도 S 안의 angle만 합한다.
+- k-of-N: 모든 angle을 두고, 결함은 detector가 k개 이상일 때, clean row는 request-changes가 k개 이상일 때만 센다.
+- angle별 결과가 없는 row(0.3.18 이후의 compact 기록 등)와 무효 row는 건너뛰고 개수를 적는다.
+
+0.3.10~0.3.17 기록(중단본 포함, review 864행 중 792행 채점)으로 돌린 결과는 아래와 같다.
+
+| 구성 | 탐지율 | clean row 오탐 | 행당 uncached input |
+|---|---:|---:|---:|
+| 모든 angle | 1.000 | 0.038 | 269,848 |
+| generalist+types | 0.990 | 0.023 | 92,841 |
+| generalist | 0.968 | 0.018 | 48,751 |
+| 2-of-N | 0.999 | 0.015 | 269,848 |
+| 3-of-N | 0.991 | 0.010 | 269,848 |
+
+이 사례는 포화돼 있다. 대부분의 결함을 거의 모든 angle이 잡는다. 그래서 이 표로 fan-out을 줄일지 정하지 않는다. #419는 angle 전용 결함 사례가 추가된 뒤 이 스크립트로 잰다.
+
 ### `phase_eval_context_reads.py` — native 출력 진단, 수동·비차단
 
 Codex author의 native `stdout.raw`에서 모델에 실제로 전달된 넓은 맥락 출력을 찾는다.

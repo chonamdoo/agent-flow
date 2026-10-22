@@ -18,6 +18,12 @@ Failure conditions come from the thresholds file:
 - a metric or token sum cannot be measured, including a valid unit without usage;
 - the thresholds file names an unknown metric or token axis.
 
+`false_request_changes_rate` divides false request-changes by reviewer subprocesses, so more angles look
+less noisy. `false_request_changes_row_rate` divides clean rows with any request-changes by clean rows: what a
+user sees per review (#425). Both are reported; the thresholds still gate the subprocess rate. The report also
+prints each kit's row counts with an exact 95% interval and says when the two intervals overlap, because a
+difference of one or two rows at n=20 decides nothing.
+
 `author_architecture_lint_pass_rate` counts only author rows where the installed architecture-lint
 gate applied (pass or fail); n/a, error and rows without the field are left out of its denominator.
 
@@ -59,11 +65,13 @@ AXES = ("behavior", "plan", "norm")
 TOKEN_AXES = ("uncached_input", "output")
 METRICS = (
     "author_required_read_rate", "author_pass_rate", "review_correct_rate", "defect_detection_rate",
-    "false_request_changes_rate", "reviewer_read_rate", "invalid_rate", "author_architecture_lint_pass_rate",
+    "false_request_changes_rate", "false_request_changes_row_rate", "reviewer_read_rate", "invalid_rate",
+    "author_architecture_lint_pass_rate",
 )
 ROW_FIELDS = (
     "scenario", "stack", "mode", "variant", "kit", "trial", "provider", "valid", "expected", "correct", "defects",
     "false_request_changes", "subprocesses", "required_read", "required_unread", "required_unobserved", "usage",
+    "defect_detectors",
 )
 
 
@@ -335,8 +343,10 @@ def _record_row(row: dict) -> dict:
     if isinstance(lint, dict):
         record["architecture_lint"] = {"status": lint.get("status")}
     if "angles" in row:
+        # angle·verdict·usage는 angle 부분집합과 k-of-N을 다시 셀 때 필요하다(#425). 리뷰 원문은 남기지 않는다.
         record["angles"] = [
-            {"provider": angle.get("provider"), "documents": [
+            {"angle": angle.get("angle"), "provider": angle.get("provider"), "verdict": angle.get("verdict"),
+             "usage": angle.get("usage"), "documents": [
                 {"inline_in_prompt": document.get("inline_in_prompt"),
                  "read_path_observed": document.get("read_path_observed")}
                 for document in angle.get("documents") or []
@@ -393,10 +403,54 @@ def kit_metrics(rows: list[dict], kit: str) -> dict[str, float | None]:
         "false_request_changes_rate": _rate(
             sum(row["false_request_changes"] for row in approve_rows), sum(row["subprocesses"] for row in approve_rows),
         ),
+        "false_request_changes_row_rate": _rate(
+            sum(row["false_request_changes"] > 0 for row in approve_rows), len(approve_rows),
+        ),
         "reviewer_read_rate": _rate(sum(observed), len(observed)),
         "invalid_rate": _rate(sum(_invalid(row) for row in own), len(own)),
         "author_architecture_lint_pass_rate": _rate(linted.count("pass"), len(linted)),
     }
+
+
+def clopper_pearson(successes: int, trials: int, alpha: float = 0.05) -> tuple[float, float]:
+    """Exact two-sided interval. The lower bound is the upper bound of the complement."""
+    def upper(k: int) -> float:
+        if k >= trials:
+            return 1.0
+        low, high = k / trials, 1.0
+        for _ in range(200):
+            middle = (low + high) / 2
+            log_terms = [math.lgamma(trials + 1) - math.lgamma(i + 1) - math.lgamma(trials - i + 1)
+                         + i * math.log(middle) + (trials - i) * math.log1p(-middle) for i in range(k + 1)]
+            peak = max(log_terms)
+            if math.exp(peak) * sum(math.exp(term - peak) for term in log_terms) > alpha / 2:
+                low = middle
+            else:
+                high = middle
+        return high
+    return 1.0 - upper(trials - successes), upper(successes)
+
+
+def false_request_changes_lines(rows: list[dict], before: str, after: str) -> list[str]:
+    counts = {}
+    for kit in (before, after):
+        clean = [row for row in rows if row.get("kit") == kit and row["scenario"] == "review"
+                 and row.get("expected") == "approve" and not _invalid(row)]
+        counts[kit] = (sum(row["false_request_changes"] > 0 for row in clean), len(clean))
+    lines = []
+    intervals = {}
+    for kit, (flagged, total) in counts.items():
+        if not total:
+            lines.append(f"- `{kit}` clean rows with a false request-changes: unmeasured")
+            continue
+        intervals[kit] = clopper_pearson(flagged, total)
+        low, high = intervals[kit]
+        lines.append(f"- `{kit}` clean rows with a false request-changes: {flagged}/{total} (95% {low:.3f}–{high:.3f})")
+    if len(intervals) == 2:
+        (low_a, high_a), (low_b, high_b) = intervals[before], intervals[after]
+        if low_a <= high_b and low_b <= high_a:
+            lines.append("- The two intervals overlap: this false request-changes difference is not conclusive.")
+    return lines
 
 
 def _unit_key(row: dict) -> tuple:
@@ -649,6 +703,8 @@ def compare(directories: list[Path], before: str, after: str, thresholds: dict, 
     lines.extend(f"|{metric}|{_fmt(metrics[before][metric])}|{_fmt(new[metric])}|" for metric in new)
     lines.extend(f"|{scenario} {axis} token ratio||{_fmt(ratio)}|"
                  for scenario, by_axis in ratios.items() for axis, ratio in by_axis.items())
+    lines.append("")
+    lines.extend(false_request_changes_lines(rows, before, after))
     lines.append("")
     lines.extend(_review_coverage_lines(rows, before, after, condition, cases))
     lines.append("")

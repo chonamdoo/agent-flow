@@ -801,3 +801,46 @@ def test_valid_compact_author_lint_and_legacy_rows_recompute(gate, tmp_path, sta
         assert all(row["architecture_lint"] == {"status": status} for row in authors)
     _, recompute_failures = gate.compare([destination], "before", "after", THRESHOLDS)
     assert recompute_failures == []
+
+
+def test_false_request_changes_is_reported_per_row_beside_the_subprocess_rate(gate, tmp_path):
+    """#425: subprocess 분모는 angle이 많을수록 오탐이 낮아 보인다. 사용자가 보는 것은 row다."""
+    rows = rows_for("before") + rows_for("after")
+    flagged = next(row for row in rows if row["kit"] == "after" and row.get("expected") == "approve")
+    flagged.update(overall="request-changes", correct=False, false_request_changes=1)
+    run = write_run(tmp_path / "run", rows)
+    lines, _ = gate.compare([run], "before", "after", THRESHOLDS)
+    metrics = gate.kit_metrics(rows, "after")
+    assert metrics["false_request_changes_rate"] == pytest.approx(1 / 6)
+    assert metrics["false_request_changes_row_rate"] == pytest.approx(1 / 3)
+    assert "|false_request_changes_row_rate|0.000|0.333|" in lines
+    assert any("`after` clean rows with a false request-changes: 1/3" in line for line in lines)
+    assert any("not conclusive" in line for line in lines)
+
+
+def test_clopper_pearson_interval_brackets_the_rate(gate):
+    low, high = gate.clopper_pearson(0, 20)
+    assert low == 0.0 and 0.16 < high < 0.17
+    low, high = gate.clopper_pearson(20, 20)
+    assert high == 1.0 and 0.83 < low < 0.84
+
+
+def test_export_keeps_per_angle_verdicts_detectors_and_usage(gate, tmp_path):
+    """#425: compact 기록에서 angle별 verdict·탐지자가 사라지면 부분집합을 다시 셀 수 없다."""
+    before_kit, after_kit = kit_tree(tmp_path / "old", "old"), kit_tree(tmp_path / "new", "new")
+    rows = rows_for("before") + rows_for("after")
+    for row in rows:
+        for index, angle in enumerate(row.get("angles", [])):
+            angle.update(angle=f"angle-{index}", verdict=row["overall"], usage=usage(), text="reviewer output")
+        if row.get("variant") == "defect":
+            row["defect_detectors"] = {"bug": ["angle-0/claude"]}
+    run = write_run(tmp_path / "run", rows, meta=digest_meta(gate, before_kit, after_kit))
+    record = tmp_path / "record"
+    _, failures = gate.compare([run], "before", "after", THRESHOLDS, export=record)
+    assert failures == []
+    exported = [json.loads(line) for line in gzip.decompress((record / "results.jsonl.gz").read_bytes()).decode().splitlines()]
+    defect = next(row for row in exported if row.get("variant") == "defect")
+    assert defect["defect_detectors"] == {"bug": ["angle-0/claude"]}
+    assert [(angle["angle"], angle["verdict"], angle["usage"]["uncached_input"]) for angle in defect["angles"]] == [
+        ("angle-0", "request-changes", 100), ("angle-1", "request-changes", 100)]
+    assert "reviewer output" not in json.dumps(exported)
