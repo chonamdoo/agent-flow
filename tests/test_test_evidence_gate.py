@@ -585,3 +585,31 @@ def test_project_override_can_turn_strict_observation_on(tmp_path):
     with pytest.raises(ValueError, match="invalid profile override execution"):
         load_profile_payload("generic", tmp_path)
     assert observation_mode(load_profile_payload("generic", tmp_path / "elsewhere")) == "self-report"
+
+
+def test_a_base_profile_with_an_unknown_observation_value_fails_when_loaded(tmp_path):
+    from agent_flow.core.profiles import load_profile_payload
+
+    profiles = tmp_path / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "custom.yaml").write_text("id: custom\nexecution:\n  observation: strcit\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="execution.observation"):
+        load_profile_payload("custom", tmp_path)
+    (profiles / "custom.yaml").write_text("id: custom\nexecution: strict\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="execution must be a mapping"):
+        load_profile_payload("custom", tmp_path)
+
+
+def test_one_strict_profile_makes_a_multi_profile_run_strict(tmp_path):
+    """반증: union이 execution을 옮기지 않아 profile을 하나 더 켜면 strict가 꺼졌다."""
+    from agent_flow.core.phase_workflow import find_kit_root
+    from agent_flow.core.profile_resolution import load_profile_union
+    from agent_flow.core.profiles import observation_mode
+
+    profiles = tmp_path / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "python.local.yaml").write_text("execution:\n  observation: strict\n", encoding="utf-8")
+    _, union = load_profile_union(find_kit_root(), ["python", "nextjs"], explicit_fallback=False, project_root=tmp_path)
+    assert observation_mode(union) == "strict"
+    _, plain = load_profile_union(find_kit_root(), ["python", "nextjs"], explicit_fallback=False, project_root=tmp_path / "x")
+    assert observation_mode(plain) == "self-report"

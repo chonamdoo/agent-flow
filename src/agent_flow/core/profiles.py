@@ -501,9 +501,11 @@ def load_profile_payload(
         raise ValueError(f"profile must be a mapping: {profile_id}")
     if payload.get("id") != profile_id:
         raise ValueError(f"profile id mismatch: {profile_id}")
-    if root is None:
-        return payload
-    return resolve_project_profile_payload(payload, profile_id=profile_id, root=root)
+    if root is not None:
+        payload = resolve_project_profile_payload(payload, profile_id=profile_id, root=root)
+    # 판정 자리에서야 터지면 관측이 있는 run은 틀린 값을 끝내 모른다. 읽을 때 막는다.
+    observation_mode(payload)
+    return payload
 
 
 def project_profile_path(root: Path, profile_id: str) -> Path:
@@ -896,7 +898,9 @@ OBSERVATION_MODES: tuple[str, ...] = ("self-report", "strict")
 
 def observation_mode(profile: Mapping[str, Any] | None) -> str:
     execution = profile.get("execution") if isinstance(profile, Mapping) else None
-    mode = execution.get("observation", "self-report") if isinstance(execution, Mapping) else "self-report"
+    if execution is not None and not isinstance(execution, Mapping):
+        raise ValueError("profile execution must be a mapping")
+    mode = execution.get("observation", "self-report") if execution is not None else "self-report"
     if mode not in OBSERVATION_MODES:
         raise ValueError(f"profile execution.observation must be one of {', '.join(OBSERVATION_MODES)}: {mode!r}")
     return mode

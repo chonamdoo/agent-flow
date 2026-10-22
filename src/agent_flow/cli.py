@@ -3965,7 +3965,7 @@ def _print_host_connection(project_root: Path, checkout: Path, active: ActiveRun
     try:
         mode = observation_mode(resolve_profile(_find_kit_root(), project_root)[1])
     except (OSError, ValueError) as exc:
-        print(f"observation: unavailable ({exc})")
+        print(f"observation: unavailable ({exc!r})")
         return
     if mode == "strict":
         print("observation: strict — 이 checkout의 명령이 관측되지 않으면 `unavailable` 신고로 통과하지 않습니다")
