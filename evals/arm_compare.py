@@ -50,6 +50,7 @@ KIT_TREES = ("bin", "lib", "templates", "bootstrap", "skills", "scripts", ".Code
 KIT_FILES = ("package.json", "pyproject.toml", "README.md")
 HIDDEN_MARKERS = ("hidden_fix", "hidden_plan", "phase-cases", "author/clean/hidden")
 BRANCH = "feat/arm-compare"
+HANDBACK = "SubagentHandback"
 
 DECLARATION = """## Completion declaration
 
@@ -170,8 +171,12 @@ def final_message(rows: list[dict]) -> str | None:
         message = row.get("message")
         if row.get("type") != "assistant" or not isinstance(message, dict):
             continue
-        texts = [block.get("text") for block in message.get("content") or []
-                 if isinstance(block, dict) and block.get("type") == "text" and block.get("text")]
+        # 서브에이전트는 최종 보고를 `SubagentHandback` 도구 호출로 넘긴다. 그 message도 최종 메시지다.
+        texts = [block.get("text") if block.get("type") == "text" else (block.get("input") or {}).get("message")
+                 for block in message.get("content") or []
+                 if isinstance(block, dict) and (block.get("type") == "text" or
+                                                 (block.get("type") == "tool_use" and block.get("name") == HANDBACK))]
+        texts = [text for text in texts if isinstance(text, str) and text]
         if texts:
             last = "\n".join(texts)
     return last
@@ -207,11 +212,15 @@ def _runner_trace(project: Path, checkout: Path) -> dict:
     entered: list[str] = []
     reviewer_jobs = 0
     for path in events:
-        for row in run_usage._jsonl(Path(path)):
+        for row in run_usage._jsonl(path):
             details = row.get("details") if isinstance(row.get("details"), dict) else {}
-            if row.get("event") == "phase_entered" and isinstance(details.get("phase"), str):
+            # 한 phase 진입이 연달아 두 번 기록되기도 한다. 이어진 중복은 하나로 센다.
+            if (row.get("event") == "phase_entered" and isinstance(details.get("phase"), str)
+                    and entered[-1:] != [details["phase"]]):
                 entered.append(details["phase"])
-        reviewer_jobs += run_usage.reviewer_usage(Path(path).parent)["observed_jobs"]
+        # 이벤트는 `<run>/context/events.jsonl`에, 리뷰 계측은 `<run>/review-metrics-*.json`에 있다.
+        run_dir = path.parent.parent if path.parent.name == "context" else path.parent
+        reviewer_jobs += run_usage.reviewer_usage(run_dir)["observed_jobs"]
     return {"phases_entered": entered, "reviewer_jobs": reviewer_jobs, "event_logs": len(events)}
 
 

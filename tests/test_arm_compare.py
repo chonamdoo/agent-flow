@@ -88,3 +88,10 @@ def test_summary_leaves_contaminated_runs_out_and_compares_with_a():
     c_line = next(line for line in table.splitlines() if line.startswith("| C |"))
     assert "| 2 | 2/2 |" in c_line and "| 1 |" in c_line
     assert "0.167" in c_line
+
+
+def test_a_subagent_handback_is_the_final_message():
+    rows = [{"type": "assistant", "message": {"content": [{"type": "text", "text": "working"}]}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "SubagentHandback", "input": {"message": "Done.\n\nEVAL-STATUS: complete"}}]}}]
+    assert arm_compare.final_message(rows).endswith("EVAL-STATUS: complete")
