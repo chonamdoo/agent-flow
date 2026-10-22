@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -136,6 +138,19 @@ def test_read_only_runs_need_landlock_on_linux(monkeypatch):
     assert verify_provider_sandbox_backend(allow_workspace_writes=False) == _LANDLOCK_LAUNCHER
 
 
+def _trusted_python() -> str:
+    """An interpreter the runner accepts as a provider: root- or self-owned and not group/other writable."""
+    for candidate in (sys.executable, "/usr/bin/python3"):
+        path = Path(candidate).resolve()
+        try:
+            identity = path.stat()
+        except OSError:
+            continue
+        if identity.st_uid in (0, os.getuid()) and not identity.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return str(path)
+    pytest.skip("no interpreter the provider trust check accepts")
+
+
 def _git(*args: str, cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
 
@@ -170,7 +185,7 @@ def test_read_only_provider_cannot_write_its_checkout_leader_or_sibling(tmp_path
     result = run_provider(
         ProviderCommand(
             name="read-only-probe",
-            argv=(sys.executable, "-c", program, "inside.txt", ".git",
+            argv=(_trusted_python(), "-c", program, "inside.txt", ".git",
                   str(tmp_path / "leader-leak.txt"), str(sibling.path / "sibling-leak.txt")),
             allow_workspace_writes=False,
         ),
