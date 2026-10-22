@@ -1,0 +1,305 @@
+openapi: 3.1.0
+info:
+  title: oy-global-fullstack evaluation contract
+  version: "1"
+  description: >
+    The API every build serves under `/api` on the same origin as the web app. Amounts are decimal
+    strings in USD (the base currency); conversion to the display currency happens in the client or
+    the server, but every number the API returns is USD. The scorer calls these endpoints directly,
+    so paths, status codes and field names are part of the task.
+servers:
+  - url: http://127.0.0.1:{port}
+    variables:
+      port:
+        default: "3000"
+components:
+  parameters:
+    LineId:
+      name: lineId
+      in: path
+      required: true
+      schema: {type: string}
+  schemas:
+    Money:
+      type: string
+      pattern: '^\d+\.\d{2}$'
+      description: USD, two decimals.
+    Option:
+      type: object
+      required: [id, name, originalPrice, salePrice, stock]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        originalPrice: {$ref: '#/components/schemas/Money'}
+        salePrice: {$ref: '#/components/schemas/Money'}
+        stock: {type: integer, minimum: 0}
+    Product:
+      type: object
+      required: [id, name, brand, categoryId, originalPrice, salePrice, popularity, options]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        brand: {type: string}
+        categoryId: {type: string}
+        originalPrice: {$ref: '#/components/schemas/Money'}
+        salePrice: {$ref: '#/components/schemas/Money'}
+        popularity: {type: integer}
+        options:
+          type: array
+          items: {$ref: '#/components/schemas/Option'}
+    Category:
+      type: object
+      required: [id, name, children]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        children:
+          type: array
+          items: {$ref: '#/components/schemas/Category'}
+    CartLine:
+      type: object
+      required: [id, productId, optionId, quantity, unitPrice, lineTotal]
+      properties:
+        id: {type: string}
+        productId: {type: string}
+        optionId: {type: [string, "null"]}
+        quantity: {type: integer, minimum: 1, maximum: 10}
+        unitPrice: {$ref: '#/components/schemas/Money'}
+        lineTotal: {$ref: '#/components/schemas/Money'}
+    Cart:
+      type: object
+      required: [lines, subtotal]
+      properties:
+        lines:
+          type: array
+          items: {$ref: '#/components/schemas/CartLine'}
+        subtotal: {$ref: '#/components/schemas/Money'}
+    Quote:
+      type: object
+      required: [country, shippable, subtotal, shipping, total, freeShippingRemaining]
+      properties:
+        country: {type: string}
+        shippable: {type: boolean}
+        subtotal: {$ref: '#/components/schemas/Money'}
+        shipping:
+          oneOf:
+            - {$ref: '#/components/schemas/Money'}
+            - {type: "null"}
+          description: '"0.00" when free; null when the country is not shippable.'
+        total:
+          oneOf:
+            - {$ref: '#/components/schemas/Money'}
+            - {type: "null"}
+        freeShippingRemaining:
+          oneOf:
+            - {$ref: '#/components/schemas/Money'}
+            - {type: "null"}
+    Prefs:
+      type: object
+      required: [country, currency]
+      properties:
+        country: {type: string, description: 'A key of fixtures/commerce.json shipping; default "GLOBAL".'}
+        currency: {type: [string, "null"], description: 'A key of fixtures/commerce.json currencies.'}
+    PrefsUpdate:
+      type: object
+      required: [country]
+      properties:
+        country: {type: string}
+        currency: {type: [string, "null"], description: Omitted or null selects the country's default currency.}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
+  responses:
+    BadRequest:
+      description: The body or a parameter is invalid (unknown product or option, sold out, quantity out of range).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: No such resource in this session.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+paths:
+  /api/categories:
+    get:
+      responses:
+        "200":
+          description: The category tree of fixtures/catalog.json.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Category'}
+  /api/products:
+    get:
+      parameters:
+        - {name: category, in: query, required: true, schema: {type: string}, description: Includes the whole subtree.}
+        - {name: filter, in: query, schema: {type: string}, description: Comma-separated descendant category ids; the union of their subtrees.}
+        - {name: sort, in: query, schema: {enum: [popularity, price-asc, price-desc], default: popularity}}
+        - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+        - {name: pageSize, in: query, schema: {enum: [24, 36, 48], default: 24}}
+      responses:
+        "200":
+          description: One page of the listing. `total` counts every matching product.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, page, pageSize, items]
+                properties:
+                  total: {type: integer}
+                  page: {type: integer}
+                  pageSize: {type: integer}
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Product'}
+        "400": {$ref: '#/components/responses/BadRequest'}
+  /api/products/{productId}:
+    get:
+      parameters:
+        - {name: productId, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: One product.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Product'}
+        "404": {$ref: '#/components/responses/NotFound'}
+  /api/search/suggest:
+    get:
+      parameters:
+        - {name: q, in: query, required: true, schema: {type: string, minLength: 1}}
+      responses:
+        "200":
+          description: >
+            At most 2 brands, 2 categories and 10 keywords, each containing `q` case-insensitively.
+            Keywords list matching popular search terms first, then product names.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [brands, categories, keywords]
+                properties:
+                  brands: {type: array, maxItems: 2, items: {type: string}}
+                  categories: {type: array, maxItems: 2, items: {type: string}}
+                  keywords: {type: array, maxItems: 10, items: {type: string}}
+  /api/cart:
+    get:
+      description: >
+        The cart of the session named by the `sid` cookie. A request without a valid `sid` gets an
+        empty cart and a new `sid` cookie. Carts survive a server restart.
+      responses:
+        "200":
+          description: The session's cart.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Cart'}
+  /api/cart/lines:
+    post:
+      description: >
+        Adds a product option. The same product and option already in the cart increases that
+        line's quantity (capped at min(10, stock)) instead of adding a line, also when two requests
+        arrive at once. Prices come from the catalog; any price field in the body is ignored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [productId, quantity]
+              properties:
+                productId: {type: string}
+                optionId: {type: [string, "null"], description: Required when the product has options.}
+                quantity: {type: integer, minimum: 1, maximum: 10}
+      responses:
+        "200":
+          description: The updated cart.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Cart'}
+        "400": {$ref: '#/components/responses/BadRequest'}
+  /api/cart/lines/{lineId}:
+    patch:
+      parameters:
+        - {$ref: '#/components/parameters/LineId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quantity]
+              properties:
+                quantity: {type: integer, minimum: 1, maximum: 10}
+      responses:
+        "200":
+          description: The updated cart.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Cart'}
+        "400": {$ref: '#/components/responses/BadRequest'}
+        "404": {$ref: '#/components/responses/NotFound'}
+    delete:
+      parameters:
+        - {$ref: '#/components/parameters/LineId'}
+      responses:
+        "200":
+          description: The updated cart.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Cart'}
+        "404": {$ref: '#/components/responses/NotFound'}
+  /api/prefs:
+    get:
+      responses:
+        "200":
+          description: The session's shipping country and display currency.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Prefs'}
+    put:
+      description: Choosing a country without a currency selects that country's default currency.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PrefsUpdate'}
+      responses:
+        "200":
+          description: The saved preferences.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Prefs'}
+        "400": {$ref: '#/components/responses/BadRequest'}
+  /api/shipping/quote:
+    get:
+      description: >
+        Quote for the session's cart and the session's country (or `country` when given), using
+        fixtures/commerce.json. Free when the subtotal reaches `freeFrom`.
+      parameters:
+        - {name: country, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: The quote in USD.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Quote'}
+        "400": {$ref: '#/components/responses/BadRequest'}
+  /api/currency/rates:
+    get:
+      responses:
+        "200":
+          description: The fixed rates of fixtures/commerce.json.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [base, rates]
+                properties:
+                  base: {const: USD}
+                  rates:
+                    type: object
+                    additionalProperties: {type: string}
