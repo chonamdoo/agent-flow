@@ -15,9 +15,12 @@ For a subset S of angle names, on rows that recorded per-angle results (`angles[
 - uncached input: summed `usage.uncached_input` of the angles in S, per row
 
 `k-of-N` keeps every angle and counts a defect when at least k angles detected it, and a clean row as
-flagged when at least k angles requested changes. Detectors are `angle/provider`; a subset matches the
-angle part, so every provider's run of that angle counts.
-Rows that are invalid (an angle without a verdict) or lack per-angle results are skipped and counted.
+flagged when at least k angles requested changes. Agreement counts angle names: the same angle run by two
+providers is one vote. Detectors are `angle/provider`; a subset matches the angle part (split at the last
+`/`), so every provider's run of that angle counts. Rows whose angles lack measured usage are left out of
+the token average, not counted as zero.
+Rows that are invalid (`valid: false`, an error, an angle without an approve/request-changes verdict, or a
+defect without a detector entry) or lack per-angle results are skipped and counted.
 """
 from __future__ import annotations
 
@@ -40,12 +43,26 @@ def read_rows(paths: list[Path]) -> list[dict]:
     return rows
 
 
+VERDICTS = ("approve", "request-changes")
+
+
 def _scorable(row: dict) -> bool:
     angles = row.get("angles")
-    return (row.get("scenario") == "review" and row.get("expected") in ("approve", "request-changes")
-            and isinstance(angles, list) and bool(angles)
-            and all(isinstance(angle, dict) and angle.get("angle") and angle.get("verdict") for angle in angles)
-            and (row["expected"] == "approve" or isinstance(row.get("defect_detectors"), dict)))
+    if (row.get("scenario") != "review" or row.get("expected") not in VERDICTS or row.get("valid") is False
+            or row.get("error") or not isinstance(angles, list) or not angles
+            or not all(isinstance(angle, dict) and angle.get("angle") and angle.get("verdict") in VERDICTS
+                       for angle in angles)):
+        return False
+    if row["expected"] == "approve":
+        return True
+    detectors = row.get("defect_detectors")
+    # 탐지자 기록이 빠진 결함이 있으면 분모가 줄어 탐지율이 부풀려진다. 그런 row는 채점하지 않는다.
+    return isinstance(detectors, dict) and bool(detectors) and set(detectors) == set(row.get("defects") or detectors)
+
+
+def _angle(detector: str) -> str:
+    # detector는 `angle/provider`다. angle 이름에 `/`가 들어갈 수 있으니 마지막 `/`에서 자른다.
+    return detector.rsplit("/", 1)[0]
 
 
 def _rate(numerator: int, denominator: int) -> float | None:
@@ -60,14 +77,18 @@ def score(rows: list[dict], *, subset: frozenset[str] | None = None, k: int = 1)
         angles = [angle for angle in row["angles"] if subset is None or angle["angle"] in subset]
         if not angles:
             continue
-        uncached.append(sum((angle.get("usage") or {}).get("uncached_input") or 0 for angle in angles))
+        tokens = [(angle.get("usage") or {}).get("uncached_input") for angle in angles]
+        # 사용량이 빠진 angle을 0으로 더하면 측정하지 않은 절감이 생긴다. 그 row는 토큰 평균에서 뺀다.
+        if all(isinstance(value, int) and not isinstance(value, bool) for value in tokens):
+            uncached.append(sum(tokens))
+        # 같은 angle을 두 provider가 돌려도 의견 하나다. k는 angle 이름으로 센다.
         if row["expected"] == "approve":
             clean += 1
-            flagged += sum(angle["verdict"] == "request-changes" for angle in angles) >= k
+            flagged += len({angle["angle"] for angle in angles if angle["verdict"] == "request-changes"}) >= k
             continue
         for detectors in row["defect_detectors"].values():
             seeded += 1
-            hits = {detector for detector in detectors if subset is None or detector.split("/")[0] in subset}
+            hits = {_angle(detector) for detector in detectors if subset is None or _angle(detector) in subset}
             found += len(hits) >= k
     return {
         "detection_rate": _rate(found, seeded), "seeded": seeded,

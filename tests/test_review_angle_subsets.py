@@ -57,3 +57,41 @@ def test_rows_without_per_angle_results_are_skipped_and_counted(subsets, tmp_pat
     assert text.startswith("3 review rows scored, 1 skipped")
     assert "| types | 0.500 | 2 | 0.500 | 2 | 10 |" in text
     assert "| 2-of-N | 0.500 | 2 | 0.000 | 2 | 30 |" in text
+
+
+def test_one_angle_run_by_two_providers_is_one_vote(subsets):
+    row = _row("request-changes", {"generalist": "request-changes", "types": "approve"},
+               {"bug": ["generalist/claude", "generalist/codex"]})
+    row["angles"].append({"angle": "generalist", "provider": "claude", "verdict": "request-changes",
+                          "usage": {"uncached_input": 10}})
+    clean = _row("approve", {"generalist": "request-changes", "types": "approve"})
+    clean["angles"].append({"angle": "generalist", "provider": "claude", "verdict": "request-changes",
+                            "usage": {"uncached_input": 10}})
+    vote = subsets.score([row, clean], k=2)
+    assert vote["detection_rate"] == 0.0 and vote["clean_false_request_changes_rate"] == 0.0
+
+
+def test_angle_names_with_a_slash_keep_their_detections(subsets):
+    row = _row("request-changes", {"security/auth": "request-changes"}, {"bug": ["security/auth/codex"]})
+    assert subsets.score([row], subset=frozenset({"security/auth"}))["detection_rate"] == 1.0
+
+
+@pytest.mark.parametrize("broken", ["invalid", "error", "incomplete-verdict", "missing-detector"])
+def test_rows_that_cannot_be_scored_honestly_are_skipped(subsets, broken):
+    row = _row("request-changes", {"generalist": "request-changes"}, {"bug": ["generalist/codex"]})
+    row["defects"] = {"bug": True}
+    if broken == "invalid":
+        row["valid"] = False
+    elif broken == "error":
+        row["error"] = "provider failed"
+    elif broken == "incomplete-verdict":
+        row["angles"][0]["verdict"] = "incomplete"
+    else:
+        row["defects"]["missed"] = False
+    assert not subsets._scorable(row)
+
+
+def test_unmeasured_usage_is_not_a_saving(subsets):
+    row = _row("approve", {"generalist": "approve"})
+    row["angles"][0]["usage"] = {"uncached_input": None}
+    assert subsets.score([row])["uncached_input_per_row"] is None
