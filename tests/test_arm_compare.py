@@ -674,3 +674,28 @@ def test_the_summary_reports_phases_and_the_orchestration_share():
     assert d_line.endswith("| 1.5 / 4 | 50% | - |")
     a_line = next(line for line in arm_compare.summarize(rows).splitlines() if line.startswith("| A |"))
     assert a_line.endswith("| - | - | - |")
+
+
+def test_a_blocked_exit_keeps_the_work_inside_its_phase(tmp_path):
+    project = tmp_path / "project"
+    path = project / ".git" / "agent-flow" / "r1" / "context" / "events.jsonl"
+    path.parent.mkdir(parents=True)
+    rows = [{"ts": "2026-10-23T01:00:00+00:00", "event": "phase_entered", "details": {"phase": "implement"}},
+            {"ts": "2026-10-23T01:10:00+00:00", "event": "phase_exited", "details": {"phase": "implement", "blocked": True}},
+            {"ts": "2026-10-23T01:30:00+00:00", "event": "phase_exited", "details": {"phase": "implement", "blocked": False}},
+            {"ts": "2026-10-23T01:30:00+00:00", "event": "phase_entered", "details": {"phase": "review"}}]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    trace = arm_compare.phase_trace(project, project, "development",
+                                    [_message("m1", "2026-10-23T01:20:00Z", 1_000_000)])
+    assert trace["phases"]["implement"]["seconds"] == 1800
+    assert trace["spend_by_category"]["build"]["cost_usd"] == 20.0 and trace["spend_by_category"]["outside"]["cost_usd"] == 0.0
+
+
+def test_unmeasured_subagents_leave_phase_costs_null(tmp_path):
+    project = tmp_path / "project"
+    _events(project / ".git" / "agent-flow" / "r1" / "context" / "events.jsonl",
+            [("2026-10-23T01:00:00+00:00", "phase_entered", "explore")])
+    trace = arm_compare.phase_trace(project, project, "development", [_message("m1", "2026-10-23T01:05:00Z", 10)],
+                                    measured=False)
+    assert trace["phases"]["explore"]["cost_usd"] is None and trace["orchestration_share"] is None
+    assert trace["phases"]["explore"]["output_tokens"] == 10
