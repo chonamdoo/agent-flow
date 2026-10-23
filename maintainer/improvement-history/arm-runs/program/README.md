@@ -18,6 +18,8 @@
 | `research/karpathy-autoresearch-prs.md` | karpathy/autoresearch PR에서 가져올 루프 기능 |
 | `program-v2.md` | 리뷰·조사·PR 검토를 반영한 v2(**승인됨**) |
 | `program-v2.1.md` | v2 뒤 변경: mobile-tabs 과제, 조건 D(`default`), phase 기록, 채택·출시 규칙, Q4(플로우 선택) 보류 조건 |
+| `program-v2.2.md` | 역할별 모델 분리 검토: 나중에, 리뷰어 계측·모델 가용성 점검부터 |
+| `reviews/*-models.md`, `research/setup-pstack-summary.md` | 역할별 모델 분리 적대적 리뷰 2개(Claude, Codex)와 setup-pstack 요약 |
 | `reviews/*-router.md`, `research/pstack-summary.md` | "에이전트가 플로우를 고른다" 적대적 리뷰 2개(Claude, Codex)와 pstack 요약 |
 
 ## 지금까지의 결과 (measured)
