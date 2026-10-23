@@ -295,7 +295,7 @@ PRINCIPLES_SHA256 = hashlib.sha256(PRINCIPLES.encode("utf-8")).hexdigest()
 def _write_principles(project: Path) -> None:
     """A+P's one difference from A: the principles as CLAUDE.md, committed before the agent starts."""
     (project / "CLAUDE.md").write_text(PRINCIPLES, encoding="utf-8")
-    _git(["add", "CLAUDE.md"], project)
+    _git(["add", "--force", "CLAUDE.md"], project)  # the mobile seeds' .gitignore lists CLAUDE.md
     _git(["commit", "-qm", "principles"], project)
 
 
