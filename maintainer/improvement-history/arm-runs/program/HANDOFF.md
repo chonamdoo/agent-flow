@@ -54,6 +54,9 @@
 - 연쇄 채점에서 앞 단계 제외가 이어지지 않던 결함을 판정 전에 고쳤다(`--after`).
 - 큰 run을 돌리기 전에는 `df /`를 확인한다. 끝난 run의 build와 .gradle은 지운다.
 
+- **사이클 2a 대기열**: 스크래치패드 `cyc2a/run.sh`(로그 `cyc2a/run.log`)가 A/A가 끝나면 시작한다. 순서는 AP-1, PS-1, AP-2, PS-2, AP-3, PS-3, B-1, D-1이고 harness는 `wt-ps`(#463)다.
+- 준비 단계 시험에서 B·D 설치 실패를 발견해 고쳤다. 모바일 case.json이 계약 없이 `--architecture-mode local`을 지정하고 있었다. 이제 kit 기본값(pending)을 쓴다(비공개 056ecac). pending 때문에 run이 멈추면 kit에 대한 발견으로 기록하고 clean으로 다시 돌린다.
+
 ## 3. 다음 할 일 (순서대로)
 
 1. ~~후속 변경 F v1~~ 완료. ②는 탐색 지표로 내렸다. 다시 살리려면 사용자 결정이 필요하다(§4).
