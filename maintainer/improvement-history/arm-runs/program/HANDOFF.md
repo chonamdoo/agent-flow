@@ -1,4 +1,4 @@
-# 인수인계: 어디까지 했나 (마지막 갱신 2026-10-23 03:00 UTC)
+# 인수인계: 어디까지 했나 (마지막 갱신 2026-10-23 04:10 UTC)
 
 이 세션의 토큰이나 컨테이너가 끝나도 다른 계정이 이어서 할 수 있게, 끝난 것, 돌던 것, 다음 할 일을 순서대로 적는다. 환경과 명령은 `REPRODUCE.md`, 결과와 PR 지도는 `README.md`.
 
@@ -16,17 +16,23 @@
 | mobile-cart v1 | 기준 S=1, mutant 18/20, 맨 모델 3/3 → 은퇴 | 비공개 `feat/mobile-cart-v1` |
 | mobile-checkout 기준 구현 | S=1(28/28), 평가기 동결 `08b1e1d9…` | 비공개 `feat/mobile-checkout-v0` `reference/` |
 | mobile-checkout 타당성 | mutant 18/20(0.9), 맨 모델 파일럿 **3/3 S=1**($3.72~4.73, 15~19분) → 기능 정확도로는 헤드룸 없음. 무결성·아키텍처·후속 변경·UI 비교용으로 쓴다 | 비공개 `feat/mobile-checkout-v0` 9eef97a |
+| mobile-tabs 과제(탭 구조) | PRD·계약·검사 29개. seed H 0, 기준 구현 1차 26/29 → 실패 3개 모두 검사 결함(스키마 순서, 다중 루트, 화면 밖 탭)이라 고침 → S=1(29/29), 평가기 동결 `b3051a4b…`. Codex mutant 20개 작성 | 비공개 `feat/mobile-tabs-v0` |
+| 플로우 선택 실험 검토 | Claude·Codex 적대적 리뷰 둘 다 "나중에, 전제 조건 뒤". 지금은 조건 D(`default`)와 phase 기록 등을 v2.1로 반영 | `program-v2.1.md`, `reviews/*-router.md` |
 | 클라우드 UI 검증 POC | 에뮬레이터 없이 Robolectric native graphics + Roborazzi로 Compose 화면을 찍고, 픽셀 차(채널 16) + semantics 트리 차로 비교. 기준 재실행 0 오탐, 간격·색·텍스트 결함 3종 모두 잡음 | 비공개 `mobile-checkout/visual-poc/`, `validity-reports/2026-10-23/visual/` |
 | 프로그램 v1, 적대적 리뷰 2개, 조사, karpathy PR 검토, 프로그램 v2 | v2 승인 대기 | 이 폴더 |
 
-## 2. 돌던 것
+## 2. 돌던 것 (컨테이너가 사라지면 다시 돌린다)
 
-없음. 파일럿과 mutant는 끝났고 기록했다. PR #452~#456 CI 녹색, 열린 스레드 없음(새 세션에서 다시 확인).
+| 작업 | 다시 돌리는 법 |
+|---|---|
+| mobile-tabs mutant 20개(동결 평가기 1회) | 기준 구현 checkout: harness `prepare --arm A --case-dir <private>/mobile-tabs --trial 0`의 project에 `git am <private>/mobile-tabs/reference/reference.patch`. 그다음 `python3 -I <private>/mobile-tabs/validity.py mutants --reference <checkout> --output report.json`. 지문이 `b3051a4b…`인지 먼저 확인 |
+| mobile-tabs 맨 모델 파일럿 A×3 | `REPRODUCE.md` §3과 같다. `--case-dir <private>/mobile-tabs`, #454 브랜치 |
 
 ## 3. 다음 할 일 (순서대로)
 
-1. **사용자 결정 받기**(§4). v2가 승인되면 그 내용을 `PREREGISTRATION.md` v1에 옮긴다(PR, merge 안 함).
-2. v2 §9 구현 순서
+1. mobile-tabs 결과(mutant, 파일럿)를 비공개 `mobile-tabs/README.md`와 `validity-reports/`에 기록한다.
+2. v2(승인됨)와 v2.1을 `PREREGISTRATION.md` v1에 옮긴다(PR, merge 안 함).
+3. v2 §9 구현 순서(v2.1 §4의 조건 D, phase 기록, 채택·출시 규칙을 4번 단계에 함께)
    1. 무결성 검사: 테스트 변조, stub, 원자 주장 감사
    2. 결정적 구조 지표와 **비공개 아키텍처 규칙**(mobile-checkout, OYG부터)
    2-1. **디자인 층과 UI 충실도**(v2 §3e, 사용자 요청): 과제별 디자인 명세, 좌표 기반 배치 검사, 토큰 준수, 시각 mutant 보정
@@ -37,15 +43,12 @@
    6. 오토리서치 workflow track(karpathy PR 기능 10개)
    7. 심판 harness와 보정 세트(사람 라벨이 필요하면 사용자에게)
    8. 두 번째 holdout(헤드룸이 있는 과제. 지금까지 헤드룸은 OYG 같은 큰 웹 과제에서만 관찰됨), Q3 시뮬레이터
-3. #454와 #455를 합친 로컬 브랜치로 mobile-checkout에서 B·C 설치를 확인한다(drive 없이 prepare만).
+4. #454와 #455를 합친 로컬 브랜치로 mobile-checkout에서 B·C 설치를 확인한다(drive 없이 prepare만).
 
-## 4. 사용자 결정 대기
+## 4. 사용자 결정 (2026-10-23)
 
-1. 프로그램 v2 승인
-2. 심판 검증용 사람 라벨 30~50개를 사용자가 맡을지, 심판 없이 갈지
-3. 사이클 예산 $150 유지 또는 증액(후속 변경을 넣으면 4조건 1세트가 약 $53)
-4. runner에 `continue --extend-fix-loop`(상한 연장 승인 경로) 구현 PR을 낼 권한. 자동 모드 분류기가 막음
-5. 이전부터 보류 중: #442 이미지 빌드, draft #431, #433~#436, #438, #441
+- 받음: v2 승인. 심판 없이 결정적 지표부터, 사람 라벨은 필요할 때. 예산 $150/사이클 유지. runner 변경 없음. UI 검증은 클라우드(Robolectric). 탭 구조 과제 제작. 플로우 선택 실험은 추천안(v2.1 §3, 나중에)대로.
+- 남음: 이전부터 보류 중인 #442 이미지 빌드, draft #431, #433~#436, #438, #441.
 
 ## 5. 사용자가 정한 운영 규칙 (지금까지)
 

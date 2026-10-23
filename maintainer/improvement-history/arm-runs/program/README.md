@@ -16,7 +16,9 @@
 | `reviews/codex-adversarial-v1.md` | Codex CLI 0.163.0의 v1 적대적 리뷰(독립) |
 | `research/architecture-quality-measures.md` | 아키텍처·SE 품질 측정 문헌 조사(출처 URL 포함, 원문을 직접 읽지 못한 수치가 있음) |
 | `research/karpathy-autoresearch-prs.md` | karpathy/autoresearch PR에서 가져올 루프 기능 |
-| `program-v2.md` | 리뷰·조사·PR 검토를 반영한 v2(승인 대기) |
+| `program-v2.md` | 리뷰·조사·PR 검토를 반영한 v2(**승인됨**) |
+| `program-v2.1.md` | v2 뒤 변경: mobile-tabs 과제, 조건 D(`default`), phase 기록, 채택·출시 규칙, Q4(플로우 선택) 보류 조건 |
+| `reviews/*-router.md`, `research/pstack-summary.md` | "에이전트가 플로우를 고른다" 적대적 리뷰 2개(Claude, Codex)와 pstack 요약 |
 
 ## 지금까지의 결과 (measured)
 
@@ -27,6 +29,7 @@
 | mobile-cart v0(holdout 후보) | 기준 구현 S=1, mutant 15/20, 맨 모델 3/3 → 너무 쉬워 은퇴 | 비공개 저장소 |
 | mobile-cart v1 | 기준 구현 S=1, mutant 18/20, 맨 모델 3/3 → 은퇴 | 비공개 저장소 |
 | mobile-checkout(대형 holdout) | 기준 구현 S=1(검사 28/28), mutant 18/20, 맨 모델 3/3(평균 $4.29, 17분) → 기능으로는 헤드룸 없음 | 비공개 저장소 |
+| mobile-tabs(탭 구조 holdout 후보) | 기준 구현 S=1(29/29), 평가기 `b3051a4b…`. mutant·맨 모델 파일럿 진행 중 | 비공개 저장소 |
 | 클라우드 UI 검증 POC | Roborazzi(Robolectric native graphics) 렌더 + 픽셀·semantics 비교. 기준 재실행 오탐 0, 간격·색·텍스트 결함 3/3 잡음 | 비공개 저장소 |
 
 ## PR과 브랜치
