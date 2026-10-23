@@ -31,7 +31,8 @@
 | mobile-cart v0(holdout 후보) | 기준 구현 S=1, mutant 15/20, 맨 모델 3/3 → 너무 쉬워 은퇴 | 비공개 저장소 |
 | mobile-cart v1 | 기준 구현 S=1, mutant 18/20, 맨 모델 3/3 → 은퇴 | 비공개 저장소 |
 | mobile-checkout(대형 holdout) | 기준 구현 S=1(검사 28/28), mutant 18/20, 맨 모델 3/3(평균 $4.29, 17분) → 기능으로는 헤드룸 없음 | 비공개 저장소 |
-| mobile-tabs(탭 구조 holdout 후보) | 기준 구현 S=1(29/29), 평가기 `b3051a4b…`. mutant·맨 모델 파일럿 진행 중 | 비공개 저장소 |
+| mobile-tabs(탭 구조 holdout 후보) | 기준 구현 S=1(29/29), mutant 19/20, 맨 모델 2/3(동결 기준. 실패 하나는 검사가 PRD보다 엄격해서 났고, PRD에 충실한 판정으로는 3/3) | 비공개 저장소 |
+| 후속 변경 F1·F2 민감도 | 정상과 구조를 망가뜨린 기반 모두 S=1. 이 난이도로는 ②가 갈리지 않음 → F v1로 다시 | 비공개 저장소 |
 | 클라우드 UI 검증 POC | Roborazzi(Robolectric native graphics) 렌더 + 픽셀·semantics 비교. 기준 재실행 오탐 0, 간격·색·텍스트 결함 3/3 잡음 | 비공개 저장소 |
 
 ## PR과 브랜치

@@ -1,59 +1,78 @@
-# 인수인계: 어디까지 했나 (마지막 갱신 2026-10-23 04:10 UTC)
+# 인수인계: 어디까지 했나 (마지막 갱신 2026-10-23 05:15 UTC)
 
-이 세션의 토큰이나 컨테이너가 끝나도 다른 계정이 이어서 할 수 있게, 끝난 것, 돌던 것, 다음 할 일을 순서대로 적는다. 환경과 명령은 `REPRODUCE.md`, 결과와 PR 지도는 `README.md`.
+이 세션의 토큰이나 컨테이너가 끝나도 다른 계정이 이어서 할 수 있게, 끝난 것, 돌던 것, 다음 할 일을 순서대로 적는다.
+- 환경과 명령: `REPRODUCE.md`
+- 결과와 PR 지도: `README.md`
+- 계획: `program-v2.md` → `program-v2.1.md` → `program-v2.2.md`
+- 판정 규칙: `../PREREGISTRATION.md` v1 절(#459)
 
-**중요.** 이 세션의 scratchpad(run 디렉터리, 기준 구현 checkout, mutant 작업 폴더)는 git에 없고 컨테이너와 함께 사라진다. 남는 것은 아래 "보존된 산출물"뿐이다. 돌던 작업은 §2의 명령으로 다시 돌린다.
+**중요.** 이 세션의 scratchpad(run 디렉터리, 기준 구현 checkout)는 git에 없다. 컨테이너와 함께 사라진다(오늘 두 번 재시작됨). 남는 것은 PR과 비공개 저장소뿐이다.
 
 ## 1. 끝난 것
 
-| 항목 | 결과 | 보존 위치 |
+### harness (public, 모두 merge 안 함)
+
+| PR | 내용 | 상태 |
 |---|---|---|
-| harness 무결성·계측 수정 | 사전등록 성공 규칙, subagent·토큰 구성, checkout 선택, CI 미실행 gate, 옮긴 run 채점 버그 | PR #452(열림, merge 안 함) |
-| OYG 사이클 1 | A 1/5, C 0/2(둘 다 fix-loop 상한 정지 + 평가기 실패) | PR #453 |
-| 비공개 과제 지원 | `--case-dir`, seed patch | PR #454 |
-| fix-loop 상한 재승인 | harness가 최대 2회 재승인("리뷰 한 번 더"). 상한 초기화 경로는 runner에 없음 | PR #455 |
-| mobile-cart v0 | 기준 S=1, mutant 15/20, 맨 모델 3/3 → 은퇴 | 비공개 `feat/mobile-cart-holdout-v0` |
-| mobile-cart v1 | 기준 S=1, mutant 18/20, 맨 모델 3/3 → 은퇴 | 비공개 `feat/mobile-cart-v1` |
-| mobile-checkout 기준 구현 | S=1(28/28), 평가기 동결 `08b1e1d9…` | 비공개 `feat/mobile-checkout-v0` `reference/` |
-| mobile-checkout 타당성 | mutant 18/20(0.9), 맨 모델 파일럿 **3/3 S=1**($3.72~4.73, 15~19분) → 기능 정확도로는 헤드룸 없음. 무결성·아키텍처·후속 변경·UI 비교용으로 쓴다 | 비공개 `feat/mobile-checkout-v0` 9eef97a |
-| mobile-tabs 과제(탭 구조) | PRD·계약·검사 29개. seed H 0, 기준 구현 1차 26/29 → 실패 3개 모두 검사 결함(스키마 순서, 다중 루트, 화면 밖 탭)이라 고침 → S=1(29/29), 평가기 동결 `b3051a4b…`. Codex mutant 20개 작성 | 비공개 `feat/mobile-tabs-v0` |
-| 플로우 선택 실험 검토 | Claude·Codex 적대적 리뷰 둘 다 "나중에, 전제 조건 뒤". 지금은 조건 D(`default`)와 phase 기록 등을 v2.1로 반영 | `program-v2.1.md`, `reviews/*-router.md` |
-| 클라우드 UI 검증 POC | 에뮬레이터 없이 Robolectric native graphics + Roborazzi로 Compose 화면을 찍고, 픽셀 차(채널 16) + semantics 트리 차로 비교. 기준 재실행 0 오탐, 간격·색·텍스트 결함 3종 모두 잡음 | 비공개 `mobile-checkout/visual-poc/`, `validity-reports/2026-10-23/visual/` |
-| 프로그램 v1, 적대적 리뷰 2개, 조사, karpathy PR 검토, 프로그램 v2 | v2 승인 대기 | 이 폴더 |
+| #452 | 채점·계측 결함 수정 | CI 녹색 |
+| #453 | OYG 사이클 1 결과 | 녹색 |
+| #454 | 외부 과제 `--case-dir` | 녹색 |
+| #455 | fix-loop 상한 재승인 | 녹색 |
+| `feat/epic-409-integration` | #454 + #455 통합 브랜치(PR 없음) | |
+| #457 | 조건 D(`default`), phase 기록, 오케스트레이션 비용 비율 | 녹색, Codex 지적 2건 반영 |
+| #458 | 무결성 검사(테스트 변조·stub·근거 없는 주장·완료 뒤 미commit) | 녹색, 2건 반영 |
+| #459 | 사전등록 v1(문서) | 녹색, 1건 반영 |
+| #460 | 후속 변경 harness(`followon`, 블라인드) | 녹색, 1건 반영 |
+| #461 | 리뷰어 비용 하한, 모델 가용성 `preflight` | 녹색, 2건 반영 |
+| #462 | 조건 A+P(고정 8원칙 CLAUDE.md) | 녹색, 지적 없음 |
 
-## 2. 돌던 것 (컨테이너가 사라지면 다시 돌린다)
+쌓인 순서: integration → #457 → #458 → #460 → #461 → #462. #459는 integration 위에 따로 있다.
 
-| 작업 | 다시 돌리는 법 |
+### 비공개 평가기 (`chonamdoo/agent-flow-evals-private`, 브랜치 `feat/mobile-tabs-v0`. 앞선 과제를 모두 포함)
+
+| 과제 | 결과 |
 |---|---|
-| mobile-tabs mutant 20개(동결 평가기 1회) | 기준 구현 checkout: harness `prepare --arm A --case-dir <private>/mobile-tabs --trial 0`의 project에 `git am <private>/mobile-tabs/reference/reference.patch`. 그다음 `python3 -I <private>/mobile-tabs/validity.py mutants --reference <checkout> --output report.json`. 지문이 `b3051a4b…`인지 먼저 확인 |
-| mobile-tabs 맨 모델 파일럿 A×3 | `REPRODUCE.md` §3과 같다. `--case-dir <private>/mobile-tabs`, #454 브랜치 |
+| mobile-checkout | 맨 모델 3/3, mutant 18/20 |
+| **mobile-tabs**(무신사 실물 탭 구조, UI) | 기준 구현 29/29, mutant 19/20, 맨 모델 2/3(동결 기준). 실패 하나(MC332)는 검사가 PRD보다 엄격해서 났다. PRD에 충실한 판정으로는 3/3(탐색) |
+| `mobile-common/archcheck.py` | 비공개 아키텍처 규칙 AR1~8. 기준 구현 2개·맨 모델 run 4개에서 0건, 결함 주입 10건을 모두 잡음 |
+| mobile-checkout 후속 F1·F2 | 독립 기준 구현으로 검증(S=1). **민감도 확인 실패**: 정상과 망가뜨린 기반 모두 S=1이라 ② 지표가 아직 타당하지 않다 |
+
+### 검토와 결정
+
+- 플로우 선택(Q4, pstack): 나중에. `program-v2.1.md` §3
+- 역할별 모델(Q5, setup-pstack): 나중에. 리뷰어 계측부터. `program-v2.2.md`
+- 사용자 결정: v2 승인, 심판 없이, $150/사이클, runner 변경 없음, UI는 클라우드(Robolectric), 추천안대로 진행.
+
+## 2. 돌던 것
+
+없다. 모든 run을 채점하고 기록했다.
 
 ## 3. 다음 할 일 (순서대로)
 
-1. mobile-tabs 결과(mutant, 파일럿)를 비공개 `mobile-tabs/README.md`와 `validity-reports/`에 기록한다.
-2. v2(승인됨)와 v2.1을 `PREREGISTRATION.md` v1에 옮긴다(PR, merge 안 함).
-3. v2 §9 구현 순서(v2.1 §4의 조건 D, phase 기록, 채택·출시 규칙을 4번 단계에 함께)
-   1. 무결성 검사: 테스트 변조, stub, 원자 주장 감사
-   2. 결정적 구조 지표와 **비공개 아키텍처 규칙**(mobile-checkout, OYG부터)
-   2-1. **디자인 층과 UI 충실도**(v2 §3e, 사용자 요청): 과제별 디자인 명세, 좌표 기반 배치 검사, 토큰 준수, 시각 mutant 보정
-   2-2. **UI 검증 평가기화**: 사용자 결정 "클라우드에서 UI가 맞게 구현됐는지 검증만 되면 된다" → 에뮬레이터(moru-artemis) 대신 Roborazzi POC를 쓴다. 남은 일: 화면 함수 서명을 계약에 고정, 디자인 명세(배치 순서·정렬·토큰)를 semantics 좌표 검사로, 픽셀 비교는 명세가 고정한 영역에만 허용치와 함께, 시각 mutant로 보정. 결과는 "UI 맞음" 통과/실패 한 항목
-   3. **후속 변경 harness**와 과제별 후속 변경 2개. 기준 구현과 결함 주입본으로 먼저 검증한다
-   4. A+P 조건, project-local workflow 설치기
-   5. A/A 보정, 잡음 바닥
-   6. 오토리서치 workflow track(karpathy PR 기능 10개)
-   7. 심판 harness와 보정 세트(사람 라벨이 필요하면 사용자에게)
-   8. 두 번째 holdout(헤드룸이 있는 과제. 지금까지 헤드룸은 OYG 같은 큰 웹 과제에서만 관찰됨), Q3 시뮬레이터
-4. #454와 #455를 합친 로컬 브랜치로 mobile-checkout에서 B·C 설치를 확인한다(drive 없이 prepare만).
+1. **후속 변경 F v1**(비공개 `mobile-checkout/followon/README.md` "다음 판")
+   - 더 어려운 F3(여러 경계를 지나는 묶음 배송 등)
+   - 연쇄 F1 → F2 → F3
+   - 보조 지표: 후속 비용, diff 크기, 후속 뒤 새 위반
+   - 민감도 재확인: 기반마다 2회 이상
+   - 통과 전에는 ②를 판정에 쓰지 않는다.
+2. **mobile-tabs v1**: MC332를 PRD에 맞추고(16dp 허용), M02를 잡게 검사 설정의 탭 이름을 바꾼다. 평가기를 다시 동결한다.
+3. **A/A 보정**: 같은 조건(A) 2벌 × 3회로 잡음 바닥을 잰다.
+4. **사이클 2**($150): mobile-tabs + mobile-checkout
+   - A·AP·B·D 각 3회, C는 참조 1~2회
+   - 무결성, 아키텍처 규칙, UI, phase 기록, 리뷰어 하한
+   - 이 사이클에 쓰는 harness는 #462 브랜치(모든 기능이 쌓여 있음)다.
+5. 오토리서치(Q2): OYG에서 축소판 탐색
+6. 두 번째 holdout으로 확정. 버그·리팩터 과제를 만든 뒤 Q4·Q5 시작 조건을 판단한다.
 
-## 4. 사용자 결정 (2026-10-23)
+## 4. 사용자 결정 대기
 
-- 받음: v2 승인. 심판 없이 결정적 지표부터, 사람 라벨은 필요할 때. 예산 $150/사이클 유지. runner 변경 없음. UI 검증은 클라우드(Robolectric). 탭 구조 과제 제작. 플로우 선택 실험은 추천안(v2.1 §3, 나중에)대로.
-- 남음: 이전부터 보류 중인 #442 이미지 빌드, draft #431, #433~#436, #438, #441.
+- 이전부터 보류 중: #442 이미지 빌드, draft #431, #433~#436, #438, #441.
+- (필요할 때) 리뷰어 토큰을 정확히 재려면 runner 변경이 필요하다. 구현 PR을 낼지 사용자에게 묻는다.
 
-## 5. 사용자가 정한 운영 규칙 (지금까지)
+## 5. 운영 규칙
 
 - 기준 브랜치는 `experiment/epic-409`다. main과 태그는 건드리지 않는다.
-- 금지 구역(hook, runner 판단, 승인 경로, 평가기와 case)은 구현 PR만 내고 merge하지 않는다. evals 전용 PR은 merge할 수 있다. 다만 최근 작업들(#452~#456)은 사용자 지시로 merge하지 않았다.
-- `--dangerously-skip-permissions`는 금지한다.
-- holdout 내용은 공개 저장소에 쓰지 않는다.
-- 자율로 진행하되, 결과를 바꾸는 판단이나 비용이 큰 결정은 보고하고 승인을 받는다.
+- 금지 구역(hook, runner 판단, 승인 경로, 평가기와 case)은 구현 PR만 내고 merge하지 않는다. 최근 PR은 모두 merge하지 않는다(사용자 지시).
+- `--dangerously-skip-permissions`는 쓰지 않는다. holdout 내용은 공개 저장소에 쓰지 않는다.
+- 평가기를 동결한 뒤 결과를 보고 검사를 고치면, 그 뒤 수치는 탐색으로만 적는다.
+- 컨테이너 재시작에 대비해 긴 run은 `setsid nohup`으로 띄운다. 이미 돈 run은 건너뛰게 짠다. 끊긴 run은 harness 오류로 따로 두고(분모 밖) 새로 돌린다.
