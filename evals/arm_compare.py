@@ -28,6 +28,9 @@ rates and counted apart.
 - A: the task, the test command and the completion declaration. No kit is installed.
 - AP (A+P): A plus the fixed `PRINCIPLES` (8 code principles and a pre-completion check) as the project's CLAUDE.md,
   committed before the agent starts. The prompt is A's, word for word.
+- PS (A+pstack): like AP with `PSTACK_PRINCIPLES` instead, lines taken word for word from pstack's principle and
+  playbook skills (MIT, see `evals/third_party/pstack-LICENSE`). AP against PS tells which principles, A against
+  either tells whether stating principles at all moves the endpoints.
 - B, C: the kit is installed with its hooks; the agent drives `agent-flow run --workflow development|full-feature`
   and answers the runner's decisions from the task text. It is not the human approver: `spec approve`/`spec confirm`
   and turning a SPEC's `verify` into `manual` are off limits, because they let the worker pass its own evidence
@@ -108,7 +111,8 @@ CONTROLLER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "ANDROID_HOME"
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CODEX_HOME", "OPENAI_API_KEY")
 AGENT_FLOW_WORKTREES = Path.home() / ".agent-flow" / "worktrees"
 CLAUDE_TOOLS = ("Bash", "Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "TodoWrite", "Task")
-ARMS = ("A", "AP", "B", "C", "D", "Cp")
+ARMS = ("A", "AP", "PS", "B", "C", "D", "Cp")
+BARE_ARMS = ("A", "AP", "PS")  # no kit; the agent gets the task prompt only (and, AP and PS, a CLAUDE.md)
 WORKFLOWS = {"B": "development", "C": "full-feature", "D": "default"}
 # 설치기가 읽는 트리만 복사한다(package.json `files`). evals/·tests/·maintainer/는 에이전트의 kit에 없다.
 KIT_TREES = ("bin", "lib", "templates", "bootstrap", "skills", "scripts", ".Codex", ".claude", "src", "docs")
@@ -291,12 +295,82 @@ for regressions, duplication and code that does not match the surrounding style.
 """
 PRINCIPLES_SHA256 = hashlib.sha256(PRINCIPLES.encode("utf-8")).hexdigest()
 
+# Arm PS (#409, pstack review): the same slot filled from pstack (github.com/cursor/plugins, pstack/ at 8b3326d,
+# MIT). Every bullet is pstack's own wording, from the principle skills, the code-quality lens and figure-it-out /
+# autonomous-run; only "PR" became "change" in the file-size rule and examples meant for PRs or humans were cut.
+# Lines that allow deleting tests (test-behavior's "rewrite or delete the rest", migrate-callers) are left out:
+# integrity is an endpoint. Skills that need subagents, other models, a human or a PR are not represented.
+PSTACK_PRINCIPLES_VERSION = "ps-v1"
+PSTACK_PRINCIPLES = """# Engineering principles for this repository
 
-def _write_principles(project: Path) -> None:
-    """A+P's one difference from A: the principles as CLAUDE.md, committed before the agent starts."""
-    (project / "CLAUDE.md").write_text(PRINCIPLES, encoding="utf-8")
+Follow these in every change.
+
+## Before writing code
+
+- Read all affected files and understand the current design.
+- State the exit condition as a checkable predicate before the first iteration.
+
+## Structure
+
+- Encode the real domain in a data structure instead of scattering it across conditionals.
+- Do not force an abstraction. Prefer boring code if the current shape is already clear, local, and unlikely to grow.
+- Place validation, type narrowing, and error handling at system boundaries. Trust internal code unconditionally.
+  Business logic lives in pure functions. The shell is thin and mechanical.
+- Do not re-export transport, storage, framework, or wire types through the public surface.
+- Keep logic in the canonical layer and reuse existing helpers. Give each piece of state one owner. Keep one list and
+  derive the others from it.
+- Collapse layers that cost more than they save: wrappers with one caller, adapters with no second implementation,
+  speculative indirection that was never needed.
+- Shrink state scope: prefer pure functions (returns over mutations), locals over fields, fields over module state,
+  and module state over globals. Derive instead of sync.
+- Treat "weird if statements in random places" as a design problem, not a style nit.
+- Do not let a change push a file from under 1k lines to over 1k lines without a very strong reason.
+- Make the smallest change that solves the problem. No speculative validators, parsers, or guards beyond what the
+  spec demands.
+
+## Tests
+
+- Derive the expected value from the requirement, not from a run of the code. Assert what the contract promises, no
+  less and no more.
+- Break the behavior. Make the code return a wrong value, skip an effect, or do the effect twice. If the test still
+  passes, it proves nothing.
+- Do not change tests merely to match a wrong implementation.
+- Do not weaken existing assertions unless the expected behavior has genuinely changed and the reason is clear.
+
+## When something fails
+
+- Reproduce first.
+- When stuck, instrument. Read the actual error and the actual state. Do not guess.
+- Guards, retries, swallowed errors, clamped values, and discarded state are the usual ways to hide a bug.
+- When two or more fixes that share one premise have failed the same gate, suspect the premise, not the fixes.
+
+## Done
+
+- Verify every task output by checking the real thing directly. Do not infer from proxies, self-reports, or "it
+  compiles."
+- When verification fails, suspect the observation method before suspecting the system.
+- A verdict is VERIFIED, NOT VERIFIED, or INCONCLUSIVE. Inconclusive is not a pass. Don't hide a negative.
+- Don't ask "should I do X?" Do X, explain why.
+- Every claim carries its evidence or its label in the same sentence. Measured, inferred, or guess.
+"""
+PSTACK_PRINCIPLES_SHA256 = hashlib.sha256(PSTACK_PRINCIPLES.encode("utf-8")).hexdigest()
+
+PRINCIPLE_SETS = {"AP": (PRINCIPLES_VERSION, PRINCIPLES, PRINCIPLES_SHA256),
+                  "PS": (PSTACK_PRINCIPLES_VERSION, PSTACK_PRINCIPLES, PSTACK_PRINCIPLES_SHA256)}
+
+
+def _write_principles(project: Path, arm: str) -> None:
+    """AP's and PS's one difference from A: the arm's principles as CLAUDE.md, committed before the agent starts."""
+    (project / "CLAUDE.md").write_text(PRINCIPLE_SETS[arm][1], encoding="utf-8")
     _git(["add", "--force", "CLAUDE.md"], project)  # the mobile seeds' .gitignore lists CLAUDE.md
     _git(["commit", "-qm", "principles"], project)
+
+
+def principles_record(arm: str) -> dict | None:
+    if arm not in PRINCIPLE_SETS:
+        return None
+    version, _, digest = PRINCIPLE_SETS[arm]
+    return {"version": version, "sha256": digest}
 
 
 # What a workflow arm's kit leaves in the project. A follow-on starts from the code alone, so the fixed follow-on agent
@@ -405,9 +479,9 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
         _seed_ui_project(ui, project)
     if ui is not None and arm == "Cp":
         raise ValueError("C′ is not defined for UI tasks")
-    if arm in ("A", "AP"):
-        if arm == "AP":
-            _write_principles(project)
+    if arm in BARE_ARMS:
+        if arm in PRINCIPLE_SETS:
+            _write_principles(project, arm)
         _git(["checkout", "-qb", BRANCH], project)
         prompt = ui_bare_prompt(case["task"]) if ui else bare_prompt(case["task"], case["test_command"])
     elif arm == "Cp":
@@ -423,7 +497,7 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
             "cprime_rules": c_prime.RULES_VERSION if arm == "Cp" else None, "isolation": isolation,
-            "principles": {"version": PRINCIPLES_VERSION, "sha256": PRINCIPLES_SHA256} if arm == "AP" else None,
+            "principles": principles_record(arm),
             "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None,
             "case_kind": "ui" if ui else "phase-case", **({"ui_task": ui["task"], "layer": ui["layer"]} if ui else {})}
     (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
@@ -432,15 +506,15 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
 
 def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: int, output: Path,
                       isolation: str) -> dict:
-    if arm not in ("A", "AP", *WORKFLOWS):
-        raise ValueError("an external case defines the A, AP, B, C and D arms only")
+    if arm not in (*BARE_ARMS, *WORKFLOWS):
+        raise ValueError("an external case defines the A, AP, PS, B, C and D arms only")
     output.mkdir(parents=True)
     agent_kit = sanitized_kit(kit, output / "kit")
     project = output / "project"
     _seed_external_project(case, case_dir, project)
-    if arm in ("A", "AP"):
-        if arm == "AP":
-            _write_principles(project)
+    if arm in BARE_ARMS:
+        if arm in PRINCIPLE_SETS:
+            _write_principles(project, arm)
         _git(["checkout", "-qb", BRANCH], project)
         prompt = external_bare_prompt(case)
     else:
@@ -453,7 +527,7 @@ def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: in
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
             "cprime_rules": None, "isolation": isolation,
-            "principles": {"version": PRINCIPLES_VERSION, "sha256": PRINCIPLES_SHA256} if arm == "AP" else None,
+            "principles": principles_record(arm),
             "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None, "case_kind": "external",
             "case_sha256": case["sha256"], "seed_commit": case["seed"]["commit"], "score_keys": case["score_keys"],
             "evaluator_repeat": bool(case.get("evaluator_repeat"))}
