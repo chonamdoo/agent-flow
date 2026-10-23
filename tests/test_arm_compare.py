@@ -149,7 +149,7 @@ def test_human_only_approvals_fail_the_run_and_are_read_from_disk(tmp_path):
                 "usage": {"input": 1, "uncached_input": 1, "cached_input": 0, "output": 1}, "seconds": 1, **extra}
     table = arm_compare.summarize([row("A"), row("C"), row("C", manual_spec_approvals=2), row("C", verify_downgrades=1)])
     c_line = next(line for line in table.splitlines() if line.startswith("| C |"))
-    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed | 0 / 0 | 1 / 0 | 0 | - | - | - |")
+    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed | 0 / 0 | 1 / 0 | 0 | - | - | - | - |")
 
 
 def test_the_artifact_fingerprint_ignores_runner_state_and_tracks_edits(bare):
@@ -393,7 +393,7 @@ def test_a_gate_deferred_to_ci_is_recorded_as_never_run(tmp_path):
     assert arm_compare.gate_record(tmp_path / "none", checkout)["local_gates"] is None
     row = _summary_row("C", gate_ledgers=1, deferred_ci_checks=["pytest"])
     c_line = next(line for line in arm_compare.summarize([row]).splitlines() if line.startswith("| C |"))
-    assert c_line.endswith("| 1 / 1 | 1 / 0 | 0 | - | - | - |")
+    assert c_line.endswith("| 1 / 1 | 1 / 0 | 0 | - | - | - | - |")
 
 
 def test_a_rule_counts_only_where_the_runs_prompt_stated_it():
@@ -671,9 +671,9 @@ def test_the_summary_reports_phases_and_the_orchestration_share():
     rows = [_summary_row("A"), _summary_row("D", phase_trace=trace),
             _summary_row("D", phase_trace={**trace, "entered": ["design"], "orchestration_share": 0.75})]
     d_line = next(line for line in arm_compare.summarize(rows).splitlines() if line.startswith("| D |"))
-    assert d_line.endswith("| 1.5 / 4 | 50% | - |")
+    assert d_line.endswith("| 1.5 / 4 | 50% | - | - |")
     a_line = next(line for line in arm_compare.summarize(rows).splitlines() if line.startswith("| A |"))
-    assert a_line.endswith("| - | - | - |")
+    assert a_line.endswith("| - | - | - | - |")
 
 
 # ─── #409 v2 §3c: follow-on changes ───
@@ -756,3 +756,42 @@ def test_unmeasured_subagents_leave_phase_costs_null(tmp_path):
                                     measured=False)
     assert trace["phases"]["explore"]["cost_usd"] is None and trace["orchestration_share"] is None
     assert trace["phases"]["explore"]["output_tokens"] == 10
+
+
+# ─── #409 v2.2: reviewer lower bound and model preflight ───
+
+def test_the_reviewer_record_is_a_lower_bound_from_the_runners_job_metrics(tmp_path):
+    project = tmp_path / "project"
+    run = project / ".git" / "agent-flow" / "r1"
+    run.mkdir(parents=True)
+    jobs = [{"provider": "claude", "model": "unspecified", "effort": "unspecified", "status": "ok", "duration_s": 100.4,
+             "prompt_utf8_bytes": 400_000, "stdout_utf8_bytes": 40_000},
+            {"provider": "codex", "model": "unspecified", "effort": "unspecified", "status": "error", "duration_s": 50,
+             "prompt_utf8_bytes": 4_000, "stdout_utf8_bytes": 0}]
+    (run / "review-metrics-a.json").write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
+    record = arm_compare.reviewer_record(project, project, "claude-opus-5-5")
+    assert record["status"] == "lower-bound" and record["jobs"] == 2 and record["waves"] == 1
+    claude = record["providers"]["claude"]
+    assert claude["token_lower_bound"] == 110_000 and claude["seconds"] == 100
+    assert claude["cost_lower_bound_usd"] == round((100_000 * 4.0 + 10_000 * 20.0) / 1_000_000, 4)
+    assert record["providers"]["codex"]["failed"] == 1 and record["providers"]["codex"]["cost_lower_bound_usd"] is None
+    assert record["cost_lower_bound_usd"] is None and record["priced_cost_lower_bound_usd"] == 0.6
+
+
+def test_no_reviewer_metrics_means_no_jobs_and_no_cost(tmp_path):
+    record = arm_compare.reviewer_record(tmp_path, tmp_path, "claude-opus-5-5")
+    assert record["jobs"] == 0 and record["cost_lower_bound_usd"] is None
+
+
+def test_preflight_reports_an_unavailable_model_instead_of_substituting(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        ok = "claude-opus-5-5" in argv
+        return arm_compare.subprocess.CompletedProcess(argv, 0 if ok else 1, "OK\n" if ok else "", "" if ok else "no such model")
+
+    monkeypatch.setattr(arm_compare.subprocess, "run", fake_run)
+    rows = arm_compare.preflight([("claude", "claude-opus-5-5"), ("claude", "claude-cheap-x")])
+    assert [row["available"] for row in rows] == [True, False] and "no such model" in rows[1]["error"]
+    assert calls[1][:4] == ["claude", "-p", "--model", "claude-cheap-x"]
