@@ -38,6 +38,9 @@ rates and counted apart.
   for the user, `drive` runs the runner's own approval command and resumes the same session
   (`drive.json` `harness_approvals`); an agent that runs it itself counts as a self-approval. There is no git
   remote, so the run ends at the first phase that needs one.
+- S: a reduced-workflow search variant (#409 program v2 §5): the kit installed as for B, C and D, plus a variant of
+  `full-feature` written into the project by `variants.py` (phases dropped from a fixed discrete set, reviewer count
+  as a project profile override). `prepare --variant '<json>'`; the record keeps the variant spec, name and digests.
 - D: like B and C with the kit's `default` workflow, the one it applies to every project and which says the agent
   sets each phase's depth per task (#409 v2.1, arm D).
 - C′: `c_prime.build()` of the same project, stopping after `commit` (#427).
@@ -88,6 +91,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools" / "autoresearch"))
 import c_prime  # noqa: E402
 import completion  # noqa: E402
+import variants  # noqa: E402
 import integrity  # noqa: E402
 import run_usage  # noqa: E402
 from cycle_report import fisher_greater  # noqa: E402
@@ -111,9 +115,9 @@ CONTROLLER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "ANDROID_HOME"
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CODEX_HOME", "OPENAI_API_KEY")
 AGENT_FLOW_WORKTREES = Path.home() / ".agent-flow" / "worktrees"
 CLAUDE_TOOLS = ("Bash", "Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "TodoWrite", "Task")
-ARMS = ("A", "AP", "PS", "B", "C", "D", "Cp")
+ARMS = ("A", "AP", "PS", "B", "C", "D", "S", "Cp")
 BARE_ARMS = ("A", "AP", "PS")  # no kit; the agent gets the task prompt only (and, AP and PS, a CLAUDE.md)
-WORKFLOWS = {"B": "development", "C": "full-feature", "D": "default"}
+WORKFLOWS = {"B": "development", "C": "full-feature", "D": "default", "S": variants.BASE}  # S: the variant's base
 # 설치기가 읽는 트리만 복사한다(package.json `files`). evals/·tests/·maintainer/는 에이전트의 kit에 없다.
 KIT_TREES = ("bin", "lib", "templates", "bootstrap", "skills", "scripts", ".Codex", ".claude", "src", "docs")
 KIT_FILES = ("package.json", "pyproject.toml", "README.md")
@@ -458,12 +462,25 @@ The project has no tests. The scorer starts the build through `eval.json` and dr
 {DECLARATION}"""
 
 
+def _write_variant(kit: Path, project: Path, profile: str, variant: dict | None) -> dict | None:
+    """Arm S: the search variant written into the installed project (gitignored `.agent-flow/`, so no commit)."""
+    return variants.write(kit, project, profile, variant) if variant is not None else None
+
+
+def _workflow_record(arm: str, searched: dict | None) -> dict:
+    if arm not in WORKFLOWS:
+        return {}
+    return {"workflow": searched["name"] if searched else WORKFLOWS[arm], **({"variant": searched} if searched else {})}
+
+
 def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isolation: str = "instructed",
-            case_dir: Path | None = None) -> dict:
+            case_dir: Path | None = None, variant: dict | None = None) -> dict:
     if isolation not in ISOLATION:
         raise ValueError(f"isolation must be one of {ISOLATION}")
+    if (arm == "S") != (variant is not None):
+        raise ValueError("arm S needs --variant, and only arm S takes one")
     if case_dir is not None:
-        return _prepare_external(kit, arm, load_external_case(case_dir), case_dir, trial, output, isolation)
+        return _prepare_external(kit, arm, load_external_case(case_dir), case_dir, trial, output, isolation, variant)
     ui = UI_CASES.get(case_name)
     if ui is None:
         case_dir = CASES / case_name
@@ -479,6 +496,7 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
         _seed_ui_project(ui, project)
     if ui is not None and arm == "Cp":
         raise ValueError("C′ is not defined for UI tasks")
+    searched = None
     if arm in BARE_ARMS:
         if arm in PRINCIPLE_SETS:
             _write_principles(project, arm)
@@ -490,14 +508,15 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
         prompt = c_prime.build(agent_kit, project, case["task"], "commit")
     else:
         _install(agent_kit, project, case, hooks=True)
-        prompt = driver_prompt(case["task"], WORKFLOWS[arm])
+        searched = _write_variant(agent_kit, project, case["profile"], variant)
+        prompt = driver_prompt(case["task"], searched["name"] if searched else WORKFLOWS[arm])
     (output / "prompt.md").write_text(prompt, encoding="utf-8")
     meta = {"arm": arm, "case": case_name, "trial": trial, "project": str(project.resolve()),
             "start_commit": _git(["rev-parse", "HEAD"], project),
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
             "cprime_rules": c_prime.RULES_VERSION if arm == "Cp" else None, "isolation": isolation,
-            "principles": principles_record(arm),
+            "principles": principles_record(arm), **_workflow_record(arm, searched),
             "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None,
             "case_kind": "ui" if ui else "phase-case", **({"ui_task": ui["task"], "layer": ui["layer"]} if ui else {})}
     (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
@@ -505,13 +524,14 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
 
 
 def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: int, output: Path,
-                      isolation: str) -> dict:
+                      isolation: str, variant: dict | None = None) -> dict:
     if arm not in (*BARE_ARMS, *WORKFLOWS):
-        raise ValueError("an external case defines the A, AP, PS, B, C and D arms only")
+        raise ValueError("an external case defines the A, AP, PS, B, C, D and S arms only")
     output.mkdir(parents=True)
     agent_kit = sanitized_kit(kit, output / "kit")
     project = output / "project"
     _seed_external_project(case, case_dir, project)
+    searched = None
     if arm in BARE_ARMS:
         if arm in PRINCIPLE_SETS:
             _write_principles(project, arm)
@@ -520,14 +540,15 @@ def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: in
     else:
         _install(agent_kit, project, {"profile": case["profile"], "modes": {"clean": {"install": case["install"]}}},
                  hooks=True)
-        prompt = driver_prompt(case["task"], WORKFLOWS[arm])
+        searched = _write_variant(agent_kit, project, case["profile"], variant)
+        prompt = driver_prompt(case["task"], searched["name"] if searched else WORKFLOWS[arm])
     (output / "prompt.md").write_text(prompt, encoding="utf-8")
     meta = {"arm": arm, "case": case["name"], "trial": trial, "project": str(project.resolve()),
             "start_commit": _git(["rev-parse", "HEAD"], project),
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
             "cprime_rules": None, "isolation": isolation,
-            "principles": principles_record(arm),
+            "principles": principles_record(arm), **_workflow_record(arm, searched),
             "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None, "case_kind": "external",
             "case_sha256": case["sha256"], "seed_commit": case["seed"]["commit"], "score_keys": case["score_keys"],
             "evaluator_repeat": bool(case.get("evaluator_repeat"))}
@@ -1090,7 +1111,7 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
               **(gate_record(project, checkout) if meta["arm"] in WORKFLOWS else {}),
               **({"reviewers": reviewer_record(project, checkout)}
                  if meta["arm"] in WORKFLOWS else {}),
-              **({"phase_trace": phase_trace(project, checkout, WORKFLOWS[meta["arm"]], rows,
+              **({"phase_trace": phase_trace(project, checkout, meta.get("workflow") or WORKFLOWS[meta["arm"]], rows,
                                              measured=read.get("subagents") != "unmeasured")}
                  if meta["arm"] in WORKFLOWS else {}),
               "scored_at": datetime.now().isoformat(timespec="seconds")}
@@ -1453,6 +1474,7 @@ def main(argv: list[str] | None = None) -> int:
     prep.add_argument("--output", type=Path, required=True)
     prep.add_argument("--isolation", choices=ISOLATION, default="instructed")
     prep.add_argument("--case-dir", type=Path, help="a case kept outside this repository (`<dir>/case.json`)")
+    prep.add_argument("--variant", type=json.loads, help="arm S: the search variant as JSON (see evals/variants.py)")
     dr = sub.add_parser("drive")
     dr.add_argument("run", type=Path)
     dr.add_argument("--model", default="claude-opus-5-5")
@@ -1479,7 +1501,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "prepare":
         print(json.dumps(prepare(args.kit.resolve(), args.arm, args.case, args.trial, args.output.resolve(),
-                                 args.isolation, args.case_dir.resolve() if args.case_dir else None), indent=1))
+                                 args.isolation, args.case_dir.resolve() if args.case_dir else None,
+                                 args.variant), indent=1))
     elif args.command == "preflight":
         rows = preflight([tuple(item.split(":", 1)) for item in args.model])
         text = json.dumps(rows, indent=1)
