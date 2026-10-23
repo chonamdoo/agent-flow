@@ -549,6 +549,20 @@ def tool_inputs(rows: list[dict]) -> list[str]:
     return inputs
 
 
+def shell_commands(rows: list[dict]) -> list[str]:
+    """The `command` of every Bash tool call: the only inputs that execute anything."""
+    commands = []
+    for row in rows:
+        message = row.get("message")
+        if row.get("type") != "assistant" or not isinstance(message, dict):
+            continue
+        for block in message.get("content") or []:
+            if (isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Bash"
+                    and isinstance((block.get("input") or {}).get("command"), str)):
+                commands.append(block["input"]["command"])
+    return commands
+
+
 def _usage_totals(rows: list[dict]) -> dict:
     messages = run_usage.claude_messages(rows)
     total = run_usage._empty()
@@ -679,6 +693,10 @@ def phase_windows(project: Path, checkout: Path) -> list[dict]:
         for row in run_usage._jsonl(path):
             details = row.get("details") if isinstance(row.get("details"), dict) else {}
             at = run_usage._timestamp(row.get("ts"))
+            # A blocked transition still writes `phase_exited` (blocked: true) but the run stays in the phase, so
+            # the work repairing the blocker belongs to it (as in `run_usage.phase_timeline`).
+            if row.get("event") == "phase_exited" and details.get("blocked"):
+                continue
             if at and isinstance(details.get("phase"), str) and row.get("event") in ("phase_entered", "phase_exited"):
                 events.append((at, row["event"], details["phase"]))
     windows: list[dict] = []
@@ -695,7 +713,9 @@ def phase_windows(project: Path, checkout: Path) -> list[dict]:
     return windows
 
 
-def phase_trace(project: Path, checkout: Path, workflow: str, rows: list[dict]) -> dict:
+def phase_trace(project: Path, checkout: Path, workflow: str, rows: list[dict], measured: bool = True) -> dict:
+    """`measured` is False when a sub-agent transcript could not be read: costs and the share are then null, as the
+    run's own totals are (`_measured_usage`), instead of a partial sum presented as measured."""
     windows = phase_windows(project, checkout)
     messages = run_usage.claude_messages(rows)
     last = max([message["at"] for message in messages] + [window["start"] for window in windows], default=None)
@@ -721,6 +741,7 @@ def phase_trace(project: Path, checkout: Path, workflow: str, rows: list[dict]) 
         if window:
             phases[window["phase"]]["cost_usd"] += cost or 0.0
             phases[window["phase"]]["output_tokens"] += output
+    priced = priced and measured
     total = sum(item["cost_usd"] for item in spend.values())
     declared = declared_phases(project, checkout, workflow)
     for item in (*phases.values(), *spend.values()):
@@ -836,7 +857,7 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
     result = {"isolation": "instructed", **meta, "task_kind": "normal", "checkout": str(checkout), **graded,
               "commits": int(commits) if commits.isdigit() else None,
               "final_message": message, "declaration": declaration,
-              "integrity": integrity.check(checkout, meta["start_commit"], tool_inputs(rows), message, declaration),
+              "integrity": integrity.check(checkout, meta["start_commit"], shell_commands(rows), message, declaration),
               "spec_self_approvals": sum(bool(SPEC_SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
               "phase_self_approvals": sum(bool(PHASE_SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
               "verify_downgrades": verify_downgrades(rows),
@@ -849,7 +870,8 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
               "harness_error": harness_error, **chosen,
               **(_runner_trace(project, checkout) if meta["arm"] in WORKFLOWS else {}),
               **(gate_record(project, checkout) if meta["arm"] in WORKFLOWS else {}),
-              **({"phase_trace": phase_trace(project, checkout, WORKFLOWS[meta["arm"]], rows)}
+              **({"phase_trace": phase_trace(project, checkout, WORKFLOWS[meta["arm"]], rows,
+                                             measured=read.get("subagents") != "unmeasured")}
                  if meta["arm"] in WORKFLOWS else {}),
               "scored_at": datetime.now().isoformat(timespec="seconds")}
     (run / "result.json").write_text(json.dumps(result, indent=1, default=str) + "\n", encoding="utf-8")
