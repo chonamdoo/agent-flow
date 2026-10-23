@@ -24,6 +24,7 @@
 | #459 | 사전등록 v1(문서) | 녹색, 1건 반영 |
 | #460 | 후속 변경 harness(`followon`, 블라인드) | 녹색, 1건 반영 |
 | #463 | arm PS(pstack 원칙을 CLAUDE.md로, `ps-v1`), 출처 `research/pstack-skills-review.md` | 새로 올림 |
+| #462 수정 6aa926a | AP가 CLAUDE.md를 `git add --force`한다. mobile seed의 .gitignore가 CLAUDE.md를 무시해 prepare가 실패했다. 사이클 2 전에 mobile-tabs smoke로 발견했고 #463에도 merge했다 | 새로 올림 |
 | #461 | 리뷰어 비용 하한, 모델 가용성 `preflight` | 녹색, 2건 반영 |
 | #462 | 조건 A+P(고정 8원칙 CLAUDE.md) | 녹색, 지적 없음 |
 
