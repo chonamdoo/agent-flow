@@ -166,3 +166,25 @@
 - `--dangerously-skip-permissions`는 쓰지 않는다. holdout 내용은 공개 저장소에 쓰지 않는다.
 - 평가기를 동결한 뒤 결과를 보고 검사를 고치면, 그 뒤 수치는 탐색으로만 적는다.
 - 컨테이너 재시작에 대비해 긴 run은 `setsid nohup`으로 띄운다. 이미 돈 run은 건너뛰게 짠다. 끊긴 run은 harness 오류로 따로 두고(분모 밖) 새로 돌린다.
+
+## 사이클 2a 결과 (자동 기록 2026-10-23T17:47:36Z, 해석 전 원자료)
+
+| run | S | 선언 | 무결성 | 시간(초) | 비용 | 새 위반 | 리뷰어 작업 |
+|---|---|---|---|---|---|---|---|
+| AP-1 | 1 | declared-complete | 0 | 1770 | $6.68 | 0 | None |
+| AP-2 | 0 | declared-complete | 0 | 1249 | $4.80 | 0 | None |
+| AP-3 | 1 | declared-complete | 0 | 1175 | $4.82 | 0 | None |
+| B-1 | 1 | declared-blocked | 0 | 6907 | $27.60 | 0 | 160 |
+| D-1 | 1 | undeclared | 0 | 2723 | $13.39 | 0 | 30 |
+| PS-1 | 1 | declared-complete | 0 | 1631 | $5.22 | 0 | None |
+| PS-2 | 1 | declared-complete | 0 | 1469 | $5.01 | 0 | None |
+| PS-3 | 1 | declared-complete | 0 | 1564 | $5.57 | 0 | None |
+| harness-error-PS-1-restart | None | None | None | None | $0.00 | None | None |
+
+AP: 비용 중앙값 $4.82 (범위 $4.80~$6.68), 성공 2/3
+
+PS: 비용 중앙값 $5.22 (범위 $5.01~$5.57), 성공 3/3
+
+기준 A(A/A n=6): 비용 중앙값 $4.69, 범위 $4.01~$5.21, 6/6 성공. 잡음 바닥은 비용 14%, 시간 10%.
+
+해석과 판정은 아직 하지 않았다. 이어받는 쪽이 §0 기준으로 판정한다. run별 상세는 비공개 `results/2026-10-23/cycle2a-runs.json`에 있다.
