@@ -43,9 +43,12 @@
 - 역할별 모델(Q5, setup-pstack): 나중에. 리뷰어 계측부터. `program-v2.2.md`
 - 사용자 결정: v2 승인, 심판 없이, $150/사이클, runner 변경 없음, UI는 클라우드(Robolectric), 추천안대로 진행.
 
-## 2. 돌던 것
+## 2. 돌던 것 (2026-10-23 06:10 UTC)
 
-없다. 모든 run을 채점하고 기록했다.
+- **후속 F v1 연쇄 민감도**: 기반 {정상(`chkref/run`), 망가뜨린 기반(`fu-bad/run`)} × 2회 × F1→F2→F3, 12 run. 스크립트는 스크래치패드 `fu-chain/run.sh`이고 로그는 `fu-chain/run.log`다. 각 단계는 앞 단계가 남긴 코드에서 시작한다.
+- **harness 오류 1건**: 05:4x에 컨테이너 디스크 할당이 다 찼다. ref-1-F1 채점에서 Robolectric 네이티브 SQLite가 `UnsatisfiedLinkError`로 실패해 모든 검사가 0이 됐다. ref-1-F2 agent도 ENOSPC를 만났다. ref-1-F2와 ref-1-F3은 `harness-error-*-diskfull`로 빼서 분모에 넣지 않는다. ref-1-F1의 drive는 깨끗했으므로 다시 채점만 한다.
+- 복구: 끝난 pilot들의 빌드 출력을 지워 5.5 GB를 확보했다. `fu-chain/run2.sh`(로그는 `run2.log`)가 run.sh가 끝나기를 기다렸다가 ref-1을 다시 돌린다. 이 스크립트는 남은 공간이 3 GB 미만이면 대기하고, 채점 뒤 빌드 출력을 지운다.
+- 이어받는 쪽은 `run2.log`에 "all done (redo)"가 나오면 12 run을 요약해 판정한다. 기준은 성공, 비용, 시간, 후속 뒤 위반이다.
 
 ## 3. 다음 할 일 (순서대로)
 
@@ -55,7 +58,7 @@
    - 보조 지표: 후속 비용, diff 크기, 후속 뒤 새 위반
    - 민감도 재확인: 기반마다 2회 이상
    - 통과 전에는 ②를 판정에 쓰지 않는다.
-2. **mobile-tabs v1**: MC332를 PRD에 맞추고(16dp 허용), M02를 잡게 검사 설정의 탭 이름을 바꾼다. 평가기를 다시 동결한다.
+2. ~~mobile-tabs v1~~ 완료: 평가기 a225eeee로 동결. 기준 구현과 A-3 모두 S=1이고, M02와 M17을 모두 잡는다.
 3. **A/A 보정**: 같은 조건(A) 2벌 × 3회로 잡음 바닥을 잰다.
 4. **사이클 2**($150): mobile-tabs + mobile-checkout
    - A·AP·B·D 각 3회, C는 참조 1~2회
