@@ -4,8 +4,10 @@
 
 A variant is a point in a fixed, discrete space; there is no free-text prompt editing, so the search cannot tune
 wording toward the evaluator. Every variant is derived from the kit's own `full-feature` workflow and lands in the
-project only (`.agent-flow/workflows/<name>.yaml`, and for the reviewer count
-`.agent-flow/profiles/<profile>.local.yaml`), which the runner reads and pins; the kit itself is not changed.
+project only: the project's installed runtime (`.agent-flow/runtime/python/agent_flow/workflows/<name>.yaml`, where
+`agent-flow run --workflow` looks; a copy also goes to `.agent-flow/workflows/` for `declared_phases`) and, for the
+reviewer count, `.agent-flow/profiles/<profile>.local.yaml`. The runner pins the definition at run start. The kit
+source is not changed; the variant is a new file beside the shipped workflows, none of which is touched.
 
 Dimensions (absent keys take the `full-feature` value):
 - planning: False drops domain-grill, product-brief, prd, slice-plan and plan-review.
@@ -118,9 +120,12 @@ def write(kit: Path, project: Path, profile: str, spec: dict) -> dict:
     """Writes the variant into the project and returns what the run record keeps."""
     definition = workflow(kit, spec)
     text = yaml.safe_dump(definition, sort_keys=False, allow_unicode=True)
-    target = project / ".agent-flow" / "workflows" / f"{definition['id']}.yaml"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
+    runtime = project / ".agent-flow" / "runtime" / "python" / "agent_flow" / "workflows"
+    if not runtime.is_dir():
+        raise ValueError(f"no installed runtime workflows in {project}: install the kit first")
+    for directory in (runtime, project / ".agent-flow" / "workflows"):
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{definition['id']}.yaml").write_text(text, encoding="utf-8")
     override = profile_override(kit, profile, spec)
     override_sha = None
     if override is not None:

@@ -59,8 +59,15 @@ def test_the_reviewer_count_is_the_generalist_plus_the_first_angles():
     assert variants.profile_override(ROOT, "android", {"planning": False}) is None
 
 
+def test_write_needs_an_installed_runtime(tmp_path):
+    with pytest.raises(ValueError):
+        variants.write(ROOT, tmp_path, "android", {"tdd": False})
+
+
 def test_write_puts_the_variant_in_the_project_only(tmp_path):
+    (tmp_path / ".agent-flow" / "runtime" / "python" / "agent_flow" / "workflows").mkdir(parents=True)
     record = variants.write(ROOT, tmp_path, "android", {"tdd": False, "reviewers": 2})
+    assert (tmp_path / ".agent-flow" / "runtime" / "python" / "agent_flow" / "workflows" / f"{record['name']}.yaml").is_file()
     assert (tmp_path / ".agent-flow" / "workflows" / f"{record['name']}.yaml").is_file()
     profile = yaml.safe_load((tmp_path / ".agent-flow" / "profiles" / "android.local.yaml").read_text(encoding="utf-8"))
     assert len(profile["review_angles"]) == 1
