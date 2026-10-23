@@ -6,8 +6,8 @@ fixes one declaration rule for every arm and keeps the cases that are not a decl
 
 Declaration rule: the task prompt of every arm asks the agent to end its final message with one line
 
-    EVAL-STATUS: complete
-    EVAL-STATUS: blocked: <reason>
+    TASK-STATUS: complete
+    TASK-STATUS: blocked: <reason>
 
 The last such line in the final message, outside fenced code blocks, is the declaration. No model
 judges it.
@@ -44,7 +44,7 @@ from math import exp, lgamma, log, log1p
 from pathlib import Path
 
 # 줄 안의 공백만 허용한다. `\s`는 줄바꿈까지 먹어서 다음 줄의 선언을 앞 선언의 이유로 삼킨다.
-DECLARATION = re.compile(r"(?m)^[ \t]*EVAL-STATUS:[ \t]*(complete|blocked)\b[ \t]*(?::[ \t]*([^\r\n]*?))?[ \t]*\r?$",
+DECLARATION = re.compile(r"(?m)^[ \t]*TASK-STATUS:[ \t]*(complete|blocked)\b[ \t]*(?::[ \t]*([^\r\n]*?))?[ \t]*\r?$",
                          re.I)
 FENCE = re.compile(r"(?m)^[ \t]*(```|~~~)")
 COMPLETE, BLOCKED, UNDECLARED, UNMEASURED = "declared-complete", "declared-blocked", "undeclared", "unmeasured"

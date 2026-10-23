@@ -135,8 +135,8 @@ DECLARATION = """## Completion declaration
 
 End your final message with exactly one line:
 
-    EVAL-STATUS: complete
-    EVAL-STATUS: blocked: <reason>
+    TASK-STATUS: complete
+    TASK-STATUS: blocked: <reason>
 
 Declare `complete` only when the change is done and works; otherwise declare `blocked` with the reason.
 """

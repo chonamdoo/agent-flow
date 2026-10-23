@@ -505,11 +505,11 @@ python evals/run_usage.py summarize <usage.json>...           # 성공 run 1건�
 **선언 규칙**(사전 고정). 모든 arm의 과제 프롬프트는 최종 메시지를 다음 한 줄로 끝내라고 요구한다.
 
 ```text
-EVAL-STATUS: complete
-EVAL-STATUS: blocked: <이유>
+TASK-STATUS: complete
+TASK-STATUS: blocked: <이유>
 ```
 
-최종 메시지에서 줄 머리에 있는 **마지막** `EVAL-STATUS:` 줄이 선언이다. 코드 펜스(```` ``` ````, `~~~`) 안의 줄은
+최종 메시지에서 줄 머리에 있는 **마지막** `TASK-STATUS:` 줄이 선언이다. 코드 펜스(```` ``` ````, `~~~`) 안의 줄은
 선언이 아니다(프롬프트 예시 인용). 판정은 정규식이고 모델은 쓰지 않는다.
 agent-flow arm의 runner 상태(완료·차단)는 이 선언과 따로 보고하고, 선언을 대신하지 않는다.
 
@@ -566,7 +566,7 @@ C′는 full-feature가 author에게 건네는 phase 프롬프트를 순서대�
 - **runner 명령 필터**: run id, project root, `## When complete`(status·next_command), 그리고 `agent-flow` 명령·승인 토큰·`run_command_prefix`를 담은 줄을 지운다. artifact 위치는 `cprime/` 아래로 바꾸고 절대경로는 상대경로로 바꾼다.
 - **pause와 승인**: 기다리지 않는다. full-feature가 사용자 승인으로 멈추는 phase(domain-grill, prd, merge-approval)에서는 artifact에 `approval: agent`를 적게 한다. 에이전트가 대신 승인한 사실이 산출물에 남는다(#413).
 - **중복 절**: 앞 phase와 똑같은 절(profile YAML, 같은 skill 본문)은 첫 phase를 가리키는 한 줄로 바꾼다. 승인 안내는 접지 않는다.
-- **완료 선언**: #424의 arm 공통 규칙(`EVAL-STATUS: complete|blocked: …`)을 붙인다.
+- **완료 선언**: #424의 arm 공통 규칙(`TASK-STATUS: complete|blocked: …`)을 붙인다.
 
 같은 kit·과제면 같은 프롬프트가 나온다. SHA-256을 출력하고 `<output>.json`에 fingerprint로 남긴다. 생성은 프로젝트의 임시 사본에서 하므로 원래 프로젝트에 run 상태가 남지 않는다.
 
@@ -785,3 +785,14 @@ prompt 전체와 그 provider의 필수 읽기를 한 번씩 센다.
 조건에서는 경로로 선택되는 가이드가 492개 phase 항목에 새로 붙었다. Clean이 아닌
 mode의 계층 경로 조건에서 `roles`가 들어간 phase envelope는 480/624에서 0/624가 됐다.
 모델 평가 결과와 채점·사례 보정 기록은 같은 폴더의 `summary.md`에 있다.
+
+
+### 다음 판의 중립 완료 선언 (#409)
+
+새 harness는 `TASK-STATUS`를 사용한다. 새 결과와 예전 `EVAL-STATUS` 결과를 섞어
+비교하거나 새 parser로 예전 transcript를 다시 채점하지 않는다. 과거 결과는 당시 pin한 harness로 읽는다.
+C′의 rules_version은 5다. 선언 상태 이름과 성공·무결성·승인 규칙은 같다.
+
+기존 case는 이번 PR에서 변경하지 않는다. 기존 UI case 계약에는 구형 선언 문장이 남아 있다.
+따라서 이 PR을 현재 실험에 바로 적용하지 않는다. 그 case를 다음 판에 재사용하려면 별도 승인 범위에서
+계약과 evaluator fingerprint를 검토한 뒤 새 판으로 준비해야 한다. 새 외부 case에는 구형 선언을 넣지 않는다.
