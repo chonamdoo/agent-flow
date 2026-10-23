@@ -698,13 +698,21 @@ def test_a_followon_starts_from_the_arms_code_without_the_kit_or_its_history(tmp
     (project / "build").mkdir()
     (project / "build" / "out.bin").write_text("x", encoding="utf-8")
     assert (project / ".agent-flow").is_dir()
+    # What the installer adds outside the fixed list, as it records it in .git/info/exclude.
+    (project / "tools-from-kit").mkdir()
+    (project / "tools-from-kit" / "hook.ts").write_text("kit\n", encoding="utf-8")
+    with (project / ".git" / "info" / "exclude").open("a", encoding="utf-8") as exclude:
+        exclude.write("/tools-from-kit/\n")
+    (project / "src-link").symlink_to(project / ".agent-flow")
     out = tmp_path / "C-1.F1"
     meta = arm_compare.prepare_followon(run, _followon_case(tmp_path), 1, out)
     follow = out / "project"
     assert (follow / "feature.txt").read_text(encoding="utf-8") == "the arm's work, left uncommitted\n"
     assert (follow / "followon-prd.md").read_text(encoding="utf-8") == "# F1 memo\n"
-    for trace in (".agent-flow", ".claude", "CLAUDE.md", "AGENTS.md", "build", "checks"):
+    for trace in (".agent-flow", ".agents", ".omp", ".claude", ".codex", "CLAUDE.md", "AGENTS.md", "build", "checks",
+                  "tools-from-kit", "src-link"):
         assert not (follow / trace).exists(), trace
+    assert [path for path in follow.rglob("*") if path.is_symlink()] == []
     assert arm_compare._git(["log", "--format=%s"], follow).splitlines() == ["base"]
     assert arm_compare._git(["branch", "--show-current"], follow) == arm_compare.BRANCH
     assert meta["arm"] == "A" and meta["case"] == "mobile-F1" and meta["case_kind"] == "external"

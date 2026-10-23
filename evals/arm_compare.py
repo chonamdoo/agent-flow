@@ -270,7 +270,8 @@ def external_bare_prompt(case: dict) -> str:
 
 # What a workflow arm's kit leaves in the project. A follow-on starts from the code alone, so the fixed follow-on agent
 # cannot tell which arm wrote it and gets no kit instructions (the seed of every external case has none of these).
-KIT_TRACES = (".agent-flow", ".claude", ".codex", ".Codex", "CLAUDE.md", "AGENTS.md")
+# The installer also lists every path it adds in `.git/info/exclude`; `_strip_kit` removes those too.
+KIT_TRACES = (".agent-flow", ".agents", ".omp", ".claude", ".codex", ".Codex", "CLAUDE.md", "AGENTS.md")
 BUILD_OUTPUTS = (".git", "build", ".gradle", ".kotlin", "local.properties", "node_modules", ".pytest_cache",
                  "__pycache__")
 
@@ -283,6 +284,25 @@ def load_followon_case(case_dir: Path) -> dict:
         if key not in case:
             raise SystemExit(f"follow-on case is missing `{key}`")
     return {**case, "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _strip_kit(base_project: Path, project: Path) -> None:
+    """Removes the paths the kit's installer recorded in the base's `.git/info/exclude`, then links into the kit or
+    left dangling by the removal (skill links point into `.agent-flow`)."""
+    exclude = base_project / ".git" / "info" / "exclude"
+    lines = exclude.read_text(encoding="utf-8").splitlines() if exclude.is_file() else []
+    for line in lines:
+        entry = line.strip().strip("/")
+        if not entry or line.lstrip().startswith(("#", "!")) or any(char in entry for char in "*?["):
+            continue
+        target = project / entry
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
+    for path in sorted(project.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        if path.is_symlink() and (".agent-flow" in os.readlink(path) or not path.exists()):
+            path.unlink()
 
 
 def prepare_followon(base_run: Path, case_dir: Path, trial: int, output: Path) -> dict:
@@ -301,6 +321,7 @@ def prepare_followon(base_run: Path, case_dir: Path, trial: int, output: Path) -
     output.mkdir(parents=True)
     project = output / "project"
     shutil.copytree(checkout, project, symlinks=True, ignore=shutil.ignore_patterns(*KIT_TRACES, *BUILD_OUTPUTS))
+    _strip_kit(base_project, project)
     for target, source in case["files"].items():
         (project / target).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(case_dir / source, project / target)
