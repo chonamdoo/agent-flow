@@ -6,13 +6,13 @@
 
 | 저장소 | 새 브랜치 | 작업 커밋 | PR / 기반 |
 |---|---|---|---|
-| 비공개 evals | `feat/holdout-2` | `e2f04f8` 후보 작성, `9c29ddb` bytecode 제외, `46feb48` lint 검토 문서 | [private #3](https://github.com/chonamdoo/agent-flow-evals-private/pull/3), draft; 기반 `feat/mobile-tabs-v0` `b8b338c` |
+| 비공개 evals | `feat/holdout-2` | `e2f04f8` 후보 작성, `9c29ddb` bytecode 제외, `46feb48` lint 검토 문서, `9e45921` 검사 보강, `1eb326e` 지문·보고 갱신 | [private #3](https://github.com/chonamdoo/agent-flow-evals-private/pull/3), draft; 기반 `feat/mobile-tabs-v0` `b8b338c` |
 | 공개 agent-flow | `codex/neutral-completion-409` | `eed6367` | [#464](https://github.com/chonamdoo/agent-flow/pull/464); 기반 `feat/epic-409-arm-ps` `5534c53` (#463) |
-| 공개 agent-flow | `codex/handoff-2026-10-23` | 이 문서의 기록 커밋과 최종 metadata 커밋은 이 PR의 Git history를 따른다 | 인계 PR 링크는 아래 기록; 기반 `docs/epic-409-program-record` `12bc814` |
+| 공개 agent-flow | `codex/handoff-2026-10-23` | `327a369` 최초 기록; 최종 metadata 커밋은 이 PR의 head를 따른다 | 인계 PR 링크는 아래 기록; 기반 `docs/epic-409-program-record` `12bc814` |
 
 ## 1. 두 번째 holdout
 
-후보를 비공개 PR에 작성했다. 명세·계약, 기준 구현 patch, 숨은 검사 **36개**, mutant **20개**, validity 정적 보고서, 후보 fingerprint가 있다. install은 `[]`다. patch 적용 검사 **20/20**, 검사 id 중복 **0**, seed-test 원본과 차이 **0**. JSON/Python 문법, reference patch 적용 가능성, whitespace, fingerprint 일관성을 정적으로 확인했다.
+후보를 비공개 PR에 작성했다. 명세·계약, 기준 구현 patch, 숨은 검사 **38개**, mutant **20개**, validity 정적 보고서, 후보 fingerprint가 있다. install은 `[]`다. patch 적용 검사 **20/20**, 검사 id 중복 **0**, seed-test 원본과 차이 **0**. JSON/Python 문법, reference patch 적용 가능성, whitespace, fingerprint 일관성을 정적으로 확인했다.
 
 **동결 완료가 아니다.** JDK 21은 있으나 Android SDK가 없어 Gradle을 실행하지 않았다. 기준 구현 S와 mutant 실측 검출률은 미측정이다. 기준 구현·검사를 같은 세션이 작성했으므로 별도 작성자의 블라인드 독립 정상 구현 증거도 남아 있다. 독립성이나 통과를 사실로 기록하지 않았다. 비공개 README의 정확한 후속 문구는 **“A 3회로 난이도 확인 필요”**다.
 
