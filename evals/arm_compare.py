@@ -457,6 +457,7 @@ def _runner_trace(project: Path, checkout: Path) -> dict:
     events = sorted({path for root in roots if root.is_dir() for path in root.rglob("events.jsonl")})
     entered: list[str] = []
     reviewer_jobs = 0
+    cap_stop = False
     for path in events:
         for row in run_usage._jsonl(path):
             details = row.get("details") if isinstance(row.get("details"), dict) else {}
@@ -467,7 +468,29 @@ def _runner_trace(project: Path, checkout: Path) -> dict:
         # 이벤트는 `<run>/context/events.jsonl`에, 리뷰 계측은 `<run>/review-metrics-*.json`에 있다.
         run_dir = path.parent.parent if path.parent.name == "context" else path.parent
         reviewer_jobs += run_usage.reviewer_usage(run_dir)["observed_jobs"]
-    return {"phases_entered": entered, "reviewer_jobs": reviewer_jobs, "event_logs": len(events)}
+        cap_stop = cap_stop or stopped_at_fix_loop_cap(run_dir / "meta.json")
+    return {"phases_entered": entered, "reviewer_jobs": reviewer_jobs, "event_logs": len(events),
+            "fix_loop_cap_stop": cap_stop}
+
+
+# runner.py `FIX_LOOP_MAX_ROUNDS`. harness는 kit 코드를 import하지 않으므로 값을 옮겨 적는다.
+RUNNER_FIX_LOOP_MAX_ROUNDS = 3
+
+
+def stopped_at_fix_loop_cap(meta_path: Path) -> bool:
+    """The run's last state is a blocked route with a fix collector at its round limit (read from runner state).
+
+    This separates "stopped at the limit" from "the code was wrong" in the results, for runs recorded before the
+    harness logged its own detection too (cycle 1 C-1, C-2).
+    """
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    rounds = meta.get("fix_loop_rounds")
+    counts = rounds.values() if isinstance(rounds, dict) else [rounds] if isinstance(rounds, int) else []
+    return (meta.get("phase_blocked_reason") == "route_blocked"
+            and any(isinstance(count, int) and count >= RUNNER_FIX_LOOP_MAX_ROUNDS for count in counts))
 
 
 def manual_spec_approvals(project: Path, checkout: Path) -> int:
@@ -567,6 +590,8 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
               "transcript": str(transcript) if transcript else None, **_measured_usage(rows, read), **read,
               "controller_cost_usd": drive.get("cost_usd"), "drive_exit": drive.get("exit"),
               "drive_timed_out": drive.get("timed_out"), "drive_is_error": drive.get("is_error"),
+              "fix_loop_reapprovals": len(drive.get("fix_loop_reapprovals") or []),
+              "fix_loop_reapproval_log": drive.get("fix_loop_reapprovals") or [],
               "harness_error": harness_error, **chosen,
               **(_runner_trace(project, checkout) if meta["arm"] in WORKFLOWS else {}),
               **(gate_record(project, checkout) if meta["arm"] in WORKFLOWS else {}),
@@ -635,6 +660,17 @@ def session_transcript(session_id: str | None, projects: Path = Path.home() / ".
 RESUME_AFTER_APPROVAL = ("The evaluator approved phase `{phase}` as the user. Continue the Agent Flow run with the "
                          "next command the runner prints.")
 MAX_HARNESS_APPROVALS = 30
+# fix-loop 상한 정지(#409 사이클 1의 C-1·C-2). runner는 `[block] fix-loop exceeded N rounds routing <phase> -> <target>`을
+# 찍고 "Update the artifact or rerun the watcher, then `agent-flow continue`"를 제시한다(runner.py `_next_index`).
+# 상한을 되돌리는 명령은 없다(`FIX_LOOP_MAX_ROUNDS`는 상수이고 `fix_loop_rounds`는 늘기만 한다). 그래서 harness가 사람
+# 대신 허락하는 것은 그 phase의 리뷰를 지금 코드로 다시 받아 artifact를 갱신하는 일뿐이다. 수정 라운드는 더 주지 않는다.
+FIX_LOOP_CAP = re.compile(r"\[block\] fix-loop exceeded (\d+) rounds routing (\S+) -> (\S+)")
+MAX_FIX_LOOP_REAPPROVALS = 2
+RESUME_AFTER_FIX_LOOP_CAP = (
+    "The evaluator, as the user, lets the run continue past the fix-loop limit at phase `{phase}`: run the "
+    "`{phase}` reviewers again on the current code, replace the phase artifact with their new aggregate, then run "
+    "the next command the runner prints. Do not change code in this step; if the reviewers still request changes, "
+    "the runner stops again.")
 
 
 def runner_status(project: Path) -> dict | None:
@@ -645,14 +681,42 @@ def runner_status(project: Path) -> dict | None:
     worktree = owned[0]
     shown = c_prime._sh([str(project / ".agent-flow" / "bin" / "agent-flow"), "continue", "--root", str(project),
                          "--worktree", worktree.name], worktree)
-    for line in (shown.stdout or "").splitlines():
+    return parse_runner_status(shown.stdout or "", worktree)
+
+
+def parse_runner_status(stdout: str, worktree: Path) -> dict | None:
+    """The `status_json:` line, plus `fix_loop_cap` when the runner stopped at the fix-loop limit."""
+    cap = next((match for match in map(FIX_LOOP_CAP.search, stdout.splitlines()) if match), None)
+    for line in stdout.splitlines():
         if line.startswith("status_json: "):
             try:
                 status = json.loads(line.split(": ", 1)[1])
             except ValueError:
                 return None
-            return {**status, "worktree": str(worktree)} if isinstance(status, dict) else None
+            if not isinstance(status, dict):
+                return None
+            limit = ({"rounds": int(cap.group(1)), "phase": cap.group(2), "target": cap.group(3)}
+                     if cap and status.get("reason") == "route_blocked" else None)
+            return {**status, "worktree": str(worktree), "fix_loop_cap": limit}
     return None
+
+
+def review_findings(worktree: Path, status: dict, limit: int = 12) -> dict:
+    """What the phase artifact still asks for when the run stops at the cap: verdict counts and the open findings."""
+    run_id = str(status.get("run") or "").rsplit("/", 1)[-1]
+    common = _common_dir(worktree)
+    phase = status["fix_loop_cap"]["phase"]
+    artifact = (common / "agent-flow" / "worktrees" / worktree.name / ".agent-flow" / "runs" / run_id / "artifacts"
+                / f"{phase}.md") if common and run_id else None
+    if artifact is None or not artifact.is_file():
+        return {"artifact": None, "verdicts": {}, "findings": []}
+    text = artifact.read_text(encoding="utf-8", errors="replace")
+    verdicts: dict[str, int] = {}
+    for verdict in re.findall(r"^verdict:\s*(\S+)", text, re.M):
+        verdicts[verdict] = verdicts.get(verdict, 0) + 1
+    findings = [line.strip()[2:] for line in text.splitlines() if re.match(r"^\s*- (high|med|medium|low|critical):", line)]
+    return {"artifact": hashlib.sha256(text.encode("utf-8")).hexdigest(), "verdicts": verdicts,
+            "findings": findings[:limit], "findings_total": len(findings)}
 
 
 def approve_phase(project: Path, status: dict) -> bool:
@@ -684,7 +748,9 @@ def _controller_once(argv: list[str], project: Path, stream, err, timeout: float
 def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
     """Runs the controller on `prompt.md`; at a phase approval the harness approves and resumes the same session.
 
-    Time and budget limits cover the whole run, every resumption included.
+    At a stop at the fix-loop limit it lets the run go on as a user would, at most `MAX_FIX_LOOP_REAPPROVALS` times:
+    the same session is resumed to get that phase reviewed again (`RESUME_AFTER_FIX_LOOP_CAP`). Time and budget
+    limits cover the whole run, every resumption included.
     """
     meta = json.loads((run / "arm.json").read_text(encoding="utf-8"))
     project = Path(meta["project"])
@@ -692,6 +758,8 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
     stream = run / "controller.jsonl"
     started = time.monotonic()
     approvals: list[str] = []
+    reapprovals: list[dict] = []
+    cap_stop = False
     session, spent, exit_code, timed_out, summary = None, 0.0, None, False, {}
     with stream.open("wb") as out, (run / "controller.stderr").open("wb") as err:
         message = prompt
@@ -713,8 +781,21 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
                 break
             # 완료를 선언한 run은 건드리지 않는다. `continue`는 상태를 다시 검증하므로 필요할 때만 부른다.
             if completion.classify(summary.get("final_text")) == completion.COMPLETE:
+                _settle_reapproval(reapprovals, passed=True)
+                cap_stop = False
                 break
             status = runner_status(project)
+            cap = (status or {}).get("fix_loop_cap")
+            if status is not None:
+                _settle_reapproval(reapprovals, passed=not cap)
+            if cap:
+                cap_stop = True
+                if len(reapprovals) >= MAX_FIX_LOOP_REAPPROVALS:
+                    break
+                reapprovals.append({**cap, **review_findings(Path(status["worktree"]), status), "passed": None})
+                message = RESUME_AFTER_FIX_LOOP_CAP.format(phase=cap["phase"])
+                continue
+            cap_stop = False
             if not status or status.get("reason") != "phase_approval_required" or not approve_phase(project, status):
                 break
             approvals.append(str(status.get("current_phase")))
@@ -724,11 +805,18 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
     record = {"model": model, "timeout_seconds": timeout, "budget_usd": budget, "exit": exit_code,
               "timed_out": timed_out, "seconds": round(time.monotonic() - started), **summary, "session_id": session,
               "cost_usd": spent or None, "harness_approvals": approvals,
+              "fix_loop_reapprovals": reapprovals, "fix_loop_cap_stop": cap_stop,
               "transcript": str(transcript) if transcript else None,
               "argv_sha256": hashlib.sha256(json.dumps(controller_argv(prompt, model, budget)).encode()).hexdigest(),
               "cli_version": c_prime._sh(["claude", "--version"], run).stdout.strip() or None}
     (run / "drive.json").write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
     return record
+
+
+def _settle_reapproval(reapprovals: list[dict], *, passed: bool) -> None:
+    """The last re-approval passed if the run did not stop at the cap again after it."""
+    if reapprovals and reapprovals[-1]["passed"] is None:
+        reapprovals[-1]["passed"] = passed
 
 
 def run_status(row: dict) -> str:
@@ -771,8 +859,9 @@ def summarize(results: list[dict]) -> str:
              "undeclared/unmeasured | contaminated / infra error / timed out (counted as failures) | "
              "harness errors (excluded) | output tokens (mean) | input uncached+cached (mean) | "
              "seconds (mean) | reviewer jobs (mean) | rule violations | isolation | "
-             "runs that ran gates / deferred a gate to CI (never run) |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "runs that ran gates / deferred a gate to CI (never run) | "
+             "successes first try / after fix-loop re-approval | runs stopped at the fix-loop limit |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     base = [row for row in assigned if row["arm"] == "A"]
     base_success = sum(_succeeded(row) for row in base)
     reasons: list[str] = []
@@ -803,7 +892,11 @@ def summarize(results: list[dict]) -> str:
             str(sum(rule_violation(row) for row in group)),
             "/".join(sorted({row.get("isolation", "instructed") for row in group})),
             (f"{sum(bool(row.get('gate_ledgers')) for row in group)} / "
-             f"{sum(bool(row.get('deferred_ci_checks')) for row in group)}" if arm in WORKFLOWS else "-") + " |"]))
+             f"{sum(bool(row.get('deferred_ci_checks')) for row in group)}" if arm in WORKFLOWS else "-"),
+            (f"{sum(_succeeded(row) and not row.get('fix_loop_reapprovals') for row in group)} / "
+             f"{sum(_succeeded(row) and bool(row.get('fix_loop_reapprovals')) for row in group)}"
+             if arm in WORKFLOWS else "-"),
+            (str(sum(bool(row.get("fix_loop_cap_stop")) for row in group)) if arm in WORKFLOWS else "-") + " |"]))
     if reasons:
         lines += ["", "Harness errors (re-run under the fixed harness, not in the denominator):", ""]
         lines += [f"- {reason}" for reason in reasons]
