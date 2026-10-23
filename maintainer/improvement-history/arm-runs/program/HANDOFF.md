@@ -26,6 +26,19 @@
   - 리뷰어 비용 하한이 run 비용의 20% 이상인가. 그렇다면 runner 계측 PR을 낸다(merge하지 않는다).
   - B·D를 더 돌릴 회수는 남은 예산으로 정한다.
 
+**Codex 클라우드나 Claude 클라우드에서 이어받는 법** (어느 agent든 같다)
+1. 저장소 두 개를 받는다.
+   - 공개: `chonamdoo/agent-flow`. 문서는 `docs/epic-409-program-record`(#456), harness는 `feat/epic-409-arm-ps`(#463, #462 위에 있다).
+   - 비공개: `chonamdoo/agent-flow-evals-private`의 `feat/mobile-tabs-v0`. 평가기, 과제, `results/`가 있다.
+   - holdout 내용(과제 PRD, 검사, 기준 구현)은 비공개 저장소에만 둔다. 공개 저장소와 실험 agent가 볼 수 있는 곳에 쓰지 않는다.
+2. 읽는 순서: 이 HANDOFF §0 → `program-v2.md` → `program-v2.1.md`·`v2.2.md`·`v2.3.md` → `PREREGISTRATION.md`의 v1 개정 → 비공개 각 과제 README.
+3. 실험 run은 harness `evals/arm_compare.py`의 `prepare → drive → score`로 돌린다. 그 뒤 비공개 `mobile-common/archcheck.py`로 구조 위반을 잰다. 스크립트 예시는 비공개 `results/2026-10-23/scripts/`에 있다.
+   - `drive`는 Claude Code CLI(`claude -p`)를 headless로 띄운다. 비교 실험의 피실험 agent가 Claude이기 때문이다. Codex 환경에서 이어받아도 run은 Claude CLI와 인증이 있어야 돌릴 수 있다. 없으면 분석·문서·평가기·harness 작업만 하고 run은 Claude 환경에 맡긴다.
+   - Android 검사에는 `ANDROID_HOME`(Android SDK)과 JDK가 필요하다(Robolectric, 에뮬레이터는 쓰지 않는다).
+   - `--dangerously-skip-permissions`는 절대 쓰지 않는다.
+4. 사이클 2a가 끝나면 이 파일 끝에 "사이클 2a 결과(자동 기록)"가 붙고, 비공개 `results/2026-10-23/cycle2a-runs.json`이 생긴다. 컨테이너가 그보다 먼저 사라졌다면 비공개 `scripts/cyc2a-run.sh`로 다시 돌린다. 이미 끝난 run은 건너뛰지만, 컨테이너가 사라졌다면 끝난 run도 다시 돌려야 한다.
+5. 운영 규칙(§5)은 그대로다. main과 태그는 건드리지 않는다. 금지 구역은 구현 PR만 낸다. 최근 PR은 merge하지 않는다. 예산은 사이클당 약 $150이다.
+
 **오늘(10-23) 확정한 것**
 - 후속 변경 지표 ②는 판정에서 뺐다. 연쇄 F1→F2→F3을 정상과 망가뜨린 기반에서 각 2회 돌렸고 12/12 S=1이었다.
 - A/A 보정: 6/6 성공. 잡음 바닥은 비용 $0.65(14%), 시간 117초(10%)다.
