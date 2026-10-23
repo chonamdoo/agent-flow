@@ -165,6 +165,7 @@ LCOM, Martin D, Maintainability Index, Sonar debt 분은 쓰지 않는다. 조�
 
 1. 무결성 검사(3a)
 2. 결정적 구조 지표와 비공개 아키텍처 규칙(3b). mobile-checkout, OYG부터
+2-1. 디자인 층과 UI 충실도 지표(3e). 과제별 디자인 명세, 좌표 기반 배치 검사, 토큰 준수 검사, 시각 mutant 보정
 3. 후속 변경 harness와 과제별 후속 변경 2개(3c)
 4. A+P 조건, project-local workflow 설치기(S 변형용)
 5. A/A 보정, 잡음 바닥 측정
