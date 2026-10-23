@@ -676,6 +676,63 @@ def test_the_summary_reports_phases_and_the_orchestration_share():
     assert a_line.endswith("| - | - | - |")
 
 
+# ─── #409 v2 §3c: follow-on changes ───
+
+def _followon_case(tmp_path):
+    case_dir = tmp_path / "private" / "mobile" / "followon" / "F1"
+    (case_dir / "task").mkdir(parents=True)
+    (case_dir / "task" / "prd.md").write_text("# F1 memo\n", encoding="utf-8")
+    (case_dir / "checks").mkdir()
+    (case_dir / "checks" / "HiddenFu.kt").write_text("secret\n", encoding="utf-8")
+    (case_dir / "case.json").write_text(json.dumps({
+        "name": "mobile-F1", "files": {"followon-prd.md": "task/prd.md"}, "task": "Add the delivery memo.",
+        "bare_note": "Run ./gradlew test.", "score_keys": ["S", "F", "G", "R", "B"]}), encoding="utf-8")
+    return case_dir
+
+
+def test_a_followon_starts_from_the_arms_code_without_the_kit_or_its_history(tmp_path):
+    run = tmp_path / "C-1"
+    arm_compare.prepare(ROOT, "C", "devflow", 1, run)
+    project = run / "project"
+    (project / "feature.txt").write_text("the arm's work, left uncommitted\n", encoding="utf-8")
+    (project / "build").mkdir()
+    (project / "build" / "out.bin").write_text("x", encoding="utf-8")
+    assert (project / ".agent-flow").is_dir()
+    # What the installer adds outside the fixed list, as it records it in .git/info/exclude.
+    (project / "tools-from-kit").mkdir()
+    (project / "tools-from-kit" / "hook.ts").write_text("kit\n", encoding="utf-8")
+    with (project / ".git" / "info" / "exclude").open("a", encoding="utf-8") as exclude:
+        exclude.write("/tools-from-kit/\n")
+    (project / "src-link").symlink_to(project / ".agent-flow")
+    out = tmp_path / "C-1.F1"
+    meta = arm_compare.prepare_followon(run, _followon_case(tmp_path), 1, out)
+    follow = out / "project"
+    assert (follow / "feature.txt").read_text(encoding="utf-8") == "the arm's work, left uncommitted\n"
+    assert (follow / "followon-prd.md").read_text(encoding="utf-8") == "# F1 memo\n"
+    for trace in (".agent-flow", ".agents", ".omp", ".claude", ".codex", "CLAUDE.md", "AGENTS.md", "build", "checks",
+                  "tools-from-kit", "src-link"):
+        assert not (follow / trace).exists(), trace
+    assert [path for path in follow.rglob("*") if path.is_symlink()] == []
+    assert arm_compare._git(["log", "--format=%s"], follow).splitlines() == ["base"]
+    assert arm_compare._git(["branch", "--show-current"], follow) == arm_compare.BRANCH
+    assert meta["arm"] == "A" and meta["case"] == "mobile-F1" and meta["case_kind"] == "external"
+    assert meta["followon_of"]["arm"] == "C" and meta["followon_of"]["artifact_sha256"]
+    prompt = (out / "prompt.md").read_text(encoding="utf-8")
+    assert "Add the delivery memo." in prompt and "EVAL-STATUS" in prompt and "Agent Flow" not in prompt
+    assert str(tmp_path / "private") not in (out / "arm.json").read_text(encoding="utf-8")
+
+
+def test_two_arms_give_the_followon_agent_the_same_prompt(tmp_path):
+    case_dir = _followon_case(tmp_path)
+    prompts = []
+    for arm in ("A", "C"):
+        run = tmp_path / f"{arm}-1"
+        arm_compare.prepare(ROOT, arm, "devflow", 1, run)
+        arm_compare.prepare_followon(run, case_dir, 1, tmp_path / f"{arm}-1.F1")
+        prompts.append((tmp_path / f"{arm}-1.F1" / "prompt.md").read_text(encoding="utf-8"))
+    assert prompts[0] == prompts[1]
+
+
 def test_a_blocked_exit_keeps_the_work_inside_its_phase(tmp_path):
     project = tmp_path / "project"
     path = project / ".git" / "agent-flow" / "r1" / "context" / "events.jsonl"

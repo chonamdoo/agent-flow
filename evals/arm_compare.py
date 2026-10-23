@@ -5,6 +5,11 @@
     python evals/arm_compare.py score <work>/C-1            # transcript from drive.json, or --transcript
     python evals/arm_compare.py summarize <work>/*/result.json
 
+    # follow-on change (#409 program v2 §3c): the fixed bare agent changes the code an arm run left
+    python evals/arm_compare.py followon <work>/C-1 --followon-dir <private>/<task>/followon/F1 --output <work>/C-1.F1
+    python evals/arm_compare.py drive <work>/C-1.F1
+    python evals/arm_compare.py score <work>/C-1.F1 --evaluator <private>/<task>/followon/F1/score.py
+
     # UI task (#428): the evaluator is the private repository's score.py, brought in only after the run
     python evals/arm_compare.py prepare --kit . --arm A --case oyg --trial 1 --output <work>/A-1
     python evals/arm_compare.py score <work>/A-1 --evaluator <private>/oyg/score.py
@@ -261,6 +266,81 @@ def external_bare_prompt(case: dict) -> str:
 {case.get("bare_note", "")}
 
 {DECLARATION}"""
+
+
+# What a workflow arm's kit leaves in the project. A follow-on starts from the code alone, so the fixed follow-on agent
+# cannot tell which arm wrote it and gets no kit instructions (the seed of every external case has none of these).
+# The installer also lists every path it adds in `.git/info/exclude`; `_strip_kit` removes those too.
+KIT_TRACES = (".agent-flow", ".agents", ".omp", ".claude", ".codex", ".Codex", "CLAUDE.md", "AGENTS.md")
+BUILD_OUTPUTS = (".git", "build", ".gradle", ".kotlin", "local.properties", "node_modules", ".pytest_cache",
+                 "__pycache__")
+
+
+def load_followon_case(case_dir: Path) -> dict:
+    """A follow-on change kept in the private evaluator repo: `<dir>/case.json` (name, files, task, score_keys)."""
+    raw = (case_dir / "case.json").read_bytes()
+    case = json.loads(raw)
+    for key in ("name", "files", "task", "score_keys"):
+        if key not in case:
+            raise SystemExit(f"follow-on case is missing `{key}`")
+    return {**case, "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _strip_kit(base_project: Path, project: Path) -> None:
+    """Removes the paths the kit's installer recorded in the base's `.git/info/exclude`, then links into the kit or
+    left dangling by the removal (skill links point into `.agent-flow`)."""
+    exclude = base_project / ".git" / "info" / "exclude"
+    lines = exclude.read_text(encoding="utf-8").splitlines() if exclude.is_file() else []
+    for line in lines:
+        entry = line.strip().strip("/")
+        if not entry or line.lstrip().startswith(("#", "!")) or any(char in entry for char in "*?["):
+            continue
+        target = project / entry
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
+    for path in sorted(project.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        if path.is_symlink() and (".agent-flow" in os.readlink(path) or not path.exists()):
+            path.unlink()
+
+
+def prepare_followon(base_run: Path, case_dir: Path, trial: int, output: Path) -> dict:
+    """A bare-model run of one follow-on change on top of the code an arm run left (#409 program v2 §3c).
+
+    The project is a fresh repository holding the base checkout as the arm left it (committed or not), without the
+    kit's traces or build outputs, plus the follow-on's task files, in one commit. It is an A run in every other
+    respect, so `drive` and `score` treat it like one; `followon_of` names the base run and its artifact fingerprint.
+    """
+    base = json.loads((base_run / "arm.json").read_text(encoding="utf-8"))
+    base_project = base_run / "project" if (base_run / "project").is_dir() else Path(base["project"])
+    checkout, chosen = select_checkout(base_project, base["arm"])
+    if chosen["checkout_error"]:
+        raise SystemExit(f"base run has no gradable checkout: {chosen['checkout_error']}")
+    case = load_followon_case(case_dir)
+    output.mkdir(parents=True)
+    project = output / "project"
+    shutil.copytree(checkout, project, symlinks=True, ignore=shutil.ignore_patterns(*KIT_TRACES, *BUILD_OUTPUTS))
+    _strip_kit(base_project, project)
+    for target, source in case["files"].items():
+        (project / target).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(case_dir / source, project / target)
+    for args in (["init", "-q", "-b", "main"], ["config", "user.name", "eval"],
+                 ["config", "user.email", "eval@example.com"], ["config", "commit.gpgsign", "false"],
+                 ["add", "-A"], ["commit", "-qm", "base"], ["checkout", "-qb", BRANCH]):
+        _git(args, project)
+    prompt = external_bare_prompt(case)
+    (output / "prompt.md").write_text(prompt, encoding="utf-8")
+    meta = {"arm": "A", "case": case["name"], "trial": trial, "project": str(project.resolve()),
+            "start_commit": _git(["rev-parse", "HEAD"], project),
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(), "kit_commit": None,
+            "cprime_rules": None, "isolation": "instructed", "approval_rules": None, "case_kind": "external",
+            "case_sha256": case["sha256"], "seed_commit": None, "score_keys": case["score_keys"],
+            "evaluator_repeat": False,
+            "followon_of": {"arm": base["arm"], "case": base["case"], "trial": base["trial"],
+                            "artifact_sha256": artifact_sha256(checkout)}}
+    (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
+    return meta
 
 
 def ui_bare_prompt(task: str) -> str:
@@ -1173,12 +1253,20 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("--repeat", type=int, default=3)
     sc.add_argument("--harness-error", metavar="REASON",
                     help="the harness itself broke this run; it is re-run and listed apart from the denominator")
+    fol = sub.add_parser("followon", help="prepare a follow-on change on top of an arm run's code")
+    fol.add_argument("base", type=Path, help="the arm run directory whose code the follow-on starts from")
+    fol.add_argument("--followon-dir", type=Path, required=True, help="the follow-on case (`<dir>/case.json`)")
+    fol.add_argument("--trial", type=int, default=1)
+    fol.add_argument("--output", type=Path, required=True)
     summ = sub.add_parser("summarize")
     summ.add_argument("results", type=Path, nargs="+")
     args = parser.parse_args(argv)
     if args.command == "prepare":
         print(json.dumps(prepare(args.kit.resolve(), args.arm, args.case, args.trial, args.output.resolve(),
                                  args.isolation, args.case_dir.resolve() if args.case_dir else None), indent=1))
+    elif args.command == "followon":
+        print(json.dumps(prepare_followon(args.base.resolve(), args.followon_dir.resolve(), args.trial,
+                                          args.output.resolve()), indent=1))
     elif args.command == "drive":
         print(json.dumps(drive(args.run.resolve(), args.model, args.timeout, args.budget), indent=1))
     elif args.command == "score":
