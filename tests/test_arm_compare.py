@@ -847,3 +847,34 @@ def test_a_followon_from_arm_ap_drops_its_principles(tmp_path):
     arm_compare.prepare(ROOT, "AP", "devflow", 1, run)
     arm_compare.prepare_followon(run, _followon_case(tmp_path), 1, tmp_path / "AP-1.F1")
     assert not (tmp_path / "AP-1.F1" / "project" / "CLAUDE.md").exists()
+
+
+# ─── #409 pstack review: arm PS ───
+
+def test_arm_ps_is_arm_a_plus_the_pstack_principles(tmp_path):
+    arm_compare.prepare(ROOT, "A", "devflow", 1, tmp_path / "A-1")
+    ps = arm_compare.prepare(ROOT, "PS", "devflow", 1, tmp_path / "PS-1")
+    project = tmp_path / "PS-1" / "project"
+    assert (project / "CLAUDE.md").read_text(encoding="utf-8") == arm_compare.PSTACK_PRINCIPLES
+    assert ((tmp_path / "PS-1" / "prompt.md").read_text(encoding="utf-8")
+            == (tmp_path / "A-1" / "prompt.md").read_text(encoding="utf-8"))
+    assert ps["principles"] == {"version": "ps-v1", "sha256": arm_compare.PSTACK_PRINCIPLES_SHA256}
+    assert arm_compare._git(["log", "--format=%s", "-1"], project) == "principles"
+    assert not (project / ".agent-flow").exists()
+
+
+def test_the_two_principle_sets_differ_and_ps_never_allows_deleting_tests():
+    assert arm_compare.PSTACK_PRINCIPLES != arm_compare.PRINCIPLES
+    assert arm_compare.PSTACK_PRINCIPLES_SHA256 != arm_compare.PRINCIPLES_SHA256
+    assert "delete" not in arm_compare.PSTACK_PRINCIPLES.lower()
+    assert "pstack" not in arm_compare.PSTACK_PRINCIPLES.lower()  # the agent is not told where the text comes from
+
+
+def test_an_external_case_prepares_arm_ps_and_a_followon_drops_it(tmp_path):
+    case_dir, _ = _external_case(tmp_path)
+    run = tmp_path / "runs" / "PS-1"
+    meta = arm_compare.prepare(ROOT, "PS", "ignored", 1, run, case_dir=case_dir)
+    assert (run / "project" / "CLAUDE.md").read_text(encoding="utf-8") == arm_compare.PSTACK_PRINCIPLES
+    assert meta["principles"]["version"] == "ps-v1"
+    arm_compare.prepare_followon(run, _followon_case(tmp_path), 1, tmp_path / "runs" / "PS-1.F1")
+    assert not (tmp_path / "runs" / "PS-1.F1" / "project" / "CLAUDE.md").exists()
