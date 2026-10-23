@@ -32,6 +32,11 @@ rates and counted apart.
   sets each phase's depth per task (#409 v2.1, arm D).
 - C′: `c_prime.build()` of the same project, stopping after `commit` (#427).
 
+Every run's result carries `integrity` (`integrity.check`, #409 v2 §3a): deleted, disabled or weakened tests and
+stubs in the diff from the start commit, a "tests pass" claim with no test command in the transcript, and changes
+left uncommitted by a run that declared `complete`. It is recorded and summarized, not yet part of the success rule
+(that waits for the preregistration v1 update, applied from the next cycle).
+
 Every workflow arm's result carries `phase_trace` (#409 v2.1): the phases the workflow declares, the ones the runner
 entered and the ones it never entered, and per phase the wall-clock seconds and the controller's tokens and list-price
 cost spent inside it. Spend is also split by phase category (plan, build, verify, deliver) plus `outside` (controller
@@ -73,6 +78,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools" / "autoresearch"))
 import c_prime  # noqa: E402
 import completion  # noqa: E402
+import integrity  # noqa: E402
 import run_usage  # noqa: E402
 from cycle_report import fisher_greater  # noqa: E402
 
@@ -484,6 +490,20 @@ def tool_inputs(rows: list[dict]) -> list[str]:
     return inputs
 
 
+def shell_commands(rows: list[dict]) -> list[str]:
+    """The `command` of every Bash tool call: the only inputs that execute anything."""
+    commands = []
+    for row in rows:
+        message = row.get("message")
+        if row.get("type") != "assistant" or not isinstance(message, dict):
+            continue
+        for block in message.get("content") or []:
+            if (isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Bash"
+                    and isinstance((block.get("input") or {}).get("command"), str)):
+                commands.append(block["input"]["command"])
+    return commands
+
+
 def _usage_totals(rows: list[dict]) -> dict:
     messages = run_usage.claude_messages(rows)
     total = run_usage._empty()
@@ -773,10 +793,12 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
         graded = _grade_phase_case(meta, checkout)
         graded["contaminated"] = any(marker in item for item in tool_inputs(rows) for marker in HIDDEN_MARKERS)
     message = final_message(main_rows)
+    declaration = completion.classify(message if main_rows else None)
     drive = json.loads((run / "drive.json").read_text(encoding="utf-8")) if (run / "drive.json").is_file() else {}
     result = {"isolation": "instructed", **meta, "task_kind": "normal", "checkout": str(checkout), **graded,
               "commits": int(commits) if commits.isdigit() else None,
-              "final_message": message, "declaration": completion.classify(message if main_rows else None),
+              "final_message": message, "declaration": declaration,
+              "integrity": integrity.check(checkout, meta["start_commit"], shell_commands(rows), message, declaration),
               "spec_self_approvals": sum(bool(SPEC_SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
               "phase_self_approvals": sum(bool(PHASE_SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
               "verify_downgrades": verify_downgrades(rows),
@@ -1058,8 +1080,9 @@ def summarize(results: list[dict]) -> str:
              "seconds (mean) | reviewer jobs (mean) | rule violations | isolation | "
              "runs that ran gates / deferred a gate to CI (never run) | "
              "successes first try / after fix-loop re-approval | runs stopped at the fix-loop limit | "
-             "phases entered / declared (mean) | orchestration share of cost (mean) |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "phases entered / declared (mean) | orchestration share of cost (mean) | "
+             "integrity flags (runs flagged) |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     base = [row for row in assigned if row["arm"] == "A"]
     base_success = sum(_succeeded(row) for row in base)
     reasons: list[str] = []
@@ -1096,11 +1119,17 @@ def summarize(results: list[dict]) -> str:
              if arm in WORKFLOWS else "-"),
             (str(sum(bool(row.get("fix_loop_cap_stop")) for row in group)) if arm in WORKFLOWS else "-"),
             _phase_cell(group) if arm in WORKFLOWS else "-",
-            _share_cell(group) if arm in WORKFLOWS else "-"]) + " |")
+            _share_cell(group) if arm in WORKFLOWS else "-",
+            _integrity_cell(group)]) + " |")
     if reasons:
         lines += ["", "Harness errors (re-run under the fixed harness, not in the denominator):", ""]
         lines += [f"- {reason}" for reason in reasons]
     return "\n".join(lines) + "\n"
+
+
+def _integrity_cell(group: list[dict]) -> str:
+    flags = [row["integrity"]["flags"] for row in group if isinstance(row.get("integrity"), dict)]
+    return "-" if not flags else f"{sum(flags)} ({sum(bool(flag) for flag in flags)})"
 
 
 def _phase_cell(group: list[dict]) -> str:
