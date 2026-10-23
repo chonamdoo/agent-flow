@@ -133,6 +133,36 @@ runner의 `gates` phase는 `execution: ci`인 gate를 돌리지 않고 `deferred
 
 C 조건의 "gate가 통과했다"를 test까지 돌았다는 뜻으로 읽지 않는다. 과제마다 이 표를 보고 해석한다.
 
+## fix-loop 상한 정지의 재승인 (v1 초안, 2026-10-23)
+
+**규칙.** C는 fix-loop 상한 정지 시 harness가 최대 2회 재승인한다. 이는 "사람이 상한에서 계속 진행을 눌러 주는 사용 방식"을 측정한다.
+
+- 근거: 사이클 1의 OYG C-1·C-2가 둘 다 multi-review → fix-loop 3라운드 상한에서 blocked로 끝났다〔measured〕. 무인 실행이라 상한에서 계속 진행을 눌러 줄 사람이 없다.
+- 재승인이 하는 일은 runner가 상한에서 제시하는 경로뿐이다.
+  - runner는 `[block] fix-loop exceeded 3 rounds routing <phase> -> <target>` 뒤에 "Update the artifact or rerun the watcher, then `agent-flow continue`"를 찍는다(`runner.py` `_next_index`, 사이클 1 C-2 출력)〔verified〕.
+  - harness는 같은 세션을 재개시켜, 에이전트가 그 phase의 리뷰어를 지금 코드로 다시 돌려 artifact를 갱신하고 `next_command`를 실행하게 한다. 이 단계에서는 코드를 바꾸지 않는다.
+- 상한 카운터는 되돌리지 않는다. 되돌리는 runner 명령이 없다(`FIX_LOOP_MAX_ROUNDS`는 상수이고 `fix_loop_rounds`는 늘기만 한다)〔verified〕. 그래서 재승인은 "수정 한 라운드 더"가 아니라 "리뷰 한 번 더"다. 다시 리뷰해도 변경 요청이 남으면 runner는 곧바로 다시 멈춘다.
+- 시간 2시간, 예산 $30 상한은 그대로다.
+- **적용 범위.** 다음 사이클부터 적용한다. 이미 돈 C-1·C-2(v0 규칙)와 섞어 비교하지 않고, 새 규칙으로 C를 다시 돌린다.
+
+**기록.**
+- `drive.json`의 `fix_loop_reapprovals`는 재승인마다 상한 정지 위치(phase, target, rounds), 그때 artifact의 판정 수와 남은 지적, 재승인 뒤 통과했는지(`passed`)를 담는다.
+- result의 `fix_loop_reapprovals`는 횟수, `fix_loop_reapproval_log`는 그 목록이다.
+- `fix_loop_cap_stop`은 run이 상한 정지 상태로 끝났는지다. runner 상태에서 읽으므로 v0 규칙의 run에도 있다.
+- 요약 표에는 "처음부터 성공 / 재승인 뒤 성공" 열과 "상한에서 멈춘 run" 열을 둔다.
+
+**결과 문서.**
+- 실패한 C run은 "상한 정지로 실패"와 "코드가 틀려 실패"를 나눠 적는다. 둘이 겹치면 둘 다 적는다.
+- blocked run도 평가기 점수(S·G)를 함께 적는다.
+- 사이클 1의 분류〔measured〕:
+
+  | run | 상한 정지 | 평가기 | 분류 |
+  |---|---|---|---|
+  | C-1 | 예 | S 0, G 0.938 | 상한 정지 + 평가기 실패 |
+  | C-2 | 예 | S 0, G 0.908 | 상한 정지 + 평가기 실패 |
+
+  - 두 run 모두 상한이 없었더라도 평가기 기준으로는 실패였다.
+
 ## 남은 준비
 
 - [ ] AL 조건 프롬프트와 harness 재검사(`arm_compare.py`)

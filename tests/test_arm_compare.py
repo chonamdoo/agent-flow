@@ -148,7 +148,7 @@ def test_human_only_approvals_fail_the_run_and_are_read_from_disk(tmp_path):
                 "usage": {"input": 1, "uncached_input": 1, "cached_input": 0, "output": 1}, "seconds": 1, **extra}
     table = arm_compare.summarize([row("A"), row("C"), row("C", manual_spec_approvals=2), row("C", verify_downgrades=1)])
     c_line = next(line for line in table.splitlines() if line.startswith("| C |"))
-    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed | 0 / 0 |")
+    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed | 0 / 0 | 1 / 0 | 0 |")
 
 
 def test_the_artifact_fingerprint_ignores_runner_state_and_tracks_edits(bare):
@@ -392,7 +392,7 @@ def test_a_gate_deferred_to_ci_is_recorded_as_never_run(tmp_path):
     assert arm_compare.gate_record(tmp_path / "none", checkout)["local_gates"] is None
     row = _summary_row("C", gate_ledgers=1, deferred_ci_checks=["pytest"])
     c_line = next(line for line in arm_compare.summarize([row]).splitlines() if line.startswith("| C |"))
-    assert c_line.endswith("| 1 / 1 |")
+    assert c_line.endswith("| 1 / 1 | 1 / 0 | 0 |")
 
 
 def test_a_rule_counts_only_where_the_runs_prompt_stated_it():
@@ -408,3 +408,102 @@ def test_a_rule_counts_only_where_the_runs_prompt_stated_it():
 def test_new_workflow_runs_record_that_the_harness_approves(tmp_path):
     meta = arm_compare.prepare(ROOT, "C", "devflow", 1, tmp_path / "C-1")
     assert meta["approval_rules"] == arm_compare.HARNESS_APPROVES
+
+
+CAP_STDOUT = """  [skip] multi-review
+  [block] fix-loop exceeded 3 rounds routing multi-review -> fix-loop
+
+status: blocked
+status_json: {"current_phase": "multi-review", "reason": "route_blocked", "run": "full-feature/20261022-131409", "next_command": "agent-flow continue --root /p --worktree w"}
+"""
+
+
+def test_the_runner_status_reports_a_stop_at_the_fix_loop_limit(tmp_path):
+    status = arm_compare.parse_runner_status(CAP_STDOUT, tmp_path)
+    assert status["fix_loop_cap"] == {"rounds": 3, "phase": "multi-review", "target": "fix-loop"}
+    approval = ('status_json: {"current_phase": "prd", "reason": "phase_approval_required", '
+                '"approval_command": "agent-flow continue --root /p --worktree w --approve abc"}')
+    assert arm_compare.parse_runner_status(approval, tmp_path)["fix_loop_cap"] is None
+    # A blocked route for another reason (a gate) is not the fix-loop limit.
+    other = 'status_json: {"current_phase": "gates", "reason": "route_blocked"}'
+    assert arm_compare.parse_runner_status(other, tmp_path)["fix_loop_cap"] is None
+
+
+def _drive_run(tmp_path, monkeypatch, statuses, finals):
+    run = tmp_path / "C-1"
+    (run / "project").mkdir(parents=True)
+    (run / "arm.json").write_text(json.dumps({"arm": "C", "project": str(run / "project")}), encoding="utf-8")
+    (run / "prompt.md").write_text("task", encoding="utf-8")
+    messages = []
+
+    def controller_once(argv, project, out, err, timeout):
+        messages.append(argv[2])
+        final = finals[min(len(messages), len(finals)) - 1]
+        out.write((json.dumps({"type": "system", "subtype": "init", "session_id": "s-1"}) + "\n" +
+                   json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 1.0 * len(messages),
+                               "result": final}) + "\n").encode())
+        return 0, False
+
+    queue = list(statuses)
+    monkeypatch.setattr(arm_compare, "_controller_once", controller_once)
+    monkeypatch.setattr(arm_compare, "runner_status", lambda project: queue.pop(0) if queue else None)
+    monkeypatch.setattr(arm_compare, "review_findings",
+                        lambda worktree, status: {"artifact": "sha", "verdicts": {"request-changes": 2},
+                                                  "findings": ["high: x"], "findings_total": 1})
+    monkeypatch.setattr(arm_compare.c_prime, "_sh", lambda argv, cwd, **_:
+                        type("R", (), {"returncode": 0, "stdout": "2.1.308", "stderr": ""})())
+    record = arm_compare.drive(run, "claude-opus-5-5", 600, 30.0)
+    return record, messages
+
+
+def _cap_status(tmp_path):
+    return {**arm_compare.parse_runner_status(CAP_STDOUT, tmp_path), "worktree": str(tmp_path)}
+
+
+def test_the_harness_reapproves_a_fix_loop_stop_at_most_twice(tmp_path, monkeypatch):
+    blocked = "Stopped.\n\nEVAL-STATUS: blocked: fix-loop limit"
+    record, messages = _drive_run(tmp_path, monkeypatch, [_cap_status(tmp_path)] * 5, [blocked])
+    assert len(messages) == 3
+    assert all("fix-loop limit at phase `multi-review`" in message for message in messages[1:])
+    assert "Do not change code" in messages[1]
+    reapprovals = record["fix_loop_reapprovals"]
+    assert len(reapprovals) == 2 and [item["passed"] for item in reapprovals] == [False, False]
+    assert reapprovals[0]["findings"] == ["high: x"] and reapprovals[0]["phase"] == "multi-review"
+    assert record["fix_loop_cap_stop"] is True
+
+
+def test_a_reapproval_that_lets_the_run_finish_is_recorded_as_passed(tmp_path, monkeypatch):
+    record, messages = _drive_run(tmp_path, monkeypatch, [_cap_status(tmp_path)],
+                                  ["Stopped.\n\nEVAL-STATUS: blocked: fix-loop limit", "Done.\n\nEVAL-STATUS: complete"])
+    assert len(messages) == 2
+    assert [item["passed"] for item in record["fix_loop_reapprovals"]] == [True]
+    assert record["fix_loop_cap_stop"] is False
+
+
+def test_the_bare_arm_is_never_reapproved(tmp_path, monkeypatch):
+    run = tmp_path / "C-1"
+    _drive_run(tmp_path, monkeypatch, [], ["Done.\n\nEVAL-STATUS: complete"])
+    (run / "arm.json").write_text(json.dumps({"arm": "A", "project": str(run / "project")}), encoding="utf-8")
+    statuses = [_cap_status(tmp_path)] * 3
+    monkeypatch.setattr(arm_compare, "runner_status", lambda project: statuses.pop(0))
+    record = arm_compare.drive(run, "claude-opus-5-5", 600, 30.0)
+    assert record["fix_loop_reapprovals"] == [] and len(statuses) == 3
+
+
+def test_a_run_stopped_at_the_limit_is_read_from_runner_state(tmp_path):
+    meta = tmp_path / "meta.json"
+    meta.write_text(json.dumps({"phase_blocked_reason": "route_blocked", "fix_loop_rounds": {"fix-loop": 3}}),
+                    encoding="utf-8")
+    assert arm_compare.stopped_at_fix_loop_cap(meta)
+    meta.write_text(json.dumps({"phase_blocked_reason": "route_blocked", "fix_loop_rounds": {"fix-loop": 1}}),
+                    encoding="utf-8")
+    assert not arm_compare.stopped_at_fix_loop_cap(meta)
+    assert not arm_compare.stopped_at_fix_loop_cap(tmp_path / "missing.json")
+
+
+def test_the_summary_separates_first_try_successes_from_reapproved_ones():
+    rows = [_summary_row("A"), _summary_row("C"), _summary_row("C", fix_loop_reapprovals=1),
+            _summary_row("C", oracle=False, declaration="declared-blocked", final="EVAL-STATUS: blocked: limit",
+                         fix_loop_reapprovals=2, fix_loop_cap_stop=True)]
+    c_line = next(line for line in arm_compare.summarize(rows).splitlines() if line.startswith("| C |"))
+    assert c_line.endswith("| 1 / 1 | 1 |")
