@@ -894,3 +894,21 @@ def test_an_external_case_prepares_arm_ps_and_a_followon_drops_it(tmp_path):
     assert meta["principles"]["version"] == "ps-v1"
     arm_compare.prepare_followon(run, _followon_case(tmp_path), 1, tmp_path / "runs" / "PS-1.F1")
     assert not (tmp_path / "runs" / "PS-1.F1" / "project" / "CLAUDE.md").exists()
+
+
+# ─── #409 §5: arm S (reduced-workflow search variant) ───
+
+def test_arm_s_installs_the_kit_and_runs_the_variant(tmp_path):
+    meta = arm_compare.prepare(ROOT, "S", "devflow", 1, tmp_path / "S-1", variant={"planning": False, "reviewers": 2})
+    project = tmp_path / "S-1" / "project"
+    name = meta["variant"]["name"]
+    assert meta["workflow"] == name and (project / ".agent-flow" / "workflows" / f"{name}.yaml").is_file()
+    assert f"--workflow {name}" in (tmp_path / "S-1" / "prompt.md").read_text(encoding="utf-8")
+    assert meta["approval_rules"] == arm_compare.HARNESS_APPROVES
+
+
+def test_only_arm_s_takes_a_variant(tmp_path):
+    with pytest.raises(ValueError):
+        arm_compare.prepare(ROOT, "S", "devflow", 1, tmp_path / "S-1")
+    with pytest.raises(ValueError):
+        arm_compare.prepare(ROOT, "B", "devflow", 1, tmp_path / "B-1", variant={"tdd": False})
