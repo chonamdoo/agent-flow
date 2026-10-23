@@ -779,15 +779,16 @@ def phase_trace(project: Path, checkout: Path, workflow: str, rows: list[dict], 
 BYTES_PER_TOKEN = 4  # a generous bytes-per-token ratio, so the token figure below stays a lower bound
 
 
-def reviewer_record(project: Path, checkout: Path, controller_model: str | None) -> dict:
+def reviewer_record(project: Path, checkout: Path) -> dict:
     """What the runner's reviewer subprocesses cost, as far as it can be seen (#409 program v2.2).
 
     The runner starts each reviewer with `--no-session-persistence` (claude) or `--ephemeral` (codex) inside a sandbox
     whose scratch is deleted afterwards, so no reviewer usage survives. `review-metrics-*.json` keeps, per job, the
     provider, model, effort, status, seconds and the prompt and output sizes. From those this reports a **lower bound**:
-    prompt and output bytes / BYTES_PER_TOKEN, priced for claude jobs at the controller model's list price when the
-    job's model is `unspecified` (the CLI default), with every file a reviewer read on its own left out. Codex jobs have
-    no price here, so their cost stays null and the run's total cost is a lower bound too.
+    the prompt and output bytes of jobs that finished `ok` / BYTES_PER_TOKEN (a failed job may never have reached the
+    model, so its prompt is kept apart as `attempted_prompt_bytes`), with every file a reviewer read on its own left
+    out. A cost is given only for a claude job whose model the runner recorded and is priced here; `unspecified` is the
+    CLI's own default, which is not necessarily the controller's model, so it stays unpriced, as do codex jobs.
     """
     roots = [project / ".git" / "agent-flow", checkout / ".agent-flow" / "runs"]
     files = sorted({path for root in roots if root.is_dir() for path in root.rglob("review-metrics-*.json")})
@@ -802,20 +803,24 @@ def reviewer_record(project: Path, checkout: Path, controller_model: str | None)
                 continue
             name = str(job.get("provider") or "unknown")
             item = providers.setdefault(name, {"jobs": 0, "failed": 0, "seconds": 0.0, "prompt_bytes": 0,
-                                               "output_bytes": 0, "models": set(), "efforts": set()})
+                                               "output_bytes": 0, "attempted_prompt_bytes": 0, "models": set(),
+                                               "efforts": set()})
+            ok = job.get("status") == "ok"
             item["jobs"] += 1
-            item["failed"] += job.get("status") != "ok"
+            item["failed"] += not ok
             item["seconds"] += float(job.get("duration_s") or 0)
-            item["prompt_bytes"] += int(job.get("prompt_utf8_bytes") or 0)
-            item["output_bytes"] += int(job.get("stdout_utf8_bytes") or 0)
+            item["attempted_prompt_bytes"] += int(job.get("prompt_utf8_bytes") or 0)
+            if ok:
+                item["prompt_bytes"] += int(job.get("prompt_utf8_bytes") or 0)
+                item["output_bytes"] += int(job.get("stdout_utf8_bytes") or 0)
             item["models"].add(str(job.get("model") or "unspecified"))
             item["efforts"].add(str(job.get("effort") or "unspecified"))
     cost = 0.0
     priced = bool(providers)
     for name, item in providers.items():
         item["token_lower_bound"] = (item["prompt_bytes"] + item["output_bytes"]) // BYTES_PER_TOKEN
-        model = controller_model if item["models"] == {"unspecified"} else next(iter(item["models"]), None)
-        price = PRICES.get(model or "") if name == "claude" and len(item["models"]) == 1 else None
+        model = next(iter(item["models"]), None) if len(item["models"]) == 1 else None
+        price = PRICES.get(model or "") if name == "claude" else None
         if price is None:
             item["cost_lower_bound_usd"] = None
             priced = False
@@ -972,7 +977,7 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
               "harness_error": harness_error, **chosen,
               **(_runner_trace(project, checkout) if meta["arm"] in WORKFLOWS else {}),
               **(gate_record(project, checkout) if meta["arm"] in WORKFLOWS else {}),
-              **({"reviewers": reviewer_record(project, checkout, next(iter(_usage_totals(rows)["models"]), None))}
+              **({"reviewers": reviewer_record(project, checkout)}
                  if meta["arm"] in WORKFLOWS else {}),
               **({"phase_trace": phase_trace(project, checkout, WORKFLOWS[meta["arm"]], rows,
                                              measured=read.get("subagents") != "unmeasured")}
@@ -1244,7 +1249,7 @@ def summarize(results: list[dict]) -> str:
              "runs that ran gates / deferred a gate to CI (never run) | "
              "successes first try / after fix-loop re-approval | runs stopped at the fix-loop limit | "
              "phases entered / declared (mean) | orchestration share of cost (mean) | "
-             "integrity flags (runs flagged) | reviewer jobs / seconds / cost lower bound (mean) |",
+             "integrity flags (runs flagged) | reviewer jobs / seconds / token and cost lower bound (mean) |",
              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     base = [row for row in assigned if row["arm"] == "A"]
     base_success = sum(_succeeded(row) for row in base)
@@ -1297,9 +1302,10 @@ def _reviewer_cell(group: list[dict]) -> str:
         return "-"
     jobs = _mean([record["jobs"] for record in records])
     seconds = _mean([sum(item["seconds"] for item in record["providers"].values()) for record in records])
-    priced = [record["priced_cost_lower_bound_usd"] for record in records]
-    unpriced = any(record["cost_lower_bound_usd"] is None for record in records)
-    return f"{jobs:.1f} / {seconds:,.0f} / ≥${_mean(priced):.2f}{' (+unpriced)' if unpriced else ''}"
+    tokens = _mean([sum(item["token_lower_bound"] for item in record["providers"].values()) for record in records])
+    costs = [record["cost_lower_bound_usd"] for record in records]
+    cost = "unpriced" if None in costs else f"≥${_mean(costs):.2f}"
+    return f"{jobs:.1f} / {seconds:,.0f} / ≥{tokens:,.0f} tok, {cost}"
 
 
 def _integrity_cell(group: list[dict]) -> str:

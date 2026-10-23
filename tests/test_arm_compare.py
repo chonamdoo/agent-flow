@@ -764,22 +764,37 @@ def test_the_reviewer_record_is_a_lower_bound_from_the_runners_job_metrics(tmp_p
     project = tmp_path / "project"
     run = project / ".git" / "agent-flow" / "r1"
     run.mkdir(parents=True)
-    jobs = [{"provider": "claude", "model": "unspecified", "effort": "unspecified", "status": "ok", "duration_s": 100.4,
+    jobs = [{"provider": "claude", "model": "claude-opus-5-5", "effort": "high", "status": "ok", "duration_s": 100.4,
              "prompt_utf8_bytes": 400_000, "stdout_utf8_bytes": 40_000},
-            {"provider": "codex", "model": "unspecified", "effort": "unspecified", "status": "error", "duration_s": 50,
-             "prompt_utf8_bytes": 4_000, "stdout_utf8_bytes": 0}]
+            {"provider": "claude", "model": "claude-opus-5-5", "effort": "high", "status": "error", "duration_s": 3,
+             "prompt_utf8_bytes": 400_000, "stdout_utf8_bytes": 0},
+            {"provider": "codex", "model": "unspecified", "effort": "unspecified", "status": "ok", "duration_s": 50,
+             "prompt_utf8_bytes": 4_000, "stdout_utf8_bytes": 400}]
     (run / "review-metrics-a.json").write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
-    record = arm_compare.reviewer_record(project, project, "claude-opus-5-5")
-    assert record["status"] == "lower-bound" and record["jobs"] == 2 and record["waves"] == 1
+    record = arm_compare.reviewer_record(project, project)
+    assert record["status"] == "lower-bound" and record["jobs"] == 3 and record["waves"] == 1
     claude = record["providers"]["claude"]
-    assert claude["token_lower_bound"] == 110_000 and claude["seconds"] == 100
+    # The failed job may never have reached the model: its prompt is kept apart, not charged.
+    assert claude["failed"] == 1 and claude["attempted_prompt_bytes"] == 800_000
+    assert claude["token_lower_bound"] == 110_000 and claude["seconds"] == 103
     assert claude["cost_lower_bound_usd"] == round((100_000 * 4.0 + 10_000 * 20.0) / 1_000_000, 4)
-    assert record["providers"]["codex"]["failed"] == 1 and record["providers"]["codex"]["cost_lower_bound_usd"] is None
+    assert record["providers"]["codex"]["cost_lower_bound_usd"] is None and record["providers"]["codex"]["token_lower_bound"] == 1_100
     assert record["cost_lower_bound_usd"] is None and record["priced_cost_lower_bound_usd"] == 0.6
 
 
+def test_a_reviewer_on_the_cli_default_model_is_not_priced_as_the_controller(tmp_path):
+    run = tmp_path / ".git" / "agent-flow" / "r1"
+    run.mkdir(parents=True)
+    job = {"provider": "claude", "model": "unspecified", "effort": "unspecified", "status": "ok", "duration_s": 10,
+           "prompt_utf8_bytes": 40_000, "stdout_utf8_bytes": 4_000}
+    (run / "review-metrics-a.json").write_text(json.dumps({"jobs": [job]}), encoding="utf-8")
+    record = arm_compare.reviewer_record(tmp_path, tmp_path)
+    assert record["providers"]["claude"]["cost_lower_bound_usd"] is None and record["cost_lower_bound_usd"] is None
+    assert record["providers"]["claude"]["token_lower_bound"] == 11_000
+
+
 def test_no_reviewer_metrics_means_no_jobs_and_no_cost(tmp_path):
-    record = arm_compare.reviewer_record(tmp_path, tmp_path, "claude-opus-5-5")
+    record = arm_compare.reviewer_record(tmp_path, tmp_path)
     assert record["jobs"] == 0 and record["cost_lower_bound_usd"] is None
 
 
@@ -795,3 +810,12 @@ def test_preflight_reports_an_unavailable_model_instead_of_substituting(monkeypa
     rows = arm_compare.preflight([("claude", "claude-opus-5-5"), ("claude", "claude-cheap-x")])
     assert [row["available"] for row in rows] == [True, False] and "no such model" in rows[1]["error"]
     assert calls[1][:4] == ["claude", "-p", "--model", "claude-cheap-x"]
+
+
+def test_the_summary_shows_reviewer_tokens_and_leaves_an_unpriced_cost_unpriced():
+    record = {"jobs": 40, "cost_lower_bound_usd": None, "priced_cost_lower_bound_usd": 0.0,
+              "providers": {"claude": {"seconds": 1500, "token_lower_bound": 127_000},
+                            "codex": {"seconds": 1450, "token_lower_bound": 116_000}}}
+    line = next(row for row in arm_compare.summarize([_summary_row("C", reviewers=record)]).splitlines()
+                if row.startswith("| C |"))
+    assert line.endswith("| 40.0 / 2,950 / ≥243,000 tok, unpriced |")
