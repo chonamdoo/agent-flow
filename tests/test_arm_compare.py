@@ -819,3 +819,31 @@ def test_the_summary_shows_reviewer_tokens_and_leaves_an_unpriced_cost_unpriced(
     line = next(row for row in arm_compare.summarize([_summary_row("C", reviewers=record)]).splitlines()
                 if row.startswith("| C |"))
     assert line.endswith("| 40.0 / 2,950 / ≥243,000 tok, unpriced |")
+
+
+# ─── #409 v2: arm A+P ───
+
+def test_arm_ap_is_arm_a_plus_the_fixed_principles(tmp_path):
+    bare = arm_compare.prepare(ROOT, "A", "devflow", 1, tmp_path / "A-1")
+    ap = arm_compare.prepare(ROOT, "AP", "devflow", 1, tmp_path / "AP-1")
+    project = tmp_path / "AP-1" / "project"
+    assert (project / "CLAUDE.md").read_text(encoding="utf-8") == arm_compare.PRINCIPLES
+    assert not (tmp_path / "A-1" / "project" / "CLAUDE.md").exists()
+    assert ((tmp_path / "AP-1" / "prompt.md").read_text(encoding="utf-8")
+            == (tmp_path / "A-1" / "prompt.md").read_text(encoding="utf-8"))
+    assert ap["principles"] == {"version": "ap-v1", "sha256": arm_compare.PRINCIPLES_SHA256} and bare["principles"] is None
+    assert arm_compare._git(["log", "--format=%s", "-1"], project) == "principles"
+    assert not (project / ".agent-flow").exists()
+
+
+def test_an_external_case_prepares_arm_ap(tmp_path):
+    case_dir, _ = _external_case(tmp_path)
+    arm_compare.prepare(ROOT, "AP", "ignored", 1, tmp_path / "runs" / "AP-1", case_dir=case_dir)
+    assert (tmp_path / "runs" / "AP-1" / "project" / "CLAUDE.md").is_file()
+
+
+def test_a_followon_from_arm_ap_drops_its_principles(tmp_path):
+    run = tmp_path / "AP-1"
+    arm_compare.prepare(ROOT, "AP", "devflow", 1, run)
+    arm_compare.prepare_followon(run, _followon_case(tmp_path), 1, tmp_path / "AP-1.F1")
+    assert not (tmp_path / "AP-1.F1" / "project" / "CLAUDE.md").exists()

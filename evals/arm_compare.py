@@ -26,6 +26,8 @@ and marks a run `contaminated` when one names a hidden-test path; contaminated r
 rates and counted apart.
 
 - A: the task, the test command and the completion declaration. No kit is installed.
+- AP (A+P): A plus the fixed `PRINCIPLES` (8 code principles and a pre-completion check) as the project's CLAUDE.md,
+  committed before the agent starts. The prompt is A's, word for word.
 - B, C: the kit is installed with its hooks; the agent drives `agent-flow run --workflow development|full-feature`
   and answers the runner's decisions from the task text. It is not the human approver: `spec approve`/`spec confirm`
   and turning a SPEC's `verify` into `manual` are off limits, because they let the worker pass its own evidence
@@ -106,7 +108,7 @@ CONTROLLER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "ANDROID_HOME"
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CODEX_HOME", "OPENAI_API_KEY")
 AGENT_FLOW_WORKTREES = Path.home() / ".agent-flow" / "worktrees"
 CLAUDE_TOOLS = ("Bash", "Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "TodoWrite", "Task")
-ARMS = ("A", "B", "C", "D", "Cp")
+ARMS = ("A", "AP", "B", "C", "D", "Cp")
 WORKFLOWS = {"B": "development", "C": "full-feature", "D": "default"}
 # 설치기가 읽는 트리만 복사한다(package.json `files`). evals/·tests/·maintainer/는 에이전트의 kit에 없다.
 KIT_TREES = ("bin", "lib", "templates", "bootstrap", "skills", "scripts", ".Codex", ".claude", "src", "docs")
@@ -268,6 +270,35 @@ def external_bare_prompt(case: dict) -> str:
 {DECLARATION}"""
 
 
+# Arm A+P (#409 program v2): the bare arm plus these principles as the project's CLAUDE.md, so the effect of stating
+# the principles can be told apart from the effect of the workflow's phases. The text is fixed; its digest is recorded.
+PRINCIPLES_VERSION = "ap-v1"
+PRINCIPLES = """# Engineering principles for this repository
+
+Follow these in every change. Prefer the repository's existing patterns, utilities and architecture.
+
+1. **Single responsibility.** A function, class or module has one reason to change. Split code that mixes concerns.
+2. **Avoid side effects.** Keep logic pure where it can be; isolate I/O, state changes and framework calls at the edges.
+3. **Don't repeat yourself.** Reuse what exists before writing new code; do not copy logic into a second place.
+4. **Minimize parameters.** Keep parameter lists short; group values that travel together into a type.
+5. **Fail fast.** Validate inputs and invariants early and fail loudly with a specific error instead of continuing.
+6. **Guard clauses.** Handle the exceptional cases first and return early, rather than nesting the main path.
+7. **Single level of abstraction.** Each function reads at one level; move lower-level detail into named helpers.
+8. **Explicit receivers.** Make it obvious which object a call acts on; avoid implicit or ambient receivers.
+
+Before declaring the work done: run the tests, check that the change stays in the task's scope, and re-read the diff
+for regressions, duplication and code that does not match the surrounding style.
+"""
+PRINCIPLES_SHA256 = hashlib.sha256(PRINCIPLES.encode("utf-8")).hexdigest()
+
+
+def _write_principles(project: Path) -> None:
+    """A+P's one difference from A: the principles as CLAUDE.md, committed before the agent starts."""
+    (project / "CLAUDE.md").write_text(PRINCIPLES, encoding="utf-8")
+    _git(["add", "CLAUDE.md"], project)
+    _git(["commit", "-qm", "principles"], project)
+
+
 # What a workflow arm's kit leaves in the project. A follow-on starts from the code alone, so the fixed follow-on agent
 # cannot tell which arm wrote it and gets no kit instructions (the seed of every external case has none of these).
 # The installer also lists every path it adds in `.git/info/exclude`; `_strip_kit` removes those too.
@@ -374,7 +405,9 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
         _seed_ui_project(ui, project)
     if ui is not None and arm == "Cp":
         raise ValueError("C′ is not defined for UI tasks")
-    if arm == "A":
+    if arm in ("A", "AP"):
+        if arm == "AP":
+            _write_principles(project)
         _git(["checkout", "-qb", BRANCH], project)
         prompt = ui_bare_prompt(case["task"]) if ui else bare_prompt(case["task"], case["test_command"])
     elif arm == "Cp":
@@ -390,6 +423,7 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
             "cprime_rules": c_prime.RULES_VERSION if arm == "Cp" else None, "isolation": isolation,
+            "principles": {"version": PRINCIPLES_VERSION, "sha256": PRINCIPLES_SHA256} if arm == "AP" else None,
             "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None,
             "case_kind": "ui" if ui else "phase-case", **({"ui_task": ui["task"], "layer": ui["layer"]} if ui else {})}
     (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
@@ -398,13 +432,15 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
 
 def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: int, output: Path,
                       isolation: str) -> dict:
-    if arm not in ("A", *WORKFLOWS):
-        raise ValueError("an external case defines the A, B, C and D arms only")
+    if arm not in ("A", "AP", *WORKFLOWS):
+        raise ValueError("an external case defines the A, AP, B, C and D arms only")
     output.mkdir(parents=True)
     agent_kit = sanitized_kit(kit, output / "kit")
     project = output / "project"
     _seed_external_project(case, case_dir, project)
-    if arm == "A":
+    if arm in ("A", "AP"):
+        if arm == "AP":
+            _write_principles(project)
         _git(["checkout", "-qb", BRANCH], project)
         prompt = external_bare_prompt(case)
     else:
@@ -417,6 +453,7 @@ def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: in
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
             "cprime_rules": None, "isolation": isolation,
+            "principles": {"version": PRINCIPLES_VERSION, "sha256": PRINCIPLES_SHA256} if arm == "AP" else None,
             "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None, "case_kind": "external",
             "case_sha256": case["sha256"], "seed_commit": case["seed"]["commit"], "score_keys": case["score_keys"],
             "evaluator_repeat": bool(case.get("evaluator_repeat"))}
