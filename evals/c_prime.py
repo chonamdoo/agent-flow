@@ -24,7 +24,7 @@ Fixed rules (`RULES_VERSION` changes when any of them does):
   record `approval: agent` in that artifact (#413), so self-approval is visible in the output.
 - A section identical to one already emitted (the profile YAML, the same skill bodies) is replaced
   by a reference to its first phase. The text the model receives is otherwise unchanged.
-- The completion declaration is the arm-common rule of #424 (`EVAL-STATUS: complete|blocked: …`).
+- The completion declaration is the arm-common rule of #424 (`TASK-STATUS: complete|blocked: …`).
 
 The output is deterministic for a kit and task: absolute paths are replaced, and the SHA-256 of the
 prompt is printed and written next to it as the fingerprint.
@@ -43,7 +43,7 @@ import tempfile
 import time
 from pathlib import Path
 
-RULES_VERSION = 4
+RULES_VERSION = 5
 EXCLUDED_PHASES = frozenset({"gates", "worktree", "run-start", "fix-loop", "pr-comment-fix", "pr-ci-fix",
                              "multi-review", "architecture-review"})
 RUNNER_LINE = re.compile(r"agent-flow\s+[a-z]|--approve\b|approval_command|run_command_prefix|next_command|"
@@ -53,8 +53,8 @@ DECLARATION = """## Completion declaration
 
 End your final message with exactly one line:
 
-    EVAL-STATUS: complete
-    EVAL-STATUS: blocked: <reason>
+    TASK-STATUS: complete
+    TASK-STATUS: blocked: <reason>
 
 Declare `complete` only when every phase above is done and the change works; otherwise declare
 `blocked` with the reason. Nothing checks your phase artifacts for you in this run.

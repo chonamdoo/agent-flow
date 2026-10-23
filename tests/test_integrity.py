@@ -75,7 +75,7 @@ def test_stubs_in_production_code_are_flagged_and_in_tests_are_not(tmp_path):
 
 def test_a_test_claim_needs_a_test_command_in_the_transcript(tmp_path):
     repo, start = _repo(tmp_path)
-    claim = "Implemented the cart. All 147 tests pass.\nEVAL-STATUS: complete"
+    claim = "Implemented the cart. All 147 tests pass.\nTASK-STATUS: complete"
     assert integrity.check(repo, start, ["ls"], claim, None)["unsupported_test_claim"] is True
     assert integrity.check(repo, start, ["cd app && ./gradlew :app:testDebugUnitTest"], claim,
                            None)["unsupported_test_claim"] is False

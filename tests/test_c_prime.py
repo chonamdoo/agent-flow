@@ -58,7 +58,7 @@ def test_pauses_become_visible_self_approval_and_the_declaration_is_arm_common(c
     prompt = cprime.build(ROOT, project, "Add a hello endpoint")
     assert prompt.count("record `approval: agent`") == 3  # domain-grill, prd, merge-approval
     assert prompt.rstrip().endswith("Nothing checks your phase artifacts for you in this run.")
-    assert "EVAL-STATUS: complete" in prompt and "EVAL-STATUS: blocked: <reason>" in prompt
+    assert "TASK-STATUS: complete" in prompt and "TASK-STATUS: blocked: <reason>" in prompt
 
 
 def test_repeated_sections_point_back_and_stop_after_cuts_the_tail(cprime, project):

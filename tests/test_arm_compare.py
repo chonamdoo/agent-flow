@@ -45,7 +45,7 @@ def test_the_agent_kit_holds_only_installed_asset_trees(bare):
 def test_bare_arm_gets_task_tests_and_declaration_only(bare):
     prompt = (bare / "prompt.md").read_text(encoding="utf-8")
     case = json.loads((ROOT / "evals" / "phase-cases" / "devflow" / "case.json").read_text(encoding="utf-8"))
-    assert case["task"] in prompt and "EVAL-STATUS: complete" in prompt
+    assert case["task"] in prompt and "TASK-STATUS: complete" in prompt
     assert " ".join(case["test_command"]) in prompt
     for marker in (*arm_compare.HIDDEN_MARKERS, "agent-flow"):
         assert marker not in prompt
@@ -59,7 +59,7 @@ def test_workflow_arm_installs_the_kit_and_drives_the_runner(tmp_path):
     run = tmp_path / "C-1"
     meta = arm_compare.prepare(ROOT, "C", "devflow", 1, run)
     prompt = (run / "prompt.md").read_text(encoding="utf-8")
-    assert "--workflow full-feature" in prompt and "EVAL-STATUS" in prompt
+    assert "--workflow full-feature" in prompt and "TASK-STATUS" in prompt
     assert (run / "project" / ".agent-flow" / "bin" / "agent-flow").exists()
     assert arm_compare._git(["branch", "--show-current"], run / "project") == "main"
     assert meta["prompt_sha256"] and meta["start_commit"]
@@ -67,7 +67,7 @@ def test_workflow_arm_installs_the_kit_and_drives_the_runner(tmp_path):
 
 def test_score_runs_hidden_tests_after_the_agent_and_flags_hidden_reads(bare, tmp_path):
     clean = _transcript(tmp_path / "clean.jsonl", tool_input={"file_path": "src/shop/cart/domain.py"},
-                        final="Nothing done.\n\nEVAL-STATUS: complete")
+                        final="Nothing done.\n\nTASK-STATUS: complete")
     result = arm_compare.score(bare, clean)
     # 구현하지 않은 seed에서는 hidden test가 실패한다. 완료 선언은 그대로 읽는다(과대보고 후보).
     assert result["oracle"] is False and result["hidden_tests"]["fix"] is False
@@ -77,11 +77,11 @@ def test_score_runs_hidden_tests_after_the_agent_and_flags_hidden_reads(bare, tm
                                           "cache_write_1h": None, "cache_read": 150, "output": 23}
     assert result["seconds"] == 100
     dirty = _transcript(tmp_path / "dirty.jsonl", tool_input={"file_path": "/x/evals/phase-cases/devflow/author/clean/hidden/t.py"},
-                        final="EVAL-STATUS: complete")
+                        final="TASK-STATUS: complete")
     assert arm_compare.score(bare, dirty)["contaminated"] is True
 
 
-def _summary_row(arm, oracle=True, *, declaration="declared-complete", final="EVAL-STATUS: complete", **extra):
+def _summary_row(arm, oracle=True, *, declaration="declared-complete", final="TASK-STATUS: complete", **extra):
     return {"arm": arm, "task_kind": "normal", "oracle": oracle, "contaminated": False, "final_message": final,
             "declaration": declaration, "usage": {"input": 1, "uncached_input": 1, "cached_input": 0, "output": 10},
             "seconds": 5, **extra}
@@ -112,8 +112,8 @@ def test_summary_keeps_every_assigned_run_in_the_denominator():
 def test_a_subagent_handback_is_the_final_message():
     rows = [{"type": "assistant", "message": {"content": [{"type": "text", "text": "working"}]}},
             {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "name": "SubagentHandback", "input": {"message": "Done.\n\nEVAL-STATUS: complete"}}]}}]
-    assert arm_compare.final_message(rows).endswith("EVAL-STATUS: complete")
+                {"type": "tool_use", "name": "SubagentHandback", "input": {"message": "Done.\n\nTASK-STATUS: complete"}}]}}]
+    assert arm_compare.final_message(rows).endswith("TASK-STATUS: complete")
 
 
 def test_the_runner_command_quotes_the_task_for_the_shell():
@@ -145,7 +145,7 @@ def test_human_only_approvals_fail_the_run_and_are_read_from_disk(tmp_path):
 
     def row(arm, **extra):
         return {"arm": arm, "task_kind": "normal", "oracle": True, "contaminated": False,
-                "final_message": "EVAL-STATUS: complete", "declaration": "declared-complete",
+                "final_message": "TASK-STATUS: complete", "declaration": "declared-complete",
                 "usage": {"input": 1, "uncached_input": 1, "cached_input": 0, "output": 1}, "seconds": 1, **extra}
     table = arm_compare.summarize([row("A"), row("C"), row("C", manual_spec_approvals=2), row("C", verify_downgrades=1)])
     c_line = next(line for line in table.splitlines() if line.startswith("| C |"))
@@ -205,7 +205,7 @@ def test_the_ui_task_seeds_only_the_layer_and_the_pinned_fixtures(tmp_path):
                      "fixtures/commerce.json", "prd.md"]
     assert meta["case_kind"] == "ui" and meta["layer"] == "prd"
     prompt = (run / "prompt.md").read_text(encoding="utf-8")
-    assert "prd.md" in prompt and "EVAL-STATUS" in prompt and "agent-flow" not in prompt
+    assert "prd.md" in prompt and "TASK-STATUS" in prompt and "agent-flow" not in prompt
     with pytest.raises(SystemExit):
         arm_compare.score(run, None)
 
@@ -270,13 +270,13 @@ def test_the_ui_task_installs_the_kit_with_a_declared_architecture(tmp_path):
 
 def _session_with_subagent(tmp_path, sub_input):
     main = _transcript(tmp_path / "s1.jsonl", tool_input={"file_path": "src/shop/cart/domain.py"},
-                       final="Done.\n\nEVAL-STATUS: complete")
+                       final="Done.\n\nTASK-STATUS: complete")
     folder = tmp_path / "s1" / "subagents"
     folder.mkdir(parents=True)
     rows = [{"type": "assistant", "isSidechain": True, "timestamp": "2026-10-22T07:00:30Z",
              "message": {"id": "sub-1", "model": "claude-x", "content": [
                  {"type": "tool_use", "name": "Bash", "input": sub_input},
-                 {"type": "text", "text": "Sub-agent done.\n\nEVAL-STATUS: blocked: not mine to say"}],
+                 {"type": "text", "text": "Sub-agent done.\n\nTASK-STATUS: blocked: not mine to say"}],
                  "usage": {"input_tokens": 7, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
                            "output_tokens": 70}}}]
     (folder / "agent-abc.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
@@ -446,7 +446,7 @@ def test_an_external_case_seeds_its_repository_and_task_files_only(tmp_path):
     assert not (project / "checks").exists() and not (project / "score.py").exists()
     assert arm_compare._git(["remote"], project) == ""
     prompt = (run / "prompt.md").read_text(encoding="utf-8")
-    assert "Build the cart." in prompt and "Run ./gradlew test." in prompt and "EVAL-STATUS" in prompt
+    assert "Build the cart." in prompt and "Run ./gradlew test." in prompt and "TASK-STATUS" in prompt
     recorded = (run / "arm.json").read_text(encoding="utf-8")
     assert meta["case"] == "mobile" and meta["case_kind"] == "external" and str(case_dir) not in recorded
     assert meta["case_sha256"] == hashlib.sha256((case_dir / "case.json").read_bytes()).hexdigest()
@@ -535,7 +535,7 @@ def _cap_status(tmp_path):
 
 
 def test_the_harness_reapproves_a_fix_loop_stop_at_most_twice(tmp_path, monkeypatch):
-    blocked = "Stopped.\n\nEVAL-STATUS: blocked: fix-loop limit"
+    blocked = "Stopped.\n\nTASK-STATUS: blocked: fix-loop limit"
     record, messages = _drive_run(tmp_path, monkeypatch, [_cap_status(tmp_path)] * 5, [blocked])
     assert len(messages) == 3
     assert all("fix-loop limit at phase `multi-review`" in message for message in messages[1:])
@@ -548,7 +548,7 @@ def test_the_harness_reapproves_a_fix_loop_stop_at_most_twice(tmp_path, monkeypa
 
 def test_a_reapproval_that_lets_the_run_finish_is_recorded_as_passed(tmp_path, monkeypatch):
     record, messages = _drive_run(tmp_path, monkeypatch, [_cap_status(tmp_path)],
-                                  ["Stopped.\n\nEVAL-STATUS: blocked: fix-loop limit", "Done.\n\nEVAL-STATUS: complete"])
+                                  ["Stopped.\n\nTASK-STATUS: blocked: fix-loop limit", "Done.\n\nTASK-STATUS: complete"])
     assert len(messages) == 2
     assert [item["passed"] for item in record["fix_loop_reapprovals"]] == [True]
     assert record["fix_loop_cap_stop"] is False
@@ -556,7 +556,7 @@ def test_a_reapproval_that_lets_the_run_finish_is_recorded_as_passed(tmp_path, m
 
 def test_the_bare_arm_is_never_reapproved(tmp_path, monkeypatch):
     run = tmp_path / "C-1"
-    _drive_run(tmp_path, monkeypatch, [], ["Done.\n\nEVAL-STATUS: complete"])
+    _drive_run(tmp_path, monkeypatch, [], ["Done.\n\nTASK-STATUS: complete"])
     (run / "arm.json").write_text(json.dumps({"arm": "A", "project": str(run / "project")}), encoding="utf-8")
     statuses = [_cap_status(tmp_path)] * 3
     monkeypatch.setattr(arm_compare, "runner_status", lambda project: statuses.pop(0))
@@ -577,7 +577,7 @@ def test_a_run_stopped_at_the_limit_is_read_from_runner_state(tmp_path):
 
 def test_the_summary_separates_first_try_successes_from_reapproved_ones():
     rows = [_summary_row("A"), _summary_row("C"), _summary_row("C", fix_loop_reapprovals=1),
-            _summary_row("C", oracle=False, declaration="declared-blocked", final="EVAL-STATUS: blocked: limit",
+            _summary_row("C", oracle=False, declaration="declared-blocked", final="TASK-STATUS: blocked: limit",
                          fix_loop_reapprovals=2, fix_loop_cap_stop=True)]
     c_line = next(line for line in arm_compare.summarize(rows).splitlines() if line.startswith("| C |"))
     assert "| 1 / 1 | 1 |" in c_line
@@ -589,7 +589,7 @@ def test_the_default_workflow_is_arm_d(tmp_path):
     run = tmp_path / "D-1"
     meta = arm_compare.prepare(ROOT, "D", "devflow", 1, run)
     prompt = (run / "prompt.md").read_text(encoding="utf-8")
-    assert "--workflow default" in prompt and "EVAL-STATUS" in prompt
+    assert "--workflow default" in prompt and "TASK-STATUS" in prompt
     assert meta["approval_rules"] == arm_compare.HARNESS_APPROVES
     assert (run / "project" / ".agent-flow" / "bin" / "agent-flow").exists()
 
@@ -718,7 +718,7 @@ def test_a_followon_starts_from_the_arms_code_without_the_kit_or_its_history(tmp
     assert meta["arm"] == "A" and meta["case"] == "mobile-F1" and meta["case_kind"] == "external"
     assert meta["followon_of"]["arm"] == "C" and meta["followon_of"]["artifact_sha256"]
     prompt = (out / "prompt.md").read_text(encoding="utf-8")
-    assert "Add the delivery memo." in prompt and "EVAL-STATUS" in prompt and "Agent Flow" not in prompt
+    assert "Add the delivery memo." in prompt and "TASK-STATUS" in prompt and "Agent Flow" not in prompt
     assert str(tmp_path / "private") not in (out / "arm.json").read_text(encoding="utf-8")
 
 
