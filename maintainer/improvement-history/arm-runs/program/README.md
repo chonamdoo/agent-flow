@@ -26,7 +26,8 @@
 | OYG(웹 풀스택, 개발 과제) | A 1/5, C 0/2. C 2회 모두 multi-review fix-loop 상한 정지. 비용 A $2.08, C $19.5/run | #453 |
 | mobile-cart v0(holdout 후보) | 기준 구현 S=1, mutant 15/20, 맨 모델 3/3 → 너무 쉬워 은퇴 | 비공개 저장소 |
 | mobile-cart v1 | 기준 구현 S=1, mutant 18/20, 맨 모델 3/3 → 은퇴 | 비공개 저장소 |
-| mobile-checkout(대형 holdout) | 기준 구현 S=1(검사 28/28). 맨 모델 A-1 S=1(28/28, 17분, $4.41). A-2·A-3과 mutant 진행 중 | 비공개 저장소 |
+| mobile-checkout(대형 holdout) | 기준 구현 S=1(검사 28/28), mutant 18/20, 맨 모델 3/3(평균 $4.29, 17분) → 기능으로는 헤드룸 없음 | 비공개 저장소 |
+| 클라우드 UI 검증 POC | Roborazzi(Robolectric native graphics) 렌더 + 픽셀·semantics 비교. 기준 재실행 오탐 0, 간격·색·텍스트 결함 3/3 잡음 | 비공개 저장소 |
 
 ## PR과 브랜치
 
