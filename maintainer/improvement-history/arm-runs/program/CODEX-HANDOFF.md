@@ -8,7 +8,7 @@
 |---|---|---|---|
 | 비공개 evals | `feat/holdout-2` | `e2f04f8` 후보 작성, `9c29ddb` bytecode 제외, `46feb48` lint 검토 문서, `9e45921` 검사 보강, `1eb326e` 지문·보고 갱신 | [private #3](https://github.com/chonamdoo/agent-flow-evals-private/pull/3), draft; 기반 `feat/mobile-tabs-v0` `b8b338c` |
 | 공개 agent-flow | `codex/neutral-completion-409` | `eed6367` | [#464](https://github.com/chonamdoo/agent-flow/pull/464); 기반 `feat/epic-409-arm-ps` `5534c53` (#463) |
-| 공개 agent-flow | `codex/handoff-2026-10-23` | `327a369` 최초 기록; 최종 metadata 커밋은 이 PR의 head를 따른다 | 인계 PR 링크는 아래 기록; 기반 `docs/epic-409-program-record` `12bc814` |
+| 공개 agent-flow | `codex/handoff-2026-10-23` | `327a369` 최초 기록, `6389f5d` 결과 갱신; 최종 metadata 커밋은 이 PR의 head를 따른다 | [#465](https://github.com/chonamdoo/agent-flow/pull/465); 기반 `docs/epic-409-program-record` `12bc814` |
 
 ## 1. 두 번째 holdout
 
@@ -36,8 +36,8 @@
 
 ## 최종 확인
 
-- 인계 PR: 생성 뒤 이 줄을 갱신한다.
-- #464 전체 CI: 진행 중. 로컬 focused 24건 통과와 구별한다.
+- 인계 PR: [#465](https://github.com/chonamdoo/agent-flow/pull/465), OPEN / merge 안 함.
+- #464 전체 CI: pytest shard 4개 진행 중. parity·python-minimum·frozen-invariants·phase_budget base/head·phase-budget-compare·skill-routing 통과. CodeRabbit은 기반 브랜치 설정상 review skipped다. 로컬 focused 24건 통과와 구별한다.
 - private #3: draft / OPEN. 실행 검증과 독립성 조건이 남아 있다.
 - 원본 공개 `docs/epic-409-program-record`와 비공개 `feat/mobile-tabs-v0`는 각각 `12bc814`, `b8b338c`를 기준으로 읽었으며 이 작업의 push 대상이 아니다.
 - 인계 문서는 문서 변경이다. 함수 계보 조사·실행 테스트는 미적용, 공개 diff와 비공개 정보 유출 여부를 확인했다. 기존 HANDOFF 및 프로그램 계획은 수정하지 않았다.
