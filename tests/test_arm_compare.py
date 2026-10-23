@@ -149,7 +149,7 @@ def test_human_only_approvals_fail_the_run_and_are_read_from_disk(tmp_path):
                 "usage": {"input": 1, "uncached_input": 1, "cached_input": 0, "output": 1}, "seconds": 1, **extra}
     table = arm_compare.summarize([row("A"), row("C"), row("C", manual_spec_approvals=2), row("C", verify_downgrades=1)])
     c_line = next(line for line in table.splitlines() if line.startswith("| C |"))
-    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed | 0 / 0 | 1 / 0 | 0 | - | - |")
+    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed | 0 / 0 | 1 / 0 | 0 | - | - | - |")
 
 
 def test_the_artifact_fingerprint_ignores_runner_state_and_tracks_edits(bare):
@@ -393,7 +393,7 @@ def test_a_gate_deferred_to_ci_is_recorded_as_never_run(tmp_path):
     assert arm_compare.gate_record(tmp_path / "none", checkout)["local_gates"] is None
     row = _summary_row("C", gate_ledgers=1, deferred_ci_checks=["pytest"])
     c_line = next(line for line in arm_compare.summarize([row]).splitlines() if line.startswith("| C |"))
-    assert c_line.endswith("| 1 / 1 | 1 / 0 | 0 | - | - |")
+    assert c_line.endswith("| 1 / 1 | 1 / 0 | 0 | - | - | - |")
 
 
 def test_a_rule_counts_only_where_the_runs_prompt_stated_it():
@@ -671,6 +671,6 @@ def test_the_summary_reports_phases_and_the_orchestration_share():
     rows = [_summary_row("A"), _summary_row("D", phase_trace=trace),
             _summary_row("D", phase_trace={**trace, "entered": ["design"], "orchestration_share": 0.75})]
     d_line = next(line for line in arm_compare.summarize(rows).splitlines() if line.startswith("| D |"))
-    assert d_line.endswith("| 1.5 / 4 | 50% |")
+    assert d_line.endswith("| 1.5 / 4 | 50% | - |")
     a_line = next(line for line in arm_compare.summarize(rows).splitlines() if line.startswith("| A |"))
-    assert a_line.endswith("| - | - |")
+    assert a_line.endswith("| - | - | - |")
