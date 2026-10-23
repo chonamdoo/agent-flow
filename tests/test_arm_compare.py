@@ -674,3 +674,52 @@ def test_the_summary_reports_phases_and_the_orchestration_share():
     assert d_line.endswith("| 1.5 / 4 | 50% | - |")
     a_line = next(line for line in arm_compare.summarize(rows).splitlines() if line.startswith("| A |"))
     assert a_line.endswith("| - | - | - |")
+
+
+# ─── #409 v2 §3c: follow-on changes ───
+
+def _followon_case(tmp_path):
+    case_dir = tmp_path / "private" / "mobile" / "followon" / "F1"
+    (case_dir / "task").mkdir(parents=True)
+    (case_dir / "task" / "prd.md").write_text("# F1 memo\n", encoding="utf-8")
+    (case_dir / "checks").mkdir()
+    (case_dir / "checks" / "HiddenFu.kt").write_text("secret\n", encoding="utf-8")
+    (case_dir / "case.json").write_text(json.dumps({
+        "name": "mobile-F1", "files": {"followon-prd.md": "task/prd.md"}, "task": "Add the delivery memo.",
+        "bare_note": "Run ./gradlew test.", "score_keys": ["S", "F", "G", "R", "B"]}), encoding="utf-8")
+    return case_dir
+
+
+def test_a_followon_starts_from_the_arms_code_without_the_kit_or_its_history(tmp_path):
+    run = tmp_path / "C-1"
+    arm_compare.prepare(ROOT, "C", "devflow", 1, run)
+    project = run / "project"
+    (project / "feature.txt").write_text("the arm's work, left uncommitted\n", encoding="utf-8")
+    (project / "build").mkdir()
+    (project / "build" / "out.bin").write_text("x", encoding="utf-8")
+    assert (project / ".agent-flow").is_dir()
+    out = tmp_path / "C-1.F1"
+    meta = arm_compare.prepare_followon(run, _followon_case(tmp_path), 1, out)
+    follow = out / "project"
+    assert (follow / "feature.txt").read_text(encoding="utf-8") == "the arm's work, left uncommitted\n"
+    assert (follow / "followon-prd.md").read_text(encoding="utf-8") == "# F1 memo\n"
+    for trace in (".agent-flow", ".claude", "CLAUDE.md", "AGENTS.md", "build", "checks"):
+        assert not (follow / trace).exists(), trace
+    assert arm_compare._git(["log", "--format=%s"], follow).splitlines() == ["base"]
+    assert arm_compare._git(["branch", "--show-current"], follow) == arm_compare.BRANCH
+    assert meta["arm"] == "A" and meta["case"] == "mobile-F1" and meta["case_kind"] == "external"
+    assert meta["followon_of"]["arm"] == "C" and meta["followon_of"]["artifact_sha256"]
+    prompt = (out / "prompt.md").read_text(encoding="utf-8")
+    assert "Add the delivery memo." in prompt and "EVAL-STATUS" in prompt and "Agent Flow" not in prompt
+    assert str(tmp_path / "private") not in (out / "arm.json").read_text(encoding="utf-8")
+
+
+def test_two_arms_give_the_followon_agent_the_same_prompt(tmp_path):
+    case_dir = _followon_case(tmp_path)
+    prompts = []
+    for arm in ("A", "C"):
+        run = tmp_path / f"{arm}-1"
+        arm_compare.prepare(ROOT, arm, "devflow", 1, run)
+        arm_compare.prepare_followon(run, case_dir, 1, tmp_path / f"{arm}-1.F1")
+        prompts.append((tmp_path / f"{arm}-1.F1" / "prompt.md").read_text(encoding="utf-8"))
+    assert prompts[0] == prompts[1]
