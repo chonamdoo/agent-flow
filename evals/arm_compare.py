@@ -776,6 +776,92 @@ def phase_trace(project: Path, checkout: Path, workflow: str, rows: list[dict], 
                                     if priced and total else None)}
 
 
+BYTES_PER_TOKEN = 4  # a generous bytes-per-token ratio, so the token figure below stays a lower bound
+
+
+def reviewer_record(project: Path, checkout: Path) -> dict:
+    """What the runner's reviewer subprocesses cost, as far as it can be seen (#409 program v2.2).
+
+    The runner starts each reviewer with `--no-session-persistence` (claude) or `--ephemeral` (codex) inside a sandbox
+    whose scratch is deleted afterwards, so no reviewer usage survives. `review-metrics-*.json` keeps, per job, the
+    provider, model, effort, status, seconds and the prompt and output sizes. From those this reports a **lower bound**:
+    the prompt and output bytes of jobs that finished `ok` / BYTES_PER_TOKEN (a failed job may never have reached the
+    model, so its prompt is kept apart as `attempted_prompt_bytes`), with every file a reviewer read on its own left
+    out. A cost is given only for a claude job whose model the runner recorded and is priced here; `unspecified` is the
+    CLI's own default, which is not necessarily the controller's model, so it stays unpriced, as do codex jobs.
+    """
+    roots = [project / ".git" / "agent-flow", checkout / ".agent-flow" / "runs"]
+    files = sorted({path for root in roots if root.is_dir() for path in root.rglob("review-metrics-*.json")})
+    providers: dict[str, dict] = {}
+    for path in files:
+        try:
+            jobs = json.loads(path.read_text(encoding="utf-8")).get("jobs") or []
+        except (OSError, ValueError):
+            continue
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            name = str(job.get("provider") or "unknown")
+            item = providers.setdefault(name, {"jobs": 0, "failed": 0, "seconds": 0.0, "prompt_bytes": 0,
+                                               "output_bytes": 0, "attempted_prompt_bytes": 0, "models": set(),
+                                               "efforts": set()})
+            ok = job.get("status") == "ok"
+            item["jobs"] += 1
+            item["failed"] += not ok
+            item["seconds"] += float(job.get("duration_s") or 0)
+            item["attempted_prompt_bytes"] += int(job.get("prompt_utf8_bytes") or 0)
+            if ok:
+                item["prompt_bytes"] += int(job.get("prompt_utf8_bytes") or 0)
+                item["output_bytes"] += int(job.get("stdout_utf8_bytes") or 0)
+            item["models"].add(str(job.get("model") or "unspecified"))
+            item["efforts"].add(str(job.get("effort") or "unspecified"))
+    cost = 0.0
+    priced = bool(providers)
+    for name, item in providers.items():
+        item["token_lower_bound"] = (item["prompt_bytes"] + item["output_bytes"]) // BYTES_PER_TOKEN
+        model = next(iter(item["models"]), None) if len(item["models"]) == 1 else None
+        price = PRICES.get(model or "") if name == "claude" else None
+        if price is None:
+            item["cost_lower_bound_usd"] = None
+            priced = False
+        else:
+            item["cost_lower_bound_usd"] = round((item["prompt_bytes"] / BYTES_PER_TOKEN * price["fresh_input"]
+                                                  + item["output_bytes"] / BYTES_PER_TOKEN * price["output"])
+                                                 / 1_000_000, 4)
+            cost += item["cost_lower_bound_usd"]
+        item["models"], item["efforts"] = sorted(item["models"]), sorted(item["efforts"])
+        item["seconds"] = round(item["seconds"])
+    return {"status": "lower-bound", "waves": len(files), "jobs": sum(item["jobs"] for item in providers.values()),
+            "providers": providers,
+            "cost_lower_bound_usd": round(cost, 4) if priced else None,
+            "priced_cost_lower_bound_usd": round(cost, 4)}
+
+
+def preflight(models: list[tuple[str, str]], timeout: int = 180) -> list[dict]:
+    """Calls each (cli, model) once with a one-word prompt in the eval environment and records whether it answered.
+
+    A model a planned arm needs must pass here before the arm runs; a failure is reported, never replaced by another
+    model.
+    """
+    rows = []
+    for cli, model in models:
+        # `default` checks the CLI's own default model (what a reviewer with model `unspecified` gets).
+        pick = [] if model == "default" else (["--model", model] if cli == "claude" else ["-m", model])
+        argv = (["claude", "-p", *pick, "Reply with the single word OK."] if cli == "claude" else
+                ["codex", "exec", "--skip-git-repo-check", *pick, "Reply with the single word OK."])
+        started = time.monotonic()
+        try:
+            done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+                                  env=controller_env(dict(os.environ)), cwd=tempfile.gettempdir())
+            answered = done.returncode == 0 and "OK" in done.stdout.upper()
+            error = None if answered else (done.stderr or done.stdout)[-300:]
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            answered, error = False, str(exc)[-300:]
+        rows.append({"cli": cli, "model": model, "available": answered, "seconds": round(time.monotonic() - started, 1),
+                     "error": error, "checked_at": datetime.now().isoformat(timespec="seconds")})
+    return rows
+
+
 def manual_spec_approvals(project: Path, checkout: Path) -> int:
     """Manual SPEC approvals the runner recorded for this project's runs, read from disk, not the transcript."""
     roots = [project / ".git" / "agent-flow", checkout / ".agent-flow" / "runs"]
@@ -891,6 +977,8 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
               "harness_error": harness_error, **chosen,
               **(_runner_trace(project, checkout) if meta["arm"] in WORKFLOWS else {}),
               **(gate_record(project, checkout) if meta["arm"] in WORKFLOWS else {}),
+              **({"reviewers": reviewer_record(project, checkout)}
+                 if meta["arm"] in WORKFLOWS else {}),
               **({"phase_trace": phase_trace(project, checkout, WORKFLOWS[meta["arm"]], rows,
                                              measured=read.get("subagents") != "unmeasured")}
                  if meta["arm"] in WORKFLOWS else {}),
@@ -1161,8 +1249,8 @@ def summarize(results: list[dict]) -> str:
              "runs that ran gates / deferred a gate to CI (never run) | "
              "successes first try / after fix-loop re-approval | runs stopped at the fix-loop limit | "
              "phases entered / declared (mean) | orchestration share of cost (mean) | "
-             "integrity flags (runs flagged) |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "integrity flags (runs flagged) | reviewer jobs / seconds / token and cost lower bound (mean) |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     base = [row for row in assigned if row["arm"] == "A"]
     base_success = sum(_succeeded(row) for row in base)
     reasons: list[str] = []
@@ -1200,11 +1288,24 @@ def summarize(results: list[dict]) -> str:
             (str(sum(bool(row.get("fix_loop_cap_stop")) for row in group)) if arm in WORKFLOWS else "-"),
             _phase_cell(group) if arm in WORKFLOWS else "-",
             _share_cell(group) if arm in WORKFLOWS else "-",
-            _integrity_cell(group)]) + " |")
+            _integrity_cell(group),
+            _reviewer_cell(group) if arm in WORKFLOWS else "-"]) + " |")
     if reasons:
         lines += ["", "Harness errors (re-run under the fixed harness, not in the denominator):", ""]
         lines += [f"- {reason}" for reason in reasons]
     return "\n".join(lines) + "\n"
+
+
+def _reviewer_cell(group: list[dict]) -> str:
+    records = [row["reviewers"] for row in group if isinstance(row.get("reviewers"), dict)]
+    if not records:
+        return "-"
+    jobs = _mean([record["jobs"] for record in records])
+    seconds = _mean([sum(item["seconds"] for item in record["providers"].values()) for record in records])
+    tokens = _mean([sum(item["token_lower_bound"] for item in record["providers"].values()) for record in records])
+    costs = [record["cost_lower_bound_usd"] for record in records]
+    cost = "unpriced" if None in costs else f"≥${_mean(costs):.2f}"
+    return f"{jobs:.1f} / {seconds:,.0f} / ≥{tokens:,.0f} tok, {cost}"
 
 
 def _integrity_cell(group: list[dict]) -> str:
@@ -1253,6 +1354,10 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("--repeat", type=int, default=3)
     sc.add_argument("--harness-error", metavar="REASON",
                     help="the harness itself broke this run; it is re-run and listed apart from the denominator")
+    pre = sub.add_parser("preflight", help="check that each model an arm needs answers in this environment")
+    pre.add_argument("--model", action="append", required=True, metavar="CLI:MODEL",
+                     help="e.g. claude:claude-opus-5-5, codex:default (the CLI's own default); repeat for each")
+    pre.add_argument("--output", type=Path)
     fol = sub.add_parser("followon", help="prepare a follow-on change on top of an arm run's code")
     fol.add_argument("base", type=Path, help="the arm run directory whose code the follow-on starts from")
     fol.add_argument("--followon-dir", type=Path, required=True, help="the follow-on case (`<dir>/case.json`)")
@@ -1264,6 +1369,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "prepare":
         print(json.dumps(prepare(args.kit.resolve(), args.arm, args.case, args.trial, args.output.resolve(),
                                  args.isolation, args.case_dir.resolve() if args.case_dir else None), indent=1))
+    elif args.command == "preflight":
+        rows = preflight([tuple(item.split(":", 1)) for item in args.model])
+        text = json.dumps(rows, indent=1)
+        if args.output:
+            args.output.write_text(text + "\n", encoding="utf-8")
+        print(text)
+        return 0 if all(row["available"] for row in rows) else 1
     elif args.command == "followon":
         print(json.dumps(prepare_followon(args.base.resolve(), args.followon_dir.resolve(), args.trial,
                                           args.output.resolve()), indent=1))
