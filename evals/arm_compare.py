@@ -362,7 +362,7 @@ PRINCIPLE_SETS = {"AP": (PRINCIPLES_VERSION, PRINCIPLES, PRINCIPLES_SHA256),
 def _write_principles(project: Path, arm: str) -> None:
     """AP's and PS's one difference from A: the arm's principles as CLAUDE.md, committed before the agent starts."""
     (project / "CLAUDE.md").write_text(PRINCIPLE_SETS[arm][1], encoding="utf-8")
-    _git(["add", "CLAUDE.md"], project)
+    _git(["add", "--force", "CLAUDE.md"], project)  # the mobile seeds' .gitignore lists CLAUDE.md
     _git(["commit", "-qm", "principles"], project)
 
 

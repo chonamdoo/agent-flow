@@ -842,6 +842,22 @@ def test_an_external_case_prepares_arm_ap(tmp_path):
     assert (tmp_path / "runs" / "AP-1" / "project" / "CLAUDE.md").is_file()
 
 
+def test_arm_ap_commits_its_principles_when_the_seed_ignores_claude_md(tmp_path):
+    case_dir, _ = _external_case(tmp_path)
+    seed = tmp_path / "seed-repo"
+    (seed / ".gitignore").write_text("CLAUDE.md\n", encoding="utf-8")
+    arm_compare._git(["add", ".gitignore"], seed)
+    arm_compare._git(["commit", "-qm", "ignore"], seed)
+    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
+    case["seed"]["commit"] = arm_compare._git(["rev-parse", "HEAD"], seed)
+    (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+    run = tmp_path / "runs" / "AP-1"
+    arm_compare.prepare(ROOT, "AP", "ignored", 1, run, case_dir=case_dir)
+    project = run / "project"
+    assert arm_compare._git(["ls-files", "CLAUDE.md"], project) == "CLAUDE.md"
+    assert arm_compare._git(["status", "--porcelain"], project) == ""
+
+
 def test_a_followon_from_arm_ap_drops_its_principles(tmp_path):
     run = tmp_path / "AP-1"
     arm_compare.prepare(ROOT, "AP", "devflow", 1, run)
