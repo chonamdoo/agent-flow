@@ -149,7 +149,7 @@ def test_human_only_approvals_fail_the_run_and_are_read_from_disk(tmp_path):
                 "usage": {"input": 1, "uncached_input": 1, "cached_input": 0, "output": 1}, "seconds": 1, **extra}
     table = arm_compare.summarize([row("A"), row("C"), row("C", manual_spec_approvals=2), row("C", verify_downgrades=1)])
     c_line = next(line for line in table.splitlines() if line.startswith("| C |"))
-    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed | 0 / 0 | 1 / 0 | 0 |")
+    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed | 0 / 0 | 1 / 0 | 0 | - | - |")
 
 
 def test_the_artifact_fingerprint_ignores_runner_state_and_tracks_edits(bare):
@@ -393,7 +393,7 @@ def test_a_gate_deferred_to_ci_is_recorded_as_never_run(tmp_path):
     assert arm_compare.gate_record(tmp_path / "none", checkout)["local_gates"] is None
     row = _summary_row("C", gate_ledgers=1, deferred_ci_checks=["pytest"])
     c_line = next(line for line in arm_compare.summarize([row]).splitlines() if line.startswith("| C |"))
-    assert c_line.endswith("| 1 / 1 | 1 / 0 | 0 |")
+    assert c_line.endswith("| 1 / 1 | 1 / 0 | 0 | - | - |")
 
 
 def test_a_rule_counts_only_where_the_runs_prompt_stated_it():
@@ -580,4 +580,97 @@ def test_the_summary_separates_first_try_successes_from_reapproved_ones():
             _summary_row("C", oracle=False, declaration="declared-blocked", final="EVAL-STATUS: blocked: limit",
                          fix_loop_reapprovals=2, fix_loop_cap_stop=True)]
     c_line = next(line for line in arm_compare.summarize(rows).splitlines() if line.startswith("| C |"))
-    assert c_line.endswith("| 1 / 1 | 1 |")
+    assert "| 1 / 1 | 1 |" in c_line
+
+
+# ─── #409 v2.1: arm D and the phase trace ───
+
+def test_the_default_workflow_is_arm_d(tmp_path):
+    run = tmp_path / "D-1"
+    meta = arm_compare.prepare(ROOT, "D", "devflow", 1, run)
+    prompt = (run / "prompt.md").read_text(encoding="utf-8")
+    assert "--workflow default" in prompt and "EVAL-STATUS" in prompt
+    assert meta["approval_rules"] == arm_compare.HARNESS_APPROVES
+    assert (run / "project" / ".agent-flow" / "bin" / "agent-flow").exists()
+
+
+def test_an_external_case_prepares_arm_d(tmp_path):
+    case_dir, _ = _external_case(tmp_path)
+    run = tmp_path / "runs" / "D-1"
+    arm_compare.prepare(ROOT, "D", "ignored", 1, run, case_dir=case_dir)
+    assert "--workflow default" in (run / "prompt.md").read_text(encoding="utf-8")
+
+
+def _events(path: Path, rows: list[tuple[str, str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps({"ts": ts, "event": event, "details": {"phase": phase}}) + "\n"
+                            for ts, event, phase in rows), encoding="utf-8")
+
+
+def _message(message_id: str, at: str, output: int) -> dict:
+    return {"type": "assistant", "timestamp": at,
+            "message": {"id": message_id, "model": "claude-opus-5-5", "content": [],
+                        "usage": {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+                                  "output_tokens": output,
+                                  "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}}}}
+
+
+def test_the_phase_trace_splits_time_and_spend_by_phase_and_names_skipped_phases(tmp_path):
+    project = tmp_path / "project"
+    workflow = project / ".agent-flow" / "runtime" / "python" / "agent_flow" / "workflows" / "default.yaml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("id: default\nphases:\n  - id: design\n  - id: implement\n  - id: gates\n  - id: commit\n",
+                        encoding="utf-8")
+    _events(project / ".git" / "agent-flow" / "r1" / "context" / "events.jsonl", [
+        ("2026-10-23T01:00:00+00:00", "phase_entered", "design"),
+        ("2026-10-23T01:00:00+00:00", "phase_entered", "design"),
+        ("2026-10-23T01:10:00+00:00", "phase_exited", "design"),
+        ("2026-10-23T01:10:00+00:00", "phase_entered", "implement"),
+        ("2026-10-23T01:40:00+00:00", "phase_entered", "commit"),
+    ])
+    rows = [_message("m0", "2026-10-23T00:59:00Z", 1_000_000),   # before any phase: outside
+            _message("m1", "2026-10-23T01:05:00Z", 100_000),     # design
+            _message("m2", "2026-10-23T01:20:00Z", 200_000),     # implement
+            _message("m3", "2026-10-23T01:45:00Z", 50_000)]      # commit (open window)
+    trace = arm_compare.phase_trace(project, project, "default", rows)
+    assert trace["declared"] == ["design", "implement", "gates", "commit"]
+    assert trace["entered"] == ["design", "implement", "commit"] and trace["skipped"] == ["gates"]
+    assert trace["phases"]["design"]["entries"] == 1 and trace["phases"]["design"]["seconds"] == 600
+    assert trace["phases"]["implement"]["seconds"] == 1800 and trace["phases"]["commit"]["seconds"] == 300
+    assert trace["phases"]["implement"]["output_tokens"] == 200_000
+    spend = trace["spend_by_category"]
+    assert spend["plan"]["cost_usd"] == 2.0 and spend["build"]["cost_usd"] == 4.0
+    assert spend["deliver"]["cost_usd"] == 1.0 and spend["outside"]["cost_usd"] == 20.0
+    assert trace["orchestration_share"] == round(21 / 27, 3)
+
+
+def test_a_project_local_workflow_overrides_the_kit_copy(tmp_path):
+    project = tmp_path / "project"
+    for path, ids in ((project / ".agent-flow" / "workflows" / "development.yaml", ["explore", "implement"]),
+                      (project / ".agent-flow" / "runtime" / "python" / "agent_flow" / "workflows" / "development.yaml",
+                       ["explore", "implement", "review", "qa"])):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("phases:\n" + "".join(f"  - id: {phase}\n" for phase in ids), encoding="utf-8")
+    assert arm_compare.declared_phases(project, project, "development") == ["explore", "implement"]
+
+
+def test_an_unpriced_model_leaves_phase_costs_null_not_zero(tmp_path):
+    project = tmp_path / "project"
+    _events(project / ".git" / "agent-flow" / "r1" / "context" / "events.jsonl",
+            [("2026-10-23T01:00:00+00:00", "phase_entered", "explore")])
+    row = _message("m1", "2026-10-23T01:05:00Z", 10)
+    row["message"]["model"] = "unknown-model"
+    trace = arm_compare.phase_trace(project, project, "development", [row])
+    assert trace["phases"]["explore"]["cost_usd"] is None and trace["orchestration_share"] is None
+    assert trace["declared"] is None and trace["skipped"] is None
+
+
+def test_the_summary_reports_phases_and_the_orchestration_share():
+    trace = {"entered": ["design", "implement"], "declared": ["design", "implement", "gates", "commit"],
+             "orchestration_share": 0.25}
+    rows = [_summary_row("A"), _summary_row("D", phase_trace=trace),
+            _summary_row("D", phase_trace={**trace, "entered": ["design"], "orchestration_share": 0.75})]
+    d_line = next(line for line in arm_compare.summarize(rows).splitlines() if line.startswith("| D |"))
+    assert d_line.endswith("| 1.5 / 4 | 50% |")
+    a_line = next(line for line in arm_compare.summarize(rows).splitlines() if line.startswith("| A |"))
+    assert a_line.endswith("| - | - |")

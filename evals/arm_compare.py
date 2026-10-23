@@ -1,4 +1,4 @@
-"""#410 arm comparison: one task under A (bare model), B (development), C (full-feature), C′ (prompt only).
+"""#410 arm comparison: one task under A (bare model), B (development), C (full-feature), D (default), C′ (prompt only).
 
     python evals/arm_compare.py prepare --kit . --arm C --case devflow --trial 1 --output <work>/C-1
     python evals/arm_compare.py drive <work>/C-1            # headless controller in <work>/C-1/project
@@ -28,7 +28,16 @@ rates and counted apart.
   for the user, `drive` runs the runner's own approval command and resumes the same session
   (`drive.json` `harness_approvals`); an agent that runs it itself counts as a self-approval. There is no git
   remote, so the run ends at the first phase that needs one.
+- D: like B and C with the kit's `default` workflow, the one it applies to every project and which says the agent
+  sets each phase's depth per task (#409 v2.1, arm D).
 - C′: `c_prime.build()` of the same project, stopping after `commit` (#427).
+
+Every workflow arm's result carries `phase_trace` (#409 v2.1): the phases the workflow declares, the ones the runner
+entered and the ones it never entered, and per phase the wall-clock seconds and the controller's tokens and list-price
+cost spent inside it. Spend is also split by phase category (plan, build, verify, deliver) plus `outside` (controller
+time outside any phase window: reading the prompt, starting the runner, ending the turn for an approval);
+`orchestration_share` is deliver + outside over the total. Runner reviewer subprocesses print no usage, so their
+tokens are in neither; `reviewer_jobs` still counts them.
 
 Success follows `completion.summarize` (#424): the hidden fix, plan and visible tests all pass (each ran at
 least one test), the run did not declare `blocked`, and it broke no evaluation rule. A rule violation is a
@@ -86,8 +95,8 @@ CONTROLLER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "ANDROID_HOME"
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CODEX_HOME", "OPENAI_API_KEY")
 AGENT_FLOW_WORKTREES = Path.home() / ".agent-flow" / "worktrees"
 CLAUDE_TOOLS = ("Bash", "Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "TodoWrite", "Task")
-ARMS = ("A", "B", "C", "Cp")
-WORKFLOWS = {"B": "development", "C": "full-feature"}
+ARMS = ("A", "B", "C", "D", "Cp")
+WORKFLOWS = {"B": "development", "C": "full-feature", "D": "default"}
 # 설치기가 읽는 트리만 복사한다(package.json `files`). evals/·tests/·maintainer/는 에이전트의 kit에 없다.
 KIT_TREES = ("bin", "lib", "templates", "bootstrap", "skills", "scripts", ".Codex", ".claude", "src", "docs")
 KIT_FILES = ("package.json", "pyproject.toml", "README.md")
@@ -304,7 +313,7 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
 def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: int, output: Path,
                       isolation: str) -> dict:
     if arm not in ("A", *WORKFLOWS):
-        raise ValueError("an external case defines the A, B and C arms only")
+        raise ValueError("an external case defines the A, B, C and D arms only")
     output.mkdir(parents=True)
     agent_kit = sanitized_kit(kit, output / "kit")
     project = output / "project"
@@ -573,6 +582,93 @@ def stopped_at_fix_loop_cap(meta_path: Path) -> bool:
             and any(isinstance(count, int) and count >= RUNNER_FIX_LOOP_MAX_ROUNDS for count in counts))
 
 
+# Phase categories for the spend split (#409 v2.1). `deliver` is the bookkeeping around the work: worktree, run start,
+# commit, push and PR steps, merge, cleanup and handoff. A phase id not listed here is reported as `unknown`.
+PHASE_CATEGORY = {
+    "plan": ("design", "explore", "reproduce", "domain-grill", "product-brief", "prd", "slice-plan", "plan-review",
+             "ddd-design"),
+    "build": ("implement", "implement-fix", "red", "green", "refactor", "comment-authoring"),
+    "verify": ("review", "qa", "final-review", "multi-review", "architecture-review", "gates", "fix-loop"),
+    "deliver": ("worktree", "run-start", "commit", "push-pr", "pr-watch", "pr-comment-fix", "pr-ci-fix",
+                "merge-approval", "merge", "cleanup", "handoff"),
+}
+CATEGORY_OF = {phase: category for category, phases in PHASE_CATEGORY.items() for phase in phases}
+SPEND_KEYS = (*PHASE_CATEGORY, "unknown", "outside")
+
+
+def declared_phases(project: Path, checkout: Path, workflow: str) -> list[str] | None:
+    """Phase ids of the workflow the run used: a project-local override first, as the runner resolves it."""
+    for root in (checkout, project):
+        for path in (root / ".agent-flow" / "workflows" / f"{workflow}.yaml",
+                     root / ".agent-flow" / "runtime" / "python" / "agent_flow" / "workflows" / f"{workflow}.yaml"):
+            if path.is_file():
+                return re.findall(r"^  - id:\s*([\w-]+)", path.read_text(encoding="utf-8"), re.M) or None
+    return None
+
+
+def phase_windows(project: Path, checkout: Path) -> list[dict]:
+    """[{phase, start, end}] in time order from the runner's events. Entering a phase closes the open one."""
+    roots = [project / ".git" / "agent-flow", checkout / ".agent-flow" / "runs"]
+    events = []
+    for path in sorted({path for root in roots if root.is_dir() for path in root.rglob("events.jsonl")}):
+        for row in run_usage._jsonl(path):
+            details = row.get("details") if isinstance(row.get("details"), dict) else {}
+            at = run_usage._timestamp(row.get("ts"))
+            if at and isinstance(details.get("phase"), str) and row.get("event") in ("phase_entered", "phase_exited"):
+                events.append((at, row["event"], details["phase"]))
+    windows: list[dict] = []
+    for at, event, phase in sorted(events, key=lambda item: item[0]):
+        current = windows[-1] if windows and windows[-1]["end"] is None else None
+        if event == "phase_entered":
+            if current and current["phase"] == phase:
+                continue  # the runner sometimes records one entry twice in a row
+            if current:
+                current["end"] = at
+            windows.append({"phase": phase, "start": at, "end": None})
+        elif current and current["phase"] == phase:
+            current["end"] = at
+    return windows
+
+
+def phase_trace(project: Path, checkout: Path, workflow: str, rows: list[dict]) -> dict:
+    windows = phase_windows(project, checkout)
+    messages = run_usage.claude_messages(rows)
+    last = max([message["at"] for message in messages] + [window["start"] for window in windows], default=None)
+    phases: dict[str, dict] = {}
+    for window in windows:
+        item = phases.setdefault(window["phase"], {"category": CATEGORY_OF.get(window["phase"], "unknown"),
+                                                   "entries": 0, "seconds": 0.0, "cost_usd": 0.0,
+                                                   "output_tokens": 0})
+        item["entries"] += 1
+        end = window["end"] or last
+        item["seconds"] += max((end - window["start"]).total_seconds(), 0.0) if end else 0.0
+    spend = {key: {"cost_usd": 0.0, "output_tokens": 0} for key in SPEND_KEYS}
+    priced = True
+    for message in messages:
+        window = next((window for window in windows if window["start"] <= message["at"]
+                       and (window["end"] is None or message["at"] < window["end"])), None)
+        cost = message_cost(message["model"], message["components"])
+        priced = priced and cost is not None
+        output = message["components"].get("output") or 0
+        key = phases[window["phase"]]["category"] if window else "outside"
+        spend[key]["cost_usd"] += cost or 0.0
+        spend[key]["output_tokens"] += output
+        if window:
+            phases[window["phase"]]["cost_usd"] += cost or 0.0
+            phases[window["phase"]]["output_tokens"] += output
+    total = sum(item["cost_usd"] for item in spend.values())
+    declared = declared_phases(project, checkout, workflow)
+    for item in (*phases.values(), *spend.values()):
+        item["cost_usd"] = round(item["cost_usd"], 4) if priced else None
+        if "seconds" in item:
+            item["seconds"] = round(item["seconds"])
+    return {"workflow": workflow, "declared": declared, "entered": list(phases),
+            "skipped": [phase for phase in declared if phase not in phases] if declared else None,
+            "phases": phases, "spend_by_category": spend,
+            "orchestration_share": (round((spend["deliver"]["cost_usd"] + spend["outside"]["cost_usd"]) / total, 3)
+                                    if priced and total else None)}
+
+
 def manual_spec_approvals(project: Path, checkout: Path) -> int:
     """Manual SPEC approvals the runner recorded for this project's runs, read from disk, not the transcript."""
     roots = [project / ".git" / "agent-flow", checkout / ".agent-flow" / "runs"]
@@ -686,6 +782,8 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
               "harness_error": harness_error, **chosen,
               **(_runner_trace(project, checkout) if meta["arm"] in WORKFLOWS else {}),
               **(gate_record(project, checkout) if meta["arm"] in WORKFLOWS else {}),
+              **({"phase_trace": phase_trace(project, checkout, WORKFLOWS[meta["arm"]], rows)}
+                 if meta["arm"] in WORKFLOWS else {}),
               "scored_at": datetime.now().isoformat(timespec="seconds")}
     (run / "result.json").write_text(json.dumps(result, indent=1, default=str) + "\n", encoding="utf-8")
     return result
@@ -951,8 +1049,9 @@ def summarize(results: list[dict]) -> str:
              "harness errors (excluded) | output tokens (mean) | input uncached+cached (mean) | "
              "seconds (mean) | reviewer jobs (mean) | rule violations | isolation | "
              "runs that ran gates / deferred a gate to CI (never run) | "
-             "successes first try / after fix-loop re-approval | runs stopped at the fix-loop limit |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "successes first try / after fix-loop re-approval | runs stopped at the fix-loop limit | "
+             "phases entered / declared (mean) | orchestration share of cost (mean) |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     base = [row for row in assigned if row["arm"] == "A"]
     base_success = sum(_succeeded(row) for row in base)
     reasons: list[str] = []
@@ -987,11 +1086,27 @@ def summarize(results: list[dict]) -> str:
             (f"{sum(_succeeded(row) and not row.get('fix_loop_reapprovals') for row in group)} / "
              f"{sum(_succeeded(row) and bool(row.get('fix_loop_reapprovals')) for row in group)}"
              if arm in WORKFLOWS else "-"),
-            (str(sum(bool(row.get("fix_loop_cap_stop")) for row in group)) if arm in WORKFLOWS else "-") + " |"]))
+            (str(sum(bool(row.get("fix_loop_cap_stop")) for row in group)) if arm in WORKFLOWS else "-"),
+            _phase_cell(group) if arm in WORKFLOWS else "-",
+            _share_cell(group) if arm in WORKFLOWS else "-"]) + " |")
     if reasons:
         lines += ["", "Harness errors (re-run under the fixed harness, not in the denominator):", ""]
         lines += [f"- {reason}" for reason in reasons]
     return "\n".join(lines) + "\n"
+
+
+def _phase_cell(group: list[dict]) -> str:
+    traces = [row["phase_trace"] for row in group if isinstance(row.get("phase_trace"), dict)]
+    entered = _mean([len(trace.get("entered") or []) for trace in traces])
+    declared = _mean([len(trace["declared"]) for trace in traces if trace.get("declared")])
+    return "-" if entered is None else f"{entered:.1f} / {'-' if declared is None else f'{declared:.0f}'}"
+
+
+def _share_cell(group: list[dict]) -> str:
+    shares = [row["phase_trace"]["orchestration_share"] for row in group if isinstance(row.get("phase_trace"), dict)
+              and row["phase_trace"].get("orchestration_share") is not None]
+    share = _mean(shares)
+    return "-" if share is None else f"{share:.0%}"
 
 
 def _fmt(value: float | None) -> str:
