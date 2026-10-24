@@ -32,6 +32,8 @@ from agent_flow.core.worktree_isolation import (
 )
 
 _MACOS_SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
+# Linux의 read-only 실행(reviewer)용 backend. Landlock 규칙을 걸고 provider를 exec하는 작은 launcher다(#422).
+_LANDLOCK_LAUNCHER = Path(__file__).resolve().with_name("landlock_launch.py")
 _HOST_STATE_DIR_NAMES = (".claude", ".Codex", ".codex", ".omp", ".agents")
 MAX_PROVIDER_OUTPUT_BYTES = 8 * 1024 * 1024
 _PROVIDER_POLL_S = 0.05
@@ -83,7 +85,11 @@ def confined_provider_launch(
         raise WorktreeIsolationError("provider argv must contain non-empty strings")
     # backend 검증이 먼저다. 이 OS에 write-sandbox가 없으면 어떤 관측도 하기 전에
     # 멈춰야 한다 — git을 먼저 부르면 막을 수 없는 플랫폼에서 일을 시작한 셈이다.
-    backend = verify_provider_sandbox_backend()
+    backend = (
+        verify_provider_sandbox_backend()
+        if allow_workspace_writes
+        else verify_provider_sandbox_backend(allow_workspace_writes=False)
+    )
     verified = _verified_provider_worktree(cwd)
     provider_kind = _provider_kind(argv[0])
     bound_argv = _bind_provider_cli_cwd(
@@ -115,13 +121,20 @@ def confined_provider_launch(
         host_home = Path(
             str((env if env is not None else os.environ).get("HOME") or Path.home())
         ).expanduser()
-        profile = _macos_sandbox_profile(
-            verified,
-            allow_workspace_writes=allow_workspace_writes,
-            scratch=scratch,
-            host_home=host_home,
-        )
-        sandboxed_argv = (str(backend), "-p", profile, *provider_argv)
+        if backend == _LANDLOCK_LAUNCHER:
+            # 쓰기는 scratch와 /dev/null뿐이다. macOS reviewer profile과 같은 집합이다.
+            sandboxed_argv = (
+                real_path(Path(sys.executable)).as_posix(), "-I", str(backend),
+                "--write", str(scratch), "--", *provider_argv,
+            )
+        else:
+            profile = _macos_sandbox_profile(
+                verified,
+                allow_workspace_writes=allow_workspace_writes,
+                scratch=scratch,
+                host_home=host_home,
+            )
+            sandboxed_argv = (str(backend), "-p", profile, *provider_argv)
         worker_env = sanitized_worker_env(base_env=env)
         worker_env.update(
             {
@@ -471,9 +484,37 @@ def _provider_worktree_identity(
 
 
 
-def verify_provider_sandbox_backend() -> Path:
-    """Return the single supported write-confinement backend or fail closed."""
+def _landlock_abi() -> int:
+    from agent_flow.providers.landlock_launch import abi_version
 
+    try:
+        return abi_version()
+    except OSError:
+        return 0
+
+
+def verify_provider_sandbox_backend(*, allow_workspace_writes: bool = True) -> Path:
+    """Return the write-confinement backend for this run or fail closed.
+
+    macOS: `sandbox-exec` for every run. Linux: the Landlock launcher, only for runs without
+    workspace writes (reviewers). Landlock cannot re-deny `.git` pointers, `.agent-flow` or host
+    state under an allowed workspace, so a run that writes the workspace stays fail closed there.
+    """
+
+    if sys.platform.startswith("linux") and not allow_workspace_writes:
+        from agent_flow.providers.landlock_launch import MIN_ABI
+
+        abi = _landlock_abi()
+        if abi < MIN_ABI:
+            raise WorktreeIsolationError(
+                "no verified provider write-sandbox backend: Landlock is unavailable on this kernel"
+                if abi < 1
+                else f"no verified provider write-sandbox backend: Landlock ABI {abi} cannot block truncation "
+                f"(needs {MIN_ABI}, Linux 6.2)"
+            )
+        if not _LANDLOCK_LAUNCHER.is_file():
+            raise WorktreeIsolationError("the Landlock provider launcher is missing from this installation")
+        return _LANDLOCK_LAUNCHER
     if sys.platform != "darwin":
         raise WorktreeIsolationError(
             "no verified provider write-sandbox backend for this operating system"

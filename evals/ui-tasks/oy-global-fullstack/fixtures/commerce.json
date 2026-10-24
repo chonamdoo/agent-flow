@@ -1,0 +1,19 @@
+{
+ "version": 1,
+ "baseCurrency": "USD",
+ "currencies": {
+  "USD": {"minorUnits": 2, "symbol": "$", "perUsd": "1"},
+  "CAD": {"minorUnits": 2, "symbol": "CA$", "perUsd": "1.37"},
+  "AUD": {"minorUnits": 2, "symbol": "A$", "perUsd": "1.52"},
+  "JPY": {"minorUnits": 0, "symbol": "¥", "perUsd": "149.5"},
+  "EUR": {"minorUnits": 2, "symbol": "€", "perUsd": "0.92"}
+ },
+ "shipping": {
+  "GLOBAL": null,
+  "US": {"flat": "25.00", "freeFrom": "60.00"},
+  "CA": {"flat": "28.00", "freeFrom": "75.00"},
+  "AU": {"flat": "30.00", "freeFrom": "80.00"},
+  "JP": {"flat": "18.00", "freeFrom": "50.00"}
+ },
+ "maxQtyPerLine": 10
+}

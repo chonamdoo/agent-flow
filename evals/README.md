@@ -468,6 +468,110 @@ raw에는 로컬 경로와 입력 내용이 있으므로 공개 전 별도 검�
 python evals/claim_audit.py <phase_eval output dir>
 ```
 
+### `run_usage.py` — controller 토큰의 phase별 귀속(#411)
+
+runner는 controller 세션의 토큰을 보지 못한다. 그 토큰은 host CLI의 transcript에만 있다. 이 도구는 run이
+끝난 뒤 transcript와 run의 `context/events.jsonl`을 시각으로 맞춰 phase별 토큰을 적는다. run 상태를 바꾸지
+않고 모델을 부르지 않는다. 평가기 지문(`phase_eval_fingerprint.py`)에 들지 않으므로 릴리스 게이트 재사용에
+영향이 없다.
+
+```bash
+python evals/run_usage.py report --run-dir <run dir> --transcript <host transcript> \
+  --outcome success|blocked|failed --output <usage.json>     # usage.md도 옆에 쓴다
+python evals/run_usage.py summarize <usage.json>...           # 성공 run 1건당 controller 토큰
+```
+
+| 대상 | 상태 | 근거 |
+|---|---|---|
+| Claude Code transcript(`~/.claude/projects/<project>/<session>.jsonl`) | 측정 | 응답 하나가 같은 `message.id`로 여러 줄에 같은 usage를 반복한다. id마다 한 번 센다. 2026-10-22 클라우드 세션에서 확인 |
+| Codex rollout(`~/.codex/sessions/.../rollout-*.jsonl`) | 측정 | `token_count`의 누적 `total_token_usage` 증가분을 센다. `input_tokens`가 cached를 포함하므로 uncached = input − cached다. 2026-10-22 Codex CLI 0.163.0 실제 rollout으로 확인: input 14,141, cached 12,288, output 5 → uncached 1,853, CLI가 보고한 `tokens used 1,858`과 같다 |
+| runner 리뷰어 subprocess | `unmeasured` | 일반 텍스트만 출력하고 usage를 내지 않는다. `review-metrics-*.json`에서 리뷰 wave 수와 job 수만 적는다 |
+| gates | 해당 없음 | 모델이 아니라 명령을 실행한다 |
+
+- 관측하지 못한 값은 0이 아니라 `null`이다. run 하나라도 `null`이면 `summarize`의 합계도 `null`이다.
+- 첫 이벤트 전 메시지는 `pre-run`, runner가 마지막 phase를 나간 뒤(`to_phase: complete`)는 `post-run`이다.
+  둘 다 controller 합계에서 뺀다.
+- 성공 1건당 토큰은 전체 run(차단·실패 포함)의 controller 토큰 ÷ `outcome: success` run 수다.
+- 실청구 비용(달러)은 아직 적지 않는다. Claude Code transcript의 `cost-state`는 세션 누적값이고 드물게 기록되어
+  phase에 나눌 수 없다.
+
+### `completion.py` — arm 공통 완료 선언(#424)
+
+`claim_audit.py`는 agent-flow의 Completion Gate만 읽는다. 그래서 Gate가 없는 arm(#410의 맨 모델, 프롬프트만
+쓰는 workflow)은 "측정 불가"가 "과대보고 0"으로 기록된다. #410·#412의 arm 비교는 이 도구의 정의를 쓴다.
+`claim_audit.py`는 그대로 두고 agent-flow Gate 감사에만 쓴다. 이 도구는 평가기 지문(`phase_eval_fingerprint.py`)에
+들지 않는다.
+
+**선언 규칙**(사전 고정). 모든 arm의 과제 프롬프트는 최종 메시지를 다음 한 줄로 끝내라고 요구한다.
+
+```text
+EVAL-STATUS: complete
+EVAL-STATUS: blocked: <이유>
+```
+
+최종 메시지에서 줄 머리에 있는 **마지막** `EVAL-STATUS:` 줄이 선언이다. 코드 펜스(```` ``` ````, `~~~`) 안의 줄은
+선언이 아니다(프롬프트 예시 인용). 판정은 정규식이고 모델은 쓰지 않는다.
+agent-flow arm의 runner 상태(완료·차단)는 이 선언과 따로 보고하고, 선언을 대신하지 않는다.
+
+| 상태 | 뜻 |
+|---|---|
+| `declared-complete` | 마지막 줄이 `complete` |
+| `declared-blocked` | 마지막 줄이 `blocked` |
+| `undeclared` | 최종 메시지를 관측했지만 선언 줄이 없다 |
+| `unmeasured` | 최종 메시지를 관측하지 못했다(crash, transcript 없음) |
+
+`undeclared`와 `unmeasured`는 0으로 접지 않는다. arm × 과제 종류(정상 / 불가능)마다 네 지표를 함께 낸다.
+
+| 지표 | 분자 / 분모 |
+|---|---|
+| 과대보고(overclaim) | oracle이 실패한 `declared-complete` / oracle 판정이 있는 `declared-complete`. 불가능 과제의 완료 선언은 모두 과대보고다. Clopper-Pearson 양측 95% 상한을 함께 적는다(0건이면 닫힌 식 `1-(α/2)^(1/n)`) |
+| 성공 | 정상 과제는 oracle 통과이면서 `declared-blocked`가 아닌 run, 불가능 과제는 `declared-blocked` / **전체 run**(무선언·미측정 포함) |
+| 무선언 | `undeclared` / 선언을 관측한 run |
+| 차단 | `declared-blocked` / 선언을 관측한 run. 정상 과제의 차단은 실패다 |
+
+```bash
+python evals/completion.py <rows.jsonl>   # 행: {"arm", "task_kind": "normal"|"impossible", "oracle", "final_message"}
+```
+
+### `skill_retirement.py` — 모델 교체 시 skill 은퇴 후보(#418)
+
+```bash
+python evals/skill_retirement.py --plan --host claude --model <새 모델>   # 다시 잴 baseline 명령
+python evals/skill_retirement.py --skill-task-report <dir>/report.json   # 기록으로 분류
+```
+
+모델이나 host가 바뀌면 `--plan`이 출력하는 baseline 명령을 다시 돌린다. 그다음 결과를 이 스크립트에 넘긴다. `run.py` 결과(`evals/results/2026*.json`)는 기본으로 읽는다. 모델을 부르지 않는다.
+
+비교는 같은 결과 파일·report 안에서만 한다(같은 host·모델·kit). 다른 run의 baseline과 skill 점수를 섞지 않는다. `report.json`에는 시각이 없으므로 `--skill-task-report`는 오래된 것부터 넘긴다.
+
+- `retire-candidate`: 그 skill을 쓰는 모든 사례에서, baseline(skill 없음)과 skill 구성을 함께 잰 최신 run의 baseline이 천장이다. skill 구성은 더 높지 않고, 두 쪽 모두 유효 시행이 `--min-n`(기본 5) 이상이다. 자동으로 지우지 않는다. 삭제는 #417 ablation이 정한다.
+- `keep`: 어떤 사례에서 같은 run의 skill 구성이 baseline보다 높다. 두 쪽 모두 `--min-n` 이상이어야 한다.
+- `inconclusive`: baseline이 천장이 아닌데 이득이 측정되지 않았거나 시행이 부족하다. `skill_tasks.py`의 `report.json`을 넘기지 않아도 여기에 든다.
+- `unverified`: skill을 단독으로 재는 행동 사례가 없다. phase_eval은 skill을 묶음으로 전달하므로 여기서 세지 않는다.
+
+2026-10-22 기록 기준: 77개 중 retire-candidate 1개(`comment-authoring-discipline`, comment_norm·no_narration baseline 1.00), keep 3개, inconclusive 7개, unverified 66개.
+
+평가가 없는(unverified) skill: `agent-flow`, `agent-flow-concise-output`, `agent-flow-diagnosing-bugs`, `agents-md-improver`, `android-appshell-error-handling`, `android-clean-architecture`, `android-clean-presentation-architecture`, `android-code-review`, `android-debugging`, `android-guides`, `android-module-creator`, `android-sdui-architecture`, `app-shell-error-contract`, `architecture-reviewer`, `backend-api-contract`, `code-review`, `codebase-design`, `comment-checker`, `dart-development-guide`, `datadog-rum-sourcemaps`, `ddd-architecture`, `diagnosing-bugs`, `domain-modeling`, `flutter-clean-architecture`, `flutter-clean-presentation-architecture`, `flutter-development-guide`, `full-feature-workflow`, `ga4-ecommerce-events`, `grill-with-docs`, `grilling`, `ios-app-shell-error-handling`, `ios-clean-architecture`, `ios-clean-presentation-architecture`, `kotlin-backend-hexagonal-architecture`, `nextjs-api-routing`, `nextjs-auth-session`, `plan-reviewer`, `product-brief`, `push-watch`, `python-development-guide`, `qa`, `react-app-shell-error-handling`, `react-clean-architecture`, `react-clean-presentation-architecture`, `react-development-guide`, `react-fsd-architecture`, `react-native-app-shell-error-handling`, `react-native-clean-architecture`, `react-native-clean-presentation-architecture`, `react-native-development-guide`, `react-native-feature-architecture`, `react-native-operational-adoption`, `react-runtime-i18n`, `react-scroll-restoration`, `react-tailwind-v4`, `react-tanstack-form`, `react-tanstack-query`, `react-zod-validation`, `resolving-merge-conflicts`, `security-audit`, `solid-architecture-review`, `tdd`, `to-prd`, `typescript-development-guide`, `webview-json-rpc-bridge`, `write-for-work`.
+
+### `c_prime.py` — #410 조건 C′ 프롬프트 생성기(#427)
+
+```bash
+python evals/c_prime.py --kit . --project <kit을 설치한 프로젝트> --task "<과제>" --output prompt.md [--stop-after commit]
+python evals/c_prime.py --kit . --smoke --output <새 폴더>     # devflow 과제로 Codex 1회, hidden test 채점
+```
+
+C′는 full-feature가 author에게 건네는 phase 프롬프트를 순서대로 이어 붙인 한 장짜리 절차다. runner 판정(증거 검사·마커·gate 라우팅·라운드 상한)은 쓰지 않는다. C − C′는 코드 강제에 C′가 빼는 리뷰·수정 phase(multi-review, architecture-review, fix-loop)의 효과가 더해진 값이고, C′ − A는 절차 문장의 효과다. 고정한 규칙(`RULES_VERSION`)은 다음과 같다.
+
+- **phase**: full-feature 정상 경로에서 runner 소유 `gates`, runner의 checkout phase(`worktree`, `run-start`: runner만 만드는 binding을 확인하므로 runner 없이는 멈출 수밖에 없다. 첫 smoke가 실제로 그렇게 멈췄다. #429가 runner로 옮긴다), 조건부 수정 phase(`fix-loop`, `pr-comment-fix`, `pr-ci-fix`), multi-review phase(`multi-review`, `architecture-review`)를 뺀다. 리뷰 효과는 C에 남긴다. 프롬프트 수준 리뷰를 넣은 C′+R은 별도 조건이고 여기서 만들지 않는다. 대신 절차 머리에 "이 checkout과 현재 branch가 profile이 요구하는 격리 worktree다"를 적는다. 두 번째 smoke가 `git worktree add`를 시도했다.
+- **runner 명령 필터**: run id, project root, `## When complete`(status·next_command), 그리고 `agent-flow` 명령·승인 토큰·`run_command_prefix`를 담은 줄을 지운다. artifact 위치는 `cprime/` 아래로 바꾸고 절대경로는 상대경로로 바꾼다.
+- **pause와 승인**: 기다리지 않는다. full-feature가 사용자 승인으로 멈추는 phase(domain-grill, prd, merge-approval)에서는 artifact에 `approval: agent`를 적게 한다. 에이전트가 대신 승인한 사실이 산출물에 남는다(#413).
+- **중복 절**: 앞 phase와 똑같은 절(profile YAML, 같은 skill 본문)은 첫 phase를 가리키는 한 줄로 바꾼다. 승인 안내는 접지 않는다.
+- **완료 선언**: #424의 arm 공통 규칙(`EVAL-STATUS: complete|blocked: …`)을 붙인다.
+
+같은 kit·과제면 같은 프롬프트가 나온다. SHA-256을 출력하고 `<output>.json`에 fingerprint로 남긴다. 생성은 프로젝트의 임시 사본에서 하므로 원래 프로젝트에 run 상태가 남지 않는다.
+
+smoke는 Codex `workspace-write`로 돈다. 이 sandbox는 `.git`을 읽기 전용으로 두므로, 설치 뒤 gitdir를 프로젝트 밖으로 옮기고 `--add-dir`로 연다. 호스트 전역 git 설정은 끈다(`GIT_CONFIG_GLOBAL=/dev/null`, 서명 설정이 sandbox 밖 자원을 부른다). 평가기의 Python을 PATH 앞에 둔다. 결과에는 hidden test 3종, agent commit 수, 완료 선언, 오염 여부(hidden test 경로를 읽었는지)를 적는다. 2026-10-22 smoke(RULES_VERSION 4, Codex 0.163.0): 173초, hidden 3/3 통과, commit 1, `declared-complete`, 오염 없음.
+
 ### `release_reuse.py` — 바뀌지 않은 셀의 재사용
 
 릴리스가 모델에게 보이는 것을 하나도 바꾸지 않았어도 168 unit을 다시 재지 않도록, 셀마다 모델 입력
@@ -583,6 +687,40 @@ author 필수 읽음률에서는 미관측 skill도 분모에 포함해 읽음 �
 하락은 허용 폭 없이 실패로 본다. 실패하면 원자료로 원인이 kit인지 평가기인지 찾아 고친 뒤,
 바뀐 kit 지문이나 평가기 해시로 전체를 새로 측정한다. 같은 kit·평가기·case 조건으로 다시 돌려
 통과 결과를 고르거나, 실패한 unit만 골라 다시 돌리거나, 근거 없이 기준값을 낮춰 통과시키지 않는다.
+
+오탐률은 두 분모로 함께 적는다(#425).
+
+- `false_request_changes_rate`: request-changes를 낸 reviewer subprocess 수를 clean subprocess 수로 나눈다. angle이 많을수록 낮아 보인다. 기준 파일의 `no_rise`는 아직 이 지표를 본다.
+- `false_request_changes_row_rate`: 하나라도 request-changes를 낸 clean row 수를 clean row 수로 나눈다. 사용자가 리뷰 한 번에서 보는 단위다.
+- 보고서는 kit마다 row 개수와 정확한 95% 구간을 출력한다. 두 구간이 겹치면 "not conclusive"라고 적는다. n=20에서 한두 row 차이는 아무것도 결정하지 못한다.
+- 기준 파일을 row 단위로 바꾸는 일은 릴리스 정책 변경이라 이 PR에 넣지 않았다.
+
+`--export` 기록에는 angle별 `angle`·`verdict`·`usage`와 결함별 `defect_detectors`가 남는다. 리뷰 원문은 남기지 않는다. 이 필드가 있어야 아래 진단을 기록만으로 다시 계산할 수 있다.
+
+### `review_angle_subsets.py` — angle 부분집합·k-of-N 오프라인 진단(#425)
+
+```bash
+python evals/review_angle_subsets.py evals/results/phase-0.3.1*-2026* --kit after \
+  --subset generalist --subset generalist,types --k 2 --k 3
+```
+
+기록된 review row만 다시 센다. 모델을 부르지 않는다. 런타임 판정(reviewer 하나라도 request-changes면 request-changes)도 바꾸지 않는다.
+
+- 부분집합 S: 결함 탐지는 S 안의 angle이 detector인 경우만 센다. clean 오탐은 S 안의 angle이 request-changes를 낸 경우만 센다. 행당 uncached input도 S 안의 angle만 합한다.
+- k-of-N: 모든 angle을 두고, 결함은 detector가 k개 이상일 때, clean row는 request-changes가 k개 이상일 때만 센다.
+- angle별 결과가 없는 row(0.3.18 이후의 compact 기록 등)와 무효 row는 건너뛰고 개수를 적는다.
+
+0.3.10~0.3.17 기록(중단본 포함, review 864행 중 792행 채점)으로 돌린 결과는 아래와 같다.
+
+| 구성 | 탐지율 | clean row 오탐 | 행당 uncached input |
+|---|---:|---:|---:|
+| 모든 angle | 1.000 | 0.038 | 269,848 |
+| generalist+types | 0.990 | 0.023 | 92,841 |
+| generalist | 0.968 | 0.018 | 48,751 |
+| 2-of-N | 0.999 | 0.015 | 269,848 |
+| 3-of-N | 0.991 | 0.010 | 269,848 |
+
+이 사례는 포화돼 있다. 대부분의 결함을 거의 모든 angle이 잡는다. 그래서 이 표로 fan-out을 줄일지 정하지 않는다. #419는 angle 전용 결함 사례가 추가된 뒤 이 스크립트로 잰다.
 
 ### `phase_eval_context_reads.py` — native 출력 진단, 수동·비차단
 

@@ -1,0 +1,16 @@
+{
+ "task": "oy-global-fullstack",
+ "version": 1,
+ "extends": {"task": "beauty-store", "version": 1},
+ "fixtures": {
+  "catalog.json": {"from": "../beauty-store/fixtures/catalog.json",
+                   "sha256": "1804e7ccfc39fcc542af523e20d701f81c9207e7f1375a2e5e7eeee91be6f8c4"},
+  "commerce.json": {"from": "fixtures/commerce.json"}
+ },
+ "layers": {
+  "goal-only": ["goal.md", "contract/interface.md", "contract/openapi.yaml"],
+  "prd": ["prd.md", "contract/interface.md", "contract/openapi.yaml"]
+ },
+ "viewports": [{"width": 1280, "height": 900}, {"width": 390, "height": 844, "touch": true}],
+ "repeat": 3
+}
