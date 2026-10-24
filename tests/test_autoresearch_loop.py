@@ -527,3 +527,25 @@ def test_an_invalid_confirmation_leaves_the_state_scoreable(tmp_path, monkeypatc
     assert loop.main([*argv, "--iterations", "2", "--confirm"]) == 0
     statuses = [row[2] for row in _rows(tmp_path)]
     assert statuses[1] == "discard" and statuses[2] == "keep"
+
+
+def test_consecutive_infra_errors_stop_the_loop_and_keep_their_cost(tmp_path, monkeypatch, capsys):
+    """반증: provider 장애 중에도 루프가 후보마다 무효 측정을 사며 예산을 태웠다(karpathy #343)."""
+    root = _repo(tmp_path)
+    errors = [{"error": "provider down", "cost": 3.0}, {"error": "provider down", "cost": 2.0}]
+    argv = _model_loop(tmp_path, monkeypatch, root, iter([_model(1), *errors]),
+                       iter(["Read the plan.", "Read the slice plan.", "Unused."]))
+    assert loop.main([*argv, "--iterations", "3", "--budget-usd", "100"]) == 0
+    rows = _rows(tmp_path)
+    assert [row[0] for row in rows] == ["baseline", "1", "2"]
+    assert [row[7] for row in rows[1:]] == ["3.0000", "2.0000"]
+    assert "stopping: infra" in capsys.readouterr().out
+
+
+def test_a_valid_measurement_resets_the_infra_error_count(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    outcomes = iter([_model(1), {"error": "provider down"}, _model(1), {"error": "provider down"}, _model(1)])
+    argv = _model_loop(tmp_path, monkeypatch, root, outcomes,
+                       iter(["Read the plan.", "Read the slice plan.", "Check the plan.", "Apply the plan."]))
+    assert loop.main([*argv, "--iterations", "4", "--budget-usd", "100"]) == 0
+    assert [row[2] for row in _rows(tmp_path)] == ["keep", "discard", "discard", "discard", "discard"]

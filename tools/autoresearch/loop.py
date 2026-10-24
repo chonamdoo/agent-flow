@@ -479,6 +479,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", help="Claude model for evaluated author runs")
     parser.add_argument("--confirm", action=argparse.BooleanOptionalAction, default=None,
                         help="re-measure a keep once before committing to it (default: on for model and subtract)")
+    parser.add_argument("--max-infra-errors", type=int, default=2,
+                        help="stop after this many evaluation errors in a row")
     args = parser.parse_args(argv)
     if args.track in ("model", "subtract") and not args.skills:
         parser.error(f"--skills is required for the {args.track} track")
@@ -520,7 +522,7 @@ def main(argv: list[str] | None = None) -> int:
            f"bytes={best_bytes}; key={best_key}" + (f"; cond={best['conditions']}" if best.get("conditions") else "") + floor, best.get("cost", 0.0), label)
     print(f"{label} {best['dev']}/{best['dev_total']} heldout {best['heldout']}/{best['heldout_total']}", flush=True)
 
-    idle = 0
+    idle = infra = 0
     for iteration in range(first, first + args.iterations):
         if spent >= args.budget_usd or idle >= args.patience:
             break
@@ -555,6 +557,8 @@ def main(argv: list[str] | None = None) -> int:
         failed_guards = guards(tree)
         outcome = {} if failed_guards else evaluate(tree, work, args)
         spent += outcome.get("cost", 0.0)
+        if not failed_guards:
+            infra = infra + 1 if "error" in outcome else 0
         candidate_bytes = surface_bytes(tree, args.track, args.skills)
         keep, reason = (False, f"guard: {failed_guards[0]}") if failed_guards else \
             better(outcome, best, args.track, candidate_bytes, best_bytes, margins)
@@ -562,6 +566,7 @@ def main(argv: list[str] | None = None) -> int:
             # 한 번의 측정이 우연히 이긴 것일 수 있다. keep은 두 번째 측정도 같은 판정을 낼 때만 한다.
             again = evaluate(tree, work, args)
             spent += again.get("cost", 0.0)
+            infra = infra + 1 if "error" in again else 0
             outcome = {**outcome, "cost": outcome.get("cost", 0.0) + again.get("cost", 0.0)}
             confirmed, second = better(again, best, args.track, candidate_bytes, best_bytes, margins)
             if not confirmed:
@@ -588,6 +593,11 @@ def main(argv: list[str] | None = None) -> int:
             idle += 1
         if reason == CONDITIONS_CHANGED:
             print("measurement conditions changed; re-run the same tag to measure a fresh baseline", flush=True)
+            break
+        if infra >= args.max_infra_errors:
+            # provider·timeout 장애가 이어지면 다음 후보도 무효 측정에 돈만 쓴다. 비용은 이미 장부에 있다.
+            print(f"stopping: infra, {infra} evaluation errors in a row; re-run the same tag once it recovers",
+                  flush=True)
             break
     print(f"best {best['dev']}/{best['dev_total']} heldout {best['heldout']}/{best['heldout_total']} at {best_commit[:12]} "
           f"on branch autoresearch/{args.tag}; spent ${spent:.2f}; log {results}")
