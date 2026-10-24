@@ -131,7 +131,7 @@ def test_a_recreated_state_is_never_re_evaluated(tmp_path, monkeypatch):
 
     def propose(tree, args, state):
         _set_terms(tree, next(edits))
-        return "edit", 0.0
+        return "edit", 0.0, {}
 
     monkeypatch.setattr(loop, "prepare_worktree", lambda base, tag: (base / tag).mkdir(parents=True) or root)
     monkeypatch.setattr(loop, "evaluate", evaluate)
@@ -164,7 +164,7 @@ def test_restart_resets_to_the_last_keep_and_keeps_the_spend(tmp_path, monkeypat
     proposed = []
     monkeypatch.setattr(loop, "prepare_worktree", lambda base, tag: root)
     monkeypatch.setattr(loop, "evaluate", evaluate)
-    monkeypatch.setattr(loop, "propose", lambda *a: proposed.append(a) or ("edit", 0.0))
+    monkeypatch.setattr(loop, "propose", lambda *a: proposed.append(a) or ("edit", 0.0, {}))
 
     assert loop.main(["--track", "routing", "--tag", "t", "--root", str(tmp_path / "work"),
                       "--iterations", "3", "--budget-usd", "5"]) == 0
@@ -209,7 +209,7 @@ def test_failed_proposer_edit_is_not_scored(tmp_path, monkeypatch):
     payload = '{"is_error": true, "subtype": "error_max_budget_usd", "total_cost_usd": 1.2}'
     monkeypatch.setattr(loop, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, payload, ""))
     args = loop.argparse.Namespace(proposer_budget_usd=1.0, proposer_model=None)
-    description, cost = loop.propose(tmp_path, args, "state")
+    description, cost, _ = loop.propose(tmp_path, args, "state")
     assert description.startswith(loop.PROPOSER_FAILED) and cost == 1.2
 
 
@@ -234,7 +234,7 @@ def test_a_state_whose_evaluation_failed_can_be_scored_again(tmp_path, monkeypat
 
     def propose(tree, args, state):
         _set_terms(tree, next(edits))
-        return "edit", 0.0
+        return "edit", 0.0, {}
 
     monkeypatch.setattr(loop, "prepare_worktree", lambda base, tag: (base / tag).mkdir(parents=True) or root)
     monkeypatch.setattr(loop, "evaluate", lambda *a: next(outcomes))
@@ -294,7 +294,7 @@ def _model_loop(tmp_path, monkeypatch, root, outcomes, edits, conditions="c" * 1
 
     def propose(tree, args, state):
         _body(tree, next(edits))
-        return "edit", 0.0
+        return "edit", 0.0, {}
     monkeypatch.setattr(loop, "propose", propose)
     return ["--track", "model", "--skills", "demo", "--tag", "t", "--root", str(tmp_path / "work"),
             "--budget-usd", "10"]
@@ -356,7 +356,7 @@ def test_a_rejected_attempt_is_recorded_before_the_reset(tmp_path, monkeypatch):
 
     def outside(tree, args, state):
         (tree / "README.md").write_text("x", encoding="utf-8")
-        return "edit", 0.25
+        return "edit", 0.25, {}
     monkeypatch.setattr(loop, "propose", outside)
     real_git = loop.git
 
@@ -379,7 +379,7 @@ def test_a_proposal_that_exhausts_the_budget_is_not_scored(tmp_path, monkeypatch
 
     def costly(tree, args, state):
         _body(tree, "Read the plan.")
-        return "edit", 20.0
+        return "edit", 20.0, {}
     monkeypatch.setattr(loop, "propose", costly)
     loop.main([*argv, "--iterations", "1"])
     assert _rows(tmp_path)[-1][6] == "budget exhausted before scoring"
@@ -627,3 +627,60 @@ def test_noise_floor_measures_the_baseline_twice_and_raises_the_bar(tmp_path, mo
     assert "noise=1" in rows[0][6]
     # 3 - 1 = 2 > noise 1이므로 keep이고, 확인 측정도 같은 판정을 낸다.
     assert rows[1][2] == "keep" and "noise=1" in rows[1][6]
+
+
+_REAL_PROPOSE = loop.propose
+_PROPOSAL = "Edited the skill.\nDESCRIPTION: {d}\nAXIS: Plan Reading\nHYPOTHESIS: authors skip the plan; a pointer helps"
+
+
+def test_proposer_axis_and_hypothesis_lines_are_parsed(tmp_path, monkeypatch):
+    payload = '{"result": %s, "total_cost_usd": 0.3}' % __import__("json").dumps(_PROPOSAL.format(d="point to the plan"))
+    monkeypatch.setattr(loop, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, payload, ""))
+    args = loop.argparse.Namespace(proposer_budget_usd=1.0, proposer_model=None)
+    description, cost, notes = loop.propose(tmp_path, args, "state")
+    assert (description, cost) == ("point to the plan", 0.3)
+    assert notes == {"axis": "plan-reading", "hypothesis": "authors skip the plan; a pointer helps"}
+    # 제안자 문장의 `;`가 extra 열에 가짜 필드를 만들지 못한다.
+    assert loop.notes_field(notes) == "; axis=plan-reading; hypothesis=authors skip the plan, a pointer helps"
+    assert loop.parse_notes("DESCRIPTION: x") == {}
+
+
+def test_state_counts_axes_beyond_the_history_window_and_lists_dead_ends(tmp_path):
+    results = tmp_path / "results.tsv"
+    results.write_text(
+        loop.TSV_HEADER
+        + "baseline\tabc\tkeep\t(1,)\t1\t-\tbytes=1\t1.0000\tbaseline\n"
+        + "1\tabc\tdiscard\t(1,)\t1\t-\tno improvement; axis=plan-reading\t1.0000\tpoint to the plan\n"
+        + "2\tabc\tkeep\t(2,)\t2\t-\timproved; axis=plan-reading\t1.0000\tquote the plan\n"
+        + "3\tabc\tdiscard\t(1,)\t1\t-\tno improvement; axis=contract-wording\t1.0000\tname the layer\n"
+        + "4\tabc\tinvalid\t\t\t\tno edit\t0.1000\tx\n", encoding="utf-8")
+    args = loop.argparse.Namespace(track="model", history=2, skills=["demo"])
+    state = loop.state_text(args, {"dev": 2, "dev_total": 3, "feedback": ""}, results)
+    assert "- 1 discard" not in state  # 창 밖의 행은 최근 목록에 없다
+    assert "- plan-reading: 1 keep, 1 discard" in state
+    assert "- contract-wording: 0 keep, 1 discard" in state
+    assert "- plan-reading: point to the plan" in state
+    assert "- contract-wording: name the layer" in state
+
+
+def test_the_same_axis_three_times_in_a_row_is_rejected_unscored(tmp_path, monkeypatch):
+    import json
+    root = _repo(tmp_path)
+    argv = _model_loop(tmp_path, monkeypatch, root, iter([_model(1), _model(1), _model(1)]), iter([]))
+    edits = iter(["Read the plan.", "Read the slice plan.", "Check the plan."])
+    real_run = loop.run
+
+    def run(argv, cwd, **kwargs):
+        if argv[0] != "claude":
+            return real_run(argv, cwd, **kwargs)
+        _body(cwd, next(edits))
+        text = _PROPOSAL.format(d="plan pointer")
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"result": text, "total_cost_usd": 0.1}), "")
+
+    monkeypatch.setattr(loop, "run", run)
+    monkeypatch.setattr(loop, "propose", _REAL_PROPOSE)
+    assert loop.main([*argv, "--iterations", "3", "--no-confirm"]) == 0
+    rows = _rows(tmp_path)
+    assert [row[2] for row in rows] == ["keep", "discard", "discard", "invalid"]
+    assert rows[3][6].startswith("axis plan-reading repeated 3 times") and "axis=plan-reading" in rows[3][6]
+    assert rows[3][7] == "0.1000"  # 제안 비용만 들고 측정은 하지 않았다

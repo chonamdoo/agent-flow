@@ -67,6 +67,8 @@ CONDITIONS_CHANGED = "measurement conditions changed"
 COND_FIELD = re.compile(r"(?:^|; )cond=([0-9a-f]{16})")
 KEY_FIELD = re.compile(r"(?:^|; )key=([0-9a-f]{64})")
 NOISE_FIELD = re.compile(r"(?:^|; )noise=(\d+)")
+AXIS_FIELD = re.compile(r"(?:^|; )axis=([^;]+)")
+AXIS_REPEAT = 3
 # 어떤 트랙에서도 최적화 대상이 아니다. 판정·승인·평가를 바꾸는 편집은 점수를 올리는 대신 측정을 무너뜨린다(#420).
 FORBIDDEN_PATHS = (
     "scripts/hooks/*", "src/agent_flow/core/*evidence*", "src/agent_flow/core/design_value_check.py",
@@ -387,7 +389,22 @@ def better(candidate: dict, best: dict, track: str, candidate_bytes: int, best_b
 
 # --------------------------------------------------------------------------- proposer
 
-def propose(tree: Path, args: argparse.Namespace, state: str) -> tuple[str, float]:
+def notes_field(notes: dict[str, str]) -> str:
+    # extra 열은 `; `로 나뉜다. 제안자의 문장이 그 구분자를 흉내 내 다른 필드를 만들지 못하게 한다.
+    return "".join(f"; {name}={re.sub(r'[;\t\n]', ',', value)[:120]}" for name, value in notes.items() if value)
+
+
+def parse_notes(text: str) -> dict[str, str]:
+    notes = {}
+    for name in ("axis", "hypothesis"):
+        match = re.search(rf"^\s*{name.upper()}:\s*(.+)$", text, re.MULTILINE)
+        if match:
+            value = match.group(1).strip()
+            notes[name] = re.sub(r"[;\s]+", "-", value.lower())[:40] if name == "axis" else value
+    return notes
+
+
+def propose(tree: Path, args: argparse.Namespace, state: str) -> tuple[str, float, dict[str, str]]:
     prompt = PROGRAM.read_text(encoding="utf-8") + "\n\n## Current state\n\n" + state
     # Absolute paths in permission rules take a leading `//`.
     settings = {"permissions": {"deny": [f"Read(/{REPO}/**)", f"Edit(/{REPO}/**)", f"Grep(/{REPO}/**)"]}}
@@ -399,14 +416,32 @@ def propose(tree: Path, args: argparse.Namespace, state: str) -> tuple[str, floa
     try:
         payload = json.loads(process.stdout)
     except json.JSONDecodeError:
-        return f"{PROPOSER_FAILED}: {(process.stderr or process.stdout)[-200:]}", 0.0
+        return f"{PROPOSER_FAILED}: {(process.stderr or process.stdout)[-200:]}", 0.0, {}
     if payload.get("is_error"):
         # 예산·turn 상한으로 끊긴 세션의 편집은 반쯤 쓴 것일 수 있다. 평가하지 않는다.
-        return f"{PROPOSER_FAILED}: {payload.get('subtype') or 'is_error'}", float(payload.get("total_cost_usd") or 0)
+        return f"{PROPOSER_FAILED}: {payload.get('subtype') or 'is_error'}", float(payload.get("total_cost_usd") or 0), {}
     text = payload.get("result") or ""
     match = re.search(r"DESCRIPTION:\s*(.+)", text)
     return (match.group(1).strip() if match else text.strip().splitlines()[-1:][0] if text.strip() else "no description"), \
-        float(payload.get("total_cost_usd") or 0)
+        float(payload.get("total_cost_usd") or 0), parse_notes(text)
+
+
+def axis_history(results: Path) -> list[tuple[str, str, str]]:
+    """(axis, status, description) of every candidate row that named an axis, oldest first."""
+    rows = [row.split("\t") for row in results.read_text(encoding="utf-8").splitlines()[1:] if row.strip()]
+    history = []
+    for row in rows:
+        if not row[0].isdigit() or len(row) < 9:
+            continue
+        match = AXIS_FIELD.search(row[6])
+        history.append((match.group(1).strip() if match else "", row[2], row[-1]))
+    return history
+
+
+def axis_repeated(results: Path, axis: str) -> bool:
+    # 한 축만 파고들면 같은 생각의 변형에 측정 비용을 쓴다(karpathy #336, #193). 연속 횟수만 본다.
+    recent = [entry[0] for entry in axis_history(results)[-(AXIS_REPEAT - 1):]]
+    return bool(axis) and len(recent) == AXIS_REPEAT - 1 and all(name == axis for name in recent)
 
 
 def state_text(args: argparse.Namespace, best: dict, results: Path) -> str:
@@ -422,6 +457,23 @@ def state_text(args: argparse.Namespace, best: dict, results: Path) -> str:
         lines.append(f"- {cells[0]} {cells[2]} ({reason}): {cells[-1]}")
     if not history:
         lines.append("- none")
+    # 최근 창 밖의 행까지 축별로 센다. 창만 보면 오래전에 막힌 축을 다시 고른다(karpathy #572, #415, #327).
+    axes: dict[str, dict[str, int]] = {}
+    dead: dict[str, list[str]] = {}
+    for axis, status, description in axis_history(results):
+        if not axis:
+            continue
+        axes.setdefault(axis, {"keep": 0, "discard": 0})
+        if status in ("keep", "discard"):
+            axes[axis][status] += 1
+        if status == "discard":
+            dead.setdefault(axis, []).append(description)
+    if axes:
+        lines += ["", "Axes tried (all iterations):"]
+        lines += [f"- {axis}: {count['keep']} keep, {count['discard']} discard" for axis, count in axes.items()]
+    if dead:
+        lines += ["", "Dead ends (discarded, by axis):"]
+        lines += [f"- {axis}: {' | '.join(items[-3:])}" for axis, items in dead.items()]
     return "\n".join(lines)
 
 
@@ -563,10 +615,12 @@ def main(argv: list[str] | None = None) -> int:
     for iteration in range(first, first + args.iterations):
         if spent >= args.budget_usd or idle >= args.patience:
             break
-        description, cost = propose(tree, args, state_text(args, best, results))
+        description, cost, notes = propose(tree, args, state_text(args, best, results))
         spent += cost
         problems = [description] if description.startswith(PROPOSER_FAILED) else []
         problems = problems or surface_violations(tree, args.track, args.skills)
+        if not problems and axis_repeated(results, notes.get("axis", "")):
+            problems = [f"axis {notes['axis']} repeated {AXIS_REPEAT} times in a row; try another axis"]
         if not problems and spent >= args.budget_usd:
             problems = ["budget exhausted before scoring"]
         if not problems and not changed_files(tree):
@@ -582,7 +636,8 @@ def main(argv: list[str] | None = None) -> int:
                 problems, status = [f"duplicate of #{seen[key]}"], "duplicate"
         if problems:
             # 되돌리기 전에 기록한다. reset이 실패해도 proposer 비용은 장부에 남아야 한다.
-            record(results, str(iteration), best_commit, status, {}, "; ".join(problems)[:200], cost, description)
+            record(results, str(iteration), best_commit, status, {}, "; ".join(problems)[:200] + notes_field(notes), cost,
+                   description)
             git(tree, "reset", "-q", "--hard", best_commit)
             git(tree, "clean", "-qfd")
             idle += 1
@@ -619,7 +674,7 @@ def main(argv: list[str] | None = None) -> int:
         record(results, str(iteration), commit, "keep" if keep else "discard", outcome,
                f"{reason}; bytes={candidate_bytes}" + (f"; key={key}" if evaluated else "")
                + (f"; cond={outcome['conditions']}" if outcome.get("conditions") else "")
-               + (f"; noise={best['noise']}" if "noise" in best else "") + evidence_field(outcome),
+               + (f"; noise={best['noise']}" if "noise" in best else "") + evidence_field(outcome) + notes_field(notes),
                cost + outcome.get("cost", 0.0), description)
         print(f"#{iteration} {'keep' if keep else 'discard'} ({reason}) {outcome.get('dev', '-')}/"
               f"{outcome.get('dev_total', '-')} heldout {outcome.get('heldout', '-')} spent ${spent:.2f}: {description}",

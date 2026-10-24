@@ -11,8 +11,10 @@ evaluator, the cases or this file.
 1. Read the current state below: the score, what is still failing, and the last attempts with their outcome.
 2. Make **one** focused change inside the editable surface for this track. Prefer the change most likely
    to fix the failures listed, generalised to the concept rather than to the exact sentence shown.
-3. Stop. Do not run commands, do not commit, do not explain at length. End with one line:
+3. Stop. Do not run commands, do not commit, do not explain at length. End with three lines:
    `DESCRIPTION: <what you changed, under 15 words>`
+   `AXIS: <the kind of change, one or two words, e.g. plan-reading or contract-wording>`
+   `HYPOTHESIS: <why this should raise the score, one sentence>`
 
 ## Rules
 
@@ -24,6 +26,8 @@ evaluator, the cases or this file.
 - Do not repeat an attempt the log shows was discarded unless you change the idea. The loop fingerprints
   the editable files: an edit that recreates the best or an already scored state is rejected unscored
   (`duplicate` or `no-op`) and counts as a wasted turn. Reordering or repeating routing terms is the same state.
+- Use the axis counts and dead ends in the state to pick a different direction. A third attempt in a row
+  on the same axis is rejected unscored.
 - Keep the language of the file you edit (English or Korean).
 
 ## Track: routing
