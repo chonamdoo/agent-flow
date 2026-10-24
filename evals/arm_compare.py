@@ -31,6 +31,13 @@ rates and counted apart.
 - PS (A+pstack): like AP with `PSTACK_PRINCIPLES` instead, lines taken word for word from pstack's principle and
   playbook skills (MIT, see `evals/third_party/pstack-LICENSE`). AP against PS tells which principles, A against
   either tells whether stating principles at all moves the endpoints.
+- V (verdict only): A's prompt, word for word, plus a fixed completion gate as the project's Stop hook
+  (`verify_gate.py`, #409 adversarial review: fix the adjudication, leave the procedure to the model). On each stop
+  it runs the case's verification command and blocks while it fails (at most 3 times), then runs one independent
+  read-only `claude -p` review against the task documents and blocks once with its findings; after the caps the
+  stop goes through. `.claude/settings.json` is committed before the agent starts; the hook script and its record
+  (`verify-gate.jsonl`) stay in the run directory, outside the agent's diff. The reviewer's cost is kept apart from
+  the controller's and added to the run's `total_cost_usd`.
 - B, C: the kit is installed with its hooks; the agent drives `agent-flow run --workflow development|full-feature`
   and answers the runner's decisions from the task text. It is not the human approver: `spec approve`/`spec confirm`
   and turning a SPEC's `verify` into `manual` are off limits, because they let the worker pass its own evidence
@@ -93,6 +100,7 @@ import c_prime  # noqa: E402
 import completion  # noqa: E402
 import variants  # noqa: E402
 import integrity  # noqa: E402
+import verify_gate  # noqa: E402
 import run_usage  # noqa: E402
 from cycle_report import fisher_greater  # noqa: E402
 
@@ -115,8 +123,10 @@ CONTROLLER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "ANDROID_HOME"
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CODEX_HOME", "OPENAI_API_KEY")
 AGENT_FLOW_WORKTREES = Path.home() / ".agent-flow" / "worktrees"
 CLAUDE_TOOLS = ("Bash", "Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "TodoWrite", "Task")
-ARMS = ("A", "AP", "PS", "B", "C", "D", "S", "Cp")
-BARE_ARMS = ("A", "AP", "PS")  # no kit; the agent gets the task prompt only (and, AP and PS, a CLAUDE.md)
+ARMS = ("A", "AP", "PS", "V", "B", "C", "D", "S", "Cp")
+# no kit; the agent gets the task prompt only (and, AP and PS, a CLAUDE.md; V, a Stop hook)
+BARE_ARMS = ("A", "AP", "PS", "V")
+GATE_ARMS = ("V",)  # the bare prompt plus `verify_gate.py` as the project's Stop hook
 WORKFLOWS = {"B": "development", "C": "full-feature", "D": "default", "S": variants.BASE}  # S: the variant's base
 # 설치기가 읽는 트리만 복사한다(package.json `files`). evals/·tests/·maintainer/는 에이전트의 kit에 없다.
 KIT_TREES = ("bin", "lib", "templates", "bootstrap", "skills", "scripts", ".Codex", ".claude", "src", "docs")
@@ -377,6 +387,61 @@ def principles_record(arm: str) -> dict | None:
     return {"version": version, "sha256": digest}
 
 
+# Arm V's gate. The verification command comes from the case, never from its hidden checks: an external case's
+# `verify_command`, a phase case's visible `test_command`, or the gradle command an android case's `bare_note` names.
+# Without one, the gate runs `npm test --silent` when the project's package.json has a test script by then.
+GRADLE_COMMAND = re.compile(r"\./gradlew(?:\s+[\w:-]+)+")
+GATE_SETTINGS = Path(".claude") / "settings.json"
+
+
+def gate_verify_command(case: dict, kind: str) -> tuple[list[str] | None, str | None]:
+    """(argv, where it came from)."""
+    command = case.get("verify_command")
+    if command:
+        return (shlex.split(command) if isinstance(command, str) else list(command)), "case"
+    if kind == "phase-case":
+        return list(case["test_command"]), "test_command"
+    found = GRADLE_COMMAND.search(case.get("bare_note") or "") if case.get("profile") == "android" else None
+    return (shlex.split(found.group(0)), "bare_note") if found else (None, None)
+
+
+def _install_verify_gate(output: Path, project: Path, task: str, documents: list[str], case: dict,
+                         kind: str) -> dict:
+    """V's one difference from A: the gate's Stop hook in the project, committed before the agent starts.
+
+    The script and its config live in `<run>/gate/` and are named by absolute path, so the agent's diff never holds
+    them. `drive` writes the controller's model into the config; the reviewer uses the same one.
+    """
+    gate = output / "gate"
+    gate.mkdir()
+    script = gate / "verify_gate.py"
+    shutil.copy2(HERE / "verify_gate.py", script)
+    argv, source = gate_verify_command(case, kind)
+    config = {"version": verify_gate.VERSION, "project": str(project.resolve()), "run_dir": str(output.resolve()),
+              "task": task, "documents": documents, "verify_command": argv, "model": "claude-opus-5-5",
+              "env": {"keys": list(CONTROLLER_ENV), "set": controller_env({})}}
+    (gate / "config.json").write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
+    settings_path = project / GATE_SETTINGS
+    settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.is_file() else {}
+    command = f"python3 -I {shlex.quote(str(script.resolve()))} {shlex.quote(str((gate / 'config.json').resolve()))}"
+    settings.setdefault("hooks", {}).setdefault("Stop", []).append(
+        {"hooks": [{"type": "command", "command": command, "timeout": verify_gate.HOOK_TIMEOUT}]})
+    settings_path.parent.mkdir(exist_ok=True)
+    settings_path.write_text(json.dumps(settings, indent=1) + "\n", encoding="utf-8")
+    _git(["add", "--force", str(GATE_SETTINGS)], project)  # seed의 .gitignore가 `.claude`를 가릴 수 있다
+    _git(["commit", "-qm", "verify gate"], project)
+    return {"version": verify_gate.VERSION, "script": str(script.resolve()),
+            "script_sha256": verify_gate.file_sha256(script), "settings_sha256": verify_gate.file_sha256(settings_path),
+            "verify_command": argv, "verify_source": source, "documents": documents,
+            "max_verify_blocks": verify_gate.MAX_VERIFY_BLOCKS, "max_review_rounds": verify_gate.MAX_REVIEW_ROUNDS,
+            "review_budget_usd": verify_gate.REVIEW_BUDGET_USD, "review_timeout_seconds": verify_gate.REVIEW_TIMEOUT}
+
+
+def _ui_documents(spec: dict) -> list[str]:
+    task = json.loads((UI_TASKS / spec["task"] / "task.json").read_text(encoding="utf-8"))
+    return sorted([*task["layers"][spec["layer"]], *(f"fixtures/{name}" for name in task["fixtures"])])
+
+
 # What a workflow arm's kit leaves in the project. A follow-on starts from the code alone, so the fixed follow-on agent
 # cannot tell which arm wrote it and gets no kit instructions (the seed of every external case has none of these).
 # The installer also lists every path it adds in `.git/info/exclude`; `_strip_kit` removes those too.
@@ -496,10 +561,13 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
         _seed_ui_project(ui, project)
     if ui is not None and arm == "Cp":
         raise ValueError("C′ is not defined for UI tasks")
-    searched = None
+    searched, gate = None, None
     if arm in BARE_ARMS:
         if arm in PRINCIPLE_SETS:
             _write_principles(project, arm)
+        if arm in GATE_ARMS:
+            gate = _install_verify_gate(output, project, case["task"], _ui_documents(ui) if ui else [], case,
+                                        "ui" if ui else "phase-case")
         _git(["checkout", "-qb", BRANCH], project)
         prompt = ui_bare_prompt(case["task"]) if ui else bare_prompt(case["task"], case["test_command"])
     elif arm == "Cp":
@@ -517,7 +585,7 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
             "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
             "cprime_rules": c_prime.RULES_VERSION if arm == "Cp" else None, "isolation": isolation,
             "principles": principles_record(arm), **_workflow_record(arm, searched),
-            "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None,
+            "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None, "verify_gate": gate,
             "case_kind": "ui" if ui else "phase-case", **({"ui_task": ui["task"], "layer": ui["layer"]} if ui else {})}
     (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
     return meta
@@ -526,15 +594,17 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
 def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: int, output: Path,
                       isolation: str, variant: dict | None = None) -> dict:
     if arm not in (*BARE_ARMS, *WORKFLOWS):
-        raise ValueError("an external case defines the A, AP, PS, B, C, D and S arms only")
+        raise ValueError("an external case defines the A, AP, PS, V, B, C, D and S arms only")
     output.mkdir(parents=True)
     agent_kit = sanitized_kit(kit, output / "kit")
     project = output / "project"
     _seed_external_project(case, case_dir, project)
-    searched = None
+    searched, gate = None, None
     if arm in BARE_ARMS:
         if arm in PRINCIPLE_SETS:
             _write_principles(project, arm)
+        if arm in GATE_ARMS:
+            gate = _install_verify_gate(output, project, case["task"], sorted(case["files"]), case, "external")
         _git(["checkout", "-qb", BRANCH], project)
         prompt = external_bare_prompt(case)
     else:
@@ -549,7 +619,8 @@ def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: in
             "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
             "cprime_rules": None, "isolation": isolation,
             "principles": principles_record(arm), **_workflow_record(arm, searched),
-            "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None, "case_kind": "external",
+            "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None, "verify_gate": gate,
+            "case_kind": "external",
             "case_sha256": case["sha256"], "seed_commit": case["seed"]["commit"], "score_keys": case["score_keys"],
             "evaluator_repeat": bool(case.get("evaluator_repeat"))}
     (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
@@ -1093,6 +1164,7 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
     message = final_message(main_rows)
     declaration = completion.classify(message if main_rows else None)
     drive = json.loads((run / "drive.json").read_text(encoding="utf-8")) if (run / "drive.json").is_file() else {}
+    gate = gate_result(run, meta, checkout) if meta["arm"] in GATE_ARMS else None
     result = {"isolation": "instructed", **meta, "task_kind": "normal", "checkout": str(checkout), **graded,
               "commits": int(commits) if commits.isdigit() else None,
               "final_message": message, "declaration": declaration,
@@ -1102,7 +1174,8 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
               "verify_downgrades": verify_downgrades(rows),
               "manual_spec_approvals": manual_spec_approvals(project, checkout), "artifact_sha256": artifact,
               "transcript": str(transcript) if transcript else None, **_measured_usage(rows, read), **read,
-              "controller_cost_usd": drive.get("cost_usd"), "drive_exit": drive.get("exit"),
+              "controller_cost_usd": drive.get("cost_usd"), "total_cost_usd": total_cost(drive.get("cost_usd"), gate),
+              **({"verify_gate": gate} if gate is not None else {}), "drive_exit": drive.get("exit"),
               "drive_timed_out": drive.get("timed_out"), "drive_is_error": drive.get("is_error"),
               "fix_loop_reapprovals": len(drive.get("fix_loop_reapprovals") or []),
               "fix_loop_reapproval_log": drive.get("fix_loop_reapprovals") or [],
@@ -1117,6 +1190,12 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
               "scored_at": datetime.now().isoformat(timespec="seconds")}
     (run / "result.json").write_text(json.dumps(result, indent=1, default=str) + "\n", encoding="utf-8")
     return result
+
+
+def total_cost(controller: float | None, gate: dict | None) -> float | None:
+    """The controller's cost plus arm V's reviewer cost; null when either is unknown."""
+    reviewer = gate["reviewer_cost_usd"] if gate is not None else 0.0
+    return None if controller is None or reviewer is None else round(controller + reviewer, 4)
 
 
 def _grade_phase_case(meta: dict, checkout: Path) -> dict:
@@ -1275,6 +1354,8 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
     project = Path(meta["project"])
     prompt = (run / "prompt.md").read_text(encoding="utf-8")
     stream = run / "controller.jsonl"
+    if meta["arm"] in GATE_ARMS:
+        set_gate_model(run, model)
     started = time.monotonic()
     approvals: list[str] = []
     reapprovals: list[dict] = []
@@ -1325,11 +1406,26 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
               "timed_out": timed_out, "seconds": round(time.monotonic() - started), **summary, "session_id": session,
               "cost_usd": spent or None, "harness_approvals": approvals,
               "fix_loop_reapprovals": reapprovals, "fix_loop_cap_stop": cap_stop,
+              **({"verify_gate": verify_gate.summary(run / verify_gate.LOG)} if meta["arm"] in GATE_ARMS else {}),
               "transcript": str(transcript) if transcript else None,
               "argv_sha256": hashlib.sha256(json.dumps(controller_argv(prompt, model, budget)).encode()).hexdigest(),
               "cli_version": c_prime._sh(["claude", "--version"], run).stdout.strip() or None}
     (run / "drive.json").write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
     return record
+
+
+def set_gate_model(run: Path, model: str) -> None:
+    """Arm V's reviewer runs on the controller's model, which only `drive` knows."""
+    path = run / "gate" / "config.json"
+    config = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**config, "model": model}, indent=1) + "\n", encoding="utf-8")
+
+
+def gate_result(run: Path, meta: dict, checkout: Path) -> dict:
+    """What arm V's gate did, read from `verify-gate.jsonl`, and whether the agent left its hook wiring as installed."""
+    settings = checkout / GATE_SETTINGS
+    intact = settings.is_file() and verify_gate.file_sha256(settings) == meta["verify_gate"]["settings_sha256"]
+    return {**verify_gate.summary(run / verify_gate.LOG), "wiring_intact": intact}
 
 
 def _settle_reapproval(reapprovals: list[dict], *, passed: bool) -> None:
@@ -1377,12 +1473,14 @@ def summarize(results: list[dict]) -> str:
     lines = ["| arm | assigned runs | success | one-sided Fisher p vs A | overclaim (upper 95%) | declared complete/blocked/"
              "undeclared/unmeasured | contaminated / infra error / timed out (counted as failures) | "
              "harness errors (excluded) | output tokens (mean) | input uncached+cached (mean) | "
-             "seconds (mean) | reviewer jobs (mean) | rule violations | isolation | "
+             "seconds (mean) | controller cost / total incl. verify-gate reviewer (mean) | "
+             "verify-gate blocks / review findings / reviewer cost (mean) | "
+             "reviewer jobs (mean) | rule violations | isolation | "
              "runs that ran gates / deferred a gate to CI (never run) | "
              "successes first try / after fix-loop re-approval | runs stopped at the fix-loop limit | "
              "phases entered / declared (mean) | orchestration share of cost (mean) | "
              "integrity flags (runs flagged) | reviewer jobs / seconds / token and cost lower bound (mean) |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     base = [row for row in assigned if row["arm"] == "A"]
     base_success = sum(_succeeded(row) for row in base)
     reasons: list[str] = []
@@ -1409,6 +1507,7 @@ def summarize(results: list[dict]) -> str:
             _fmt(_mean([u["uncached_input"] + u["cached_input"] for u in usage
                         if u["uncached_input"] is not None and u["cached_input"] is not None])),
             _fmt(_mean([row["seconds"] for row in group if row.get("seconds") is not None])),
+            _cost_cell(group), _gate_cell(group) if arm in GATE_ARMS else "-",
             _fmt(_mean([row["reviewer_jobs"] for row in group if "reviewer_jobs" in row])),
             str(sum(rule_violation(row) for row in group)),
             "/".join(sorted({row.get("isolation", "instructed") for row in group})),
@@ -1426,6 +1525,25 @@ def summarize(results: list[dict]) -> str:
         lines += ["", "Harness errors (re-run under the fixed harness, not in the denominator):", ""]
         lines += [f"- {reason}" for reason in reasons]
     return "\n".join(lines) + "\n"
+
+
+def _usd(value: float | None) -> str:
+    return "-" if value is None else f"${value:.2f}"
+
+
+def _cost_cell(group: list[dict]) -> str:
+    controller = _mean([row["controller_cost_usd"] for row in group if row.get("controller_cost_usd") is not None])
+    total = _mean([row["total_cost_usd"] for row in group if row.get("total_cost_usd") is not None])
+    return f"{_usd(controller)} / {_usd(total)}"
+
+
+def _gate_cell(group: list[dict]) -> str:
+    gates = [row["verify_gate"] for row in group if isinstance(row.get("verify_gate"), dict)]
+    if not gates:
+        return "-"
+    costs = [gate["reviewer_cost_usd"] for gate in gates if gate.get("reviewer_cost_usd") is not None]
+    return (f"{_mean([gate['blocks'] for gate in gates]):.1f} / {_mean([gate['review_findings'] for gate in gates]):.1f}"
+            f" / {_usd(_mean(costs))}")
 
 
 def _reviewer_cell(group: list[dict]) -> str:

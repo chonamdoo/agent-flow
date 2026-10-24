@@ -912,3 +912,175 @@ def test_only_arm_s_takes_a_variant(tmp_path):
         arm_compare.prepare(ROOT, "S", "devflow", 1, tmp_path / "S-1")
     with pytest.raises(ValueError):
         arm_compare.prepare(ROOT, "B", "devflow", 1, tmp_path / "B-1", variant={"tdd": False})
+
+
+# ─── #409 adversarial review: arm V (verdict only) ───
+
+def _gate_hook(project: Path) -> dict:
+    settings = json.loads((project / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    (entry,) = settings["hooks"]["Stop"]
+    (hook,) = entry["hooks"]
+    return hook
+
+
+def test_arm_v_is_arm_a_plus_a_stop_hook_outside_the_project(tmp_path):
+    arm_compare.prepare(ROOT, "A", "devflow", 1, tmp_path / "A-1")
+    run = tmp_path / "V-1"
+    meta = arm_compare.prepare(ROOT, "V", "devflow", 1, run)
+    project = run / "project"
+    assert (run / "prompt.md").read_text(encoding="utf-8") == (tmp_path / "A-1" / "prompt.md").read_text(encoding="utf-8")
+    hook = _gate_hook(project)
+    script, config = (run / "gate" / "verify_gate.py").resolve(), (run / "gate" / "config.json").resolve()
+    assert hook["type"] == "command" and hook["command"] == f"python3 -I {script} {config}"
+    assert hook["timeout"] == arm_compare.verify_gate.HOOK_TIMEOUT
+    assert project.resolve() not in script.parents
+    gate = meta["verify_gate"]
+    assert gate["script_sha256"] == hashlib.sha256(script.read_bytes()).hexdigest()
+    assert gate["script_sha256"] == hashlib.sha256((ROOT / "evals" / "verify_gate.py").read_bytes()).hexdigest()
+    case = json.loads((ROOT / "evals" / "phase-cases" / "devflow" / "case.json").read_text(encoding="utf-8"))
+    assert gate["verify_command"] == case["test_command"] and gate["verify_source"] == "test_command"
+    assert arm_compare._git(["ls-files", ".claude/settings.json"], project) == ".claude/settings.json"
+    assert arm_compare._git(["status", "--porcelain"], project) == ""
+    assert arm_compare._git(["log", "--format=%s", "-1"], project) == "verify gate"
+    assert arm_compare._git(["rev-parse", "HEAD"], project) == meta["start_commit"]
+    assert arm_compare._git(["branch", "--show-current"], project) == arm_compare.BRANCH
+    assert not (project / "CLAUDE.md").exists() and not (project / ".agent-flow").exists()
+    assert meta["principles"] is None and meta["approval_rules"] is None
+    stored = json.loads(config.read_text(encoding="utf-8"))
+    assert stored["env"] == {"keys": list(arm_compare.CONTROLLER_ENV), "set": arm_compare.controller_env({})}
+    assert stored["task"] == case["task"] and stored["documents"] == []
+
+
+def test_an_external_case_commits_arm_vs_hook_past_an_ignored_claude_dir(tmp_path):
+    case_dir, _ = _external_case(tmp_path)
+    seed = tmp_path / "seed-repo"
+    (seed / ".gitignore").write_text(".claude\n", encoding="utf-8")
+    arm_compare._git(["add", ".gitignore"], seed)
+    arm_compare._git(["commit", "-qm", "ignore"], seed)
+    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
+    case["seed"]["commit"] = arm_compare._git(["rev-parse", "HEAD"], seed)
+    (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+    run = tmp_path / "runs" / "V-1"
+    meta = arm_compare.prepare(ROOT, "V", "ignored", 1, run, case_dir=case_dir)
+    project = run / "project"
+    assert arm_compare._git(["ls-files", ".claude/settings.json"], project) == ".claude/settings.json"
+    assert arm_compare._git(["status", "--porcelain"], project) == ""
+    # android: the gradle command the bare note names; the task documents are the case's files.
+    assert meta["verify_gate"]["verify_command"] == ["./gradlew", "test"]
+    assert meta["verify_gate"]["verify_source"] == "bare_note" and meta["verify_gate"]["documents"] == ["prd.md"]
+    assert str(case_dir) not in (run / "gate" / "config.json").read_text(encoding="utf-8")
+    arm_compare.prepare_followon(run, _followon_case(tmp_path), 1, tmp_path / "runs" / "V-1.F1")
+    assert not (tmp_path / "runs" / "V-1.F1" / "project" / ".claude").exists()
+
+
+def test_the_gate_verify_command_comes_from_the_case_and_is_null_without_one():
+    assert arm_compare.gate_verify_command({"verify_command": "npm run check -- --ci"}, "external") == (
+        ["npm", "run", "check", "--", "--ci"], "case")
+    assert arm_compare.gate_verify_command(
+        {"profile": "android", "bare_note": "Build with `./gradlew :app:testDebugUnitTest --offline`."},
+        "external") == (["./gradlew", ":app:testDebugUnitTest", "--offline"], "bare_note")
+    assert arm_compare.gate_verify_command({"profile": "node", "bare_note": "Run ./gradlew test."}, "external") == (
+        None, None)
+    assert arm_compare.gate_verify_command({}, "ui") == (None, None)
+
+
+def _fake_claude(bin_dir: Path, result: str, seen: Path) -> None:
+    bin_dir.mkdir()
+    fake = bin_dir / "claude"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        f"open({str(seen)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'env': dict(os.environ), "
+        "'cwd': os.getcwd()}))\n"
+        "open('reviewer-was-here', 'w').write('x')\n"
+        f"print(json.dumps({{'result': {result!r}, 'total_cost_usd': 0.5, 'num_turns': 3, 'is_error': False, "
+        "'usage': {'input_tokens': 100, 'output_tokens': 20}}))\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+
+def test_the_installed_hook_blocks_once_on_review_findings_and_never_touches_the_project(tmp_path, monkeypatch):
+    run = tmp_path / "V-1"
+    arm_compare.prepare(ROOT, "V", "devflow", 1, run)
+    project = run / "project"
+    seen = tmp_path / "reviewer.json"
+    _fake_claude(tmp_path / "bin", "1. The quote has no discount field.", seen)
+    command = _gate_hook(project)["command"]
+    env = {"PATH": f"{tmp_path / 'bin'}:{arm_compare.os.environ['PATH']}", "HOME": str(tmp_path),
+           "CLAUDE_CODE_SESSION_ID": "controller-session", "CLAUDE_PROJECT_DIR": str(project)}
+
+    def stop(active):
+        done = arm_compare.subprocess.run(["sh", "-c", command], cwd=project, env=env, capture_output=True, text=True,
+                                          input=json.dumps({"hook_event_name": "Stop", "stop_hook_active": active}))
+        assert done.returncode == 0, done.stderr
+        return json.loads(done.stdout) if done.stdout.strip() else {}
+
+    first = stop(False)
+    assert first["decision"] == "block" and "1. The quote has no discount field." in first["reason"]
+    reviewer = json.loads(seen.read_text(encoding="utf-8"))
+    # the controller's allowlisted env only; the reviewer worked in a throwaway copy with read-only tools
+    assert "CLAUDE_CODE_SESSION_ID" not in reviewer["env"] and "CLAUDE_PROJECT_DIR" not in reviewer["env"]
+    assert reviewer["env"]["CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS"] == "1"
+    assert Path(reviewer["cwd"]).resolve() != project.resolve()
+    argv = reviewer["argv"]
+    assert argv[argv.index("--model") + 1] == "claude-opus-5-5" and argv[argv.index("--output-format") + 1] == "json"
+    assert argv[argv.index("--tools") + 1] == "Read,Glob,Grep,Bash"
+    assert "Edit" in argv[argv.index("--disallowedTools") + 1] and argv[argv.index("--setting-sources") + 1] == ""
+    assert "--max-budget-usd" in argv
+    assert stop(True) == {}  # one review round: the second stop goes through
+    assert arm_compare._git(["status", "--porcelain"], project) == ""
+    summary = arm_compare.verify_gate.summary(run / "verify-gate.jsonl")
+    assert summary["blocks"] == 1 and summary["review_rounds"] == 1 and summary["review_findings"] == 1
+    assert summary["reviewer_cost_usd"] == 0.5 and summary["reviewer_usage"] == {"input_tokens": 100, "output_tokens": 20}
+    assert summary["gate_cap_reached"] == "review" and summary["verify_blocks"] == 0
+
+
+def test_drive_gives_the_gate_the_controllers_model_and_records_its_events(tmp_path, monkeypatch):
+    run = tmp_path / "V-1"
+    arm_compare.prepare(ROOT, "V", "devflow", 1, run)
+
+    def controller_once(argv, project, out, err, timeout):
+        out.write((json.dumps({"type": "system", "subtype": "init", "session_id": "s-1"}) + "\n" +
+                   json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 2.0,
+                               "result": "EVAL-STATUS: complete"}) + "\n").encode())
+        (run / "verify-gate.jsonl").write_text(json.dumps({"step": "verify", "decision": "block"}) + "\n",
+                                               encoding="utf-8")
+        return 0, False
+
+    monkeypatch.setattr(arm_compare, "_controller_once", controller_once)
+    record = arm_compare.drive(run, "claude-opus-x", 600, 30.0)
+    assert json.loads((run / "gate" / "config.json").read_text(encoding="utf-8"))["model"] == "claude-opus-x"
+    assert record["verify_gate"]["verify_blocks"] == 1 and record["cost_usd"] == 2.0
+
+
+def test_arm_vs_score_adds_the_reviewer_cost_to_the_total_and_checks_the_wiring(tmp_path):
+    run = tmp_path / "V-1"
+    arm_compare.prepare(ROOT, "V", "devflow", 1, run)
+    (run / "drive.json").write_text(json.dumps({"cost_usd": 2.0, "exit": 0}), encoding="utf-8")
+    (run / "verify-gate.jsonl").write_text(
+        json.dumps({"step": "verify", "decision": "block"}) + "\n"
+        + json.dumps({"step": "review", "decision": "block", "findings": 2,
+                      "review": {"cost_usd": 0.75, "seconds": 40, "usage": {"output_tokens": 9}}}) + "\n",
+        encoding="utf-8")
+    result = arm_compare.score(run, None)
+    gate = result["verify_gate"]
+    assert gate["blocks"] == 2 and gate["review_findings"] == 2 and gate["wiring_intact"] is True
+    assert result["controller_cost_usd"] == 2.0 and result["total_cost_usd"] == 2.75
+    (run / "project" / ".claude" / "settings.json").write_text("{}\n", encoding="utf-8")
+    assert arm_compare.score(run, None)["verify_gate"]["wiring_intact"] is False
+    rows = [_summary_row("A", controller_cost_usd=1.0, total_cost_usd=1.0),
+            _summary_row("V", controller_cost_usd=2.0, total_cost_usd=2.75, verify_gate=gate)]
+    table = arm_compare.summarize(rows)
+    v_line = next(line for line in table.splitlines() if line.startswith("| V |"))
+    a_line = next(line for line in table.splitlines() if line.startswith("| A |"))
+    assert "| $2.00 / $2.75 | 2.0 / 2.0 / $0.75 |" in v_line and "| $1.00 / $1.00 | - |" in a_line
+
+
+def test_the_cli_and_preflight_take_arm_v(tmp_path, monkeypatch):
+    run = tmp_path / "V-cli"
+    assert arm_compare.main(["prepare", "--kit", str(ROOT), "--arm", "V", "--case", "devflow",
+                             "--output", str(run)]) == 0
+    assert (run / "gate" / "verify_gate.py").is_file()
+    # V's reviewer runs on the controller's model, so the controller's preflight entry covers it.
+    monkeypatch.setattr(arm_compare.subprocess, "run", lambda argv, **_: arm_compare.subprocess.CompletedProcess(
+        argv, 0, "OK\n", ""))
+    assert arm_compare.main(["preflight", "--model", "claude:claude-opus-5-5"]) == 0
