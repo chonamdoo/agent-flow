@@ -52,8 +52,8 @@ cannot show what a removed rule protects in other phases and stacks.
 Editable: the same skill bodies as the model track, but **only by deleting whole lines**. Any added
 or reworded line, a new file, or a frontmatter change is rejected. Delete text that a model already
 does without being told; keep anything that names a project-specific contract. A deletion is kept
-only when the evaluated runs stay within the fixed non-inferiority margin and a second measurement
-agrees.
+only when the evaluated runs stay within the fixed non-inferiority margin, use no more uncached
+input tokens than the margin allows, and a second measurement agrees.
 
 ## Everywhere
 

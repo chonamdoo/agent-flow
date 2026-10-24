@@ -21,8 +21,9 @@ drop and overclaims may not rise. Model runs are noisy: keep decisions need a st
 and by default a confirmation measurement that agrees.
 subtract: the model evaluator, but the edit may only delete whole lines of the named skills' bodies.
 A deletion is kept when it is non-inferior (pass rate within the margins fixed in
-`noninferiority.json`, no read-rate drop, no overclaim rise) and the surface got smaller. The track
-refuses to start while a margin is unset (#420), and every keep needs a confirmation measurement.
+`noninferiority.json`, uncached tokens within their margin, no read-rate drop, no overclaim rise) and
+the surface got smaller. The track refuses to start while a margin is unset (#420), and every keep
+needs a confirmation measurement.
 
 Paths in `FORBIDDEN_PATHS` (hooks, runner judgment code, the approval path, workflow YAML, the
 evaluator, cases and tests) are invariants, not optimization targets: an edit touching one is
@@ -364,6 +365,11 @@ def better(candidate: dict, best: dict, track: str, candidate_bytes: int, best_b
         drop = (best["score"][0] - candidate["score"][0]) / total if total else 1.0
         if drop > margins.get("pass_rate_drop", 0):
             return False, f"inferior: pass rate dropped {drop:.3f} > {margins.get('pass_rate_drop', 0)}"
+        # 표면이 줄어도 author가 덜 읽은 만큼 더 헤매면 실제 비용은 오른다. 더 싼 편집만 keep한다.
+        tokens, best_tokens = -candidate["score"][2], -best["score"][2]
+        rise = (tokens - best_tokens) / best_tokens if best_tokens else (math.inf if tokens > 0 else 0.0)
+        if rise > margins.get("tokens_rise", 0):
+            return False, f"uncached tokens rose {rise:.3f} > {margins.get('tokens_rise', 0)}"
         if candidate_bytes >= best_bytes:
             return False, "not smaller"
         return True, "non-inferior, smaller"

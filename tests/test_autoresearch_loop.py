@@ -581,3 +581,16 @@ def test_recorded_scores_name_the_results_file_that_produced_them(tmp_path, monk
         digest = hashlib.sha256((Path(fields["evidence"]) / "results.jsonl").read_bytes()).hexdigest()[:16]
         assert fields["ev_sha"] == digest
     assert rows[0][6] != rows[1][6]
+
+
+def test_subtract_rejects_a_smaller_surface_that_costs_more_tokens():
+    """반증: 표면은 줄었지만 author가 더 헤매 uncached 토큰이 늘어난 삭제가 "더 싸다"며 keep됐다."""
+    best, margins = _scored(9), {"pass_rate_drop": 0.1, "tokens_rise": 0.0}
+    costlier = {**_scored(9), "score": (9, 9, -1001)}
+    keep, reason = loop.better(costlier, best, "subtract", 90, 100, margins)
+    assert not keep and reason.startswith("uncached tokens rose")
+    cheaper = {**_scored(9), "score": (9, 9, -900)}
+    assert loop.better(cheaper, best, "subtract", 90, 100, margins) == (True, "non-inferior, smaller")
+    assert loop.better(costlier, best, "subtract", 90, 100, {**margins, "tokens_rise": 0.01}) == (
+        True, "non-inferior, smaller")
+
