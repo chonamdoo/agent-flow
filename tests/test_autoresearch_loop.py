@@ -549,3 +549,35 @@ def test_a_valid_measurement_resets_the_infra_error_count(tmp_path, monkeypatch)
                        iter(["Read the plan.", "Read the slice plan.", "Check the plan.", "Apply the plan."]))
     assert loop.main([*argv, "--iterations", "4", "--budget-usd", "100"]) == 0
     assert [row[2] for row in _rows(tmp_path)] == ["keep", "discard", "discard", "discard", "discard"]
+
+
+def test_recorded_scores_name_the_results_file_that_produced_them(tmp_path, monkeypatch):
+    """반증: TSV의 점수가 어떤 run 기록에서 나왔는지 대조할 수 없었다(karpathy #623)."""
+    import hashlib
+    import json
+    root = _repo(tmp_path)
+    passes = iter([1, 2])
+    real_run = loop.run
+
+    def run(argv, cwd, **kwargs):
+        if "--output" not in argv:
+            return real_run(argv, cwd, **kwargs)
+        output = Path(argv[argv.index("--output") + 1])
+        output.mkdir(parents=True)
+        ok = next(passes)
+        rows = [{"oracle": {"behavior": i < ok, "plan": True, "norm": True}, "cost_usd": 1.0} for i in range(3)]
+        (output / "results.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    argv = _model_loop(tmp_path, monkeypatch, root, iter([]), iter(["Read the plan."]))
+    monkeypatch.setattr(loop, "evaluate", lambda tree, work, args: {**loop.score_model(tree, work, args),
+                                                                    "conditions": "c" * 16})
+    monkeypatch.setattr(loop, "run", run)
+    loop.main([*argv, "--iterations", "1", "--no-confirm"])
+    rows = _rows(tmp_path)
+    assert [row[2] for row in rows] == ["keep", "keep"]
+    for row in rows:
+        fields = dict(part.split("=", 1) for part in row[6].split("; ") if "=" in part)
+        digest = hashlib.sha256((Path(fields["evidence"]) / "results.jsonl").read_bytes()).hexdigest()[:16]
+        assert fields["ev_sha"] == digest
+    assert rows[0][6] != rows[1][6]

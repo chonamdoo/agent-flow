@@ -249,7 +249,8 @@ def score_routing(tree: Path, work: Path) -> dict:
 
 
 def score_model(tree: Path, work: Path, args: argparse.Namespace) -> dict:
-    output = work / f"eval-{int(time.time())}"
+    # 측정마다 다른 폴더여야 기록한 해시가 가리키는 증거가 다음 측정에 덮어쓰이지 않는다.
+    output = work / f"eval-{time.time_ns()}"
     process = run([sys.executable, str(REPO / "evals" / "phase_eval.py"), "--kit", f"after={tree}",
                    "--stacks", args.stacks, "--modes", args.modes, "--scenario", "author",
                    "--trials", str(args.trials), "--author-provider", "claude", "--review-providers", "claude",
@@ -258,13 +259,16 @@ def score_model(tree: Path, work: Path, args: argparse.Namespace) -> dict:
     results = output / "results.jsonl"
     if not results.is_file():
         return {"error": (process.stderr or process.stdout)[-600:]}
-    rows = [json.loads(line) for line in results.read_text(encoding="utf-8").splitlines() if line.strip()]
+    raw = results.read_bytes()
+    # 점수를 그 점수를 낸 run 기록에 묶는다. 기록된 점수를 나중에 원본 결과와 대조할 수 있어야 한다(karpathy #623).
+    evidence = {"evidence": str(output), "ev_sha": hashlib.sha256(raw).hexdigest()[:16]}
+    rows = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
     valid = [row for row in rows if not row.get("error") and isinstance(row.get("oracle"), dict)]
     # 무효 행(timeout·provider 오류)을 실패로 세면 baseline과 후보의 인프라 운이 승패를 정한다.
     # 한 행이라도 무효면 이 측정은 판정에 쓰지 않는다.
     if process.returncode != 0 or len(valid) != len(rows) or not rows:
         return {"error": f"{len(rows) - len(valid)}/{len(rows)} invalid runs, exit {process.returncode}",
-                "cost": sum(row.get("cost_usd") or 0 for row in rows)}
+                "cost": sum(row.get("cost_usd") or 0 for row in rows), **evidence}
     passed = sum(all(row["oracle"].get(axis) for axis in ("behavior", "plan", "norm")) for row in valid)
     plan = sum(bool(row["oracle"].get("plan")) for row in valid)
     tokens = sum((row.get("usage") or {}).get("uncached_input") or 0 for row in valid)
@@ -277,7 +281,8 @@ def score_model(tree: Path, work: Path, args: argparse.Namespace) -> dict:
             "overclaims": sum(bool(row.get("overclaims")) for row in valid),
             # 완료 선언 자체가 사라지면 overclaim은 0이 된다. 그 감소를 개선으로 세지 않도록 따로 센다.
             "claims_missing": sum(row.get("claims") is None for row in valid),
-            "feedback": f"{passed}/{len(rows)} runs passed every axis; failed checks:\n" + ("\n".join(checks) or "- none")}
+            "feedback": f"{passed}/{len(rows)} runs passed every axis; failed checks:\n" + ("\n".join(checks) or "- none"),
+            **evidence}
 
 
 def conditions(args: argparse.Namespace) -> str:
@@ -412,6 +417,10 @@ def state_text(args: argparse.Namespace, best: dict, results: Path) -> str:
     return "\n".join(lines)
 
 
+def evidence_field(outcome: dict) -> str:
+    return f"; evidence={outcome['evidence']}; ev_sha={outcome['ev_sha']}" if outcome.get("ev_sha") else ""
+
+
 def record(results: Path, iteration: str, commit: str, status: str, outcome: dict, extra: str, cost: float,
            description: str) -> None:
     score = outcome.get("score", "")
@@ -504,7 +513,7 @@ def main(argv: list[str] | None = None) -> int:
     if "error" in best:
         # 무효로 끝난 측정도 돈은 썼다. 기록하지 않으면 재시작이 예산을 적게 복원하고 같은 측정을 다시 산다.
         # keep이 아니고 지문도 남기지 않으므로 resume은 이 행을 비용으로만 센다.
-        record(results, label, git(tree, "rev-parse", "HEAD"), "error", {}, best["error"][:200],
+        record(results, label, git(tree, "rev-parse", "HEAD"), "error", {}, best["error"][:200] + evidence_field(best),
                best.get("cost", 0.0), label)
         print(f"{label} evaluation failed: {best['error']}", file=sys.stderr)
         return 1
@@ -519,7 +528,8 @@ def main(argv: list[str] | None = None) -> int:
     best_key = surface_key(tree, args.track, args.skills)
     seen.setdefault(best_key, label)
     record(results, label, best_commit, "keep", best,
-           f"bytes={best_bytes}; key={best_key}" + (f"; cond={best['conditions']}" if best.get("conditions") else "") + floor, best.get("cost", 0.0), label)
+           f"bytes={best_bytes}; key={best_key}" + (f"; cond={best['conditions']}" if best.get("conditions") else "") + floor
+           + evidence_field(best), best.get("cost", 0.0), label)
     print(f"{label} {best['dev']}/{best['dev_total']} heldout {best['heldout']}/{best['heldout_total']}", flush=True)
 
     idle = infra = 0
@@ -581,7 +591,7 @@ def main(argv: list[str] | None = None) -> int:
             seen[key] = str(iteration)
         record(results, str(iteration), commit, "keep" if keep else "discard", outcome,
                f"{reason}; bytes={candidate_bytes}" + (f"; key={key}" if evaluated else "")
-               + (f"; cond={outcome['conditions']}" if outcome.get("conditions") else ""),
+               + (f"; cond={outcome['conditions']}" if outcome.get("conditions") else "") + evidence_field(outcome),
                cost + outcome.get("cost", 0.0), description)
         print(f"#{iteration} {'keep' if keep else 'discard'} ({reason}) {outcome.get('dev', '-')}/"
               f"{outcome.get('dev_total', '-')} heldout {outcome.get('heldout', '-')} spent ${spent:.2f}: {description}",
