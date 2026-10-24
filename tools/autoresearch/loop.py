@@ -66,6 +66,7 @@ PROPOSER_FAILED = "proposer failed"
 CONDITIONS_CHANGED = "measurement conditions changed"
 COND_FIELD = re.compile(r"(?:^|; )cond=([0-9a-f]{16})")
 KEY_FIELD = re.compile(r"(?:^|; )key=([0-9a-f]{64})")
+NOISE_FIELD = re.compile(r"(?:^|; )noise=(\d+)")
 # 어떤 트랙에서도 최적화 대상이 아니다. 판정·승인·평가를 바꾸는 편집은 점수를 올리는 대신 측정을 무너뜨린다(#420).
 FORBIDDEN_PATHS = (
     "scripts/hooks/*", "src/agent_flow/core/*evidence*", "src/agent_flow/core/design_value_check.py",
@@ -378,7 +379,8 @@ def better(candidate: dict, best: dict, track: str, candidate_bytes: int, best_b
     # Model runs are noisy; a token change alone is not evidence. Only more passing runs keep an edit.
     # No "same passes, shorter" tie-break here: the score covers a few cases, so it cannot see what a
     # deleted rule protects elsewhere (the first fixloop run kept four deletions of unrelated guidance).
-    if passed > best_passed:
+    # --noise-floor면 같은 baseline을 두 번 잰 차이보다 크게 이겨야 한다(karpathy #560, #303).
+    if passed - best_passed > best.get("noise", 0):
         return True, "improved"
     return False, "no improvement"
 
@@ -436,7 +438,8 @@ def record(results: Path, iteration: str, commit: str, status: str, outcome: dic
                                           description.replace("\t", " ").replace("\n", " ")])) + "\n")
 
 
-def resume(tree: Path, results: Path, current: str | None = None) -> tuple[float, int, dict[str, str], tuple | None]:
+def resume(tree: Path, results: Path, current: str | None = None) -> tuple[float, int, dict[str, str], tuple | None,
+                                                                         int | None]:
     """Spent cost, next iteration number and seen surface keys from an earlier run of the same tag.
 
     A run can die between committing a candidate and resetting it (a timeout or a container
@@ -447,7 +450,8 @@ def resume(tree: Path, results: Path, current: str | None = None) -> tuple[float
     The last keep's recorded score comes back too: re-measuring the best on a noisy track can draw a
     lower value, and a candidate would then win against that unlucky draw. Seen keys and the
     recorded score are dropped when the measurement conditions changed since that keep; the run
-    then starts over from a fresh baseline, as the runbook requires after a model change.
+    then starts over from a fresh baseline, as the runbook requires after a model change. The noise
+    floor measured for that baseline comes back with the score, under the same rule.
     """
     rows = [row.split("\t") for row in results.read_text(encoding="utf-8").splitlines()[1:] if row.strip()]
     spent = sum(float(row[7]) for row in rows if len(row) > 7 and re.fullmatch(r"\d+(\.\d+)?", row[7]))
@@ -458,7 +462,7 @@ def resume(tree: Path, results: Path, current: str | None = None) -> tuple[float
         if match:
             seen.setdefault(match.group(1), row[0])
     kept = [row for row in rows if len(row) > 6 and row[2] == "keep"]
-    recorded = None
+    recorded = noise = None
     if kept:
         git(tree, "reset", "-q", "--hard", git(tree, "rev-parse", kept[-1][1]))
         git(tree, "clean", "-qfd")
@@ -470,7 +474,9 @@ def resume(tree: Path, results: Path, current: str | None = None) -> tuple[float
                 recorded = ast.literal_eval(kept[-1][3])
             except (ValueError, SyntaxError):
                 recorded = None
-    return spent, max(numbers, default=0) + 1, seen, recorded if isinstance(recorded, tuple) else None
+            match = NOISE_FIELD.search(kept[-1][6])
+            noise = int(match.group(1)) if match else None
+    return spent, max(numbers, default=0) + 1, seen, recorded if isinstance(recorded, tuple) else None, noise
 
 
 # --------------------------------------------------------------------------- loop
@@ -496,6 +502,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="re-measure a keep once before committing to it (default: on for model and subtract)")
     parser.add_argument("--max-infra-errors", type=int, default=2,
                         help="stop after this many evaluation errors in a row")
+    parser.add_argument("--noise-floor", action="store_true",
+                        help="model track: measure the baseline twice and keep only gains above that difference")
     args = parser.parse_args(argv)
     if args.track in ("model", "subtract") and not args.skills:
         parser.error(f"--skills is required for the {args.track} track")
@@ -510,7 +518,7 @@ def main(argv: list[str] | None = None) -> int:
     results = work / "results.tsv"
     if not results.exists():
         results.write_text(TSV_HEADER, encoding="utf-8")
-    spent, first, seen, recorded = resume(tree, results, conditions(args))
+    spent, first, seen, recorded, noise = resume(tree, results, conditions(args))
     if spent >= args.budget_usd:
         print(f"budget already spent: ${spent:.2f} of ${args.budget_usd:.2f}; log {results}")
         return 0
@@ -524,6 +532,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{label} evaluation failed: {best['error']}", file=sys.stderr)
         return 1
     spent += best.get("cost", 0.0)
+    if args.track == "model" and args.noise_floor and noise is None:
+        # 같은 표면을 두 번 잰 통과 수 차이가 이 설정의 노이즈다. 그만큼의 승리는 우연과 구분되지 않는다.
+        again = evaluate(tree, work, args)
+        spent += again.get("cost", 0.0)
+        best = {**best, "cost": best.get("cost", 0.0) + again.get("cost", 0.0)}
+        if "error" in again:
+            record(results, label, git(tree, "rev-parse", "HEAD"), "error", {},
+                   f"noise floor: {again['error']}"[:200] + evidence_field(again), best["cost"], label)
+            print(f"{label} noise-floor evaluation failed: {again['error']}", file=sys.stderr)
+            return 1
+        noise = abs(again["score"][0] - best["score"][0])
+    if noise is not None:
+        best = {**best, "noise": noise}
     floor = ""
     if args.track in ("model", "subtract") and recorded is not None and recorded > best["score"]:
         # 같은 조건에서 이미 그 점수를 냈다. 재측정의 나쁜 운을 기준으로 삼지 않는다.
@@ -535,7 +556,7 @@ def main(argv: list[str] | None = None) -> int:
     seen.setdefault(best_key, label)
     record(results, label, best_commit, "keep", best,
            f"bytes={best_bytes}; key={best_key}" + (f"; cond={best['conditions']}" if best.get("conditions") else "") + floor
-           + evidence_field(best), best.get("cost", 0.0), label)
+           + (f"; noise={best['noise']}" if "noise" in best else "") + evidence_field(best), best.get("cost", 0.0), label)
     print(f"{label} {best['dev']}/{best['dev_total']} heldout {best['heldout']}/{best['heldout_total']}", flush=True)
 
     idle = infra = 0
@@ -597,13 +618,15 @@ def main(argv: list[str] | None = None) -> int:
             seen[key] = str(iteration)
         record(results, str(iteration), commit, "keep" if keep else "discard", outcome,
                f"{reason}; bytes={candidate_bytes}" + (f"; key={key}" if evaluated else "")
-               + (f"; cond={outcome['conditions']}" if outcome.get("conditions") else "") + evidence_field(outcome),
+               + (f"; cond={outcome['conditions']}" if outcome.get("conditions") else "")
+               + (f"; noise={best['noise']}" if "noise" in best else "") + evidence_field(outcome),
                cost + outcome.get("cost", 0.0), description)
         print(f"#{iteration} {'keep' if keep else 'discard'} ({reason}) {outcome.get('dev', '-')}/"
               f"{outcome.get('dev_total', '-')} heldout {outcome.get('heldout', '-')} spent ${spent:.2f}: {description}",
               flush=True)
         if keep:
-            best, best_commit, best_bytes, best_key, idle = outcome, commit, candidate_bytes, key, 0
+            best = {**outcome, "noise": best["noise"]} if "noise" in best else outcome
+            best_commit, best_bytes, best_key, idle = commit, candidate_bytes, key, 0
         else:
             git(tree, "reset", "-q", "--hard", best_commit)
             idle += 1

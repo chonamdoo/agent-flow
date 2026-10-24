@@ -266,7 +266,7 @@ def test_a_failed_baseline_records_its_cost_for_the_next_restart(tmp_path, monke
     assert loop.main(argv) == 1
     rows = [line.split("\t") for line in (tmp_path / "work" / "t" / "results.tsv").read_text().splitlines()[1:]]
     assert rows[0][2] == "error" and rows[0][7] == "4.0000"
-    assert loop.resume(root, tmp_path / "work" / "t" / "results.tsv") == (4.0, 1, {}, None)
+    assert loop.resume(root, tmp_path / "work" / "t" / "results.tsv") == (4.0, 1, {}, None, None)
 
 
 def test_a_score_from_other_measurement_conditions_is_never_kept():
@@ -594,3 +594,36 @@ def test_subtract_rejects_a_smaller_surface_that_costs_more_tokens():
     assert loop.better(costlier, best, "subtract", 90, 100, {**margins, "tokens_rise": 0.01}) == (
         True, "non-inferior, smaller")
 
+
+
+def test_a_model_keep_must_beat_the_measured_noise_floor():
+    best = {**_scored(5), "noise": 1}
+    assert loop.better(_scored(6), best, "model", 10, 10) == (False, "no improvement")
+    assert loop.better(_scored(7), best, "model", 10, 10) == (True, "improved")
+    assert loop.better(_scored(6), _scored(5), "model", 10, 10) == (True, "improved")
+
+
+def test_resume_restores_the_noise_floor_of_the_last_keep(tmp_path):
+    root = _repo(tmp_path)
+    kept = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True,
+                          text=True).stdout.strip()
+    results = tmp_path / "results.tsv"
+    results.write_text(
+        loop.TSV_HEADER
+        + f"baseline\t{kept[:12]}\tkeep\t(3, 3, 0)\t3\t-\tbytes=1; cond={'c' * 16}; noise=2\t1.0000\tbaseline\n"
+        + f"1\t{kept[:12]}\tdiscard\t(4, 4, 0)\t4\t-\tno improvement; cond={'c' * 16}; noise=2\t1.0000\tx\n",
+        encoding="utf-8")
+    assert loop.resume(root, results, "c" * 16)[3:] == ((3, 3, 0), 2)
+    # 조건이 바뀌면 그 노이즈도 다시 잰다.
+    assert loop.resume(root, results, "d" * 16)[3:] == (None, None)
+
+
+def test_noise_floor_measures_the_baseline_twice_and_raises_the_bar(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    argv = _model_loop(tmp_path, monkeypatch, root, iter([_model(1), _model(2), _model(3), _model(3)]),
+                       iter(["Read the plan."]))
+    assert loop.main([*argv, "--iterations", "1", "--noise-floor"]) == 0
+    rows = _rows(tmp_path)
+    assert "noise=1" in rows[0][6]
+    # 3 - 1 = 2 > noise 1이므로 keep이고, 확인 측정도 같은 판정을 낸다.
+    assert rows[1][2] == "keep" and "noise=1" in rows[1][6]
