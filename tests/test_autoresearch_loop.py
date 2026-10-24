@@ -306,7 +306,7 @@ def _rows(tmp_path: Path) -> list[list[str]]:
 
 def test_a_measurement_with_a_different_run_count_leaves_the_state_scoreable(tmp_path, monkeypatch):
     root = _repo(tmp_path)
-    argv = _model_loop(tmp_path, monkeypatch, root, iter([_model(1), _model(2, total=2), _model(2)]),
+    argv = _model_loop(tmp_path, monkeypatch, root, iter([_model(1), _model(2, total=2), _model(2), _model(2)]),
                        iter(["Read the plan.", "Read the plan."]))
     loop.main([*argv, "--iterations", "2"])
     assert [row[2] for row in _rows(tmp_path)] == ["keep", "discard", "keep"]
@@ -342,7 +342,7 @@ def test_restart_under_new_conditions_forgets_scores_and_fingerprints(tmp_path, 
         + f"baseline\t{kept[:12]}\tkeep\t(3, 3, 0)\t3\t-\tbytes=1; cond={'c' * 16}\t1.0000\tbaseline\n"
         + f"1\t{kept[:12]}\tdiscard\t(1, 1, 0)\t1\t-\tno improvement; key={key}; cond={'c' * 16}\t1.0000\tx\n",
         encoding="utf-8")
-    argv = _model_loop(tmp_path, monkeypatch, root, iter([_model(1, cond="d" * 16), _model(2, cond="d" * 16)]),
+    argv = _model_loop(tmp_path, monkeypatch, root, iter([_model(1, cond="d" * 16), _model(2, cond="d" * 16), _model(2, cond="d" * 16)]),
                        iter(["Read the plan."]), conditions="d" * 16)
     loop.main([*argv, "--iterations", "1"])
     rows = _rows(tmp_path)
@@ -465,6 +465,15 @@ def test_a_keep_that_the_confirmation_measurement_does_not_repeat_is_discarded(t
     assert loop.main([*argv, "--iterations", "1", "--confirm"]) == 0
     rows = _rows(tmp_path)
     assert rows[-1][2] == "discard" and rows[-1][6].startswith("not confirmed")
+
+
+def test_the_model_track_confirms_a_keep_by_default(tmp_path, monkeypatch):
+    """반증: model 트랙은 확인 측정이 꺼져 있어 한 번 우연히 이긴 측정이 그대로 keep됐다(karpathy #218, #624)."""
+    root = _repo(tmp_path)
+    argv = _model_loop(tmp_path, monkeypatch, root, iter([_model(1), _model(2), _model(1)]), iter(["Read the plan."]))
+    assert loop.main([*argv, "--iterations", "1"]) == 0
+    rows = _rows(tmp_path)
+    assert rows[-1][2] == "discard" and loop.NOT_CONFIRMED in rows[-1][6]
 
 
 def test_a_keep_the_confirmation_repeats_stays(tmp_path, monkeypatch):

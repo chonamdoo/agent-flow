@@ -17,7 +17,8 @@ routing: score = development cases passing in `evals/skill_routing.py`; no case 
 best commit may fail; held-out cases are recorded for every iteration but never decide.
 model:   score = author runs passing behavior, plan and norm in `evals/phase_eval.py` (Claude author
 only), then plan passes, then fewer uncached input tokens; the observed required-read rate may not
-drop and overclaims may not rise. Model runs are noisy: keep decisions need a strictly higher pass count.
+drop and overclaims may not rise. Model runs are noisy: keep decisions need a strictly higher pass count,
+and by default a confirmation measurement that agrees.
 subtract: the model evaluator, but the edit may only delete whole lines of the named skills' bodies.
 A deletion is kept when it is non-inferior (pass rate within the margins fixed in
 `noninferiority.json`, no read-rate drop, no overclaim rise) and the surface got smaller. The track
@@ -477,14 +478,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--concurrency", type=int, default=3)
     parser.add_argument("--model", help="Claude model for evaluated author runs")
     parser.add_argument("--confirm", action=argparse.BooleanOptionalAction, default=None,
-                        help="re-measure a keep once before committing to it (default: on for subtract)")
+                        help="re-measure a keep once before committing to it (default: on for model and subtract)")
     args = parser.parse_args(argv)
     if args.track in ("model", "subtract") and not args.skills:
         parser.error(f"--skills is required for the {args.track} track")
     margins = load_margins()
     if args.track == "subtract" and margins is None:
         parser.error(f"non-inferiority margins are not fixed in {NONINFERIORITY} (#420); the subtract track waits for them")
-    confirm = args.confirm if args.confirm is not None else args.track == "subtract"
+    # 비싼 소표본 측정은 한 번의 우연한 승리로 keep되기 쉽다. model 트랙도 기본으로 다시 잰다.
+    confirm = args.confirm if args.confirm is not None else args.track in ("model", "subtract")
 
     tree = prepare_worktree(args.root, args.tag)
     work = args.root / args.tag

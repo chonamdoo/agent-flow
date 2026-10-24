@@ -44,7 +44,7 @@ Editable: the body (not the frontmatter) of the skill files listed in the state,
 Claude session implements a task with the kit, then fewer tokens. A failing `plan` check means the author
 missed a decision written only in the slice plan; a failing `norm` check means it broke the architecture
 contract. Improve how the skill makes an author read and apply the plan and the contract, in general terms.
-Only more passing runs keep an edit here. Do not delete text to shorten a skill: these few cases
+Only more passing runs, repeated by a second measurement, keep an edit here. Do not delete text to shorten a skill: these few cases
 cannot show what a removed rule protects in other phases and stacks.
 
 ## Track: subtract
