@@ -684,3 +684,14 @@ def test_the_same_axis_three_times_in_a_row_is_rejected_unscored(tmp_path, monke
     assert [row[2] for row in rows] == ["keep", "discard", "discard", "invalid"]
     assert rows[3][6].startswith("axis plan-reading repeated 3 times") and "axis=plan-reading" in rows[3][6]
     assert rows[3][7] == "0.1000"  # 제안 비용만 들고 측정은 하지 않았다
+
+
+def test_the_proposer_cannot_list_this_repository(tmp_path, monkeypatch):
+    """반증: Read·Grep만 막혀 있어 제안자가 Glob으로 평가 사례의 파일 이름을 볼 수 있었다."""
+    import json
+    calls = []
+    monkeypatch.setattr(loop, "run", lambda argv, *a, **k: calls.append(argv) or subprocess.CompletedProcess(
+        argv, 0, '{"result": "DESCRIPTION: x", "total_cost_usd": 0}', ""))
+    loop.propose(tmp_path, loop.argparse.Namespace(proposer_budget_usd=1.0, proposer_model=None), "state")
+    deny = json.loads(calls[0][calls[0].index("--settings") + 1])["permissions"]["deny"]
+    assert {f"{tool}(/{loop.REPO}/**)" for tool in ("Read", "Edit", "Grep", "Glob")} <= set(deny)

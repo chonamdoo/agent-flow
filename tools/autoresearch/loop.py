@@ -407,7 +407,9 @@ def parse_notes(text: str) -> dict[str, str]:
 def propose(tree: Path, args: argparse.Namespace, state: str) -> tuple[str, float, dict[str, str]]:
     prompt = PROGRAM.read_text(encoding="utf-8") + "\n\n## Current state\n\n" + state
     # Absolute paths in permission rules take a leading `//`.
-    settings = {"permissions": {"deny": [f"Read(/{REPO}/**)", f"Edit(/{REPO}/**)", f"Grep(/{REPO}/**)"]}}
+    # Glob도 막는다. 내용은 못 읽어도 평가 사례의 파일 이름 목록이 과제를 드러낸다.
+    settings = {"permissions": {"deny": [f"Read(/{REPO}/**)", f"Edit(/{REPO}/**)", f"Grep(/{REPO}/**)",
+                                         f"Glob(/{REPO}/**)"]}}
     process = run(["claude", "-p", "--output-format", "json", "--permission-mode", "acceptEdits",
                    "--settings", json.dumps(settings), "--max-budget-usd", str(args.proposer_budget_usd),
                    *(["--model", args.proposer_model] if args.proposer_model else []),
