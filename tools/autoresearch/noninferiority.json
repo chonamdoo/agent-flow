@@ -1,7 +1,7 @@
 {
-  "note": "subtract 트랙의 비열등 허용 폭(#420). 유지보수자가 정하기 전까지 null이고, 그동안 subtract 트랙은 시작하지 않는다. pass_rate_drop: 후보의 세 축 통과율이 best보다 이만큼(비율)까지 낮아도 비열등으로 본다. tokens_rise: 후보의 uncached input 토큰이 best보다 이만큼(비율)까지 늘어도 받는다. 0은 늘어나면 거부한다.",
+  "note": "subtract 트랙의 비열등 허용 폭(#420). 유지보수자가 정하기 전까지 null이고, 그동안 subtract 트랙은 시작하지 않는다. pass_rate_drop: 후보의 세 축 통과율이 best보다 이만큼(비율)까지 낮아도 비열등으로 본다. tokens_rise: 후보의 uncached input 토큰이 best보다 이만큼(비율)까지 늘어도 받는다. maintainer/improvement-history/README.md 후보 검사 표의 공통 기준(uncached input 토큰 +10% 이내)과 같다.",
   "margins": {
     "pass_rate_drop": null,
-    "tokens_rise": 0.0
+    "tokens_rise": 0.10
   }
 }
