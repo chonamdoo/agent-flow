@@ -13,7 +13,7 @@ import arm_compare  # noqa: E402
 import router  # noqa: E402
 import variants  # noqa: E402
 
-NAMES = ["none", "verify-only", "development", "default", "full-feature"]
+NAMES = ["none", "verify-only", "verify-skills", "development", "default", "full-feature", "compose"]
 
 
 @pytest.fixture
@@ -63,7 +63,7 @@ def test_parsing_takes_only_an_exact_json_last_line_naming_a_menu_option():
 def test_the_menu_is_fixed_text_and_variants_join_it_under_their_names():
     items = router.menu()
     assert [item["name"] for item in items] == NAMES
-    assert [item["arm"] for item in items] == ["A", "V", "B", "D", "C"]
+    assert [item["arm"] for item in items] == ["A", "V", "VK", "B", "D", "C", "S"]
     assert router.menu_sha256(items) == router.menu_sha256(router.menu())
     spec = {"planning": False, "reviewers": 2}
     with_variant = router.menu([spec])
@@ -251,6 +251,7 @@ def test_score_adds_the_router_cost_and_the_summary_shows_the_choices(tmp_path, 
     assert "| verify-only | V | 1 | 1/1 | 0 | $0.50 |" in choices
     assert "| development | B | 2 | 1/2 | 0 | $0.25 |" in choices
     assert "| default | D | 0 | 0/0 | 0 | - |" in choices and "| full-feature | C | 0 | 0/0 | 0 | - |" in choices
+    assert "| verify-skills | VK | 0 | 0/0 | 0 | - |" in choices and "| compose | S | 0 | 0/0 | 0 | - |" in choices
 
 
 def test_the_cli_and_preflight_take_arm_r(tmp_path, fake_router, monkeypatch):
@@ -265,3 +266,89 @@ def test_the_cli_and_preflight_take_arm_r(tmp_path, fake_router, monkeypatch):
     monkeypatch.setattr(arm_compare.subprocess, "run", lambda argv, **_: arm_compare.subprocess.CompletedProcess(
         argv, 0, "OK\n", ""))
     assert arm_compare.main(["preflight", "--model", "claude:claude-opus-5-5"]) == 0
+
+
+# ─── compose: the router assembles a reduced full-feature from variants' space ───
+
+def _compose(spec, reason="Small change; planning adds nothing."):
+    return f"I read the cart module.\n\n{json.dumps({'choice': 'compose', 'reason': reason, 'spec': spec})}"
+
+
+def test_the_compose_option_describes_variants_space_in_neutral_words():
+    (item,) = [item for item in router.menu() if item["name"] == "compose"]
+    assert item["arm"] == "S" and "variant" not in item
+    text = item["description"]
+    for key in (*variants.DROPS, "reviewers"):
+        assert f"`{key}`" in text
+    for phases in variants.DROPS.values():
+        assert all(phase in text for phase in phases)
+    assert all(str(count) in text for count in variants.REVIEWER_COUNTS) and '"spec"' in text
+    assert "$" not in text and "minute" not in text and "token" not in text
+    assert '"spec"' in router.prompt("Do the task.", router.menu())
+
+
+def test_compose_needs_a_spec_that_variants_accepts_and_no_other_choice_takes_one():
+    good, error = router.parse_choice(_compose({"planning": False, "reviewers": 2}), NAMES)
+    assert not error and good["spec"] == {"planning": False, "reviewers": 2}
+    assert router.parse_choice(_compose({}), NAMES)[0] is not None  # every key absent: full-feature's values
+    for text, reason in (
+            ('{"choice": "compose", "reason": "x"}', "`compose` needs exactly `choice`, `reason` and `spec`"),
+            (_compose({"planning": "no"}), "`spec` is invalid: planning must be true or false"),
+            (_compose({"reviewers": 3}), "`spec` is invalid: reviewers must be one of (2, 5)"),
+            (_compose({"qa": False}), "`spec` is invalid: unknown variant keys: ['qa']"),
+            (_compose([False]), "`spec` is not an object"),
+            ('{"choice": "none", "reason": "x", "spec": {}}',
+             "last line is not an object with exactly `choice` and `reason`")):
+        assert router.parse_choice(text, NAMES) == (None, reason), text
+
+
+def test_a_composed_spec_is_prepared_as_arm_s_with_that_variant(tmp_path, fake_router):
+    spec = {"planning": False, "tdd": True, "architecture_review": False, "reviewers": 2}
+    name = variants.name(spec)
+    calls = fake_router(_compose(spec))
+    run = tmp_path / "R-1"
+    meta = arm_compare.prepare(ROOT, "R", "devflow", 1, run)
+    assert len(calls()) == 1
+    decision = meta["router"]
+    assert decision["choice"] == "compose" and decision["fallback"] is False and decision["spec"] == spec
+    assert decision["variant"] == variants.normalize(spec) == {"planning": False, "architecture_review": False,
+                                                                "reviewers": 2}
+    assert decision["variant_name"] == name and meta["effective_arm"] == "S"
+    assert meta["workflow"] == name and meta["variant"]["name"] == name
+    assert meta["variant"]["spec"] == variants.normalize(spec)
+    phases = meta["variant"]["phases"]
+    assert "domain-grill" not in phases and "architecture-review" not in phases and "red" in phases
+    assert (run / "project" / ".agent-flow" / "workflows" / f"{name}.yaml").is_file()
+    assert f"--workflow {name}" in (run / "prompt.md").read_text(encoding="utf-8")
+    assert meta["approval_rules"] == arm_compare.HARNESS_APPROVES
+    stored = json.loads((run / "arm.json").read_text(encoding="utf-8"))
+    assert stored["router"]["spec"] == spec and stored["router"]["variant_name"] == name
+
+
+def test_an_invalid_spec_is_retried_once_then_falls_back_to_none(tmp_path, fake_router):
+    calls = fake_router(_compose({"reviewers": 3}), _compose({"planning": False}))
+    meta = arm_compare.prepare(ROOT, "R", "devflow", 1, tmp_path / "R-1")
+    assert len(calls()) == 2 and meta["effective_arm"] == "S" and meta["router"]["attempts"] == 2
+    assert meta["router"]["errors"] == ["`spec` is invalid: reviewers must be one of (2, 5)"]
+
+
+def test_a_spec_the_runs_profile_cannot_build_counts_as_invalid(tmp_path, fake_router):
+    # devflow's python profile has 3 review angles: 5 reviewers is a valid point of the space but not of this run
+    calls = fake_router(_compose({"reviewers": 5}), _compose({"design": "off"}))
+    run = tmp_path / "R-2"
+    meta = arm_compare.prepare(ROOT, "R", "devflow", 2, run)
+    decision = meta["router"]
+    assert len(calls()) == 2 and decision["choice"] == "none" and decision["fallback"] is True
+    assert decision["errors"] == ["`spec` is invalid: profile python has 3 angles; 5 reviewers need 4",
+                                  "`spec` is invalid: design must be true or false"]
+    assert "spec" not in decision and "variant" not in decision and "variant_name" not in decision
+    assert meta["effective_arm"] == "A" and not (run / "project" / ".agent-flow").exists()
+
+
+def test_verify_skills_prepares_arm_vk(tmp_path, fake_router):
+    fake_router(_answer("verify-skills"))
+    run = tmp_path / "R-1"
+    meta = arm_compare.prepare(ROOT, "R", "devflow", 1, run)
+    assert meta["effective_arm"] == "VK" and meta["verify_gate"] is not None
+    assert meta["skills"]["names"] and (run / "project" / ".claude" / "skills" / "tdd" / "SKILL.md").is_file()
+    assert not (run / "project" / ".agent-flow").exists()

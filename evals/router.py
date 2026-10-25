@@ -6,8 +6,11 @@ option from a fixed menu. Each option is an existing arm's setup; the menu text 
 recorded. The decision is frozen into `arm.json` before the chosen option is prepared, and the controller that then
 does the task starts with a fresh context (the router keeps no session).
 
-The answer's last non-empty line must be exactly a JSON object `{"choice": "<option>", "reason": "..."}`. An answer
-that does not parse, names an option that is not on the menu, or a call that fails is retried once; after a second
+The answer's last non-empty line must be exactly a JSON object `{"choice": "<option>", "reason": "..."}`; the
+`compose` option adds `"spec": {...}`, a point in `variants`' space (the dimensions on or off and the reviewer count)
+that `variants.normalize` must accept (and the caller's `check_spec`, which tries it on the run's kit and profile),
+and is prepared as arm S with that variant. An answer that does not parse, names
+an option that is not on the menu, carries an invalid spec, or a call that fails is retried once; after a second
 failure the router falls back to `none` and records `fallback: true`. Only the standard library and `variants` are used.
 """
 from __future__ import annotations
@@ -18,11 +21,12 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import variants
 
-VERSION = "router-v1"
+VERSION = "router-v2"
 TIMEOUT = 600
 BUDGET_USD = 2.0
 MAX_ATTEMPTS = 2
@@ -44,6 +48,10 @@ OPTIONS = {
         "hook runs the project's verification command and sends you back while it fails (at most 3 times), then one "
         "independent read-only reviewer compares the project with the task once and sends you back once with any "
         "unmet requirements. There are no phases.")),
+    "verify-skills": ("VK", (
+        "No workflow, with the same completion check as `verify-only`, and the Agent Flow kit's skills available as "
+        "the project's Claude Code skills: each is listed by name and description, and you may load any of them when "
+        "you judge it useful. Nothing tells you to use them, and there are no phases.")),
     "development": ("B", (
         "The Agent Flow kit installed with its `development` workflow, driven through its runner: explore, "
         "implement, review (independent reviewer subprocesses), qa, fix-loop and handoff.")),
@@ -57,7 +65,9 @@ OPTIONS = {
         "product-brief, prd, slice-plan, plan-review, ddd-design, worktree, red, green, refactor, "
         "comment-authoring, multi-review (several independent reviewers), architecture-review, gates and fix-loop, "
         "then delivery phases. This run has no git remote, so it ends at the first phase that needs one.")),
+    "compose": ("S", None),  # its text is built from `variants`' space by `compose_description`
 }
+COMPOSE = "compose"
 
 DIMENSION_TEXT = {"planning": "planning phases", "design": "ddd-design", "tdd": "red (tests are written with the code "
                   "in green)", "architecture_review": "architecture-review"}
@@ -77,7 +87,22 @@ choose exactly one of these options:
 End your answer with one line that is exactly a JSON object, with nothing after it:
 
 {{"choice": "<option name>", "reason": "<at most 3 sentences>"}}
+
+For `compose`, the object also has `"spec"`, as that option says.
 """
+
+
+def compose_description() -> str:
+    """The `compose` option's text: the same dimensions and reviewer counts as `variants`, in fixed words."""
+    keys = "; ".join(f"`{key}` ({', '.join(phases)})" for key, phases in variants.DROPS.items())
+    counts = " or ".join(str(count) for count in variants.REVIEWER_COUNTS)
+    return ("The Agent Flow kit installed with a reduced form of `full-feature` that you assemble, driven through its "
+            "runner. Choose it by adding `\"spec\": {...}` to your JSON line. Each of these keys is true to keep "
+            f"those phases or false to drop them: {keys}; without red, green writes the tests with the code. "
+            f"`reviewers` is {counts} to run that many reviewers in multi-review; leave it out for the profile's "
+            "default number. A key you leave out keeps the `full-feature` value; "
+            "every other phase, the gates and the fix-loop are as in `full-feature`. This run has no git remote, so it "
+            "ends at the first phase that needs one.")
 
 
 def variant_description(spec: dict) -> str:
@@ -95,7 +120,8 @@ def variant_description(spec: dict) -> str:
 
 def menu(variant_specs: list[dict] | None = None) -> list[dict]:
     """[{name, arm, description, variant?}] in menu order; a variant is named by `variants.name`."""
-    items = [{"name": name, "arm": arm, "description": text} for name, (arm, text) in OPTIONS.items()]
+    items = [{"name": name, "arm": arm, "description": text if text is not None else compose_description()}
+             for name, (arm, text) in OPTIONS.items()]
     for spec in variant_specs or []:
         name = variants.name(spec)
         if any(item["name"] == name for item in items):
@@ -126,8 +152,11 @@ def argv(text: str, model: str) -> list[str]:
             "--no-session-persistence", "--max-budget-usd", f"{BUDGET_USD:g}"]
 
 
-def parse_choice(text: str | None, names: list[str]) -> tuple[dict | None, str | None]:
-    """(decision, None) when the last non-empty line is exactly {"choice": <a menu name>, "reason": <text>}."""
+def parse_choice(text: str | None, names: list[str],
+                 check_spec: Callable[[dict], object] | None = None) -> tuple[dict | None, str | None]:
+    """(decision, None) when the last non-empty line is exactly {"choice": <a menu name>, "reason": <text>}, plus
+    `"spec"` that `variants.normalize` (and `check_spec`, which raises ValueError) accepts when the choice is `compose`
+    (and only then)."""
     if not isinstance(text, str) or not text.strip():
         return None, "empty answer"
     last = text.strip().splitlines()[-1].strip()
@@ -135,12 +164,25 @@ def parse_choice(text: str | None, names: list[str]) -> tuple[dict | None, str |
         decision = json.loads(last)
     except ValueError:
         return None, "last line is not JSON"
-    if not isinstance(decision, dict) or set(decision) != {"choice", "reason"}:
+    if not isinstance(decision, dict):
         return None, "last line is not an object with exactly `choice` and `reason`"
+    composed = decision.get("choice") == COMPOSE and COMPOSE in names
+    if set(decision) != ({"choice", "reason", "spec"} if composed else {"choice", "reason"}):
+        return None, ("`compose` needs exactly `choice`, `reason` and `spec`" if composed else
+                      "last line is not an object with exactly `choice` and `reason`")
     if not isinstance(decision["reason"], str) or not decision["reason"].strip():
         return None, "`reason` is not a non-empty string"
     if decision["choice"] not in names:
         return None, f"`choice` {decision['choice']!r} is not on the menu"
+    if composed:
+        if not isinstance(decision["spec"], dict):
+            return None, "`spec` is not an object"
+        try:
+            variants.normalize(decision["spec"])
+            if check_spec is not None:
+                check_spec(decision["spec"])
+        except ValueError as exc:
+            return None, f"`spec` is invalid: {exc}"
     return decision, None
 
 
@@ -162,7 +204,7 @@ def _call(command: list[str], cwd: Path, env: dict[str, str], timeout: int) -> t
 
 
 def _attempt(number: int, text: str, model: str, project: Path, env: dict[str, str], out_dir: Path,
-             names: list[str]) -> dict:
+             names: list[str], check_spec: Callable[[dict], object] | None) -> dict:
     started = time.monotonic()
     code, stdout, stderr, timed_out = _call(argv(text, model), project, env, TIMEOUT)
     raw = out_dir / f"attempt-{number}.json"
@@ -177,7 +219,7 @@ def _attempt(number: int, text: str, model: str, project: Path, env: dict[str, s
     if timed_out or code != 0 or payload.get("is_error") or answer is None:
         decision, error = None, ("timed out" if timed_out else f"call failed (exit {code})")
     else:
-        decision, error = parse_choice(answer, names)
+        decision, error = parse_choice(answer, names, check_spec)
     return {"attempt": number, "exit": code, "timed_out": timed_out, "seconds": round(time.monotonic() - started, 1),
             "cost_usd": payload.get("total_cost_usd"), "usage": payload.get("usage"),
             "num_turns": payload.get("num_turns"), "raw_output": str(raw.resolve()), "decision": decision,
@@ -185,8 +227,11 @@ def _attempt(number: int, text: str, model: str, project: Path, env: dict[str, s
 
 
 def route(task: str, project: Path, out_dir: Path, model: str, env: dict[str, str],
-          variant_specs: list[dict] | None = None) -> dict:
-    """Runs the router (at most `MAX_ATTEMPTS` calls) and returns the record `arm.json` keeps as `router`."""
+          variant_specs: list[dict] | None = None, check_spec: Callable[[dict], object] | None = None) -> dict:
+    """Runs the router (at most `MAX_ATTEMPTS` calls) and returns the record `arm.json` keeps as `router`.
+
+    `check_spec` raises ValueError for a `compose` spec the run cannot build (5 reviewers on a profile with fewer
+    angles); that answer is retried like any other invalid one."""
     items = menu(variant_specs)
     names = [item["name"] for item in items]
     text = prompt(task, items)
@@ -194,12 +239,14 @@ def route(task: str, project: Path, out_dir: Path, model: str, env: dict[str, st
     (out_dir / "prompt.md").write_text(text, encoding="utf-8")
     attempts: list[dict] = []
     for number in range(1, MAX_ATTEMPTS + 1):
-        attempts.append(_attempt(number, text, model, project, env, out_dir, names))
+        attempts.append(_attempt(number, text, model, project, env, out_dir, names, check_spec))
         if attempts[-1]["decision"] is not None:
             break
     decision = attempts[-1]["decision"]
     choice = decision["choice"] if decision else FALLBACK
     chosen = next(item for item in items if item["name"] == choice)
+    if choice == COMPOSE:
+        chosen = {**chosen, "variant": variants.normalize(decision["spec"])}
     costs = [item["cost_usd"] for item in attempts]
     usage: dict[str, int] = {}
     for item in attempts:
@@ -208,6 +255,8 @@ def route(task: str, project: Path, out_dir: Path, model: str, env: dict[str, st
                 usage[key] = usage.get(key, 0) + value
     return {"version": VERSION, "model": model, "choice": choice, "effective_arm": chosen["arm"],
             **({"variant": chosen["variant"]} if "variant" in chosen else {}),
+            **({"spec": decision["spec"], "variant_name": variants.name(decision["spec"])}
+               if choice == COMPOSE else {}),
             "reason": decision["reason"] if decision else None, "fallback": decision is None,
             "attempts": len(attempts), "errors": [item["error"] for item in attempts if item["error"]],
             # 한 번이라도 비용을 보고하지 않았으면 합계는 0이나 부분합이 아니라 null이다.

@@ -38,6 +38,14 @@ rates and counted apart.
   stop goes through. `.claude/settings.json` is committed before the agent starts; the hook script and its record
   (`verify-gate.jsonl`) stay in the run directory, outside the agent's diff. The reviewer's cost is kept apart from
   the controller's and added to the run's `total_cost_usd`.
+- VK (V+skills): V word for word (prompt, Stop-hook gate) plus the kit's skills as the project's Claude Code skills
+  (`.claude/skills/<name>/`, committed with V's settings before the agent starts). Claude Code lists them by name and
+  description and loads a body only when the model invokes it; nothing tells the agent to use them (no workflow, no
+  runner, no CLAUDE.md). A skill that runs `agent-flow` commands, or works only inside the runner, is left out
+  (`EXCLUDED_SKILLS`, recorded with its reason); `prepare` fails if a skill not on that list names an `agent-flow`
+  command in a code span, unless `CLI_MENTIONS_KEPT` says why it works without the CLI. `arm.json` `skills` keeps each
+  copied skill's sha256 and the exclusions. Every run's result has `skills_invoked`, the skills the transcript's Skill
+  tool calls loaded.
 - B, C: the kit is installed with its hooks; the agent drives `agent-flow run --workflow development|full-feature`
   and answers the runner's decisions from the task text. It is not the human approver: `spec approve`/`spec confirm`
   and turning a SPEC's `verify` into `manual` are off limits, because they let the worker pass its own evidence
@@ -53,9 +61,11 @@ rates and counted apart.
 - C′: `c_prime.build()` of the same project, stopping after `commit` (#427).
 - R (router): the model chooses the workflow. After seeding, one read-only `claude -p` router (`router.py`; the
   controller's model, Read/Glob/Grep only, 10 minutes, $2) gets the task text and a fixed menu (`none` = A,
-  `verify-only` = V, `development` = B, `default` = D, `full-feature` = C, plus each `--menu-variant` S spec under its
-  variant name) and answers `{"choice": ..., "reason": ...}` on its last line; a bad answer is retried once, then
-  `none` is used with `router.fallback: true`. The decision (choice, reason, cost, tokens, seconds, menu sha256, raw
+  `verify-only` = V, `verify-skills` = VK, `development` = B, `default` = D, `full-feature` = C, `compose` = S with a
+  variant the router assembles, plus each `--menu-variant` S spec under its variant name) and answers
+  `{"choice": ..., "reason": ...}` on its last line (`compose` adds `"spec"`, checked by `variants.normalize`; the
+  router record keeps it with its `variant_name`); a bad answer is retried once, then `none` is used with
+  `router.fallback: true`. The decision (choice, reason, cost, tokens, seconds, menu sha256, raw
   output paths) is written to `arm.json` `router` before the chosen arm is prepared in the same run directory, and
   `drive` starts a fresh controller on it. The router's cost is added to the run's `total_cost_usd`.
 
@@ -131,14 +141,15 @@ CONTROLLER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "ANDROID_HOME"
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CODEX_HOME", "OPENAI_API_KEY")
 AGENT_FLOW_WORKTREES = Path.home() / ".agent-flow" / "worktrees"
 CLAUDE_TOOLS = ("Bash", "Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "TodoWrite", "Task")
-ARMS = ("A", "AP", "PS", "V", "B", "C", "D", "S", "Cp", "R")
+ARMS = ("A", "AP", "PS", "V", "VK", "B", "C", "D", "S", "Cp", "R")
 # R: the router picks one of these arms' setups (`router.OPTIONS`, plus S variants); the record keeps `arm: "R"` and the
 # picked `effective_arm`, and everything that depends on the setup reads `effective_arm(meta)`.
 ROUTED_ARMS = ("R",)
 DEFAULT_MODEL = "claude-opus-5-5"
-# no kit; the agent gets the task prompt only (and, AP and PS, a CLAUDE.md; V, a Stop hook)
-BARE_ARMS = ("A", "AP", "PS", "V")
-GATE_ARMS = ("V",)  # the bare prompt plus `verify_gate.py` as the project's Stop hook
+# no kit runner; the agent gets the task prompt only (and, AP and PS, a CLAUDE.md; V, a Stop hook; VK, also skills)
+BARE_ARMS = ("A", "AP", "PS", "V", "VK")
+GATE_ARMS = ("V", "VK")  # the bare prompt plus `verify_gate.py` as the project's Stop hook
+SKILL_ARMS = ("VK",)  # plus the kit's skills as project skills
 WORKFLOWS = {"B": "development", "C": "full-feature", "D": "default", "S": variants.BASE}  # S: the variant's base
 # 설치기가 읽는 트리만 복사한다(package.json `files`). evals/·tests/·maintainer/는 에이전트의 kit에 없다.
 KIT_TREES = ("bin", "lib", "templates", "bootstrap", "skills", "scripts", ".Codex", ".claude", "src", "docs")
@@ -449,6 +460,107 @@ def _install_verify_gate(output: Path, project: Path, task: str, documents: list
             "review_budget_usd": verify_gate.REVIEW_BUDGET_USD, "review_timeout_seconds": verify_gate.REVIEW_TIMEOUT}
 
 
+# Arm VK's skills. Claude Code reads project skills from `.claude/skills/<name>/SKILL.md`; a skill's other files are
+# its bundled references and scripts. `agents/` holds Codex's `openai.yaml`, host metadata Claude Code does not read.
+SKILLS_VERSION = "vk-v1"
+PROJECT_SKILLS = Path(".claude") / "skills"
+SKILL_HOST_METADATA = ("agents",)
+# A skill left out because it does not work without the kit's CLI or runner. The reason is recorded in `arm.json`.
+EXCLUDED_SKILLS = {
+    "agent-flow": "drives the runner: `.agent-flow/bin/agent-flow status`, `run`, `spec`, `worktree create`",
+    "agent-flow-diagnosing-bugs": "runs inside the runner's phase: `agent-flow status`, `agent-flow run`, "
+                                  "`agent-flow worktree create`",
+    "full-feature-workflow": "drives the runner: `agent-flow status` and the `next_command` it prints",
+    "push-watch": "`agent-flow status`, `agent-flow pr-watch` and `agent-flow abort` on a pushed PR; the runner routes",
+    "architecture-reviewer": "aggregates the artifacts of the runner's reviewer subprocesses in the full-feature "
+                             "architecture-review phase, which its description names",
+    "comment-checker": "configures the kit's comment-checker hooks, which this arm does not install",
+}
+# A kept skill whose files name an `agent-flow` command in a code span, and why it works without the CLI.
+CLI_MENTIONS_KEPT = {
+    "qa": "`agent-flow run-command` is used only when a phase supplies it; otherwise the skill records the command "
+          "and exit it saw",
+    "code-generation-discipline": "`agent-flow skills sync` is named only as the owner of installation; the skill "
+                                  "says to continue with the skills available",
+}
+CLI_COMMAND = re.compile(r"`[^`\n]*\bagent-flow\s+[a-z][a-z-]*[^`\n]*`")
+SKILL_TOOL = "Skill"
+
+
+def skill_files(skill: Path) -> list[Path]:
+    """A skill's files, relative and sorted: SKILL.md and what it bundles, without host metadata or caches."""
+    return sorted(path.relative_to(skill) for path in skill.rglob("*")
+                  if path.is_file() and path.relative_to(skill).parts[0] not in SKILL_HOST_METADATA
+                  and not {"__pycache__", "node_modules"} & set(path.relative_to(skill).parts))
+
+
+def skill_cli_commands(skill: Path) -> list[str]:
+    """The code spans in a skill's files that name an `agent-flow` command."""
+    found: list[str] = []
+    for relative in skill_files(skill):
+        found += CLI_COMMAND.findall((skill / relative).read_text(encoding="utf-8", errors="replace"))
+    return found
+
+
+def skill_sha256(skill: Path) -> str:
+    lines = [f"{relative.as_posix()}\0{verify_gate.file_sha256(skill / relative)}\n" for relative in skill_files(skill)]
+    return hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
+
+
+def _install_skills(agent_kit: Path, project: Path) -> dict:
+    """VK's one difference from V: the kit's skills in `.claude/skills/`, committed before the agent starts."""
+    source = agent_kit / "skills"
+    items, excluded, mentions = [], [], []
+    for skill in sorted(path for path in source.iterdir() if (path / "SKILL.md").is_file()):
+        if skill.name in EXCLUDED_SKILLS:
+            excluded.append({"name": skill.name, "reason": EXCLUDED_SKILLS[skill.name]})
+            continue
+        commands = skill_cli_commands(skill)
+        if commands and skill.name not in CLI_MENTIONS_KEPT:
+            raise SystemExit(f"skill {skill.name} names agent-flow commands {sorted(set(commands))}: add it to "
+                             "EXCLUDED_SKILLS or CLI_MENTIONS_KEPT with the reason")
+        if skill.name in CLI_MENTIONS_KEPT:
+            mentions.append({"name": skill.name, "reason": CLI_MENTIONS_KEPT[skill.name]})
+        target = project / PROJECT_SKILLS / skill.name
+        for relative in skill_files(skill):
+            (target / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(skill / relative, target / relative)
+        items.append({"name": skill.name, "sha256": skill_sha256(target),
+                      "skill_md_sha256": verify_gate.file_sha256(target / "SKILL.md"),
+                      "files": len(skill_files(target))})
+    _git(["add", "--force", str(PROJECT_SKILLS)], project)  # seed의 .gitignore가 `.claude`를 가릴 수 있다
+    _git(["commit", "-qm", "skills"], project)
+    listing = "".join(f"{item['name']}\0{item['sha256']}\n" for item in items)
+    return {"version": SKILLS_VERSION, "path": PROJECT_SKILLS.as_posix(), "source": "kit skills/",
+            "sha256": hashlib.sha256(listing.encode("utf-8")).hexdigest(), "items": items,
+            "names": [item["name"] for item in items], "excluded": excluded, "cli_mentions_kept": mentions}
+
+
+def skills_invoked(rows: list[dict]) -> dict:
+    """The Skill tool calls in the transcript: the names loaded (call order, repeats kept) and the calls that failed.
+
+    A call counts as loaded unless its tool result is an error (a denied or unknown skill).
+    """
+    failed_ids = set()
+    for row in rows:
+        message = row.get("message")
+        if row.get("type") != "user" or not isinstance(message, dict) or not isinstance(message.get("content"), list):
+            continue
+        failed_ids |= {block.get("tool_use_id") for block in message["content"]
+                       if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error")}
+    invoked, failed = [], []
+    for use in _tool_uses(rows):
+        if use.get("name") != SKILL_TOOL:
+            continue
+        data = use.get("input") if isinstance(use.get("input"), dict) else {}
+        name = data.get("skill") if isinstance(data.get("skill"), str) else data.get("command")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        name = name.strip().lstrip("/")
+        (failed if use.get("id") in failed_ids else invoked).append(name)
+    return {"skills_invoked": invoked, "skill_calls_failed": failed}
+
+
 def _ui_documents(spec: dict) -> list[str]:
     task = json.loads((UI_TASKS / spec["task"] / "task.json").read_text(encoding="utf-8"))
     return sorted([*task["layers"][spec["layer"]], *(f"fixtures/{name}" for name in task["fixtures"])])
@@ -551,10 +663,17 @@ def effective_arm(meta: dict) -> str | None:
 
 
 def _route(output: Path, project: Path, task: str, model: str, menu_variants: list[dict] | None,
-           frozen: dict) -> dict:
-    """Arm R's decision, written to `arm.json` before the chosen arm's preparation touches the project."""
+           frozen: dict, kit: Path, profile: str) -> dict:
+    """Arm R's decision, written to `arm.json` before the chosen arm's preparation touches the project.
+
+    A `compose` spec is tried on the run's kit and profile first (the workflow and the reviewer override), so a spec
+    that would fail in `variants.write` is a bad answer, retried and then replaced by `none`, not a crash."""
+    def check_spec(spec: dict) -> None:
+        variants.workflow(kit, spec)
+        variants.profile_override(kit, profile, spec)
+
     decision = router.route(task, project, output / router.OUT_DIR, model, controller_env(dict(os.environ)),
-                            menu_variants)
+                            menu_variants, check_spec)
     if _git(["status", "--porcelain"], project):
         raise SystemExit("the router changed the project")
     frozen = {**frozen, "effective_arm": decision["effective_arm"], "router": decision,
@@ -602,15 +721,18 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
     routed, requested = {}, arm
     if arm in ROUTED_ARMS:
         routed = _route(output, project, case["task"], model, menu_variants,
-                        {"arm": arm, "case": case_name, "trial": trial, "project": str(project.resolve())})
+                        {"arm": arm, "case": case_name, "trial": trial, "project": str(project.resolve())},
+                        agent_kit, case["profile"])
         arm, variant = routed["effective_arm"], routed["router"].get("variant")
-    searched, gate = None, None
+    searched, gate, skills = None, None, None
     if arm in BARE_ARMS:
         if arm in PRINCIPLE_SETS:
             _write_principles(project, arm)
         if arm in GATE_ARMS:
             gate = _install_verify_gate(output, project, case["task"], _ui_documents(ui) if ui else [], case,
                                         "ui" if ui else "phase-case")
+        if arm in SKILL_ARMS:
+            skills = _install_skills(agent_kit, project)
         _git(["checkout", "-qb", BRANCH], project)
         prompt = ui_bare_prompt(case["task"]) if ui else bare_prompt(case["task"], case["test_command"])
     elif arm == "Cp":
@@ -629,6 +751,7 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
             "cprime_rules": c_prime.RULES_VERSION if arm == "Cp" else None, "isolation": isolation,
             "principles": principles_record(arm), **_workflow_record(arm, searched),
             "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None, "verify_gate": gate,
+            **({"skills": skills} if skills is not None else {}),
             "case_kind": "ui" if ui else "phase-case", **({"ui_task": ui["task"], "layer": ui["layer"]} if ui else {})}
     (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
     return meta
@@ -638,7 +761,7 @@ def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: in
                       isolation: str, variant: dict | None = None, menu_variants: list[dict] | None = None,
                       model: str = DEFAULT_MODEL) -> dict:
     if arm not in (*BARE_ARMS, *WORKFLOWS, *ROUTED_ARMS):
-        raise ValueError("an external case defines the A, AP, PS, V, B, C, D, S and R arms only")
+        raise ValueError("an external case defines the A, AP, PS, V, VK, B, C, D, S and R arms only")
     output.mkdir(parents=True)
     agent_kit = sanitized_kit(kit, output / "kit")
     project = output / "project"
@@ -646,14 +769,17 @@ def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: in
     routed, requested = {}, arm
     if arm in ROUTED_ARMS:
         routed = _route(output, project, case["task"], model, menu_variants,
-                        {"arm": arm, "case": case["name"], "trial": trial, "project": str(project.resolve())})
+                        {"arm": arm, "case": case["name"], "trial": trial, "project": str(project.resolve())},
+                        agent_kit, case["profile"])
         arm, variant = routed["effective_arm"], routed["router"].get("variant")
-    searched, gate = None, None
+    searched, gate, skills = None, None, None
     if arm in BARE_ARMS:
         if arm in PRINCIPLE_SETS:
             _write_principles(project, arm)
         if arm in GATE_ARMS:
             gate = _install_verify_gate(output, project, case["task"], sorted(case["files"]), case, "external")
+        if arm in SKILL_ARMS:
+            skills = _install_skills(agent_kit, project)
         _git(["checkout", "-qb", BRANCH], project)
         prompt = external_bare_prompt(case)
     else:
@@ -669,6 +795,7 @@ def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: in
             "cprime_rules": None, "isolation": isolation,
             "principles": principles_record(arm), **_workflow_record(arm, searched),
             "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None, "verify_gate": gate,
+            **({"skills": skills} if skills is not None else {}),
             "case_kind": "external",
             "case_sha256": case["sha256"], "seed_commit": case["seed"]["commit"], "score_keys": case["score_keys"],
             "evaluator_repeat": bool(case.get("evaluator_repeat"))}
@@ -1222,7 +1349,7 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
               "integrity": integrity.check(checkout, meta["start_commit"], shell_commands(rows), message, declaration),
               "spec_self_approvals": sum(bool(SPEC_SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
               "phase_self_approvals": sum(bool(PHASE_SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
-              "verify_downgrades": verify_downgrades(rows),
+              "verify_downgrades": verify_downgrades(rows), **skills_invoked(rows),
               "manual_spec_approvals": manual_spec_approvals(project, checkout), "artifact_sha256": artifact,
               "transcript": str(transcript) if transcript else None, **_measured_usage(rows, read), **read,
               "controller_cost_usd": drive.get("cost_usd"),
@@ -1540,8 +1667,9 @@ def summarize(results: list[dict]) -> str:
              "runs that ran gates / deferred a gate to CI (never run) | "
              "successes first try / after fix-loop re-approval | runs stopped at the fix-loop limit | "
              "phases entered / declared (mean) | orchestration share of cost (mean) | "
-             "integrity flags (runs flagged) | reviewer jobs / seconds / token and cost lower bound (mean) |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "integrity flags (runs flagged) | reviewer jobs / seconds / token and cost lower bound (mean) | "
+             "skills invoked (runs that invoked any: name×calls) |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     base = [row for row in assigned if row["arm"] == "A"]
     reasons: list[str] = []
     for arm in ARMS:
@@ -1630,7 +1758,7 @@ def _summary_line(label: str, group: list[dict], excluded: list[dict], base: lis
         _phase_cell(group) if workflow else "-",
         _share_cell(group) if workflow else "-",
         _integrity_cell(group),
-        _reviewer_cell(group) if workflow else "-"]) + " |"
+        _reviewer_cell(group) if workflow else "-", _skills_cell(group)]) + " |"
 
 
 def _usd(value: float | None) -> str:
@@ -1662,6 +1790,20 @@ def _reviewer_cell(group: list[dict]) -> str:
     costs = [record["cost_lower_bound_usd"] for record in records]
     cost = "unpriced" if None in costs else f"≥${_mean(costs):.2f}"
     return f"{jobs:.1f} / {seconds:,.0f} / ≥{tokens:,.0f} tok, {cost}"
+
+
+def _skills_cell(group: list[dict]) -> str:
+    """`-` when no run recorded Skill calls (results scored before `skills_invoked` existed)."""
+    recorded = [row["skills_invoked"] for row in group if isinstance(row.get("skills_invoked"), list)]
+    if not recorded:
+        return "-"
+    counts: dict[str, int] = {}
+    for names in recorded:
+        for name in names:
+            counts[name] = counts.get(name, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    listed = ", ".join(f"{name}×{count}" for name, count in ranked)
+    return f"{sum(bool(names) for names in recorded)}/{len(recorded)}: {listed or 'none'}"
 
 
 def _integrity_cell(group: list[dict]) -> str:

@@ -149,7 +149,7 @@ def test_human_only_approvals_fail_the_run_and_are_read_from_disk(tmp_path):
                 "usage": {"input": 1, "uncached_input": 1, "cached_input": 0, "output": 1}, "seconds": 1, **extra}
     table = arm_compare.summarize([row("A"), row("C"), row("C", manual_spec_approvals=2), row("C", verify_downgrades=1)])
     c_line = next(line for line in table.splitlines() if line.startswith("| C |"))
-    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed | 0 / 0 | 1 / 0 | 0 | - | - | - | - |")
+    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed | 0 / 0 | 1 / 0 | 0 | - | - | - | - | - |")
 
 
 def test_the_artifact_fingerprint_ignores_runner_state_and_tracks_edits(bare):
@@ -393,7 +393,7 @@ def test_a_gate_deferred_to_ci_is_recorded_as_never_run(tmp_path):
     assert arm_compare.gate_record(tmp_path / "none", checkout)["local_gates"] is None
     row = _summary_row("C", gate_ledgers=1, deferred_ci_checks=["pytest"])
     c_line = next(line for line in arm_compare.summarize([row]).splitlines() if line.startswith("| C |"))
-    assert c_line.endswith("| 1 / 1 | 1 / 0 | 0 | - | - | - | - |")
+    assert c_line.endswith("| 1 / 1 | 1 / 0 | 0 | - | - | - | - | - |")
 
 
 def test_a_rule_counts_only_where_the_runs_prompt_stated_it():
@@ -671,9 +671,9 @@ def test_the_summary_reports_phases_and_the_orchestration_share():
     rows = [_summary_row("A"), _summary_row("D", phase_trace=trace),
             _summary_row("D", phase_trace={**trace, "entered": ["design"], "orchestration_share": 0.75})]
     d_line = next(line for line in arm_compare.summarize(rows).splitlines() if line.startswith("| D |"))
-    assert d_line.endswith("| 1.5 / 4 | 50% | - | - |")
+    assert d_line.endswith("| 1.5 / 4 | 50% | - | - | - |")
     a_line = next(line for line in arm_compare.summarize(rows).splitlines() if line.startswith("| A |"))
-    assert a_line.endswith("| - | - | - | - |")
+    assert a_line.endswith("| - | - | - | - | - |")
 
 
 # ─── #409 v2 §3c: follow-on changes ───
@@ -818,7 +818,7 @@ def test_the_summary_shows_reviewer_tokens_and_leaves_an_unpriced_cost_unpriced(
                             "codex": {"seconds": 1450, "token_lower_bound": 116_000}}}
     line = next(row for row in arm_compare.summarize([_summary_row("C", reviewers=record)]).splitlines()
                 if row.startswith("| C |"))
-    assert line.endswith("| 40.0 / 2,950 / ≥243,000 tok, unpriced |")
+    assert line.endswith("| 40.0 / 2,950 / ≥243,000 tok, unpriced | - |")
 
 
 # ─── #409 v2: arm A+P ───
@@ -1081,6 +1081,165 @@ def test_the_cli_and_preflight_take_arm_v(tmp_path, monkeypatch):
                              "--output", str(run)]) == 0
     assert (run / "gate" / "verify_gate.py").is_file()
     # V's reviewer runs on the controller's model, so the controller's preflight entry covers it.
+    monkeypatch.setattr(arm_compare.subprocess, "run", lambda argv, **_: arm_compare.subprocess.CompletedProcess(
+        argv, 0, "OK\n", ""))
+    assert arm_compare.main(["preflight", "--model", "claude:claude-opus-5-5"]) == 0
+
+
+# ─── arm VK (V + the kit's skills as project skills) ───
+
+def _kit_skill_names() -> list[str]:
+    return sorted(path.name for path in (ROOT / "skills").iterdir() if (path / "SKILL.md").is_file())
+
+
+def test_arm_vk_is_arm_v_plus_the_kits_skills_committed_as_project_skills(tmp_path):
+    arm_compare.prepare(ROOT, "A", "devflow", 1, tmp_path / "A-1")
+    v = arm_compare.prepare(ROOT, "V", "devflow", 1, tmp_path / "V-1")
+    run = tmp_path / "VK-1"
+    meta = arm_compare.prepare(ROOT, "VK", "devflow", 1, run)
+    project = run / "project"
+    prompt = (run / "prompt.md").read_text(encoding="utf-8")
+    assert prompt == (tmp_path / "A-1" / "prompt.md").read_text(encoding="utf-8")
+    assert prompt == (tmp_path / "V-1" / "prompt.md").read_text(encoding="utf-8")
+    assert meta["prompt_sha256"] == v["prompt_sha256"] and "skill" not in prompt.lower()
+    # V's gate, unchanged
+    assert meta["verify_gate"]["script_sha256"] == v["verify_gate"]["script_sha256"]
+    assert {key: value for key, value in meta["verify_gate"].items() if key not in ("script", "settings_sha256")} == {
+        key: value for key, value in v["verify_gate"].items() if key not in ("script", "settings_sha256")}
+    assert _gate_hook(project)["command"].endswith(f"{(run / 'gate' / 'config.json').resolve()}")
+    # the kit's skills minus the exclusions, each file as in the kit, without Codex's host metadata
+    skills = meta["skills"]
+    excluded = set(arm_compare.EXCLUDED_SKILLS)
+    assert skills["names"] == [name for name in _kit_skill_names() if name not in excluded]
+    assert skills["excluded"] == [{"name": name, "reason": arm_compare.EXCLUDED_SKILLS[name]}
+                                  for name in _kit_skill_names() if name in excluded]
+    assert {item["name"] for item in skills["excluded"]} == excluded
+    assert all(item["reason"] for item in skills["excluded"])
+    assert sorted(item["name"] for item in skills["cli_mentions_kept"]) == sorted(arm_compare.CLI_MENTIONS_KEPT)
+    target = project / ".claude" / "skills"
+    assert sorted(path.name for path in target.iterdir()) == skills["names"]
+    for item in skills["items"]:
+        source, copied = ROOT / "skills" / item["name"], target / item["name"]
+        assert item["sha256"] == arm_compare.skill_sha256(source) == arm_compare.skill_sha256(copied)
+        assert item["skill_md_sha256"] == hashlib.sha256((source / "SKILL.md").read_bytes()).hexdigest()
+        assert arm_compare.skill_files(copied) == arm_compare.skill_files(source)
+        assert not (copied / "agents").exists()
+        # no kept skill tells the agent to run an `agent-flow` command, except the recorded mentions
+        assert not arm_compare.skill_cli_commands(copied) or item["name"] in arm_compare.CLI_MENTIONS_KEPT
+        front = (copied / "SKILL.md").read_text(encoding="utf-8").split("---")[1]
+        assert not arm_compare.CLI_COMMAND.search(front) and ".agent-flow/" not in front
+    for name in excluded:
+        assert not (target / name).exists()
+    assert (target / "tdd" / "SKILL.md").is_file() and (target / "security-audit" / "validate-findings.cjs").is_file()
+    # committed before the agent starts; nothing else of the kit is there
+    tracked = arm_compare._git(["ls-files", ".claude/skills"], project).splitlines()
+    assert ".claude/skills/tdd/SKILL.md" in tracked and len(tracked) == sum(item["files"] for item in skills["items"])
+    assert arm_compare._git(["status", "--porcelain"], project) == ""
+    assert arm_compare._git(["log", "--format=%s", "-2"], project).splitlines() == ["skills", "verify gate"]
+    assert arm_compare._git(["rev-parse", "HEAD"], project) == meta["start_commit"]
+    assert arm_compare._git(["branch", "--show-current"], project) == arm_compare.BRANCH
+    assert not (project / "CLAUDE.md").exists() and not (project / ".agent-flow").exists()
+    assert meta["principles"] is None and meta["approval_rules"] is None and "workflow" not in meta
+    assert json.loads((run / "arm.json").read_text(encoding="utf-8"))["skills"] == skills
+    assert "skills" not in v
+
+
+def test_a_skill_that_names_agent_flow_commands_is_refused_unless_it_is_listed(tmp_path):
+    kit = tmp_path / "kit"
+    for name, body in (("plain", "Write tests first."), ("driver", "Run `agent-flow status` and continue."),
+                       ("agent-flow", "Run `.agent-flow/bin/agent-flow run`.")):
+        (kit / "skills" / name).mkdir(parents=True)
+        (kit / "skills" / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n{body}\n",
+                                                        encoding="utf-8")
+    project = tmp_path / "project"
+    _git_init(project)
+    (project / "a.txt").write_text("a\n", encoding="utf-8")
+    arm_compare._git(["add", "a.txt"], project)
+    arm_compare._git(["commit", "-qm", "seed"], project)
+    with pytest.raises(SystemExit, match="driver"):
+        arm_compare._install_skills(kit, project)
+    (kit / "skills" / "driver" / "SKILL.md").unlink()
+    record = arm_compare._install_skills(kit, project)
+    assert record["names"] == ["plain"] and [item["name"] for item in record["excluded"]] == ["agent-flow"]
+
+
+def test_an_external_case_commits_arm_vks_skills_past_an_ignored_claude_dir(tmp_path):
+    case_dir, _ = _external_case(tmp_path)
+    seed = tmp_path / "seed-repo"
+    (seed / ".gitignore").write_text(".claude\n", encoding="utf-8")
+    arm_compare._git(["add", ".gitignore"], seed)
+    arm_compare._git(["commit", "-qm", "ignore"], seed)
+    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
+    case["seed"]["commit"] = arm_compare._git(["rev-parse", "HEAD"], seed)
+    (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+    run = tmp_path / "runs" / "VK-1"
+    meta = arm_compare.prepare(ROOT, "VK", "ignored", 1, run, case_dir=case_dir)
+    project = run / "project"
+    assert ".claude/skills/tdd/SKILL.md" in arm_compare._git(["ls-files", ".claude"], project).splitlines()
+    assert arm_compare._git(["status", "--porcelain"], project) == ""
+    assert meta["verify_gate"]["documents"] == ["prd.md"] and meta["skills"]["names"]
+    arm_compare.prepare_followon(run, _followon_case(tmp_path), 1, tmp_path / "runs" / "VK-1.F1")
+    assert not (tmp_path / "runs" / "VK-1.F1" / "project" / ".claude").exists()
+
+
+def _skill_transcript(path: Path) -> Path:
+    rows = [
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "Let me check the skills."},
+            {"type": "tool_use", "id": "t1", "name": "Skill", "input": {"skill": "tdd"}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "loaded"}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": ".claude/skills/qa/SKILL.md"}},
+            {"type": "tool_use", "id": "t3", "name": "Skill", "input": {"skill": "no-such-skill"}}]}},
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t2", "content": "..."},
+            {"type": "tool_result", "tool_use_id": "t3", "content": "Unknown skill", "is_error": True}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t4", "name": "Skill", "input": {"command": "/code-review", "args": "x"}},
+            {"type": "tool_use", "id": "t5", "name": "Skill", "input": {"skill": "tdd"}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t4", "content": "ok"},
+                                                 {"type": "tool_result", "tool_use_id": "t5", "content": "ok"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Done.\n\nEVAL-STATUS: complete"}]}},
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    return path
+
+
+def test_skills_invoked_reads_the_skill_tool_calls_and_keeps_failed_ones_apart(tmp_path):
+    rows = arm_compare.run_usage._jsonl(_skill_transcript(tmp_path / "t.jsonl"))
+    assert arm_compare.skills_invoked(rows) == {"skills_invoked": ["tdd", "code-review", "tdd"],
+                                                "skill_calls_failed": ["no-such-skill"]}
+    assert arm_compare.skills_invoked([]) == {"skills_invoked": [], "skill_calls_failed": []}
+
+
+def test_arm_vks_score_records_the_invoked_skills_and_the_summary_shows_them(tmp_path):
+    run = tmp_path / "VK-1"
+    arm_compare.prepare(ROOT, "VK", "devflow", 1, run)
+    (run / "drive.json").write_text(json.dumps({"cost_usd": 2.0, "exit": 0}), encoding="utf-8")
+    result = arm_compare.score(run, _skill_transcript(tmp_path / "t.jsonl"))
+    assert result["skills_invoked"] == ["tdd", "code-review", "tdd"]
+    assert result["skill_calls_failed"] == ["no-such-skill"]
+    assert result["verify_gate"]["wiring_intact"] is True and result["skills"]["names"]
+    assert json.loads((run / "result.json").read_text(encoding="utf-8"))["skills_invoked"] == result["skills_invoked"]
+    rows = [_summary_row("A", skills_invoked=[]), _summary_row("VK", skills_invoked=["tdd", "qa", "tdd"]),
+            _summary_row("VK", skills_invoked=[]), _summary_row("VK", skills_invoked=["qa"])]
+    table = arm_compare.summarize(rows)
+    assert "skills invoked (runs that invoked any: name×calls)" in table.splitlines()[0]
+    vk = next(line for line in table.splitlines() if line.startswith("| VK |"))
+    assert vk.endswith("| 2/3: qa×2, tdd×2 |")
+    a = next(line for line in table.splitlines() if line.startswith("| A |"))
+    assert a.endswith("| 0/1: none |")
+    old = arm_compare.summarize([_summary_row("A")])
+    assert next(line for line in old.splitlines() if line.startswith("| A |")).endswith("| - |")
+
+
+def test_the_cli_and_preflight_take_arm_vk(tmp_path, monkeypatch):
+    run = tmp_path / "VK-cli"
+    assert arm_compare.main(["prepare", "--kit", str(ROOT), "--arm", "VK", "--case", "devflow",
+                             "--output", str(run)]) == 0
+    assert (run / "gate" / "verify_gate.py").is_file() and (run / "project" / ".claude" / "skills").is_dir()
+    assert "VK" in arm_compare.ARMS and "VK" in arm_compare.GATE_ARMS and "VK" in arm_compare.BARE_ARMS
+    # VK's reviewer runs on the controller's model, so the controller's preflight entry covers it.
     monkeypatch.setattr(arm_compare.subprocess, "run", lambda argv, **_: arm_compare.subprocess.CompletedProcess(
         argv, 0, "OK\n", ""))
     assert arm_compare.main(["preflight", "--model", "claude:claude-opus-5-5"]) == 0
