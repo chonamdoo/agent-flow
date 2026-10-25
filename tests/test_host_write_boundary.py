@@ -1833,7 +1833,11 @@ def test_unbound_lifecycle_command_is_allowed_to_establish_binding(tmp_path: Pat
     ) is None
 
 
-@pytest.mark.parametrize("suffix", [" 2>&1", " | tail -8", " 2>&1 | tail -n 20", " | head -5"])
+@pytest.mark.parametrize(
+    "suffix",
+    [" 2>&1", " | tail -8", " 2>&1 | tail -n 20", " | head -5", " 2>&1 | grep -v '^status_json' | tail -15",
+     ' | grep -E "next|status" | head -n 3'],
+)
 def test_unbound_lifecycle_command_with_output_trim_can_establish_binding(
     tmp_path: Path, suffix: str
 ):
@@ -1882,7 +1886,9 @@ def test_cd_prefix_exempts_only_a_lifecycle_command(tmp_path: Path, command: str
 
 
 @pytest.mark.parametrize(
-    "suffix", [" | tail -8; printf leaked > {leak}", " | tail -8 | tee {leak}", " 2>&1 > {leak}"]
+    "suffix",
+    [" | tail -8; printf leaked > {leak}", " | tail -8 | tee {leak}", " 2>&1 > {leak}", " | grep x {leak}",
+     " | grep -v x | sh"],
 )
 def test_output_trim_does_not_exempt_a_following_command(tmp_path: Path, suffix: str):
     root, statuses, runs = _setup(tmp_path)

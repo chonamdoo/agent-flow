@@ -73,10 +73,15 @@ _PATCH_KEYS = frozenset({"patch", "diff", "input"})
 _VIRTUAL_PATH = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _SAFE_VIRTUAL_PATH = re.compile(r"^xd://", re.IGNORECASE)
 _SHELL_PUNCTUATION = ";&|<>()`"
-# agent-flow 호출 끝의 출력 정리(`2>&1`, `| tail -8`, `| head -n 20`)만 벗겨 낸다. 이것까지 거부하면 unbound
-# 세션이 안내받은 status/continue를 `| tail`과 함께 부르는 순간 bind할 길이 없어진다(#409 OYG r003·r004: headless
-# 세션이 모든 명령을 거부당하고 blocked로 끝났다). 숫자 인자만 받는 tail·head 하나만 인정하므로 다른 명령을 잇는 길은 없다.
-_OUTPUT_TRIM = re.compile(r"(?:\s+2>&1)?(?:\s*\|\s*(?:tail|head)(?:\s+-n)?(?:\s+-?\d+)?)?\s*$")
+# agent-flow 호출 끝의 출력 정리(`2>&1`, `| grep -v '^status_json' | tail -15`, `| head -n 20`)만 벗겨 낸다. 이것까지
+# 거부하면 세션이 안내받은 status/continue를 출력 정리와 함께 부르는 순간 진행할 길이 없어진다(#409 OYG r003·r004,
+# 사이클 3 C: headless 세션이 blocked로 끝났다). 표준 입력만 읽는 필터만 인정한다: 숫자 인자만 받는 tail·head와,
+# 플래그와 패턴 하나만 받는 grep. 파일 인자, 리다이렉션, 다른 명령은 걸리지 않으므로 예전처럼 거부된다.
+_OUTPUT_FILTER = (
+    r"\s*\|\s*(?:(?:tail|head)(?:\s+-n)?(?:\s+-?\d+)?"
+    r"|grep(?:\s+-[A-Za-z]+)*\s+(?:'[^']*'|\"[^\"$`\\]*\"|[^\s|;&<>()`$'\"\\]+))"
+)
+_OUTPUT_TRIM = re.compile(rf"(?:\s+2>&1)?(?:{_OUTPUT_FILTER})*\s*$")
 # 같은 이유로 앞머리의 `cd <경로> &&` 하나도 벗긴다. 가드가 안내하는 복구는 "그 worktree에서 status/continue를
 # 다시 실행"인데, unbound 세션은 `cd <worktree> && agent-flow status`로만 그렇게 할 수 있다. 그 자리는 이미
 # ``_session_cwd``가 앞머리 `cd`로 읽어 cwd로 넘기므로, 여기서는 명령 낱말만 남긴다.
