@@ -353,6 +353,16 @@ def select_layer(case: dict, case_dir: Path, layer: str | None) -> dict:
     return {"layer": layer, "files": files, "oracle": oracle}
 
 
+SCP_LIKE = re.compile(r"^[\w.-]+@[\w.-]+:")
+
+
+def seed_repository(repository: str, case_dir: Path) -> str:
+    """A relative seed path (`"seed.bundle"`) is the case directory's; absolute paths and URLs are left as written."""
+    if "://" in repository or SCP_LIKE.match(repository) or Path(repository).is_absolute():
+        return repository
+    return str((case_dir / repository).resolve())
+
+
 def _seed_external_project(case: dict, case_dir: Path, project: Path) -> None:
     """The seed repository at its pinned commit with no remote, then the task files in one commit.
 
@@ -360,7 +370,8 @@ def _seed_external_project(case: dict, case_dir: Path, project: Path) -> None:
     checks live, so the reflog is emptied along with the remote.
     """
     seed = case["seed"]
-    c_prime._sh(["git", "clone", "-q", "--no-checkout", seed["repository"], str(project)], project.parent, check=True)
+    c_prime._sh(["git", "clone", "-q", "--no-checkout", seed_repository(seed["repository"], case_dir), str(project)],
+                project.parent, check=True)
     for args in (["checkout", "-q", "-B", "main", seed["commit"]], ["remote", "remove", "origin"],
                  ["config", "user.name", "eval"], ["config", "user.email", "eval@example.com"],
                  ["config", "commit.gpgsign", "false"]):

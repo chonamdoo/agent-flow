@@ -455,6 +455,21 @@ def test_an_external_case_seeds_its_repository_and_task_files_only(tmp_path):
     assert leaks == []
 
 
+def test_a_relative_seed_repository_is_the_case_directorys(tmp_path):
+    case_dir, _ = _external_case(tmp_path)
+    arm_compare._git(["bundle", "create", "-q", str(case_dir / "seed.bundle"), "HEAD", "main"], tmp_path / "seed-repo")
+    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
+    case["seed"]["repository"] = "seed.bundle"
+    (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+    run = tmp_path / "elsewhere" / "runs" / "A-1"
+    arm_compare.prepare(ROOT, "A", "ignored", 1, run, case_dir=case_dir)
+    assert (run / "project" / "app.txt").read_text(encoding="utf-8") == "seed app\n"
+    assert arm_compare._git(["remote"], run / "project") == ""
+    for kept in ("https://example.com/seed.git", "git@example.com:org/seed.git", str(tmp_path / "seed-repo")):
+        assert arm_compare.seed_repository(kept, case_dir) == kept
+    assert arm_compare.seed_repository("../seed.bundle", case_dir) == str((case_dir.parent / "seed.bundle").resolve())
+
+
 def test_an_external_case_is_graded_by_its_own_evaluator_and_keys(tmp_path):
     case_dir, evaluator = _external_case(tmp_path)
     run = tmp_path / "runs" / "A-1"
