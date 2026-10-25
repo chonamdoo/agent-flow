@@ -144,13 +144,14 @@ def test_noise_floor_is_the_c_spread_but_never_below_the_preregistered_floor():
 def test_revival_is_cumulative_in_the_preregistered_order():
     labels = [item["label"] for item in arm_search.candidates()]
     assert labels == ["S-min", "S-min+tdd", "S-min+tdd+architecture_review",
-                      "S-min+tdd+architecture_review+reviewers5", "S-min+tdd+architecture_review+reviewers5+design",
-                      "S-min+tdd+architecture_review+reviewers5+design+planning"]
+                      "S-min+tdd+architecture_review+reviewers", "S-min+tdd+architecture_review+reviewers+design",
+                      "S-min+tdd+architecture_review+reviewers+design+planning"]
     specs = [item["spec"] for item in arm_search.candidates()]
     assert specs[0] == arm_search.S_MIN
     assert specs[1] == {"planning": False, "design": False, "architecture_review": False, "reviewers": 2}
-    assert specs[3] == {"planning": False, "design": False, "reviewers": 5}
-    assert specs[-1] == {"reviewers": 5}
+    # reviving reviewers drops the override: the profile's default reviewers, as in C
+    assert specs[3] == {"planning": False, "design": False}
+    assert specs[-1] == {}
     assert [item["axis"] for item in arm_search.candidates()] == ["reduce-all", *arm_search.REVIVAL]
 
 
@@ -375,3 +376,47 @@ def test_a_ui_case_without_its_evaluator_stops_before_any_run(tmp_path, monkeypa
     assert _run(fake, out) == 5
     assert arm_search.read_ledger(out) == []
     assert "--evaluator" in json.loads((out / "stop.json").read_text())["detail"]
+
+
+def test_the_reviewers_revival_is_the_profile_default_on_every_shipped_profile():
+    import variants
+    spec = arm_search.revived(3)["spec"]
+    assert "reviewers" not in spec
+    for profile in sorted(path.stem for path in (ROOT / "src" / "agent_flow" / "profiles").glob("*.yaml")
+                          if not path.stem.endswith(".local")):
+        assert variants.profile_override(ROOT, profile, spec) is None
+    with pytest.raises(ValueError, match="node has 3 angles"):
+        variants.profile_override(ROOT, "node", {"reviewers": 5})
+
+
+def test_a_failed_precheck_is_a_dead_end_in_the_plan():
+    rows = _opening(c_ok=1, s_ok=0) + [{**_row(TDD, status="precheck-failed", cost=""), "detail": "runner rejects it"}]
+    step = arm_search.plan(rows, _order())
+    assert step["variant"]["name"] == ARCH and step["stage"] == "search"
+    assert step["trail"][-1]["step"] == "precheck" and step["trail"][-1]["passed"] is False
+    assert "runner rejects it" in step["trail"][-1]["reasons"][0]
+    assert arm_search.stats([rows[-1]])["n"] == 0 and arm_search.spent(rows) == arm_search.spent(rows[:-1])
+
+
+def test_a_candidate_that_fails_precheck_is_skipped_and_the_search_goes_on(tmp_path, monkeypatch):
+    scenario = {"full-feature": [{"ok": True, "cost": 20}], "*": [{"ok": False, "cost": 8}]}
+    fake, out = _setup(tmp_path, scenario, monkeypatch)
+    real = arm_search.Driver.precheck
+
+    def precheck(self, variant):
+        if variant["name"] == TDD:
+            return False, "installed runner rejects the workflow: boom"
+        return real(self, variant)
+
+    monkeypatch.setattr(arm_search.Driver, "precheck", precheck)
+    assert _run(fake, out) == 0
+    rows = arm_search.read_ledger(out)
+    refused = [row for row in rows if row["status"] == "precheck-failed"]
+    assert [row["label"] for row in refused] == ["S-min+tdd"] and refused[0]["cost_usd"] == ""
+    assert not any(row["variant"] == TDD and row["status"] == "ok" for row in rows)
+    assert any(row["variant"] == ARCH for row in rows)  # the next candidate ran
+    decisions = json.loads((out / "decisions.json").read_text())
+    assert {"step": "precheck", "label": "S-min+tdd", "passed": False}.items() <= decisions[1].items()
+    insights = (out / "insights.md").read_text()
+    assert "S-min+tdd" in insights and "precheck" in insights
+    assert json.loads((out / "s_star.json").read_text())["menu"] == "removed"

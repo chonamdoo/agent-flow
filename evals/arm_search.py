@@ -18,9 +18,17 @@ own record next to the runs:
 Order (program v2.4): the opening block is C ×3 and S-min ×3 (all dimensions off, 2 reviewers), shuffled by `--seed`
 and written to `order.txt`; the C reruns are also the noise floor. If S-min passes the quality-purpose rule
 (`quality_rule`) against C, it is the candidate; otherwise dimensions come back one at a time, cumulatively on top of
-S-min, in the order tdd → architecture_review → reviewers 5 → design → planning, ×3 each, stopping at the first that
-passes. A candidate is re-measured 3 more times and must pass again on all 6 runs; one that does not is a dead end and
-the revival goes on. S* is the confirmed variant with the lowest cost per success.
+S-min, in the order tdd → architecture_review → reviewers → design → planning, ×3 each, stopping at the first that
+passes. Reviving `reviewers` removes S-min's reviewer override, so the profile's default reviewers (the generalist and
+every review angle of the profile, `variants.profile_override` returns None) come back; a fixed count such as 5 would
+not exist on every profile (node has 3 angles, so at most 4 reviewers). A candidate is re-measured 3 more times and
+must pass again on all 6 runs; one that does not is a dead end and the revival goes on. S* is the confirmed variant
+with the lowest cost per success.
+
+A revival candidate whose precheck fails (the kit or the installed runner cannot take it) is a dead end too: a
+`precheck-failed` row in the ledger (no cost, not an attempt), a failed `precheck` step in the decisions and
+insights, and the search goes on to the next candidate. A failed precheck of C or S-min still stops the search
+(`precheck-failed`, exit 5): without them there is no comparison.
 
 Run accounting:
 - `infra-error`: arm_compare exited non-zero, or `result.json` marks a harness error, an evaluator error or a
@@ -63,7 +71,8 @@ HYPOTHESES = {
     "reduce-all": "모든 차원을 끄고 리뷰어 2명만 두어도 C보다 성공이 많고 성공 1건당 비용이 낮다",
     "tdd": "red(TDD)를 되살리면 테스트가 먼저 생겨 숨은 검사 통과가 늘어난다",
     "architecture_review": "architecture-review를 되살리면 구조 결함이 gates 전에 잡혀 fix-loop 상한 정지가 준다",
-    "reviewers": "리뷰어를 5명으로 늘리면 multi-review가 더 많은 결함을 잡아 성공이 늘어난다",
+    "reviewers": "리뷰어 2명 제한을 풀어 profile 기본 리뷰어(일반 리뷰어와 profile의 모든 각도)를 되살리면 multi-review가 "
+                 "더 많은 결함을 잡아 성공이 늘어난다",
     "design": "ddd-design을 되살리면 도메인 경계가 먼저 정해져 구현 실패가 준다",
     "planning": "기획 묶음(domain-grill~plan-review)을 되살리면 요구 누락이 줄어 성공이 늘어난다",
 }
@@ -73,6 +82,7 @@ QUALITY_COST_MULTIPLE = 3.0  # v3: 성공 1건당 비용이 기준의 3배 이�
 NOISE_FLOOR_COST = 0.14  # v2.4: A/A 잡음 바닥(비용)
 DEFAULT_EXPECTED_COST = 25.0
 INFRA_STOP = 2
+PRECHECK_FAILED = "precheck-failed"
 CHECKPOINT_EVERY = 20
 DRIVE_TIMEOUT, DRIVE_BUDGET = 7200, 30.0
 LEDGER = "ledger.tsv"
@@ -89,14 +99,13 @@ def baseline() -> dict:
 
 
 def revived(step: int) -> dict:
-    """S-min with the first `step` dimensions of REVIVAL back on (step 0 is S-min itself)."""
+    """S-min with the first `step` dimensions of REVIVAL back on (step 0 is S-min itself).
+
+    Reviving `reviewers` drops the key: the profile's default reviewers, the same level C runs with."""
     spec = dict(S_MIN)
     for dim in REVIVAL[:step]:
-        if dim == "reviewers":
-            spec["reviewers"] = 5
-        else:
-            spec.pop(dim)
-    label = "S-min" + "".join(f"+{dim}{'5' if dim == 'reviewers' else ''}" for dim in REVIVAL[:step])
+        spec.pop(dim)
+    label = "S-min" + "".join(f"+{dim}" for dim in REVIVAL[:step])
     return {"label": label, "name": variants.name(spec), "arm": "S", "spec": variants.normalize(spec),
             "axis": REVIVAL[step - 1] if step else "reduce-all"}
 
@@ -284,6 +293,12 @@ def plan(rows: list[dict], order: list[str]) -> dict:
         axes.append(variant["axis"])
         mine = by_name.get(variant["name"], [])
         n = counted.get(variant["name"], 0)
+        refused = [row for row in mine if row["status"] == PRECHECK_FAILED]
+        if refused and n == 0:
+            trail.append({"step": "precheck", "label": variant["label"], "variant": variant["name"],
+                          "axis": variant["axis"], "passed": False,
+                          "reasons": [f"precheck 실패: {refused[-1].get('detail') or '-'}"], "stats": None})
+            continue
         if n < RUNS_PER_VARIANT:
             return {"kind": "run", "variant": variant, "stage": "search", "remaining": RUNS_PER_VARIANT - n,
                     "trail": trail}
@@ -663,7 +678,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         ok, why = driver.precheck(variant)
         kind = (_json(out / "precheck" / f"{variant['name']}.json") or {}).get("case_kind")
         if ok and kind in ("ui", "external") and driver.evaluator is None:
-            ok, why = False, f"a {kind} case is scored by its private evaluator: pass --evaluator"
+            code = stop(out, "precheck-failed", f"a {kind} case is scored by its private evaluator: pass --evaluator", 5)
+            write_insights(out, rows, step)
+            return code
+        if not ok and step["stage"] != "opening":
+            # a revival candidate the kit cannot take is a dead end, not the end of the search
+            append_ledger(out, {"run": f"r{len(rows) + 1:03d}", "stage": "precheck", "label": variant["label"],
+                                "variant": variant["name"], "spec": variant["spec"], "axis": variant["axis"],
+                                "hypothesis": HYPOTHESES[variant["axis"]], "success": 0, "false_complete": 0,
+                                "integrity_flags": 0, "status": PRECHECK_FAILED, "run_status": PRECHECK_FAILED,
+                                "detail": why[:300]})
+            continue
         if not ok:
             code = stop(out, "precheck-failed", f"{variant['label']} {variant['name']}: {why}", 5)
             write_insights(out, rows, step)
