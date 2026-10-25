@@ -7,9 +7,10 @@
     python3 -I <run>/user-sim/user_sim.py ask <run>/user-sim/config.json "<question>"
 
 The oracle is a facts file (`{"facts": [{"id", "ko", "en"?, "topic"?, "keywords"?, "rule"?}]}`), or a Markdown list
-that is split into one fact per top-level bullet (indented lines stay with their bullet). One question is answered in two separate `claude -p` calls (the configured model, effort `low` through
-`CLAUDE_CODE_EFFORT_LEVEL`, no tools, no settings, no session, an allowlisted environment, a temporary empty working
-directory, JSON output, `BUDGET_USD` and `TIMEOUT` per call):
+that is split into one fact per top-level bullet (indented lines stay with their bullet). One question is answered in
+two separate `claude -p` calls (the configured model, effort `low` through `CLAUDE_CODE_EFFORT_LEVEL`, no tools, no
+settings, no session, an allowlisted environment, a temporary empty working directory, JSON output, `BUDGET_USD` and
+`TIMEOUT` per call):
 
 1. **select**: a fixed prompt with every fact (id and text) returns the ids of the facts that directly answer some
    part of the question, as JSON. Unknown ids are dropped.
