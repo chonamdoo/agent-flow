@@ -69,6 +69,17 @@ rates and counted apart.
   output paths) is written to `arm.json` `router` before the chosen arm is prepared in the same run directory, and
   `drive` starts a fresh controller on it. The router's cost is added to the run's `total_cost_usd`.
 
+Layers and the simulated user (grill experiment): an external case may declare `layers` (for example `complete`
+and `underspec`, `select_layer`), picked with `prepare --layer`; `arm.json` keeps `layer`. A case or layer with
+`user_sim: {"oracle": "<path in the case dir>"}` gets `<run>/user-sim/ask-user` (`user_sim.py`, outside the
+project; the oracle is a copy no project file comes from) and every arm's task text gains `ASK_USER_LINE`; without
+`user_sim` no prompt changes. A workflow controller is told to put a phase's user questions to `ask-user` instead
+of answering them itself, and before approving `domain-grill` the harness checks that the artifact's `user round`
+decisions have at least as many `ask-user` calls behind them (`grill_check`; sent back once, then approved and
+recorded in `drive.json` `grill_checks`). `score` reads `<run>/user-sim.jsonl` into `ask_user_calls`,
+`ask_user_questions`, `asked_any` and `user_sim_cost_usd` (added to `total_cost_usd`), and marks a run contaminated
+when a tool call names the oracle copy or the simulator's config. `arm.json` `user_sim` keeps the oracle's sha256.
+
 Every run's result carries `integrity` (`integrity.check`, #409 v2 §3a): deleted, disabled or weakened tests and
 stubs in the diff from the start commit, a "tests pass" claim with no test command in the transcript, and changes
 left uncommitted by a run that declared `complete`. It is recorded and summarized, not yet part of the success rule
@@ -118,6 +129,7 @@ import completion  # noqa: E402
 import variants  # noqa: E402
 import integrity  # noqa: E402
 import router  # noqa: E402
+import user_sim  # noqa: E402
 import verify_gate  # noqa: E402
 import run_usage  # noqa: E402
 from cycle_report import fisher_greater  # noqa: E402
@@ -214,7 +226,22 @@ def _install(kit: Path, project: Path, case: dict, *, hooks: bool) -> None:
     _git(["commit", "-qm", "install", "--allow-empty"], project)
 
 
-def driver_prompt(task: str, workflow: str) -> str:
+# A case or layer with `user_sim` gives every arm the same way to ask the product owner (`user_sim.py`). The line is
+# part of the task text, so a workflow arm's runner, and so its domain-grill, sees it too. Without `user_sim` no
+# prompt changes by a byte.
+ASK_USER_LINE = ('If a requirement is unclear, you may ask the product owner by running `{script} "<question>"`; '
+                 "answers come back on stdout.")
+ANSWER_FROM_TASK = "answer it from the task text"
+ANSWER_FROM_OWNER = ("ask the product owner with that `ask-user` command and record the answers as that user round; "
+                     "do not answer it yourself")
+
+
+def with_ask_user(task: str, ask_user: str | None) -> str:
+    return task if ask_user is None else f"{task}\n\n{ASK_USER_LINE.format(script=ask_user)}"
+
+
+def driver_prompt(task: str, workflow: str, ask_user: bool = False) -> str:
+    answer = ANSWER_FROM_OWNER if ask_user else ANSWER_FROM_TASK
     return f"""# Task
 
 {task}
@@ -224,7 +251,7 @@ Use Agent Flow, installed in this project, to do this task with the `{workflow}`
     .agent-flow/bin/agent-flow run {shlex.quote(task)} --workflow {workflow}
 
 Do each phase the runner prints and continue with the command it prints. When a phase asks the user a
-question, answer it from the task text. You are not the human approver: the evaluator approves phases. When the
+question, {answer}. You are not the human approver: the evaluator approves phases. When the
 runner pauses a phase for user approval, do not run its approval command; summarize the artifact and end your
 turn. The evaluator approves it and resumes you. Do not run `agent-flow spec approve` or
 `agent-flow spec confirm`, and do not change a SPEC's `verify` to `manual`; if the runner cannot go on without
@@ -272,10 +299,41 @@ def load_external_case(case_dir: Path) -> dict:
     """
     raw = (case_dir / "case.json").read_bytes()
     case = json.loads(raw)
-    for key in ("name", "seed", "files", "task", "profile", "install", "score_keys"):
+    for key in ("name", "seed", "task", "profile", "install", "score_keys"):
         if key not in case:
             raise SystemExit(f"external case is missing `{key}`")
+    if "files" not in case and "layers" not in case:
+        raise SystemExit("external case is missing `files`")
     return {**case, "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def select_layer(case: dict, case_dir: Path, layer: str | None) -> dict:
+    """The task files and the simulated user for one layer of an external case.
+
+    `layers` maps a name to either a files map (`{"prd.md": "task/prd-full.md"}`) or `{"files": {...}, "user_sim":
+    {"oracle": "<path in the case dir>"}}`. The layer's files go over the case's own `files`; its `user_sim`, or else the
+    case's, names the oracle. A case with layers needs `--layer`, one without takes none. The oracle must be a file in
+    the case directory that no project file is copied from, so the agent never gets it through the project.
+    """
+    layers = case.get("layers")
+    if layers is None and layer is not None:
+        raise SystemExit(f"case {case['name']} has no layers; --layer {layer} does not apply")
+    if layers is not None and layer not in layers:
+        raise SystemExit(f"case {case['name']} needs --layer, one of {sorted(layers)}")
+    chosen = layers[layer] if layers is not None else {}
+    structured = isinstance(chosen.get("files"), dict)
+    files = {**case.get("files", {}), **(chosen["files"] if structured else chosen)}
+    simulated = (chosen.get("user_sim") if structured else None) or case.get("user_sim")
+    oracle = None
+    if simulated is not None:
+        if not isinstance(simulated, dict) or not isinstance(simulated.get("oracle"), str):
+            raise SystemExit("`user_sim` must be {\"oracle\": \"<path in the case dir>\"}")
+        oracle = (case_dir / simulated["oracle"]).resolve()
+        if not oracle.is_file() or not oracle.is_relative_to(case_dir.resolve()):
+            raise SystemExit(f"the oracle {simulated['oracle']} is not a file in the case directory")
+        if any((case_dir / source).resolve() == oracle for source in files.values()):
+            raise SystemExit(f"the oracle {simulated['oracle']} is also copied into the project")
+    return {"layer": layer, "files": files, "oracle": oracle}
 
 
 def _seed_external_project(case: dict, case_dir: Path, project: Path) -> None:
@@ -690,8 +748,9 @@ def _workflow_record(arm: str, searched: dict | None) -> dict:
 
 def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isolation: str = "instructed",
             case_dir: Path | None = None, variant: dict | None = None, menu_variants: list[dict] | None = None,
-            model: str = DEFAULT_MODEL) -> dict:
-    """`model` is arm R's router model; `drive` must run the controller on the same one."""
+            model: str = DEFAULT_MODEL, layer: str | None = None) -> dict:
+    """`model` is arm R's router model; `drive` must run the controller on the same one. `layer` picks one of an
+    external case's layers (`select_layer`)."""
     if isolation not in ISOLATION:
         raise ValueError(f"isolation must be one of {ISOLATION}")
     if (arm == "S") != (variant is not None):
@@ -702,7 +761,9 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
         router.menu(menu_variants)  # a bad menu variant fails before anything is seeded
     if case_dir is not None:
         return _prepare_external(kit, arm, load_external_case(case_dir), case_dir, trial, output, isolation, variant,
-                                 menu_variants, model)
+                                 menu_variants, model, layer)
+    if layer is not None:
+        raise ValueError("--layer applies to an external case (--case-dir) with layers")
     ui = UI_CASES.get(case_name)
     if ui is None:
         case_dir = CASES / case_name
@@ -757,18 +818,29 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
     return meta
 
 
+def _install_user_sim(output: Path, oracle: Path | None, model: str) -> dict | None:
+    """The `ask-user` script and its oracle copy in `<run>/user-sim/`, outside the project; None without an oracle."""
+    if oracle is None:
+        return None
+    return user_sim.install(output, oracle, {"keys": list(CONTROLLER_ENV), "set": controller_env({})}, model)
+
+
 def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: int, output: Path,
                       isolation: str, variant: dict | None = None, menu_variants: list[dict] | None = None,
-                      model: str = DEFAULT_MODEL) -> dict:
+                      model: str = DEFAULT_MODEL, layer: str | None = None) -> dict:
     if arm not in (*BARE_ARMS, *WORKFLOWS, *ROUTED_ARMS):
         raise ValueError("an external case defines the A, AP, PS, V, VK, B, C, D, S and R arms only")
+    selected = select_layer(case, case_dir, layer)
+    case = {**case, "files": selected["files"]}
     output.mkdir(parents=True)
     agent_kit = sanitized_kit(kit, output / "kit")
     project = output / "project"
     _seed_external_project(case, case_dir, project)
+    simulated = _install_user_sim(output, selected["oracle"], model)
+    task = with_ask_user(case["task"], simulated["ask_user"] if simulated else None)
     routed, requested = {}, arm
     if arm in ROUTED_ARMS:
-        routed = _route(output, project, case["task"], model, menu_variants,
+        routed = _route(output, project, task, model, menu_variants,
                         {"arm": arm, "case": case["name"], "trial": trial, "project": str(project.resolve())},
                         agent_kit, case["profile"])
         arm, variant = routed["effective_arm"], routed["router"].get("variant")
@@ -781,12 +853,12 @@ def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: in
         if arm in SKILL_ARMS:
             skills = _install_skills(agent_kit, project)
         _git(["checkout", "-qb", BRANCH], project)
-        prompt = external_bare_prompt(case)
+        prompt = external_bare_prompt({**case, "task": task})
     else:
         _install(agent_kit, project, {"profile": case["profile"], "modes": {"clean": {"install": case["install"]}}},
                  hooks=True)
         searched = _write_variant(agent_kit, project, case["profile"], variant)
-        prompt = driver_prompt(case["task"], searched["name"] if searched else WORKFLOWS[arm])
+        prompt = driver_prompt(task, searched["name"] if searched else WORKFLOWS[arm], ask_user=simulated is not None)
     (output / "prompt.md").write_text(prompt, encoding="utf-8")
     meta = {"arm": requested, **routed, "case": case["name"], "trial": trial, "project": str(project.resolve()),
             "start_commit": _git(["rev-parse", "HEAD"], project),
@@ -798,7 +870,9 @@ def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: in
             **({"skills": skills} if skills is not None else {}),
             "case_kind": "external",
             "case_sha256": case["sha256"], "seed_commit": case["seed"]["commit"], "score_keys": case["score_keys"],
-            "evaluator_repeat": bool(case.get("evaluator_repeat"))}
+            "evaluator_repeat": bool(case.get("evaluator_repeat")),
+            **({"layer": selected["layer"]} if selected["layer"] is not None else {}),
+            **({"user_sim": simulated} if simulated is not None else {})}
     (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
     return meta
 
@@ -1338,6 +1412,10 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
     else:
         graded = _grade_phase_case(meta, checkout)
         graded["contaminated"] = any(marker in item for item in tool_inputs(rows) for marker in HIDDEN_MARKERS)
+    simulated = user_sim.summary(run / user_sim.LOG) if meta.get("user_sim") else None
+    if simulated is not None:
+        simulated["oracle_reads"] = oracle_reads(rows, run)
+        graded["contaminated"] = graded["contaminated"] or bool(simulated["oracle_reads"])
     message = final_message(main_rows)
     declaration = completion.classify(message if main_rows else None)
     drive = json.loads((run / "drive.json").read_text(encoding="utf-8")) if (run / "drive.json").is_file() else {}
@@ -1353,7 +1431,9 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
               "manual_spec_approvals": manual_spec_approvals(project, checkout), "artifact_sha256": artifact,
               "transcript": str(transcript) if transcript else None, **_measured_usage(rows, read), **read,
               "controller_cost_usd": drive.get("cost_usd"),
-              "total_cost_usd": total_cost(drive.get("cost_usd"), gate, routed),
+              "total_cost_usd": total_cost(drive.get("cost_usd"), gate, routed,
+                                           simulated["user_sim_cost_usd"] if simulated else 0.0),
+              **(simulated or {}), **({"grill_checks": drive["grill_checks"]} if "grill_checks" in drive else {}),
               **({"router_cost_usd": routed.get("cost_usd")} if routed else {}),
               **({"verify_gate": gate} if gate is not None else {}), "drive_exit": drive.get("exit"),
               "drive_timed_out": drive.get("timed_out"), "drive_is_error": drive.get("is_error"),
@@ -1372,11 +1452,22 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
     return result
 
 
-def total_cost(controller: float | None, gate: dict | None, routed: dict | None = None) -> float | None:
-    """The controller's cost plus arm V's reviewer cost and arm R's router cost; null when any of them is unknown."""
+def total_cost(controller: float | None, gate: dict | None, routed: dict | None = None,
+               simulator: float | None = 0.0) -> float | None:
+    """The controller's cost plus arm V's reviewer cost, arm R's router cost and the simulated user's cost; null when
+    any of them is unknown."""
     reviewer = gate["reviewer_cost_usd"] if gate is not None else 0.0
     chooser = routed.get("cost_usd") if routed else 0.0
-    return None if None in (controller, reviewer, chooser) else round(controller + reviewer + chooser, 4)
+    parts = (controller, reviewer, chooser, simulator)
+    return None if None in parts else round(sum(parts), 4)
+
+
+def oracle_reads(rows: list[dict], run: Path) -> int:
+    """Tool calls that name the simulator's oracle copy or config. Running `ask-user` itself names neither."""
+    target = (run / user_sim.DIR).resolve()
+    markers = (str(target / user_sim.ORACLE), str(target / user_sim.CONFIG), f"{user_sim.DIR}/{user_sim.ORACLE}",
+               f"{user_sim.DIR}/{user_sim.CONFIG}", f"{user_sim.DIR}/user_sim.py")
+    return sum(any(marker in item for marker in markers) for item in tool_inputs(rows))
 
 
 def _grade_phase_case(meta: dict, checkout: Path) -> dict:
@@ -1480,13 +1571,18 @@ def parse_runner_status(stdout: str, worktree: Path) -> dict | None:
     return None
 
 
-def review_findings(worktree: Path, status: dict, limit: int = 12) -> dict:
-    """What the phase artifact still asks for when the run stops at the cap: verdict counts and the open findings."""
+def phase_artifact(worktree: Path, status: dict, phase: str) -> Path | None:
+    """`<git-common-dir>/agent-flow/worktrees/<name>/.agent-flow/runs/<run>/artifacts/<phase>.md`, where the runner
+    keeps the run's artifacts."""
     run_id = str(status.get("run") or "").rsplit("/", 1)[-1]
     common = _common_dir(worktree)
-    phase = status["fix_loop_cap"]["phase"]
-    artifact = (common / "agent-flow" / "worktrees" / worktree.name / ".agent-flow" / "runs" / run_id / "artifacts"
-                / f"{phase}.md") if common and run_id else None
+    return (common / "agent-flow" / "worktrees" / worktree.name / ".agent-flow" / "runs" / run_id / "artifacts"
+            / f"{phase}.md") if common and run_id else None
+
+
+def review_findings(worktree: Path, status: dict, limit: int = 12) -> dict:
+    """What the phase artifact still asks for when the run stops at the cap: verdict counts and the open findings."""
+    artifact = phase_artifact(worktree, status, status["fix_loop_cap"]["phase"])
     if artifact is None or not artifact.is_file():
         return {"artifact": None, "verdicts": {}, "findings": []}
     text = artifact.read_text(encoding="utf-8", errors="replace")
@@ -1496,6 +1592,38 @@ def review_findings(worktree: Path, status: dict, limit: int = 12) -> dict:
     findings = [line.strip()[2:] for line in text.splitlines() if re.match(r"^\s*- (high|med|medium|low|critical):", line)]
     return {"artifact": hashlib.sha256(text.encode("utf-8")).hexdigest(), "verdicts": verdicts,
             "findings": findings[:limit], "findings_total": len(findings)}
+
+
+# domain-grill의 사용자 라운드(#409 grill 실험). 시뮬레이터가 있는 run에서 harness는 grill을 승인하기 전에, artifact의
+# `## Decision Sources`에서 `user round <n>`이 출처인 결정의 라운드 수가 `ask-user` 호출 수를 넘지 않는지 본다. 넘으면
+# controller가 사용자 대신 답한 것이므로 한 번 되돌려 보내고, 그래도 넘으면 승인하되 기록에 남긴다.
+# 한계: 라운드와 호출을 수로만 맞춘다. 어떤 답이 어떤 결정이 됐는지, 출처를 `task`로 적은 결정이 정말 과제에 있었는지는
+# 보지 않는다.
+GRILL_PHASE = "domain-grill"
+USER_ROUND = re.compile(r"\buser round\s*(\d+)", re.I)
+MAX_GRILL_RECHECKS = 1
+RESUME_AFTER_GRILL_CHECK = (
+    "The evaluator, as the user, has not approved `domain-grill`: domain-grill.md records {rounds} user round(s) under "
+    "`## Decision Sources`, but the product owner was asked {calls} time(s). Ask the product owner every question of "
+    "those rounds with `{script}`, update domain-grill.md from their answers, then end your turn for approval.")
+
+
+def grill_check(worktree: Path, status: dict, log: Path) -> dict:
+    """Whether every `user round <n>` decision in the grill artifact can have come through `ask-user`."""
+    artifact = phase_artifact(worktree, status, GRILL_PHASE)
+    calls = user_sim.summary(log)["ask_user_calls"]
+    if artifact is None or not artifact.is_file():
+        return {"artifact": None, "decisions": None, "user_round_decisions": None, "user_rounds": None,
+                "ask_user_calls": calls, "passed": None}
+    text = artifact.read_text(encoding="utf-8", errors="replace")
+    section = re.search(r"^## Decision Sources\s*$(.*?)(?=^## |\Z)", text, re.M | re.S)
+    lines = [line.strip() for line in (section.group(1) if section else "").splitlines()
+             if line.strip().startswith("- ")]
+    rounds = [match for match in (USER_ROUND.search(line.rsplit(":", 1)[-1]) for line in lines) if match]
+    distinct = len({int(match.group(1)) for match in rounds})
+    return {"artifact": hashlib.sha256(text.encode("utf-8")).hexdigest(), "decisions": len(lines),
+            "user_round_decisions": len(rounds), "user_rounds": distinct, "ask_user_calls": calls,
+            "passed": distinct <= calls}
 
 
 def approve_phase(project: Path, status: dict) -> bool:
@@ -1541,6 +1669,10 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
         raise SystemExit(f"arm R's router ran on {routed.get('model')}; drive the controller on the same model")
     if arm in GATE_ARMS:
         set_gate_model(run, model)
+    simulated = meta.get("user_sim")
+    if simulated:
+        user_sim.set_model(run, model)
+    grill_checks: list[dict] = []
     started = time.monotonic()
     approvals: list[str] = []
     reapprovals: list[dict] = []
@@ -1581,7 +1713,16 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
                 message = RESUME_AFTER_FIX_LOOP_CAP.format(phase=cap["phase"])
                 continue
             cap_stop = False
-            if not status or status.get("reason") != "phase_approval_required" or not approve_phase(project, status):
+            if not status or status.get("reason") != "phase_approval_required":
+                break
+            if simulated and status.get("current_phase") == GRILL_PHASE:
+                check = grill_check(Path(status["worktree"]), status, run / user_sim.LOG)
+                grill_checks.append(check)
+                if check["passed"] is False and sum(item["passed"] is False for item in grill_checks) <= MAX_GRILL_RECHECKS:
+                    message = RESUME_AFTER_GRILL_CHECK.format(rounds=check["user_rounds"], calls=check["ask_user_calls"],
+                                                              script=simulated["ask_user"])
+                    continue
+            if not approve_phase(project, status):
                 break
             approvals.append(str(status.get("current_phase")))
             message = RESUME_AFTER_APPROVAL.format(phase=status.get("current_phase"))
@@ -1591,6 +1732,7 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
               "timed_out": timed_out, "seconds": round(time.monotonic() - started), **summary, "session_id": session,
               "cost_usd": spent or None, "harness_approvals": approvals,
               "fix_loop_reapprovals": reapprovals, "fix_loop_cap_stop": cap_stop,
+              **({"grill_checks": grill_checks} if simulated else {}),
               **({"verify_gate": verify_gate.summary(run / verify_gate.LOG)} if arm in GATE_ARMS else {}),
               "transcript": str(transcript) if transcript else None,
               "argv_sha256": hashlib.sha256(json.dumps(controller_argv(prompt, model, budget)).encode()).hexdigest(),
@@ -1655,7 +1797,9 @@ def summarize(results: list[dict]) -> str:
     """Every assigned run is in its arm's denominator; only harness errors are listed apart (with their reasons).
 
     Arm R gets one row over all its runs and one row per chosen option (`R: <option>`); the option rows have no
-    Fisher p, because the router, not the assignment, put each run there. A "Router choices" table follows.
+    Fisher p, because the router, not the assignment, put each run there. A "Router choices" table follows, and a
+    "By layer" table when any run records a case layer or had a simulated user: one row per arm and layer (`-` for
+    none), with the runs that asked, the `ask-user` calls and questions, and the simulator's cost.
     """
     assigned = [row for row in results if run_status(row) != "harness-error"]
     lines = ["| arm | assigned runs | success | one-sided Fisher p vs A | overclaim (upper 95%) | declared complete/blocked/"
@@ -1699,6 +1843,17 @@ def summarize(results: list[dict]) -> str:
             lines.append(f"| {option} | {'/'.join(arms)} | {len(group)} | {sum(_succeeded(row) for row in group)}/"
                          f"{len(group)} | {sum(bool(row['router'].get('fallback')) for row in group)} | "
                          f"{_usd(_mean(costs))} |")
+    layered = [row for row in assigned if row.get("layer") is not None or "ask_user_calls" in row]
+    if layered:
+        lines += ["", "By layer (assigned runs):", "",
+                  "| arm | layer | runs | success | simulated user: runs that asked / ask-user calls / questions / "
+                  "cost (mean) | total cost (mean) |", "|---|---|---|---|---|---|"]
+        for arm in ARMS:
+            for layer in sorted({str(row.get("layer") or "-") for row in layered if row["arm"] == arm}):
+                group = [row for row in layered if row["arm"] == arm and str(row.get("layer") or "-") == layer]
+                total = _mean([row["total_cost_usd"] for row in group if row.get("total_cost_usd") is not None])
+                lines.append(f"| {arm} | {layer} | {len(group)} | {sum(_succeeded(row) for row in group)}/{len(group)}"
+                             f" | {_ask_cell(group)} | {_usd(total)} |")
     return "\n".join(lines) + "\n"
 
 
@@ -1806,6 +1961,21 @@ def _skills_cell(group: list[dict]) -> str:
     return f"{sum(bool(names) for names in recorded)}/{len(recorded)}: {listed or 'none'}"
 
 
+def _ask_cell(group: list[dict]) -> str:
+    """`-` when no run in the group had a simulated user."""
+    simulated = [row for row in group if "ask_user_calls" in row]
+    if not simulated:
+        return "-"
+    costs = [row["user_sim_cost_usd"] for row in simulated if row.get("user_sim_cost_usd") is not None]
+    return (f"{sum(bool(row.get('asked_any')) for row in simulated)}/{len(simulated)} / "
+            f"{_fmt1(_mean([row['ask_user_calls'] for row in simulated]))} / "
+            f"{_fmt1(_mean([row['ask_user_questions'] for row in simulated]))} / {_usd(_mean(costs))}")
+
+
+def _fmt1(value: float | None) -> str:
+    return "-" if value is None else f"{value:.1f}"
+
+
 def _integrity_cell(group: list[dict]) -> str:
     flags = [row["integrity"]["flags"] for row in group if isinstance(row.get("integrity"), dict)]
     return "-" if not flags else f"{sum(flags)} ({sum(bool(flag) for flag in flags)})"
@@ -1845,6 +2015,7 @@ def main(argv: list[str] | None = None) -> int:
                       help="arm R: an S variant spec (JSON) to add to the router's menu; repeat for each")
     prep.add_argument("--model", default=DEFAULT_MODEL,
                       help="arm R: the router's model; `drive --model` must be the same")
+    prep.add_argument("--layer", help="an external case's layer (case.json `layers`), e.g. complete or underspec")
     dr = sub.add_parser("drive")
     dr.add_argument("run", type=Path)
     dr.add_argument("--model", default=DEFAULT_MODEL)
@@ -1872,7 +2043,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "prepare":
         print(json.dumps(prepare(args.kit.resolve(), args.arm, args.case, args.trial, args.output.resolve(),
                                  args.isolation, args.case_dir.resolve() if args.case_dir else None,
-                                 args.variant, args.menu_variants, args.model), indent=1))
+                                 args.variant, args.menu_variants, args.model, args.layer), indent=1))
     elif args.command == "preflight":
         rows = preflight([tuple(item.split(":", 1)) for item in args.model])
         text = json.dumps(rows, indent=1)

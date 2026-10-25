@@ -26,7 +26,7 @@ from pathlib import Path
 
 import variants
 
-VERSION = "router-v2"
+VERSION = "router-v3"
 TIMEOUT = 600
 BUDGET_USD = 2.0
 MAX_ATTEMPTS = 2
@@ -69,8 +69,21 @@ OPTIONS = {
 }
 COMPOSE = "compose"
 
-DIMENSION_TEXT = {"planning": "planning phases", "design": "ddd-design", "tdd": "red (tests are written with the code "
-                  "in green)", "architecture_review": "architecture-review"}
+DIMENSION_TEXT = {"grill": "domain-grill", "planning": "planning phases", "design": "ddd-design",
+                  "tdd": "red (tests are written with the code in green)", "architecture_review": "architecture-review"}
+# 각 차원이 무엇을 하려고 있는지. 비용·시간 수치는 넣지 않는다(위 OPTIONS 주석과 같은 이유).
+DIMENSION_PURPOSE = {
+    "grill": ("interviews the user, in rounds, to settle requirements the task leaves undefined or ambiguous; useful "
+              "when the spec is incomplete, redundant when it is complete"),
+    "planning": ("writes a product brief and a PRD with checkable spec items, splits the work into slices and reviews "
+                 "that plan; useful when the scope or the acceptance criteria still have to be written down or the "
+                 "work split, redundant when the task already states them"),
+    "design": ("models the domain terms, boundaries and layers before code; useful when the change adds or reshapes "
+               "domain concepts, redundant when it fits the existing design"),
+    "tdd": "writes failing tests before the code; without it, green writes the tests with the code",
+    "architecture_review": ("reviews the change's structure against the design after multi-review; useful when the "
+                            "change spans several modules or layers, redundant for a local change"),
+}
 
 PROMPT = """You are choosing how a coding task will be carried out in the repository in the current directory. \
 You do not do the task yourself, and another agent with a fresh context will do it.
@@ -94,22 +107,25 @@ For `compose`, the object also has `"spec"`, as that option says.
 
 def compose_description() -> str:
     """The `compose` option's text: the same dimensions and reviewer counts as `variants`, in fixed words."""
-    keys = "; ".join(f"`{key}` ({', '.join(phases)})" for key, phases in variants.DROPS.items())
+    keys = "\n".join(f"  - `{key}` ({', '.join(phases)}): {DIMENSION_PURPOSE[key]}."
+                      for key, phases in variants.DROPS.items())
     counts = " or ".join(str(count) for count in variants.REVIEWER_COUNTS)
     return ("The Agent Flow kit installed with a reduced form of `full-feature` that you assemble, driven through its "
             "runner. Choose it by adding `\"spec\": {...}` to your JSON line. Each of these keys is true to keep "
-            f"those phases or false to drop them: {keys}; without red, green writes the tests with the code. "
-            f"`reviewers` is {counts} to run that many reviewers in multi-review; leave it out for the profile's "
-            "default number. A key you leave out keeps the `full-feature` value; "
-            "every other phase, the gates and the fix-loop are as in `full-feature`. This run has no git remote, so it "
-            "ends at the first phase that needs one.")
+            f"those phases or false to drop them:\n{keys}\n"
+            f"  - `reviewers` ({counts}): how many independent reviewers multi-review runs; leave it out for the "
+            "profile's default number.\n"
+            "A key you leave out keeps the `full-feature` value, except `grill`, which then takes the value you give "
+            "`planning`; give `grill` to decide it on its own. Every other phase, the gates and the fix-loop are as in "
+            "`full-feature`. This run has no git remote, so it ends at the first phase that needs one.")
 
 
 def variant_description(spec: dict) -> str:
     """A menu variant's description, built from its spec in fixed words (no free text)."""
+    values = variants.effective(spec)
     spec = variants.normalize(spec)
     dropped = [f"{DIMENSION_TEXT[key]} ({', '.join(variants.DROPS[key])})" if key == "planning" else DIMENSION_TEXT[key]
-               for key in variants.DROPS if spec.get(key) is False]
+               for key in variants.DROPS if not values[key]]
     parts = [f"drops {', '.join(dropped)}" if dropped else "drops no phase"]
     if "reviewers" in spec:
         parts.append(f"runs {spec['reviewers']} reviewers in multi-review")

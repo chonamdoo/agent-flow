@@ -352,3 +352,41 @@ def test_verify_skills_prepares_arm_vk(tmp_path, fake_router):
     assert meta["effective_arm"] == "VK" and meta["verify_gate"] is not None
     assert meta["skills"]["names"] and (run / "project" / ".claude" / "skills" / "tdd" / "SKILL.md").is_file()
     assert not (run / "project" / ".agent-flow").exists()
+
+
+# ─── grill: domain-grill is its own dimension, apart from the other planning phases ───
+
+GRILL_PURPOSE = ("interviews the user, in rounds, to settle requirements the task leaves undefined or ambiguous; "
+                 "useful when the spec is incomplete, redundant when it is complete")
+
+
+def test_the_compose_menu_explains_every_dimensions_purpose_and_the_grill_default():
+    assert router.VERSION == "router-v3"
+    (item,) = [item for item in router.menu() if item["name"] == "compose"]
+    text = item["description"]
+    assert f"`grill` (domain-grill): {GRILL_PURPOSE}." in text
+    assert "`planning` (product-brief, prd, slice-plan, plan-review)" in text
+    for key in variants.DROPS:
+        assert router.DIMENSION_PURPOSE[key] in text
+    assert "except `grill`, which then takes the value you give `planning`" in text
+    assert "$" not in text and "minute" not in text and "token" not in text
+
+
+def test_compose_parses_a_grill_spec_and_prepares_it(tmp_path, fake_router):
+    spec = {"grill": False, "reviewers": 2}
+    good, error = router.parse_choice(_compose(spec), NAMES)
+    assert not error and good["spec"] == spec
+    assert router.parse_choice(_compose({"grill": "no"}), NAMES) == (None, "`spec` is invalid: grill must be true or false")
+    fake_router(_compose(spec))
+    meta = arm_compare.prepare(ROOT, "R", "devflow", 1, tmp_path / "R-1")
+    phases = meta["variant"]["phases"]
+    assert meta["router"]["variant"] == {"grill": False, "reviewers": 2} and meta["effective_arm"] == "S"
+    assert "domain-grill" not in phases and phases[0] == "product-brief" and "prd" in phases
+
+
+def test_a_menu_variant_names_what_its_effective_spec_drops():
+    assert router.variant_description({"grill": False}).count("drops domain-grill;") == 1
+    legacy = router.variant_description({"planning": False})
+    assert "drops domain-grill, planning phases (product-brief, prd, slice-plan, plan-review)" in legacy
+    split = router.variant_description({"planning": False, "grill": True})
+    assert "domain-grill" not in split and "planning phases (product-brief" in split

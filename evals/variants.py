@@ -9,14 +9,20 @@ project only: the project's installed runtime (`.agent-flow/runtime/python/agent
 reviewer count, `.agent-flow/profiles/<profile>.local.yaml`. The runner pins the definition at run start. The kit
 source is not changed; the variant is a new file beside the shipped workflows, none of which is touched.
 
-Dimensions (absent keys take the `full-feature` value):
-- planning: False drops domain-grill, product-brief, prd, slice-plan and plan-review.
+Dimensions (absent keys take the `full-feature` value, except `grill`, below):
+- grill: False drops domain-grill (the interview that settles requirements the task leaves open).
+- planning: False drops product-brief, prd, slice-plan and plan-review.
 - design: False drops ddd-design.
 - tdd: False drops red (green still writes the tests with the code).
 - architecture_review: False drops architecture-review.
 - reviewers: 2 or 5 keeps that many reviewers (the generalist plus the profile's first N-1 angles); absent keeps
   the profile's full list.
 The fix-loop cap, gates and delivery phases are never changed.
+
+`grill` was split out of `planning` later. A spec without a `grill` key gives `grill` the value of `planning`, so an
+older spec's `planning: false` still drops all five phases and keeps its name; a spec that names `grill` sets it on
+its own (`{"planning": false, "grill": true}` keeps domain-grill, `{"grill": false}` drops only it). `normalize`
+records `grill` only where it differs from `planning`, so equal meanings share one name.
 
 A dropped phase's place in the order and every route that pointed at it go to the next phase that is kept, so the
 remaining graph is the original one with that step removed.
@@ -34,32 +40,51 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "full-feature"
 DROPS = {
-    "planning": ("domain-grill", "product-brief", "prd", "slice-plan", "plan-review"),
+    "grill": ("domain-grill",),
+    "planning": ("product-brief", "prd", "slice-plan", "plan-review"),
     "design": ("ddd-design",),
     "tdd": ("red",),
     "architecture_review": ("architecture-review",),
 }
 REVIEWER_COUNTS = (2, 5)
 KEYS = (*DROPS, "reviewers")
+# 분리 전 spec과의 호환: `grill`이 없으면 `planning`의 값을 따른다.
+GRILL, GRILL_FOLLOWS = "grill", "planning"
 
 
 def normalize(spec: dict) -> dict:
-    """The variant with its keys checked; the name is derived from it, so equal specs share one name."""
+    """The variant with its keys checked; the name is derived from it, so equal specs share one name.
+
+    Every dimension but `grill` is kept only when False. `grill` is kept only when it differs from `planning`, the
+    value it takes when absent, so `{"planning": false}` and `{"planning": false, "grill": false}` are one variant."""
     unknown = sorted(set(spec) - set(KEYS))
     if unknown:
         raise ValueError(f"unknown variant keys: {unknown}")
     out: dict = {}
     for key in DROPS:
-        if key in spec:
-            if not isinstance(spec[key], bool):
-                raise ValueError(f"{key} must be true or false")
-            if spec[key] is False:
-                out[key] = False
+        if key in spec and not isinstance(spec[key], bool):
+            raise ValueError(f"{key} must be true or false")
+    for key in DROPS:
+        if key == GRILL:
+            continue
+        if spec.get(key) is False:
+            out[key] = False
+    follows = spec.get(GRILL_FOLLOWS, True)
+    if spec.get(GRILL, follows) != follows:
+        out[GRILL] = spec[GRILL]
+    out = {key: out[key] for key in DROPS if key in out}
     if "reviewers" in spec:
         if spec["reviewers"] not in REVIEWER_COUNTS:
             raise ValueError(f"reviewers must be one of {REVIEWER_COUNTS}")
         out["reviewers"] = spec["reviewers"]
     return out
+
+
+def effective(spec: dict) -> dict[str, bool]:
+    """Each dimension's effective value: True keeps its phases."""
+    spec = normalize(spec)
+    values = {key: spec.get(key, True) for key in DROPS if key != GRILL}
+    return {key: spec.get(GRILL, values[GRILL_FOLLOWS]) if key == GRILL else values[key] for key in DROPS}
 
 
 def name(spec: dict) -> str:
@@ -74,7 +99,8 @@ def base_definition(kit: Path) -> dict:
 def workflow(kit: Path, spec: dict) -> dict:
     spec = normalize(spec)
     definition = base_definition(kit)
-    dropped = {phase for key, phases in DROPS.items() if spec.get(key) is False for phase in phases}
+    values = effective(spec)
+    dropped = {phase for key, phases in DROPS.items() if not values[key] for phase in phases}
     order = [phase["id"] for phase in definition["phases"]]
     missing = sorted(dropped - set(order))
     if missing:
