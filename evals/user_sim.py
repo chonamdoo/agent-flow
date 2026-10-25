@@ -1,10 +1,18 @@
 """A simulated product owner who answers the agent's requirement questions from a hidden list of atomic facts.
 
-`arm_compare.prepare` installs it for a case or layer that sets `user_sim: {"oracle": "<path in the case dir>"}`:
-`install` copies this file and the oracle into `<run>/user-sim/` (outside the project) and writes an executable
-`<run>/user-sim/ask-user`. Every arm's prompt then says it may run that script; the agent's question goes to
+`arm_compare.prepare` installs it for a case or layer that sets `user_sim: {"oracle": "<path in the case dir>"}`.
+The oracle never enters the run sandbox (#409 v3.14, grill): `install` puts the oracle copy, the simulator's config
+and its log in `<run>.user-sim/` (`private_dir`, a sibling of the run directory, which the sandbox does not mount and
+hides), and only a client in `<run>/user-sim/` (this file and an executable `ask-user`). Every arm's prompt says it
+may run that script. During `drive` the simulator runs on the host as a broker (`Broker`) on an abstract unix stream
+socket (the sandbox shares the host's network namespace, as `claude_usage`'s collector does); `drive` writes the
+socket name and a per-drive token to `<run>/user-sim/client.json`, and the agent's question goes to
 
-    python3 -I <run>/user-sim/user_sim.py ask <run>/user-sim/config.json "<question>"
+    python3 -I <run>/user-sim/user_sim.py client <run>/user-sim/client.json "<question>"
+
+which sends only the question and prints the answer the broker sends back. The broker answers with `ask` below and
+logs every row to `<run>.user-sim/user-sim.jsonl` (`log_path`), where the harness reads it. A run prepared before this
+layout (`<run>/user-sim/oracle`) is read by `state_dir`/`log_path` for scoring, and `drive` refuses it.
 
 The oracle is a facts file (`{"facts": [{"id", "ko", "en"?, "topic"?, "keywords"?, "rule"?}]}`), or a Markdown list
 that is split into one fact per top-level bullet (indented lines stay with their bullet). One question is answered in
@@ -32,15 +40,19 @@ question. Only the standard library is used, because the script runs outside thi
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,7 +64,10 @@ TIMEOUT = 300
 BUDGET_USD = 1.0
 LOG = "user-sim.jsonl"
 DIR = "user-sim"
+PRIVATE = ".user-sim"  # `<run>.user-sim/`: oracle, config and log, outside the sandbox
+CLIENT = "client.json"  # `<run>/user-sim/client.json`: the broker's socket and token for this drive
 SCRIPT = "ask-user"
+MAX_QUESTION_BYTES = 64_000
 # The copy keeps the source bytes (facts JSON or Markdown); the name has no extension so path markers match either.
 ORACLE = "oracle"
 CONFIG = "config.json"
@@ -313,25 +328,55 @@ def summary(log: Path) -> dict:
             "user_sim_cost_usd": (round(sum(costs), 4) if None not in costs else None) if rows else 0.0}
 
 
+# ─── layout ───
+
+def private_dir(run_dir: Path) -> Path:
+    """`<run>.user-sim/`: the oracle copy, the config and the log, beside the run directory and never in the sandbox."""
+    return run_dir.parent / f"{run_dir.name}{PRIVATE}"
+
+
+def state_dir(run_dir: Path) -> Path:
+    """Where the oracle and the config are: `private_dir`, or `<run>/user-sim/` for a run prepared before it."""
+    private = private_dir(run_dir)
+    return private if private.is_dir() or not (run_dir / DIR / CONFIG).is_file() else run_dir / DIR
+
+
+def log_path(run_dir: Path) -> Path:
+    """The simulator's log: `<run>.user-sim/user-sim.jsonl`, or `<run>/user-sim.jsonl` for a run prepared before."""
+    private = private_dir(run_dir)
+    return private / LOG if private.is_dir() or not (run_dir / DIR / CONFIG).is_file() else run_dir / LOG
+
+
+def legacy(run_dir: Path) -> bool:
+    """True for a run whose oracle copy sits inside the run directory (prepared before the broker)."""
+    return state_dir(run_dir) == run_dir / DIR
+
+
 # ─── install ───
 
 def install(run_dir: Path, oracle: Path, env: dict, model: str) -> dict:
-    """`<run>/user-sim/` with this script, the oracle copy, the config and the `ask-user` wrapper; the record."""
+    """`<run>.user-sim/` with the oracle copy and the config, `<run>/user-sim/` with this script (as the client) and
+    the `ask-user` wrapper; the record."""
+    private = private_dir(run_dir)
     target = run_dir / DIR
     target.mkdir()
+    if private.exists():  # left by an earlier attempt in a run directory that was removed and is prepared again
+        shutil.rmtree(private)
+    private.mkdir()
     script = target / "user_sim.py"
     shutil.copy2(Path(__file__), script)
-    oracle_copy = target / ORACLE
+    oracle_copy = private / ORACLE
     shutil.copy2(oracle, oracle_copy)
     facts = load_facts(oracle_copy.read_text(encoding="utf-8"))
-    config = {"version": VERSION, "run_dir": str(run_dir.resolve()), "oracle": str(oracle_copy.resolve()),
-              "model": model, "effort": EFFORT, "env": env}
-    (target / CONFIG).write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
+    # `run_dir` is where `ask` logs: the private directory, which the harness reads and the agent cannot see.
+    config = {"version": VERSION, "run_dir": str(private.resolve()), "run": str(run_dir.resolve()),
+              "oracle": str(oracle_copy.resolve()), "model": model, "effort": EFFORT, "env": env}
+    (private / CONFIG).write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
     wrapper = target / SCRIPT
-    wrapper.write_text(f"#!/bin/sh\nexec python3 -I {shlex.quote(str(script.resolve()))} ask "
-                       f"{shlex.quote(str((target / CONFIG).resolve()))} \"$@\"\n", encoding="utf-8")
+    wrapper.write_text(f"#!/bin/sh\nexec python3 -I {shlex.quote(str(script.resolve()))} client "
+                       f"{shlex.quote(str((target / CLIENT).resolve()))} \"$@\"\n", encoding="utf-8")
     wrapper.chmod(0o755)
-    return {"version": VERSION, "ask_user": str(wrapper.resolve()),
+    return {"version": VERSION, "ask_user": str(wrapper.resolve()), "channel": "broker",
             "oracle_sha256": hashlib.sha256(oracle_copy.read_bytes()).hexdigest(), "facts": len(facts),
             "script_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
             "budget_usd": BUDGET_USD, "timeout_seconds": TIMEOUT, "effort": EFFORT,
@@ -340,20 +385,130 @@ def install(run_dir: Path, oracle: Path, env: dict, model: str) -> dict:
 
 def set_model(run_dir: Path, model: str) -> None:
     """The simulator runs on the controller's model, which only `drive` knows."""
-    path = run_dir / DIR / CONFIG
+    path = state_dir(run_dir) / CONFIG
     config = json.loads(path.read_text(encoding="utf-8"))
     path.write_text(json.dumps({**config, "model": model}, indent=1) + "\n", encoding="utf-8")
 
 
+# ─── broker (host) and client (sandbox) ───
+
+def _send_line(conn: socket.socket, data: dict) -> None:
+    conn.sendall(json.dumps(data, ensure_ascii=False).encode("utf-8") + b"\n")
+
+
+def _read_line(conn: socket.socket, limit: int) -> bytes:
+    data = b""
+    while b"\n" not in data:
+        chunk = conn.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+        if len(data) > limit:
+            raise ValueError("message too long")
+    return data.split(b"\n", 1)[0]
+
+
+class Broker:
+    """The simulator for one drive, on the host: listens on a fresh abstract unix stream socket, checks the per-drive
+    token, answers each question with `ask` (one at a time, so the log keeps their order) and sends back only the
+    answer. `drive` holds it open for the whole drive; `call` is injectable for tests."""
+
+    def __init__(self, run_dir: Path, call=None, environ: dict[str, str] | None = None):
+        self.run_dir, self.call, self.environ = run_dir, call, environ
+        self.socket_name = f"arm-compare-user-sim-{secrets.token_hex(8)}"
+        self.token = secrets.token_hex(16)
+        self.answered = 0
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._sock: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "Broker":
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.bind(b"\0" + self.socket_name.encode("utf-8"))
+        self._sock.listen(16)
+        self._sock.settimeout(0.2)
+        client = self.run_dir / DIR / CLIENT
+        client.write_text(json.dumps({"socket": self.socket_name, "token": self.token}) + "\n", encoding="utf-8")
+        self._thread = threading.Thread(target=self._loop, name="user-sim-broker", daemon=True)
+        self._thread.start()
+        return self
+
+    def _loop(self) -> None:
+        assert self._sock is not None
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn: socket.socket) -> None:
+        with conn:
+            try:
+                conn.settimeout(30)
+                request = json.loads(_read_line(conn, MAX_QUESTION_BYTES).decode("utf-8"))
+                question = str(request.get("question") or "").strip()
+                if not hmac.compare_digest(str(request.get("token") or ""), self.token):
+                    _send_line(conn, {"ok": False, "error": "unknown token"})
+                    return
+                if not question:
+                    _send_line(conn, {"ok": False, "error": "empty question"})
+                    return
+                with self._lock:
+                    config = json.loads((state_dir(self.run_dir) / CONFIG).read_text(encoding="utf-8"))
+                    row = ask(question, config, **({"call": self.call} if self.call else {}),
+                              **({"environ": self.environ} if self.environ is not None else {}))
+                    self.answered += 1
+                conn.settimeout(None)
+                _send_line(conn, {"ok": row["ok"], "answer": row["answer"] if row["ok"] else None})
+            except (OSError, ValueError) as failure:
+                try:
+                    _send_line(conn, {"ok": False, "error": f"{type(failure).__name__}"})
+                except OSError:
+                    pass
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+        if self._sock is not None:
+            self._sock.close()
+        (self.run_dir / DIR / CLIENT).unlink(missing_ok=True)
+
+
+def client(client_config: Path, question: str, timeout: float = 2 * TIMEOUT + 60) -> tuple[bool, str]:
+    """(answered, text): sends the question to this drive's broker and returns its answer."""
+    try:
+        config = json.loads(client_config.read_text(encoding="utf-8"))
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(timeout)
+            conn.connect(b"\0" + str(config["socket"]).encode("utf-8"))
+            _send_line(conn, {"token": config["token"], "question": question})
+            reply = json.loads(_read_line(conn, 4 * MAX_QUESTION_BYTES).decode("utf-8"))
+    except (OSError, ValueError, KeyError):
+        return False, FAILED
+    if not reply.get("ok") or not isinstance(reply.get("answer"), str):
+        return False, FAILED
+    return True, reply["answer"]
+
+
 def main(args: list[str]) -> int:
-    if len(args) < 2 or args[0] != "ask":
-        print("usage: user_sim.py ask <config.json> <question...>", file=sys.stderr)
+    if len(args) < 2 or args[0] not in ("ask", "client"):
+        print("usage: user_sim.py client <client.json> <question...>  |  ask <config.json> <question...>",
+              file=sys.stderr)
         return 2
-    config = json.loads(Path(args[1]).read_text(encoding="utf-8"))
     question = " ".join(args[2:]).strip() or sys.stdin.read().strip()
     if not question:
         print("ask-user: give the question as an argument", file=sys.stderr)
         return 2
+    if args[0] == "client":
+        answered, text = client(Path(args[1]), question)
+        print(text)
+        return 0 if answered else 1
+    config = json.loads(Path(args[1]).read_text(encoding="utf-8"))
     row = ask(question, config)
     if not row["ok"]:
         print(FAILED)

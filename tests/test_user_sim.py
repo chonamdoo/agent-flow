@@ -93,13 +93,17 @@ def test_the_underspec_layer_seeds_its_files_and_keeps_the_oracle_out_of_the_pro
     project = run / "project"
     assert (project / "prd.md").read_text(encoding="utf-8") == UNDER
     assert meta["layer"] == "underspec" and meta["user_sim"]["oracle_sha256"] == _sha(FULL)
-    oracle = run / user_sim.DIR / user_sim.ORACLE
+    oracle = user_sim.private_dir(run) / user_sim.ORACLE
     assert oracle.read_text(encoding="utf-8") == FULL and not oracle.resolve().is_relative_to(project.resolve())
+    # nothing the sandbox mounts (the run directory) holds the oracle or the simulator's config
+    assert not oracle.resolve().is_relative_to(run.resolve()) and not (run / user_sim.DIR / user_sim.ORACLE).exists()
+    assert all(FULL.encode() not in path.read_bytes() for path in run.rglob("*") if path.is_file())
     tracked = arm_compare._git(["ls-files"], project).splitlines()
     assert all(FULL not in (project / name).read_text(encoding="utf-8", errors="replace") for name in tracked)
     assert all(path.read_bytes() != FULL.encode() for path in project.rglob("*") if path.is_file())
     recorded = (run / "arm.json").read_text(encoding="utf-8")
-    assert str(case_dir) not in recorded and str(case_dir) not in (run / user_sim.DIR / user_sim.CONFIG).read_text()
+    assert str(case_dir) not in recorded
+    assert str(case_dir) not in (user_sim.private_dir(run) / user_sim.CONFIG).read_text()
     ask = Path(meta["user_sim"]["ask_user"])
     assert ask.is_file() and os.access(ask, os.X_OK) and not ask.resolve().is_relative_to(project.resolve())
     prompt = (run / "prompt.md").read_text(encoding="utf-8")
@@ -163,17 +167,20 @@ def _fake_claude(bin_dir: Path, seen: Path, answer: str = "최대 5개입니다.
     fake.chmod(0o755)
 
 
-def test_the_ask_user_script_selects_facts_then_answers_from_only_those_and_logs_them(tmp_path):
+def test_the_ask_user_script_selects_facts_then_answers_from_only_those_and_logs_them(tmp_path, monkeypatch):
     case_dir = _case(tmp_path)
     run = tmp_path / "A-under"
     meta = arm_compare.prepare(ROOT, "A", "x", 1, run, case_dir=case_dir, layer="underspec")
     user_sim.set_model(run, "claude-test-model")
     seen = tmp_path / "seen.jsonl"
     _fake_claude(tmp_path / "bin", seen)
-    env = {**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "CLAUDE_CODE_SESSION_ID": "controller",
-           "CLAUDE_CODE_EFFORT_LEVEL": "high"}
-    done = subprocess.run([meta["user_sim"]["ask_user"], "장바구니에 최대 몇 개까지 담나요?"], capture_output=True,
-                          text=True, env=env, cwd=run / "project", timeout=60)
+    # the broker runs on the host (drive's process): its environment is the one the simulator's calls start from
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}:{os.environ['PATH']}")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "controller")
+    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "high")
+    with user_sim.Broker(run):
+        done = subprocess.run([meta["user_sim"]["ask_user"], "장바구니에 최대 몇 개까지 담나요?"], capture_output=True,
+                              text=True, env=dict(os.environ), cwd=run / "project", timeout=60)
     assert done.returncode == 0 and done.stdout.strip() == "최대 5개입니다."
     select, answer = [json.loads(line) for line in seen.read_text(encoding="utf-8").splitlines()]
     for call in (select, answer):
@@ -190,7 +197,8 @@ def test_the_ask_user_script_selects_facts_then_answers_from_only_those_and_logs
     assert "The cart holds at most 5 items." in answering and "Coupons" not in answering
     assert user_sim.UNDECIDED in answering and "Answer in Korean" in answering
     assert answer["stdin"] == "장바구니에 최대 몇 개까지 담나요?"
-    (row,) = user_sim.read_log(run / user_sim.LOG)
+    (row,) = user_sim.read_log(user_sim.log_path(run))
+    assert user_sim.log_path(run).parent == user_sim.private_dir(run) and not (run / user_sim.LOG).exists()
     assert row["question"] == "장바구니에 최대 몇 개까지 담나요?" and row["answer"] == "최대 5개입니다."
     assert row["disclosed_fact_ids"] == ["F01"] and row["language"] == "ko" and row["effort"] == "low"
     assert row["cost_usd"] == 0.04 and row["questions"] == 1 and row["ok"] and row["oracle_sha256"] == _sha(FULL)
@@ -294,7 +302,7 @@ def test_score_counts_ask_user_calls_adds_the_simulator_cost_and_flags_oracle_re
     case_dir = _case(tmp_path)
     run = tmp_path / "A-under"
     arm_compare.prepare(ROOT, "A", "x", 1, run, case_dir=case_dir, layer="underspec")
-    config = json.loads((run / user_sim.DIR / user_sim.CONFIG).read_text(encoding="utf-8"))
+    config = json.loads((user_sim.private_dir(run) / user_sim.CONFIG).read_text(encoding="utf-8"))
     stub = _staged('{"fact_ids": ["F01"]}', "5개", cost=0.05)
     user_sim.ask("최대 수량은? 쿠폰은?", config, call=stub, environ={})
     user_sim.ask("배송비는?", config, call=stub, environ={})
@@ -305,7 +313,7 @@ def test_score_counts_ask_user_calls_adds_the_simulator_cost_and_flags_oracle_re
     assert result["layer"] == "underspec" and result["oracle_reads"] == 0 and result["contaminated"] is False
     transcript = tmp_path / "t.jsonl"
     transcript.write_text(json.dumps({"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "name": "Bash", "input": {"command": f"cat {run / user_sim.DIR / user_sim.ORACLE}"}}]}})
+        {"type": "tool_use", "name": "Bash", "input": {"command": f"cat {user_sim.private_dir(run) / user_sim.ORACLE}"}}]}})
         + "\n", encoding="utf-8")
     peeked = arm_compare.score(run, transcript, case_dir / "score.py")
     assert peeked["oracle_reads"] == 1 and peeked["contaminated"] is True
@@ -379,7 +387,8 @@ def test_drive_sends_a_self_answered_grill_back_once_then_approves_and_records_i
     run = tmp_path / "C-1"
     (run / "project").mkdir(parents=True)
     (run / user_sim.DIR).mkdir()
-    (run / user_sim.DIR / user_sim.CONFIG).write_text(json.dumps({"model": "old"}), encoding="utf-8")
+    user_sim.private_dir(run).mkdir()
+    (user_sim.private_dir(run) / user_sim.CONFIG).write_text(json.dumps({"model": "old"}), encoding="utf-8")
     (run / "arm.json").write_text(json.dumps({"arm": "C", "project": str(run / "project"),
                                               "user_sim": {"ask_user": "/r/user-sim/ask-user"}}), encoding="utf-8")
     (run / "prompt.md").write_text("task", encoding="utf-8")
@@ -411,4 +420,67 @@ def test_drive_sends_a_self_answered_grill_back_once_then_approves_and_records_i
     assert messages[2] == arm_compare.RESUME_AFTER_APPROVAL.format(phase="domain-grill")
     assert [check["passed"] for check in record["grill_checks"]] == [False, False]
     assert record["harness_approvals"] == ["domain-grill"]
-    assert json.loads((run / user_sim.DIR / user_sim.CONFIG).read_text(encoding="utf-8"))["model"] == "claude-opus-5-5"
+    assert json.loads((user_sim.private_dir(run) / user_sim.CONFIG).read_text(encoding="utf-8"))["model"] == "claude-opus-5-5"
+
+
+# ─── the broker: the oracle stays on the host, ask-user only sends the question ───
+
+def _prepared(tmp_path):
+    case_dir = _case(tmp_path)
+    run = tmp_path / "runs" / "C-under"
+    meta = arm_compare.prepare(ROOT, "A", "x", 1, run, case_dir=case_dir, layer="underspec")
+    return run, meta
+
+
+def test_ask_user_without_a_broker_fails_softly_and_with_a_wrong_token_gets_nothing(tmp_path):
+    run, meta = _prepared(tmp_path)
+    done = subprocess.run([meta["user_sim"]["ask_user"], "몇 개?"], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 1 and done.stdout.strip() == user_sim.FAILED
+    with user_sim.Broker(run, call=_staged('{"fact_ids": ["F01"]}', "5개"), environ={}) as broker:
+        client = json.loads((run / user_sim.DIR / user_sim.CLIENT).read_text(encoding="utf-8"))
+        assert set(client) == {"socket", "token"}
+        forged = tmp_path / "forged.json"
+        forged.write_text(json.dumps({**client, "token": "0" * 32}), encoding="utf-8")
+        assert user_sim.client(forged, "몇 개?") == (False, user_sim.FAILED)
+        assert broker.answered == 0 and not user_sim.log_path(run).exists()
+        assert user_sim.client(run / user_sim.DIR / user_sim.CLIENT, "몇 개?") == (True, "5개")
+    assert broker.answered == 1 and len(user_sim.read_log(user_sim.log_path(run))) == 1
+
+
+def test_concurrent_questions_are_answered_one_at_a_time_and_all_logged(tmp_path):
+    import threading
+    run, _ = _prepared(tmp_path)
+    answers = []
+    with user_sim.Broker(run, call=_staged('{"fact_ids": ["F01"]}', "5개"), environ={}):
+        threads = [threading.Thread(target=lambda n=n: answers.append(
+            user_sim.client(run / user_sim.DIR / user_sim.CLIENT, f"질문 {n}?"))) for n in range(5)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+    assert sorted(answers) == [(True, "5개")] * 5
+    assert sorted(row["question"] for row in user_sim.read_log(user_sim.log_path(run))) == [f"질문 {n}?" for n in range(5)]
+
+
+def test_the_run_sandbox_mounts_neither_the_oracle_nor_the_simulator_log(tmp_path):
+    run, meta = _prepared(tmp_path)
+    box = arm_compare.run_box(run, meta, run / "project", 60, "controller")
+    private = str(user_sim.private_dir(run).resolve())
+    assert all(not item["path"].startswith(private) for item in box["expose"])
+    assert all(not item["path"].endswith(user_sim.LOG) for item in box["expose"])
+    assert {item["path"] for item in box["expose"] if item["mode"] == "ro"} >= {str(run.resolve())}
+
+
+def test_drive_refuses_a_run_whose_oracle_is_inside_the_run_directory(tmp_path, monkeypatch):
+    run = tmp_path / "C-old"
+    (run / "project").mkdir(parents=True)
+    (run / user_sim.DIR).mkdir()
+    (run / user_sim.DIR / user_sim.ORACLE).write_text(FULL, encoding="utf-8")
+    (run / user_sim.DIR / user_sim.CONFIG).write_text(json.dumps({"model": "m"}), encoding="utf-8")
+    (run / "arm.json").write_text(json.dumps({"arm": "A", "project": str(run / "project"),
+                                              "user_sim": {"ask_user": "x"}}), encoding="utf-8")
+    (run / "prompt.md").write_text("task", encoding="utf-8")
+    monkeypatch.setattr(arm_compare, "cli_version", lambda: arm_compare.PINNED_CLI_VERSION)
+    assert user_sim.legacy(run) and user_sim.log_path(run) == run / user_sim.LOG
+    with pytest.raises(SystemExit, match="prepare it again"):
+        arm_compare.drive(run, "claude-opus-5-5", 600, 30.0)

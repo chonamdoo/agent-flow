@@ -109,12 +109,15 @@ rates and counted apart.
 
 Layers and the simulated user (grill experiment): an external case may declare `layers` (for example `complete`
 and `underspec`, `select_layer`), picked with `prepare --layer`; `arm.json` keeps `layer`. A case or layer with
-`user_sim: {"oracle": "<path in the case dir>"}` gets `<run>/user-sim/ask-user` (`user_sim.py`, outside the
-project; the oracle is a copy no project file comes from) and every arm's task text gains `ASK_USER_LINE`; without
+`user_sim: {"oracle": "<path in the case dir>"}` gets `<run>/user-sim/ask-user` (`user_sim.py`'s client, outside the
+project). The oracle copy, the simulator's config and its log live in `<run>.user-sim/`, outside everything the
+sandbox mounts; during `drive` the simulator answers from the host as a broker on an abstract unix socket
+(`user_sim.Broker`), and `ask-user` only sends the question and prints the answer. Every arm's task text gains
+`ASK_USER_LINE`; without
 `user_sim` no prompt changes. A workflow controller is told to put a phase's user questions to `ask-user` instead
 of answering them itself, and before approving `domain-grill` the harness checks that the artifact's `user round`
 decisions have at least as many `ask-user` calls behind them (`grill_check`; sent back once, then approved and
-recorded in `drive.json` `grill_checks`). `score` reads `<run>/user-sim.jsonl` into `ask_user_calls`,
+recorded in `drive.json` `grill_checks`). `score` reads `<run>.user-sim/user-sim.jsonl` into `ask_user_calls`,
 `ask_user_questions`, `asked_any` and `user_sim_cost_usd` (added to `total_cost_usd`), and marks a run contaminated
 when a tool call names the oracle copy or the simulator's config. `arm.json` `user_sim` keeps the oracle's sha256.
 
@@ -156,6 +159,7 @@ reviewer subprocesses are not in it; `reviewer_jobs` counts them and the usage w
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -1918,6 +1922,7 @@ def run_logs(run: Path, transcript: Path | None, project: Path, checkout: Path) 
         logs.append(transcript)
         logs += run_usage.subagent_transcripts(transcript)[0]
     logs += [run / name for name in ("controller.jsonl", "controller.stderr", verify_gate.LOG, user_sim.LOG)]
+    logs += [user_sim.log_path(run)]
     logs += sorted((run / router.OUT_DIR).glob("attempt-*")) if (run / router.OUT_DIR).is_dir() else []
     logs += sorted((run / "review-archive").glob("*")) if (run / "review-archive").is_dir() else []
     logs += [path for path in state_files(project, checkout, "*.md")]
@@ -2026,8 +2031,8 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
     declaration = completion.classify(message if main_rows else None)
     found_canaries = _case_canaries(meta, case_dir, evaluator)
     oracle_text = ""
-    if meta.get("user_sim") and (run / user_sim.DIR / user_sim.ORACLE).is_file():
-        oracle_text = (run / user_sim.DIR / user_sim.ORACLE).read_text(encoding="utf-8", errors="replace")
+    if meta.get("user_sim") and (user_sim.state_dir(run) / user_sim.ORACLE).is_file():
+        oracle_text = (user_sim.state_dir(run) / user_sim.ORACLE).read_text(encoding="utf-8", errors="replace")
     logs = run_logs(run, transcript, project, live)
     scanned = scan_contamination(run, rows, logs, found_canaries, oracle_text)
     submission = None
@@ -2042,7 +2047,7 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
                 raise SystemExit("an external case or UI task needs --evaluator <its score.py>")
             if sandboxed:
                 submission = wrap_submission(checkout, Path(scratch))
-            scans = [path for path in logs if not (path == run / user_sim.LOG and any(c in oracle_text
+            scans = [path for path in logs if not (path == user_sim.log_path(run) and any(c in oracle_text
                                                                                       for c in found_canaries))]
             browser = BROWSER_REPEAT if evaluator_supports(evaluator, "--browser-repeat") else None
             if meta.get("case_kind") == "external":
@@ -2073,7 +2078,7 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
                                                  for marker in HIDDEN_MARKERS)
             graded["no_start"], graded["complete_build"] = None, None
     graded["contamination_scan"] = scanned
-    simulated = user_sim.summary(run / user_sim.LOG) if meta.get("user_sim") else None
+    simulated = user_sim.summary(user_sim.log_path(run)) if meta.get("user_sim") else None
     if simulated is not None:
         simulated["oracle_reads"] = oracle_reads(rows, run)
     if meta.get("chain"):
@@ -2145,9 +2150,10 @@ def total_cost(controller: float | None, gate: dict | None, routed: dict | None 
 
 def oracle_reads(rows: list[dict], run: Path) -> int:
     """Tool calls that name the simulator's oracle copy or config. Running `ask-user` itself names neither."""
-    target = (run / user_sim.DIR).resolve()
+    target, private = (run / user_sim.DIR).resolve(), user_sim.private_dir(run.resolve())
+    # the private directory is not in the sandbox; naming it is an attempt, a diagnostic in a healthy sandbox
     markers = (str(target / user_sim.ORACLE), str(target / user_sim.CONFIG), f"{user_sim.DIR}/{user_sim.ORACLE}",
-               f"{user_sim.DIR}/{user_sim.CONFIG}", f"{user_sim.DIR}/user_sim.py")
+               f"{user_sim.DIR}/{user_sim.CONFIG}", str(private), private.name)
     return sum(any(marker in item for marker in markers) for item in tool_inputs(rows))
 
 
@@ -2296,13 +2302,19 @@ def run_box(run: Path, meta: dict, cwd: Path | str, timeout: float, label: str) 
     layout = sandbox.prepare_layout(run)
     expose = [{"path": str(run.resolve()), "mode": "ro"}, {"path": str(Path(meta["project"]).resolve()), "mode": "rw"},
               *auth_exposes()]
-    for name, needed in ((verify_gate.LOG, effective_arm(meta) in GATE_ARMS), (user_sim.LOG, bool(meta.get("user_sim")))):
-        if needed:
-            (run / name).touch()
-            expose.append({"path": str((run / name).resolve()), "mode": "rw"})
+    if effective_arm(meta) in GATE_ARMS:
+        (run / verify_gate.LOG).touch()
+        expose.append({"path": str((run / verify_gate.LOG).resolve()), "mode": "rw"})
+    hide = sandbox.HIDE
+    private = user_sim.private_dir(run.resolve())
+    # The simulator's oracle, config and log stay outside the sandbox: a sibling of the run directory, which is under
+    # a hidden root or a private tmpfs (`/tmp`), or else hidden here by name.
+    if meta.get("user_sim") and private.is_dir() and not any(
+            str(private).startswith(root.rstrip("/") + "/") for root in (*sandbox.HIDE, *sandbox.SCRATCH)):
+        hide = (*hide, str(private))
     env = claude_usage.with_wrapper({**controller_env(dict(os.environ)), "HOME": sandbox.HOME_TARGET}, usage_bin(run))
     return sandbox.spec(expose=expose, cwd=str(cwd), env=env, timeout=timeout, home=str(layout["home"]),
-                        overlay_root=str(layout["overlay"]), label=label)
+                        overlay_root=str(layout["overlay"]), hide=hide, label=label)
 
 
 def _sandboxed_call(expose: list[dict], reports: list[dict], label: str):
@@ -2602,7 +2614,7 @@ def budget_ledger(run: Path, meta: dict, controller: float | None, classifier: f
     gate = verify_gate.summary(run / verify_gate.LOG)["reviewer_cost_usd"] if arm in GATE_ARMS else 0.0
     routed = meta.get("router") or {}
     router_cost = routed.get("cost_usd") if routed else 0.0
-    simulator = user_sim.summary(run / user_sim.LOG)["user_sim_cost_usd"] if meta.get("user_sim") else 0.0
+    simulator = user_sim.summary(user_sim.log_path(run))["user_sim_cost_usd"] if meta.get("user_sim") else 0.0
     reviewers = reviewer_record(project, checkout or project) if arm in WORKFLOWS else None
     kit_usage = kit_reviewer_cost(run, reviewers)
     kit = kit_usage["cost_usd"]
@@ -2678,9 +2690,9 @@ def verify_pins(run: Path, meta: dict, project: Path, checkout: Path, init: dict
     if routed:
         expect("router", routed.get("model"), routed.get("effort") or "unspecified")
     if meta.get("user_sim"):
-        config = json.loads((run / user_sim.DIR / user_sim.CONFIG).read_text(encoding="utf-8"))
+        config = json.loads((user_sim.state_dir(run) / user_sim.CONFIG).read_text(encoding="utf-8"))
         expect("simulator config", config.get("model"), config.get("effort") or "unspecified")
-        for number, row in enumerate(user_sim.read_log(run / user_sim.LOG), start=1):
+        for number, row in enumerate(user_sim.read_log(user_sim.log_path(run)), start=1):
             expect(f"simulator call {number}", row.get("model"), row.get("effort") or "unspecified")
             for used in row.get("models_used") or []:
                 expect(f"simulator call {number} (served)", used, None)
@@ -2730,7 +2742,7 @@ def outage_seen(run: Path, meta: dict, stream: Path, classifier_failures: list[d
     sources = [("kit reviewer", row.get("error_text")) for row in claude_usage.read_rows(run / claude_usage.LOG)]
     sources += [("router", error) for error in (meta.get("router") or {}).get("errors") or []]
     if meta.get("user_sim"):
-        sources += [("simulator", row.get("error")) for row in user_sim.read_log(run / user_sim.LOG)]
+        sources += [("simulator", row.get("error")) for row in user_sim.read_log(user_sim.log_path(run))]
     sources += [("review classifier", item.get("error")) for item in classifier_failures]
     for where, text in sources:
         found = outage.from_text(text)
@@ -2786,6 +2798,9 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
         set_gate_model(run, model)
     simulated = meta.get("user_sim")
     if simulated:
+        if user_sim.legacy(run):
+            raise SystemExit("user-sim: this run keeps its oracle inside the run directory (prepared by an older "
+                             "harness), where the sandbox shows it; prepare it again")
         user_sim.set_model(run, model)
     gate_config_sha = verify_gate.file_sha256(run / "gate" / "config.json") if arm in GATE_ARMS else None
     tripwire_before = sandbox.tripwire()
@@ -2811,7 +2826,9 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
     controller_seconds = 0.0
     session, spent, exit_code, timed_out, summary = None, 0.0, None, False, {}
     sandbox_error = outage_detail = None
-    with _Lock(exclusive=False), claude_usage.Collector(usage_socket, run / claude_usage.LOG), \
+    # the simulated user answers from the host for the whole drive: its oracle never enters the sandbox
+    broker = user_sim.Broker(run) if simulated else contextlib.nullcontext()
+    with _Lock(exclusive=False), claude_usage.Collector(usage_socket, run / claude_usage.LOG), broker, \
             stream.open("wb") as out, (run / "controller.stderr").open("wb") as err:
         message = prompt
         while True:
@@ -2895,7 +2912,7 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
             if not status or status.get("reason") != "phase_approval_required":
                 break
             if simulated and status.get("current_phase") == GRILL_PHASE:
-                check = grill_check(_status_worktree(status), status, run / user_sim.LOG)
+                check = grill_check(_status_worktree(status), status, user_sim.log_path(run))
                 grill_checks.append(check)
                 if check["passed"] is False and sum(item["passed"] is False for item in grill_checks) <= MAX_GRILL_RECHECKS:
                     message = RESUME_AFTER_GRILL_CHECK.format(rounds=check["user_rounds"], calls=check["ask_user_calls"],

@@ -550,7 +550,9 @@ def test_a_usage_limit_met_by_another_participating_call_is_an_outage_too(tmp_pa
             + "\n", encoding="utf-8")
     elif where == "simulator":
         meta["user_sim"] = {"ask_user": "x"}
-        (run / "user-sim.jsonl").write_text(json.dumps(
+        import user_sim
+        user_sim.private_dir(run).mkdir()
+        user_sim.log_path(run).write_text(json.dumps(
             {"ok": False, "error": "exit 1:  | You've hit your limit · resets 3pm"}) + "\n", encoding="utf-8")
     else:
         meta["router"] = {"errors": ["claude -p failed: API Error: 429 rate_limit_error"]}

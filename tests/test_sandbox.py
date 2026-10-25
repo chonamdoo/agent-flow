@@ -191,3 +191,55 @@ def test_a_sandboxed_drive_kills_what_the_run_left_freezes_the_tree_and_records_
     assert result["isolation"] == "enforced" and result["uncommitted"] is True
     assert (run / "graded" / "tree" / "work.txt").read_text(encoding="utf-8") == "done 1\n"
     assert result["artifact_sha256"] == snapshot.verify(run)["tree_sha256"]
+
+
+# ─── the simulated user's oracle stays outside the sandbox ───
+
+ORACLE_TOKEN = "ORACLE-TOKEN-7f3a91"
+
+
+def _simulated_run(base: Path) -> tuple[Path, dict]:
+    from tests.test_user_sim import _case
+    case_dir = _case(base)
+    oracle = case_dir / "task" / "prd.md"
+    oracle.write_text(oracle.read_text(encoding="utf-8") + f"- The secret coupon code is {ORACLE_TOKEN}.\n",
+                      encoding="utf-8")
+    run = base / "runs" / "r-sim"
+    meta = arm_compare.prepare(ROOT, "A", "x", 1, run, case_dir=case_dir, layer="underspec")
+    return run, meta
+
+
+@pytest.mark.parametrize("where", ["tmp", "visible-host-path"])
+def test_inside_the_sandbox_the_oracle_cannot_be_read_but_ask_user_answers(tmp_path, monkeypatch, where):
+    import shutil
+    import user_sim
+    from tests.test_user_sim import _staged
+    base = tmp_path if where == "tmp" else Path("/srv") / f"arm-compare-test-{os.getpid()}"
+    base.mkdir(parents=True, exist_ok=True)
+    try:
+        run, meta = _simulated_run(base)
+        private = user_sim.private_dir(run)
+        assert ORACLE_TOKEN in (private / user_sim.ORACLE).read_text(encoding="utf-8")
+        box = arm_compare.run_box(run, meta, run / "project", 60, "controller")
+        if where != "tmp":  # a run dir outside /tmp and /home: its private sibling is hidden by name
+            assert str(private) in box["hide"]
+        head, tail = ORACLE_TOKEN[:6], ORACLE_TOKEN[6:]  # the probe itself must not hold the token
+        probe = (f"t={head}; grep -rs \"$t{tail}\" {run} {run.parent} /tmp /home --exclude-dir=sandbox --exclude-dir=kit; echo grep=$?\n"
+                 f"cat {private / user_sim.ORACLE} >/dev/null 2>&1; echo cat=$?\n"
+                 f"ls -A {private} 2>/dev/null | wc -l\n"
+                 f"{meta['user_sim']['ask_user']} '장바구니에 최대 몇 개까지 담나요?'; echo ask=$?\n")
+        (run / "project" / "probe.sh").write_text(probe, encoding="utf-8")
+        with user_sim.Broker(run, call=_staged('{"fact_ids": ["F01"]}', "최대 5개입니다."), environ={}):
+            result = sandbox.run(box, ["bash", str(run / "project" / "probe.sh")], capture=True)
+        out = result["stdout"]
+        assert "grep=1" in out and ORACLE_TOKEN not in out, out
+        # the same search on the host finds it: the probe would have seen the oracle had it been mounted
+        assert subprocess.run(["grep", "-rqs", ORACLE_TOKEN, str(run.parent)]).returncode == 0
+        assert "cat=1" in out and "최대 5개입니다." in out and "ask=0" in out, out + result["stderr"]
+        assert result["checks"]["host_read_only"] is True and result["checks"]["hidden_leaks"] == []
+        (row,) = user_sim.read_log(user_sim.log_path(run))
+        assert row["disclosed_fact_ids"] == ["F01"] and row["answer"] == "최대 5개입니다."
+        assert not (run / user_sim.DIR / user_sim.CLIENT).exists()  # the broker's address ends with the drive
+    finally:
+        if where != "tmp":
+            shutil.rmtree(base, ignore_errors=True)
