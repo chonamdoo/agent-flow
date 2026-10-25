@@ -339,6 +339,70 @@ def test_the_canaries_come_from_the_case_and_only_their_digest_is_in_the_run(tmp
     assert result["contaminated"] is True and result["contamination_scan"]["canary_hits"] == {str(transcript): 1}
 
 
+HEALTHY_SANDBOX = {"mode": "required", "checks": {"host_read_only": True, "hidden": ["/home"], "hidden_leaks": []},
+                   "errors": [], "survivors": []}
+
+
+def _hidden_read_run(tmp_path, monkeypatch, sandbox_record, canary_text="nothing"):
+    monkeypatch.setenv(arm_compare.HIDDEN_ROOTS_ENV, "/srv/hidden")
+    case_dir, evaluator = _external_case(tmp_path)
+    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
+    case["canaries"] = ["CANARY-synthetic-9"]
+    (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+    run = tmp_path / "runs" / "C-1"
+    arm_compare.prepare(ROOT, "A", "x", 1, run, case_dir=case_dir)
+    (run / "drive.json").write_text(json.dumps({"cost_usd": 1.0, "exit": 0,
+                                                **({"sandbox": sandbox_record} if sandbox_record else {})}),
+                                    encoding="utf-8")
+    transcript = tmp_path / "t.jsonl"
+    # the agent made its own file under a hidden root (inside the sandbox that root is an empty tmpfs) and read it
+    transcript.write_text("".join(json.dumps(row) + "\n" for row in _rows("cat /srv/hidden/notes.txt", canary_text)),
+                          encoding="utf-8")
+    return arm_compare.score(run, transcript, evaluator, case_dir=case_dir)
+
+
+def test_a_hidden_path_read_in_a_healthy_sandbox_is_a_diagnostic_not_contamination(tmp_path, monkeypatch):
+    result = _hidden_read_run(tmp_path, monkeypatch, HEALTHY_SANDBOX)
+    assert result["contamination_scan"]["hidden_path_reads"] == 1
+    assert result["contamination_rule"] == "content" and result["contaminated"] is False
+    assert result["contamination_evidence"]["hidden_path_reads"] == 1
+    assert arm_compare.run_status(result) == "ok"
+
+
+def test_a_canary_hit_in_a_healthy_sandbox_is_contamination(tmp_path, monkeypatch):
+    result = _hidden_read_run(tmp_path, monkeypatch, HEALTHY_SANDBOX, canary_text="CANARY-synthetic-9")
+    assert result["contamination_rule"] == "content" and result["contaminated"] is True
+    assert arm_compare.run_status(result) == "contaminated"
+
+
+@pytest.mark.parametrize("record", [None, {**HEALTHY_SANDBOX, "checks": {"host_read_only": False, "hidden_leaks": []}},
+                                    {**HEALTHY_SANDBOX, "checks": {"host_read_only": True, "hidden_leaks": ["/home/x"]}},
+                                    {**HEALTHY_SANDBOX, "mode": "off"}])
+def test_without_a_healthy_sandbox_a_hidden_path_read_is_still_contamination(tmp_path, monkeypatch, record):
+    result = _hidden_read_run(tmp_path, monkeypatch, record)
+    assert result["contamination_rule"] == "path" and result["contaminated"] is True
+
+
+def test_the_rule_is_applied_from_the_evidence_by_run_status_the_chain_and_the_search():
+    sys.path.insert(0, str(ROOT / "evals"))
+    import arm_search
+    diagnostic = {"contaminated": True, "oracle": True, "declaration": "declared-complete",
+                  "contamination_evidence": {"sandbox_healthy": True, "canary_hits": 0, "evaluator_read": False,
+                                             "hidden_path_reads": 2, "oracle_reads": 1, "chain_reads": 1,
+                                             "phase_hidden_markers": True, "tripwire_changed": True}}
+    assert arm_compare.run_status(diagnostic) == "ok"
+    assert arm_search.outcome(diagnostic, {})["run_status"] == "ok"
+    unhealthy = {**diagnostic, "contamination_evidence": {**diagnostic["contamination_evidence"],
+                                                          "sandbox_healthy": False}}
+    assert arm_compare.run_status(unhealthy) == "contaminated"
+    assert arm_search.outcome(unhealthy, {})["run_status"] == "contaminated"
+    evaluator = {**diagnostic, "contamination_evidence": {**diagnostic["contamination_evidence"],
+                                                          "evaluator_read": True}}
+    assert arm_compare.run_status(evaluator) == "contaminated"
+    assert "contaminated" in arm_compare.CHAIN_REFUSED
+    assert arm_compare.run_status({"contaminated": True}) == "contaminated"  # scored before the evidence existed
+
+
 # ─── E. metrics ───
 
 def test_the_summary_never_pools_strata_and_pairs_false_complete_with_false_block():

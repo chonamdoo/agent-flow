@@ -59,6 +59,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import attempts  # noqa: E402
 import variants  # noqa: E402
 
 COMPLETE = "declared-complete"
@@ -174,7 +175,8 @@ def outcome(result: dict | None, drive: dict | None, failed_step: str | None = N
     else:
         status, detail = "ok", ""
     if status == "ok":
-        run_status = ("contaminated" if result.get("contaminated") else
+        # v3.14 C: in a healthy sandbox only a canary hit or the evaluator's read verdict (`attempts.contaminated`)
+        run_status = ("contaminated" if attempts.contaminated(result) else
                       "timed-out" if result.get("drive_timed_out") else
                       "limit" if _limit_stop(drive) else "ok")
     else:

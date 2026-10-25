@@ -79,6 +79,38 @@ def check_reason(reason: str) -> str:
     return reason
 
 
+# Contamination (#409 v3.14 note C). In a run whose sandbox was healthy (the host read-only inside, no hidden path
+# showing anything, `sandbox_healthy`) nothing hidden was reachable, so only content proves contamination: a canary hit
+# in a log or the evaluator's own `read` verdict (its gating `contamination` list). A hidden path named by a tool call,
+# a read of the simulator's or an earlier step's files, a phase case's hidden markers, a changed tripwire are then
+# diagnostics. A run without a healthy sandbox keeps the path-based rule: any of them is contamination.
+CONTENT_EVIDENCE = ("canary_hits", "evaluator_read")
+PATH_EVIDENCE = ("hidden_path_reads", "phase_hidden_markers", "oracle_reads", "chain_reads", "tripwire_changed")
+
+
+def sandbox_healthy(sandbox: dict | None) -> bool:
+    """A `drive.json` `sandbox` record of a required sandbox whose checks hold: host read-only, no hidden leaks."""
+    if not isinstance(sandbox, dict) or sandbox.get("mode") != "required":
+        return False
+    checks = sandbox.get("checks")
+    return (isinstance(checks, dict) and checks.get("host_read_only") is True and checks.get("hidden_leaks") == []
+            and not sandbox.get("errors") and not sandbox.get("survivors"))
+
+
+def contamination_rule(evidence: dict) -> str:
+    return "content" if evidence.get("sandbox_healthy") else "path"
+
+
+def contaminated(row: dict) -> bool:
+    """The contamination verdict of a result (or of its `contamination_evidence`). A result scored before the
+    evidence was recorded keeps its `contaminated` flag."""
+    evidence = row.get("contamination_evidence") if "contamination_evidence" in row else row
+    if not isinstance(evidence, dict) or "sandbox_healthy" not in evidence:
+        return bool(row.get("contaminated"))
+    keys = CONTENT_EVIDENCE if evidence["sandbox_healthy"] else (*CONTENT_EVIDENCE, *PATH_EVIDENCE)
+    return any(bool(evidence.get(key)) for key in keys)
+
+
 def attempt_key(row: dict) -> tuple:
     chain = row.get("chain") or {}
     return (row.get("case"), row.get("layer"), row.get("arm"), row.get("trial"),

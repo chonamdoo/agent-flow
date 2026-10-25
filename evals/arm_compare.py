@@ -44,6 +44,10 @@ Pre-registration v3.14 (the harness changes of the pre-flight audits):
   `--browser-repeat 2` and every log as `--scan`.
 - Conditions: the case's notes are in every arm's task text, the declaration is one text, the harness polls with
   read-only `agent-flow status`, and arm V's unjudged reviews are `gate-error`s.
+- Contamination rule (`attempts.contaminated`, from the result's `contamination_evidence`): in a run whose sandbox
+  was healthy (host read-only inside, no hidden leaks) only a canary hit or the evaluator's `read` verdict makes it
+  contaminated; hidden-path reads, oracle or chain reads, phase-case markers and the tripwire are diagnostics. A run
+  without a healthy sandbox keeps the path-based rule (`contamination_rule` `content` / `path`).
 - Metrics: content-based contamination (`scan_contamination`), completeness from the hidden checks for every arm,
   no-start, false complete beside false block, strata never pooled, the archive left out of chain metrics, steps
   survived by the success definition.
@@ -2049,7 +2053,7 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
                 graded = {"ui": {key: ui.get(key) for key in ("S", "G", "API", "V", "E", "error", "failed_browser",
                                                                  "failed_api", "evaluator_sha256", "build_sha256",
                                                                  "ledger", "isolation")}}
-            graded.update({"oracle": ui.get("S") == 1, "contaminated": bool(ui.get("contamination")),
+            graded.update({"oracle": ui.get("S") == 1, "evaluator_read": bool(ui.get("contamination")),
                            "evaluator_contamination_detail": ui.get("contamination_detail"),
                            "evaluator_browser_repeat": browser})
             if submission is not None:
@@ -2064,19 +2068,25 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
             graded["complete_build"] = not failures["no_build"] and failures["missing"] == 0
         else:
             graded = _grade_phase_case(meta, checkout)
-            graded["contaminated"] = any(marker in item for item in tool_inputs(rows) for marker in HIDDEN_MARKERS)
+            graded["phase_hidden_markers"] = any(marker in item for item in tool_inputs(rows)
+                                                 for marker in HIDDEN_MARKERS)
             graded["no_start"], graded["complete_build"] = None, None
     graded["contamination_scan"] = scanned
-    graded["contaminated"] = graded["contaminated"] or scanned["contaminated"]
-    if driven.get("tripwire_changed"):
-        graded["contaminated"] = True
     simulated = user_sim.summary(run / user_sim.LOG) if meta.get("user_sim") else None
     if simulated is not None:
         simulated["oracle_reads"] = oracle_reads(rows, run)
-        graded["contaminated"] = graded["contaminated"] or bool(simulated["oracle_reads"])
     if meta.get("chain"):
         graded["chain_reads"] = chain_reads(rows, meta)
-        graded["contaminated"] = graded["contaminated"] or bool(graded["chain_reads"])
+    healthy = attempts.sandbox_healthy(driven.get("sandbox"))
+    evidence = {"sandbox_healthy": healthy, "canary_hits": sum(scanned["canary_hits"].values()),
+                "evaluator_read": bool(graded.pop("evaluator_read", False)),
+                "hidden_path_reads": scanned["hidden_path_reads"],
+                "phase_hidden_markers": bool(graded.pop("phase_hidden_markers", False)),
+                "oracle_reads": (simulated or {}).get("oracle_reads", 0), "chain_reads": graded.get("chain_reads", 0),
+                "tripwire_changed": bool(driven.get("tripwire_changed"))}
+    graded["contamination_evidence"] = evidence
+    graded["contamination_rule"] = attempts.contamination_rule(evidence)
+    graded["contaminated"] = attempts.contaminated(evidence)
     if gate is not None and not gate["integrity_intact"]:
         harness_error = harness_error or "gate-integrity: the gate script or config changed after prepare/drive"
     routed = meta.get("router")
@@ -2963,7 +2973,7 @@ def run_status(row: dict) -> str:
     """
     if row.get("harness_error"):
         return "harness-error"
-    if row.get("contaminated"):
+    if attempts.contaminated(row):
         return "contaminated"
     if row.get("drive_timed_out"):
         return "timed-out"

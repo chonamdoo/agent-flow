@@ -211,7 +211,8 @@ def test_arm_r_reuses_the_previous_frozen_decision_without_calling_the_router(tm
 @pytest.mark.parametrize("damage, message", [
     ({"drop": "drive.json"}, "has no drive.json"),
     ({"drop": "result.json"}, "has no result.json"),
-    ({"result": {"contaminated": True}}, "is contaminated"),
+    ({"result": {"contaminated": True, "contamination_evidence": {"sandbox_healthy": True, "canary_hits": 1}}},
+     "is contaminated"),
     ({"result": {"drive_exit": 1}}, "is infra-error"),
     ({"result": {"harness_error": "broken"}}, "is harness-error"),
 ])
