@@ -208,16 +208,39 @@ def reap(pid_dir: Path) -> list[dict]:
         members = namespace_members(pid)
         survivors.append({"unshare_pid": pid, "label": data.get("label"), "argv": data.get("argv"),
                           "members": members})
+        stop_namespace(pid)
+    return survivors
+
+
+def _gone(pid: int) -> bool:
+    """No process `pid`, or only its zombie (killed, not yet reaped)."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
+    except (OSError, IndexError):
+        return True
+
+
+def stop_namespace(unshare_pid: int, timeout: float = 20.0) -> list[dict]:
+    """SIGKILL `unshare` (`--kill-child` then kills PID 1, and with it the namespace) and wait until no process of
+    that namespace is left; returns the processes that had to be killed one by one after `timeout`. Never waits on a
+    `Popen` (it may be called from a signal handler while the main thread is inside `wait()`)."""
+    members = namespace_members(unshare_pid)
+    try:
+        os.kill(unshare_pid, signal.SIGKILL)
+    except OSError:
+        pass
+    deadline = time.monotonic() + timeout
+    alive = [*members, {"pid": unshare_pid}]
+    while alive and time.monotonic() < deadline:
+        alive = [item for item in alive if not _gone(item["pid"])]
+        if alive:
+            time.sleep(0.05)
+    for item in alive:
         try:
-            os.kill(pid, signal.SIGKILL)
+            os.kill(item["pid"], signal.SIGKILL)
         except OSError:
             pass
-        for member in members:
-            try:
-                os.kill(member["pid"], signal.SIGKILL)
-            except OSError:
-                pass
-    return survivors
+    return [item for item in alive if "cmdline" in item]
 
 
 def run(sandbox: dict, argv: list[str], *, stdout=None, stderr=None, stdin=None, capture: bool = False,
@@ -561,8 +584,10 @@ def exec_main(args: argparse.Namespace) -> int:
         command = command[1:]
     pid_dir = Path(config["pids"]) if config.get("pids") else None
     record: list[Path] = []
+    started_proc: list = []
 
     def started(proc) -> None:
+        started_proc.append(proc)
         if pid_dir is None:
             return
         try:
@@ -574,9 +599,19 @@ def exec_main(args: argparse.Namespace) -> int:
         except OSError:
             pass
 
-    # a SIGTERM/SIGHUP from the evaluator ends this process normally, so PDEATHSIG takes the namespace down too
+    def stop(signum, _frame) -> None:
+        """An evaluator stops a started server by signalling this wrapper (`killpg` SIGTERM). The namespace's PID 1
+        ignores a SIGTERM from outside (a namespace init only takes signals it handles) and `unshare --fork` ignores
+        it too, so nothing would stop. End the namespace here and return only when every process of it is gone: the
+        caller's `wait()` then means the server is down and its port free, so a restart on the same port binds."""
+        if started_proc:
+            stop_namespace(started_proc[0].pid)
+            for path in record:
+                path.unlink(missing_ok=True)
+        os._exit(128 + signum)
+
     for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        signal.signal(signum, lambda *_: sys.exit(128 + 15))
+        signal.signal(signum, stop)
     result = run(box, command, on_start=started)
     for path in record:  # the namespace ended with the command: nothing left to reap
         path.unlink(missing_ok=True)

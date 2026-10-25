@@ -299,3 +299,75 @@ def test_reap_kills_a_recorded_namespace_that_is_still_running_and_reports_it(tm
     assert len(survivors) == 1 and any("sleep 402" in item["cmdline"] for item in survivors[0]["members"])
     thread.join(timeout=30)
     assert not _alive("sleep 402")
+
+
+SERVER = r'''
+import http.server, os, sys
+TOKEN = os.urandom(8).hex()  # one per server process (pids repeat across fresh PID namespaces)
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = TOKEN.encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+'''
+
+
+def test_an_exec_server_stopped_by_killpg_restarts_on_the_same_port_and_keeps_answering(tmp_path):
+    """The evaluators' `Build.restart()` on a wrapped submission (`wrap_submission`): `Popen(eval.json start,
+    shell=True, start_new_session=True)`, `killpg` SIGTERM + `wait()`, then start again on the same port and DATA_DIR.
+    The old server must be down when `wait()` returns: under 9ce653d it never died (a restart check talked to the
+    old server and the namespace outlived scoring); under 7aabd6f `wait()` returned when `/bin/sh` died, before the
+    wrapper had ended the namespace, so the new server lost the race for the port (lumi-web LW063–069)."""
+    import signal as signals
+    import socket
+    import urllib.request
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / "server.py").write_text(SERVER, encoding="utf-8")
+    (build / "eval.json").write_text(json.dumps({"start": "python3 server.py $PORT"}), encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    arm_compare.wrap_submission(build, work)
+    start_cmd = json.loads((build / "eval.json").read_text(encoding="utf-8"))["start"]
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    env = {**os.environ, "PORT": str(port)}
+
+    def get() -> str:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2) as answer:
+            return answer.read().decode()
+
+    def start():
+        proc = subprocess.Popen(start_cmd, shell=True, cwd=build, env=env, start_new_session=True)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            assert proc.poll() is None, "server exited before listening"
+            try:
+                return proc, get()
+            except OSError:
+                time.sleep(0.2)
+        raise AssertionError("no answer")
+
+    def stop(proc):
+        os.killpg(proc.pid, signals.SIGTERM)
+        proc.wait(timeout=30)
+
+    first, first_token = start()
+    stop(first)
+    with pytest.raises(OSError):  # the old server is down the moment wait() returns
+        get()
+    second, second_token = start()
+    try:
+        answers = []
+        for _ in range(8):
+            answers.append(get())
+            time.sleep(0.3)
+        assert set(answers) == {second_token} and second_token != first_token  # the new server, every time
+    finally:
+        stop(second)
+    with pytest.raises(OSError):
+        get()
+    assert sandbox.reap(work / arm_compare.SUBMISSION_PIDS) == []

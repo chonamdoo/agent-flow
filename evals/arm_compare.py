@@ -1839,7 +1839,11 @@ def wrap_submission(build: Path, workdir: Path) -> dict:
     if isinstance(spec, dict):
         for key in ("install", "start", "build", "test"):
             if isinstance(spec.get(key), str) and spec[key].strip():
-                spec[key] = f"{prefix} sh -c {shlex.quote(spec[key])}"
+                # `exec`: the evaluator's `Popen(shell=True)` pid is then the wrapper itself, so its `killpg` +
+                # `wait()` returns only after the wrapper has ended the namespace (the old server is down and its port
+                # free before a restart). Without it `wait()` returned when `/bin/sh` died and a restart raced the old
+                # server (lumi-web LW063–069, #409).
+                spec[key] = f"exec {prefix} sh -c {shlex.quote(spec[key])}"
                 wrapped["eval_json"].append(key)
         spec_path.write_text(json.dumps(spec, indent=1) + "\n", encoding="utf-8")
     gradlew = build / "gradlew"
