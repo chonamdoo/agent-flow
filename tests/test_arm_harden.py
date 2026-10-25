@@ -470,3 +470,89 @@ def test_the_agents_own_tmp_files_are_not_hidden_paths(monkeypatch):
     monkeypatch.setenv(arm_compare.HIDDEN_ROOTS_ENV, "/tmp/claude-0/-home-user/operator-session")
     assert arm_compare._hidden_paths("cat /tmp/claude-0/-home-user/operator-session/x/prd.md",
                                      arm_compare.hidden_roots(), [])
+
+
+# ─── usage-quota exhaustion is an infra outage ───
+
+import outage  # noqa: E402
+
+LIMIT_RESULT = {"type": "result", "subtype": "success", "is_error": True, "total_cost_usd": 0.4,
+                "result": "You've hit your limit · resets 3pm (UTC)"}
+LIMIT_STREAMS = {
+    "result": [LIMIT_RESULT],
+    "event": [{"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "rateLimitType": "five_hour",
+                                                               "resetsAt": 1761400000}}],
+    "assistant": [{"type": "assistant", "error": "rate_limit",
+                   "message": {"model": "<synthetic>", "content": [
+                       {"type": "text", "text": "API Error: Request rejected (429) · usage limit reached"}]}}],
+    "safety": [{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t", "is_error": True,
+                                                         "content": "Auto mode is unavailable: the server returned no "
+                                                                    "safety verdict for 3 responses in a row, so Bash "
+                                                                    "was not run and this turn has ended."}]}}],
+}
+
+
+@pytest.mark.parametrize("name", sorted(LIMIT_STREAMS))
+def test_the_cli_s_usage_limit_and_auto_mode_outages_are_detected_in_the_stream(name):
+    found = outage.from_stream(LIMIT_STREAMS[name])
+    assert found and found.startswith("auto-mode" if name == "safety" else "usage-limit")
+
+
+def test_the_agent_s_own_words_and_allowed_or_overage_events_are_not_outages():
+    prose = [{"type": "assistant", "message": {"model": "claude-opus-5-5", "content": [
+        {"type": "text", "text": "I added a rate limiter: after 5 tries the API answers 429 rate limit, "
+                                 "usage limit reached."}]}},
+             {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t",
+                                                       "content": "You've hit your limit (test fixture)"}]}},
+             {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning"}},
+             {"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "overageStatus": "allowed"}},
+             {"type": "result", "is_error": False, "result": "Done. usage limit reached in the fixture."}]
+    assert outage.from_stream(prose) is None
+
+
+def test_a_usage_limit_ends_the_drive_as_an_infra_outage_and_marks_the_runs_root(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "runs"
+    run = root / "r-1"
+    (run / "project").mkdir(parents=True)
+    (run / "arm.json").write_text(json.dumps({"arm": "C", "project": str(run / "project")}), encoding="utf-8")
+    (run / "prompt.md").write_text("task", encoding="utf-8")
+    turns = []
+
+    def controller_once(argv, project, out, err, timeout, **_):
+        turns.append(argv)
+        out.write((json.dumps({"type": "system", "subtype": "init", "session_id": "s-1"}) + "\n"
+                   + json.dumps(LIMIT_RESULT) + "\n").encode())
+        return 1, False
+
+    monkeypatch.setattr(arm_compare, "_controller_once", controller_once)
+    monkeypatch.setattr(arm_compare, "runner_status", lambda *a, **k: pytest.fail("no status poll after an outage"))
+    monkeypatch.setattr(arm_compare, "cli_version", lambda: arm_compare.PINNED_CLI_VERSION)
+    assert arm_compare.main(["drive", str(run), "--timeout", "600", "--budget", "30"]) == outage.EXIT_CODE
+    record = json.loads((run / "drive.json").read_text(encoding="utf-8"))
+    assert len(turns) == 1 and record["outage"].startswith("controller usage-limit")
+    assert record["harness_error"].startswith("infra-outage: controller usage-limit")
+    assert attempts.exclusion_code(record["harness_error"]) == "infra-outage"
+    marker = [json.loads(line) for line in (root / outage.MARKER).read_text(encoding="utf-8").splitlines()]
+    assert marker[0]["run"] == str(run) and "hit your limit" in marker[0]["detail"]
+    assert "infra-outage" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("where", ["kit reviewer", "simulator", "router"])
+def test_a_usage_limit_met_by_another_participating_call_is_an_outage_too(tmp_path, where):
+    run = tmp_path / "r-2"
+    run.mkdir()
+    stream = run / "controller.jsonl"
+    stream.write_text(json.dumps({"type": "result", "is_error": False, "result": "ok"}) + "\n", encoding="utf-8")
+    meta: dict = {"arm": "C"}
+    if where == "kit reviewer":
+        (run / "kit-reviewer-usage.jsonl").write_text(json.dumps(
+            {"kind": "kit-reviewer", "is_error": True, "error_text": "Claude AI usage limit reached|1761400000"})
+            + "\n", encoding="utf-8")
+    elif where == "simulator":
+        meta["user_sim"] = {"ask_user": "x"}
+        (run / "user-sim.jsonl").write_text(json.dumps(
+            {"ok": False, "error": "exit 1:  | You've hit your limit · resets 3pm"}) + "\n", encoding="utf-8")
+    else:
+        meta["router"] = {"errors": ["claude -p failed: API Error: 429 rate_limit_error"]}
+    found = arm_compare.outage_seen(run, meta, stream, [])
+    assert found and found.startswith(f"{where} usage-limit")

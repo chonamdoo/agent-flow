@@ -104,6 +104,8 @@ def test_a_reviewer_sees_the_text_mode_bytes_and_exit_and_the_ledger_gets_its_us
     assert row["usage"] == {"input_tokens": 5, "output_tokens": 7} and row["model"] == "claude-opus-5-5"
     assert row["requested_model"] == "claude-opus-5-5" and row["effort"] == "low" and row["text_exact"] is True
     assert row["duration_s"] >= 0
+    # an error result keeps the CLI's own text, which `outage` reads for a usage limit
+    assert row["error_text"].startswith("review of: Review the diff.")
 
 
 def test_every_other_call_reaches_the_real_cli_unchanged(cli):

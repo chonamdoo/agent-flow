@@ -220,7 +220,9 @@ def _model_call(stage: str, system: str, stdin: str, config: dict, env: dict[str
     return {"stage": stage, "ok": ok, "text": text.strip() if ok else None, "exit": code, "timed_out": timed_out,
             "seconds": round(time.monotonic() - started, 1), "cost_usd": payload.get("total_cost_usd"),
             "usage": payload.get("usage"), "models": sorted(models) if isinstance(models, dict) else None,
-            "error": None if ok else (("timed out" if timed_out else f"exit {code}") + f": {stderr[-400:]}")}
+            "error": None if ok else (("timed out" if timed_out else f"exit {code}") + f": {stderr[-400:]}"
+                                      # the CLI's own error result (a usage limit, an outage) is kept for `outage`
+                                      + (f" | {str(payload.get('result'))[:300]}" if payload.get("is_error") else ""))}
 
 
 def _sum_usage(usages: list) -> dict | None:

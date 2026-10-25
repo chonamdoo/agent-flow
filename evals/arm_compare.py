@@ -184,6 +184,7 @@ import snapshot  # noqa: E402
 import variants  # noqa: E402
 import integrity  # noqa: E402
 import router  # noqa: E402
+import outage  # noqa: E402
 import user_sim  # noqa: E402
 import verify_gate  # noqa: E402
 import run_usage  # noqa: E402
@@ -2714,6 +2715,30 @@ def recorded_checkout(run: Path, meta: dict, driven: dict) -> tuple[Path, dict]:
     return Path(record["host"]), record
 
 
+def outage_seen(run: Path, meta: dict, stream: Path, classifier_failures: list[dict]) -> str | None:
+    """A usage-limit or service outage any participating call reported (`outage`): the controller's stream and
+    stderr, the kit's reviewers (usage wrapper rows), arm R's router, the simulated user, the review classifier."""
+    found = outage.from_stream(run_usage._jsonl(stream))
+    if found:
+        return f"controller {found}"
+    try:
+        found = outage.from_text((run / "controller.stderr").read_text(encoding="utf-8", errors="replace")[-20000:])
+    except OSError:
+        found = None
+    if found:
+        return f"controller {found}"
+    sources = [("kit reviewer", row.get("error_text")) for row in claude_usage.read_rows(run / claude_usage.LOG)]
+    sources += [("router", error) for error in (meta.get("router") or {}).get("errors") or []]
+    if meta.get("user_sim"):
+        sources += [("simulator", row.get("error")) for row in user_sim.read_log(run / user_sim.LOG)]
+    sources += [("review classifier", item.get("error")) for item in classifier_failures]
+    for where, text in sources:
+        found = outage.from_text(text)
+        if found:
+            return f"{where} {found}"
+    return None
+
+
 def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | None = PINNED_CLI_VERSION) -> dict:
     """Runs the controller on `prompt.md` in the run sandbox; at a phase approval the harness approves and resumes the
     same session.
@@ -2785,7 +2810,7 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
     cap_stop = budget_stop = deadline_stop = False
     controller_seconds = 0.0
     session, spent, exit_code, timed_out, summary = None, 0.0, None, False, {}
-    sandbox_error = None
+    sandbox_error = outage_detail = None
     with _Lock(exclusive=False), claude_usage.Collector(usage_socket, run / claude_usage.LOG), \
             stream.open("wb") as out, (run / "controller.stderr").open("wb") as err:
         message = prompt
@@ -2817,6 +2842,10 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
             summary = _stream_summary(stream)
             session = summary["session_id"] or session
             spent = summary["cost_usd"] or spent
+            err.flush()
+            outage_detail = outage_seen(run, meta, stream, classifier_failures)
+            if outage_detail:
+                break
             if timed_out or arm not in WORKFLOWS or len(approvals) >= MAX_HARNESS_APPROVALS:
                 break
             # 완료를 선언한 run은 건드리지 않는다. 관측은 읽기 전용 `status`로 한다.
@@ -2895,7 +2924,9 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
     changed = sandbox.tripwire_changed(tripwire_before, sandbox.tripwire())
     survivors = [item for report in reports for item in report.get("survivors") or []]
     setup_errors = [report["error"] for report in reports if report.get("error")]
+    outage_detail = outage_detail or outage_seen(run, meta, stream, classifier_failures)
     harness_error = next((reason for reason in (
+        f"infra-outage: {outage_detail}" if outage_detail else None,
         f"sandbox: {sandbox_error}" if sandbox_error else None,
         f"sandbox: {len(survivors)} process(es) outlived their namespace" if survivors else None,
         f"sandbox: {setup_errors[0]}" if setup_errors else None,
@@ -2930,8 +2961,10 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
                           "survivors": survivors, "errors": setup_errors,
                           "checks": next((report.get("checks") for report in reports if report.get("checks")), None)},
               "tripwire_changed": changed, "checkout": checkout_record, "snapshot": frozen, "pins": pins,
-              "base_skills": skills, "harness_error": harness_error, "driven_at": _now()}
+              "base_skills": skills, "harness_error": harness_error, "outage": outage_detail, "driven_at": _now()}
     (run / "drive.json").write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
+    if outage_detail:
+        record["outage_marker"] = str(outage.mark(run.parent, run, outage_detail))
     return record
 
 
@@ -3401,7 +3434,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(prepare_chain_next(args.prev.resolve(), args.case_dir.resolve(), args.output.resolve(),
                                             args.layer), indent=1))
     elif args.command == "drive":
-        print(json.dumps(drive(args.run.resolve(), args.model, args.timeout, args.budget, args.cli_version), indent=1))
+        record = drive(args.run.resolve(), args.model, args.timeout, args.budget, args.cli_version)
+        print(json.dumps(record, indent=1))
+        if record.get("outage"):
+            # a usage limit or service outage: the run is an `infra-outage` exclusion and the campaign should pause
+            print(f"infra-outage: {record['outage']}; marker {record['outage_marker']}", file=sys.stderr)
+            return outage.EXIT_CODE
     elif args.command == "score-serial":
         for run in args.runs:
             result = score_serial(run.resolve(), args.evaluator, args.repeat, args.case_dir)

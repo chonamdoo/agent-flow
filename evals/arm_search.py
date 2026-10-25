@@ -13,7 +13,8 @@ own record next to the runs:
 - `decisions.json`: the decision trail, replayed from the ledger by the same pure rules each time.
 - `checkpoint-<n>.md`: a strategy summary every 20 runs.
 - `s_star.json` when the search ends (`name` null when no variant survived: S* leaves the menu), `stop.json` when it
-  stopped before that (budget, infra errors, checkpoint review, failed precheck).
+  stopped before that (budget, infra errors, checkpoint review, failed precheck, a usage-limit outage: `drive` wrote
+  `runs/QUOTA_EXHAUSTED`, exit 6, until the operator removes it).
 
 Order (program v2.4): the opening block is C ×3 and S-min ×3 (all dimensions off, 2 reviewers), shuffled by `--seed`
 and written to `order.txt`; the C reruns are also the noise floor. If S-min passes the quality-purpose rule
@@ -60,6 +61,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import attempts  # noqa: E402
+import outage  # noqa: E402
 import variants  # noqa: E402
 
 COMPLETE = "declared-complete"
@@ -512,7 +514,9 @@ class Driver:
             state["steps"][step] = "started"
             _write_json(state_path, state)
             code = self.call(step, *argv, log=log)
-            state["steps"][step] = "done" if code == 0 and output.is_file() else f"exit {code}"
+            # a drive that met a usage limit exits EXIT_CODE with its drive.json: score it (an infra-outage row)
+            finished = code == 0 or (step == "drive" and code == outage.EXIT_CODE)
+            state["steps"][step] = "done" if finished and output.is_file() else f"exit {code}"
             _write_json(state_path, state)
             if state["steps"][step] != "done":
                 failed = step
@@ -651,6 +655,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         rows = read_ledger(out)
         step = plan(rows, order)
         write_insights(out, rows, step)
+        marker = out / "runs" / outage.MARKER
+        if marker.is_file():
+            code = stop(out, "quota-exhausted", f"{marker} exists (usage limit or service outage); the outage run is "
+                        "an infra-outage row and its slot runs again. Remove the marker after the reset, then `run`", 6)
+            write_insights(out, rows, step)
+            return code
         if infra_stop(rows, acks["infra"]):
             code = stop(out, "infra-errors", f"{INFRA_STOP} infra errors in a row; fix the cause and `run --ack-infra`",
                         3)

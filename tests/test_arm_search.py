@@ -56,10 +56,14 @@ if item.get("fail") == cmd:
 if cmd == "drive":
     (run / "drive.json").write_text(json.dumps({"cost_usd": item.get("cost", 10.0), "seconds": item.get("seconds", 100),
                                                 "exit": 0}))
+    if item.get("quota"):
+        (run.parent / "QUOTA_EXHAUSTED").write_text("{}\n")
+        sys.exit(75)
 else:
     result = {"oracle": item.get("ok", False), "declaration": item.get("declaration", "declared-complete"),
               "integrity": {"flags": item.get("flags", 0)}, "total_cost_usd": item.get("cost", 10.0),
-              "harness_error": item.get("harness_error"), "drive_exit": 0, "drive_is_error": False,
+              "harness_error": "infra-outage: controller usage-limit" if item.get("quota") else item.get("harness_error"),
+              "drive_exit": 0, "drive_is_error": False,
               "approval_rules": "harness-approves-phases", "ui": {"S": int(item.get("ok", False)), "G": 0.5}}
     (run / "result.json").write_text(json.dumps(result))
 '''
@@ -420,3 +424,16 @@ def test_a_candidate_that_fails_precheck_is_skipped_and_the_search_goes_on(tmp_p
     insights = (out / "insights.md").read_text()
     assert "S-min+tdd" in insights and "precheck" in insights
     assert json.loads((out / "s_star.json").read_text())["menu"] == "removed"
+
+
+def test_a_usage_limit_outage_is_scored_as_infra_and_stops_the_search_until_the_marker_is_removed(tmp_path, monkeypatch):
+    fake, out = _setup(tmp_path, {"*": [{"quota": True, "cost": 3}, {"ok": False, "cost": 5}]}, monkeypatch)
+    assert _run(fake, out) == 6
+    rows = arm_search.read_ledger(out)
+    assert [row["status"] for row in rows] == ["infra-error"] and "infra-outage" in rows[0]["detail"]
+    assert any(call.startswith("score") for call in _calls(tmp_path))  # the outage run was still scored
+    assert json.loads((out / "stop.json").read_text())["reason"] == "quota-exhausted"
+    assert _run(fake, out) == 6 and len(arm_search.read_ledger(out)) == 1  # nothing runs while the marker is there
+    (out / "runs" / "QUOTA_EXHAUSTED").unlink()
+    assert _run(fake, out, "--max-runs", "1") == 0
+    assert arm_search.read_ledger(out)[-1]["status"] == "ok"

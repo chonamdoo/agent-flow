@@ -156,7 +156,10 @@ def reviewer(real: str, args: list[str], config: dict) -> int:
                                 "models": models, "model_usage": payload.get("modelUsage"),
                                 "subtype": payload.get("subtype"), "is_error": payload.get("is_error"),
                                 "cli_duration_ms": payload.get("duration_ms"), "text_exact": exact,
-                                "stdout_bytes": len(text)})
+                                "stdout_bytes": len(text),
+                                # the CLI's own error text (a usage limit, an outage), read by `outage.from_text`
+                                **({"error_text": text.decode("utf-8", "replace")[:400]}
+                                   if payload.get("is_error") else {})})
     return done.returncode
 
 
