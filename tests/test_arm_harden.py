@@ -376,3 +376,15 @@ def test_chain_metrics_leave_the_archive_out_and_carry_only_kit_managed_paths(tm
     _git_init(target)
     copied = arm_compare._carry_kit_state(project, target)
     assert copied == [".agent-flow"] and not (target / ".env").exists() and not (target / "data").exists()
+
+
+def test_the_sandbox_shows_only_the_clis_credential_files_read_only(tmp_path, monkeypatch):
+    token = tmp_path / ".oauth_token"
+    token.write_text("t", encoding="utf-8")
+    monkeypatch.setenv(arm_compare.AUTH_FILES_ENV, f"{token}:{tmp_path / 'absent'}")
+    assert arm_compare.auth_exposes() == [{"path": str(token), "mode": "ro"}]
+    run = tmp_path / "run"
+    (run / "project").mkdir(parents=True)
+    box = arm_compare.run_box(run, {"arm": "A", "project": str(run / "project")}, run / "project", 10, "t")
+    assert {"path": str(token), "mode": "ro"} in box["expose"] and box["env"]["HOME"] == "/root"
+    assert box["home"] == str(run / "sandbox" / "home")

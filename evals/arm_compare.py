@@ -234,6 +234,16 @@ SANDBOX_ENV = "ARM_COMPARE_SANDBOX"
 LOCK_ENV = "ARM_COMPARE_LOCK"
 DEFAULT_LOCK = Path(tempfile.gettempdir()) / "arm-compare.lock"
 BROWSER_REPEAT = 2
+# What the claude CLI reads to authenticate in this environment (the agent proxy supplies the rest), shown read-only
+# inside the sandbox at the same path. Nothing else of the host's HOME or the remote session's state is.
+AUTH_FILES_ENV = "ARM_COMPARE_AUTH_FILES"
+AUTH_FILES = ("/home/claude/.claude/remote/.oauth_token", "/home/claude/.claude/remote/.api_key")
+
+
+def auth_exposes() -> list[dict]:
+    listed = os.environ.get(AUTH_FILES_ENV)
+    names = [item for item in listed.split(":") if item] if listed is not None else list(AUTH_FILES)
+    return [{"path": name, "mode": "ro"} for name in names if Path(name).is_file()]
 ARMS = ("A", "AP", "PS", "V", "VK", "B", "C", "D", "S", "Cp", "R")
 # R: the router picks one of these arms' setups (`router.OPTIONS`, plus S variants); the record keeps `arm: "R"` and the
 # picked `effective_arm`, and everything that depends on the setup reads `effective_arm(meta)`.
@@ -1113,7 +1123,7 @@ def _route(output: Path, project: Path, task: str, model: str, menu_variants: li
         variants.profile_override(kit, profile, spec)
 
     reports: list[dict] = []
-    call = (_sandboxed_call([{"path": str(project.resolve()), "mode": "ro"}], reports, "router")
+    call = (_sandboxed_call([{"path": str(project.resolve()), "mode": "ro"}, *auth_exposes()], reports, "router")
             if sandbox_mode() == "required" else None)
     decision = router.route(task, project, output / router.OUT_DIR, model, controller_env(dict(os.environ)),
                             menu_variants, check_spec, effort=PINNED_EFFORT, call=call)
@@ -2249,7 +2259,8 @@ def run_box(run: Path, meta: dict, cwd: Path | str, timeout: float, label: str) 
     HOME is the run's own (`<run>/sandbox/home`, so the runner's worktrees and the CLI's transcripts stay in the run).
     """
     layout = sandbox.prepare_layout(run)
-    expose = [{"path": str(run.resolve()), "mode": "ro"}, {"path": str(Path(meta["project"]).resolve()), "mode": "rw"}]
+    expose = [{"path": str(run.resolve()), "mode": "ro"}, {"path": str(Path(meta["project"]).resolve()), "mode": "rw"},
+              *auth_exposes()]
     for name, needed in ((verify_gate.LOG, effective_arm(meta) in GATE_ARMS), (user_sim.LOG, bool(meta.get("user_sim")))):
         if needed:
             (run / name).touch()
@@ -3302,8 +3313,10 @@ def main(argv: list[str] | None = None) -> int:
     summ.add_argument("--manifest", type=Path, help="the pre-registered assignment (JSON list of attempts)")
     args = parser.parse_args(argv)
     if args.command == "prepare":
-        output = args.output or attempts.new_run(args.runs_root.resolve(), case=args.case_dir.name if args.case_dir
-                                                 else args.case, layer=args.layer, arm=args.arm, trial=args.trial)
+        name = (json.loads((args.case_dir / "case.json").read_text(encoding="utf-8"))["name"] if args.case_dir
+                else args.case)
+        output = args.output or attempts.new_run(args.runs_root.resolve(), case=name, layer=args.layer, arm=args.arm,
+                                                 trial=args.trial)
         print(json.dumps(prepare(args.kit.resolve(), args.arm, args.case, args.trial, output.resolve(),
                                  args.isolation, args.case_dir.resolve() if args.case_dir else None,
                                  args.variant, args.menu_variants, args.model, args.layer), indent=1))
