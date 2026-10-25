@@ -217,3 +217,21 @@ v2의 "비열등 ∧ 비용 우월" 규칙만으로는 "비싸지만 더 낫다"
 - **부기 (07:20Z), OYG r002:**
   - OYG 탐색 r002(S-min)는 서버의 auto mode 안전 판정이 10번 연속 오지 않아 CLI가 멈췄다(`error_during_execution`). 인프라 오류로 기록하고, 탐색 규칙대로 그 칸을 다시 돌린다.
   - 사이클 3·웹 체인 run에는 이 오류가 없다.
+
+## 개정 v3.9 (2026-10-25): workflow arm 아키텍처 설정, blocked 이유 분류
+
+- **결함:**
+  - 외부 과제(lumi-web·v1·L, lumi-app·v1·체인)의 `case.json`은 `install: []`였다. 그래서 kit이 node·android 프로필을 `architecture: pending`으로 설치했다.
+  - 이 상태에서 workflow arm의 리뷰는 "아키텍처 미선택"을 이유로 계속 변경을 요청하고, run 도중에 모드를 고르면 정책 drift로 거부한다.
+  - 사이클 3 workflow run 8개 중 5개가 이 이유로 blocked를 선언했다.
+  - kit 문서는 "첫 run 전에 고른다"이고, OYG는 이미 `--architecture-mode clean`이다(같은 결함을 OYG C-1에서 고친 기록이 harness 주석에 있다). 사람이 하는 설치 단계를 평가가 빠뜨린 것이므로 실험 조건 결함으로 본다.
+- **수정 (비공개 `dc16b76`):** 모든 외부 과제의 kit 설치를 `--architecture-mode clean`으로 한다. harness 코드는 바뀌지 않는다(`db20840` 유지).
+  - bare arm(A·AP·PS·V·VK, verify-only를 고른 R)은 kit을 설치하지 않으므로 영향이 없다.
+  - `pending`으로 설치된 사이클 3 workflow run 8개는 `c3/explore-arch-pending/`으로 옮기고 다시 돌린다.
+- **blocked 분류 (`bb2d496`, 분석 전용):** 모든 blocked run에 두 가지를 붙인다.
+  - 선언 이유: guard / architecture / review-cap / review-findings / other
+  - 숨은 판정: false-block(S=1) / blocked-with-defects / no-build
+  - 판정 표에는 거짓 완료와 함께 "false-block 비율"과 "이유별 분포"를 넣는다.
+- **수정 전 분류** (탐색 기록, 9 run):
+  - 이유: architecture 5, guard 2, review-cap 1(OYG S-min: 장바구니 중복 추가라는 실제 결함), other 1
+  - 숨은 판정: 모두 S=0. false-block은 0이다. 이유가 절차였던 run도 코드에는 결함이 남아 있었다(G 0.72–0.96).
