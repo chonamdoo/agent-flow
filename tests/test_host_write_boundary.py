@@ -1853,6 +1853,34 @@ def test_unbound_lifecycle_command_with_output_trim_can_establish_binding(
     assert record_host_checkout_binding(payload, root) is not None
 
 
+@pytest.mark.parametrize("suffix", ["", " 2>&1 | tail -5"])
+def test_unbound_session_can_bind_by_cd_into_the_active_worktree(tmp_path: Path, suffix: str):
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    command = f"cd {first.path} && agent-flow status{suffix}"
+
+    assert host_write_boundary_violation(
+        _command_payload(command, session="new-session", host_cwd=root), root
+    ) is None
+    payload = _status_payload(root, first, runs[0])
+    payload["tool_input"]["command"] = command
+    assert record_host_checkout_binding(payload, root) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["cd {wt} && ls", "cd {wt} && agent-flow status; printf leaked > {leak}", "cd {wt}; agent-flow status",
+     "cd {wt} && cd {wt} && agent-flow status && printf leaked > {leak}"],
+)
+def test_cd_prefix_exempts_only_a_lifecycle_command(tmp_path: Path, command: str):
+    root, statuses, _ = _setup(tmp_path)
+    command = command.format(wt=statuses[0].path, leak=root / "leaked.py")
+
+    assert host_write_boundary_violation(
+        _command_payload(command, session="unbound", host_cwd=root), root
+    ) is not None
+
+
 @pytest.mark.parametrize(
     "suffix", [" | tail -8; printf leaked > {leak}", " | tail -8 | tee {leak}", " 2>&1 > {leak}"]
 )

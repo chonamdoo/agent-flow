@@ -77,6 +77,10 @@ _SHELL_PUNCTUATION = ";&|<>()`"
 # 세션이 안내받은 status/continue를 `| tail`과 함께 부르는 순간 bind할 길이 없어진다(#409 OYG r003·r004: headless
 # 세션이 모든 명령을 거부당하고 blocked로 끝났다). 숫자 인자만 받는 tail·head 하나만 인정하므로 다른 명령을 잇는 길은 없다.
 _OUTPUT_TRIM = re.compile(r"(?:\s+2>&1)?(?:\s*\|\s*(?:tail|head)(?:\s+-n)?(?:\s+-?\d+)?)?\s*$")
+# 같은 이유로 앞머리의 `cd <경로> &&` 하나도 벗긴다. 가드가 안내하는 복구는 "그 worktree에서 status/continue를
+# 다시 실행"인데, unbound 세션은 `cd <worktree> && agent-flow status`로만 그렇게 할 수 있다. 그 자리는 이미
+# ``_session_cwd``가 앞머리 `cd`로 읽어 cwd로 넘기므로, 여기서는 명령 낱말만 남긴다.
+_CD_PREFIX = re.compile(r"^\s*cd\s+(?:\"[^\"$`\\]*\"|'[^']*'|[^\s;&|<>()`$\"'\\]+)\s*&&\s*")
 # 인용 밖에서 명령을 끊는 문자. 이 뒤는 새 명령이므로 `VAR=값`이 다시 대입이다.
 # 줄바꿈도 여기 속한다 — 여러 줄 명령의 둘째 줄도 명령의 시작이다.
 _COMMAND_SEPARATORS = frozenset(";&|()\n\r")
@@ -2534,7 +2538,7 @@ def _agent_flow_arguments(
     root: Path | None = None,
     cwd: Path | None = None,
 ) -> tuple[str, ...] | None:
-    argv = _direct_shell_argv(_OUTPUT_TRIM.sub("", command))
+    argv = _direct_shell_argv(_OUTPUT_TRIM.sub("", _CD_PREFIX.sub("", command, count=1)))
     if not argv:
         return None
     if argv[0] in {"agent-flow", "agent-flow-kit"}:
