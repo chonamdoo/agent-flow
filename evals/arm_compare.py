@@ -150,7 +150,9 @@ UI_TASK = ("Build the global beauty commerce site that `prd.md` describes: a web
 CONTROLLER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "ANDROID_HOME", "JAVA_HOME", "HTTPS_PROXY",
                   "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "NODE_EXTRA_CA_CERTS",
                   "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
-                  "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CODEX_HOME", "OPENAI_API_KEY")
+                  "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CODEX_HOME", "OPENAI_API_KEY",
+                  # 실험 run의 effort(#409 v3.5). controller가 띄우는 reviewer·gate·router·시뮬레이터도 같은 값을 받는다.
+                  "CLAUDE_CODE_EFFORT_LEVEL")
 AGENT_FLOW_WORKTREES = Path.home() / ".agent-flow" / "worktrees"
 CLAUDE_TOOLS = ("Bash", "Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "TodoWrite", "Task")
 ARMS = ("A", "AP", "PS", "V", "VK", "B", "C", "D", "S", "Cp", "R")
@@ -1736,7 +1738,8 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
               **({"verify_gate": verify_gate.summary(run / verify_gate.LOG)} if arm in GATE_ARMS else {}),
               "transcript": str(transcript) if transcript else None,
               "argv_sha256": hashlib.sha256(json.dumps(controller_argv(prompt, model, budget)).encode()).hexdigest(),
-              "cli_version": c_prime._sh(["claude", "--version"], run).stdout.strip() or None}
+              "cli_version": c_prime._sh(["claude", "--version"], run).stdout.strip() or None,
+              "effort": os.environ.get("CLAUDE_CODE_EFFORT_LEVEL")}
     (run / "drive.json").write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
     return record
 
