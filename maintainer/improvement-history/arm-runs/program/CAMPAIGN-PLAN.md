@@ -126,6 +126,9 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
   - 캠페인: `scratch/campaign/` — `campaign.py`, `next*.sh`, `campaign.log`, 단계별 폴더(`ledger.jsonl`, `assignment.json`, `missing.json`)
   - 숨은 경로: `ARM_COMPARE_HIDDEN_ROOTS`
 - **비공개 저장소:** `/home/user/agent-flow-evals-private`(브랜치 `feat/lumi-ui-v1`). 과제 lumi-web, lumi-web-v1, lumi-web-L, lumi-app-chain/steps/F1–F3. OYG 평가기는 `scratch/oyg-eval`(브랜치 `fix/oyg-missing-eval-json`).
+- **컨테이너 재시작 시 (2026-10-25 18:56Z에 실제로 일어남):** 백그라운드 작업이 없으면 세션이 유휴로 보여 컨테이너가 회수되고 모든 프로세스가 죽는다.
+  - 대비: 감시 작업을 항상 하나 띄워 둔다(최대 약 105분, 끝나면 다시 건다). 점검 예약도 약 2시간마다 둔다.
+  - 복구: `campaign/next4.sh <harness>`를 다시 실행하면 이어 간다. 채워진 칸은 그대로 두고, 결과 없이 끊긴 run은 인프라 제외로 `campaign/aborted/<단계>/`에 옮긴 뒤 그 칸만 다시 돌린다. OYG 탐색은 `--ack-infra`로 이어 간다.
 - **사용량 소진 시:** 캠페인이 `campaign/PAUSE`를 만들고 멈춘다. 다음 주 수요일에 `PAUSE`를 지우고, 남은 단계를 `campaign.py <phases>`로 다시 시작한다. 소진으로 실패한 run은 인프라 제외(`infra-outage`)로 처리하고 다시 돌린다.
 
 ## 6. 평가기 상태
@@ -153,7 +156,7 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
   - workflow arm에 `agent-flow` CLI를 PATH에 둔다. 전에는 모델이 우연히 경로를 찾아야 했고, 못 찾으면 멈추는 함정이었다.
 - [x] 스모크(작은 node 과제): C는 grill→구현→리뷰→commit까지 가서 S=1이었다. VK 게이트는 incomplete 1건을 막았고, 고친 뒤 통과했다. 탐색 precheck도 통과했다.
 - [x] 숨은 아키텍처 채점기 동결(9a6374c). 채점 뒤 `campaign.py`가 자동으로 `arch.json`을 만든다.
-- [ ] **기준선 재실행(16:34Z 시작):** workflow arm 환경(CLI PATH)이 바뀌어서, 같은 조건으로 비교하려고 다시 돌린다. 옛 기준선은 `campaign/baseline-9ce653d/`에 참고로 둔다.
+- [ ] **기준선 재실행(16:34Z 시작):** 4칸이 끝났다. 남은 2칸(C·R 각 trial 2)은 컨테이너 재시작으로 끊겨서 인프라 제외하고 20:53Z에 다시 돌린다. workflow arm 환경(CLI PATH)이 바뀌어서, 같은 조건으로 비교하려고 다시 돌린다. 옛 기준선은 `campaign/baseline-9ce653d/`에 참고로 둔다.
 - [ ] 그다음 자동으로 OYG S\* 탐색 → 웹 체인 → 앱 체인 → (평가기 동결 시) 웹 L.
 - [x] 웹 L 평가기 동결(f16079f). `next4.sh`는 동결 표식을 `lumi-web-L/FREEZE.md`에서 찾지만 실제 위치는 `validity-reports/FREEZE.md`다. 그래서 앱 체인이 끝나면 `campaign.py webL`을 손으로 시작한다(실행 중인 스크립트는 고치지 않는다).
 - [ ] 결론 보고서(모든 칸이 채워진 뒤).
