@@ -397,3 +397,12 @@ def test_the_sandbox_shows_only_the_clis_credential_files_read_only(tmp_path, mo
     box = arm_compare.run_box(run, {"arm": "A", "project": str(run / "project")}, run / "project", 10, "t")
     assert {"path": str(token), "mode": "ro"} in box["expose"] and box["env"]["HOME"] == "/root"
     assert box["home"] == str(run / "sandbox" / "home")
+
+
+def test_the_agents_own_tmp_files_are_not_hidden_paths(monkeypatch):
+    monkeypatch.delenv(arm_compare.HIDDEN_ROOTS_ENV, raising=False)
+    own_task_output = "/tmp/claude-0/-tmp-run-project/abc/tasks/x.output"
+    assert arm_compare._hidden_paths(f"cat {own_task_output}", arm_compare.hidden_roots(), []) == []
+    monkeypatch.setenv(arm_compare.HIDDEN_ROOTS_ENV, "/tmp/claude-0/-home-user/operator-session")
+    assert arm_compare._hidden_paths("cat /tmp/claude-0/-home-user/operator-session/x/prd.md",
+                                     arm_compare.hidden_roots(), [])

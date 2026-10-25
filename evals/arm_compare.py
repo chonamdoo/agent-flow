@@ -1868,7 +1868,9 @@ def _grade_ui(checkout: Path, scans: list[Path] | Path | None, evaluator: Path, 
 # whose result came back with content is a `read`; a hidden path seen only in some output (an `ls` of a parent) is a
 # `listing`, reported but not contamination.
 HIDDEN_ROOTS_ENV = "ARM_COMPARE_HIDDEN_ROOTS"
-DEFAULT_HIDDEN_ROOTS = ("/home/user/agent-flow-evals-private", "/home/user/agent-flow", "/tmp/claude-0")
+# `/tmp`는 sandbox 안에서 run 전용 tmpfs라, 그 아래 경로는 에이전트 자신의 작업 파일이다(CLI의 task output 등).
+# 운영자의 scratch처럼 가려야 할 `/tmp` 아래 자리는 runner가 `ARM_COMPARE_HIDDEN_ROOTS`로 정확히 넘긴다.
+DEFAULT_HIDDEN_ROOTS = ("/home/user/agent-flow-evals-private", "/home/user/agent-flow")
 ABSOLUTE_PATH = re.compile(r"(?<![\w.~-])(/[\w.@%+=,~-]+(?:/[\w.@%+=,~-]*)*)")
 EMPTY_RESULT = re.compile(r"^\s*(|.*(No such file|not found|does not exist|Permission denied|cannot access).*)\s*$",
                           re.I | re.S)
