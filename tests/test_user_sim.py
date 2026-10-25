@@ -143,63 +143,147 @@ def test_a_workflow_arm_routes_phase_questions_to_the_product_owner(tmp_path):
 
 # ─── the simulator and its ask-user script ───
 
-def _fake_claude(bin_dir: Path, seen: Path, answer: str = "최대 5개입니다.") -> None:
+def _fake_claude(bin_dir: Path, seen: Path, answer: str = "최대 5개입니다.", selection: str = '{"fact_ids": ["F01"]}') -> None:
+    """A `claude` that answers the select call (its system prompt asks for fact_ids) and the answer call."""
     bin_dir.mkdir()
     fake = bin_dir / "claude"
     fake.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, sys\n"
         "stdin = sys.stdin.read()\n"
+        "system = sys.argv[sys.argv.index('--system-prompt') + 1]\n"
         f"open({str(seen)!r}, 'a').write(json.dumps({{'argv': sys.argv[1:], 'stdin': stdin, 'cwd': os.getcwd(),\n"
         "                                         'env': dict(os.environ)}) + '\\n')\n"
-        f"print(json.dumps({{'result': {answer!r}, 'total_cost_usd': 0.02, 'is_error': False,\n"
-        "                  'usage': {'input_tokens': 50, 'output_tokens': 5}}))\n", encoding="utf-8")
+        f"result = {selection!r} if 'fact_ids' in system else {answer!r}\n"
+        "print(json.dumps({'result': result, 'total_cost_usd': 0.02, 'is_error': False,\n"
+        "                  'modelUsage': {'claude-opus-5-5': {}}, 'usage': {'input_tokens': 50, 'output_tokens': 5}}))\n",
+        encoding="utf-8")
     fake.chmod(0o755)
 
 
-def test_the_ask_user_script_asks_the_simulator_with_the_oracle_and_logs_the_answer(tmp_path):
+def test_the_ask_user_script_selects_facts_then_answers_from_only_those_and_logs_them(tmp_path):
     case_dir = _case(tmp_path)
     run = tmp_path / "A-under"
     meta = arm_compare.prepare(ROOT, "A", "x", 1, run, case_dir=case_dir, layer="underspec")
     user_sim.set_model(run, "claude-test-model")
     seen = tmp_path / "seen.jsonl"
     _fake_claude(tmp_path / "bin", seen)
-    env = {**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "CLAUDE_CODE_SESSION_ID": "controller"}
+    env = {**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "CLAUDE_CODE_SESSION_ID": "controller",
+           "CLAUDE_CODE_EFFORT_LEVEL": "high"}
     done = subprocess.run([meta["user_sim"]["ask_user"], "장바구니에 최대 몇 개까지 담나요?"], capture_output=True,
                           text=True, env=env, cwd=run / "project", timeout=60)
     assert done.returncode == 0 and done.stdout.strip() == "최대 5개입니다."
-    (call,) = [json.loads(line) for line in seen.read_text(encoding="utf-8").splitlines()]
-    argv = call["argv"]
-    assert call["stdin"] == "장바구니에 최대 몇 개까지 담나요?"
-    assert argv[argv.index("--model") + 1] == "claude-test-model" and argv[argv.index("--tools") + 1] == ""
-    assert argv[argv.index("--max-budget-usd") + 1] == "1" and argv[argv.index("--output-format") + 1] == "json"
-    system = argv[argv.index("--system-prompt") + 1]
-    assert FULL.strip() in system and user_sim.UNDECIDED in system and "prd.md" not in system
-    assert "CLAUDE_CODE_SESSION_ID" not in call["env"]
-    assert not Path(call["cwd"]).resolve().is_relative_to((run / "project").resolve())
+    select, answer = [json.loads(line) for line in seen.read_text(encoding="utf-8").splitlines()]
+    for call in (select, answer):
+        argv = call["argv"]
+        assert argv[argv.index("--model") + 1] == "claude-test-model" and argv[argv.index("--tools") + 1] == ""
+        assert argv[argv.index("--max-budget-usd") + 1] == "1" and argv[argv.index("--output-format") + 1] == "json"
+        assert "CLAUDE_CODE_SESSION_ID" not in call["env"] and call["env"]["CLAUDE_CODE_EFFORT_LEVEL"] == "low"
+        assert not Path(call["cwd"]).resolve().is_relative_to((run / "project").resolve())
+    selecting = select["argv"][select["argv"].index("--system-prompt") + 1]
+    assert '<fact id="F01">The cart holds at most 5 items.</fact>' in selecting
+    assert '<fact id="F02">Coupons are not supported.</fact>' in selecting and "prd.md" not in selecting
+    assert "장바구니에 최대 몇 개까지 담나요?" in select["stdin"]
+    answering = answer["argv"][answer["argv"].index("--system-prompt") + 1]
+    assert "The cart holds at most 5 items." in answering and "Coupons" not in answering
+    assert user_sim.UNDECIDED in answering and "Answer in Korean" in answering
+    assert answer["stdin"] == "장바구니에 최대 몇 개까지 담나요?"
     (row,) = user_sim.read_log(run / user_sim.LOG)
     assert row["question"] == "장바구니에 최대 몇 개까지 담나요?" and row["answer"] == "최대 5개입니다."
-    assert row["cost_usd"] == 0.02 and row["questions"] == 1 and row["ok"] and row["oracle_sha256"] == _sha(FULL)
+    assert row["disclosed_fact_ids"] == ["F01"] and row["language"] == "ko" and row["effort"] == "low"
+    assert row["cost_usd"] == 0.04 and row["questions"] == 1 and row["ok"] and row["oracle_sha256"] == _sha(FULL)
+    assert [call["stage"] for call in row["calls"]] == ["select", "answer"]
+    assert row["models_used"] == ["claude-opus-5-5"]
+
+
+FACTS = {"facts": [
+    {"id": "U01.1", "rule": "U01", "topic": "장바구니 수량", "ko": "장바구니에는 최대 5개까지 담는다."},
+    {"id": "U01.2", "rule": "U01", "topic": "장바구니 수량", "ko": "6번째를 담으면 담지 않고 안내 문구를 보인다."},
+    {"id": "U05.1", "rule": "U05", "topic": "배송비", "ko": "배송비는 주문당 3,000원이다.",
+     "en": "Shipping costs 3,000 won per order."}]}
+
+
+def _staged(selection: str, answer: str = "답", cost: float | None = 0.01, seen: list | None = None):
+    """A `call` stub: the select call returns `selection`, the answer call `answer`; every call is kept in `seen`."""
+    def stub(argv, stdin, cwd, env, timeout):
+        system = argv[argv.index("--system-prompt") + 1]
+        if seen is not None:
+            seen.append({"system": system, "stdin": stdin, "env": env})
+        result = selection if "fact_ids" in system else answer
+        return 0, json.dumps({"result": result, "total_cost_usd": cost}), "", False
+    return stub
+
+
+def _config(tmp_path: Path, oracle_text: str) -> dict:
+    oracle = tmp_path / "oracle"
+    oracle.write_text(oracle_text, encoding="utf-8")
+    return {"run_dir": str(tmp_path), "oracle": str(oracle), "model": "m", "env": {"keys": ["PATH"], "set": {}}}
+
+
+def test_a_compound_question_discloses_exactly_the_selected_facts(tmp_path):
+    config = _config(tmp_path, json.dumps(FACTS, ensure_ascii=False))
+    seen: list = []
+    row = user_sim.ask("장바구니에 몇 개까지 담나요? 배송비는 얼마인가요?", config,
+                       call=_staged('{"fact_ids": ["U05.1", "U01.1", "U99.9"]}', "5개, 3,000원입니다.", seen=seen),
+                       environ={})
+    assert row["ok"] and row["disclosed_fact_ids"] == ["U01.1", "U05.1"] and row["invalid_fact_ids"] == ["U99.9"]
+    assert row["disclosed_rules"] == ["U01", "U05"] and row["questions"] == 2 and row["cost_usd"] == 0.02
+    answering = seen[1]["system"]
+    assert "최대 5개" in answering and "3,000원" in answering and "안내 문구" not in answering
+    assert "U01.1" not in answering and "(English: Shipping costs 3,000 won per order.)" in answering
+    assert seen[0]["env"]["CLAUDE_CODE_EFFORT_LEVEL"] == "low"
+
+
+def test_an_english_question_is_answered_in_english_and_unknowns_get_the_english_undecided_sentence(tmp_path):
+    config = _config(tmp_path, json.dumps(FACTS, ensure_ascii=False))
+    seen: list = []
+    row = user_sim.ask("How much is shipping?", config,
+                       call=_staged('{"fact_ids": ["U05.1"]}', "3,000 won per order.", seen=seen), environ={})
+    assert row["language"] == "en" and row["answer_language"] == "en" and row["disclosed_fact_ids"] == ["U05.1"]
+    assert "Answer in English" in seen[1]["system"] and user_sim.UNDECIDED_BY_LANGUAGE["en"] in seen[1]["system"]
+    seen.clear()
+    unknown = user_sim.ask("What colour is the logo?", config, call=_staged('{"fact_ids": []}', seen=seen), environ={})
+    assert unknown["ok"] and unknown["undecided"] and unknown["answer"] == user_sim.UNDECIDED_BY_LANGUAGE["en"]
+    assert unknown["disclosed_fact_ids"] == [] and len(seen) == 1 and unknown["cost_usd"] == 0.01
+    korean = user_sim.ask("로고 색은요?", config, call=_staged('{"fact_ids": []}'), environ={})
+    assert korean["answer"] == user_sim.UNDECIDED and korean["language"] == "ko"
 
 
 def test_every_question_and_answer_is_logged_with_its_cost_and_failures_count(tmp_path):
-    oracle = tmp_path / "oracle.md"
-    oracle.write_text(FULL, encoding="utf-8")
-    config = {"run_dir": str(tmp_path), "oracle": str(oracle), "model": "m", "env": {"keys": ["PATH"], "set": {}}}
-    replies = iter([(0, json.dumps({"result": user_sim.UNDECIDED, "total_cost_usd": 0.01}), "", False),
-                    (1, "", "boom", False)])
+    config = _config(tmp_path, FULL)
+    replies = iter([(0, json.dumps({"result": '{"fact_ids": []}', "total_cost_usd": 0.01}), "", False),
+                    (1, "", "boom", False),
+                    (0, json.dumps({"result": "I think F01", "total_cost_usd": 0.01}), "", False),
+                    (0, json.dumps({"result": '{"fact_ids": ["F02"]}', "total_cost_usd": 0.01}), "", False),
+                    (0, json.dumps({"result": "쿠폰은 없습니다."}), "", False)])
     stub = lambda argv, stdin, cwd, env, timeout: next(replies)  # noqa: E731
     first = user_sim.ask("1. 쿠폰은요? 2. 배송비는?", config, call=stub, environ={})
     second = user_sim.ask("색상은?", config, call=stub, environ={})
-    assert first["ok"] and first["undecided"] and first["questions"] == 2
+    third = user_sim.ask("포장은?", config, call=stub, environ={})
+    fourth = user_sim.ask("쿠폰은요?", config, call=stub, environ={})
+    assert first["ok"] and first["undecided"] and first["questions"] == 2 and first["answer"] == user_sim.UNDECIDED
     assert not second["ok"] and second["answer"] is None and "boom" in second["error"]
+    assert not third["ok"] and "fact_ids" in third["error"] and third["disclosed_fact_ids"] == []
+    assert fourth["ok"] and fourth["disclosed_fact_ids"] == ["F02"] and fourth["cost_usd"] is None
     rows = user_sim.read_log(tmp_path / user_sim.LOG)
-    assert [row["question"] for row in rows] == ["1. 쿠폰은요? 2. 배송비는?", "색상은?"]
+    assert [row["question"] for row in rows] == ["1. 쿠폰은요? 2. 배송비는?", "색상은?", "포장은?", "쿠폰은요?"]
     assert user_sim.summary(tmp_path / user_sim.LOG) == {
-        "ask_user_calls": 2, "ask_user_questions": 3, "asked_any": True, "ask_user_failed": 1,
-        "ask_user_undecided": 1, "user_sim_cost_usd": None}
+        "ask_user_calls": 4, "ask_user_questions": 5, "asked_any": True, "ask_user_failed": 2,
+        "ask_user_undecided": 1, "ask_user_disclosed_fact_ids": ["F02"], "user_sim_cost_usd": None}
     assert user_sim.summary(tmp_path / "none.jsonl")["user_sim_cost_usd"] == 0.0
     assert user_sim.count_questions("") == 0 and user_sim.count_questions("Tell me the limit") == 1
+
+
+def test_markdown_oracles_split_into_one_fact_per_bullet_with_their_indented_lines():
+    facts = user_sim.facts_from_markdown("<!-- c -->\n# T\n\n## 상품\n- 첫째.\n  - 예: 1개.\n- 둘째.\n\n## 결제\n- 셋째.\n")
+    assert facts == [{"id": "F01", "ko": "첫째.\n- 예: 1개.", "topic": "상품"}, {"id": "F02", "ko": "둘째.", "topic": "상품"},
+                     {"id": "F03", "ko": "셋째.", "topic": "결제"}]
+    assert [fact["id"] for fact in user_sim.load_facts(json.dumps(FACTS))] == ["U01.1", "U01.2", "U05.1"]
+    with pytest.raises(ValueError):
+        user_sim.load_facts('{"facts": []}')
+    assert [user_sim.language(t) for t in ("몇 개?", "How many?", "いくつ?", "1?")] == ["ko", "en", "ja", "en"]
+    assert user_sim.parse_selection("```json\n{\"fact_ids\": [\"b\", \"a\"]}\n```", ["a", "b"]) == (["a", "b"], [])
+    assert user_sim.parse_selection("none", ["a"]) == (None, [])
 
 
 # ─── score and summarize ───
@@ -209,13 +293,13 @@ def test_score_counts_ask_user_calls_adds_the_simulator_cost_and_flags_oracle_re
     run = tmp_path / "A-under"
     arm_compare.prepare(ROOT, "A", "x", 1, run, case_dir=case_dir, layer="underspec")
     config = json.loads((run / user_sim.DIR / user_sim.CONFIG).read_text(encoding="utf-8"))
-    stub = lambda argv, stdin, cwd, env, timeout: (0, json.dumps({"result": "5개", "total_cost_usd": 0.05}), "", False)  # noqa: E731
+    stub = _staged('{"fact_ids": ["F01"]}', "5개", cost=0.05)
     user_sim.ask("최대 수량은? 쿠폰은?", config, call=stub, environ={})
     user_sim.ask("배송비는?", config, call=stub, environ={})
     (run / "drive.json").write_text(json.dumps({"cost_usd": 2.0, "exit": 0}), encoding="utf-8")
     result = arm_compare.score(run, None, case_dir / "score.py")
     assert result["ask_user_calls"] == 2 and result["ask_user_questions"] == 3 and result["asked_any"] is True
-    assert result["user_sim_cost_usd"] == 0.1 and result["total_cost_usd"] == 2.1
+    assert result["user_sim_cost_usd"] == 0.2 and result["total_cost_usd"] == 2.2
     assert result["layer"] == "underspec" and result["oracle_reads"] == 0 and result["contaminated"] is False
     transcript = tmp_path / "t.jsonl"
     transcript.write_text(json.dumps({"type": "assistant", "message": {"content": [
