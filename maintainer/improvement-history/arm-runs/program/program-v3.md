@@ -259,3 +259,20 @@ v2의 "비열등 ∧ 비용 우월" 규칙만으로는 "비싸지만 더 낫다"
   4. 고친 효과: round k의 지적이 round k+1에서 사라졌는지, 그리고 관련 숨은 체크가 최종에 통과했는지
   5. blocked 해석: "미완성 때문에 멈춤", "버그 때문에 멈춤", "절차 때문에 멈춤"을 v3.9의 이유 분류와 함께 낸다.
 - bare arm(A·V·VK)은 리뷰가 없지만, 숨은 실패의 missing/wrong 분포는 같은 방식으로 낸다. "맨 모델은 미완성으로 틀리는가, 버그로 틀리는가"를 비교하기 위해서다.
+
+## 개정 v3.11 (2026-10-25): 모든 과제·모든 arm에 같은 아키텍처, 기능 누락을 따로 잰다
+
+사용자 지시: "버그나 코드 수정은 있을 수 있지만 기능 누락은 다른 이야기다. 과제 전부 동일 아키텍처, 모델 역시 동일 아키텍처로."
+
+- **같은 아키텍처:**
+  - 모든 lumi 과제에 kit의 `clean-architecture-core`를 `architecture.md`로 넣는다. 앱 과제는 `android-clean-architecture`도 함께 넣는다.
+  - 과제 문장에는 "Follow the architecture in … (the same for every participant)."를 더한다(비공개 `fcf8c91`).
+  - workflow arm은 kit도 clean으로 설치하므로 같은 계약을 리뷰로도 받는다. bare arm은 같은 문서를 과제로 받는다.
+  - OYG는 모든 arm이 workflow이고 clean으로 설치되므로 바꾸지 않는다.
+- **과제가 바뀌었으므로 사이클 3을 처음부터 다시 잰다.** 앞의 run은 모두 `c3/explore-no-archdoc/`, `explore-arch-pending/`의 탐색 기록이다. harness는 `db20840` 그대로다.
+- **기능 누락은 1차 지표로 분리한다.** v3.10의 숨은 실패 분류를 쓴다.
+  - **완성도:** missing 실패가 0인가, 그리고 missing 체크 비율이다. "만들지 않았다"이므로 버그와 다른 실패다.
+  - **정확도:** missing을 뺀 나머지에서 wrong 실패 비율이다. "만들었는데 틀렸다"이고, 고치면 되는 실패다.
+  - **거짓 완료의 등급:** complete를 선언했는데 missing이 있으면 `false-complete-missing`(가장 무겁다), wrong만 있으면 `false-complete-bug`다.
+  - 판정 표에는 S·거짓 완료와 함께 이 둘을 따로 싣는다.
+- **보조 지표:** 아키텍처 준수. 최종 코드를 같은 `architecture.md`로 채점하는 독립 리뷰(고정 루브릭, Opus 5.5 medium)다. 판정에는 쓰지 않고 보고만 한다.
