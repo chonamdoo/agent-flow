@@ -569,6 +569,93 @@ def test_a_reapproval_that_lets_the_run_finish_is_recorded_as_passed(tmp_path, m
     assert record["fix_loop_cap_stop"] is False
 
 
+def _labelled_drive(tmp_path, monkeypatch, labels, finals, statuses=3, fail=False):
+    findings = [{"job_id": "codex-generalist", "section": "must-fix", "severity": "high", "text": f"finding {n}",
+                 "sha": f"sha{n}"} for n in range(len(labels))]
+    monkeypatch.setattr(arm_compare, "open_findings", lambda worktree, status: findings)
+    calls = []
+
+    def run_claude(prompt, system, **_):
+        calls.append(system)
+        if fail:
+            raise RuntimeError("claude -p gave no JSON")
+        ids = [item["id"] for item in json.loads(prompt)]
+        return {"text": json.dumps({"labels": [{"id": i, "label": label, "why": "w"}
+                                               for i, label in zip(ids, labels)]}), "cost": 0.05}
+
+    monkeypatch.setattr(arm_compare.finding_split, "run_claude", run_claude)
+    record, messages = _drive_run(tmp_path, monkeypatch, [_cap_status(tmp_path)] * statuses, finals)
+    return record, messages, calls
+
+
+BLOCKED = "Stopped.\n\nEVAL-STATUS: blocked: fix-loop limit"
+
+
+def test_an_incomplete_finding_at_the_cap_ends_the_run(tmp_path, monkeypatch):
+    record, messages, calls = _labelled_drive(tmp_path, monkeypatch, ["bug", "incomplete"], [BLOCKED])
+    assert len(messages) == 1 and calls == [arm_compare.finding_split.LABEL_PROMPT]
+    stop = record["review_stop"]
+    assert stop["verdict"] == "incomplete" and stop["incomplete"] == 1 and stop["phase"] == "multi-review"
+    assert [item["label"] for item in stop["findings"]] == ["bug", "incomplete"]
+    assert record["fix_extensions"] == [] and record["fix_loop_reapprovals"] == []
+    assert record["review_classifier_cost_usd"] == 0.05 and record["fix_loop_cap_stop"] is True
+
+
+def test_bug_findings_at_the_cap_get_at_most_two_fix_extensions(tmp_path, monkeypatch):
+    record, messages, calls = _labelled_drive(tmp_path, monkeypatch, ["bug", "design"], [BLOCKED], statuses=5)
+    assert len(messages) == 3 and len(calls) == 3
+    assert all("Fix them in the code, run the tests" in message for message in messages[1:])
+    assert "- [bug] finding 0" in messages[1] and "- [design] finding 1" in messages[1]
+    extensions = record["fix_extensions"]
+    assert [item["passed"] for item in extensions] == [False, False]
+    assert extensions[0]["findings"][0]["label"] == "bug" and record["fix_loop_reapprovals"] == []
+    assert record["review_stop"] is None and record["review_classifier_cost_usd"] == 0.15
+
+
+def test_a_fix_extension_that_lets_the_run_finish_is_passed(tmp_path, monkeypatch):
+    record, messages, _ = _labelled_drive(tmp_path, monkeypatch, ["procedure"], [BLOCKED, "Done.\n\nEVAL-STATUS: complete"],
+                                          statuses=1)
+    assert len(messages) == 2 and [item["passed"] for item in record["fix_extensions"]] == [True]
+    assert record["fix_loop_cap_stop"] is False
+
+
+def test_a_classifier_failure_falls_back_to_the_re_review(tmp_path, monkeypatch):
+    record, messages, calls = _labelled_drive(tmp_path, monkeypatch, ["bug"], [BLOCKED], statuses=5, fail=True)
+    assert len(messages) == 3 and "Do not change code" in messages[1]
+    assert len(record["fix_loop_reapprovals"]) == 2 and record["fix_extensions"] == []
+    failures = record["review_classifier_failures"]
+    assert len(failures) == 3 and "no JSON" in failures[0]["error"]
+
+
+def test_no_open_findings_falls_back_without_a_classifier_call(tmp_path, monkeypatch):
+    record, messages = _drive_run(tmp_path, monkeypatch, [_cap_status(tmp_path)] * 5, [BLOCKED])
+    assert record["review_classifier_failures"][0]["error"] == "no-open-findings"
+    assert record["review_classifier_cost_usd"] == 0.0 and len(record["fix_loop_reapprovals"]) == 2
+
+
+def test_open_findings_come_from_reviewers_that_requested_changes(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "20261022-131409"
+    (run_dir / "artifacts").mkdir(parents=True)
+    body = ("# codex-types\n\n## review output\n\n```text\n### Must-fix\n- <severity:high> [a.js:3] Refund is not "
+            "recorded.\n### Notes\n- <severity:low> [a.js:9] fine\n\nverdict: request-changes\n```\n")
+    (run_dir / "multi-review-types-codex.md").write_text(body, encoding="utf-8")
+    (run_dir / "multi-review-types-claude.md").write_text(body.replace("Refund", "Other"), encoding="utf-8")
+    (run_dir / "multi-review-review-results.json").write_text(json.dumps({"outcomes": [
+        {"artifact": "multi-review-types-codex.md", "job_id": "codex-types", "verdict": "request-changes"},
+        {"artifact": "multi-review-types-claude.md", "job_id": "claude-types", "verdict": "approve"}]}),
+        encoding="utf-8")
+    monkeypatch.setattr(arm_compare, "phase_artifact",
+                        lambda worktree, status, phase: run_dir / "artifacts" / f"{phase}.md")
+    found = arm_compare.open_findings(tmp_path, _cap_status(tmp_path))
+    assert [(item["job_id"], item["section"]) for item in found] == [("codex-types", "must-fix")]
+    assert "Refund is not recorded" in found[0]["text"]
+
+
+def test_the_total_cost_adds_the_review_classifier():
+    assert arm_compare.total_cost(1.0, None, None, 0.5, 0.25) == 1.75
+    assert arm_compare.total_cost(1.0, None, None, 0.0, None) is None
+
+
 def test_the_bare_arm_is_never_reapproved(tmp_path, monkeypatch):
     run = tmp_path / "C-1"
     _drive_run(tmp_path, monkeypatch, [], ["Done.\n\nEVAL-STATUS: complete"])

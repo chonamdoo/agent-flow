@@ -146,6 +146,7 @@ import router  # noqa: E402
 import user_sim  # noqa: E402
 import verify_gate  # noqa: E402
 import run_usage  # noqa: E402
+import review_findings as finding_split  # noqa: E402 - the module; `review_findings` below is a function
 from cycle_report import fisher_greater  # noqa: E402
 
 CASES = HERE / "phase-cases"
@@ -1677,7 +1678,10 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
               "transcript": str(transcript) if transcript else None, **_measured_usage(rows, read), **read,
               "controller_cost_usd": drive.get("cost_usd"),
               "total_cost_usd": total_cost(drive.get("cost_usd"), gate, routed,
-                                           simulated["user_sim_cost_usd"] if simulated else 0.0),
+                                           simulated["user_sim_cost_usd"] if simulated else 0.0,
+                                           drive.get("review_classifier_cost_usd") or 0.0),
+              **({key: drive[key] for key in ("review_classifier_cost_usd", "review_stop", "fix_extensions",
+                                              "review_classifier_failures") if key in drive}),
               **(simulated or {}), **({"grill_checks": drive["grill_checks"]} if "grill_checks" in drive else {}),
               **({"router_cost_usd": routed.get("cost_usd")} if routed else {}),
               **({"verify_gate": gate} if gate is not None else {}), "drive_exit": drive.get("exit"),
@@ -1698,12 +1702,12 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
 
 
 def total_cost(controller: float | None, gate: dict | None, routed: dict | None = None,
-               simulator: float | None = 0.0) -> float | None:
-    """The controller's cost plus arm V's reviewer cost, arm R's router cost and the simulated user's cost; null when
-    any of them is unknown."""
+               simulator: float | None = 0.0, classifier: float | None = 0.0) -> float | None:
+    """The controller's cost plus arm V's reviewer cost, arm R's router cost, the simulated user's cost and the
+    harness's review-finding classifier cost; null when any of them is unknown."""
     reviewer = gate["reviewer_cost_usd"] if gate is not None else 0.0
     chooser = routed.get("cost_usd") if routed else 0.0
-    parts = (controller, reviewer, chooser, simulator)
+    parts = (controller, reviewer, chooser, simulator, classifier)
     return None if None in parts else round(sum(parts), 4)
 
 
@@ -1786,6 +1790,17 @@ RESUME_AFTER_FIX_LOOP_CAP = (
     "`{phase}` reviewers again on the current code, replace the phase artifact with their new aggregate, then run "
     "the next command the runner prints. Do not change code in this step; if the reviewers still request changes, "
     "the runner stops again.")
+# v3.12: at a cap stop the harness labels the open findings with the frozen review_findings classifier (no tools, run by
+# the harness, unseen by the agent). An `incomplete` finding ends the run there (a completeness failure). Otherwise the
+# run gets up to MAX_FIX_EXTENSIONS more fix rounds on exactly those findings. A classifier failure, or no parsed
+# findings, falls back to the re-review above and is recorded.
+MAX_FIX_EXTENSIONS = 2
+OPEN_FINDINGS_SHOWN = 20
+RESUME_TO_FIX_FINDINGS = (
+    "The evaluator, as the user, lets the run continue past the fix-loop limit at phase `{phase}` so that these open "
+    "review findings get fixed:\n{findings}\nFix them in the code, run the tests, run the `{phase}` reviewers again on "
+    "the new code, replace the phase artifact with their new aggregate, then run the next command the runner prints.")
+REVIEW_CLASSIFIER_BUDGET_USD = 2.0
 
 
 def runner_status(project: Path) -> dict | None:
@@ -1837,6 +1852,52 @@ def review_findings(worktree: Path, status: dict, limit: int = 12) -> dict:
     findings = [line.strip()[2:] for line in text.splitlines() if re.match(r"^\s*- (high|med|medium|low|critical):", line)]
     return {"artifact": hashlib.sha256(text.encode("utf-8")).hexdigest(), "verdicts": verdicts,
             "findings": findings[:limit], "findings_total": len(findings)}
+
+
+def open_findings(worktree: Path, status: dict) -> list[dict]:
+    """Must-fix and should-fix items of the reviewers that asked for changes in the capped phase's last round, read
+    from the per-reviewer artifacts that `<phase>-review-results.json` lists next to the phase artifact."""
+    phase = status["fix_loop_cap"]["phase"]
+    artifact = phase_artifact(worktree, status, phase)
+    if artifact is None:
+        return []
+    results = artifact.parent.parent / f"{phase}-review-results.json"
+    try:
+        outcomes = json.loads(results.read_text(encoding="utf-8")).get("outcomes") or []
+    except (OSError, ValueError):
+        return []
+    items: list[dict] = []
+    for outcome in outcomes:
+        if outcome.get("verdict") != "request-changes" or not outcome.get("artifact"):
+            continue
+        path = results.parent / outcome["artifact"]
+        if not path.is_file():
+            continue
+        for item in finding_split.parse_findings(path.read_text(encoding="utf-8", errors="replace")):
+            if item["section"] in ("must-fix", "should-fix"):
+                items.append({"job_id": outcome.get("job_id"), "section": item["section"],
+                              "severity": item["severity"], "text": item["text"],
+                              "sha": finding_split.finding_sha(item["text"])})
+    return list({item["sha"]: item for item in items}.values())
+
+
+def label_open_findings(findings: list[dict], timeout: float) -> dict:
+    """Labels from the frozen classifier, its cost, and the error if it failed. Never raises."""
+    if not findings:
+        return {"findings": [], "cost_usd": 0.0, "error": "no-open-findings"}
+
+    def runner(prompt: str, system: str) -> dict:
+        return finding_split.run_claude(prompt, system, timeout=int(max(60, min(600, timeout))))
+
+    classifier = finding_split.Classifier(None, runner=runner, budget=REVIEW_CLASSIFIER_BUDGET_USD)
+    try:
+        labels = classifier.label(findings)
+        error = None if all(labels[item["sha"]]["label"] for item in findings) else "unlabelled-findings"
+    except Exception as failure:  # noqa: BLE001 - any classifier failure falls back to the old re-review
+        labels, error = {}, f"{type(failure).__name__}: {failure}"[:300]
+    labelled = [{**item, **labels.get(item["sha"], {"label": None, "why": None})} for item in findings]
+    return {"findings": labelled, "cost_usd": round(classifier.spent, 4), "error": error,
+            "prompt_sha256": finding_split.prompt_sha(finding_split.LABEL_PROMPT)}
 
 
 # domain-grill의 사용자 라운드(#409 grill 실험). 시뮬레이터가 있는 run에서 harness는 grill을 승인하기 전에, artifact의
@@ -1900,9 +1961,11 @@ def _controller_once(argv: list[str], project: Path, stream, err, timeout: float
 def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
     """Runs the controller on `prompt.md`; at a phase approval the harness approves and resumes the same session.
 
-    At a stop at the fix-loop limit it lets the run go on as a user would, at most `MAX_FIX_LOOP_REAPPROVALS` times:
-    the same session is resumed to get that phase reviewed again (`RESUME_AFTER_FIX_LOOP_CAP`). Time and budget
-    limits cover the whole run, every resumption included.
+    At a stop at the fix-loop limit the harness labels the open findings (`label_open_findings`). An `incomplete`
+    finding ends the run (`review_stop`). Otherwise the same session is resumed to fix exactly those findings, at most
+    `MAX_FIX_EXTENSIONS` times (`fix_extensions`). When the classifier fails or no findings parse, it falls back to
+    the old rule: at most `MAX_FIX_LOOP_REAPPROVALS` re-reviews without code changes (`RESUME_AFTER_FIX_LOOP_CAP`).
+    Time and budget limits cover the whole run, every resumption included.
     """
     meta = json.loads((run / "arm.json").read_text(encoding="utf-8"))
     project = Path(meta["project"])
@@ -1928,6 +1991,10 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
     started = time.monotonic()
     approvals: list[str] = []
     reapprovals: list[dict] = []
+    extensions: list[dict] = []
+    classifier_failures: list[dict] = []
+    review_stop: dict | None = None
+    classifier_cost = 0.0
     cap_stop = False
     session, spent, exit_code, timed_out, summary = None, 0.0, None, False, {}
     with stream.open("wb") as out, (run / "controller.stderr").open("wb") as err:
@@ -1951,14 +2018,34 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
             # 완료를 선언한 run은 건드리지 않는다. `continue`는 상태를 다시 검증하므로 필요할 때만 부른다.
             if completion.classify(summary.get("final_text")) == completion.COMPLETE:
                 _settle_reapproval(reapprovals, passed=True)
+                _settle_reapproval(extensions, passed=True)
                 cap_stop = False
                 break
             status = runner_status(project)
             cap = (status or {}).get("fix_loop_cap")
             if status is not None:
                 _settle_reapproval(reapprovals, passed=not cap)
+                _settle_reapproval(extensions, passed=not cap)
             if cap:
                 cap_stop = True
+                worktree = Path(status["worktree"])
+                labelled = label_open_findings(open_findings(worktree, status),
+                                               timeout - (time.monotonic() - started))
+                classifier_cost += labelled["cost_usd"]
+                if labelled["error"] is None:
+                    findings = labelled["findings"]
+                    unfinished = [item for item in findings if item["label"] == "incomplete"]
+                    if unfinished:
+                        review_stop = {"verdict": "incomplete", **cap, "findings": findings,
+                                       "incomplete": len(unfinished)}
+                        break
+                    if len(extensions) >= MAX_FIX_EXTENSIONS:
+                        break
+                    extensions.append({**cap, "findings": findings, "passed": None})
+                    shown = "\n".join(f"- [{item['label']}] {item['text']}" for item in findings[:OPEN_FINDINGS_SHOWN])
+                    message = RESUME_TO_FIX_FINDINGS.format(phase=cap["phase"], findings=shown)
+                    continue
+                classifier_failures.append({**cap, "error": labelled["error"], "findings": len(labelled["findings"])})
                 if len(reapprovals) >= MAX_FIX_LOOP_REAPPROVALS:
                     break
                 reapprovals.append({**cap, **review_findings(Path(status["worktree"]), status), "passed": None})
@@ -1984,6 +2071,9 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
               "timed_out": timed_out, "seconds": round(time.monotonic() - started), **summary, "session_id": session,
               "cost_usd": spent or None, "harness_approvals": approvals,
               "fix_loop_reapprovals": reapprovals, "fix_loop_cap_stop": cap_stop,
+              **({"fix_extensions": extensions, "review_stop": review_stop,
+                  "review_classifier_failures": classifier_failures,
+                  "review_classifier_cost_usd": round(classifier_cost, 4)} if arm in WORKFLOWS else {}),
               **({"grill_checks": grill_checks} if simulated else {}),
               **({"verify_gate": verify_gate.summary(run / verify_gate.LOG)} if arm in GATE_ARMS else {}),
               "transcript": str(transcript) if transcript else None,
