@@ -613,18 +613,35 @@ def test_bug_findings_at_the_cap_get_at_most_two_fix_extensions(tmp_path, monkey
     record, messages, calls = _labelled_drive(tmp_path, monkeypatch, ["bug", "design"], [BLOCKED], statuses=5)
     assert len(messages) == 3 and len(calls) == 3
     assert all("Fix them in the code, run the tests" in message for message in messages[1:])
-    assert "- [bug] finding 0" in messages[1] and "- [design] finding 1" in messages[1]
+    # v3.18: only bug and architecture findings are sent back, each tagged with its label
+    assert "- [bug] finding 0" in messages[1] and "finding 1" not in messages[1]
     extensions = record["fix_extensions"]
     assert [item["passed"] for item in extensions] == [False, False]
+    assert extensions[0]["label_counts_before"]["bug"] == 1 and extensions[0]["label_counts_before"]["design"] == 1
+    assert extensions[0]["label_counts_after"] == extensions[0]["label_counts_before"]  # the next cap: same open
+    assert extensions[1]["label_counts_after"]["bug"] == 1  # labelled at the third cap, where the run ends
     assert extensions[0]["findings"][0]["label"] == "bug" and record["fix_loop_reapprovals"] == []
     assert record["review_stop"] is None and record["review_classifier_cost_usd"] == 0.15
 
 
 def test_a_fix_extension_that_lets_the_run_finish_is_passed(tmp_path, monkeypatch):
-    record, messages, _ = _labelled_drive(tmp_path, monkeypatch, ["procedure"], [BLOCKED, "Done.\n\nEVAL-STATUS: complete"],
-                                          statuses=1)
+    record, messages, _ = _labelled_drive(tmp_path, monkeypatch, ["architecture", "style"],
+                                          [BLOCKED, "Done.\n\nEVAL-STATUS: complete"], statuses=1)
     assert len(messages) == 2 and [item["passed"] for item in record["fix_extensions"]] == [True]
+    assert "- [architecture] finding 0" in messages[1] and "finding 1" not in messages[1]
+    after = record["fix_extensions"][0]["label_counts_after"]
+    assert set(after) == set(arm_compare.finding_split.LABELS) and not any(after.values())
     assert record["fix_loop_cap_stop"] is False
+
+
+@pytest.mark.parametrize("labels", [["style"], ["design", "procedure", "other"], ["style", "design"]])
+def test_only_non_blocking_findings_at_the_cap_end_the_run_without_a_fix_round(tmp_path, monkeypatch, labels):
+    record, messages, calls = _labelled_drive(tmp_path, monkeypatch, labels, [BLOCKED], statuses=3)
+    assert len(messages) == 1 and len(calls) == 1
+    stop = record["review_stop"]
+    assert stop["verdict"] == "non-blocking" and [item["label"] for item in stop["findings"]] == labels
+    assert sum(stop["label_counts"].values()) == len(labels)
+    assert record["fix_extensions"] == [] and record["fix_loop_reapprovals"] == []
 
 
 def test_a_classifier_failure_falls_back_to_the_re_review(tmp_path, monkeypatch):
@@ -1399,3 +1416,18 @@ def test_the_cli_and_preflight_take_arm_vk(tmp_path, monkeypatch):
     monkeypatch.setattr(arm_compare.subprocess, "run", lambda argv, **_: arm_compare.subprocess.CompletedProcess(
         argv, 0, "OK\n", ""))
     assert arm_compare.main(["preflight", "--model", "claude:claude-opus-5-5"]) == 0
+
+
+def test_the_gate_labeler_uses_the_frozen_classifier_on_the_host(monkeypatch):
+    def run_claude(prompt, system, **_):
+        assert system == arm_compare.finding_split.LABEL_PROMPT
+        ids = [item["id"] for item in json.loads(prompt)]
+        return {"text": json.dumps({"labels": [{"id": i, "label": label, "why": "w"}
+                                               for i, label in zip(ids, ["incomplete", "style"])]}), "cost": 0.04}
+
+    monkeypatch.setattr(arm_compare.finding_split, "run_claude", run_claude)
+    got = arm_compare.gate_labeler(lambda: 300.0)(["1. No refund screen.", "2. Rename it."])
+    assert [item["label"] for item in got["labels"]] == ["incomplete", "style"] and got["cost_usd"] == 0.04
+    monkeypatch.setattr(arm_compare.finding_split, "run_claude",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    assert "error" in arm_compare.gate_labeler(lambda: 300.0)(["1. x"])

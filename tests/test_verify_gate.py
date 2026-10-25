@@ -145,3 +145,70 @@ def test_the_real_verify_runner_reports_exit_and_tail(tmp_path):
     passed = verify_gate.run_verify(["sh", "-c", "echo ok"], tmp_path, {"PATH": "/usr/bin:/bin"})
     failed = verify_gate.run_verify(["sh", "-c", "echo broken; exit 3"], tmp_path, {"PATH": "/usr/bin:/bin"})
     assert passed["passed"] and not failed["passed"] and failed["exit"] == 3 and "broken" in failed["tail"]
+
+
+# ─── v3.18: the gate's findings follow the kit arms' review→fix rule ───
+
+def _labels(*names, cost=0.03):
+    def label(config, findings):
+        assert len(findings) == len(names)
+        return {"labels": [{"label": name, "why": "w"} for name in names], "cost_usd": cost}
+    return label
+
+
+def _review_stop(config, stubs, label):
+    output, event = verify_gate.decide(config, {"session_id": "s"}, verify=stubs.verify, review=stubs.review,
+                                       label=label, environ={"PATH": "/bin"})
+    verify_gate.append_event(config, event)
+    return output, event
+
+
+def test_the_gate_blocks_only_for_incomplete_bug_and_architecture_findings_each_tagged(tmp_path):
+    config = {**_config(tmp_path), "blocking_labels": ["incomplete", "bug", "architecture"]}
+    stubs = Stubs([True], ["1. The refund screen is missing.\n2. Rename `x` to `total`.\n3. API imports web code."])
+    output, event = _review_stop(config, stubs, _labels("incomplete", "style", "architecture"))
+    assert output["decision"] == "block"
+    assert "[incomplete] 1. The refund screen is missing." in output["reason"]
+    assert "[architecture] 3. API imports web code." in output["reason"] and "Rename" not in output["reason"]
+    assert event["label_counts"] == {"incomplete": 1, "style": 1, "architecture": 1}
+    assert event["blocking_findings"] == 2 and [item["label"] for item in event["labels"]] == [
+        "incomplete", "style", "architecture"]
+    summary = verify_gate.summary(tmp_path / verify_gate.LOG)
+    assert summary["label_cost_usd"] == 0.03 and summary["label_counts"]["style"] == 1
+
+
+def test_style_only_feedback_does_not_block_the_stop(tmp_path):
+    config, stubs = _config(tmp_path), Stubs([True], ["1. Rename `x`.\n2. The module is large."])
+    output, event = _review_stop(config, stubs, _labels("style", "design"))
+    assert output == {} and event["decision"] == "allow" and event["non_blocking"] is True
+    summary = verify_gate.summary(tmp_path / verify_gate.LOG)
+    assert summary["non_blocking_stops"] == 1 and summary["blocks"] == 0 and summary["gate_errors"] == 0
+
+
+def test_without_labels_the_gate_blocks_on_every_finding_as_before(tmp_path):
+    config, stubs = _config(tmp_path), Stubs([True], ["1. Rename `x`."])
+    output, event = _review_stop(config, stubs, verify_gate.label_findings)  # no broker: no labels.json
+    assert output["decision"] == "block" and "1. Rename `x`." in output["reason"] and "[" not in output["reason"]
+    assert event["label_error"] and event["label_cost_usd"] == 0.0
+    assert verify_gate.summary(tmp_path / verify_gate.LOG)["label_errors"] == 1
+
+
+def test_the_label_broker_answers_the_hook_and_refuses_a_wrong_token(tmp_path):
+    (tmp_path / "gate").mkdir()
+    seen = []
+
+    def labeler(texts):
+        seen.append(texts)
+        return {"labels": [{"label": "bug" if "crash" in text else "style", "why": "w"} for text in texts],
+                "cost_usd": 0.02}
+
+    config = _config(tmp_path)
+    with verify_gate.LabelBroker(tmp_path / "gate", labeler) as broker:
+        got = verify_gate.label_findings(config, ["1. It can crash.", "2. Bad name."])
+        assert [item["label"] for item in got["labels"]] == ["bug", "style"] and got["cost_usd"] == 0.02
+        client = json.loads((tmp_path / "gate" / verify_gate.LABELS_CLIENT).read_text(encoding="utf-8"))
+        forged = tmp_path / "forged.json"
+        forged.write_text(json.dumps({**client, "token": "0" * 32}), encoding="utf-8")
+        assert "error" in verify_gate.label_findings({**config, "labels_client": str(forged)}, ["x"])
+    assert seen == [["1. It can crash.", "2. Bad name."]] and broker.calls == 1 and broker.cost_usd == 0.02
+    assert not (tmp_path / "gate" / verify_gate.LABELS_CLIENT).exists()

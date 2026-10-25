@@ -9,9 +9,14 @@ sides and crosses them, after the runs have ended. It only reads run directories
    parsed into finding items: bullets with a `<severity:..>` tag or a `[file:line]` location, or any bullet under a
    Must-fix/Should-fix heading. Each item keeps the reviewer job id, provider, verdict, phase and round. Rounds come
    from `<run>/review-archive/` (every round, see `index.jsonl`) and from the final files left in the project.
-2. Labels. A fixed prompt sent to `claude -p` (no tools) labels each finding `bug` (implemented, behaves wrong),
-   `incomplete` (a requirement is not implemented), `design`, `procedure` (kit process) or `other`, with a one-line
-   rationale. Labels are cached by finding sha, so re-runs cost nothing.
+2. Labels. A fixed prompt sent to `claude -p` (no tools) labels each finding `incomplete` (a requirement is not
+   implemented), `bug` (implemented, behaves wrong), `architecture` (breaks a rule of the architecture contract),
+   `style` (naming, docs, idiom), `design` (structure the contract does not cover), `procedure` (the agent-flow process
+   only) or `other`, with a one-line rationale (#409 v3.18). Labels are cached by finding sha, so re-runs cost nothing.
+   The same labels drive the post-review fix rule in `arm_compare.drive` and arm V/VK's gate (`BLOCKING`, `FIXABLE`).
+   Per label, `label_flow` counts the findings raised, fixed (absent at the next review of the same phase, by finding
+   sha) and remaining in the final review; arm V/VK's single gate review adds raised counts only (it has no next
+   review). Recall against the hidden checks stays for bug and incomplete findings only.
 3. Hidden failures. Fixed rules on the failure message give `missing` (not found, 404/501, locator timeout, count 0)
    or `wrong` (value, state or text differs). What the rules cannot decide is `unclear` and goes to the classifier.
    A run whose build failed to install has every check `missing` (`no_build`).
@@ -50,7 +55,11 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Callable, Iterable
 
-LABELS = ("bug", "incomplete", "design", "procedure", "other")
+LABELS = ("incomplete", "bug", "architecture", "style", "design", "procedure", "other")
+# The findings the post-review fix rule acts on (#409 v3.18): `incomplete` ends a run as a completeness failure,
+# `bug` and `architecture` get fix rounds; the others never block.
+BLOCKING = ("incomplete", "bug", "architecture")
+FIXABLE = ("bug", "architecture")
 KINDS = ("missing", "wrong")
 MODEL = "claude-opus-5-5"
 EFFORT = "medium"
@@ -58,26 +67,42 @@ LABEL_BATCH = 40
 MATCH_BATCH = 120
 
 LABEL_PROMPT = """You label code-review findings. Each finding is one item a reviewer wrote about a change that builds a \
-product from a PRD (requirements) and a contract (interface: routes, APIs, fields, test ids). Give each finding exactly \
-one label, judged by the defect the finding claims, not by its severity or tone.
+product from a PRD (requirements), a contract (interface: routes, APIs, fields, test ids) and an architecture contract \
+(the layering and placement rules the project selected). Give each finding exactly one label, judged by the defect the \
+finding claims, not by its severity or tone. Check the labels in this order and take the first that fits. A finding \
+that suggests a change takes the label of that change even when the reviewer calls the current code acceptable or \
+fine for now.
 
-- bug: the finding claims something that is implemented behaves wrong: a wrong value, condition, order, timing, \
-status code, state transition or message; a crash, race, lost or corrupted data, a leak, a security hole, an unhandled \
-error in code that exists. A missing check or edge case inside an existing feature is a bug, unless the next rule \
-applies.
 - incomplete: the finding claims that something the PRD or contract requires is not implemented: an absent screen, \
 route, API, field, element or test id; a required state, message, rule or flow that the code never produces; a stub \
 or placeholder; a feature that exists but is not wired up. A missing error display or edge-case handling is \
 incomplete when the finding says the PRD or contract requires it.
-- design: structure, layering, module size, responsibility split, coupling, duplication or maintainability, with no \
-claim that the product behaves wrong or lacks a requirement.
-- procedure: the agent-flow process rather than the product: architecture mode or selection, gates or checks not run, \
-missing test evidence or missing tests, artifact or report format, branch or workflow rules, review markers.
-- other: style, naming, comments, docs; an observation that something is fine or matches the contract; a note with no \
+- bug: the finding claims something that is implemented behaves wrong: a wrong value, condition, order, timing, \
+status code, state transition or message; a crash, race, lost or corrupted data, a leak, a security hole, an unhandled \
+error in code that exists. A missing check or edge case inside an existing feature is a bug, unless the rule above \
+applies.
+- architecture: the finding claims the code violates the architecture contract it was given: a layer or dependency \
+direction, slice isolation, a public API boundary, or placement. Placement means, for example: fetch outside \
+shared/api, routing outside app, I/O in the domain, adapters in the application layer, business logic in an inbound \
+handler, a use case calling another use case, state or file access outside the persistence adapter, adapters \
+constructed outside the composition root, web code importing server code or server code importing web code, a state \
+or cache placement the contract forbids; on Android, a Clean layer or module rule. The claim must be that a rule of \
+the contract is broken. A note that the code follows the contract is not architecture.
+- design: structure or maintainability that the architecture contract does not cover: duplication, file, class or \
+module size, responsibility split, cohesion, coupling, an abstraction or helper that would fit better elsewhere, with \
+no claim that the product behaves wrong, lacks a requirement or breaks a contract rule.
+- style: naming, formatting, comments, docs or type annotations, code order, idiom or readability, with no behaviour, \
+requirement, contract or structure claim. A finding that names such a weakness (something documented only in a \
+comment, a missing type, a name that drifted) is style even when it calls the code acceptable.
+- procedure: the agent-flow process only, not the product: no architecture selected or recorded (`pending`), gates or \
+checks not run, missing test evidence or missing tests, uncommitted work, artifact or report format, branch or \
+workflow rules, review markers.
+- other: an observation that something is fine, safe or matches the contract and suggests no change; a note with no \
 defect claim; anything else.
 
 Input: a JSON list of {"id", "section", "severity", "text"}. Output only JSON, no prose and no code fence:
-{"labels": [{"id": "<id>", "label": "<bug|incomplete|design|procedure|other>", "why": "<one short line>"}]}
+{"labels": [{"id": "<id>", "label": "<incomplete|bug|architecture|style|design|procedure|other>", \
+"why": "<one short line>"}]}
 Return one entry for every input id."""
 
 MATCH_PROMPT = """You cross hidden acceptance checks with code-review findings for one build. You get the product's PRD \
@@ -106,9 +131,11 @@ Output:
 Return one entry per failed check and one per judge_prd id."""
 
 
-# Frozen after validation against 20 hand-labelled findings (19/20 agree, #409 v3.10). Changing LABEL_PROMPT changes
-# its cache key and needs a new validation; the test pins this value.
-LABEL_PROMPT_SHA256 = "fc6e89b3cffd0792cfcb8b1eedf9236a1fd969d70b510399cec580d684111d2d"
+# Frozen after validation (#409 v3.18): 41 hand-labelled findings used while writing it (41/41 agree) and two held-out
+# sets labelled before the classifier saw them (12/12 and 6/8); per label over all 61: incomplete 6/6, bug 12/12,
+# architecture 9/9, style 11/12, design 9/9, procedure 5/5, other 7/8. Changing LABEL_PROMPT changes its cache key and
+# needs a new validation; the test pins this value.
+LABEL_PROMPT_SHA256 = "fe848de5406a31907653295cde1c72604affeaa2c6af1fa4ac8b18bea07a35df"
 
 
 def prompt_sha(prompt: str) -> str:
@@ -640,7 +667,7 @@ def analyze_run(run: Path, specs: dict[str, str], prd: str, classifier: Classifi
     for item in findings:
         item["hidden_match"] = item["sha"] in pointed
         item["prd"] = crossed["prd"].get(item["sha"])
-    return {**meta, **_summarize_run(rounds, findings, hidden, total_checks), "rounds": [
+    return {**meta, **_summarize_run(rounds, findings, hidden, total_checks, gate_findings(run)), "rounds": [
         {key: entry[key] for key in ("run_id", "phase", "seq", "order", "final", "verdict", "source")}
         | {"earlier_rounds_lost": entry.get("earlier_rounds_lost", False)} for entry in rounds],
         "findings": findings, "hidden": hidden}
@@ -651,7 +678,55 @@ def _distribution(items: Iterable[dict]) -> dict:
     return {label: counts.get(label, 0) for label in (*LABELS, "unlabelled") if counts.get(label) or label in LABELS}
 
 
-def _summarize_run(rounds: list[dict], findings: list[dict], hidden: dict, total_checks: int | None) -> dict:
+def label_flow(rounds: list[dict], findings: list[dict], gate: list[dict] | None = None) -> dict:
+    """Per label: findings raised (unique per phase and sha), fixed (raised in a review round and absent from the next
+    round of the same phase) and remaining (in the final round of their phase). Gate findings (`gate`, labelled rows
+    of arm V/VK's single review) add to raised only; their fixed and remaining are unknown."""
+    flow = {label: {"raised": 0, "fixed": 0, "remaining": 0} for label in (*LABELS, "unlabelled")}
+    by_round: dict[tuple[str, int], dict[str, str]] = defaultdict(dict)
+    for item in findings:
+        by_round[(item["phase"], item["order"])][item["sha"]] = item.get("label") or "unlabelled"
+    raised: dict[tuple[str, str], str] = {}
+    phases = sorted({phase for phase, _ in by_round})
+    for phase in phases:
+        orders = sorted(order for name, order in by_round if name == phase)
+        for index, order in enumerate(orders):
+            current = by_round[(phase, order)]
+            for sha, label in current.items():
+                raised.setdefault((phase, sha), label)
+            if index + 1 < len(orders):
+                following = by_round[(phase, orders[index + 1])]
+                for sha, label in current.items():
+                    flow[label]["fixed"] += sha not in following
+            elif any(entry["final"] and entry["phase"] == phase and entry["order"] == order for entry in rounds):
+                for label in current.values():
+                    flow[label]["remaining"] += 1
+    for label in raised.values():
+        flow[label]["raised"] += 1
+    gate_raised = Counter(item.get("label") or "unlabelled" for item in gate or [])
+    for label, count in gate_raised.items():
+        flow.setdefault(label, {"raised": 0, "fixed": 0, "remaining": 0})["raised"] += count
+    return {label: values for label, values in flow.items() if label in LABELS or any(values.values())}
+
+
+def gate_findings(run: Path) -> list[dict]:
+    """The labelled findings of arm V/VK's gate review (`verify-gate.jsonl`), as the hook recorded them."""
+    path = run / "verify-gate.jsonl"
+    if not path.is_file():
+        return []
+    items = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("step") == "review":
+            items += [item for item in row.get("labels") or [] if isinstance(item, dict)]
+    return items
+
+
+def _summarize_run(rounds: list[dict], findings: list[dict], hidden: dict, total_checks: int | None,
+                   gate: list[dict] | None = None) -> dict:
     final = [item for item in findings if item["final"]]
     failed = hidden["failed"]
     kinds = Counter(check.get("kind", check["rule"]) for check in failed)
@@ -695,6 +770,7 @@ def _summarize_run(rounds: list[dict], findings: list[dict], hidden: dict, total
         "missing_ratio": _ratio(missing, total) if total else None,
         "wrong_ratio_of_present": _ratio(wrong, total - missing) if total else None,
         "false_completion": grade, "recall": recall, "precision": precision,
+        "label_flow": label_flow(rounds, findings, gate),
     }
 
 
@@ -711,7 +787,8 @@ def summarize_arms(rows: list[dict]) -> dict:
                                                     "recall": defaultdict(lambda: [0, 0]),
                                                     "precision": defaultdict(lambda: [0, 0]),
                                                     "false_completion": Counter(), "complete": 0,
-                                                    "total_checks": 0})
+                                                    "total_checks": 0,
+                                                    "label_flow": defaultdict(lambda: Counter())})
         arm["runs"] += 1
         arm["no_build"] += bool(row.get("no_build"))
         for key in SUM_KEYS:  # a run with no build fails every check; it is counted apart, not as missing checks
@@ -732,6 +809,8 @@ def summarize_arms(rows: list[dict]) -> dict:
         if row.get("false_completion"):
             arm["false_completion"][row["false_completion"]] += 1
         arm["complete"] += bool(row.get("complete"))
+        for label, values in (row.get("label_flow") or {}).items():
+            arm["label_flow"][label].update(values)
         arm["total_checks"] += 0 if row.get("no_build") else row.get("total_checks") or 0
     out = {}
     for name, arm in sorted(arms.items()):
@@ -742,6 +821,8 @@ def summarize_arms(rows: list[dict]) -> dict:
             "precision": {key: {"hit": hit, "of": of, "rate": _ratio(hit, of)}
                           for key, (hit, of) in arm["precision"].items()},
             "false_completion": dict(arm["false_completion"]),
+            "label_flow": {label: {key: values.get(key, 0) for key in ("raised", "fixed", "remaining")}
+                           for label, values in arm["label_flow"].items()},
             "missing_ratio": _ratio(arm["missing"], arm["total_checks"]),
             "wrong_ratio_of_present": _ratio(arm["wrong"], arm["total_checks"] - arm["missing"]),
         }
@@ -757,7 +838,7 @@ def _frac(value: dict) -> str:
 
 
 def markdown(rows: list[dict], arms: dict) -> str:
-    lines = ["| run | arm | decl | S | G | rounds | final b/i/d/p/o | all b/i/d/p/o | failed | missing | wrong | "
+    lines = ["| run | arm | decl | S | G | rounds | final i/b/a/s/d/p/o | all i/b/a/s/d/p/o | failed | missing | wrong | "
              "grade | recall final m | recall final w | recall any m | recall any w | prec final hidden | "
              "prec final +PRD |", "|" + "---|" * 18]
     for row in rows:
@@ -775,7 +856,7 @@ def markdown(rows: list[dict], arms: dict) -> str:
             "-" if p_hidden is None else f"{p_hidden:.2f} (n={precision['final_claims']})",
             "-" if p_prd is None else f"{p_prd:.2f}")) + " |")
     lines += ["", "| arm | runs | no build | failed | missing | wrong | missing ratio | wrong ratio of present | "
-                  "false completion | final b/i/d/p/o | recall final m | recall final w | prec final hidden |",
+                  "false completion | final i/b/a/s/d/p/o | recall final m | recall final w | prec final hidden |",
               "|" + "---|" * 13]
     for name, arm in arms.items():
         lines.append("| " + " | ".join(str(cell) for cell in (
@@ -785,6 +866,12 @@ def markdown(rows: list[dict], arms: dict) -> str:
             _dist(arm["findings_final"]) if arm["findings_total"] else "-",
             _frac(arm["recall"].get("final_missing")), _frac(arm["recall"].get("final_wrong")),
             _frac(arm["precision"].get("final_hidden")))) + " |")
+    lines += ["", "Findings by label (raised / fixed at the next review / remaining at the end):", "",
+              "| arm | " + " | ".join(LABELS) + " |", "|" + "---|" * (len(LABELS) + 1)]
+    for name, arm in arms.items():
+        flow = arm.get("label_flow") or {}
+        lines.append(f"| {name} | " + " | ".join(
+            "{raised}/{fixed}/{remaining}".format(**flow[label]) if label in flow else "-" for label in LABELS) + " |")
     return "\n".join(lines) + "\n"
 
 

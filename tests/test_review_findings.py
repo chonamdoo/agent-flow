@@ -181,7 +181,8 @@ def test_analyze_run_end_to_end_with_cache(tmp_path):
     runner = FakeRunner()
     classifier = rf.Classifier(tmp_path / "cache.json", runner=runner, budget=1.0)
     row = rf.analyze_run(run, {}, "PRD text", classifier, total_checks=10)
-    assert row["findings_final"] == {"bug": 1, "incomplete": 1, "design": 0, "procedure": 1, "other": 0}
+    assert row["findings_final"] == {"incomplete": 1, "bug": 1, "architecture": 0, "style": 0, "design": 0,
+                                     "procedure": 1, "other": 0}
     assert row["findings_all"]["bug"] == 2
     assert (row["missing"], row["wrong"], row["unclear"], row["rule_unclear"]) == (2, 1, 0, 1)
     assert row["recall"]["final_missing"] == {"hit": 2, "of": 2, "rate": 1.0}
@@ -226,3 +227,35 @@ def test_prompts_are_frozen():
 def test_a_field_absent_from_an_answered_response_is_wrong():
     assert rf.rule_kind("AssertionError: no price for PLAN_A: {'items': []}") == "wrong"
     assert rf.rule_kind("AssertionError: no price for PLAN_A") == "unclear"
+
+
+def test_the_v318_labels_and_the_fix_rule_sets():
+    assert rf.LABELS == ("incomplete", "bug", "architecture", "style", "design", "procedure", "other")
+    assert rf.BLOCKING == ("incomplete", "bug", "architecture") and rf.FIXABLE == ("bug", "architecture")
+    for label in rf.LABELS:
+        assert f"- {label}:" in rf.LABEL_PROMPT
+    assert "architecture mode or selection" not in rf.LABEL_PROMPT  # procedure is the agent-flow process only
+
+
+def test_label_flow_counts_raised_fixed_at_the_next_review_and_remaining(tmp_path):
+    def item(phase, order, sha, label):
+        return {"phase": phase, "order": order, "sha": sha, "label": label, "final": False}
+    rounds = [{"phase": "multi-review", "order": 1, "final": False}, {"phase": "multi-review", "order": 2, "final": True},
+              {"phase": "architecture-review", "order": 0, "final": True}]
+    findings = [item("multi-review", 1, "a", "bug"), item("multi-review", 1, "b", "style"),
+                item("multi-review", 1, "c", "architecture"),
+                item("multi-review", 2, "b", "style"), item("multi-review", 2, "d", "bug"),
+                item("architecture-review", 0, "e", "architecture")]
+    gate = [{"text": "1. x", "label": "incomplete"}, {"text": "2. y", "label": "style"}]
+    flow = rf.label_flow(rounds, findings, gate)
+    assert flow["bug"] == {"raised": 2, "fixed": 1, "remaining": 1}
+    assert flow["style"] == {"raised": 2, "fixed": 0, "remaining": 1}
+    assert flow["architecture"] == {"raised": 2, "fixed": 1, "remaining": 1}
+    assert flow["incomplete"] == {"raised": 1, "fixed": 0, "remaining": 0}
+    (tmp_path / "verify-gate.jsonl").write_text(json.dumps({"step": "review", "labels": gate}) + "\n" +
+                                                json.dumps({"step": "done"}) + "\n", encoding="utf-8")
+    assert rf.gate_findings(tmp_path) == gate
+    arms = rf.summarize_arms([{"arm": "C", "label_flow": flow}, {"arm": "C", "label_flow": flow}])
+    assert arms["C"]["label_flow"]["bug"] == {"raised": 4, "fixed": 2, "remaining": 2}
+    table = rf.markdown([], arms)
+    assert "Findings by label" in table and "| C | 2/0/0 | 4/2/2 | 4/2/2 | 4/0/2 |" in table

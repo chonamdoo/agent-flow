@@ -14,6 +14,15 @@ On each Stop attempt it
    and blocks once with its numbered findings;
 3. after either cap it lets the stop through and records `gate_cap_reached`.
 
+The review→fix rule is the kit arms' (#409 v3.18): the reviewer's findings are labelled by the frozen classifier
+(`review_findings.LABEL_PROMPT`), which the harness runs on the host, unseen by the agent: during `drive` a
+`LabelBroker` listens on an abstract unix socket (the address and a per-drive token in `<run>/gate/labels.json`) and
+the hook sends it only the finding texts. The stop is blocked only for `incomplete`, `bug` and `architecture`
+findings (`config["blocking_labels"]`), and the block lists only those, each tagged with its label; findings that are
+all `style`, `design`, `procedure` or `other` let the stop through (`non_blocking`). When the labels cannot be had
+(no broker, an error, a missing label) the hook blocks on every finding as before and records `label_error`. The
+verification command logic is unchanged.
+
 A review that fails (the call errors, times out, or its answer is neither a numbered list nor `NO_FINDINGS`) does not
 pass silently: its row is recorded with `decision: gate-error` and `gate_error` (the stop goes through, the gate could
 not judge), and `summary` counts it, so the run is reported as a gate error, not as a clean pass. The reviewer runs on
@@ -26,26 +35,33 @@ standard library is used, because the hook runs outside this repository.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "verify-gate-v2"
+VERSION = "verify-gate-v3"
 MAX_VERIFY_BLOCKS = 3
 MAX_REVIEW_ROUNDS = 1
 VERIFY_TIMEOUT = 900
 REVIEW_TIMEOUT = 900
 REVIEW_BUDGET_USD = 3.0
-# hook 하나가 검증과 리뷰를 모두 상한까지 쓸 수 있게 둔다. CLI 기본 hook 시한(60초)으로는 리뷰가 끝나지 않는다.
-HOOK_TIMEOUT = VERIFY_TIMEOUT + REVIEW_TIMEOUT + 300
+LABEL_TIMEOUT = 660
+LABELS_CLIENT = "labels.json"
+BLOCKING_LABELS = ("incomplete", "bug", "architecture")
+# hook 하나가 검증과 리뷰와 분류를 모두 상한까지 쓸 수 있게 둔다. CLI 기본 hook 시한(60초)으로는 리뷰가 끝나지 않는다.
+HOOK_TIMEOUT = VERIFY_TIMEOUT + REVIEW_TIMEOUT + LABEL_TIMEOUT + 300
 TAIL_CHARS = 3000
 REVIEW_TOOLS = ("Read", "Glob", "Grep", "Bash")
 DENIED_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit")
@@ -183,7 +199,112 @@ def review_block_reason(findings: list[str]) -> str:
             + "\n\nAddress them before you finish, or say in your final message why one does not apply.")
 
 
-def decide(config: dict, hook_input: dict, *, verify=run_verify, review=run_review,
+# ─── labels: the harness's classifier on the host, reached through a socket ───
+
+def _send_line(conn: socket.socket, data: dict) -> None:
+    conn.sendall(json.dumps(data, ensure_ascii=False).encode("utf-8") + b"\n")
+
+
+def _read_line(conn: socket.socket, limit: int = 4_000_000) -> bytes:
+    data = b""
+    while b"\n" not in data:
+        chunk = conn.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+        if len(data) > limit:
+            raise ValueError("message too long")
+    return data.split(b"\n", 1)[0]
+
+
+def label_findings(config: dict, findings: list[str], timeout: float = LABEL_TIMEOUT) -> dict:
+    """{"labels": [{"label", "why"}, ...] in the findings' order, "cost_usd"} from the drive's `LabelBroker`, or
+    {"error": ...}. Never raises."""
+    path = Path(config.get("labels_client") or Path(config["run_dir"]) / "gate" / LABELS_CLIENT)
+    try:
+        client = json.loads(path.read_text(encoding="utf-8"))
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(timeout)
+            conn.connect(b"\0" + str(client["socket"]).encode("utf-8"))
+            _send_line(conn, {"token": client["token"], "findings": findings})
+            reply = json.loads(_read_line(conn).decode("utf-8"))
+    except (OSError, ValueError, KeyError) as failure:
+        return {"error": f"{type(failure).__name__}: {failure}"[:200], "cost_usd": 0.0}  # nothing was asked
+    labels = reply.get("labels") if isinstance(reply, dict) else None
+    if not reply.get("ok") or not isinstance(labels, list) or len(labels) != len(findings) \
+            or not all(isinstance(item, dict) and item.get("label") for item in labels):
+        return {"error": str(reply.get("error") or "unlabelled findings")[:200], "cost_usd": reply.get("cost_usd")}
+    return {"labels": labels, "cost_usd": reply.get("cost_usd")}
+
+
+class LabelBroker:
+    """Host side, held open by `drive` for a gate arm: `labeler(texts) -> {"labels": [...], "cost_usd"}` (the frozen
+    classifier) answers the hook's requests; the address and a per-drive token go to `<gate_dir>/labels.json`."""
+
+    def __init__(self, gate_dir: Path, labeler):
+        self.gate_dir, self.labeler = gate_dir, labeler
+        self.socket_name = f"arm-compare-gate-labels-{secrets.token_hex(8)}"
+        self.token = secrets.token_hex(16)
+        self.cost_usd = 0.0
+        self.calls = 0
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._sock: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "LabelBroker":
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.bind(b"\0" + self.socket_name.encode("utf-8"))
+        self._sock.listen(4)
+        self._sock.settimeout(0.2)
+        (self.gate_dir / LABELS_CLIENT).write_text(json.dumps({"socket": self.socket_name, "token": self.token}) + "\n",
+                                                  encoding="utf-8")
+        self._thread = threading.Thread(target=self._loop, name="gate-label-broker", daemon=True)
+        self._thread.start()
+        return self
+
+    def _loop(self) -> None:
+        assert self._sock is not None
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn: socket.socket) -> None:
+        with conn:
+            try:
+                conn.settimeout(30)
+                request = json.loads(_read_line(conn).decode("utf-8"))
+                if not hmac.compare_digest(str(request.get("token") or ""), self.token):
+                    _send_line(conn, {"ok": False, "error": "unknown token"})
+                    return
+                texts = [str(item) for item in request.get("findings") or []]
+                with self._lock:
+                    try:
+                        answer = self.labeler(texts)
+                    except Exception as failure:  # noqa: BLE001 - the hook falls back to blocking on every finding
+                        answer = {"error": f"{type(failure).__name__}: {failure}"[:200], "cost_usd": 0.0}
+                    self.calls += 1
+                    self.cost_usd += float(answer.get("cost_usd") or 0.0)
+                conn.settimeout(None)
+                _send_line(conn, {"ok": "error" not in answer, **answer})
+            except (OSError, ValueError):
+                pass
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+        if self._sock is not None:
+            self._sock.close()
+        (self.gate_dir / LABELS_CLIENT).unlink(missing_ok=True)
+
+
+def decide(config: dict, hook_input: dict, *, verify=run_verify, review=run_review, label=label_findings,
            environ: dict[str, str] | None = None) -> tuple[dict, dict]:
     """(hook output, the event row) for one Stop attempt. `verify` and `review` are injectable for tests."""
     project = Path(config["project"])
@@ -222,7 +343,24 @@ def decide(config: dict, hook_input: dict, *, verify=run_verify, review=run_revi
                   "review_text": outcome.get("text"), "findings": None if findings is None else len(findings),
                   "model": config["model"], "effort": effort})
     if findings:
-        return {"decision": "block", "reason": review_block_reason(findings)}, {**event, "decision": "block"}
+        labelled = label(config, findings)
+        event["label_cost_usd"] = labelled.get("cost_usd")
+        if "labels" not in labelled:
+            # 분류를 얻지 못했으면 예전처럼 모든 지적으로 막는다. 기록에 남긴다.
+            event["label_error"] = labelled.get("error") or "no labels"
+            return {"decision": "block", "reason": review_block_reason(findings)}, {**event, "decision": "block"}
+        blocking_labels = tuple(config.get("blocking_labels") or BLOCKING_LABELS)
+        tagged = [{"text": text, "label": str(item["label"]), "why": item.get("why")}
+                  for text, item in zip(findings, labelled["labels"])]
+        counts: dict[str, int] = {}
+        for item in tagged:
+            counts[item["label"]] = counts.get(item["label"], 0) + 1
+        blocking = [item for item in tagged if item["label"] in blocking_labels]
+        event.update({"labels": tagged, "label_counts": counts, "blocking_findings": len(blocking)})
+        if blocking:
+            shown = [f"[{item['label']}] {item['text']}" for item in blocking]
+            return {"decision": "block", "reason": review_block_reason(shown)}, {**event, "decision": "block"}
+        return {}, {**event, "decision": "allow", "non_blocking": True}
     if findings is None:
         # 판정하지 못한 리뷰는 통과가 아니다. 멈춤은 허락하되 gate 오류로 남긴다.
         why = ("review-timed-out" if outcome.get("timed_out") else
@@ -241,6 +379,12 @@ def summary(log: Path) -> dict:
     events = read_events(log)
     reviews = [row for row in events if row.get("step") == "review"]
     costs = [(row.get("review") or {}).get("cost_usd") for row in reviews]
+    # a row without the key had no label call (a gate before v3.18): 0, not unknown
+    label_costs = [row.get("label_cost_usd", 0.0) for row in reviews if row.get("findings")]
+    label_counts: dict[str, int] = {}
+    for row in reviews:
+        for name, count in (row.get("label_counts") or {}).items():
+            label_counts[name] = label_counts.get(name, 0) + count
     usage: dict[str, int] = {}
     for row in reviews:
         for key, value in ((row.get("review") or {}).get("usage") or {}).items():
@@ -259,7 +403,11 @@ def summary(log: Path) -> dict:
             "reviewer_cost_usd": (round(sum(costs), 4) if None not in costs else None) if reviews else 0.0,
             "reviewer_seconds": round(sum((row.get("review") or {}).get("seconds") or 0 for row in reviews), 1),
             "reviewer_usage": usage or None,
-            "gate_cap_reached": next((row["gate_cap_reached"] for row in events if row.get("gate_cap_reached")), None)}
+            "gate_cap_reached": next((row["gate_cap_reached"] for row in events if row.get("gate_cap_reached")), None),
+            # 지적 분류(호스트의 분류기) 비용: 분류가 실패해 비용을 모르면 null이다.
+            "label_cost_usd": round(sum(label_costs), 4) if None not in label_costs else None,
+            "label_counts": label_counts, "label_errors": sum(bool(row.get("label_error")) for row in reviews),
+            "non_blocking_stops": sum(bool(row.get("non_blocking")) for row in reviews)}
 
 
 def file_sha256(path: Path) -> str:

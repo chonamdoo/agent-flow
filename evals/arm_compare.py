@@ -173,6 +173,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -678,7 +679,10 @@ def _install_verify_gate(output: Path, project: Path, task: str, documents: list
     argv, source = gate_verify_command(case, kind)
     config = {"version": verify_gate.VERSION, "project": str(project.resolve()), "run_dir": str(output.resolve()),
               "task": task, "documents": documents, "verify_command": argv, "model": "claude-opus-5-5",
-              "env": {"keys": list(CONTROLLER_ENV), "set": controller_env({})}}
+              "env": {"keys": list(CONTROLLER_ENV), "set": controller_env({})},
+              # v3.18: the same review→fix rule as the kit arms, from the same frozen classifier
+              "blocking_labels": list(finding_split.BLOCKING), "labels_client": str((gate / verify_gate.LABELS_CLIENT).resolve()),
+              "label_prompt_sha256": finding_split.prompt_sha(finding_split.LABEL_PROMPT)}
     (gate / "config.json").write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
     settings_path = project / GATE_SETTINGS
     settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.is_file() else {}
@@ -2242,9 +2246,12 @@ RESUME_AFTER_FIX_LOOP_CAP = (
     "the next command the runner prints. Do not change code in this step; if the reviewers still request changes, "
     "the runner stops again.")
 # v3.12: at a cap stop the harness labels the open findings with the frozen review_findings classifier (no tools, run by
-# the harness, unseen by the agent). An `incomplete` finding ends the run there (a completeness failure). Otherwise the
-# run gets up to MAX_FIX_EXTENSIONS more fix rounds on exactly those findings. A classifier failure, or no parsed
-# findings, falls back to the re-review above and is recorded.
+# the harness, unseen by the agent). An `incomplete` finding ends the run there (a completeness failure). v3.18: otherwise
+# only `bug` and `architecture` findings get fix rounds: up to MAX_FIX_EXTENSIONS more, showing only those findings,
+# each tagged with its label. When only `style`, `design`, `procedure` or `other` findings are open the run ends there as
+# `review_stop` `non-blocking` (not a completeness failure), the findings recorded and not sent back. Each extension
+# records its label counts before and after. A classifier failure, or no parsed findings, falls back to the re-review
+# above and is recorded.
 MAX_FIX_EXTENSIONS = 2
 OPEN_FINDINGS_SHOWN = 20
 RESUME_TO_FIX_FINDINGS = (
@@ -2611,7 +2618,11 @@ def budget_ledger(run: Path, meta: dict, controller: float | None, classifier: f
     unpriced (a reviewer job without its row); `enforced_usd` is what the run cap is checked against: every priced part
     plus, while the reviewers are unpriced, the larger of their rows' cost and their byte lower bound."""
     arm = effective_arm(meta)
-    gate = verify_gate.summary(run / verify_gate.LOG)["reviewer_cost_usd"] if arm in GATE_ARMS else 0.0
+    gate = 0.0
+    if arm in GATE_ARMS:
+        gated = verify_gate.summary(run / verify_gate.LOG)
+        parts = (gated["reviewer_cost_usd"], gated.get("label_cost_usd", 0.0))
+        gate = None if None in parts else round(sum(parts), 4)
     routed = meta.get("router") or {}
     router_cost = routed.get("cost_usd") if routed else 0.0
     simulator = user_sim.summary(user_sim.log_path(run))["user_sim_cost_usd"] if meta.get("user_sim") else 0.0
@@ -2727,6 +2738,22 @@ def recorded_checkout(run: Path, meta: dict, driven: dict) -> tuple[Path, dict]:
     return Path(record["host"]), record
 
 
+def gate_labeler(remaining):
+    """Arm V/VK's gate findings, labelled like the kit's open findings (`label_open_findings`): texts → labels in
+    order and the cost. A failure is an `error` (the hook then blocks on every finding)."""
+    def labeler(texts: list[str]) -> dict:
+        findings = [{"section": "gate", "severity": None, "text": text, "sha": finding_split.finding_sha(text)}
+                    for text in texts]
+        labelled = label_open_findings(findings, min(600.0, remaining()),
+                                       env={**controller_env(dict(os.environ)),
+                                            "CLAUDE_CODE_EFFORT_LEVEL": finding_split.EFFORT})
+        if labelled["error"]:
+            return {"error": labelled["error"], "cost_usd": labelled["cost_usd"]}
+        return {"labels": [{"label": item["label"], "why": item.get("why")} for item in labelled["findings"]],
+                "cost_usd": labelled["cost_usd"], "prompt_sha256": labelled.get("prompt_sha256")}
+    return labeler
+
+
 def outage_seen(run: Path, meta: dict, stream: Path, classifier_failures: list[dict]) -> str | None:
     """A usage-limit or service outage any participating call reported (`outage`): the controller's stream and
     stderr, the kit's reviewers (usage wrapper rows), arm R's router, the simulated user, the review classifier."""
@@ -2744,6 +2771,8 @@ def outage_seen(run: Path, meta: dict, stream: Path, classifier_failures: list[d
     if meta.get("user_sim"):
         sources += [("simulator", row.get("error")) for row in user_sim.read_log(user_sim.log_path(run))]
     sources += [("review classifier", item.get("error")) for item in classifier_failures]
+    for row in verify_gate.read_events(run / verify_gate.LOG):
+        sources += [("gate reviewer", (row.get("review") or {}).get("error")), ("gate labeler", row.get("label_error"))]
     for where, text in sources:
         found = outage.from_text(text)
         if found:
@@ -2828,7 +2857,10 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
     sandbox_error = outage_detail = None
     # the simulated user answers from the host for the whole drive: its oracle never enters the sandbox
     broker = user_sim.Broker(run) if simulated else contextlib.nullcontext()
-    with _Lock(exclusive=False), claude_usage.Collector(usage_socket, run / claude_usage.LOG), broker, \
+    # arm V/VK: the gate reviewer's findings are labelled on the host by the frozen classifier (v3.18)
+    labels = verify_gate.LabelBroker(run / "gate", gate_labeler(remaining)) if arm in GATE_ARMS \
+        else contextlib.nullcontext()
+    with _Lock(exclusive=False), claude_usage.Collector(usage_socket, run / claude_usage.LOG), broker, labels, \
             stream.open("wb") as out, (run / "controller.stderr").open("wb") as err:
         message = prompt
         while True:
@@ -2868,6 +2900,8 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
             # 완료를 선언한 run은 건드리지 않는다. 관측은 읽기 전용 `status`로 한다.
             if completion.classify(summary.get("final_text")) == completion.COMPLETE:
                 _settle_reapproval(reapprovals, passed=True)
+                if extensions and extensions[-1]["passed"] is None:
+                    _settle_extension_labels(extensions, None)
                 _settle_reapproval(extensions, passed=True)
                 cap_stop = False
                 break
@@ -2875,6 +2909,8 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
             cap = (status or {}).get("fix_loop_cap")
             if status is not None:
                 _settle_reapproval(reapprovals, passed=not cap)
+                if not cap and extensions and extensions[-1]["passed"] is None:
+                    _settle_extension_labels(extensions, None)
                 _settle_reapproval(extensions, passed=not cap)
             if cap:
                 cap_stop = True
@@ -2891,15 +2927,24 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
                     break
                 if labelled["error"] is None:
                     findings = labelled["findings"]
+                    counts = label_counts(findings)
+                    _settle_extension_labels(extensions, counts)
                     unfinished = [item for item in findings if item["label"] == "incomplete"]
                     if unfinished:
                         review_stop = {"verdict": "incomplete", **cap, "findings": findings,
-                                       "incomplete": len(unfinished)}
+                                       "incomplete": len(unfinished), "label_counts": counts}
+                        break
+                    # v3.18: only bug and architecture findings get fix rounds; the rest never block
+                    fixable = [item for item in findings if item["label"] in finding_split.FIXABLE]
+                    if not fixable:
+                        review_stop = {"verdict": "non-blocking", **cap, "findings": findings, "label_counts": counts}
                         break
                     if len(extensions) >= MAX_FIX_EXTENSIONS:
                         break
-                    extensions.append({**cap, "findings": findings, "passed": None})
-                    shown = "\n".join(f"- [{item['label']}] {item['text']}" for item in findings[:OPEN_FINDINGS_SHOWN])
+                    extensions.append({**cap, "findings": findings, "label_counts_before": counts,
+                                       "label_counts_after": None, "shown": len(fixable[:OPEN_FINDINGS_SHOWN]),
+                                       "passed": None})
+                    shown = "\n".join(f"- [{item['label']}] {item['text']}" for item in fixable[:OPEN_FINDINGS_SHOWN])
                     message = RESUME_TO_FIX_FINDINGS.format(phase=cap["phase"], findings=shown)
                     continue
                 classifier_failures.append({**cap, "error": labelled["error"], "findings": len(labelled["findings"])})
@@ -3004,6 +3049,19 @@ def gate_result(run: Path, meta: dict, checkout: Path, driven: dict | None = Non
     config_ok = expected_config is None or (config.is_file() and verify_gate.file_sha256(config) == expected_config)
     return {**verify_gate.summary(run / verify_gate.LOG), "wiring_intact": intact,
             "integrity_intact": script_ok and config_ok, "script_intact": script_ok, "config_intact": config_ok}
+
+
+def label_counts(findings: list[dict]) -> dict[str, int]:
+    """Findings per label, every label of the frozen classifier listed (0 when absent)."""
+    counted = Counter(item.get("label") or "unlabelled" for item in findings)
+    return {label: counted.get(label, 0) for label in (*finding_split.LABELS, "unlabelled")
+            if label in finding_split.LABELS or counted.get(label)}
+
+
+def _settle_extension_labels(extensions: list[dict], counts: dict[str, int] | None) -> None:
+    """The open findings per label after the last fix extension: at the next cap stop, or none when the review passed."""
+    if extensions and extensions[-1].get("label_counts_after") is None and "label_counts_before" in extensions[-1]:
+        extensions[-1]["label_counts_after"] = counts if counts is not None else label_counts([])
 
 
 def _settle_reapproval(reapprovals: list[dict], *, passed: bool) -> None:
