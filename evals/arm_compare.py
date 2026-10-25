@@ -51,6 +51,13 @@ rates and counted apart.
 - D: like B and C with the kit's `default` workflow, the one it applies to every project and which says the agent
   sets each phase's depth per task (#409 v2.1, arm D).
 - C′: `c_prime.build()` of the same project, stopping after `commit` (#427).
+- R (router): the model chooses the workflow. After seeding, one read-only `claude -p` router (`router.py`; the
+  controller's model, Read/Glob/Grep only, 10 minutes, $2) gets the task text and a fixed menu (`none` = A,
+  `verify-only` = V, `development` = B, `default` = D, `full-feature` = C, plus each `--menu-variant` S spec under its
+  variant name) and answers `{"choice": ..., "reason": ...}` on its last line; a bad answer is retried once, then
+  `none` is used with `router.fallback: true`. The decision (choice, reason, cost, tokens, seconds, menu sha256, raw
+  output paths) is written to `arm.json` `router` before the chosen arm is prepared in the same run directory, and
+  `drive` starts a fresh controller on it. The router's cost is added to the run's `total_cost_usd`.
 
 Every run's result carries `integrity` (`integrity.check`, #409 v2 §3a): deleted, disabled or weakened tests and
 stubs in the diff from the start commit, a "tests pass" claim with no test command in the transcript, and changes
@@ -100,6 +107,7 @@ import c_prime  # noqa: E402
 import completion  # noqa: E402
 import variants  # noqa: E402
 import integrity  # noqa: E402
+import router  # noqa: E402
 import verify_gate  # noqa: E402
 import run_usage  # noqa: E402
 from cycle_report import fisher_greater  # noqa: E402
@@ -123,7 +131,11 @@ CONTROLLER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "ANDROID_HOME"
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CODEX_HOME", "OPENAI_API_KEY")
 AGENT_FLOW_WORKTREES = Path.home() / ".agent-flow" / "worktrees"
 CLAUDE_TOOLS = ("Bash", "Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "TodoWrite", "Task")
-ARMS = ("A", "AP", "PS", "V", "B", "C", "D", "S", "Cp")
+ARMS = ("A", "AP", "PS", "V", "B", "C", "D", "S", "Cp", "R")
+# R: the router picks one of these arms' setups (`router.OPTIONS`, plus S variants); the record keeps `arm: "R"` and the
+# picked `effective_arm`, and everything that depends on the setup reads `effective_arm(meta)`.
+ROUTED_ARMS = ("R",)
+DEFAULT_MODEL = "claude-opus-5-5"
 # no kit; the agent gets the task prompt only (and, AP and PS, a CLAUDE.md; V, a Stop hook)
 BARE_ARMS = ("A", "AP", "PS", "V")
 GATE_ARMS = ("V",)  # the bare prompt plus `verify_gate.py` as the project's Stop hook
@@ -488,7 +500,7 @@ def prepare_followon(base_run: Path, case_dir: Path, trial: int, output: Path) -
     """
     base = json.loads((base_run / "arm.json").read_text(encoding="utf-8"))
     base_project = base_run / "project" if (base_run / "project").is_dir() else Path(base["project"])
-    checkout, chosen = select_checkout(base_project, base["arm"])
+    checkout, chosen = select_checkout(base_project, effective_arm(base))
     if chosen["checkout_error"]:
         raise SystemExit(f"base run has no gradable checkout: {chosen['checkout_error']}")
     case = load_followon_case(case_dir)
@@ -511,7 +523,8 @@ def prepare_followon(base_run: Path, case_dir: Path, trial: int, output: Path) -
             "cprime_rules": None, "isolation": "instructed", "approval_rules": None, "case_kind": "external",
             "case_sha256": case["sha256"], "seed_commit": None, "score_keys": case["score_keys"],
             "evaluator_repeat": False,
-            "followon_of": {"arm": base["arm"], "case": base["case"], "trial": base["trial"],
+            "followon_of": {"arm": base["arm"], "effective_arm": effective_arm(base), "case": base["case"],
+                            "trial": base["trial"],
                             "artifact_sha256": artifact_sha256(checkout)}}
     (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
     return meta
@@ -532,6 +545,24 @@ def _write_variant(kit: Path, project: Path, profile: str, variant: dict | None)
     return variants.write(kit, project, profile, variant) if variant is not None else None
 
 
+def effective_arm(meta: dict) -> str | None:
+    """The arm whose setup the run used: the router's pick for arm R, the arm itself otherwise."""
+    return meta.get("effective_arm") or meta.get("arm")
+
+
+def _route(output: Path, project: Path, task: str, model: str, menu_variants: list[dict] | None,
+           frozen: dict) -> dict:
+    """Arm R's decision, written to `arm.json` before the chosen arm's preparation touches the project."""
+    decision = router.route(task, project, output / router.OUT_DIR, model, controller_env(dict(os.environ)),
+                            menu_variants)
+    if _git(["status", "--porcelain"], project):
+        raise SystemExit("the router changed the project")
+    frozen = {**frozen, "effective_arm": decision["effective_arm"], "router": decision,
+              "router_frozen_at": datetime.now().isoformat(timespec="seconds")}
+    (output / "arm.json").write_text(json.dumps(frozen, indent=1) + "\n", encoding="utf-8")
+    return frozen
+
+
 def _workflow_record(arm: str, searched: dict | None) -> dict:
     if arm not in WORKFLOWS:
         return {}
@@ -539,13 +570,20 @@ def _workflow_record(arm: str, searched: dict | None) -> dict:
 
 
 def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isolation: str = "instructed",
-            case_dir: Path | None = None, variant: dict | None = None) -> dict:
+            case_dir: Path | None = None, variant: dict | None = None, menu_variants: list[dict] | None = None,
+            model: str = DEFAULT_MODEL) -> dict:
+    """`model` is arm R's router model; `drive` must run the controller on the same one."""
     if isolation not in ISOLATION:
         raise ValueError(f"isolation must be one of {ISOLATION}")
     if (arm == "S") != (variant is not None):
         raise ValueError("arm S needs --variant, and only arm S takes one")
+    if menu_variants and arm not in ROUTED_ARMS:
+        raise ValueError("only arm R takes --menu-variant")
+    if arm in ROUTED_ARMS:
+        router.menu(menu_variants)  # a bad menu variant fails before anything is seeded
     if case_dir is not None:
-        return _prepare_external(kit, arm, load_external_case(case_dir), case_dir, trial, output, isolation, variant)
+        return _prepare_external(kit, arm, load_external_case(case_dir), case_dir, trial, output, isolation, variant,
+                                 menu_variants, model)
     ui = UI_CASES.get(case_name)
     if ui is None:
         case_dir = CASES / case_name
@@ -561,6 +599,11 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
         _seed_ui_project(ui, project)
     if ui is not None and arm == "Cp":
         raise ValueError("C′ is not defined for UI tasks")
+    routed, requested = {}, arm
+    if arm in ROUTED_ARMS:
+        routed = _route(output, project, case["task"], model, menu_variants,
+                        {"arm": arm, "case": case_name, "trial": trial, "project": str(project.resolve())})
+        arm, variant = routed["effective_arm"], routed["router"].get("variant")
     searched, gate = None, None
     if arm in BARE_ARMS:
         if arm in PRINCIPLE_SETS:
@@ -579,7 +622,7 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
         searched = _write_variant(agent_kit, project, case["profile"], variant)
         prompt = driver_prompt(case["task"], searched["name"] if searched else WORKFLOWS[arm])
     (output / "prompt.md").write_text(prompt, encoding="utf-8")
-    meta = {"arm": arm, "case": case_name, "trial": trial, "project": str(project.resolve()),
+    meta = {"arm": requested, **routed, "case": case_name, "trial": trial, "project": str(project.resolve()),
             "start_commit": _git(["rev-parse", "HEAD"], project),
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
@@ -592,13 +635,19 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
 
 
 def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: int, output: Path,
-                      isolation: str, variant: dict | None = None) -> dict:
-    if arm not in (*BARE_ARMS, *WORKFLOWS):
-        raise ValueError("an external case defines the A, AP, PS, V, B, C, D and S arms only")
+                      isolation: str, variant: dict | None = None, menu_variants: list[dict] | None = None,
+                      model: str = DEFAULT_MODEL) -> dict:
+    if arm not in (*BARE_ARMS, *WORKFLOWS, *ROUTED_ARMS):
+        raise ValueError("an external case defines the A, AP, PS, V, B, C, D, S and R arms only")
     output.mkdir(parents=True)
     agent_kit = sanitized_kit(kit, output / "kit")
     project = output / "project"
     _seed_external_project(case, case_dir, project)
+    routed, requested = {}, arm
+    if arm in ROUTED_ARMS:
+        routed = _route(output, project, case["task"], model, menu_variants,
+                        {"arm": arm, "case": case["name"], "trial": trial, "project": str(project.resolve())})
+        arm, variant = routed["effective_arm"], routed["router"].get("variant")
     searched, gate = None, None
     if arm in BARE_ARMS:
         if arm in PRINCIPLE_SETS:
@@ -613,7 +662,7 @@ def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: in
         searched = _write_variant(agent_kit, project, case["profile"], variant)
         prompt = driver_prompt(case["task"], searched["name"] if searched else WORKFLOWS[arm])
     (output / "prompt.md").write_text(prompt, encoding="utf-8")
-    meta = {"arm": arm, "case": case["name"], "trial": trial, "project": str(project.resolve()),
+    meta = {"arm": requested, **routed, "case": case["name"], "trial": trial, "project": str(project.resolve()),
             "start_commit": _git(["rev-parse", "HEAD"], project),
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
@@ -1100,7 +1149,7 @@ def rule_violation(row: dict) -> bool:
     command breaks the rule only for runs whose prompt left phase approvals to the harness; the first round's
     prompt told the agent to approve (`approval_rules` absent, read as AGENT_APPROVES).
     """
-    if row.get("arm") not in WORKFLOWS:
+    if effective_arm(row) not in WORKFLOWS:
         return False
     phase_rule = row.get("approval_rules") or AGENT_APPROVES
     return bool(row.get("spec_self_approvals") or row.get("verify_downgrades") or row.get("manual_spec_approvals")
@@ -1136,7 +1185,8 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
     project = run / "project" if (run / "project").is_dir() else Path(meta["project"])
     if project.resolve() != Path(meta["project"]).resolve():
         meta = {**meta, "project": str(project.resolve()), "project_recorded": meta["project"]}
-    checkout, chosen = select_checkout(project, meta["arm"])
+    arm = effective_arm(meta)
+    checkout, chosen = select_checkout(project, arm)
     harness_error = harness_error or chosen["checkout_error"]
     if transcript is None and (run / "drive.json").is_file():
         recorded = json.loads((run / "drive.json").read_text(encoding="utf-8")).get("transcript")
@@ -1164,7 +1214,8 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
     message = final_message(main_rows)
     declaration = completion.classify(message if main_rows else None)
     drive = json.loads((run / "drive.json").read_text(encoding="utf-8")) if (run / "drive.json").is_file() else {}
-    gate = gate_result(run, meta, checkout) if meta["arm"] in GATE_ARMS else None
+    gate = gate_result(run, meta, checkout) if arm in GATE_ARMS else None
+    routed = meta.get("router")
     result = {"isolation": "instructed", **meta, "task_kind": "normal", "checkout": str(checkout), **graded,
               "commits": int(commits) if commits.isdigit() else None,
               "final_message": message, "declaration": declaration,
@@ -1174,28 +1225,31 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
               "verify_downgrades": verify_downgrades(rows),
               "manual_spec_approvals": manual_spec_approvals(project, checkout), "artifact_sha256": artifact,
               "transcript": str(transcript) if transcript else None, **_measured_usage(rows, read), **read,
-              "controller_cost_usd": drive.get("cost_usd"), "total_cost_usd": total_cost(drive.get("cost_usd"), gate),
+              "controller_cost_usd": drive.get("cost_usd"),
+              "total_cost_usd": total_cost(drive.get("cost_usd"), gate, routed),
+              **({"router_cost_usd": routed.get("cost_usd")} if routed else {}),
               **({"verify_gate": gate} if gate is not None else {}), "drive_exit": drive.get("exit"),
               "drive_timed_out": drive.get("timed_out"), "drive_is_error": drive.get("is_error"),
               "fix_loop_reapprovals": len(drive.get("fix_loop_reapprovals") or []),
               "fix_loop_reapproval_log": drive.get("fix_loop_reapprovals") or [],
               "harness_error": harness_error, **chosen,
-              **(_runner_trace(project, checkout) if meta["arm"] in WORKFLOWS else {}),
-              **(gate_record(project, checkout) if meta["arm"] in WORKFLOWS else {}),
+              **(_runner_trace(project, checkout) if arm in WORKFLOWS else {}),
+              **(gate_record(project, checkout) if arm in WORKFLOWS else {}),
               **({"reviewers": reviewer_record(project, checkout)}
-                 if meta["arm"] in WORKFLOWS else {}),
-              **({"phase_trace": phase_trace(project, checkout, meta.get("workflow") or WORKFLOWS[meta["arm"]], rows,
+                 if arm in WORKFLOWS else {}),
+              **({"phase_trace": phase_trace(project, checkout, meta.get("workflow") or WORKFLOWS[arm], rows,
                                              measured=read.get("subagents") != "unmeasured")}
-                 if meta["arm"] in WORKFLOWS else {}),
+                 if arm in WORKFLOWS else {}),
               "scored_at": datetime.now().isoformat(timespec="seconds")}
     (run / "result.json").write_text(json.dumps(result, indent=1, default=str) + "\n", encoding="utf-8")
     return result
 
 
-def total_cost(controller: float | None, gate: dict | None) -> float | None:
-    """The controller's cost plus arm V's reviewer cost; null when either is unknown."""
+def total_cost(controller: float | None, gate: dict | None, routed: dict | None = None) -> float | None:
+    """The controller's cost plus arm V's reviewer cost and arm R's router cost; null when any of them is unknown."""
     reviewer = gate["reviewer_cost_usd"] if gate is not None else 0.0
-    return None if controller is None or reviewer is None else round(controller + reviewer, 4)
+    chooser = routed.get("cost_usd") if routed else 0.0
+    return None if None in (controller, reviewer, chooser) else round(controller + reviewer + chooser, 4)
 
 
 def _grade_phase_case(meta: dict, checkout: Path) -> dict:
@@ -1354,7 +1408,11 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
     project = Path(meta["project"])
     prompt = (run / "prompt.md").read_text(encoding="utf-8")
     stream = run / "controller.jsonl"
-    if meta["arm"] in GATE_ARMS:
+    arm = effective_arm(meta)
+    routed = meta.get("router")
+    if routed and routed.get("model") != model:
+        raise SystemExit(f"arm R's router ran on {routed.get('model')}; drive the controller on the same model")
+    if arm in GATE_ARMS:
         set_gate_model(run, model)
     started = time.monotonic()
     approvals: list[str] = []
@@ -1377,7 +1435,7 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
             summary = _stream_summary(stream)
             session = summary["session_id"] or session
             spent = summary["cost_usd"] or spent
-            if timed_out or meta["arm"] not in WORKFLOWS or len(approvals) >= MAX_HARNESS_APPROVALS:
+            if timed_out or arm not in WORKFLOWS or len(approvals) >= MAX_HARNESS_APPROVALS:
                 break
             # 완료를 선언한 run은 건드리지 않는다. `continue`는 상태를 다시 검증하므로 필요할 때만 부른다.
             if completion.classify(summary.get("final_text")) == completion.COMPLETE:
@@ -1406,7 +1464,7 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
               "timed_out": timed_out, "seconds": round(time.monotonic() - started), **summary, "session_id": session,
               "cost_usd": spent or None, "harness_approvals": approvals,
               "fix_loop_reapprovals": reapprovals, "fix_loop_cap_stop": cap_stop,
-              **({"verify_gate": verify_gate.summary(run / verify_gate.LOG)} if meta["arm"] in GATE_ARMS else {}),
+              **({"verify_gate": verify_gate.summary(run / verify_gate.LOG)} if arm in GATE_ARMS else {}),
               "transcript": str(transcript) if transcript else None,
               "argv_sha256": hashlib.sha256(json.dumps(controller_argv(prompt, model, budget)).encode()).hexdigest(),
               "cli_version": c_prime._sh(["claude", "--version"], run).stdout.strip() or None}
@@ -1467,13 +1525,16 @@ STATUS_COLUMNS = ("contaminated", "infra-error", "timed-out")
 
 
 def summarize(results: list[dict]) -> str:
-    """Every assigned run is in its arm's denominator; only harness errors are listed apart (with their reasons)."""
+    """Every assigned run is in its arm's denominator; only harness errors are listed apart (with their reasons).
+
+    Arm R gets one row over all its runs and one row per chosen option (`R: <option>`); the option rows have no
+    Fisher p, because the router, not the assignment, put each run there. A "Router choices" table follows.
+    """
     assigned = [row for row in results if run_status(row) != "harness-error"]
-    table = completion.summarize(assigned)
     lines = ["| arm | assigned runs | success | one-sided Fisher p vs A | overclaim (upper 95%) | declared complete/blocked/"
              "undeclared/unmeasured | contaminated / infra error / timed out (counted as failures) | "
              "harness errors (excluded) | output tokens (mean) | input uncached+cached (mean) | "
-             "seconds (mean) | controller cost / total incl. verify-gate reviewer (mean) | "
+             "seconds (mean) | controller cost / total incl. verify-gate reviewer and router (mean) | "
              "verify-gate blocks / review findings / reviewer cost (mean) | "
              "reviewer jobs (mean) | rule violations | isolation | "
              "runs that ran gates / deferred a gate to CI (never run) | "
@@ -1482,7 +1543,6 @@ def summarize(results: list[dict]) -> str:
              "integrity flags (runs flagged) | reviewer jobs / seconds / token and cost lower bound (mean) |",
              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     base = [row for row in assigned if row["arm"] == "A"]
-    base_success = sum(_succeeded(row) for row in base)
     reasons: list[str] = []
     for arm in ARMS:
         group = [row for row in assigned if row["arm"] == arm]
@@ -1490,41 +1550,87 @@ def summarize(results: list[dict]) -> str:
         if not group and not excluded:
             continue
         reasons += [f"{arm}-{row.get('trial')}: {row['harness_error']}" for row in excluded]
-        item = table.get((arm, "normal"), {})
-        success = sum(_succeeded(row) for row in group)
-        p = (f"{fisher_greater(base_success, len(base), success, len(group)):.3f}"
-             if arm != "A" and base and group else "-")
-        states = item.get("states", {})
-        usage = [row["usage"] for row in group]
-        upper = item.get("overclaim_upper95")
-        lines.append(" | ".join([
-            f"| {arm}", str(len(group)), f"{success}/{len(group)}", p,
-            f"{completion._cell(item.get('overclaim'))} ({completion._cell(upper)})",
-            "/".join(str(states.get(state, 0)) for state in
-                     (completion.COMPLETE, completion.BLOCKED, completion.UNDECLARED, completion.UNMEASURED)),
-            " / ".join(str(sum(run_status(row) == status for row in group)) for status in STATUS_COLUMNS),
-            str(len(excluded)), _fmt(_mean([u["output"] for u in usage if u["output"] is not None])),
-            _fmt(_mean([u["uncached_input"] + u["cached_input"] for u in usage
-                        if u["uncached_input"] is not None and u["cached_input"] is not None])),
-            _fmt(_mean([row["seconds"] for row in group if row.get("seconds") is not None])),
-            _cost_cell(group), _gate_cell(group) if arm in GATE_ARMS else "-",
-            _fmt(_mean([row["reviewer_jobs"] for row in group if "reviewer_jobs" in row])),
-            str(sum(rule_violation(row) for row in group)),
-            "/".join(sorted({row.get("isolation", "instructed") for row in group})),
-            (f"{sum(bool(row.get('gate_ledgers')) for row in group)} / "
-             f"{sum(bool(row.get('deferred_ci_checks')) for row in group)}" if arm in WORKFLOWS else "-"),
-            (f"{sum(_succeeded(row) and not row.get('fix_loop_reapprovals') for row in group)} / "
-             f"{sum(_succeeded(row) and bool(row.get('fix_loop_reapprovals')) for row in group)}"
-             if arm in WORKFLOWS else "-"),
-            (str(sum(bool(row.get("fix_loop_cap_stop")) for row in group)) if arm in WORKFLOWS else "-"),
-            _phase_cell(group) if arm in WORKFLOWS else "-",
-            _share_cell(group) if arm in WORKFLOWS else "-",
-            _integrity_cell(group),
-            _reviewer_cell(group) if arm in WORKFLOWS else "-"]) + " |")
+        lines.append(_summary_line(arm, group, excluded, base, compare=arm != "A"))
+        if arm in ROUTED_ARMS:
+            for option in _router_options(group + excluded):
+                lines.append(_summary_line(
+                    f"{arm}: {option}", [row for row in group if _router_choice(row) == option],
+                    [row for row in excluded if _router_choice(row) == option], base, compare=False))
     if reasons:
         lines += ["", "Harness errors (re-run under the fixed harness, not in the denominator):", ""]
         lines += [f"- {reason}" for reason in reasons]
+    routed = [row for row in assigned if row["arm"] in ROUTED_ARMS]
+    if routed:
+        lines += ["", "Router choices (arm R, assigned runs):", "",
+                  "| option | effective arm | runs | success | router fallbacks | router cost (mean) |",
+                  "|---|---|---|---|---|---|"]
+        for option in _router_options(routed, with_menu=True):
+            group = [row for row in routed if _router_choice(row) == option]
+            arms = sorted({str(effective_arm(row)) for row in group}) or [_menu_arm(routed, option)]
+            costs = [row["router"].get("cost_usd") for row in group if row["router"].get("cost_usd") is not None]
+            lines.append(f"| {option} | {'/'.join(arms)} | {len(group)} | {sum(_succeeded(row) for row in group)}/"
+                         f"{len(group)} | {sum(bool(row['router'].get('fallback')) for row in group)} | "
+                         f"{_usd(_mean(costs))} |")
     return "\n".join(lines) + "\n"
+
+
+def _router_choice(row: dict) -> str | None:
+    return (row.get("router") or {}).get("choice")
+
+
+def _router_options(rows: list[dict], with_menu: bool = False) -> list[str]:
+    """Chosen options in menu order (then any other chosen name); with_menu adds every option a menu offered."""
+    order: list[str] = []
+    for row in rows:
+        for name in (row.get("router") or {}).get("menu") or []:
+            if name not in order:
+                order.append(name)
+    chosen = {_router_choice(row) for row in rows} - {None}
+    listed = [name for name in order if with_menu or name in chosen]
+    return listed + sorted(chosen - set(listed))
+
+
+def _menu_arm(rows: list[dict], option: str) -> str:
+    """The arm an option stands for when no run chose it: `router.OPTIONS`, or S for a menu variant."""
+    return router.OPTIONS[option][0] if option in router.OPTIONS else "S"
+
+
+def _summary_line(label: str, group: list[dict], excluded: list[dict], base: list[dict], *, compare: bool) -> str:
+    """One table row. A setup-specific column is filled when any run in the group used that setup."""
+    setups = {effective_arm(row) for row in group}
+    workflow = bool(setups & set(WORKFLOWS))
+    gated = bool(setups & set(GATE_ARMS))
+    item = completion.summarize(group).get((group[0]["arm"], "normal"), {}) if group else {}
+    success = sum(_succeeded(row) for row in group)
+    p = (f"{fisher_greater(sum(_succeeded(row) for row in base), len(base), success, len(group)):.3f}"
+         if compare and base and group else "-")
+    states = item.get("states", {})
+    usage = [row["usage"] for row in group]
+    upper = item.get("overclaim_upper95")
+    return " | ".join([
+        f"| {label}", str(len(group)), f"{success}/{len(group)}", p,
+        f"{completion._cell(item.get('overclaim'))} ({completion._cell(upper)})",
+        "/".join(str(states.get(state, 0)) for state in
+                 (completion.COMPLETE, completion.BLOCKED, completion.UNDECLARED, completion.UNMEASURED)),
+        " / ".join(str(sum(run_status(row) == status for row in group)) for status in STATUS_COLUMNS),
+        str(len(excluded)), _fmt(_mean([u["output"] for u in usage if u["output"] is not None])),
+        _fmt(_mean([u["uncached_input"] + u["cached_input"] for u in usage
+                    if u["uncached_input"] is not None and u["cached_input"] is not None])),
+        _fmt(_mean([row["seconds"] for row in group if row.get("seconds") is not None])),
+        _cost_cell(group), _gate_cell(group) if gated else "-",
+        _fmt(_mean([row["reviewer_jobs"] for row in group if "reviewer_jobs" in row])),
+        str(sum(rule_violation(row) for row in group)),
+        "/".join(sorted({row.get("isolation", "instructed") for row in group})),
+        (f"{sum(bool(row.get('gate_ledgers')) for row in group)} / "
+         f"{sum(bool(row.get('deferred_ci_checks')) for row in group)}" if workflow else "-"),
+        (f"{sum(_succeeded(row) and not row.get('fix_loop_reapprovals') for row in group)} / "
+         f"{sum(_succeeded(row) and bool(row.get('fix_loop_reapprovals')) for row in group)}"
+         if workflow else "-"),
+        (str(sum(bool(row.get("fix_loop_cap_stop")) for row in group)) if workflow else "-"),
+        _phase_cell(group) if workflow else "-",
+        _share_cell(group) if workflow else "-",
+        _integrity_cell(group),
+        _reviewer_cell(group) if workflow else "-"]) + " |"
 
 
 def _usd(value: float | None) -> str:
@@ -1593,9 +1699,13 @@ def main(argv: list[str] | None = None) -> int:
     prep.add_argument("--isolation", choices=ISOLATION, default="instructed")
     prep.add_argument("--case-dir", type=Path, help="a case kept outside this repository (`<dir>/case.json`)")
     prep.add_argument("--variant", type=json.loads, help="arm S: the search variant as JSON (see evals/variants.py)")
+    prep.add_argument("--menu-variant", type=json.loads, action="append", dest="menu_variants", metavar="SPEC",
+                      help="arm R: an S variant spec (JSON) to add to the router's menu; repeat for each")
+    prep.add_argument("--model", default=DEFAULT_MODEL,
+                      help="arm R: the router's model; `drive --model` must be the same")
     dr = sub.add_parser("drive")
     dr.add_argument("run", type=Path)
-    dr.add_argument("--model", default="claude-opus-5-5")
+    dr.add_argument("--model", default=DEFAULT_MODEL)
     dr.add_argument("--timeout", type=int, default=7200)
     dr.add_argument("--budget", type=float, default=30.0)
     sc = sub.add_parser("score")
@@ -1620,7 +1730,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "prepare":
         print(json.dumps(prepare(args.kit.resolve(), args.arm, args.case, args.trial, args.output.resolve(),
                                  args.isolation, args.case_dir.resolve() if args.case_dir else None,
-                                 args.variant), indent=1))
+                                 args.variant, args.menu_variants, args.model), indent=1))
     elif args.command == "preflight":
         rows = preflight([tuple(item.split(":", 1)) for item in args.model])
         text = json.dumps(rows, indent=1)
