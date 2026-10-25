@@ -3,6 +3,7 @@ content-based contamination and stratified metrics. Synthetic fixtures only."""
 from __future__ import annotations
 
 import json
+import subprocess
 import os
 import sys
 from pathlib import Path
@@ -558,3 +559,36 @@ def test_a_usage_limit_met_by_another_participating_call_is_an_outage_too(tmp_pa
         meta["router"] = {"errors": ["claude -p failed: API Error: 429 rate_limit_error"]}
     found = arm_compare.outage_seen(run, meta, stream, [])
     assert found and found.startswith(f"{where} usage-limit")
+
+
+def test_a_submission_sandbox_that_outlives_scoring_is_killed_recorded_and_a_harness_error(tmp_path, monkeypatch):
+    monkeypatch.setenv(arm_compare.SANDBOX_ENV, "required")
+    case_dir, evaluator = _external_case(tmp_path)
+    run = tmp_path / "runs" / "A-1"
+    monkeypatch.setenv(arm_compare.SANDBOX_ENV, "off")
+    arm_compare.prepare(ROOT, "A", "x", 1, run, case_dir=case_dir)
+    monkeypatch.setenv(arm_compare.SANDBOX_ENV, "required")
+    seen = []
+
+    def reap(pid_dir):
+        seen.append(pid_dir)
+        return [{"unshare_pid": 4242, "label": "submission", "members": [{"pid": 4243, "cmdline": "node server.js"}]}]
+
+    monkeypatch.setattr(arm_compare.sandbox, "reap", reap)
+    result = arm_compare.score(run, None, evaluator, case_dir=case_dir)
+    assert seen and seen[0].name == arm_compare.SUBMISSION_PIDS
+    assert result["submission_sandbox"]["survivors_after_scoring"][0]["unshare_pid"] == 4242
+    assert result["harness_error"].startswith("sandbox: 1 submission sandbox(es) outlived scoring")
+    assert attempts.exclusion_code(result["harness_error"]) == "sandbox"
+
+
+def test_a_workflow_arm_gets_agent_flow_on_path_as_a_real_install_has_it(tmp_path):
+    run = tmp_path / "C-1"
+    (run / "project" / ".agent-flow" / "bin").mkdir(parents=True)
+    launcher = run / "project" / ".agent-flow" / "bin" / "agent-flow"
+    launcher.write_text("#!/bin/sh\necho launcher \"$@\"\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    shim = arm_compare.install_cli_shim(run, {"arm": "C", "project": str(run / "project")})
+    done = subprocess.run([shim["path"], "continue", "--root", "x"], capture_output=True, text=True)
+    assert done.stdout.strip() == "launcher continue --root x" and Path(shim["path"]).parent == arm_compare.usage_bin(run)
+    assert arm_compare.install_cli_shim(run, {"arm": "A", "project": str(run / "project")}) is None

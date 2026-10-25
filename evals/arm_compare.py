@@ -1815,6 +1815,7 @@ def _tests_pass(command: list[str], cwd: Path) -> bool:
 
 
 SUBMISSION_WRAPPED = "gradlew.unsandboxed"
+SUBMISSION_PIDS = "submission-pids"
 
 
 def wrap_submission(build: Path, workdir: Path) -> dict:
@@ -1825,7 +1826,9 @@ def wrap_submission(build: Path, workdir: Path) -> dict:
     launcher = [sys.executable, "-I", str((HERE / "sandbox.py").resolve()), "exec"]
     config = workdir / "submission-sandbox.json"
     log = workdir / "submission-sandbox.jsonl"
-    config.write_text(json.dumps({"timeout": 3600, "log": str(log)}), encoding="utf-8")
+    # `pids`: each submission sandbox's unshare pid, so `score` can prove none outlives the grading (`sandbox.reap`)
+    config.write_text(json.dumps({"timeout": 3600, "log": str(log), "pids": str(workdir / SUBMISSION_PIDS)}),
+                      encoding="utf-8")
     prefix = " ".join(shlex.quote(item) for item in [*launcher, "--spec", str(config), "--"])
     wrapped: dict = {"eval_json": [], "gradlew": False, "log": str(log)}
     spec_path = build / "eval.json"
@@ -2067,6 +2070,13 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
                            "evaluator_contamination_detail": ui.get("contamination_detail"),
                            "evaluator_browser_repeat": browser})
             if submission is not None:
+                # v3.14 A: no process the graded build started may outlive the grading. The evaluator stops a server
+                # by killing its wrapper; PDEATHSIG takes the namespace down, and this proves it (and kills a survivor).
+                submission["survivors_after_scoring"] = sandbox.reap(Path(scratch) / SUBMISSION_PIDS)
+                if submission["survivors_after_scoring"]:
+                    harness_error = harness_error or (
+                        f"sandbox: {len(submission['survivors_after_scoring'])} submission sandbox(es) outlived "
+                        "scoring (killed)")
                 submission["runs"] = [json.loads(line) for line in Path(submission["log"]).read_text(
                     encoding="utf-8").splitlines() if line.strip()] if Path(submission["log"]).is_file() else []
                 submission["survivors"] = sum(len(item.get("survivors") or []) for item in submission["runs"])
@@ -2248,10 +2258,13 @@ RESUME_AFTER_FIX_LOOP_CAP = (
 # v3.12: at a cap stop the harness labels the open findings with the frozen review_findings classifier (no tools, run by
 # the harness, unseen by the agent). An `incomplete` finding ends the run there (a completeness failure). v3.18: otherwise
 # only `bug` and `architecture` findings get fix rounds: up to MAX_FIX_EXTENSIONS more, showing only those findings,
-# each tagged with its label. When only `style`, `design`, `procedure` or `other` findings are open the run ends there as
-# `review_stop` `non-blocking` (not a completeness failure), the findings recorded and not sent back. Each extension
-# records its label counts before and after. A classifier failure, or no parsed findings, falls back to the re-review
-# above and is recorded.
+# each tagged with its label. When only `style`, `design`, `procedure` or `other` findings are open, nothing is sent back
+# to fix: the runner cannot be approved past its cap (no command undoes `fix_loop_rounds`), so the harness asks for the
+# re-review above (no code changes), counted against MAX_FIX_LOOP_REAPPROVALS; when the reviewers approve, the workflow
+# continues to its next phase as if the review had passed. When the cap still holds after those re-reviews the run ends
+# as `review_stop` `non-blocking` (not a completeness failure; success is the hidden evaluation). Each extension records
+# its label counts before and after. A classifier failure, or no parsed findings, falls back to the re-review above and
+# is recorded.
 MAX_FIX_EXTENSIONS = 2
 OPEN_FINDINGS_SHOWN = 20
 RESUME_TO_FIX_FINDINGS = (
@@ -2297,6 +2310,29 @@ def install_usage_wrapper(run: Path) -> str:
     name = f"arm-compare-usage-{secrets.token_hex(8)}"
     claude_usage.install(usage_bin(run), name)
     return name
+
+
+CLI_SHIM = "agent-flow"
+
+
+def install_cli_shim(run: Path, meta: dict) -> dict | None:
+    """`agent-flow` on PATH for a workflow arm, as a real install has it (`brew install` puts the CLI on PATH).
+
+    The runner prints its next command as bare `agent-flow continue --root <leader> --worktree <name>`, and once the
+    session is bound its guard accepts lifecycle commands only from the worktree, where the project's launcher
+    (`<leader>/.agent-flow/bin/agent-flow`) does not exist. Without the CLI on PATH the printed command cannot run
+    anywhere (a C smoke stopped after domain-grill this way; the baseline under 9ce653d got past it only because the
+    model found `$(git rev-parse --git-common-dir)/../.agent-flow/bin/agent-flow`). The shim execs the project's own
+    installed launcher, so the kit and its runtime are the treatment's, unchanged."""
+    if effective_arm(meta) not in WORKFLOWS:
+        return None
+    launcher = Path(meta["project"]).resolve() / ".agent-flow" / "bin" / "agent-flow"
+    target = usage_bin(run) / CLI_SHIM
+    target.parent.mkdir(parents=True, exist_ok=True)
+    text = f"#!/bin/sh\nexec {shlex.quote(str(launcher))} \"$@\"\n"
+    target.write_text(text, encoding="utf-8")
+    target.chmod(0o755)
+    return {"path": str(target), "launcher": str(launcher), "sha256": hashlib.sha256(text.encode()).hexdigest()}
 
 
 def run_box(run: Path, meta: dict, cwd: Path | str, timeout: float, label: str) -> dict:
@@ -2834,6 +2870,7 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
     gate_config_sha = verify_gate.file_sha256(run / "gate" / "config.json") if arm in GATE_ARMS else None
     tripwire_before = sandbox.tripwire()
     usage_socket = install_usage_wrapper(run)
+    cli_shim = install_cli_shim(run, meta)
     reports: list[dict] = []
     router_seconds = float(routed.get("seconds") or 0) if routed and not routed.get("reused") else 0.0
     started = time.monotonic()
@@ -2937,7 +2974,17 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
                     # v3.18: only bug and architecture findings get fix rounds; the rest never block
                     fixable = [item for item in findings if item["label"] in finding_split.FIXABLE]
                     if not fixable:
-                        review_stop = {"verdict": "non-blocking", **cap, "findings": findings, "label_counts": counts}
+                        # The runner has no way to approve past the cap. The closest step that changes no code is the
+                        # re-review: if the reviewers now approve, the workflow goes on to its next phase as if the
+                        # review had passed. It counts against MAX_FIX_LOOP_REAPPROVALS; when the cap still holds
+                        # after those, the run ends here as non-blocking.
+                        if len(reapprovals) < MAX_FIX_LOOP_REAPPROVALS:
+                            reapprovals.append({**cap, **review_findings(worktree, status), "reason": "non-blocking",
+                                                "label_counts": counts, "passed": None})
+                            message = RESUME_AFTER_FIX_LOOP_CAP.format(phase=cap["phase"])
+                            continue
+                        review_stop = {"verdict": "non-blocking", **cap, "findings": findings, "label_counts": counts,
+                                       "rereviews": len(reapprovals)}
                         break
                     if len(extensions) >= MAX_FIX_EXTENSIONS:
                         break
@@ -3023,7 +3070,8 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
                           "survivors": survivors, "errors": setup_errors,
                           "checks": next((report.get("checks") for report in reports if report.get("checks")), None)},
               "tripwire_changed": changed, "checkout": checkout_record, "snapshot": frozen, "pins": pins,
-              "base_skills": skills, "harness_error": harness_error, "outage": outage_detail, "driven_at": _now()}
+              "base_skills": skills, "cli_on_path": cli_shim, "harness_error": harness_error, "outage": outage_detail,
+              "driven_at": _now()}
     (run / "drive.json").write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
     if outage_detail:
         record["outage_marker"] = str(outage.mark(run.parent, run, outage_detail))

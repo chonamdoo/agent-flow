@@ -635,13 +635,34 @@ def test_a_fix_extension_that_lets_the_run_finish_is_passed(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("labels", [["style"], ["design", "procedure", "other"], ["style", "design"]])
-def test_only_non_blocking_findings_at_the_cap_end_the_run_without_a_fix_round(tmp_path, monkeypatch, labels):
-    record, messages, calls = _labelled_drive(tmp_path, monkeypatch, labels, [BLOCKED], statuses=3)
-    assert len(messages) == 1 and len(calls) == 1
+def test_only_non_blocking_findings_get_re_reviews_without_fixes_then_end_as_non_blocking(tmp_path, monkeypatch,
+                                                                                          labels):
+    record, messages, calls = _labelled_drive(tmp_path, monkeypatch, labels, [BLOCKED], statuses=5)
+    # two re-reviews (no code changes), counted as fix-loop re-approvals; the cap still holds: the run ends there
+    assert len(messages) == 3 and len(calls) == 3
+    assert all("Do not change code" in message for message in messages[1:])
+    assert all("Fix them" not in message for message in messages)
+    reapprovals = record["fix_loop_reapprovals"]
+    assert [item["reason"] for item in reapprovals] == ["non-blocking"] * 2
+    assert [item["passed"] for item in reapprovals] == [False, False]
     stop = record["review_stop"]
     assert stop["verdict"] == "non-blocking" and [item["label"] for item in stop["findings"]] == labels
-    assert sum(stop["label_counts"].values()) == len(labels)
-    assert record["fix_extensions"] == [] and record["fix_loop_reapprovals"] == []
+    assert sum(stop["label_counts"].values()) == len(labels) and stop["rereviews"] == 2
+    assert record["fix_extensions"] == []
+
+
+def test_a_non_blocking_re_review_that_passes_lets_the_workflow_continue(tmp_path, monkeypatch):
+    approval = {"reason": "phase_approval_required", "current_phase": "final-review", "worktree": str(tmp_path),
+                "run": "full-feature/1", "approval_command": "agent-flow continue --approve x"}
+    findings = [{"job_id": "j", "section": "should-fix", "severity": "low", "text": "rename x", "sha": "s1"}]
+    monkeypatch.setattr(arm_compare, "open_findings", lambda worktree, status: findings)
+    monkeypatch.setattr(arm_compare.finding_split, "run_claude", lambda prompt, system, **_: {
+        "text": json.dumps({"labels": [{"id": "f1", "label": "style", "why": "w"}]}), "cost": 0.01})
+    monkeypatch.setattr(arm_compare, "approve_phase", lambda *a, **k: True)
+    record, messages = _drive_run(tmp_path, monkeypatch, [_cap_status(tmp_path), approval], [BLOCKED])
+    assert "Do not change code" in messages[1]  # the re-review, not a fix round
+    assert record["fix_loop_reapprovals"][0]["passed"] is True and record["review_stop"] is None
+    assert record["harness_approvals"] == ["final-review"]  # the workflow went on past the reviewed phase
 
 
 def test_a_classifier_failure_falls_back_to_the_re_review(tmp_path, monkeypatch):

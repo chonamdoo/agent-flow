@@ -23,7 +23,10 @@ The network namespace is shared: the proxy listens on the host's loopback. A ser
 port, but not visible (`ps`, `pkill`) or killable.
 
 When the command exits or the deadline passes, PID 1 kills every process left in the namespace and reports them
-(`killed_at_exit`); when PID 1 exits the kernel ends the namespace. `run` then looks for any host process still in that
+(`killed_at_exit`); when PID 1 exits the kernel ends the namespace. `unshare` gets `PR_SET_PDEATHSIG` (SIGKILL, set by `setpriv`), so a
+caller killed from outside (an evaluator stopping a started server by killing its `sandbox.py exec` wrapper) takes
+`unshare`, and with `--kill-child` the whole namespace, with it. `exec` also records each `unshare` pid in the spec's
+`pids` directory, so the scorer can check after grading that nothing it started survives (`reap`). `run` then looks for any host process still in that
 PID namespace: one found is `survivors`, a harness error. `tripwire()` hashes listings of the system directories before
 and after a run; a change marks the run contaminated.
 
@@ -32,6 +35,7 @@ Standard library only: the submission wrapper runs from a copy outside this repo
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
@@ -155,7 +159,69 @@ def _pid_ns_members(inode: str) -> list[dict]:
     return found
 
 
-def run(sandbox: dict, argv: list[str], *, stdout=None, stderr=None, stdin=None, capture: bool = False) -> dict:
+PR_SET_PDEATHSIG = 1
+
+
+def _die_with_parent() -> None:
+    """In the forked `unshare`, before exec: SIGKILL when the process that started it exits."""
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
+
+
+def _children(pid: int) -> list[int]:
+    found = []
+    for task in Path(f"/proc/{pid}/task").glob("*"):
+        try:
+            found += [int(item) for item in (task / "children").read_text().split()]
+        except (OSError, ValueError):
+            continue
+    return found
+
+
+def namespace_members(unshare_pid: int) -> list[dict]:
+    """The processes in the PID namespace whose PID 1 `unshare_pid` forked (empty when it is gone)."""
+    members = []
+    for child in _children(unshare_pid):
+        try:
+            inode = os.readlink(f"/proc/{child}/ns/pid")
+        except OSError:
+            continue
+        members += _pid_ns_members(inode)
+    return members
+
+
+def reap(pid_dir: Path) -> list[dict]:
+    """Every `unshare` recorded in `pid_dir` (by `exec`) that is still alive: its namespace's processes, then SIGKILL
+    (with `--kill-child` its PID 1 and so the namespace die with it). Returns what survived."""
+    survivors = []
+    for record in sorted(pid_dir.glob("*.json")) if pid_dir.is_dir() else []:
+        try:
+            data = json.loads(record.read_text(encoding="utf-8"))
+            pid = int(data["pid"])
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+        except (OSError, ValueError, KeyError):
+            continue
+        if "sandbox.py" not in cmdline or " inner " not in f" {cmdline} ":
+            continue  # the pid was reused
+        members = namespace_members(pid)
+        survivors.append({"unshare_pid": pid, "label": data.get("label"), "argv": data.get("argv"),
+                          "members": members})
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        for member in members:
+            try:
+                os.kill(member["pid"], signal.SIGKILL)
+            except OSError:
+                pass
+    return survivors
+
+
+def run(sandbox: dict, argv: list[str], *, stdout=None, stderr=None, stdin=None, capture: bool = False,
+        on_start=None) -> dict:
     """Runs `argv` in a new sandbox and returns {returncode, timed_out, killed_at_exit, survivors, ..., stdout?}.
 
     `stdout`/`stderr` are files (or None to inherit); `capture` collects both as text instead. Raises SandboxError when
@@ -163,12 +229,18 @@ def run(sandbox: dict, argv: list[str], *, stdout=None, stderr=None, stdin=None,
     """
     read_fd, write_fd = os.pipe()
     payload = json.dumps({**sandbox, "argv": list(argv), "report_fd": write_fd})
-    command = [*UNSHARE, "--", sys.executable, "-I", str(Path(__file__).resolve()), "inner", payload]
+    # PDEATHSIG through `setpriv` (kept across its exec of unshare): no preexec_fn in a threaded caller
+    setpriv = shutil.which("setpriv")
+    command = [*([setpriv, "--pdeathsig", "KILL"] if setpriv else []), *UNSHARE, "--", sys.executable, "-I",
+               str(Path(__file__).resolve()), "inner", payload]
     started = time.monotonic()
     pipes = subprocess.PIPE if capture else None
     proc = subprocess.Popen(command, stdout=pipes or stdout, stderr=pipes or stderr,
-                            stdin=stdin if stdin is not None else subprocess.DEVNULL, pass_fds=(write_fd,))
+                            stdin=stdin if stdin is not None else subprocess.DEVNULL, pass_fds=(write_fd,),
+                            preexec_fn=None if setpriv else _die_with_parent)
     os.close(write_fd)
+    if on_start is not None:
+        on_start(proc)
     limit = float(sandbox["timeout"]) + GRACE_SECONDS
     out = err = b""
     try:
@@ -487,7 +559,27 @@ def exec_main(args: argparse.Namespace) -> int:
     command = list(args.argv)
     if command and command[0] == "--":
         command = command[1:]
-    result = run(box, command)
+    pid_dir = Path(config["pids"]) if config.get("pids") else None
+    record: list[Path] = []
+
+    def started(proc) -> None:
+        if pid_dir is None:
+            return
+        try:
+            pid_dir.mkdir(parents=True, exist_ok=True)
+            path = pid_dir / f"{proc.pid}.json"
+            path.write_text(json.dumps({"pid": proc.pid, "label": box.get("label"), "argv": command[:6]}),
+                            encoding="utf-8")
+            record.append(path)
+        except OSError:
+            pass
+
+    # a SIGTERM/SIGHUP from the evaluator ends this process normally, so PDEATHSIG takes the namespace down too
+    for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(signum, lambda *_: sys.exit(128 + 15))
+    result = run(box, command, on_start=started)
+    for path in record:  # the namespace ended with the command: nothing left to reap
+        path.unlink(missing_ok=True)
     log = config.get("log")
     if log:
         try:

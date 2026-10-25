@@ -243,3 +243,59 @@ def test_inside_the_sandbox_the_oracle_cannot_be_read_but_ask_user_answers(tmp_p
     finally:
         if where != "tmp":
             shutil.rmtree(base, ignore_errors=True)
+
+
+# ─── a submission sandbox never outlives the scorer ───
+
+def _alive(pattern: str) -> bool:
+    return subprocess.run(["pgrep", "-f", f"^{pattern}"], capture_output=True).returncode == 0  # the process itself
+
+
+@pytest.mark.parametrize("how", ["SIGKILL", "SIGTERM"])
+def test_killing_the_exec_wrapper_takes_the_whole_submission_namespace_with_it(tmp_path, how):
+    import signal as signals
+    work = tmp_path / "build"
+    work.mkdir()
+    marker = f"sleep {400 + (how == 'SIGTERM')}"
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({"timeout": 600, "pids": str(tmp_path / "pids")}), encoding="utf-8")
+    # what an evaluator does with `eval.json start`: start the server through the wrapper, later kill the wrapper
+    wrapper = subprocess.Popen([sys.executable, "-I", str(ROOT / "evals" / "sandbox.py"), "exec", "--spec", str(spec),
+                                "--", "sh", "-c", f"{marker} & {marker}"], cwd=work)
+    deadline = time.monotonic() + 20
+    while not _alive(marker) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert _alive(marker) and len(list((tmp_path / "pids").glob("*.json"))) == 1
+    wrapper.send_signal(getattr(signals, how))
+    wrapper.wait(timeout=30)
+    deadline = time.monotonic() + 15
+    while _alive(marker) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not _alive(marker)
+    assert sandbox.reap(tmp_path / "pids") == []  # the recorded unshare is gone: nothing to reap
+
+
+def test_reap_kills_a_recorded_namespace_that_is_still_running_and_reports_it(tmp_path):
+    import threading
+    run, box = _box(tmp_path, timeout=120)
+    pids = tmp_path / "pids"
+    pids.mkdir()
+
+    def record(proc):
+        (pids / f"{proc.pid}.json").write_text(json.dumps({"pid": proc.pid, "label": "submission"}), encoding="utf-8")
+
+    def drive():
+        try:
+            sandbox.run(box, ["sleep", "402"], on_start=record)
+        except sandbox.SandboxError:  # killed by reap before it could report
+            pass
+
+    thread = threading.Thread(target=drive, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 20
+    while not _alive("sleep 402") and time.monotonic() < deadline:
+        time.sleep(0.2)
+    survivors = sandbox.reap(pids)
+    assert len(survivors) == 1 and any("sleep 402" in item["cmdline"] for item in survivors[0]["members"])
+    thread.join(timeout=30)
+    assert not _alive("sleep 402")
