@@ -95,8 +95,8 @@ def test_quality_rule_passes_a_variant_better_and_cheaper_than_c():
 
 
 @pytest.mark.parametrize("variant_rows, reason", [
-    ([_row("v", ok=True, cost=8), _row("v", cost=8, declaration="x"), _row("v", cost=8, declaration="x")], "성공률"),
-    ([_row("v", ok=True, cost=8), _row("v", ok=True, cost=8), _row("v", cost=8)], "거짓 완료"),
+    ([_row("v", cost=8, declaration="x")] * 3, "성공률"),
+    ([_row("v", ok=True, cost=8), _row("v", cost=8), _row("v", cost=8)], "거짓 완료"),
     ([_row("v", ok=True, cost=8, flags=1), _row("v", ok=True, cost=8), _row("v", cost=8, declaration="x")], "무결성"),
     ([_row("v", ok=True, cost=150), _row("v", ok=True, cost=150), _row("v", cost=150, declaration="x")], "3배"),
     ([_row("v", ok=True, cost=37), _row("v", ok=True, cost=37), _row("v", cost=37, declaration="x")], "잡음"),
@@ -202,11 +202,11 @@ def test_s_min_passing_goes_straight_to_confirmation():
 
 
 def test_failing_s_min_revives_tdd_then_architecture_review():
-    rows = _opening(c_ok=1, s_ok=1)  # S-min ties C on successes: not better
+    rows = _opening(c_ok=1, s_ok=0)  # S-min below C on successes: inferior
     step = arm_search.plan(rows, _order())
     assert step["variant"]["name"] == TDD and step["stage"] == "search"
     assert step["trail"][0]["passed"] is False
-    rows += [_row(TDD, ok=i < 1, cost=10) for i in range(3)]
+    rows += [_row(TDD, cost=10) for i in range(3)]
     assert arm_search.plan(rows, _order())["variant"]["name"] == ARCH
 
 

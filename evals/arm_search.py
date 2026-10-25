@@ -220,7 +220,8 @@ def noise_floor(baseline_rows: list[dict]) -> dict:
 
 
 def quality_rule(variant: dict, base: dict, noise: float, minimum: int = RUNS_PER_VARIANT) -> tuple[bool, list[str]]:
-    """v3 품질 목적 규칙 against C, plus a cost per success lower than C's beyond the noise floor.
+    """S* is a cheaper stand-in for C (program-v2.4, v3.3): non-inferior to C on success and false completion,
+    no integrity warning, and a cost per success lower than C's beyond the noise floor (and within 3× of it).
 
     Counts are compared as rates so a confirmed variant (6 runs) is judged against C's 3 on the same scale; at equal
     n this is the preregistered "S 합계", "거짓 완료 수" comparison.
@@ -228,10 +229,10 @@ def quality_rule(variant: dict, base: dict, noise: float, minimum: int = RUNS_PE
     failed = []
     if variant["n"] < minimum or base["n"] < RUNS_PER_VARIANT:
         failed.append(f"표본 부족: 변형 {variant['n']}/{minimum}, C {base['n']}/{RUNS_PER_VARIANT}")
-    if not variant["success_rate"] > base["success_rate"]:
-        failed.append(f"성공률 {variant['successes']}/{variant['n']} ≤ C {base['successes']}/{base['n']}")
-    if not variant["false_complete_rate"] < base["false_complete_rate"]:
-        failed.append(f"거짓 완료 {variant['false_completes']}/{variant['n']} ≥ C {base['false_completes']}/{base['n']}")
+    if not variant["success_rate"] >= base["success_rate"]:
+        failed.append(f"성공률 {variant['successes']}/{variant['n']} < C {base['successes']}/{base['n']}")
+    if not variant["false_complete_rate"] <= base["false_complete_rate"]:
+        failed.append(f"거짓 완료 {variant['false_completes']}/{variant['n']} > C {base['false_completes']}/{base['n']}")
     if variant["integrity_flags"]:
         failed.append(f"무결성 경고 {variant['integrity_flags']}건")
     v_cps, c_cps = variant["cost_per_success"], base["cost_per_success"]
