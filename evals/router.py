@@ -31,36 +31,32 @@ TOOLS = ("Read", "Glob", "Grep")
 DENIED_TOOLS = ("Bash", "Edit", "MultiEdit", "Write", "NotebookEdit", "Task", "WebFetch", "WebSearch")
 OUT_DIR = "router"
 
-# The fixed options in menu order: name -> (the arm whose setup it is, its description). Figures come from the first
-# measured round of this harness (maintainer/improvement-history/arm-runs/2026-10-22-devflow, one small task, n=5);
-# options that round did not run say so instead of giving a number.
+# The fixed options in menu order: name -> (the arm whose setup it is, its description). The descriptions say what
+# each option does and give no cost or time figures: the only figures this harness has come from one small task, and
+# options it has not measured would read as unknown next to measured ones, which would tilt the choice.
 OPTIONS = {
     "none": ("A", (
         "No workflow. You get the task, the project's test command if it has one, and a completion declaration, "
         "and you work however you see fit. Nothing is installed in the project and there are no phases, reviewers "
-        "or gates. On the small task of the first measured round it took about 40 seconds and $0.25 per run.")),
+        "or gates.")),
     "verify-only": ("V", (
         "No workflow, with a fixed completion check. You get the same prompt as `none`; when you try to finish, a "
         "hook runs the project's verification command and sends you back while it fails (at most 3 times), then one "
         "independent read-only reviewer compares the project with the task once and sends you back once with any "
-        "unmet requirements. There are no phases. It costs a `none` run plus the reruns and that one review (review "
-        "budget up to $3); it has not been measured in this harness yet.")),
+        "unmet requirements. There are no phases.")),
     "development": ("B", (
         "The Agent Flow kit installed with its `development` workflow, driven through its runner: explore, "
-        "implement, review (independent reviewer subprocesses), qa, fix-loop and handoff. On the small task of the "
-        "first measured round it took about 9 minutes and $1.70 per run, not counting the reviewers.")),
+        "implement, review (independent reviewer subprocesses), qa, fix-loop and handoff.")),
     "default": ("D", (
         "The Agent Flow kit installed with its `default` workflow, driven through its runner: design, slice-plan, "
         "worktree, implement, comment-authoring, final-review, gates and fix-loop, then delivery phases (commit, "
         "push and pull request); the agent sets each phase's depth for the task. This run has no git remote, so it "
-        "ends at the first phase that needs one. It has not been measured in this harness yet.")),
+        "ends at the first phase that needs one.")),
     "full-feature": ("C", (
         "The Agent Flow kit installed with its `full-feature` workflow, driven through its runner: domain-grill, "
         "product-brief, prd, slice-plan, plan-review, ddd-design, worktree, red, green, refactor, "
         "comment-authoring, multi-review (several independent reviewers), architecture-review, gates and fix-loop, "
-        "then delivery phases. This run has no git remote, so it ends at the first phase that needs one. On the "
-        "small task of the first measured round it took about 21 minutes and $5.20 per run, not counting the "
-        "reviewers.")),
+        "then delivery phases. This run has no git remote, so it ends at the first phase that needs one.")),
 }
 
 DIMENSION_TEXT = {"planning": "planning phases", "design": "ddd-design", "tdd": "red (tests are written with the code "
@@ -94,8 +90,7 @@ def variant_description(spec: dict) -> str:
         parts.append(f"runs {spec['reviewers']} reviewers in multi-review")
     return ("The Agent Flow kit installed with a reduced form of `full-feature`, driven through its runner: it "
             f"{' and '.join(parts)}; every other phase, the gates and the fix-loop are as in `full-feature`. This run "
-            "has no git remote, so it ends at the first phase that needs one. It has not been measured in this "
-            "harness yet.")
+            "has no git remote, so it ends at the first phase that needs one.")
 
 
 def menu(variant_specs: list[dict] | None = None) -> list[dict]:
