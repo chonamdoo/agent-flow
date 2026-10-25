@@ -10,6 +10,10 @@
     python evals/arm_compare.py drive <work>/C-1.F1
     python evals/arm_compare.py score <work>/C-1.F1 --evaluator <private>/<task>/followon/F1/score.py
 
+    # chain step (H2-①, accumulation): the SAME arm develops the next step on its own previous result, new session
+    python evals/arm_compare.py chain-next <work>/C-1 --case-dir <private>/<task>/steps/v1 --output <work>/C-1.s2
+    python evals/arm_compare.py drive <work>/C-1.s2 && python evals/arm_compare.py score <work>/C-1.s2 --evaluator ...
+
     # UI task (#428): the evaluator is the private repository's score.py, brought in only after the run
     python evals/arm_compare.py prepare --kit . --arm A --case oyg --trial 1 --output <work>/A-1
     python evals/arm_compare.py score <work>/A-1 --evaluator <private>/oyg/score.py
@@ -79,6 +83,16 @@ decisions have at least as many `ask-user` calls behind them (`grill_check`; sen
 recorded in `drive.json` `grill_checks`). `score` reads `<run>/user-sim.jsonl` into `ask_user_calls`,
 `ask_user_questions`, `asked_any` and `user_sim_cost_usd` (added to `total_cost_usd`), and marks a run contaminated
 when a tool call names the oracle copy or the simulator's config. `arm.json` `user_sim` keeps the oracle's sha256.
+
+Chains (H2-①, accumulation across sessions): a follow-on runs a fixed bare agent on an arm's code (maintainability);
+`chain-next` runs the same arm again (its arm.json setup, R's frozen router decision reused without a router call,
+the drive model and effort, which `drive` then requires) on the previous step's committed result plus its
+uncommitted work, with the next step's task files as the seed commit. It refuses a previous run with no drive.json
+or result.json, or one that is contaminated, infra-errored or a harness error. What the arm built up stays: its
+history, a workflow arm's kit state (reinstalled from the same kit copy so hook paths name the new project) and its
+earlier runner runs in the kit's archive; harness-owned config is this step's (V's gate, the simulated user). `arm.json`
+`chain` keeps `step`, `prev_run`, `prev_head`, `root_run`; `score` also marks a run contaminated when a tool call
+names an earlier step's `result.json` or `ui-score.json`, and `summarize` adds per-chain S/G and steps survived.
 
 Every run's result carries `integrity` (`integrity.check`, #409 v2 §3a): deleted, disabled or weakened tests and
 stubs in the diff from the start commit, a "tests pass" claim with no test command in the transcript, and changes
@@ -293,15 +307,16 @@ def _seed_ui_project(spec: dict, project: Path) -> None:
         _git(args, project)
 
 
-def load_external_case(case_dir: Path) -> dict:
+def load_external_case(case_dir: Path, *, seeded: bool = True) -> dict:
     """A case kept outside this repository (a holdout in the private evaluator repo): `<dir>/case.json`.
 
     It names a seed repository at a pinned commit, the task files to place in the project, the task text and the
-    evaluator protocol. Only its name and sha256 go into the run record, never its path.
+    evaluator protocol. Only its name and sha256 go into the run record, never its path. A chain step (`seeded`
+    False) starts from the previous step's code, so its `seed` is optional and never used.
     """
     raw = (case_dir / "case.json").read_bytes()
     case = json.loads(raw)
-    for key in ("name", "seed", "task", "profile", "install", "score_keys"):
+    for key in ("name", *(("seed",) if seeded else ()), "task", "profile", "install", "score_keys"):
         if key not in case:
             raise SystemExit(f"external case is missing `{key}`")
     if "files" not in case and "layers" not in case:
@@ -700,6 +715,220 @@ def prepare_followon(base_run: Path, case_dir: Path, trial: int, output: Path) -
                             "artifact_sha256": artifact_sha256(checkout)}}
     (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
     return meta
+
+
+# A chain step (H2-①, accumulation across sessions): the same arm develops the next step of a task on top of its own
+# previous result, in a new session. Unlike a follow-on, the arm's kit, hooks, skills and what it wrote stay.
+CHAIN_REFUSED = ("harness-error", "contaminated", "infra-error")
+# The kit's live run state in `.agent-flow/`: a chain step starts no run in progress. Finished runs are archived.
+KIT_RUNTIME_STATE = ("runs", "state", "install-recovery", "install.lock")
+CHAIN_SEED = "chain step {step}: task"
+
+
+def _chain_previous(prev_run: Path) -> tuple[dict, dict, dict]:
+    """(arm.json, result.json, drive.json) of the run a chain step builds on, or SystemExit with the reason."""
+    for name, why in (("arm.json", "it is not a prepared run"), ("drive.json", "drive it first"),
+                      ("result.json", "score it first: a chain step builds only on a run known to be clean")):
+        if not (prev_run / name).is_file():
+            raise SystemExit(f"the previous run {prev_run} has no {name}; {why}")
+    meta, result, driven = (json.loads((prev_run / name).read_text(encoding="utf-8"))
+                            for name in ("arm.json", "result.json", "drive.json"))
+    if meta.get("case_kind") != "external" or "followon_of" in meta:
+        raise SystemExit("a chain builds on an external-case arm run (prepare --case-dir) or an earlier chain step")
+    status = run_status(result)
+    if status in CHAIN_REFUSED:
+        raise SystemExit(f"the previous run is {status}; a chain does not build on it")
+    return meta, result, driven
+
+
+def _start_from_previous(checkout: Path, project: Path) -> str:
+    """A new repository whose `main` is the previous checkout's HEAD, with its history and no remote or other refs."""
+    project.mkdir(parents=True)
+    for args in (["init", "-q", "-b", "main"], ["config", "user.name", "eval"],
+                 ["config", "user.email", "eval@example.com"], ["config", "commit.gpgsign", "false"]):
+        _git(args, project)
+    head = _git(["rev-parse", "HEAD"], checkout)
+    _git(["fetch", "-q", "--no-tags", str(checkout), "HEAD"], project)
+    _git(["checkout", "-q", "-B", "main", head], project)
+    _git(["reflog", "expire", "--expire=all", "--all"], project)
+    return head
+
+
+def _carry_uncommitted(checkout: Path, project: Path) -> list[str]:
+    """The follow-on rule: the checkout as the arm left it, committed or not. Uncommitted work is one commit."""
+    listed = c_prime._sh(["git", "ls-files", "-co", "--exclude-standard", "-z"], checkout).stdout.split("\0")
+    for name in (item for item in listed if item and not item.startswith(".agent-flow/runs/")):
+        source, target = checkout / name, project / name
+        if source.is_symlink() or source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            shutil.copy2(source, target, follow_symlinks=False)
+    for name in c_prime._sh(["git", "ls-files", "-d", "-z"], checkout).stdout.split("\0"):
+        if name and (project / name).is_file():
+            (project / name).unlink()
+    _git(["add", "-A"], project)
+    changed = [item for item in _git(["diff", "--cached", "--name-only", "-z"], project).split("\0") if item]
+    if changed:
+        _git(["commit", "-qm", "uncommitted work of the previous step"], project)
+    return changed
+
+
+def _carry_kit_state(prev_project: Path, project: Path) -> list[str]:
+    """What the kit keeps out of git in the previous project (its install, project settings, local skills,
+    handoffs), without build outputs or live run state. `_install` then rewrites the paths it holds."""
+    common = _common_dir(prev_project)
+    if common is not None and (common / "info" / "exclude").is_file():
+        (project / ".git" / "info").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(common / "info" / "exclude", project / ".git" / "info" / "exclude")
+    listing = c_prime._sh(["git", "ls-files", "-o", "-i", "--exclude-standard", "--directory", "-z"],
+                          prev_project).stdout.split("\0")
+    kit_dir = (prev_project / ".agent-flow").resolve()
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        skipped = {name for name in names if name in BUILD_OUTPUTS}
+        return skipped | (set(names) & set(KIT_RUNTIME_STATE) if Path(directory).resolve() == kit_dir else set())
+
+    copied: list[str] = []
+    for name in sorted(item.rstrip("/") for item in listing if item.strip("/")):
+        if set(Path(name).parts) & set(BUILD_OUTPUTS) or any(name.startswith(f"{done}/") for done in copied):
+            continue
+        if name.startswith(".agent-flow/") and Path(name).parts[1] in KIT_RUNTIME_STATE:
+            continue
+        source, target = prev_project / name, project / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_symlink() or source.is_file():
+            shutil.copy2(source, target, follow_symlinks=False)
+        elif source.is_dir():
+            shutil.copytree(source, target, symlinks=True, ignore=ignore, dirs_exist_ok=True)
+        copied.append(name)
+    return copied
+
+
+def _archive_previous_runs(prev_project: Path, project: Path, step: int) -> list[str]:
+    """The previous step's runner runs (artifacts, plans, ledgers) where the kit itself keeps finished runs of a
+    removed worktree (`<git-common-dir>/agent-flow/archive/worktrees/`), without their active markers, plus the
+    archive the previous step carried. No live worktree state is copied, so the new run starts fresh."""
+    prev_state, state = _common_dir(prev_project) / "agent-flow", project / ".git" / "agent-flow"
+    if (prev_state / "archive").is_dir():
+        shutil.copytree(prev_state / "archive", state / "archive", symlinks=True, dirs_exist_ok=True)
+    sources = [(path.name, path / ".agent-flow" / "runs") for path in sorted((prev_state / "worktrees").glob("*"))]
+    sources.append(("leader", prev_project / ".agent-flow" / "runs"))
+    archived = []
+    for name, runs in sources:
+        for run in sorted(runs.glob("*")) if runs.is_dir() else []:
+            if not run.is_dir():
+                continue
+            target = state / "archive" / "worktrees" / f"{name}-step{step - 1}" / ".agent-flow" / "runs" / run.name
+            shutil.copytree(run, target, symlinks=True)
+            for marker in ("active", "active.lock"):
+                (target / marker).unlink(missing_ok=True)
+            archived.append(target.relative_to(state).as_posix())
+    return archived
+
+
+def _drop_gate_hooks(project: Path) -> None:
+    """Removes the previous step's verify-gate Stop hook; `_install_verify_gate` then adds this step's."""
+    path = project / GATE_SETTINGS
+    if not path.is_file():
+        return
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    stops = [entry for entry in (settings.get("hooks") or {}).get("Stop") or []
+             if not any("verify_gate.py" in str(hook.get("command")) for hook in entry.get("hooks") or [])]
+    if stops:
+        settings["hooks"]["Stop"] = stops
+    elif "Stop" in (settings.get("hooks") or {}):
+        del settings["hooks"]["Stop"]
+    path.write_text(json.dumps(settings, indent=1) + "\n", encoding="utf-8")
+
+
+def prepare_chain_next(prev_run: Path, case_dir: Path, output: Path, layer: str | None = None) -> dict:
+    """The next step of a chain: the previous run's arm, unchanged, on the previous run's code, in a new session.
+
+    The project's `main` is the previous checkout's HEAD (`chain.prev_head`, history kept), plus its uncommitted work
+    as one commit, plus the step's task files (`select_layer`, as `prepare`) as the seed commit. A workflow arm keeps
+    the kit state it had (reinstalled from the same kit copy so its hook paths name the new project) and its earlier
+    runner runs in the kit's archive; arm V/VK gets this step's gate; a layer with `user_sim` gets this step's
+    simulator. Arm R reuses the previous step's frozen decision (`router.reused`, no router call, no router cost).
+    `drive` and `score` work on the new run as on any external-case run.
+    """
+    prev_run, output = prev_run.resolve(), output.resolve()
+    prev, prev_result, prev_drive = _chain_previous(prev_run)
+    prev_project = prev_run / "project" if (prev_run / "project").is_dir() else Path(prev["project"])
+    arm = effective_arm(prev)
+    checkout, chosen = select_checkout(prev_project, arm)
+    if chosen["checkout_error"]:
+        raise SystemExit(f"the previous run has no gradable checkout: {chosen['checkout_error']}")
+    if prev_result.get("artifact_sha256") and artifact_sha256(checkout) != prev_result["artifact_sha256"]:
+        raise SystemExit("the previous run's checkout changed after it was scored; score it again first")
+    case = load_external_case(case_dir, seeded=False)
+    selected = select_layer(case, case_dir, layer)
+    case = {**case, "files": selected["files"]}
+    chained = prev.get("chain") or {}
+    step = int(chained.get("step", 1)) + 1
+    output.mkdir(parents=True)
+    agent_kit = output / "kit"
+    shutil.copytree(prev_run / "kit", agent_kit, symlinks=True)
+    project = output / "project"
+    prev_head = _start_from_previous(checkout, project)
+    carried = {"uncommitted_carried": _carry_uncommitted(checkout, project)}
+    for target, source in case["files"].items():
+        (project / target).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(case_dir / source, project / target)
+    _git(["add", "--force", *case["files"]], project)
+    _git(["commit", "-qm", CHAIN_SEED.format(step=step), "--allow-empty"], project)
+    simulated = _install_user_sim(output, selected["oracle"], prev_drive.get("model") or DEFAULT_MODEL)
+    task = with_ask_user(case["task"], simulated["ask_user"] if simulated else None)
+    routed = {}
+    if prev["arm"] in ROUTED_ARMS:
+        decision = prev["router"]
+        routed = {"effective_arm": arm, "router_frozen_at": prev.get("router_frozen_at"),
+                  "router": {**decision, "cost_usd": 0.0, "reused": True, "reused_from": str(prev_run),
+                             "original_cost_usd": decision.get("cost_usd")}}
+    searched, gate, skills = None, None, None
+    if arm in BARE_ARMS:
+        if arm in GATE_ARMS:
+            _drop_gate_hooks(project)
+            gate = _install_verify_gate(output, project, case["task"], sorted(case["files"]), case, "external")
+        if arm in SKILL_ARMS:
+            skills = prev.get("skills")  # committed in the previous step's history, as the arm left them
+        _git(["checkout", "-qb", BRANCH], project)
+        prompt = external_bare_prompt({**case, "task": task})
+    else:
+        carried["kit_state_carried"] = _carry_kit_state(prev_project, project)
+        _install(agent_kit, project, {"profile": case["profile"], "modes": {"clean": {"install": case["install"]}}},
+                 hooks=True)
+        carried["archived_runs"] = _archive_previous_runs(prev_project, project, step)
+        spec = (prev["router"].get("variant") if prev["arm"] in ROUTED_ARMS
+                else (prev.get("variant") or {}).get("spec")) if arm == "S" else None
+        searched = _write_variant(agent_kit, project, case["profile"], spec)
+        prompt = driver_prompt(task, searched["name"] if searched else WORKFLOWS[arm], ask_user=simulated is not None)
+    (output / "prompt.md").write_text(prompt, encoding="utf-8")
+    prior = [*chained.get("prior_runs", []), str(prev_run)]
+    meta = {"arm": prev["arm"], **routed, "case": case["name"], "trial": prev.get("trial"),
+            "project": str(project.resolve()), "start_commit": _git(["rev-parse", "HEAD"], project),
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(), "kit_commit": prev.get("kit_commit"),
+            "cprime_rules": None, "isolation": prev.get("isolation", "instructed"),
+            "principles": principles_record(arm), **_workflow_record(arm, searched),
+            "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None, "verify_gate": gate,
+            **({"skills": skills} if skills is not None else {}),
+            "case_kind": "external", "case_sha256": case["sha256"], "seed_commit": None,
+            "score_keys": case["score_keys"], "evaluator_repeat": bool(case.get("evaluator_repeat")),
+            **({"layer": selected["layer"]} if selected["layer"] is not None else {}),
+            **({"user_sim": simulated} if simulated is not None else {}),
+            "chain": {"step": step, "prev_run": str(prev_run), "prev_head": prev_head,
+                      "root_run": chained.get("root_run", str(prev_run)), "prior_runs": prior,
+                      "prev_case": prev.get("case"), "prev_artifact_sha256": prev_result.get("artifact_sha256"),
+                      "model": prev_drive.get("model"), "effort": prev_drive.get("effort"), **carried}}
+    (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
+    return meta
+
+
+def chain_reads(rows: list[dict], meta: dict) -> int:
+    """Tool calls that name an earlier step's grading output (its result or the evaluator's report)."""
+    markers = [str(Path(run) / name) for run in (meta.get("chain") or {}).get("prior_runs", [])
+               for name in ("result.json", "ui-score.json")]
+    return sum(any(marker in item for marker in markers) for item in tool_inputs(rows))
 
 
 def ui_bare_prompt(task: str) -> str:
@@ -1418,6 +1647,9 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
     if simulated is not None:
         simulated["oracle_reads"] = oracle_reads(rows, run)
         graded["contaminated"] = graded["contaminated"] or bool(simulated["oracle_reads"])
+    if meta.get("chain"):
+        graded["chain_reads"] = chain_reads(rows, meta)
+        graded["contaminated"] = graded["contaminated"] or bool(graded["chain_reads"])
     message = final_message(main_rows)
     declaration = completion.classify(message if main_rows else None)
     drive = json.loads((run / "drive.json").read_text(encoding="utf-8")) if (run / "drive.json").is_file() else {}
@@ -1669,6 +1901,13 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
     routed = meta.get("router")
     if routed and routed.get("model") != model:
         raise SystemExit(f"arm R's router ran on {routed.get('model')}; drive the controller on the same model")
+    chained = meta.get("chain") or {}
+    if chained.get("model") and chained["model"] != model:
+        raise SystemExit(f"chain step {chained['step']} continues a run driven on {chained['model']}; "
+                         "drive it on the same model")
+    if chained and chained.get("effort") != os.environ.get("CLAUDE_CODE_EFFORT_LEVEL"):
+        raise SystemExit(f"chain step {chained['step']} continues a run with CLAUDE_CODE_EFFORT_LEVEL="
+                         f"{chained.get('effort')}; drive it with the same effort")
     if arm in GATE_ARMS:
         set_gate_model(run, model)
     simulated = meta.get("user_sim")
@@ -1857,7 +2096,50 @@ def summarize(results: list[dict]) -> str:
                 total = _mean([row["total_cost_usd"] for row in group if row.get("total_cost_usd") is not None])
                 lines.append(f"| {arm} | {layer} | {len(group)} | {sum(_succeeded(row) for row in group)}/{len(group)}"
                              f" | {_ask_cell(group)} | {_usd(total)} |")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines + _chain_lines(results)) + "\n"
+
+
+def _run_dirs(row: dict) -> set[str]:
+    """The run directory a result belongs to, as recorded and, for a moved run, as scored."""
+    return {str(Path(row[key]).parent) for key in ("project", "project_recorded") if row.get(key)}
+
+
+def chain_survived(steps: dict[int, dict]) -> int:
+    """Consecutive steps from step 1 with S=1 in an ordinary run (not contaminated, errored or timed out)."""
+    survived = 0
+    while (row := steps.get(survived + 1)) is not None and row.get("oracle") and run_status(row) == "ok":
+        survived += 1
+    return survived
+
+
+def _chain_lines(results: list[dict]) -> list[str]:
+    """One row per chain (`chain.root_run`): each step's S and G, and the steps survived. Step 1 is the result whose
+    run directory is the root; a step whose result was not given shows `missing` and ends the survived count."""
+    chained = [row for row in results if row.get("chain")]
+    if not chained:
+        return []
+    lines = ["", "Chains (the same arm, each step a new session on its own previous result):", "",
+             "| root run | arm | steps | per-step S / G | steps survived |", "|---|---|---|---|---|"]
+    for root in sorted({row["chain"]["root_run"] for row in chained}):
+        steps = {int(row["chain"]["step"]): row for row in chained if row["chain"]["root_run"] == root}
+        first = next((row for row in results if not row.get("chain") and root in _run_dirs(row)), None)
+        if first is not None:
+            steps[1] = first
+        cells = []
+        for number in range(1, max(steps) + 1):
+            row = steps.get(number)
+            if row is None:
+                cells.append(f"{number}: missing")
+                continue
+            status = run_status(row)
+            g = (row.get("ui") or {}).get("G")
+            cells.append(f"{number}: S={int(bool(row.get('oracle')))} G={'-' if g is None else f'{g:g}'}"
+                         + ("" if status == "ok" else f" ({status})"))
+        sample = steps.get(1) or next(iter(steps.values()))
+        arm = str(sample["arm"]) + (f"→{effective_arm(sample)}" if effective_arm(sample) != sample["arm"] else "")
+        lines.append(f"| {Path(root).name} | {arm} | {max(steps)} | {'; '.join(cells)} | "
+                     f"{chain_survived(steps)}/{max(steps)} |")
+    return lines
 
 
 def _router_choice(row: dict) -> str | None:
@@ -2040,6 +2322,11 @@ def main(argv: list[str] | None = None) -> int:
     fol.add_argument("--followon-dir", type=Path, required=True, help="the follow-on case (`<dir>/case.json`)")
     fol.add_argument("--trial", type=int, default=1)
     fol.add_argument("--output", type=Path, required=True)
+    nxt = sub.add_parser("chain-next", help="prepare the next chain step: the same arm on its own previous result")
+    nxt.add_argument("prev", type=Path, help="the previous step's run directory (driven and scored)")
+    nxt.add_argument("--case-dir", type=Path, required=True, help="the next step's case (`<dir>/case.json`)")
+    nxt.add_argument("--layer", help="the next step case's layer (case.json `layers`)")
+    nxt.add_argument("--output", type=Path, required=True)
     summ = sub.add_parser("summarize")
     summ.add_argument("results", type=Path, nargs="+")
     args = parser.parse_args(argv)
@@ -2057,6 +2344,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "followon":
         print(json.dumps(prepare_followon(args.base.resolve(), args.followon_dir.resolve(), args.trial,
                                           args.output.resolve()), indent=1))
+    elif args.command == "chain-next":
+        print(json.dumps(prepare_chain_next(args.prev.resolve(), args.case_dir.resolve(), args.output.resolve(),
+                                            args.layer), indent=1))
     elif args.command == "drive":
         print(json.dumps(drive(args.run.resolve(), args.model, args.timeout, args.budget), indent=1))
     elif args.command == "score":
