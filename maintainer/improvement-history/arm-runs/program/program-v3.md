@@ -307,3 +307,57 @@ v2의 "비열등 ∧ 비용 우월" 규칙만으로는 "비싸지만 더 낫다"
   - L `underspec` 층은 v1과 같은 방법으로 만든다. 숨은 체크가 잡는 규칙 약 30개를 빼고 oracle과 규칙-체크 지도를 만든다.
 - **H2-① 체인(웹 v0→v1, 앱 F1–F3)은 그대로다.**
 - 아낀 예산은 웹 L·체인의 n을 늘리는 데 먼저 쓴다(v3.6의 n≤6 안에서).
+
+## 개정 v3.14 초안 (2026-10-25): 재시작 전 사전 감사(Claude·Codex) 반영
+
+두 감사(독립 작성, 읽기 전용)와 직접 확인한 내용을 합쳐 실행 환경·모델·채점·조건·지표를 바꾼다. 구현과 스모크를 마친 뒤 이 절을 확정하고 harness를 고정한다.
+
+**발견 (요지):**
+- run끼리 서로의 프로세스를 죽였다. `pkill -f "node server.js"` 같은 명령이 다른 run의 채점 서버를 내렸다(complete-R-3의 LWV38–40이 ECONNREFUSED, 05:59:21Z underspec-B-3).
+- 에이전트가 `/usr/local/bin/agent-flow` shim을 설치했다(OYG r004-C, 07:27:49Z). 이후 4개 run이 그 shim으로 다른 run의 kit을 썼다. shim은 삭제했고 증거는 `audit-evidence/`에 보관했다.
+- 기준 구현과 oracle 사본이 project의 3단계 위에 있었다. canary는 `CANARY` 파일에만 있었고, 다른 run의 채점 결과(기대값 포함)도 읽을 수 있었다.
+- run 디렉터리를 옮기면 workflow arm은 아무 경고 없이 빈 project로 채점된다.
+- 조건이 arm마다 달랐다:
+  - `bare_note`가 bare arm에만 들어갔다.
+  - kit 리뷰어 비용이 집계되지 않았고 상한도 없었다.
+  - harness가 운영자 환경으로 runner를 불렀다.
+  - 시뮬레이터가 묻지 않은 사실까지 말하고, 답하는 언어가 바뀌었다.
+- 체인은 앞 단계 archive가 계측에 섞였고, kit 상태만 넓게 넘어갔다.
+- 공유 `/tmp`·HOME, 기계 부하, 브라우저 1회 채점이 결과에 영향을 줬다.
+- 산출물이 동결되지 않았고, fingerprint가 불완전했고, 자식 프로세스가 timeout 뒤에도 살아남았다.
+- V gate가 리뷰 오류를 통과시켰다.
+- 오염 탐지가 경로 문자열에만 의존했고, subagent·리뷰어·router 기록은 검사하지 않았다.
+- 지표: blocked 선언은 거짓 완료 0을 공짜로 얻는다. 완성도 판정 근거가 arm마다 달랐다. 통계를 층화하지 않고 합쳤다.
+
+**바뀌는 설계:**
+- **A. 실행 격리**
+  - run마다 PID·mount namespace를 둔다. controller와 모든 하위 호출이 그 안에서 돈다.
+  - 루트는 읽기 전용이고, 쓸 수 있는 곳은 자기 run·자기 worktree·자기 `/tmp`·자기 HOME뿐이다. 비공개 저장소, scratch의 나머지, 실험 문서, 다른 transcript는 가린다.
+  - run이 끝나면 namespace를 종료하고, 남은 프로세스가 있으면 harness 오류로 처리한다.
+  - run 경로는 불투명 id를 쓰고, 옮기거나 다시 쓰지 않는다.
+  - 자동 업데이트와 자동 메모리는 끈다. CLI 버전을 고정하고, 바뀌면 멈춘다. 도구 집합은 모든 arm에 같게 `--tools`로 정한다.
+- **B. 모델·예산**
+  - 모든 참여 호출(controller, kit 리뷰어(claude만), V gate, router, 시뮬레이터)은 Opus 5.5 low다. 산출물로 검증하고, 다르면 harness 오류다.
+  - 분류기는 채점 도구이므로 medium이다.
+  - 공통 예산 원장에 모든 호출 비용을 합산하고, 상한은 run 전체에 둔다. 측정하지 못한 비용이 있으면 total을 null로 두고 비용 규칙을 적용하지 않는다.
+  - 시간은 prepare부터 정리까지 하나의 deadline으로 잰다.
+- **C. 채점**
+  - drive가 끝나면 불변 snapshot(내용·mode·symlink manifest)을 만든다. score와 chain은 snapshot만 쓴다. workflow arm은 worktree와 HEAD를 기록하고, 없으면 오류다.
+  - 채점 대상은 모든 arm에서 "남긴 작업 트리"다. 미커밋 여부는 따로 보고한다.
+  - 채점은 실험 run과 겹치지 않게 직렬로 하고, 제출 코드도 격리된 곳에서 돌린다. 브라우저 반복은 2회 이상이다.
+  - 숨은 파일 전체에 canary를 넣고, 모든 기록(subagent·리뷰어·gate·router·시뮬레이터)의 내용을 검사한다.
+- **D. 조건 정합**
+  - `bare_note`를 과제 문장으로 옮겨 모든 arm이 받게 한다.
+  - 완료 기준 문구를 모든 arm에 같게 한다.
+  - harness가 부르는 runner 호출은 controller 환경과 timeout을 쓰고, 관측은 읽기 전용으로 한다.
+  - V gate의 리뷰 오류는 `gate-error`로 기록하고, gate 무결성을 확인한다.
+  - 기본 스킬 집합은 모든 arm에 같다.
+  - 시뮬레이터 oracle을 원자 사실 단위로 나누고, 물은 것만 질문의 언어로 답하게 한다. 공개한 사실은 기록한다.
+- **E. 지표·통계**
+  - 완성도(missing)는 모든 arm에서 숨은 체크로 판정한다.
+  - 빌드가 뜨지 않으면 no-start로 따로 센다.
+  - 거짓 완료를 보고할 때 거짓 차단률을 항상 같이 싣는다.
+  - case·layer·step으로 층화하고, 사전 배정표로 누락·중복을 검사하고, 제외 사유를 고정 분류한다.
+  - chain은 archive를 계측에서 빼고, kit이 관리하는 경로만 넘긴다. steps survived는 성공 정의와 같게 정한다.
+  - reviewer 수를 바꾸는 것은 복합 처치로 명시한다. seed는 허용된 commit만 담은 저장소로 만든다.
+- **F. 과거 run:** 모두 탐색으로 둔다. 영향받은 목록(R-3 채점 손상, shim을 쓴 4개 run, 옮긴 workflow run)을 `audit-evidence/`에 기록한다.
