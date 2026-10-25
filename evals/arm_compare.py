@@ -32,6 +32,9 @@ Pre-registration v3.14 (the harness changes of the pre-flight audits):
 - Pins: the controller, the kit's reviewers (claude only, declared in the project's profile override), arm V's gate,
   arm R's router and the simulated user run on Opus 5.5 low; `drive` checks the CLI version first and every recorded
   call after (`verify_pins`). No self-update, no auto memory, one `--tools` list for every arm.
+- Kit reviewer usage (`claude_usage.py`): a transparent `claude` first on the sandbox's PATH execs the real CLI for
+  every call but the kit's reviewers, which it runs with `--output-format json`, printing the same text and sending a
+  usage row to the run's `kit-reviewer-usage.jsonl`; the kit is unchanged.
 - Budget and time: one ledger of every call (`budget_ledger`; null total while any part is unpriced), the cap checked
   between resumes and before the classifier, one deadline from the router to the snapshot; `end_to_end_seconds` and
   `controller_seconds` are reported apart.
@@ -130,8 +133,9 @@ Every workflow arm's result carries `phase_trace` (#409 v2.1): the phases the wo
 entered and the ones it never entered, and per phase the wall-clock seconds and the controller's tokens and list-price
 cost spent inside it. Spend is also split by phase category (plan, build, verify, deliver) plus `outside` (controller
 time outside any phase window: reading the prompt, starting the runner, ending the turn for an approval);
-`orchestration_share` is deliver + outside over the total. Runner reviewer subprocesses print no usage, so their
-tokens are in neither; `reviewer_jobs` still counts them.
+`orchestration_share` is deliver + outside over the total. Runner reviewer subprocesses are not in the controller's
+transcript, so their tokens are in neither; `reviewer_jobs` counts them and `budget_ledger` prices them from the usage
+wrapper's rows.
 
 Success follows `completion.summarize` (#424): the hidden fix, plan and visible tests all pass (each ran at
 least one test), the run did not declare `blocked`, and it broke no evaluation rule. A rule violation is a
@@ -142,8 +146,8 @@ later re-score can tell whether it graded the same tree. `isolation` records whe
 from the hidden tests was only instructed (subagents on a shared filesystem) or enforced by a sandbox. Tokens
 come from the agent's own transcript (`run_usage.claude_messages`) and its sub-agent transcripts
 (`<session>/subagents/agent-*.jsonl`), which every transcript scan reads too; `transcript_cost_estimate_usd` prices
-them at list price next to the CLI's own `controller_cost_usd`, so a gap shows usage the transcripts missed. Runner reviewer subprocesses print no usage, so their tokens are not in it;
-`reviewer_jobs` counts them.
+them at list price next to the CLI's own `controller_cost_usd`, so a gap shows usage the transcripts missed. Runner
+reviewer subprocesses are not in it; `reviewer_jobs` counts them and the usage wrapper's rows price them.
 """
 from __future__ import annotations
 
@@ -154,6 +158,7 @@ import json
 import os
 import re
 import shlex
+import secrets
 import shutil
 import signal
 import subprocess
@@ -168,6 +173,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools" / "autoresearch"))
 import attempts  # noqa: E402
 import c_prime  # noqa: E402
+import claude_usage  # noqa: E402
 import completion  # noqa: E402
 import sandbox  # noqa: E402
 import snapshot  # noqa: E402
@@ -1668,6 +1674,8 @@ def reviewer_record(project: Path, checkout: Path) -> dict:
     model, so its prompt is kept apart as `attempted_prompt_bytes`), with every file a reviewer read on its own left
     out. A cost is given only for a claude job whose model the runner recorded and is priced here; `unspecified` is the
     CLI's own default, which is not necessarily the controller's model, so it stays unpriced, as do codex jobs.
+    This bound is the cap's fallback only: `budget_ledger` prices the reviewers from the usage wrapper's rows
+    (`claude_usage`), one per reviewer call.
     """
     files = state_files(project, checkout, "review-metrics-*.json")
     providers: dict[str, dict] = {}
@@ -2252,11 +2260,25 @@ class _Lock:
         self.handle.close()
 
 
+def usage_bin(run: Path) -> Path:
+    """Where `drive` installs the kit reviewer usage wrapper (`claude_usage.install`): in the run directory, which the
+    sandbox shows read-only, outside the project and its worktrees (the kit refuses a provider binary inside them)."""
+    return run / "sandbox" / "bin"
+
+
+def install_usage_wrapper(run: Path) -> str:
+    """The wrapper and a fresh collector socket name for this drive."""
+    name = f"arm-compare-usage-{secrets.token_hex(8)}"
+    claude_usage.install(usage_bin(run), name)
+    return name
+
+
 def run_box(run: Path, meta: dict, cwd: Path | str, timeout: float, label: str) -> dict:
     """The run sandbox for one call inside a run: the controller, or the harness's runner status and approvals.
 
     The run directory is read-only; its project, and the logs the gate and the simulator append to, are writable;
     HOME is the run's own (`<run>/sandbox/home`, so the runner's worktrees and the CLI's transcripts stay in the run).
+    PATH starts with the kit reviewer usage wrapper when `drive` installed one (`usage_bin`).
     """
     layout = sandbox.prepare_layout(run)
     expose = [{"path": str(run.resolve()), "mode": "ro"}, {"path": str(Path(meta["project"]).resolve()), "mode": "rw"},
@@ -2265,7 +2287,7 @@ def run_box(run: Path, meta: dict, cwd: Path | str, timeout: float, label: str) 
         if needed:
             (run / name).touch()
             expose.append({"path": str((run / name).resolve()), "mode": "rw"})
-    env = {**controller_env(dict(os.environ)), "HOME": sandbox.HOME_TARGET}
+    env = claude_usage.with_wrapper({**controller_env(dict(os.environ)), "HOME": sandbox.HOME_TARGET}, usage_bin(run))
     return sandbox.spec(expose=expose, cwd=str(cwd), env=env, timeout=timeout, home=str(layout["home"]),
                         overlay_root=str(layout["overlay"]), label=label)
 
@@ -2503,7 +2525,7 @@ def approve_phase(project: Path, status: dict, call=None) -> bool:
 
 
 def _controller_once(argv: list[str], project: Path, stream, err, timeout: float, box: dict | None = None,
-                     reports: list[dict] | None = None) -> tuple[int, bool]:
+                     reports: list[dict] | None = None, wrapper: Path | None = None) -> tuple[int, bool]:
     """One controller process. With `box` it is the namespace's only child; when it ends, everything it left running
     is killed with the namespace (`reports` keeps what was killed and any survivor)."""
     if box is not None:
@@ -2512,7 +2534,8 @@ def _controller_once(argv: list[str], project: Path, stream, err, timeout: float
             reports.append(result)
         code = result["returncode"] if isinstance(result["returncode"], int) else 125
         return code, result["timed_out"]
-    proc = subprocess.Popen(argv, cwd=project, env=controller_env(dict(os.environ)), stdout=stream, stderr=err,
+    env = claude_usage.with_wrapper(controller_env(dict(os.environ)), wrapper)
+    proc = subprocess.Popen(argv, cwd=project, env=env, stdout=stream, stderr=err,
                             stdin=subprocess.DEVNULL, start_new_session=True)
     try:
         proc.wait(timeout=max(timeout, 1))
@@ -2539,30 +2562,48 @@ def cli_version() -> str | None:
     return words[0] if shown.returncode == 0 and words else None
 
 
+def kit_reviewer_cost(run: Path, reviewers: dict | None) -> dict:
+    """The kit's reviewers from the usage wrapper's rows (`claude_usage`) against the jobs the kit's metrics list.
+
+    `cost_usd` is the rows' summed cost when every claude reviewer job has exactly one priced row (counts match) and
+    there is no other provider's job; otherwise None (unpriced). `seen_usd` is what the rows that arrived cost, a lower
+    bound either way."""
+    usage = claude_usage.summary(claude_usage.read_rows(run / claude_usage.LOG))
+    jobs = reviewers["jobs"] if reviewers else 0
+    claude_jobs = ((reviewers or {}).get("providers") or {}).get("claude", {}).get("jobs", 0)
+    matched = usage["rows"] == jobs == claude_jobs and not usage["unpriced"]
+    return {"jobs": jobs, "rows": usage["rows"], "rows_unpriced": usage["unpriced"], "matched": matched,
+            "cost_usd": round(usage["cost_usd"], 4) if matched else (0.0 if jobs == usage["rows"] == 0 else None),
+            "seen_usd": round(usage["cost_usd"], 4), "models": usage["models"], "efforts": usage["efforts"],
+            "text_inexact": usage["text_inexact"]}
+
+
 def budget_ledger(run: Path, meta: dict, controller: float | None, classifier: float, project: Path,
                   checkout: Path | None) -> dict:
     """Every participating call's cost (#409 v3.14 B): the controller, the kit's reviewers, arm V's gate reviewer,
-    arm R's router, the simulated user and the harness's review classifier. `total_cost_usd` is null and
-    `cost_complete` false when any part is unpriced (the kit's reviewers print no usage); `enforced_usd` is what the
-    run cap is checked against: every priced part plus the reviewers' lower bound."""
+    arm R's router, the simulated user and the harness's review classifier. The kit's reviewers are priced from the
+    usage wrapper's ledger (`kit_reviewer_cost`); `total_cost_usd` is null and `cost_complete` false when any part is
+    unpriced (a reviewer job without its row); `enforced_usd` is what the run cap is checked against: every priced part
+    plus, while the reviewers are unpriced, the larger of their rows' cost and their byte lower bound."""
     arm = effective_arm(meta)
     gate = verify_gate.summary(run / verify_gate.LOG)["reviewer_cost_usd"] if arm in GATE_ARMS else 0.0
     routed = meta.get("router") or {}
     router_cost = routed.get("cost_usd") if routed else 0.0
     simulator = user_sim.summary(run / user_sim.LOG)["user_sim_cost_usd"] if meta.get("user_sim") else 0.0
-    kit, kit_floor, kit_jobs = 0.0, 0.0, 0
-    if arm in WORKFLOWS:
-        reviewers = reviewer_record(project, checkout or project)
-        kit_jobs = reviewers["jobs"]
-        kit = 0.0 if not kit_jobs else None
-        kit_floor = reviewers["priced_cost_lower_bound_usd"]
+    reviewers = reviewer_record(project, checkout or project) if arm in WORKFLOWS else None
+    kit_usage = kit_reviewer_cost(run, reviewers)
+    kit = kit_usage["cost_usd"]
+    kit_floor = max(reviewers["priced_cost_lower_bound_usd"] if reviewers else 0.0, kit_usage["seen_usd"])
     parts = {"controller": controller, "kit_reviewers": kit, "verify_gate": gate, "router": router_cost,
              "simulator": simulator, "review_classifier": classifier}
     unpriced = sorted(key for key, value in parts.items() if value is None)
     known = sum(value for value in parts.values() if value is not None)
-    return {"components": parts, "unpriced": unpriced, "kit_reviewer_jobs": kit_jobs,
+    return {"components": parts, "unpriced": unpriced, "kit_reviewer_jobs": kit_usage["jobs"],
+            "kit_reviewer_rows": kit_usage["rows"], "kit_reviewer_rows_unpriced": kit_usage["rows_unpriced"],
+            "kit_reviewer_ledger_usd": kit_usage["seen_usd"],
             "kit_reviewer_cost_lower_bound_usd": kit_floor, "cost_complete": not unpriced,
-            "total_cost_usd": None if unpriced else round(known, 4), "enforced_usd": round(known + kit_floor, 4)}
+            "total_cost_usd": None if unpriced else round(known, 4),
+            "enforced_usd": round(known + (kit_floor if kit is None else 0.0), 4)}
 
 
 PROVENANCE = re.compile(r"^- (provider|model|effort): (\S+)\s*$", re.M)
@@ -2609,6 +2650,11 @@ def verify_pins(run: Path, meta: dict, project: Path, checkout: Path, init: dict
         if item["provider"] != "claude":
             mismatches.append(f"kit reviewer {item['source']}: provider {item['provider']}")
         expect(f"kit reviewer {item['source']}", item["model"], item["effort"] or "unspecified")
+    calls = [row for row in claude_usage.read_rows(run / claude_usage.LOG) if row.get("kind") == "kit-reviewer"]
+    for number, row in enumerate(calls, start=1):
+        expect(f"kit reviewer call {number}", row.get("requested_model"), row.get("effort") or "unspecified")
+        for used in row.get("models") or []:
+            expect(f"kit reviewer call {number} (served)", used, None)
     if arm in GATE_ARMS:
         config = json.loads((run / "gate" / "config.json").read_text(encoding="utf-8"))
         expect("verify gate config", config.get("model"), config.get("effort") or "unspecified")
@@ -2626,7 +2672,7 @@ def verify_pins(run: Path, meta: dict, project: Path, checkout: Path, init: dict
             for used in row.get("models_used") or []:
                 expect(f"simulator call {number} (served)", used, None)
     return {"model": pinned_model, "effort": pinned_effort, "kit_reviewers_checked": len(reviewers),
-            "mismatches": mismatches}
+            "kit_reviewer_calls_checked": len(calls), "mismatches": mismatches}
 
 
 def base_skills(init: dict | None, project: Path) -> dict | None:
@@ -2703,6 +2749,7 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
         user_sim.set_model(run, model)
     gate_config_sha = verify_gate.file_sha256(run / "gate" / "config.json") if arm in GATE_ARMS else None
     tripwire_before = sandbox.tripwire()
+    usage_socket = install_usage_wrapper(run)
     reports: list[dict] = []
     router_seconds = float(routed.get("seconds") or 0) if routed and not routed.get("reused") else 0.0
     started = time.monotonic()
@@ -2724,7 +2771,8 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
     controller_seconds = 0.0
     session, spent, exit_code, timed_out, summary = None, 0.0, None, False, {}
     sandbox_error = None
-    with _Lock(exclusive=False), stream.open("wb") as out, (run / "controller.stderr").open("wb") as err:
+    with _Lock(exclusive=False), claude_usage.Collector(usage_socket, run / claude_usage.LOG), \
+            stream.open("wb") as out, (run / "controller.stderr").open("wb") as err:
         message = prompt
         while True:
             ledger = budget_ledger(run, meta, spent, classifier_cost, project, project)
@@ -2743,7 +2791,8 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
             box = run_box(run, meta, project, left, "controller") if mode == "required" else None
             turn_started = time.monotonic()
             try:
-                exit_code, timed_out = _controller_once(argv, project, out, err, left, box=box, reports=reports)
+                exit_code, timed_out = _controller_once(argv, project, out, err, left, box=box, reports=reports,
+                                                        wrapper=usage_bin(run))
             except sandbox.SandboxError as failure:
                 sandbox_error = str(failure)
                 break
@@ -2847,7 +2896,10 @@ def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | 
               "budget_stop": budget_stop, "seconds": round(end_to_end), "end_to_end_seconds": round(end_to_end),
               "controller_seconds": round(controller_seconds), "router_seconds": round(router_seconds),
               **summary, "session_id": session, "init": init,
-              "cost_usd": spent or None, "budget_ledger": ledger, "harness_approvals": approvals,
+              "cost_usd": spent or None, "budget_ledger": ledger,
+              "kit_reviewer_usage": {"version": claude_usage.VERSION, "log": claude_usage.LOG,
+                                     **claude_usage.summary(claude_usage.read_rows(run / claude_usage.LOG))},
+              "harness_approvals": approvals,
               "fix_loop_reapprovals": reapprovals, "fix_loop_cap_stop": cap_stop,
               **({"fix_extensions": extensions, "review_stop": review_stop,
                   "review_classifier_failures": classifier_failures,
