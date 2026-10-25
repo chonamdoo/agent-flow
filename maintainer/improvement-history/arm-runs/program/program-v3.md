@@ -379,3 +379,8 @@ v2의 "비열등 ∧ 비용 우월" 규칙만으로는 "비싸지만 더 낫다"
   - 예산 상한은 resume 사이에서 확인하므로 리뷰어 비용만큼 넘칠 수 있다.
 - **순서를 바꿨다:** 기준선 → 웹 체인 → 웹 L(평가기 동결 후) → 앱 체인 → OYG S\*. H2-②가 핵심이고, S\*는 추가 arm 하나라서다.
 - **실행 방식:** 단계마다 2개씩 drive하고, 묶음이 끝나면 직렬로 채점한다(`campaign/campaign.py`). run id는 불투명하고, 배정표는 단계별 `assignment.json`에 둔다.
+- **부기 (14:45Z), 오염 판정 규칙을 명확히 한다 (채점 해석만, 처치·진행 변경 없음):**
+  - 기준선 A run 하나(r-475647546337)가 `contaminated`로 표시됐다.
+  - 원인: 에이전트가 직접 `mkdir -p …/scratchpad/e2e`를 만들고 자기 스크립트를 쓴 뒤 읽었다. 그 경로가 운영자 scratch 경로 아래라 "숨은 경로 read"로 잡혔다. host에는 그 경로가 없고, sandbox 안의 숨은 경로는 빈 tmpfs라 실제 숨은 내용은 읽을 수 없다.
+  - 규칙: sandbox가 정상(`host_read_only`, `hidden_leaks` 없음)인 run에서는 `canary_hits`(또는 평가기의 read 판정)가 있을 때만 contaminated로 본다. 숨은 경로 접근은 진단으로 기록만 한다.
+  - 이미 채점된 run도 저장된 `contamination_scan`으로 다시 판정할 수 있어 재채점은 필요 없다. 집계 단계에서 이 규칙을 적용한다.
