@@ -213,6 +213,15 @@ def test_the_base_skill_set_is_the_clis_own_after_the_projects_skills(tmp_path):
     assert drifted["missing"] == [arm_compare.BASE_SKILLS[0]] and drifted["extra"] == ["operator-skill"]
 
 
+def test_a_project_skill_shadowing_a_base_skill_is_the_arms_treatment(tmp_path):
+    project = tmp_path / "project"
+    shadow = arm_compare.BASE_SKILLS[0]
+    (project / ".claude" / "skills" / shadow).mkdir(parents=True)
+    (project / ".claude" / "skills" / shadow / "SKILL.md").write_text("x", encoding="utf-8")
+    skills = arm_compare.base_skills({"skills": list(arm_compare.BASE_SKILLS)}, project)
+    assert skills["matches_pin"] is True and skills["shadowed"] == [shadow] and skills["missing"] == []
+
+
 # ─── D. condition alignment ───
 
 def test_every_arm_gets_the_cases_note_in_the_task_text(tmp_path):

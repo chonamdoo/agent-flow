@@ -2682,9 +2682,12 @@ def base_skills(init: dict | None, project: Path) -> dict | None:
     local = {path.parent.name for path in (project / PROJECT_SKILLS).glob("*/SKILL.md")}
     listed = sorted(str(name) for name in init["skills"])
     base = sorted(name for name in listed if name not in local)
-    return {"listed": len(listed), "project": sorted(local & set(listed)), "base": base,
-            "matches_pin": base == sorted(BASE_SKILLS),
-            "missing": sorted(set(BASE_SKILLS) - set(base)), "extra": sorted(set(base) - set(BASE_SKILLS))}
+    # 같은 이름의 project 스킬이 CLI 기본 스킬을 가린 것은 arm의 처치다(VK의 kit `code-review` 등). 빠진 것으로 세지 않는다.
+    shadowed = sorted(set(BASE_SKILLS) & local & set(listed))
+    missing = sorted(set(BASE_SKILLS) - set(base) - set(shadowed))
+    return {"listed": len(listed), "project": sorted(local & set(listed)), "base": base, "shadowed": shadowed,
+            "matches_pin": not missing and not (set(base) - set(BASE_SKILLS)),
+            "missing": missing, "extra": sorted(set(base) - set(BASE_SKILLS))}
 
 
 def recorded_checkout(run: Path, meta: dict, driven: dict) -> tuple[Path, dict]:
