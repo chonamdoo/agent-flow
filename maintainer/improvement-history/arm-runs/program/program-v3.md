@@ -201,3 +201,9 @@ v2의 "비열등 ∧ 비용 우월" 규칙만으로는 "비싸지만 더 낫다"
 - `db20840`은 앞머리 `cd <경로> &&` 하나를 벗겨 낸다. 그 자리는 이미 `_session_cwd`가 cwd로 읽는다. 뒤에 다른 명령이 이어지면 예전처럼 거부한다. 관련 테스트 833개가 통과했다.
 - `14b22a0`으로 시작한 workflow run(OYG r001, 사이클 3 R 2개)은 10분 안에 멈췄고 탐색으로 옮겼다. A·V·VK 유효성 판단은 v3.7과 같다(이번 수정도 workflow 가드만 바꾼다).
 - 재시작한 뒤 첫 workflow run의 가드 거부 횟수를 확인한다. 0이 아니면 다시 멈추고 원인을 찾는다.
+- **부기 (04:25Z):**
+  - `db20840`에서는 교착이 없다. 루트에서 `.agent-flow/bin/agent-flow status`로 bind한 뒤 `cd`하는 길이 있고, OYG r001-C는 그 길로 진행했다.
+  - 그래도 run 초반에 모델이 worktree에 없는 경로(`cd W && .agent-flow/bin/agent-flow …`)를 부르다 막히는 일은 남는다. 사이클 3 underspec-R-3(compose)은 거부 2번 뒤 `EnterWorktree` 승인을 요청하고 blocked로 끝났다.
+  - headless에서 `EnterWorktree`를 미리 허용해 승인을 대신하려 했으나, `--allowedTools`의 `EnterWorktree`, `EnterWorktree(*)`, 경로 패턴 모두 승인되지 않았다(실측).
+  - 그래서 남은 가드 마찰은 **arm(kit)의 결과로 센다.** 교착이 아니고, 자율 실행에서 kit이 실제로 치르는 비용이다. run마다 가드 거부 횟수를 진단 지표로 남긴다.
+  - kit의 안내 문구를 개선하는 것은 별도 개선 arm으로 사전 등록하고 따로 잰다.
