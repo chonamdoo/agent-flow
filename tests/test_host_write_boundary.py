@@ -1833,6 +1833,48 @@ def test_unbound_lifecycle_command_is_allowed_to_establish_binding(tmp_path: Pat
     ) is None
 
 
+@pytest.mark.parametrize("suffix", [" 2>&1", " | tail -8", " 2>&1 | tail -n 20", " | head -5"])
+def test_unbound_lifecycle_command_with_output_trim_can_establish_binding(
+    tmp_path: Path, suffix: str
+):
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+
+    assert host_write_boundary_violation(
+        _command_payload(
+            f"agent-flow continue --root {root} --worktree {first.name}{suffix}",
+            session="new-session",
+            host_cwd=root,
+        ),
+        root,
+    ) is None
+    payload = _status_payload(root, first, runs[0])
+    payload["tool_input"]["command"] += suffix
+    assert record_host_checkout_binding(payload, root) is not None
+
+
+@pytest.mark.parametrize(
+    "suffix", [" | tail -8; printf leaked > {leak}", " | tail -8 | tee {leak}", " 2>&1 > {leak}"]
+)
+def test_output_trim_does_not_exempt_a_following_command(tmp_path: Path, suffix: str):
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    suffix = suffix.format(leak=root / "leaked.py")
+
+    violation = host_write_boundary_violation(
+        _command_payload(
+            f"agent-flow status --root {root} --worktree {first.name}{suffix}",
+            session="unbound",
+            host_cwd=root,
+        ),
+        root,
+    )
+    assert violation is not None
+    payload = _status_payload(root, first, runs[0])
+    payload["tool_input"]["command"] += suffix
+    assert record_host_checkout_binding(payload, root) is None
+
+
 def test_compound_lifecycle_command_cannot_bypass_an_unbound_session(tmp_path: Path):
     root, statuses, _ = _setup(tmp_path)
     first = statuses[0]
