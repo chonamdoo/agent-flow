@@ -392,7 +392,14 @@ def hidden_failures(run: Path) -> dict:
     """Failed checks of a run, merged across viewports, each with its messages and rule kind."""
     result = _read_json(run / "result.json") or {}
     score = _read_json(run / "ui-score.json") or {}
-    ui = result.get("ui") or {}
+    return {"declaration": result.get("declaration"), **failures_from(score, result.get("ui") or {})}
+
+
+def failures_from(score: dict, ui: dict) -> dict:
+    """`hidden_failures` from the evaluator's report and the run's `ui` keys, plus the counts per rule kind
+    (`missing`, `wrong`, `unclear`, `failed_count`). `score` uses it for every arm, so completeness (no `missing` failure)
+    comes from the hidden checks alike for bare and workflow arms, and `no_build` (a build that never started) is
+    told apart from a build that is incomplete."""
     failed = score.get("failed_checks") or ui.get("failed_checks")
     if failed is None:
         failed = [*(score.get("failed_browser") or ui.get("failed_browser") or []),
@@ -416,8 +423,10 @@ def hidden_failures(run: Path) -> dict:
         else:
             kinds = [rule_kind(message) for message in row["messages"]] or ["unclear"]
             row["rule"] = min(kinds, key=rank.__getitem__)
-    return {"declaration": result.get("declaration"), "S": ui.get("S", score.get("S")), "G": ui.get("G", score.get("G")),
-            "no_build": no_build, "failed": sorted(merged.values(), key=lambda row: row["id"])}
+    rows = sorted(merged.values(), key=lambda row: row["id"])
+    counts = {kind: sum(row["rule"] == kind for row in rows) for kind in ("missing", "wrong", "unclear")}
+    return {"S": ui.get("S", score.get("S")), "G": ui.get("G", score.get("G")),
+            "no_build": no_build, "failed": rows, "failed_count": len(rows), **counts}
 
 
 # ---------------------------------------------------------------- check specs and PRD
@@ -472,12 +481,15 @@ def spec_for(check_id: str, specs: dict[str, str]) -> str:
 
 # ---------------------------------------------------------------- classifier
 
-def run_claude(prompt: str, system: str, model: str = MODEL, effort: str = EFFORT, timeout: int = 900) -> dict:
-    """One `claude -p` call with no tools, from an empty directory. Returns {"text", "cost"}."""
-    env = {**os.environ, "CLAUDE_CODE_EFFORT_LEVEL": effort}
+def run_claude(prompt: str, system: str, model: str = MODEL, effort: str = EFFORT, timeout: int = 900,
+               env: dict[str, str] | None = None) -> dict:
+    """One `claude -p` call with no tools, from an empty directory. Returns {"text", "cost"}. `env` replaces the
+    operator's environment (the harness passes the controller's allowlist); the effort is always this tool's own."""
+    env = {**(os.environ if env is None else env), "CLAUDE_CODE_EFFORT_LEVEL": effort}
     with tempfile.TemporaryDirectory(prefix="review-findings-") as cwd:
         done = subprocess.run(
-            ["claude", "-p", "--model", model, "--output-format", "json", "--tools", "", "--strict-mcp-config",
+            ["claude", "-p", "--model", model, "--effort", effort, "--output-format", "json", "--tools", "",
+             "--strict-mcp-config",
              "--no-session-persistence", "--setting-sources", "", "--system-prompt", system],
             input=prompt, capture_output=True, text=True, cwd=cwd, env=env, timeout=timeout, check=False)
     try:

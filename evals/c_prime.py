@@ -139,8 +139,10 @@ def _build(kit: Path, project: Path, task: str, stop_after: str | None) -> str:
 SMOKE_CASE = Path(__file__).resolve().parent / "phase-cases" / "devflow"
 
 
-def _sh(args: list[str], cwd: Path, extra_env: dict[str, str] | None = None, **kwargs) -> subprocess.CompletedProcess:
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+def _sh(args: list[str], cwd: Path, extra_env: dict[str, str] | None = None, env: dict[str, str] | None = None,
+        **kwargs) -> subprocess.CompletedProcess:
+    """`env` replaces the operator's environment as the base (the harness passes the controller's)."""
+    env = {key: value for key, value in (os.environ if env is None else env).items() if not key.startswith("GIT_")}
     env.update(extra_env or {})
     return subprocess.run(args, cwd=cwd, capture_output=True, text=True, env=env, **kwargs)
 

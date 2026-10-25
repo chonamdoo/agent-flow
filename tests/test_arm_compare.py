@@ -149,7 +149,7 @@ def test_human_only_approvals_fail_the_run_and_are_read_from_disk(tmp_path):
                 "usage": {"input": 1, "uncached_input": 1, "cached_input": 0, "output": 1}, "seconds": 1, **extra}
     table = arm_compare.summarize([row("A"), row("C"), row("C", manual_spec_approvals=2), row("C", verify_downgrades=1)])
     c_line = next(line for line in table.splitlines() if line.startswith("| C |"))
-    assert "| 1/3 |" in c_line and c_line.endswith("| 2 | instructed | 0 / 0 | 1 / 0 | 0 | - | - | - | - | - |")
+    assert "| 1/3 |" in c_line and "| 2 | instructed | 0 / 0 | 1 / 0 | 0 | - | - | - | - | - |" in c_line
 
 
 def test_the_artifact_fingerprint_ignores_runner_state_and_tracks_edits(bare):
@@ -237,7 +237,12 @@ def test_drive_reads_the_session_and_cost_from_the_stream(tmp_path):
 def test_the_controller_does_not_inherit_the_operators_session():
     env = arm_compare.controller_env({"PATH": "/bin", "HOME": "/root", "CLAUDE_CODE_SESSION_ID": "operator",
                                       "CLAUDE_CODE_REMOTE": "true", "CLAUDE_EFFORT": "low", "HTTPS_PROXY": "http://p"})
-    assert env == {"PATH": "/bin", "HOME": "/root", "HTTPS_PROXY": "http://p", "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1"}
+    assert env == {"PATH": "/bin", "HOME": "/root", "HTTPS_PROXY": "http://p", "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1",
+                   **arm_compare.PINNED_ENV}
+    # v3.14: no self-update, no auto memory, claude-only kit reviewers, every alias on the pinned model, effort low.
+    assert env["DISABLE_AUTOUPDATER"] == "1" and env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    assert env["AGENT_FLOW_REVIEWERS"] == "claude" and env["CLAUDE_CODE_EFFORT_LEVEL"] == "low"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == arm_compare.PINNED_MODEL
 
 
 def test_running_the_runners_approval_command_is_self_approval():
@@ -343,19 +348,20 @@ def test_an_undecidable_worktree_is_a_harness_error(tmp_path):
     assert chosen == project and info["checkout_error"] == "0 runner worktrees among 1 linked worktrees"
 
 
-def test_a_moved_run_is_graded_on_its_own_project(tmp_path):
+def test_a_moved_run_is_refused_and_a_harness_error_needs_a_taxonomy_code(tmp_path):
+    # v3.14: a run directory is never moved; grading it elsewhere is refused instead of guessed.
     first = tmp_path / "A-1"
-    arm_compare.prepare(ROOT, "A", "devflow", 1, first)
+    meta = arm_compare.prepare(ROOT, "A", "devflow", 1, first)
+    assert meta["run_id"] == "A-1" and meta["run_dir"] == str(first.resolve())
     kept = tmp_path / "harness-error-A-1"
     first.rename(kept)
-    rerun = arm_compare.prepare(ROOT, "A", "devflow", 1, first)
-    (first / "project" / "work.txt").write_text("rerun\n", encoding="utf-8")
-    arm_compare._git(["add", "work.txt"], first / "project")
-    arm_compare._git(["-c", "user.name=t", "-c", "user.email=t@e", "commit", "-qm", "rerun work"], first / "project")
-    result = arm_compare.score(kept, None, harness_error="moved aside")
-    assert result["project"] == str((kept / "project").resolve()) and result["project_recorded"] == rerun["project"]
-    assert result["commits"] == 0
-    assert "project_recorded" not in arm_compare.score(first, None)
+    with pytest.raises(SystemExit, match="moved"):
+        arm_compare.score(kept, None)
+    kept.rename(first)
+    with pytest.raises(SystemExit, match="harness error must start with one of"):
+        arm_compare.score(first, None, harness_error="moved aside")
+    result = arm_compare.score(first, None, harness_error="harness-bug: fixed in abc123")
+    assert result["exclusion"] == "harness-bug" and arm_compare.run_status(result) == "harness-error"
 
 
 def test_a_worktree_path_reused_by_a_later_project_is_not_graded(tmp_path):
@@ -393,7 +399,7 @@ def test_a_gate_deferred_to_ci_is_recorded_as_never_run(tmp_path):
     assert arm_compare.gate_record(tmp_path / "none", checkout)["local_gates"] is None
     row = _summary_row("C", gate_ledgers=1, deferred_ci_checks=["pytest"])
     c_line = next(line for line in arm_compare.summarize([row]).splitlines() if line.startswith("| C |"))
-    assert c_line.endswith("| 1 / 1 | 1 / 0 | 0 | - | - | - | - | - |")
+    assert "| 1 / 1 | 1 / 0 | 0 | - | - | - | - | - |" in c_line
 
 
 def test_a_rule_counts_only_where_the_runs_prompt_stated_it():
@@ -494,7 +500,8 @@ def test_an_external_case_can_start_from_patches_of_an_earlier_build(tmp_path):
     arm_compare.prepare(ROOT, "A", "ignored", 1, run, case_dir=case_dir)
     project = run / "project"
     assert (project / "cart.txt").read_text(encoding="utf-8") == "cart v0\n"
-    assert arm_compare._git(["log", "--format=%s", "-3"], project).splitlines() == ["task", "v0 cart", "app"]
+    # v3.14: the seed is an export of the pinned commit, so its history ("app", "seed app") is not in the project.
+    assert arm_compare._git(["log", "--format=%s"], project).splitlines() == ["task", "v0 cart", "seed"]
     assert [path for path in (project / ".git").rglob("*") if path.is_file()
             and str(case_dir).encode() in path.read_bytes()] == []
 
@@ -518,14 +525,14 @@ def test_the_runner_status_reports_a_stop_at_the_fix_loop_limit(tmp_path):
     assert arm_compare.parse_runner_status(other, tmp_path)["fix_loop_cap"] is None
 
 
-def _drive_run(tmp_path, monkeypatch, statuses, finals):
-    run = tmp_path / "C-1"
+def _drive_run(tmp_path, monkeypatch, statuses, finals, arm="C"):
+    run = tmp_path / f"{arm}-1"
     (run / "project").mkdir(parents=True)
-    (run / "arm.json").write_text(json.dumps({"arm": "C", "project": str(run / "project")}), encoding="utf-8")
+    (run / "arm.json").write_text(json.dumps({"arm": arm, "project": str(run / "project")}), encoding="utf-8")
     (run / "prompt.md").write_text("task", encoding="utf-8")
     messages = []
 
-    def controller_once(argv, project, out, err, timeout):
+    def controller_once(argv, project, out, err, timeout, **_):
         messages.append(argv[2])
         final = finals[min(len(messages), len(finals)) - 1]
         out.write((json.dumps({"type": "system", "subtype": "init", "session_id": "s-1"}) + "\n" +
@@ -535,7 +542,8 @@ def _drive_run(tmp_path, monkeypatch, statuses, finals):
 
     queue = list(statuses)
     monkeypatch.setattr(arm_compare, "_controller_once", controller_once)
-    monkeypatch.setattr(arm_compare, "runner_status", lambda project: queue.pop(0) if queue else None)
+    monkeypatch.setattr(arm_compare, "runner_status", lambda project, *_: queue.pop(0) if queue else None)
+    monkeypatch.setattr(arm_compare, "cli_version", lambda: arm_compare.PINNED_CLI_VERSION)
     monkeypatch.setattr(arm_compare, "review_findings",
                         lambda worktree, status: {"artifact": "sha", "verdicts": {"request-changes": 2},
                                                   "findings": ["high: x"], "findings_total": 1})
@@ -645,7 +653,7 @@ def test_open_findings_come_from_reviewers_that_requested_changes(tmp_path, monk
         {"artifact": "multi-review-types-claude.md", "job_id": "claude-types", "verdict": "approve"}]}),
         encoding="utf-8")
     monkeypatch.setattr(arm_compare, "phase_artifact",
-                        lambda worktree, status, phase: run_dir / "artifacts" / f"{phase}.md")
+                        lambda worktree, status, phase: run_dir / f"{phase}.md")
     found = arm_compare.open_findings(tmp_path, _cap_status(tmp_path))
     assert [(item["job_id"], item["section"]) for item in found] == [("codex-types", "must-fix")]
     assert "Refund is not recorded" in found[0]["text"]
@@ -657,13 +665,47 @@ def test_the_total_cost_adds_the_review_classifier():
 
 
 def test_the_bare_arm_is_never_reapproved(tmp_path, monkeypatch):
-    run = tmp_path / "C-1"
-    _drive_run(tmp_path, monkeypatch, [], ["Done.\n\nEVAL-STATUS: complete"])
-    (run / "arm.json").write_text(json.dumps({"arm": "A", "project": str(run / "project")}), encoding="utf-8")
-    statuses = [_cap_status(tmp_path)] * 3
-    monkeypatch.setattr(arm_compare, "runner_status", lambda project: statuses.pop(0))
-    record = arm_compare.drive(run, "claude-opus-5-5", 600, 30.0)
-    assert record["fix_loop_reapprovals"] == [] and len(statuses) == 3
+    record, messages = _drive_run(tmp_path, monkeypatch, [_cap_status(tmp_path)] * 3, [BLOCKED], arm="A")
+    assert record["fix_loop_reapprovals"] == [] and len(messages) == 1
+
+
+def test_a_run_is_driven_once(tmp_path, monkeypatch):
+    _drive_run(tmp_path, monkeypatch, [], ["Done.\n\nEVAL-STATUS: complete"], arm="A")
+    with pytest.raises(SystemExit, match="driven once"):
+        arm_compare.drive(tmp_path / "A-1", "claude-opus-5-5", 600, 30.0)
+
+
+def test_a_cli_other_than_the_pinned_version_stops_before_the_drive(tmp_path, monkeypatch):
+    run = tmp_path / "A-1"
+    arm_compare.prepare(ROOT, "A", "devflow", 1, run)
+    monkeypatch.setattr(arm_compare, "cli_version", lambda: "2.1.311")
+    with pytest.raises(SystemExit, match="cli-version"):
+        arm_compare.drive(run, "claude-opus-5-5", 600, 30.0)
+    assert not (run / "drive.json").exists() and not (run / "controller.jsonl").exists()
+
+
+def test_the_phase_artifact_is_where_the_runner_writes_it(tmp_path):
+    project = tmp_path / "project"
+    _git_init(project)
+    worktree = tmp_path / "wt" / "feat-x"
+    arm_compare._git(["worktree", "add", "-q", "-b", "feat/x", str(worktree)], project)
+    path = arm_compare.phase_artifact(worktree, {"run": "full-feature/20261022-131409"}, "domain-grill")
+    assert path == (project / ".git" / "agent-flow" / "worktrees" / "feat-x" / ".agent-flow" / "runs"
+                    / "20261022-131409" / "domain-grill.md").resolve()
+
+
+def test_a_cap_stop_is_read_from_runner_state_when_status_prints_no_limit_line(tmp_path):
+    project = tmp_path / "project"
+    _git_init(project)
+    worktree = tmp_path / "wt" / "feat-x"
+    arm_compare._git(["worktree", "add", "-q", "-b", "feat/x", str(worktree)], project)
+    state = project / ".git" / "agent-flow" / "worktrees" / "feat-x" / ".agent-flow" / "runs" / "r1"
+    state.mkdir(parents=True)
+    (state / "meta.json").write_text(json.dumps({"fix_loop_rounds": {"fix-loop": 3}}), encoding="utf-8")
+    status = {"run": "full-feature/r1", "reason": "route_blocked", "current_phase": "multi-review"}
+    cap = arm_compare.fix_loop_cap_from_state(worktree, status)
+    assert cap == {"rounds": 3, "phase": "multi-review", "target": "fix-loop", "source": "runner-state"}
+    assert arm_compare.fix_loop_cap_from_state(worktree, {**status, "reason": "phase_approval_required"}) is None
 
 
 def test_a_run_stopped_at_the_limit_is_read_from_runner_state(tmp_path):
@@ -773,9 +815,9 @@ def test_the_summary_reports_phases_and_the_orchestration_share():
     rows = [_summary_row("A"), _summary_row("D", phase_trace=trace),
             _summary_row("D", phase_trace={**trace, "entered": ["design"], "orchestration_share": 0.75})]
     d_line = next(line for line in arm_compare.summarize(rows).splitlines() if line.startswith("| D |"))
-    assert d_line.endswith("| 1.5 / 4 | 50% | - | - | - |")
+    assert "| 1.5 / 4 | 50% | - | - | - |" in d_line
     a_line = next(line for line in arm_compare.summarize(rows).splitlines() if line.startswith("| A |"))
-    assert a_line.endswith("| - | - | - | - | - |")
+    assert "| - | - | - | - | - |" in a_line
 
 
 # ─── #409 v2 §3c: follow-on changes ───
@@ -920,7 +962,7 @@ def test_the_summary_shows_reviewer_tokens_and_leaves_an_unpriced_cost_unpriced(
                             "codex": {"seconds": 1450, "token_lower_bound": 116_000}}}
     line = next(row for row in arm_compare.summarize([_summary_row("C", reviewers=record)]).splitlines()
                 if row.startswith("| C |"))
-    assert line.endswith("| 40.0 / 2,950 / ≥243,000 tok, unpriced | - |")
+    assert "| 40.0 / 2,950 / ≥243,000 tok, unpriced | - |" in line
 
 
 # ─── #409 v2: arm A+P ───
@@ -1050,7 +1092,7 @@ def test_arm_v_is_arm_a_plus_a_stop_hook_outside_the_project(tmp_path):
     assert meta["principles"] is None and meta["approval_rules"] is None
     stored = json.loads(config.read_text(encoding="utf-8"))
     assert stored["env"] == {"keys": list(arm_compare.CONTROLLER_ENV), "set": arm_compare.controller_env({})}
-    assert stored["task"] == case["task"] and stored["documents"] == []
+    assert stored["task"] == arm_compare.phase_task(case) and stored["documents"] == []
 
 
 def test_an_external_case_commits_arm_vs_hook_past_an_ignored_claude_dir(tmp_path):
@@ -1140,7 +1182,7 @@ def test_drive_gives_the_gate_the_controllers_model_and_records_its_events(tmp_p
     run = tmp_path / "V-1"
     arm_compare.prepare(ROOT, "V", "devflow", 1, run)
 
-    def controller_once(argv, project, out, err, timeout):
+    def controller_once(argv, project, out, err, timeout, **_):
         out.write((json.dumps({"type": "system", "subtype": "init", "session_id": "s-1"}) + "\n" +
                    json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 2.0,
                                "result": "EVAL-STATUS: complete"}) + "\n").encode())
@@ -1149,9 +1191,14 @@ def test_drive_gives_the_gate_the_controllers_model_and_records_its_events(tmp_p
         return 0, False
 
     monkeypatch.setattr(arm_compare, "_controller_once", controller_once)
-    record = arm_compare.drive(run, "claude-opus-x", 600, 30.0)
-    assert json.loads((run / "gate" / "config.json").read_text(encoding="utf-8"))["model"] == "claude-opus-x"
+    monkeypatch.setattr(arm_compare, "cli_version", lambda: arm_compare.PINNED_CLI_VERSION)
+    with pytest.raises(SystemExit):  # v3.14: only the pinned model drives
+        arm_compare.drive(run, "claude-opus-x", 600, 30.0)
+    record = arm_compare.drive(run, "claude-opus-5-5", 600, 30.0)
+    config = json.loads((run / "gate" / "config.json").read_text(encoding="utf-8"))
+    assert config["model"] == "claude-opus-5-5" and config["effort"] == "low"
     assert record["verify_gate"]["verify_blocks"] == 1 and record["cost_usd"] == 2.0
+    assert record["gate_config_sha256"] == arm_compare.verify_gate.file_sha256(run / "gate" / "config.json")
 
 
 def test_arm_vs_score_adds_the_reviewer_cost_to_the_total_and_checks_the_wiring(tmp_path):
@@ -1167,8 +1214,15 @@ def test_arm_vs_score_adds_the_reviewer_cost_to_the_total_and_checks_the_wiring(
     gate = result["verify_gate"]
     assert gate["blocks"] == 2 and gate["review_findings"] == 2 and gate["wiring_intact"] is True
     assert result["controller_cost_usd"] == 2.0 and result["total_cost_usd"] == 2.75
+    # v3.14: the first score froze the graded tree; a later edit of the live project changes nothing graded, and an
+    # edit of the snapshot is refused.
     (run / "project" / ".claude" / "settings.json").write_text("{}\n", encoding="utf-8")
-    assert arm_compare.score(run, None)["verify_gate"]["wiring_intact"] is False
+    assert arm_compare.score(run, None)["verify_gate"]["wiring_intact"] is True
+    frozen = run / "graded" / "tree" / ".claude" / "settings.json"
+    frozen.chmod(0o644)
+    frozen.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="snapshot"):
+        arm_compare.score(run, None)
     rows = [_summary_row("A", controller_cost_usd=1.0, total_cost_usd=1.0),
             _summary_row("V", controller_cost_usd=2.0, total_cost_usd=2.75, verify_gate=gate)]
     table = arm_compare.summarize(rows)
@@ -1328,11 +1382,11 @@ def test_arm_vks_score_records_the_invoked_skills_and_the_summary_shows_them(tmp
     table = arm_compare.summarize(rows)
     assert "skills invoked (runs that invoked any: name×calls)" in table.splitlines()[0]
     vk = next(line for line in table.splitlines() if line.startswith("| VK |"))
-    assert vk.endswith("| 2/3: qa×2, tdd×2 |")
+    assert "| 2/3: qa×2, tdd×2 |" in vk
     a = next(line for line in table.splitlines() if line.startswith("| A |"))
-    assert a.endswith("| 0/1: none |")
+    assert "| 0/1: none |" in a
     old = arm_compare.summarize([_summary_row("A")])
-    assert next(line for line in old.splitlines() if line.startswith("| A |")).endswith("| - |")
+    assert "| - | 0/1 / 0/0 |" in next(line for line in old.splitlines() if line.startswith("| A |"))
 
 
 def test_the_cli_and_preflight_take_arm_vk(tmp_path, monkeypatch):

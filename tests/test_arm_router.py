@@ -86,6 +86,7 @@ def test_the_router_is_one_read_only_call_in_the_seeded_project(tmp_path, fake_r
     assert argv[argv.index("--tools") + 1] == "Read,Glob,Grep"
     assert {"Bash", "Edit", "Write"} <= set(argv[argv.index("--disallowedTools") + 1].split(","))
     assert argv[argv.index("--max-budget-usd") + 1] == "2" and "--no-session-persistence" in argv
+    assert argv[argv.index("--effort") + 1] == "low" and meta["router"]["effort"] == "low"
     assert "CLAUDE_CODE_SESSION_ID" not in call["env"] and call["env"]["CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS"] == "1"
     text = argv[argv.index("-p") + 1]
     case = json.loads((ROOT / "evals" / "phase-cases" / "devflow" / "case.json").read_text(encoding="utf-8"))
@@ -199,7 +200,7 @@ def test_drive_runs_the_chosen_arm_with_a_fresh_controller_on_the_routers_model(
     arm_compare.prepare(ROOT, "R", "devflow", 1, run)
     started = []
 
-    def controller_once(argv, project, out, err, timeout):
+    def controller_once(argv, project, out, err, timeout, **_):
         started.append(argv)
         out.write((json.dumps({"type": "system", "subtype": "init", "session_id": "s-1"}) + "\n" +
                    json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 2.0,
@@ -207,6 +208,7 @@ def test_drive_runs_the_chosen_arm_with_a_fresh_controller_on_the_routers_model(
         return 0, False
 
     monkeypatch.setattr(arm_compare, "_controller_once", controller_once)
+    monkeypatch.setattr(arm_compare, "cli_version", lambda: arm_compare.PINNED_CLI_VERSION)
     with pytest.raises(SystemExit):
         arm_compare.drive(run, "claude-other", 600, 30.0)
     record = arm_compare.drive(run, "claude-opus-5-5", 600, 30.0)

@@ -70,3 +70,20 @@ def skip_install_fsync() -> Iterator[None]:
     finally:
         if previous is None:
             os.environ.pop("AGENT_FLOW_INSTALL_FSYNC", None)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def arm_compare_sandbox_off() -> Iterator[None]:
+    """The arm-comparison harness's tests fake the CLI on the host, where the run sandbox would hide it.
+
+    `tests/test_sandbox.py` turns the sandbox back on for the tests that exercise it.
+    """
+    previous = os.environ.get("ARM_COMPARE_SANDBOX")
+    os.environ["ARM_COMPARE_SANDBOX"] = "off"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("ARM_COMPARE_SANDBOX", None)
+        else:
+            os.environ["ARM_COMPARE_SANDBOX"] = previous

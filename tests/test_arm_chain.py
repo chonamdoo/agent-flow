@@ -231,15 +231,22 @@ def test_chain_next_refuses_a_previous_run_it_cannot_build_on(tmp_path, damage, 
     assert not (tmp_path / "work" / "A-1.s2").exists()
 
 
-def test_chain_next_refuses_a_checkout_changed_after_scoring(tmp_path):
+def test_chain_next_builds_on_the_graded_snapshot_and_refuses_a_changed_one(tmp_path):
     steps = _cases(tmp_path)
     first = tmp_path / "work" / "A-1"
     arm_compare.prepare(ROOT, "A", "ignored", 1, first, case_dir=steps["s1"])
     _finish(first)
     _score(first, steps["s1"])
+    # v3.14: a later edit of the live project is not carried; the chain reads only the frozen snapshot.
     (first / "project" / "late.txt").write_text("after scoring\n", encoding="utf-8")
-    with pytest.raises(SystemExit, match="changed after it was scored"):
-        arm_compare.prepare_chain_next(first, steps["s2"], tmp_path / "work" / "A-1.s2", "complete")
+    second = tmp_path / "work" / "A-1.s2"
+    arm_compare.prepare_chain_next(first, steps["s2"], second, "complete")
+    assert not (second / "project" / "late.txt").exists() and (second / "project" / "draft.txt").is_file()
+    frozen = first / "graded" / "tree" / "work.txt"
+    frozen.chmod(0o644)
+    frozen.write_text("tampered\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="graded snapshot"):
+        arm_compare.prepare_chain_next(first, steps["s2"], tmp_path / "work" / "A-1.s3", "complete")
 
 
 def test_a_chain_step_is_driven_in_a_new_session_on_the_same_model_and_flags_reads_of_earlier_grades(
@@ -253,7 +260,7 @@ def test_a_chain_step_is_driven_in_a_new_session_on_the_same_model_and_flags_rea
     arm_compare.prepare_chain_next(first, steps["s2"], second, "complete")
     started = []
 
-    def controller_once(argv, project, out, err, timeout):
+    def controller_once(argv, project, out, err, timeout, **_):
         started.append(argv)
         out.write((json.dumps({"type": "system", "subtype": "init", "session_id": "new-session"}) + "\n" +
                    json.dumps({"type": "result", "total_cost_usd": 1.0, "result": "EVAL-STATUS: complete"})
@@ -261,13 +268,15 @@ def test_a_chain_step_is_driven_in_a_new_session_on_the_same_model_and_flags_rea
         return 0, False
 
     monkeypatch.setattr(arm_compare, "_controller_once", controller_once)
-    monkeypatch.delenv("CLAUDE_CODE_EFFORT_LEVEL", raising=False)
-    with pytest.raises(SystemExit, match="same model"):
+    monkeypatch.setattr(arm_compare, "cli_version", lambda: arm_compare.PINNED_CLI_VERSION)
+    with pytest.raises(SystemExit, match="pinned"):
         arm_compare.drive(second, "claude-other", 600, 30.0)
-    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "high")
-    with pytest.raises(SystemExit, match="same effort"):
+    chained = json.loads((second / "arm.json").read_text(encoding="utf-8"))
+    (second / "arm.json").write_text(json.dumps({**chained, "chain": {**chained["chain"], "effort": "high"}}),
+                                     encoding="utf-8")
+    with pytest.raises(SystemExit, match="effort high"):
         arm_compare.drive(second, "claude-opus-5-5", 600, 30.0)
-    monkeypatch.delenv("CLAUDE_CODE_EFFORT_LEVEL")
+    (second / "arm.json").write_text(json.dumps(chained), encoding="utf-8")
     record = arm_compare.drive(second, "claude-opus-5-5", 600, 30.0)
     (argv,) = started
     assert "--resume" not in argv and "--continue" not in argv and record["session_id"] == "new-session"
@@ -293,7 +302,15 @@ def test_the_summary_groups_chains_by_root_and_counts_the_steps_survived():
     table = arm_compare.summarize(rows)
     assert "Chains (the same arm, each step a new session on its own previous result):" in table
     lines = table.splitlines()
-    assert ("| C-1 | C | 4 | 1: S=1 G=0.9; 2: S=1 G=0.8; 3: S=0 G=0.5; 4: S=1 G=0.5 | 2/4 |") in lines
-    assert "| C-2 | C | 3 | 1: S=1 G=0.5; 2: S=1 G=0.5 (contaminated); 3: S=1 G=0.5 | 1/3 |" in lines
-    assert "| C-3 | C | 2 | 1: missing; 2: S=1 G=0.5 | 0/2 |" in lines
+    assert ("| C-1 | C | 4 | 1: S=1 G=0.9; 2: S=1 G=0.8; 3: S=0 G=0.5; 4: S=1 G=0.5 | 2/4 | 2/4 |") in lines
+    assert "| C-2 | C | 3 | 1: S=1 G=0.5; 2: S=1 G=0.5 (contaminated); 3: S=1 G=0.5 | 1/3 | 1/3 |" in lines
+    assert "| C-3 | C | 2 | 1: missing; 2: S=1 G=0.5 | 0/2 | 0/2 |" in lines
+    # Steps survived is the success definition: a step that met the oracle but declared blocked ends it; the
+    # functional survival still counts it.
+    blocked = [row("C-4", g=0.9), row("C-4.s2", step=2, root="C-4", declaration="declared-blocked",
+                                       final_message="EVAL-STATUS: blocked: x"), row("C-4.s3", step=3, root="C-4")]
+    assert "| C-4 | C | 3 | 1: S=1 G=0.9; 2: S=1 G=0.5; 3: S=1 G=0.5 | 1/3 | 3/3 |" in arm_compare.summarize(
+        blocked).splitlines()
+    # Chain steps are separate strata: each step's arm table stands alone, never pooled across steps.
+    assert "## case None, layer -, chain step 2" in table
     assert "Chains" not in arm_compare.summarize([row("C-1")])

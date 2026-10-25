@@ -159,9 +159,9 @@ def prompt(task: str, items: list[dict]) -> str:
     return PROMPT.format(task=task.strip(), menu=menu_text(items))
 
 
-def argv(text: str, model: str) -> list[str]:
+def argv(text: str, model: str, effort: str | None = None) -> list[str]:
     # 어떤 설정 파일도 읽지 않고 세션도 남기지 않는다. 그래서 작업할 controller가 이 대화를 이어받을 수 없다.
-    return ["claude", "-p", text, "--model", model, "--output-format", "json",
+    return ["claude", "-p", text, "--model", model, *(["--effort", effort] if effort else []), "--output-format", "json",
             "--tools", ",".join(TOOLS), "--allowedTools", ",".join(TOOLS),
             "--disallowedTools", ",".join(DENIED_TOOLS), "--permission-mode", "auto",
             "--setting-sources", "", "--settings", json.dumps({"disableAllHooks": True}),
@@ -220,9 +220,10 @@ def _call(command: list[str], cwd: Path, env: dict[str, str], timeout: int) -> t
 
 
 def _attempt(number: int, text: str, model: str, project: Path, env: dict[str, str], out_dir: Path,
-             names: list[str], check_spec: Callable[[dict], object] | None) -> dict:
+             names: list[str], check_spec: Callable[[dict], object] | None, effort: str | None = None,
+             call: Callable = _call, timeout: int = TIMEOUT) -> dict:
     started = time.monotonic()
-    code, stdout, stderr, timed_out = _call(argv(text, model), project, env, TIMEOUT)
+    code, stdout, stderr, timed_out = call(argv(text, model, effort), project, env, timeout)
     raw = out_dir / f"attempt-{number}.json"
     raw.write_text(stdout, encoding="utf-8")
     (out_dir / f"attempt-{number}.stderr").write_text(stderr, encoding="utf-8")
@@ -243,11 +244,13 @@ def _attempt(number: int, text: str, model: str, project: Path, env: dict[str, s
 
 
 def route(task: str, project: Path, out_dir: Path, model: str, env: dict[str, str],
-          variant_specs: list[dict] | None = None, check_spec: Callable[[dict], object] | None = None) -> dict:
+          variant_specs: list[dict] | None = None, check_spec: Callable[[dict], object] | None = None,
+          effort: str | None = None, call: Callable | None = None, timeout: int = TIMEOUT) -> dict:
     """Runs the router (at most `MAX_ATTEMPTS` calls) and returns the record `arm.json` keeps as `router`.
 
     `check_spec` raises ValueError for a `compose` spec the run cannot build (5 reviewers on a profile with fewer
-    angles); that answer is retried like any other invalid one."""
+    angles); that answer is retried like any other invalid one. `call` replaces the process launch (the harness runs
+    the router in the run's sandbox); `effort` is passed as `--effort` and recorded."""
     items = menu(variant_specs)
     names = [item["name"] for item in items]
     text = prompt(task, items)
@@ -255,7 +258,8 @@ def route(task: str, project: Path, out_dir: Path, model: str, env: dict[str, st
     (out_dir / "prompt.md").write_text(text, encoding="utf-8")
     attempts: list[dict] = []
     for number in range(1, MAX_ATTEMPTS + 1):
-        attempts.append(_attempt(number, text, model, project, env, out_dir, names, check_spec))
+        attempts.append(_attempt(number, text, model, project, env, out_dir, names, check_spec, effort,
+                                 call or _call, timeout))
         if attempts[-1]["decision"] is not None:
             break
     decision = attempts[-1]["decision"]
@@ -269,7 +273,7 @@ def route(task: str, project: Path, out_dir: Path, model: str, env: dict[str, st
         for key, value in (item["usage"] or {}).items():
             if isinstance(value, int):
                 usage[key] = usage.get(key, 0) + value
-    return {"version": VERSION, "model": model, "choice": choice, "effective_arm": chosen["arm"],
+    return {"version": VERSION, "model": model, "effort": effort, "choice": choice, "effective_arm": chosen["arm"],
             **({"variant": chosen["variant"]} if "variant" in chosen else {}),
             **({"spec": decision["spec"], "variant_name": variants.name(decision["spec"])}
                if choice == COMPOSE else {}),

@@ -14,6 +14,11 @@ On each Stop attempt it
    and blocks once with its numbered findings;
 3. after either cap it lets the stop through and records `gate_cap_reached`.
 
+A review that fails (the call errors, times out, or its answer is neither a numbered list nor `NO_FINDINGS`) does not
+pass silently: its row is recorded with `decision: gate-error` and `gate_error` (the stop goes through, the gate could
+not judge), and `summary` counts it, so the run is reported as a gate error, not as a clean pass. The reviewer runs on
+the config's model and effort (`--model`, `--effort`), and each review row records both.
+
 It never edits the project: the reviewer works in a copy. It reads only project files, so it cannot reveal hidden
 checks. Every attempt is one row in `<run>/verify-gate.jsonl`; the counters are read back from those rows. Only the
 standard library is used, because the hook runs outside this repository.
@@ -33,7 +38,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "verify-gate-v1"
+VERSION = "verify-gate-v2"
 MAX_VERIFY_BLOCKS = 3
 MAX_REVIEW_ROUNDS = 1
 VERIFY_TIMEOUT = 900
@@ -112,22 +117,22 @@ def run_verify(argv: list[str], project: Path, env: dict[str, str]) -> dict:
             "seconds": round(time.monotonic() - started, 1), "tail": output[-TAIL_CHARS:]}
 
 
-def reviewer_argv(prompt: str, model: str) -> list[str]:
+def reviewer_argv(prompt: str, model: str, effort: str | None = None) -> list[str]:
     # 리뷰어는 어떤 설정 파일도 읽지 않는다. 사본에도 이 Stop hook이 있으므로 읽으면 리뷰어 안에서 gate가 다시 돈다.
-    return ["claude", "-p", prompt, "--model", model, "--output-format", "json",
+    return ["claude", "-p", prompt, "--model", model, *(["--effort", effort] if effort else []), "--output-format", "json",
             "--tools", ",".join(REVIEW_TOOLS), "--allowedTools", ",".join(REVIEW_TOOLS),
             "--disallowedTools", ",".join(DENIED_TOOLS), "--permission-mode", "auto",
             "--setting-sources", "", "--settings", json.dumps({"disableAllHooks": True}),
             "--no-session-persistence", "--max-budget-usd", f"{REVIEW_BUDGET_USD:g}"]
 
 
-def run_review(prompt: str, model: str, project: Path, env: dict[str, str]) -> dict:
+def run_review(prompt: str, model: str, project: Path, env: dict[str, str], effort: str | None = None) -> dict:
     """One `claude -p` review on a throwaway copy of the project, so nothing it runs can change the agent's tree."""
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="verify-gate-review-") as scratch:
         copy = Path(scratch) / "project"
         shutil.copytree(project, copy, symlinks=True)
-        code, output, timed_out = _run(reviewer_argv(prompt, model), copy, env, REVIEW_TIMEOUT)
+        code, output, timed_out = _run(reviewer_argv(prompt, model, effort), copy, env, REVIEW_TIMEOUT)
     seconds = round(time.monotonic() - started, 1)
     try:
         payload = json.loads(output)
@@ -209,12 +214,20 @@ def decide(config: dict, hook_input: dict, *, verify=run_verify, review=run_revi
         flagged = any(row.get("step") == "review" and row.get("findings") for row in events)
         return {}, {**event, "step": "done", "decision": "allow", "gate_cap_reached": "review" if flagged else None}
     prompt = review_prompt(config["task"], config["documents"])
-    outcome = review(prompt, config["model"], project, env)
+    effort = config.get("effort")
+    outcome = review(prompt, config["model"], project, env, effort) if effort else review(prompt, config["model"],
+                                                                                          project, env)
     findings = parse_findings(outcome.get("text")) if not outcome.get("is_error") else None
     event.update({"step": "review", "review": {key: value for key, value in outcome.items() if key != "text"},
-                  "review_text": outcome.get("text"), "findings": None if findings is None else len(findings)})
+                  "review_text": outcome.get("text"), "findings": None if findings is None else len(findings),
+                  "model": config["model"], "effort": effort})
     if findings:
         return {"decision": "block", "reason": review_block_reason(findings)}, {**event, "decision": "block"}
+    if findings is None:
+        # 판정하지 못한 리뷰는 통과가 아니다. 멈춤은 허락하되 gate 오류로 남긴다.
+        why = ("review-timed-out" if outcome.get("timed_out") else
+               "review-error" if outcome.get("is_error") or outcome.get("text") is None else "review-unparsed")
+        return {}, {**event, "decision": "gate-error", "gate_error": why}
     return {}, {**event, "decision": "allow"}
 
 
@@ -239,6 +252,9 @@ def summary(log: Path) -> dict:
             "review_rounds": len(reviews),
             "review_findings": sum(row.get("findings") or 0 for row in reviews),
             "review_unparsed": sum(row.get("findings") is None for row in reviews),
+            "gate_errors": sum(row.get("decision") == "gate-error" for row in events),
+            "gate_error_reasons": [row.get("gate_error") for row in events if row.get("decision") == "gate-error"],
+            "review_models": sorted({f"{row.get('model')}/{row.get('effort')}" for row in reviews}),
             # 리뷰가 없으면 비용은 0이다. 리뷰가 비용을 보고하지 않았으면 0이 아니라 null이다.
             "reviewer_cost_usd": (round(sum(costs), 4) if None not in costs else None) if reviews else 0.0,
             "reviewer_seconds": round(sum((row.get("review") or {}).get("seconds") or 0 for row in reviews), 1),

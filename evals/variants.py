@@ -16,7 +16,10 @@ Dimensions (absent keys take the `full-feature` value, except `grill`, below):
 - tdd: False drops red (green still writes the tests with the code).
 - architecture_review: False drops architecture-review.
 - reviewers: 2 or 5 keeps that many reviewers (the generalist plus the profile's first N-1 angles); absent keeps
-  the profile's full list.
+  the profile's full list. This is a **compound treatment** (#409 v3.14 E): the count and the set of review angles
+  change together (fewer reviewers means the later angles are gone, not the same angles reviewed fewer times), so a
+  difference between reviewer counts cannot be read as the effect of the count alone. `write` records it as
+  `compound_treatment`.
 The fix-loop cap, gates and delivery phases are never changed.
 
 `grill` was split out of `planning` later. A spec without a `grill` key gives `grill` the value of `planning`, so an
@@ -142,6 +145,20 @@ def profile_override(kit: Path, profile: str, spec: dict) -> dict | None:
     return {"review_angles": angles[:count - 1]}
 
 
+def pin_reviewers(project: Path, profile: str, candidate: dict) -> dict:
+    """Declares the kit reviewers' launch identity for every phase and angle in the project's profile override
+    (`execution.reviewers`, one rule with no `match`), merged with what the file already holds (a variant's
+    `review_angles`). The runner reads it from the leader checkout for every reviewer it starts."""
+    path = project / ".agent-flow" / "profiles" / f"{profile}.local.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = yaml.safe_load(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    merged = {**(existing or {}), "execution": {"reviewers": [{"candidates": [dict(candidate)]}]}}
+    text = yaml.safe_dump(merged, sort_keys=False, allow_unicode=True)
+    path.write_text(text, encoding="utf-8")
+    return {**candidate, "path": path.relative_to(project).as_posix(),
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+
+
 def write(kit: Path, project: Path, profile: str, spec: dict) -> dict:
     """Writes the variant into the project and returns what the run record keeps."""
     definition = workflow(kit, spec)
@@ -164,7 +181,9 @@ def write(kit: Path, project: Path, profile: str, spec: dict) -> dict:
         override_sha = hashlib.sha256(override_text.encode("utf-8")).hexdigest()
     return {"name": definition["id"], "spec": normalize(spec), "base": BASE,
             "workflow_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            "phases": [phase["id"] for phase in definition["phases"]], "profile_override_sha256": override_sha}
+            "phases": [phase["id"] for phase in definition["phases"]], "profile_override_sha256": override_sha,
+            **({"compound_treatment": "reviewer count and review-angle subset change together"}
+               if override is not None else {})}
 
 
 def main(argv: list[str] | None = None) -> int:

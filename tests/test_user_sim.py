@@ -18,9 +18,10 @@ import user_sim  # noqa: E402
 FULL = "# PRD\n\n- The cart holds at most 5 items.\n- Coupons are not supported.\n"
 UNDER = "# PRD\n\nBuild a cart.\n"
 # HEAD 이전(user_sim 도입 전) 코드로 만든 프롬프트의 sha256. user_sim이 없으면 한 바이트도 달라지지 않아야 한다.
-PINNED = {"devflow-A": "e6cd3009825aa3b09f9f1e91d342f0eff79644f249c06c5b93ac73483b001206",
-          "ext-A": "f9100087baedac60aa8514bb55ceed9620facae44ac4d9dda3b18fd6f3d3c7ac",
-          "ext-C": "f066ecc387c8c988859e3c689992845852f5304f47a5b00dc1dc7bf55aefe522"}
+# v3.14 changed every prompt once: the case notes moved into the task text, the declaration names the missing remote.
+PINNED = {"devflow-A": "cbce68252cc1cc583515e7e0264124cb4293611b31b2f4664b9de059336bea64",
+          "ext-A": "22c0237b90a1fe907c1cb2721d8be19f2748834bf96d2b326505c94f608f801f",
+          "ext-C": "0ca4223295d165cf8abcbb6fa9bb4c272a65e9e3d21ebd5798d0899a39d903c0"}
 
 
 def _git_init(path: Path) -> None:
@@ -104,8 +105,8 @@ def test_the_underspec_layer_seeds_its_files_and_keeps_the_oracle_out_of_the_pro
     prompt = (run / "prompt.md").read_text(encoding="utf-8")
     line = arm_compare.ASK_USER_LINE.format(script=ask)
     assert line in prompt and f'`{ask} "<question>"`' in prompt
-    assert prompt == arm_compare.external_bare_prompt({"task": f"Build the cart.\n\n{line}",
-                                                       "bare_note": "Run ./gradlew test."})
+    # v3.14: the case's note is part of the task text for every arm; the ask-user line follows it.
+    assert prompt == arm_compare.task_prompt(f"Build the cart.\n\nRun ./gradlew test.\n\n{line}")
 
 
 def test_a_layered_case_needs_a_known_layer_and_a_plain_case_takes_none(tmp_path):
@@ -138,7 +139,8 @@ def test_a_workflow_arm_routes_phase_questions_to_the_product_owner(tmp_path):
     line = arm_compare.ASK_USER_LINE.format(script=meta["user_sim"]["ask_user"])
     assert line in prompt and arm_compare.ANSWER_FROM_OWNER in prompt
     assert arm_compare.ANSWER_FROM_TASK not in prompt
-    assert prompt == arm_compare.driver_prompt(f"Build the cart.\n\n{line}", "full-feature", ask_user=True)
+    assert prompt == arm_compare.driver_prompt(f"Build the cart.\n\nRun ./gradlew test.\n\n{line}", "full-feature",
+                                               ask_user=True)
 
 
 # ─── the simulator and its ask-user script ───
@@ -385,7 +387,7 @@ def test_drive_sends_a_self_answered_grill_back_once_then_approves_and_records_i
     artifact.write_text(GRILL, encoding="utf-8")
     messages = []
 
-    def controller_once(argv, project, out, err, timeout):
+    def controller_once(argv, project, out, err, timeout, **_):
         messages.append(argv[2])
         out.write((json.dumps({"type": "system", "subtype": "init", "session_id": "s-1"}) + "\n" +
                    json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 1.0,
@@ -397,9 +399,10 @@ def test_drive_sends_a_self_answered_grill_back_once_then_approves_and_records_i
     queue = [grill, grill]
     approved = []
     monkeypatch.setattr(arm_compare, "_controller_once", controller_once)
-    monkeypatch.setattr(arm_compare, "runner_status", lambda project: queue.pop(0) if queue else None)
+    monkeypatch.setattr(arm_compare, "runner_status", lambda project, *_: queue.pop(0) if queue else None)
     monkeypatch.setattr(arm_compare, "phase_artifact", lambda worktree, status, phase: artifact)
-    monkeypatch.setattr(arm_compare, "approve_phase", lambda project, status: approved.append(status) or True)
+    monkeypatch.setattr(arm_compare, "approve_phase", lambda project, status, *_: approved.append(status) or True)
+    monkeypatch.setattr(arm_compare, "cli_version", lambda: arm_compare.PINNED_CLI_VERSION)
     monkeypatch.setattr(arm_compare.c_prime, "_sh", lambda argv, cwd, **_:
                         type("R", (), {"returncode": 0, "stdout": "2.1.308", "stderr": ""})())
     record = arm_compare.drive(run, "claude-opus-5-5", 600, 30.0)

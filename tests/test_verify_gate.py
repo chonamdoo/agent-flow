@@ -105,13 +105,40 @@ def test_a_node_project_falls_back_to_its_test_script(tmp_path):
     assert verify_gate.verify_command(config, project) == ["npm", "test", "--silent"]
 
 
-def test_a_failed_or_unparseable_review_blocks_nothing(tmp_path):
+def test_a_failed_or_unparseable_review_is_a_recorded_gate_error_not_a_pass(tmp_path):
     assert verify_gate.parse_findings("NO_FINDINGS") == [] and verify_gate.parse_findings("`NO_FINDINGS`\n") == []
     assert verify_gate.parse_findings("Looks fine overall.") is None and verify_gate.parse_findings(None) is None
     config, stubs = _config(tmp_path), Stubs([True], ["I could not tell."])
     output, event = _stop(config, stubs)
     assert output == {} and event["findings"] is None
-    assert verify_gate.summary(tmp_path / verify_gate.LOG)["review_unparsed"] == 1
+    assert event["decision"] == "gate-error" and event["gate_error"] == "review-unparsed"
+    summary = verify_gate.summary(tmp_path / verify_gate.LOG)
+    assert summary["review_unparsed"] == 1 and summary["gate_errors"] == 1 and summary["blocks"] == 0
+    assert summary["gate_error_reasons"] == ["review-unparsed"]
+
+
+def test_a_review_call_that_errors_is_a_gate_error(tmp_path):
+    config = _config(tmp_path)
+    stubs = Stubs([True], [None])
+    stubs.review = lambda prompt, model, project, env: {"exit": 1, "timed_out": False, "seconds": 1, "is_error": True,
+                                                        "text": None, "cost_usd": None, "usage": None,
+                                                        "num_turns": None, "error": "boom"}
+    _, event = _stop(config, stubs)
+    assert event["decision"] == "gate-error" and event["gate_error"] == "review-error"
+
+
+def test_the_reviewer_runs_on_the_configured_model_and_effort(tmp_path):
+    argv = verify_gate.reviewer_argv("p", "claude-opus-5-5", "low")
+    assert argv[argv.index("--model") + 1] == "claude-opus-5-5" and argv[argv.index("--effort") + 1] == "low"
+    config = {**_config(tmp_path), "effort": "low"}
+    seen = []
+    stubs = Stubs([True], ["NO_FINDINGS"])
+    stubs.review = lambda prompt, model, project, env, effort=None: seen.append((model, effort)) or {
+        "exit": 0, "timed_out": False, "seconds": 1, "is_error": False, "text": "NO_FINDINGS", "cost_usd": 0.1,
+        "usage": None, "num_turns": 1, "error": None}
+    _, event = _stop(config, stubs)
+    assert seen == [("claude-opus-5-5", "low")] and event["model"] == "claude-opus-5-5" and event["effort"] == "low"
+    assert verify_gate.summary(tmp_path / verify_gate.LOG)["review_models"] == ["claude-opus-5-5/low"]
 
 
 def test_the_real_verify_runner_reports_exit_and_tail(tmp_path):

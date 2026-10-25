@@ -18,6 +18,33 @@
     python evals/arm_compare.py prepare --kit . --arm A --case oyg --trial 1 --output <work>/A-1
     python evals/arm_compare.py score <work>/A-1 --evaluator <private>/oyg/score.py
 
+Pre-registration v3.14 (the harness changes of the pre-flight audits):
+
+- Run sandbox (`sandbox.py`): `drive` runs every controller turn and every harness call of the runner in a PID and
+  mount namespace of its own: the host read-only, a private /tmp, the run's own HOME (`<run>/sandbox/home`, which holds
+  the runner's worktrees and the CLI's transcripts), the private evaluator repository, the harness checkout and other
+  runs hidden. What a turn leaves running dies with its namespace; a survivor, a sandbox setup error or a changed
+  system directory (tripwire) is recorded (`sandbox`, `tripwire_changed`) and is a harness error or contamination.
+  `ARM_COMPARE_SANDBOX=off` exists for the tests only.
+- Attempts (`attempts.py`): `prepare --runs-root` names a run directory with a random id and keeps the assignment in a
+  ledger beside it; a run is driven once, never moved (`check_not_moved`), and a run left out of the rates carries a
+  code of the fixed exclusion taxonomy.
+- Pins: the controller, the kit's reviewers (claude only, declared in the project's profile override), arm V's gate,
+  arm R's router and the simulated user run on Opus 5.5 low; `drive` checks the CLI version first and every recorded
+  call after (`verify_pins`). No self-update, no auto memory, one `--tools` list for every arm.
+- Budget and time: one ledger of every call (`budget_ledger`; null total while any part is unpriced), the cap checked
+  between resumes and before the classifier, one deadline from the router to the snapshot; `end_to_end_seconds` and
+  `controller_seconds` are reported apart.
+- Graded tree (`snapshot.py`): `drive` freezes the working tree as the run left it (same rule for every arm) with a
+  manifest; `score` and `chain-next` read only that snapshot, the submission runs in its own sandbox while the private
+  evaluator grades it (`wrap_submission`), scoring takes an exclusive lock against drives, and evaluators get
+  `--browser-repeat 2` and every log as `--scan`.
+- Conditions: the case's notes are in every arm's task text, the declaration is one text, the harness polls with
+  read-only `agent-flow status`, and arm V's unjudged reviews are `gate-error`s.
+- Metrics: content-based contamination (`scan_contamination`), completeness from the hidden checks for every arm,
+  no-start, false complete beside false block, strata never pooled, the archive left out of chain metrics, steps
+  survived by the success definition.
+
 `drive` starts the same `claude -p` controller for every arm in the run's project, so a workflow arm gets the
 project's hooks (a subagent does not load them, which blocked C-3 of the first round). It records the session's
 transcript path and the cost the CLI reports in `drive.json`.
@@ -121,6 +148,7 @@ them at list price next to the CLI's own `controller_cost_usd`, so a gap shows u
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -138,8 +166,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools" / "autoresearch"))
+import attempts  # noqa: E402
 import c_prime  # noqa: E402
 import completion  # noqa: E402
+import sandbox  # noqa: E402
+import snapshot  # noqa: E402
 import variants  # noqa: E402
 import integrity  # noqa: E402
 import router  # noqa: E402
@@ -154,8 +185,9 @@ UI_TASKS = HERE / "ui-tasks"
 # 브라우저로 채점하는 과제. 평가기는 비공개 저장소에 있고 `score --evaluator`로 넘긴다(#428).
 # devflow와 같은 Clean 아키텍처로 설치한다. 빈 프로젝트에 모드를 주지 않으면 `pending`으로 설치되고, run 도중에
 # 모드를 고르면 runner가 새 run을 요구해 진행이 막힌다(OYG C-1 네 번째 시도, harness 오류).
+# `canaries`: the private evaluator's canary for the task (the text exists only in its hidden files, #409 v3.14 C).
 UI_CASES = {"oyg": {"task": "oy-global-fullstack", "layer": "prd", "profile": "node",
-                    "install": ["--architecture-mode", "clean"]}}
+                    "install": ["--architecture-mode", "clean"], "canaries": ["OYG-CANARY-c899b7587bb72532bdcde083"]}}
 UI_TASK = ("Build the global beauty commerce site that `prd.md` describes: a web frontend and its backend. Follow "
            "`contract/interface.md` (how the build is started, routes, test ids) and `contract/openapi.yaml` (the API), "
            "and use only the data in `fixtures/`. Commit your work.")
@@ -168,13 +200,45 @@ CONTROLLER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "ANDROID_HOME"
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CODEX_HOME", "OPENAI_API_KEY",
                   # 실험 run의 effort(#409 v3.5). controller가 띄우는 reviewer·gate·router·시뮬레이터도 같은 값을 받는다.
                   "CLAUDE_CODE_EFFORT_LEVEL")
-AGENT_FLOW_WORKTREES = Path.home() / ".agent-flow" / "worktrees"
-CLAUDE_TOOLS = ("Bash", "Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "TodoWrite", "Task")
+# Pinned identity of every participating call (#409 v3.14 B): the controller, the kit's reviewers (claude only), arm V's
+# gate reviewer, arm R's router and the simulated user run on this model and effort; the CLI is this version. `drive`
+# stops before the controller starts when the CLI differs, and marks the run a harness error (`model-pin`) when any
+# call's record shows another model or effort.
+PINNED_MODEL = "claude-opus-5-5"
+PINNED_EFFORT = "low"
+PINNED_CLI_VERSION = "2.1.310"
+# What the controller's environment always sets: no self-update, no auto memory, the kit's reviewers on claude only,
+# and every model alias (sub-agents included) on the pinned model.
+PINNED_ENV = {"DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "AGENT_FLOW_REVIEWERS": "claude",
+              "CLAUDE_CODE_EFFORT_LEVEL": PINNED_EFFORT, "CLAUDE_CODE_SUBAGENT_MODEL": PINNED_MODEL,
+              "ANTHROPIC_DEFAULT_OPUS_MODEL": PINNED_MODEL, "ANTHROPIC_DEFAULT_SONNET_MODEL": PINNED_MODEL,
+              "ANTHROPIC_DEFAULT_HAIKU_MODEL": PINNED_MODEL}
+# The kit's reviewers, declared in the project's profile override for every phase and angle.
+REVIEWER_PIN = {"provider": "claude", "model": PINNED_MODEL, "effort": PINNED_EFFORT}
+# Inside the run sandbox HOME is the run's own (`sandbox.HOME_TARGET`), so the runner's worktrees have the same path
+# whether drive or the harness looks (`sandbox.to_host` maps them to `<run>/sandbox/home/...`).
+AGENT_FLOW_WORKTREES = Path(sandbox.HOME_TARGET) / ".agent-flow" / "worktrees"
+# One tool list for every arm (`--tools`, also pre-approved): files, shell, sub-agents, skills and the task list. No web,
+# no scheduling, no worktree switching (it needs an approval a headless run cannot give).
+CLAUDE_TOOLS = ("Bash", "Read", "Edit", "Write", "Glob", "Grep", "Task", "Skill", "TaskCreate", "TaskGet", "TaskList",
+                "TaskUpdate", "TaskStop")
+# The CLI's own skills, which every arm sees (Claude Code 2.1.310, HOME the run's own, project and local settings only).
+# A project's `.claude/skills` add to them (the kit's for B/C/D/S/R, all kit skills for VK: their treatment). Any other
+# difference is a harness error (`base-skills`).
+BASE_SKILLS = ("batch", "claude-api", "code-review", "dataviz", "debug", "deep-research", "design", "design-sync",
+               "doctor", "fewer-permission-prompts", "loop", "plugin-authoring", "run", "run-skill-generator",
+               "schedule", "simplify", "update-config", "verify", "workflow-authoring")
+# `off` only for tests that fake the CLI on the host; experiment runs need the sandbox (`required`).
+SANDBOX_ENV = "ARM_COMPARE_SANDBOX"
+# drive holds this lock shared, score exclusive: no run is graded while any drive is running (serial scoring).
+LOCK_ENV = "ARM_COMPARE_LOCK"
+DEFAULT_LOCK = Path(tempfile.gettempdir()) / "arm-compare.lock"
+BROWSER_REPEAT = 2
 ARMS = ("A", "AP", "PS", "V", "VK", "B", "C", "D", "S", "Cp", "R")
 # R: the router picks one of these arms' setups (`router.OPTIONS`, plus S variants); the record keeps `arm: "R"` and the
 # picked `effective_arm`, and everything that depends on the setup reads `effective_arm(meta)`.
 ROUTED_ARMS = ("R",)
-DEFAULT_MODEL = "claude-opus-5-5"
+DEFAULT_MODEL = PINNED_MODEL
 # no kit runner; the agent gets the task prompt only (and, AP and PS, a CLAUDE.md; V, a Stop hook; VK, also skills)
 BARE_ARMS = ("A", "AP", "PS", "V", "VK")
 GATE_ARMS = ("V", "VK")  # the bare prompt plus `verify_gate.py` as the project's Stop hook
@@ -204,7 +268,8 @@ End your final message with exactly one line:
     EVAL-STATUS: complete
     EVAL-STATUS: blocked: <reason>
 
-Declare `complete` only when the change is done and works; otherwise declare `blocked` with the reason.
+Declare `complete` only when the change is done and works; otherwise declare `blocked` with the reason. There is no
+git remote: work that waits only for a push or a pull request counts as done.
 """
 
 
@@ -278,14 +343,37 @@ or pull request), stop there.
 {DECLARATION}"""
 
 
-def bare_prompt(task: str, test_command: list[str]) -> str:
+def task_prompt(task: str) -> str:
+    """The bare arms' prompt: the task text (which carries the case's notes) and the completion declaration."""
     return f"""# Task
 
 {task}
 
-The project's tests run with `{' '.join(test_command)}`. Commit your change on the current branch.
-
 {DECLARATION}"""
+
+
+# What a case adds to its task for every arm (#409 v3.14 D): the phase case's test command and commit rule, the UI
+# task's scorer note, an external case's `bare_note`. Bare and workflow arms get the same task text, and so does the
+# runner (`agent-flow run <task>`), arm V's reviewer and arm R's router.
+def phase_task(case: dict) -> str:
+    return (f"{case['task']}\n\nThe project's tests run with `{' '.join(case['test_command'])}`. Commit your change "
+            "on the current branch.")
+
+
+UI_NOTE = "The project has no tests. The scorer starts the build through `eval.json` and drives it through the contract."
+
+
+def ui_task(task: str) -> str:
+    return f"{task}\n\n{UI_NOTE}"
+
+
+def external_task(case: dict) -> str:
+    note = (case.get("bare_note") or "").strip()
+    return f"{case['task']}\n\n{note}" if note else case["task"]
+
+
+def bare_prompt(task: str, test_command: list[str]) -> str:
+    return task_prompt(phase_task({"task": task, "test_command": test_command}))
 
 
 def _seed_ui_project(spec: dict, project: Path) -> None:
@@ -364,38 +452,74 @@ def seed_repository(repository: str, case_dir: Path) -> str:
     return str((case_dir / repository).resolve())
 
 
-def _seed_external_project(case: dict, case_dir: Path, project: Path) -> None:
-    """The seed repository at its pinned commit with no remote, then the task files in one commit.
+def _seed_external_project(case: dict, case_dir: Path, project: Path) -> dict:
+    """An export of the seed repository's pinned commit as the project's first commit, then the task files in one commit.
 
-    The clone's reflog names where it came from, and a seed inside the private checkout would tell the agent where the
-    checks live, so the reflog is emptied along with the remote.
+    Only the pinned tree comes in (#409 v3.14 E): no history, tags, other refs or objects of the seed repository, so a
+    later build kept in it is not reachable from the project. A later version of a task can start from an earlier
+    version's reference build (`seed.patches`, `git format-patch` output), applied as commits on top.
     """
     seed = case["seed"]
-    c_prime._sh(["git", "clone", "-q", "--no-checkout", seed_repository(seed["repository"], case_dir), str(project)],
-                project.parent, check=True)
-    for args in (["checkout", "-q", "-B", "main", seed["commit"]], ["remote", "remove", "origin"],
-                 ["config", "user.name", "eval"], ["config", "user.email", "eval@example.com"],
-                 ["config", "commit.gpgsign", "false"]):
+    with tempfile.TemporaryDirectory(prefix="arm-seed-") as scratch:
+        source = Path(scratch) / "source"
+        c_prime._sh(["git", "clone", "-q", "--no-checkout", seed_repository(seed["repository"], case_dir),
+                     str(source)], Path(scratch), check=True)
+        tree = _git(["rev-parse", f"{seed['commit']}^{{tree}}"], source)
+        project.mkdir(parents=True)
+        _git(["--work-tree", str(project.resolve()), "checkout", "-f", seed["commit"], "--", "."], source)
+    for args in (["init", "-q", "-b", "main"], ["config", "user.name", "eval"],
+                 ["config", "user.email", "eval@example.com"], ["config", "commit.gpgsign", "false"],
+                 ["add", "-A", "-f"], ["commit", "-qm", "seed"]):
         _git(args, project)
-    # A later version of a task can start from an earlier version's reference build (`git format-patch` output).
+    if _git(["rev-parse", "HEAD^{tree}"], project) != tree:
+        raise SystemExit("the seed export does not match the pinned commit's tree")
     for patch in seed.get("patches", []):
         _git(["am", "-q", str((case_dir / patch).resolve())], project)
-    _git(["reflog", "expire", "--expire=all", "--all"], project)
-    for target, source in case["files"].items():
+    for target, source_file in case["files"].items():
         (project / target).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(case_dir / source, project / target)
+        shutil.copy2(case_dir / source_file, project / target)
     _git(["add", "-A", *case["files"]], project)
     _git(["commit", "-qm", "task"], project)
+    return {"commit": seed["commit"], "tree": tree, "patches": len(seed.get("patches", []))}
+
+
+def canaries(case: dict) -> list[str]:
+    """The case's canary strings (`case.json` `canaries`): text that exists only in its hidden files."""
+    found = case.get("canaries") or []
+    if not isinstance(found, list) or not all(isinstance(item, str) and item.strip() for item in found):
+        raise SystemExit("`canaries` must be a list of non-empty strings")
+    return [item.strip() for item in found]
+
+
+def canaries_sha256(case: dict) -> str | None:
+    """Only the digest goes into `arm.json`: the run directory is readable by the agent, the canaries must not be."""
+    found = canaries(case)
+    return hashlib.sha256("\0".join(sorted(found)).encode("utf-8")).hexdigest() if found else None
+
+
+def _now() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _run_identity(output: Path) -> dict:
+    """The run's opaque id (its directory name) and where it was prepared. A run directory is never moved."""
+    return {"run_id": output.name, "run_dir": str(output.resolve())}
+
+
+def check_not_moved(run: Path, meta: dict) -> None:
+    recorded = meta.get("run_dir") or (str(Path(meta["project"]).parent) if meta.get("project") else None)
+    if recorded and Path(recorded).resolve() != run.resolve():
+        raise SystemExit(f"moved: the run was prepared at {recorded}, not {run}; a run directory is never moved "
+                         "(score it where it was prepared, or record it as a harness error `moved`)")
+
+
+def pin_reviewers(project: Path, profile: str) -> dict:
+    """Every kit reviewer on the pinned claude model and effort, declared in the project's profile override."""
+    return variants.pin_reviewers(project, profile, REVIEWER_PIN)
 
 
 def external_bare_prompt(case: dict) -> str:
-    return f"""# Task
-
-{case["task"]}
-
-{case.get("bare_note", "")}
-
-{DECLARATION}"""
+    return task_prompt(external_task(case))
 
 
 # Arm A+P (#409 program v2): the bare arm plus these principles as the project's CLAUDE.md, so the effect of stating
@@ -786,15 +910,27 @@ def _carry_uncommitted(checkout: Path, project: Path) -> list[str]:
     return changed
 
 
+def kit_managed_paths(prev_project: Path) -> list[str]:
+    """The paths the kit's installer recorded as its own in `.git/info/exclude` (no globs, no negations)."""
+    common = _common_dir(prev_project)
+    exclude = (common / "info" / "exclude") if common is not None else prev_project / ".git" / "info" / "exclude"
+    lines = exclude.read_text(encoding="utf-8").splitlines() if exclude.is_file() else []
+    return sorted({line.strip().strip("/") for line in lines
+                   if line.strip() and not line.lstrip().startswith(("#", "!"))
+                   and not any(char in line for char in "*?[") and line.strip().strip("/")})
+
+
 def _carry_kit_state(prev_project: Path, project: Path) -> list[str]:
-    """What the kit keeps out of git in the previous project (its install, project settings, local skills,
-    handoffs), without build outputs or live run state. `_install` then rewrites the paths it holds."""
+    """Only what the kit manages in the previous project (#409 v3.14 E): the paths its installer recorded in
+    `.git/info/exclude` (its install, project settings, local skills, handoffs), without build outputs or live run
+    state. A bare arm carries none of these, so neither arm carries anything else git ignores (`.env`, data, build
+    output). `_install` then rewrites the paths the kit state holds."""
     common = _common_dir(prev_project)
     if common is not None and (common / "info" / "exclude").is_file():
         (project / ".git" / "info").mkdir(parents=True, exist_ok=True)
         shutil.copy2(common / "info" / "exclude", project / ".git" / "info" / "exclude")
-    listing = c_prime._sh(["git", "ls-files", "-o", "-i", "--exclude-standard", "--directory", "-z"],
-                          prev_project).stdout.split("\0")
+    listing = [name for name in kit_managed_paths(prev_project) if (prev_project / name).exists()
+               or (prev_project / name).is_symlink()]
     kit_dir = (prev_project / ".agent-flow").resolve()
 
     def ignore(directory: str, names: list[str]) -> set[str]:
@@ -866,13 +1002,17 @@ def prepare_chain_next(prev_run: Path, case_dir: Path, output: Path, layer: str 
     """
     prev_run, output = prev_run.resolve(), output.resolve()
     prev, prev_result, prev_drive = _chain_previous(prev_run)
-    prev_project = prev_run / "project" if (prev_run / "project").is_dir() else Path(prev["project"])
+    check_not_moved(prev_run, prev)
+    prev_project = Path(prev["project"])
     arm = effective_arm(prev)
-    checkout, chosen = select_checkout(prev_project, arm)
-    if chosen["checkout_error"]:
-        raise SystemExit(f"the previous run has no gradable checkout: {chosen['checkout_error']}")
-    if prev_result.get("artifact_sha256") and artifact_sha256(checkout) != prev_result["artifact_sha256"]:
-        raise SystemExit("the previous run's checkout changed after it was scored; score it again first")
+    try:
+        frozen = snapshot.verify(prev_run)
+    except snapshot.SnapshotError as failure:
+        raise SystemExit(f"the previous run has no graded snapshot to build on: {failure}") from failure
+    if prev_result.get("artifact_sha256") and frozen["tree_sha256"] != prev_result["artifact_sha256"]:
+        raise SystemExit("the previous run's graded snapshot is not the one it was scored on")
+    scratch = Path(tempfile.mkdtemp(prefix="arm-chain-"))
+    checkout = snapshot.materialize(prev_run, scratch / "checkout")
     case = load_external_case(case_dir, seeded=False)
     selected = select_layer(case, case_dir, layer)
     case = {**case, "files": selected["files"]}
@@ -890,35 +1030,40 @@ def prepare_chain_next(prev_run: Path, case_dir: Path, output: Path, layer: str 
     _git(["add", "--force", *case["files"]], project)
     _git(["commit", "-qm", CHAIN_SEED.format(step=step), "--allow-empty"], project)
     simulated = _install_user_sim(output, selected["oracle"], prev_drive.get("model") or DEFAULT_MODEL)
-    task = with_ask_user(case["task"], simulated["ask_user"] if simulated else None)
+    task_text = external_task(case)
+    task = with_ask_user(task_text, simulated["ask_user"] if simulated else None)
     routed = {}
     if prev["arm"] in ROUTED_ARMS:
         decision = prev["router"]
         routed = {"effective_arm": arm, "router_frozen_at": prev.get("router_frozen_at"),
                   "router": {**decision, "cost_usd": 0.0, "reused": True, "reused_from": str(prev_run),
                              "original_cost_usd": decision.get("cost_usd")}}
-    searched, gate, skills = None, None, None
+    searched, gate, skills, pinned = None, None, None, None
     if arm in BARE_ARMS:
         if arm in GATE_ARMS:
             _drop_gate_hooks(project)
-            gate = _install_verify_gate(output, project, case["task"], sorted(case["files"]), case, "external")
+            gate = _install_verify_gate(output, project, task_text, sorted(case["files"]), case, "external")
         if arm in SKILL_ARMS:
             skills = prev.get("skills")  # committed in the previous step's history, as the arm left them
         _git(["checkout", "-qb", BRANCH], project)
-        prompt = external_bare_prompt({**case, "task": task})
+        prompt = task_prompt(task)
     else:
         carried["kit_state_carried"] = _carry_kit_state(prev_project, project)
         _install(agent_kit, project, {"profile": case["profile"], "modes": {"clean": {"install": case["install"]}}},
                  hooks=True)
+        pinned = pin_reviewers(project, case["profile"])
         carried["archived_runs"] = _archive_previous_runs(prev_project, project, step)
         spec = (prev["router"].get("variant") if prev["arm"] in ROUTED_ARMS
                 else (prev.get("variant") or {}).get("spec")) if arm == "S" else None
         searched = _write_variant(agent_kit, project, case["profile"], spec)
         prompt = driver_prompt(task, searched["name"] if searched else WORKFLOWS[arm], ask_user=simulated is not None)
     (output / "prompt.md").write_text(prompt, encoding="utf-8")
+    shutil.rmtree(scratch, ignore_errors=True)
     prior = [*chained.get("prior_runs", []), str(prev_run)]
     meta = {"arm": prev["arm"], **routed, "case": case["name"], "trial": prev.get("trial"),
-            "project": str(project.resolve()), "start_commit": _git(["rev-parse", "HEAD"], project),
+            "project": str(project.resolve()), **_run_identity(output), "prepared_at": _now(),
+            "reviewer_pin": pinned, "canaries_sha256": canaries_sha256(case),
+            "start_commit": _git(["rev-parse", "HEAD"], project),
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(), "kit_commit": prev.get("kit_commit"),
             "cprime_rules": None, "isolation": prev.get("isolation", "instructed"),
             "principles": principles_record(arm), **_workflow_record(arm, searched),
@@ -944,13 +1089,7 @@ def chain_reads(rows: list[dict], meta: dict) -> int:
 
 
 def ui_bare_prompt(task: str) -> str:
-    return f"""# Task
-
-{task}
-
-The project has no tests. The scorer starts the build through `eval.json` and drives it through the contract.
-
-{DECLARATION}"""
+    return task_prompt(ui_task(task))
 
 
 def _write_variant(kit: Path, project: Path, profile: str, variant: dict | None) -> dict | None:
@@ -973,8 +1112,17 @@ def _route(output: Path, project: Path, task: str, model: str, menu_variants: li
         variants.workflow(kit, spec)
         variants.profile_override(kit, profile, spec)
 
+    reports: list[dict] = []
+    call = (_sandboxed_call([{"path": str(project.resolve()), "mode": "ro"}], reports, "router")
+            if sandbox_mode() == "required" else None)
     decision = router.route(task, project, output / router.OUT_DIR, model, controller_env(dict(os.environ)),
-                            menu_variants, check_spec)
+                            menu_variants, check_spec, effort=PINNED_EFFORT, call=call)
+    if call is not None:
+        survivors = [item for report in reports for item in report.get("survivors") or []]
+        decision = {**decision, "sandbox": {"calls": len(reports), "survivors": survivors,
+                                            "errors": [report["error"] for report in reports if report.get("error")]}}
+        if survivors:
+            raise SystemExit(f"sandbox: {len(survivors)} router process(es) outlived their namespace")
     if _git(["status", "--porcelain"], project):
         raise SystemExit("the router changed the project")
     frozen = {**frozen, "effective_arm": decision["effective_arm"], "router": decision,
@@ -1013,6 +1161,9 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
         case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
     else:
         case = {"task": UI_TASK, "profile": ui["profile"], "modes": {"clean": {"install": ui["install"]}}}
+    if ui is not None and arm == "Cp":
+        raise ValueError("C′ is not defined for UI tasks")
+    prepared_at = _now()
     output.mkdir(parents=True)
     agent_kit = sanitized_kit(kit, output / "kit")
     project = output / "project"
@@ -1020,35 +1171,36 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
         _seed_project(case_dir, project)
     else:
         _seed_ui_project(ui, project)
-    if ui is not None and arm == "Cp":
-        raise ValueError("C′ is not defined for UI tasks")
+    task = ui_task(case["task"]) if ui else phase_task(case)
     routed, requested = {}, arm
     if arm in ROUTED_ARMS:
-        routed = _route(output, project, case["task"], model, menu_variants,
-                        {"arm": arm, "case": case_name, "trial": trial, "project": str(project.resolve())},
-                        agent_kit, case["profile"])
+        routed = _route(output, project, task, model, menu_variants,
+                        {"arm": arm, "case": case_name, "trial": trial, "project": str(project.resolve()),
+                         **_run_identity(output)}, agent_kit, case["profile"])
         arm, variant = routed["effective_arm"], routed["router"].get("variant")
-    searched, gate, skills = None, None, None
+    searched, gate, skills, pinned = None, None, None, None
     if arm in BARE_ARMS:
         if arm in PRINCIPLE_SETS:
             _write_principles(project, arm)
         if arm in GATE_ARMS:
-            gate = _install_verify_gate(output, project, case["task"], _ui_documents(ui) if ui else [], case,
+            gate = _install_verify_gate(output, project, task, _ui_documents(ui) if ui else [], case,
                                         "ui" if ui else "phase-case")
         if arm in SKILL_ARMS:
             skills = _install_skills(agent_kit, project)
         _git(["checkout", "-qb", BRANCH], project)
-        prompt = ui_bare_prompt(case["task"]) if ui else bare_prompt(case["task"], case["test_command"])
+        prompt = task_prompt(task)
     elif arm == "Cp":
         _install(agent_kit, project, case, hooks=False)
         _git(["checkout", "-qb", BRANCH], project)
-        prompt = c_prime.build(agent_kit, project, case["task"], "commit")
+        prompt = c_prime.build(agent_kit, project, task, "commit")
     else:
         _install(agent_kit, project, case, hooks=True)
+        pinned = pin_reviewers(project, case["profile"])
         searched = _write_variant(agent_kit, project, case["profile"], variant)
-        prompt = driver_prompt(case["task"], searched["name"] if searched else WORKFLOWS[arm])
+        prompt = driver_prompt(task, searched["name"] if searched else WORKFLOWS[arm])
     (output / "prompt.md").write_text(prompt, encoding="utf-8")
     meta = {"arm": requested, **routed, "case": case_name, "trial": trial, "project": str(project.resolve()),
+            **_run_identity(output), "prepared_at": prepared_at, "reviewer_pin": pinned,
             "start_commit": _git(["rev-parse", "HEAD"], project),
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
@@ -1075,35 +1227,40 @@ def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: in
         raise ValueError("an external case defines the A, AP, PS, V, VK, B, C, D, S and R arms only")
     selected = select_layer(case, case_dir, layer)
     case = {**case, "files": selected["files"]}
+    prepared_at = _now()
     output.mkdir(parents=True)
     agent_kit = sanitized_kit(kit, output / "kit")
     project = output / "project"
-    _seed_external_project(case, case_dir, project)
+    seeded = _seed_external_project(case, case_dir, project)
     simulated = _install_user_sim(output, selected["oracle"], model)
-    task = with_ask_user(case["task"], simulated["ask_user"] if simulated else None)
+    task_text = external_task(case)
+    task = with_ask_user(task_text, simulated["ask_user"] if simulated else None)
     routed, requested = {}, arm
     if arm in ROUTED_ARMS:
         routed = _route(output, project, task, model, menu_variants,
-                        {"arm": arm, "case": case["name"], "trial": trial, "project": str(project.resolve())},
-                        agent_kit, case["profile"])
+                        {"arm": arm, "case": case["name"], "trial": trial, "project": str(project.resolve()),
+                         **_run_identity(output)}, agent_kit, case["profile"])
         arm, variant = routed["effective_arm"], routed["router"].get("variant")
-    searched, gate, skills = None, None, None
+    searched, gate, skills, pinned = None, None, None, None
     if arm in BARE_ARMS:
         if arm in PRINCIPLE_SETS:
             _write_principles(project, arm)
         if arm in GATE_ARMS:
-            gate = _install_verify_gate(output, project, case["task"], sorted(case["files"]), case, "external")
+            gate = _install_verify_gate(output, project, task_text, sorted(case["files"]), case, "external")
         if arm in SKILL_ARMS:
             skills = _install_skills(agent_kit, project)
         _git(["checkout", "-qb", BRANCH], project)
-        prompt = external_bare_prompt({**case, "task": task})
+        prompt = task_prompt(task)
     else:
         _install(agent_kit, project, {"profile": case["profile"], "modes": {"clean": {"install": case["install"]}}},
                  hooks=True)
+        pinned = pin_reviewers(project, case["profile"])
         searched = _write_variant(agent_kit, project, case["profile"], variant)
         prompt = driver_prompt(task, searched["name"] if searched else WORKFLOWS[arm], ask_user=simulated is not None)
     (output / "prompt.md").write_text(prompt, encoding="utf-8")
     meta = {"arm": requested, **routed, "case": case["name"], "trial": trial, "project": str(project.resolve()),
+            **_run_identity(output), "prepared_at": prepared_at, "reviewer_pin": pinned, "seed_export": seeded,
+            "canaries_sha256": canaries_sha256(case),
             "start_commit": _git(["rev-parse", "HEAD"], project),
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "kit_commit": c_prime._sh(["git", "rev-parse", "HEAD"], kit).stdout.strip() or None,
@@ -1125,40 +1282,46 @@ def _common_dir(path: Path) -> Path | None:
     return Path(out).resolve() if out else None
 
 
-def linked_worktrees(project: Path) -> list[Path]:
-    """Linked worktrees git lists for the project (`--porcelain -z`, so no path is split on a newline).
+def linked_worktrees(project: Path, home: Path | None = None) -> list[Path]:
+    """Linked worktrees git lists for the project (`--porcelain -z`, so no path is split on a newline), as host paths.
 
+    `home` is the run sandbox's HOME on the host: git records a worktree the runner made inside the sandbox at its
+    inside path (`/root/.agent-flow/worktrees/<name>`), which `sandbox.to_host` maps back into the run directory.
     A listed path counts only while it still belongs to this repository. A stale registration can name a path that
     another project's worktree now occupies (a project moved aside and re-prepared at the same path makes the runner
     create its worktree there again), and grading it would credit that project's work to this run.
     """
     listing = c_prime._sh(["git", "worktree", "list", "--porcelain", "-z"], project).stdout
     paths = [Path(field.split(" ", 1)[1]) for field in listing.split("\0") if field.startswith("worktree ")]
+    if home is not None:
+        paths = [sandbox.to_host(path, home) for path in paths]
     common = _common_dir(project)
     return [path for path in paths if path.resolve() != project.resolve() and path.is_dir()
             and _common_dir(path) == common]
 
 
-def runner_worktrees(project: Path) -> list[Path]:
+def runner_worktrees(project: Path, home: Path | None = None) -> list[Path]:
     """Linked worktrees the runner owns: they have run state in `<git-common-dir>/agent-flow/worktrees/<name>/`."""
     state = _common_dir(project)
-    return [path for path in linked_worktrees(project)
+    return [path for path in linked_worktrees(project, home)
             if state is not None and (state / "agent-flow" / "worktrees" / path.name / ".agent-flow" / "runs").is_dir()]
 
 
-def select_checkout(project: Path, arm: str) -> tuple[Path, dict]:
-    """Which checkout to grade, chosen from run state, never from modification times.
+def select_checkout(project: Path, arm: str, home: Path | None = None) -> tuple[Path, dict]:
+    """Which checkout to grade, chosen from run state, never from modification times. `drive` asks this once, when
+    the run ends, records the answer (`drive.json` `checkout`: path, HEAD) and freezes that tree; `score` and
+    `chain-next` read only the frozen snapshot (`recorded_checkout`).
 
     A workflow arm's work is in the worktree its runner created; an agent can add worktrees of its own
     (`git worktree add` came up in the C′ smoke, #444), and the newest one need not be the one it worked in. The
     other arms work in the project itself. When a workflow arm has linked worktrees but not exactly one with run
     state, the choice is not decidable and the run is a harness error.
     """
-    linked = linked_worktrees(project)
+    linked = linked_worktrees(project, home)
     info = {"linked_worktrees": len(linked), "checkout_selected_by": None, "checkout_error": None}
     if arm not in WORKFLOWS:
         return project, {**info, "checkout_selected_by": "project"}
-    owned = runner_worktrees(project)
+    owned = runner_worktrees(project, home)
     if len(owned) == 1:
         return owned[0], {**info, "checkout_selected_by": "runner-state"}
     if not linked:
@@ -1311,6 +1474,19 @@ def _measured_usage(rows: list[dict], read: dict) -> dict:
     return totals
 
 
+def archived(path: Path) -> bool:
+    """A file in the kit's archive of earlier runs (`.git/agent-flow/archive/**`, a chain step's history)."""
+    parts = path.parts
+    return any(parts[index:index + 2] == ("agent-flow", "archive") for index in range(len(parts) - 1))
+
+
+def state_files(project: Path, checkout: Path, pattern: str) -> list[Path]:
+    """Runner state files of this run (`.git/agent-flow`, the checkout's `.agent-flow/runs`), never the archive: a
+    chain step's metrics must not count an earlier step's phases, reviewers, gates or approvals (#409 v3.14 E)."""
+    roots = [project / ".git" / "agent-flow", checkout / ".agent-flow" / "runs"]
+    return sorted({path for root in roots if root.is_dir() for path in root.rglob(pattern) if not archived(path)})
+
+
 def gate_record(project: Path, checkout: Path) -> dict:
     """What the runner's `gates` phase ran locally and what it only deferred to CI.
 
@@ -1318,8 +1494,7 @@ def gate_record(project: Path, checkout: Path) -> dict:
     the harness has no remote, so a deferred gate is never run at all. Read from each run's canonical
     `artifacts/gate-results.json`; the last one written is the run's final gate ledger.
     """
-    roots = [project / ".git" / "agent-flow", checkout / ".agent-flow" / "runs"]
-    ledgers = sorted({path for root in roots if root.is_dir() for path in root.rglob("artifacts/gate-results.json")},
+    ledgers = sorted(state_files(project, checkout, "artifacts/gate-results.json"),
                      key=lambda path: path.stat().st_mtime_ns)
     if not ledgers:
         return {"gate_ledgers": 0, "local_gates": None, "deferred_ci_checks": None, "required_local_gates_ran": None}
@@ -1338,8 +1513,7 @@ def gate_record(project: Path, checkout: Path) -> dict:
 
 def _runner_trace(project: Path, checkout: Path) -> dict:
     # `glob`의 `**`는 `.agent-flow` 같은 숨은 폴더를 건너뛴다. rglob은 건너뛰지 않는다.
-    roots = [project / ".git" / "agent-flow", checkout / ".agent-flow" / "runs"]
-    events = sorted({path for root in roots if root.is_dir() for path in root.rglob("events.jsonl")})
+    events = state_files(project, checkout, "events.jsonl")
     entered: list[str] = []
     reviewer_jobs = 0
     cap_stop = False
@@ -1404,9 +1578,8 @@ def declared_phases(project: Path, checkout: Path, workflow: str) -> list[str] |
 
 def phase_windows(project: Path, checkout: Path) -> list[dict]:
     """[{phase, start, end}] in time order from the runner's events. Entering a phase closes the open one."""
-    roots = [project / ".git" / "agent-flow", checkout / ".agent-flow" / "runs"]
     events = []
-    for path in sorted({path for root in roots if root.is_dir() for path in root.rglob("events.jsonl")}):
+    for path in state_files(project, checkout, "events.jsonl"):
         for row in run_usage._jsonl(path):
             details = row.get("details") if isinstance(row.get("details"), dict) else {}
             at = run_usage._timestamp(row.get("ts"))
@@ -1486,8 +1659,7 @@ def reviewer_record(project: Path, checkout: Path) -> dict:
     out. A cost is given only for a claude job whose model the runner recorded and is priced here; `unspecified` is the
     CLI's own default, which is not necessarily the controller's model, so it stays unpriced, as do codex jobs.
     """
-    roots = [project / ".git" / "agent-flow", checkout / ".agent-flow" / "runs"]
-    files = sorted({path for root in roots if root.is_dir() for path in root.rglob("review-metrics-*.json")})
+    files = state_files(project, checkout, "review-metrics-*.json")
     providers: dict[str, dict] = {}
     for path in files:
         try:
@@ -1560,8 +1732,7 @@ def preflight(models: list[tuple[str, str]], timeout: int = 180) -> list[dict]:
 
 def manual_spec_approvals(project: Path, checkout: Path) -> int:
     """Manual SPEC approvals the runner recorded for this project's runs, read from disk, not the transcript."""
-    roots = [project / ".git" / "agent-flow", checkout / ".agent-flow" / "runs"]
-    files = {path for root in roots if root.is_dir() for path in root.rglob(MANUAL_APPROVALS)}
+    files = state_files(project, checkout, MANUAL_APPROVALS)
     count = 0
     for path in files:
         try:
@@ -1575,14 +1746,9 @@ def manual_spec_approvals(project: Path, checkout: Path) -> int:
 
 
 def artifact_sha256(checkout: Path) -> str:
-    """Manifest hash of the files git sees in the checkout (tracked and untracked, not ignored), runner run state aside."""
-    listing = c_prime._sh(["git", "ls-files", "-co", "--exclude-standard", "-z"], checkout).stdout
-    manifest = hashlib.sha256()
-    for name in sorted(item for item in listing.split("\0") if item and not item.startswith(".agent-flow/runs/")):
-        path = checkout / name
-        digest = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
-        manifest.update(f"{digest}  {name}\n".encode("utf-8"))
-    return manifest.hexdigest()
+    """The graded snapshot's fingerprint of a tree: path, type, mode, symlink target and content of every entry, by the
+    snapshot rule (`snapshot.entries`: no `.git`, dependency folders or runner state)."""
+    return snapshot.entries_sha256(snapshot.entries(checkout))
 
 
 def rule_violation(row: dict) -> bool:
@@ -1601,60 +1767,289 @@ def rule_violation(row: dict) -> bool:
 
 
 def _tests_pass(command: list[str], cwd: Path) -> bool:
-    result = c_prime._sh(command, cwd, timeout=300)
-    ran = re.search(r"^Ran (\d+) tests?", result.stderr, re.M)
-    return result.returncode == 0 and bool(ran) and int(ran.group(1)) > 0 and "\nOK" in result.stderr
+    """A hidden or visible test command on the grading copy; in the submission's own sandbox when the sandbox is on
+    (the copy writable, nothing else of the machine: no other run, no evaluator repository, a private /tmp)."""
+    if sandbox_mode() == "required":
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8", "HOME": str(cwd)}
+        try:
+            result = sandbox.run(sandbox.submission_spec(cwd, env, 300, []), command, capture=True)
+        except sandbox.SandboxError:
+            return False
+        stderr, code = result["stderr"], result["returncode"]
+    else:
+        done = c_prime._sh(command, cwd, timeout=300)
+        stderr, code = done.stderr, done.returncode
+    ran = re.search(r"^Ran (\d+) tests?", stderr, re.M)
+    return code == 0 and bool(ran) and int(ran.group(1)) > 0 and "\nOK" in stderr
 
 
-def _grade_ui(checkout: Path, transcript: Path | None, evaluator: Path, repeat: int | None, out: Path) -> dict:
+SUBMISSION_WRAPPED = "gradlew.unsandboxed"
+
+
+def wrap_submission(build: Path, workdir: Path) -> dict:
+    """Makes a graded build start in its own sandbox when the evaluator runs it (#409 v3.14 C): every `eval.json`
+    command and `./gradlew` go through `sandbox.py exec`, which exposes only the evaluator's working copy of the build,
+    its HOME and DATA_DIR, with its own PID namespace and /tmp. The evaluator itself, its checks and the private
+    repository stay outside, invisible to the submission. Applied to the throwaway checkout given to the evaluator."""
+    launcher = [sys.executable, "-I", str((HERE / "sandbox.py").resolve()), "exec"]
+    config = workdir / "submission-sandbox.json"
+    log = workdir / "submission-sandbox.jsonl"
+    config.write_text(json.dumps({"timeout": 3600, "log": str(log)}), encoding="utf-8")
+    prefix = " ".join(shlex.quote(item) for item in [*launcher, "--spec", str(config), "--"])
+    wrapped: dict = {"eval_json": [], "gradlew": False, "log": str(log)}
+    spec_path = build / "eval.json"
+    try:
+        spec = json.loads(spec_path.read_text(encoding="utf-8")) if spec_path.is_file() else None
+    except (OSError, ValueError):
+        spec = None
+    if isinstance(spec, dict):
+        for key in ("install", "start", "build", "test"):
+            if isinstance(spec.get(key), str) and spec[key].strip():
+                spec[key] = f"{prefix} sh -c {shlex.quote(spec[key])}"
+                wrapped["eval_json"].append(key)
+        spec_path.write_text(json.dumps(spec, indent=1) + "\n", encoding="utf-8")
+    gradlew = build / "gradlew"
+    if gradlew.is_file() and not gradlew.is_symlink():
+        gradlew.rename(build / SUBMISSION_WRAPPED)
+        gradlew.write_text(f'#!/bin/sh\nexec {prefix} "$(dirname "$0")/{SUBMISSION_WRAPPED}" "$@"\n', encoding="utf-8")
+        gradlew.chmod(0o755)
+        wrapped["gradlew"] = True
+    return wrapped
+
+
+def evaluator_supports(evaluator: Path, flag: str) -> bool:
+    try:
+        return flag in evaluator.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def _grade_ui(checkout: Path, scans: list[Path] | Path | None, evaluator: Path, repeat: int | None, out: Path,
+              browser_repeat: int | None = None, reference_build: bool = False) -> dict:
     """Runs the private evaluator's `score.py` on the checkout. It copies the build itself and never writes to it.
 
-    `repeat` is None for an evaluator that takes no `--repeat` (an external case says which it is).
+    `repeat` is None for an evaluator that takes no `--repeat` (an external case says which it is); `browser_repeat` is
+    passed only to an evaluator that has `--browser-repeat`. Every log in `scans` is passed with its own `--scan`.
     """
+    if isinstance(scans, Path):
+        scans = [scans]
     argv = [sys.executable, "-I", str(evaluator), "--build", str(checkout),
-            *(["--repeat", str(repeat)] if repeat else []), "--output", str(out)]
-    if transcript is not None:
-        argv += ["--scan", str(transcript)]
+            *(["--repeat", str(repeat)] if repeat else []),
+            *(["--browser-repeat", str(browser_repeat)] if browser_repeat else []),
+            *(["--reference-build"] if reference_build else []), "--output", str(out)]
+    for path in scans or []:
+        argv += ["--scan", str(path)]
     graded = subprocess.run(argv, capture_output=True, text=True, timeout=7200)
     if graded.returncode != 0 or not out.is_file():
         return {"S": 0, "error": f"evaluator exited {graded.returncode}: {graded.stderr[-400:]}"}
     return json.loads(out.read_text(encoding="utf-8"))
 
 
+# Content-based contamination (#409 v3.14 C): every log of a run is read for the case's canaries (text that exists only
+# in its hidden files), and every tool call is read for paths under the hidden roots. A hidden path a tool call names
+# whose result came back with content is a `read`; a hidden path seen only in some output (an `ls` of a parent) is a
+# `listing`, reported but not contamination.
+HIDDEN_ROOTS_ENV = "ARM_COMPARE_HIDDEN_ROOTS"
+DEFAULT_HIDDEN_ROOTS = ("/home/user/agent-flow-evals-private", "/home/user/agent-flow", "/tmp/claude-0")
+ABSOLUTE_PATH = re.compile(r"(?<![\w.~-])(/[\w.@%+=,~-]+(?:/[\w.@%+=,~-]*)*)")
+EMPTY_RESULT = re.compile(r"^\s*(|.*(No such file|not found|does not exist|Permission denied|cannot access).*)\s*$",
+                          re.I | re.S)
+
+
+def hidden_roots() -> list[str]:
+    extra = [item for item in os.environ.get(HIDDEN_ROOTS_ENV, "").split(":") if item]
+    return [*DEFAULT_HIDDEN_ROOTS, *extra]
+
+
+def _hidden_paths(text: str, roots: list[str], own: list[str]) -> list[str]:
+    found = []
+    for path in ABSOLUTE_PATH.findall(text):
+        if any(path == root or path.startswith(root.rstrip("/") + "/") for root in roots) and not any(
+                path == mine or path.startswith(mine.rstrip("/") + "/") or mine.startswith(path.rstrip("/") + "/")
+                for mine in own):
+            found.append(path)
+    return found
+
+
+def _tool_results(rows: list[dict]) -> dict[str, tuple[str, bool]]:
+    results = {}
+    for row in rows:
+        message = row.get("message")
+        if row.get("type") != "user" or not isinstance(message, dict) or not isinstance(message.get("content"), list):
+            continue
+        for block in message["content"]:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                content = block.get("content")
+                text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+                results[block.get("tool_use_id")] = (text, bool(block.get("is_error")))
+    return results
+
+
+def run_logs(run: Path, transcript: Path | None, project: Path, checkout: Path) -> list[Path]:
+    """Every log a run leaves: the controller's transcript and its sub-agents', the stream, the kit's reviewer
+    outputs (state and archive copies), arm V's gate log, arm R's router outputs and the simulated user's log."""
+    logs: list[Path] = []
+    if transcript is not None and transcript.is_file():
+        logs.append(transcript)
+        logs += run_usage.subagent_transcripts(transcript)[0]
+    logs += [run / name for name in ("controller.jsonl", "controller.stderr", verify_gate.LOG, user_sim.LOG)]
+    logs += sorted((run / router.OUT_DIR).glob("attempt-*")) if (run / router.OUT_DIR).is_dir() else []
+    logs += sorted((run / "review-archive").glob("*")) if (run / "review-archive").is_dir() else []
+    logs += [path for path in state_files(project, checkout, "*.md")]
+    logs += [path for path in state_files(project, checkout, "*review-results.json")]
+    return [path for path in dict.fromkeys(logs) if path.is_file()]
+
+
+def scan_contamination(run: Path, rows: list[dict], logs: list[Path], found_canaries: list[str],
+                       disclosed: str = "") -> dict:
+    """Canary hits per log, and hidden-path reads (named by a tool call that got content back) apart from listings."""
+    effective = [canary for canary in found_canaries if canary not in disclosed]
+    hits: dict[str, int] = {}
+    for path in logs:
+        try:
+            text = path.read_bytes().decode("utf-8", "replace")
+        except OSError:
+            hits[f"{path.name} (unreadable)"] = hits.get(f"{path.name} (unreadable)", 0)
+            continue
+        count = sum(text.count(canary) for canary in effective)
+        if count:
+            hits[str(path)] = count
+    roots, own = hidden_roots(), [str(run.resolve())]
+    results = _tool_results(rows)
+    reads, named, listed, examples = 0, 0, 0, []
+    used_ids = set()
+    for use in _tool_uses(rows):
+        text = json.dumps(use.get("input"), ensure_ascii=False)
+        paths = _hidden_paths(text, roots, own)
+        used_ids.add(use.get("id"))
+        if not paths:
+            continue
+        named += 1
+        result, is_error = results.get(use.get("id"), ("", False))
+        if not is_error and not EMPTY_RESULT.match(result):
+            reads += 1
+            examples.append(paths[0])
+    for tool_id, (result, _) in results.items():
+        if _hidden_paths(result, roots, own):
+            listed += 1
+    return {"canaries": len(effective), "canaries_disclosed_by_oracle": len(found_canaries) - len(effective),
+            "logs_scanned": len(logs), "canary_hits": hits, "hidden_path_named": named, "hidden_path_reads": reads,
+            "hidden_path_listed": listed, "read_examples": examples[:5],
+            "contaminated": bool(hits) or reads > 0}
+
+
+def _case_canaries(meta: dict, case_dir: Path | None, evaluator: Path | None) -> list[str]:
+    """The canaries of the run's case, from its `case.json` (never from the run directory); checked against the
+    digest `prepare` recorded."""
+    expected = meta.get("canaries_sha256")
+    if meta.get("case_kind") == "ui":
+        return list(UI_CASES.get(meta.get("case"), {}).get("canaries") or [])
+    if not expected:
+        return []
+    candidates = [case_dir] if case_dir is not None else []
+    if evaluator is not None:
+        candidates.append(evaluator.parent)
+    for directory in candidates:
+        if directory is not None and (directory / "case.json").is_file():
+            case = json.loads((directory / "case.json").read_text(encoding="utf-8"))
+            if canaries_sha256(case) == expected:
+                return canaries(case)
+    raise SystemExit("the run's case has canaries: pass --case-dir with the case.json it was prepared from")
+
+
 def score(run: Path, transcript: Path | None, evaluator: Path | None = None, repeat: int = 3,
-          harness_error: str | None = None) -> dict:
+          harness_error: str | None = None, case_dir: Path | None = None, reference_build: bool = False) -> dict:
+    """Grades the frozen snapshot (`snapshot.verify`, then a throwaway `snapshot.materialize`), never the live tree.
+
+    An undriven run (no `drive.json`) is frozen here first; a driven run without a snapshot cannot be graded and is a
+    harness error. Scoring holds the exclusive lock, so it never overlaps a drive."""
     meta = json.loads((run / "arm.json").read_text(encoding="utf-8"))
-    # `prepare` puts the project in the run directory and records its absolute path. A run moved aside (a harness
-    # error kept for the record) would otherwise be graded on whatever now sits at the recorded path.
-    project = run / "project" if (run / "project").is_dir() else Path(meta["project"])
-    if project.resolve() != Path(meta["project"]).resolve():
-        meta = {**meta, "project": str(project.resolve()), "project_recorded": meta["project"]}
+    check_not_moved(run, meta)
+    if harness_error:
+        try:
+            attempts.check_reason(harness_error)
+        except ValueError as failure:
+            raise SystemExit(str(failure)) from failure
+    project = Path(meta["project"])
     arm = effective_arm(meta)
-    checkout, chosen = select_checkout(project, arm)
-    harness_error = harness_error or chosen["checkout_error"]
-    if transcript is None and (run / "drive.json").is_file():
-        recorded = json.loads((run / "drive.json").read_text(encoding="utf-8")).get("transcript")
-        transcript = Path(recorded) if recorded else None
+    driven = json.loads((run / "drive.json").read_text(encoding="utf-8")) if (run / "drive.json").is_file() else {}
+    harness_error = harness_error or driven.get("harness_error")
+    if transcript is None and driven.get("transcript"):
+        transcript = Path(driven["transcript"])
     main_rows, rows, read = session_rows(transcript)
-    commits = c_prime._sh(["git", "rev-list", "--count", f"{meta['start_commit']}..HEAD"], checkout).stdout.strip()
-    artifact = artifact_sha256(checkout)
-    if meta.get("case_kind") == "external":
-        if evaluator is None:
-            raise SystemExit("an external case needs --evaluator <its score.py>")
-        ui = _grade_ui(checkout, transcript, evaluator, repeat if meta.get("evaluator_repeat") else None,
-                       run / "ui-score.json")
-        graded = {"ui": {key: ui.get(key) for key in (*meta["score_keys"], "error")},
-                  "oracle": ui.get("S") == 1, "contaminated": bool(ui.get("contamination"))}
-    elif meta.get("case_kind") == "ui":
-        if evaluator is None:
-            raise SystemExit("a UI task needs --evaluator <private score.py>")
-        ui = _grade_ui(checkout, transcript, evaluator, repeat, run / "ui-score.json")
-        graded = {"ui": {key: ui.get(key) for key in ("S", "G", "API", "V", "E", "error", "failed_browser", "failed_api",
-                                                         "evaluator_sha256", "build_sha256", "ledger", "isolation")},
-                  "oracle": ui.get("S") == 1, "contaminated": bool(ui.get("contamination"))}
+    # A v3.14 drive (`driven_at`) freezes the tree and records the checkout itself. A run with no drive, or with a
+    # drive.json from an older harness, is frozen here and says so (`legacy_drive`).
+    current = bool(driven.get("driven_at"))
+    if snapshot.load(run) is None:
+        if current:
+            raise SystemExit("snapshot: the driven run has no graded snapshot; record it with "
+                             "--harness-error 'snapshot: ...' after checking drive.json")
+        frozen_checkout, _ = select_checkout(project, arm)
+        snapshot.freeze(frozen_checkout, run, meta.get("start_commit"),
+                        "score: legacy drive" if driven else "score: undriven run")
+    try:
+        manifest = snapshot.verify(run)
+    except snapshot.SnapshotError as failure:
+        raise SystemExit(f"snapshot: {failure}") from failure
+    if current:
+        live, chosen = recorded_checkout(run, meta, driven)
+        chosen = {key: chosen.get(key) for key in ("linked_worktrees", "checkout_selected_by", "checkout_error")}
     else:
-        graded = _grade_phase_case(meta, checkout)
-        graded["contaminated"] = any(marker in item for item in tool_inputs(rows) for marker in HIDDEN_MARKERS)
+        live, chosen = select_checkout(project, arm)
+    harness_error = harness_error or chosen.get("checkout_error")
+    message = final_message(main_rows)
+    declaration = completion.classify(message if main_rows else None)
+    found_canaries = _case_canaries(meta, case_dir, evaluator)
+    oracle_text = ""
+    if meta.get("user_sim") and (run / user_sim.DIR / user_sim.ORACLE).is_file():
+        oracle_text = (run / user_sim.DIR / user_sim.ORACLE).read_text(encoding="utf-8", errors="replace")
+    logs = run_logs(run, transcript, project, live)
+    scanned = scan_contamination(run, rows, logs, found_canaries, oracle_text)
+    submission = None
+    with _Lock(exclusive=True), tempfile.TemporaryDirectory(prefix="arm-score-") as scratch:
+        checkout = snapshot.materialize(run, Path(scratch) / "checkout")
+        commits = c_prime._sh(["git", "rev-list", "--count", f"{meta['start_commit']}..HEAD"], checkout).stdout.strip()
+        checked = integrity.check(checkout, meta["start_commit"], shell_commands(rows), message, declaration)
+        gate = gate_result(run, meta, checkout, driven) if arm in GATE_ARMS else None
+        sandboxed = sandbox_mode() == "required"
+        if meta.get("case_kind") in ("external", "ui"):
+            if evaluator is None:
+                raise SystemExit("an external case or UI task needs --evaluator <its score.py>")
+            if sandboxed:
+                submission = wrap_submission(checkout, Path(scratch))
+            scans = [path for path in logs if not (path == run / user_sim.LOG and any(c in oracle_text
+                                                                                      for c in found_canaries))]
+            browser = BROWSER_REPEAT if evaluator_supports(evaluator, "--browser-repeat") else None
+            if meta.get("case_kind") == "external":
+                ui = _grade_ui(checkout, scans, evaluator, repeat if meta.get("evaluator_repeat") else None,
+                               run / "ui-score.json", browser, reference_build)
+                graded = {"ui": {key: ui.get(key) for key in (*meta["score_keys"], "error")}}
+            else:
+                ui = _grade_ui(checkout, scans, evaluator, repeat, run / "ui-score.json", browser, reference_build)
+                graded = {"ui": {key: ui.get(key) for key in ("S", "G", "API", "V", "E", "error", "failed_browser",
+                                                                 "failed_api", "evaluator_sha256", "build_sha256",
+                                                                 "ledger", "isolation")}}
+            graded.update({"oracle": ui.get("S") == 1, "contaminated": bool(ui.get("contamination")),
+                           "evaluator_contamination_detail": ui.get("contamination_detail"),
+                           "evaluator_browser_repeat": browser})
+            if submission is not None:
+                submission["runs"] = [json.loads(line) for line in Path(submission["log"]).read_text(
+                    encoding="utf-8").splitlines() if line.strip()] if Path(submission["log"]).is_file() else []
+                submission["survivors"] = sum(len(item.get("survivors") or []) for item in submission["runs"])
+                submission.pop("log", None)
+            failures = finding_split.failures_from(ui, graded["ui"])
+            graded["hidden_failures"] = {key: failures[key] for key in ("missing", "wrong", "unclear", "no_build",
+                                                                        "failed_count")}
+            graded["no_start"] = failures["no_build"]
+            graded["complete_build"] = not failures["no_build"] and failures["missing"] == 0
+        else:
+            graded = _grade_phase_case(meta, checkout)
+            graded["contaminated"] = any(marker in item for item in tool_inputs(rows) for marker in HIDDEN_MARKERS)
+            graded["no_start"], graded["complete_build"] = None, None
+    graded["contamination_scan"] = scanned
+    graded["contaminated"] = graded["contaminated"] or scanned["contaminated"]
+    if driven.get("tripwire_changed"):
+        graded["contaminated"] = True
     simulated = user_sim.summary(run / user_sim.LOG) if meta.get("user_sim") else None
     if simulated is not None:
         simulated["oracle_reads"] = oracle_reads(rows, run)
@@ -1662,38 +2057,44 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
     if meta.get("chain"):
         graded["chain_reads"] = chain_reads(rows, meta)
         graded["contaminated"] = graded["contaminated"] or bool(graded["chain_reads"])
-    message = final_message(main_rows)
-    declaration = completion.classify(message if main_rows else None)
-    drive = json.loads((run / "drive.json").read_text(encoding="utf-8")) if (run / "drive.json").is_file() else {}
-    gate = gate_result(run, meta, checkout) if arm in GATE_ARMS else None
+    if gate is not None and not gate["integrity_intact"]:
+        harness_error = harness_error or "gate-integrity: the gate script or config changed after prepare/drive"
     routed = meta.get("router")
-    result = {"isolation": "instructed", **meta, "task_kind": "normal", "checkout": str(checkout), **graded,
+    ledger = budget_ledger(run, meta, driven.get("cost_usd"), driven.get("review_classifier_cost_usd") or 0.0,
+                           project, live)
+    sandboxed_drive = (driven.get("sandbox") or {}).get("mode") == "required"
+    result = {"isolation": "instructed", **meta, "task_kind": "normal",
+              **({"isolation": "enforced"} if sandboxed_drive else {}),
+              "checkout": str(live), "graded_tree": str(run / snapshot.DIR / "tree"),
+              "legacy_drive": bool(driven) and not current,
+              "snapshot": snapshot.record(manifest), "uncommitted": manifest["has_uncommitted"], **graded,
+              "submission_sandbox": submission,
               "commits": int(commits) if commits.isdigit() else None,
-              "final_message": message, "declaration": declaration,
-              "integrity": integrity.check(checkout, meta["start_commit"], shell_commands(rows), message, declaration),
+              "final_message": message, "declaration": declaration, "integrity": checked,
               "spec_self_approvals": sum(bool(SPEC_SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
               "phase_self_approvals": sum(bool(PHASE_SELF_APPROVAL.search(item)) for item in tool_inputs(rows)),
               "verify_downgrades": verify_downgrades(rows), **skills_invoked(rows),
-              "manual_spec_approvals": manual_spec_approvals(project, checkout), "artifact_sha256": artifact,
+              "manual_spec_approvals": manual_spec_approvals(project, live), "artifact_sha256": manifest["tree_sha256"],
               "transcript": str(transcript) if transcript else None, **_measured_usage(rows, read), **read,
-              "controller_cost_usd": drive.get("cost_usd"),
-              "total_cost_usd": total_cost(drive.get("cost_usd"), gate, routed,
-                                           simulated["user_sim_cost_usd"] if simulated else 0.0,
-                                           drive.get("review_classifier_cost_usd") or 0.0),
-              **({key: drive[key] for key in ("review_classifier_cost_usd", "review_stop", "fix_extensions",
-                                              "review_classifier_failures") if key in drive}),
-              **(simulated or {}), **({"grill_checks": drive["grill_checks"]} if "grill_checks" in drive else {}),
+              "controller_cost_usd": driven.get("cost_usd"), "total_cost_usd": ledger["total_cost_usd"],
+              "cost_complete": ledger["cost_complete"], "cost_components": ledger["components"],
+              "cost_unpriced": ledger["unpriced"], "cost_enforced_usd": ledger["enforced_usd"],
+              "end_to_end_seconds": driven.get("end_to_end_seconds"),
+              "controller_seconds": driven.get("controller_seconds"),
+              **({key: driven[key] for key in ("review_classifier_cost_usd", "review_stop", "fix_extensions",
+                                               "review_classifier_failures", "budget_stop", "deadline_stop",
+                                               "pins", "base_skills", "tripwire_changed") if key in driven}),
+              **(simulated or {}), **({"grill_checks": driven["grill_checks"]} if "grill_checks" in driven else {}),
               **({"router_cost_usd": routed.get("cost_usd")} if routed else {}),
-              **({"verify_gate": gate} if gate is not None else {}), "drive_exit": drive.get("exit"),
-              "drive_timed_out": drive.get("timed_out"), "drive_is_error": drive.get("is_error"),
-              "fix_loop_reapprovals": len(drive.get("fix_loop_reapprovals") or []),
-              "fix_loop_reapproval_log": drive.get("fix_loop_reapprovals") or [],
-              "harness_error": harness_error, **chosen,
-              **(_runner_trace(project, checkout) if arm in WORKFLOWS else {}),
-              **(gate_record(project, checkout) if arm in WORKFLOWS else {}),
-              **({"reviewers": reviewer_record(project, checkout)}
-                 if arm in WORKFLOWS else {}),
-              **({"phase_trace": phase_trace(project, checkout, meta.get("workflow") or WORKFLOWS[arm], rows,
+              **({"verify_gate": gate} if gate is not None else {}), "drive_exit": driven.get("exit"),
+              "drive_timed_out": driven.get("timed_out"), "drive_is_error": driven.get("is_error"),
+              "fix_loop_reapprovals": len(driven.get("fix_loop_reapprovals") or []),
+              "fix_loop_reapproval_log": driven.get("fix_loop_reapprovals") or [],
+              "harness_error": harness_error, "exclusion": attempts.exclusion_code(harness_error), **chosen,
+              **(_runner_trace(project, live) if arm in WORKFLOWS else {}),
+              **(gate_record(project, live) if arm in WORKFLOWS else {}),
+              **({"reviewers": reviewer_record(project, live)} if arm in WORKFLOWS else {}),
+              **({"phase_trace": phase_trace(project, live, meta.get("workflow") or WORKFLOWS[arm], rows,
                                              measured=read.get("subagents") != "unmeasured")}
                  if arm in WORKFLOWS else {}),
               "scored_at": datetime.now().isoformat(timespec="seconds")}
@@ -1702,12 +2103,12 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
 
 
 def total_cost(controller: float | None, gate: dict | None, routed: dict | None = None,
-               simulator: float | None = 0.0, classifier: float | None = 0.0) -> float | None:
-    """The controller's cost plus arm V's reviewer cost, arm R's router cost, the simulated user's cost and the
-    harness's review-finding classifier cost; null when any of them is unknown."""
+               simulator: float | None = 0.0, classifier: float | None = 0.0, kit: float | None = 0.0) -> float | None:
+    """The controller's cost plus arm V's reviewer cost, arm R's router cost, the simulated user's cost, the
+    harness's review-finding classifier cost and the kit's reviewers; null when any of them is unknown."""
     reviewer = gate["reviewer_cost_usd"] if gate is not None else 0.0
     chooser = routed.get("cost_usd") if routed else 0.0
-    parts = (controller, reviewer, chooser, simulator, classifier)
+    parts = (controller, reviewer, chooser, simulator, classifier, kit)
     return None if None in parts else round(sum(parts), 4)
 
 
@@ -1741,7 +2142,8 @@ def controller_argv(prompt: str, model: str, budget: float | None) -> list[str]:
     `--dangerously-skip-permissions`).
     Only project and local settings load, so nothing from the operator's own setup reaches one arm and not another.
     """
-    argv = ["claude", "-p", prompt, "--model", model, "--output-format", "stream-json", "--verbose",
+    argv = ["claude", "-p", prompt, "--model", model, "--effort", PINNED_EFFORT, "--output-format", "stream-json",
+            "--verbose", "--tools", ",".join(CLAUDE_TOOLS),
             # acceptEdits는 runner가 산출물을 쓰는 `.git/agent-flow/**`를 보호 경로로 막고 allow 규칙으로도 열리지 않는다
             # (OYG C-1 두 번째 시도). auto는 행동마다 분류기가 판정하는 모드로, 1차 pilot의 서브에이전트도 이 모드였다.
             "--permission-mode", "auto", "--allowedTools", ",".join(CLAUDE_TOOLS),
@@ -1754,7 +2156,18 @@ def controller_argv(prompt: str, model: str, budget: float | None) -> list[str]:
 
 
 def controller_env(parent: dict[str, str]) -> dict[str, str]:
-    return {**{key: parent[key] for key in CONTROLLER_ENV if key in parent}, "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1"}
+    """The allowlist from the operator's environment, plus the fixed settings every participating call runs with."""
+    return {**{key: parent[key] for key in CONTROLLER_ENV if key in parent}, "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1",
+            **PINNED_ENV}
+
+
+def _stream_init(stream: Path) -> dict | None:
+    """What the CLI said it started with (first `init` row): model, tools, skills, version, permission mode."""
+    for row in run_usage._jsonl(stream):
+        if row.get("type") == "system" and row.get("subtype") == "init":
+            return {key: row.get(key) for key in ("model", "tools", "skills", "claude_code_version", "permissionMode",
+                                                  "cwd", "plugins", "mcp_servers")}
+    return None
 
 
 def _stream_summary(stream: Path) -> dict:
@@ -1765,6 +2178,7 @@ def _stream_summary(stream: Path) -> dict:
         elif row.get("type") == "result":
             result = row
     return {"session_id": session, "cost_usd": result.get("total_cost_usd"), "is_error": result.get("is_error"),
+            "init": _stream_init(stream),
             "num_turns": result.get("num_turns"), "result_subtype": result.get("subtype"),
             "final_text": result.get("result") if isinstance(result.get("result"), str) else None}
 
@@ -1803,15 +2217,128 @@ RESUME_TO_FIX_FINDINGS = (
 REVIEW_CLASSIFIER_BUDGET_USD = 2.0
 
 
-def runner_status(project: Path) -> dict | None:
-    """What `agent-flow continue` reports for the run's worktree, read by the harness, not by the agent."""
-    owned = runner_worktrees(project)
+def sandbox_mode() -> str:
+    """`required` (the default: every drive and grading call runs in the run sandbox) or `off` (tests only)."""
+    mode = os.environ.get(SANDBOX_ENV, "required")
+    if mode not in ("required", "off"):
+        raise SystemExit(f"{SANDBOX_ENV} must be required or off, not {mode!r}")
+    return mode
+
+
+class _Lock:
+    """drive: shared; score: exclusive. Scoring waits until no drive runs, and a drive waits for a scoring to end."""
+
+    def __init__(self, exclusive: bool):
+        self.exclusive = exclusive
+        self.path = Path(os.environ.get(LOCK_ENV) or DEFAULT_LOCK)
+
+    def __enter__(self):
+        self.handle = self.path.open("a+")
+        fcntl.flock(self.handle, fcntl.LOCK_EX if self.exclusive else fcntl.LOCK_SH)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.handle, fcntl.LOCK_UN)
+        self.handle.close()
+
+
+def run_box(run: Path, meta: dict, cwd: Path | str, timeout: float, label: str) -> dict:
+    """The run sandbox for one call inside a run: the controller, or the harness's runner status and approvals.
+
+    The run directory is read-only; its project, and the logs the gate and the simulator append to, are writable;
+    HOME is the run's own (`<run>/sandbox/home`, so the runner's worktrees and the CLI's transcripts stay in the run).
+    """
+    layout = sandbox.prepare_layout(run)
+    expose = [{"path": str(run.resolve()), "mode": "ro"}, {"path": str(Path(meta["project"]).resolve()), "mode": "rw"}]
+    for name, needed in ((verify_gate.LOG, effective_arm(meta) in GATE_ARMS), (user_sim.LOG, bool(meta.get("user_sim")))):
+        if needed:
+            (run / name).touch()
+            expose.append({"path": str((run / name).resolve()), "mode": "rw"})
+    env = {**controller_env(dict(os.environ)), "HOME": sandbox.HOME_TARGET}
+    return sandbox.spec(expose=expose, cwd=str(cwd), env=env, timeout=timeout, home=str(layout["home"]),
+                        overlay_root=str(layout["overlay"]), label=label)
+
+
+def _sandboxed_call(expose: list[dict], reports: list[dict], label: str):
+    """A `(argv, cwd, env, timeout) -> (exit, stdout, stderr, timed out)` launcher that runs in a fresh sandbox with an
+    empty HOME (arm R's router at prepare)."""
+    def call(command: list[str], cwd: Path, env: dict[str, str], timeout: int):
+        box = sandbox.spec(expose=expose, cwd=str(cwd), env={**env, "HOME": sandbox.HOME_TARGET}, timeout=timeout,
+                           home=None, overlay_root=None, label=label)
+        try:
+            result = sandbox.run(box, command, capture=True)
+        except sandbox.SandboxError as failure:
+            reports.append({"label": label, "error": str(failure)})
+            return None, "", str(failure), False
+        reports.append({key: value for key, value in result.items() if key not in ("stdout", "stderr")})
+        return result["returncode"], result["stdout"], result["stderr"], result["timed_out"]
+    return call
+
+
+def runner_call(run: Path | None, meta: dict | None, argv: list[str], cwd: Path | str, timeout: float,
+                reports: list[dict] | None = None, label: str = "runner") -> subprocess.CompletedProcess:
+    """A harness call of the kit's runner (`status`, the approval `continue`): the controller's environment, a timeout
+    from the run's remaining time, and, when the sandbox is on, the run sandbox (same paths as the controller sees)."""
+    timeout = max(1.0, timeout)
+    if run is None or sandbox_mode() == "off":
+        try:
+            return c_prime._sh(argv, Path(cwd), env=controller_env(dict(os.environ)), timeout=timeout)
+        except subprocess.TimeoutExpired as expired:
+            return subprocess.CompletedProcess(argv, 124, expired.stdout or "", "timeout")
+    try:
+        result = sandbox.run(run_box(run, meta, cwd, timeout, label), argv, capture=True)
+    except sandbox.SandboxError as failure:
+        if reports is not None:
+            reports.append({"label": label, "error": str(failure)})
+        return subprocess.CompletedProcess(argv, 125, "", str(failure))
+    if reports is not None:
+        reports.append({key: value for key, value in result.items() if key not in ("stdout", "stderr")})
+    code = result["returncode"] if isinstance(result["returncode"], int) else 125
+    return subprocess.CompletedProcess(argv, 124 if result["timed_out"] else code, result["stdout"], result["stderr"])
+
+
+def runner_status(project: Path, home: Path | None = None, call=None) -> dict | None:
+    """What the read-only `agent-flow status` reports for the run's worktree, read by the harness, not by the agent.
+
+    `call(argv, cwd)` runs it (the run sandbox in `drive`). A stop at the fix-loop limit is read from the runner's
+    state (`fix_loop_cap_from_state`), since only `continue` prints the limit line and polling must not advance the run.
+    """
+    owned = runner_worktrees(project, home)
     if len(owned) != 1:
         return None
     worktree = owned[0]
-    shown = c_prime._sh([str(project / ".agent-flow" / "bin" / "agent-flow"), "continue", "--root", str(project),
-                         "--worktree", worktree.name], worktree)
-    return parse_runner_status(shown.stdout or "", worktree)
+    inside = sandbox.to_inside(worktree, home) if home is not None else worktree
+    argv = [str(project / ".agent-flow" / "bin" / "agent-flow"), "status", "--root", str(project),
+            "--worktree", worktree.name]
+    shown = call(argv, inside) if call is not None else runner_call(None, None, argv, inside, 120)
+    status = parse_runner_status(shown.stdout or "", inside)
+    if status is None:
+        return None
+    status["worktree_host"] = str(worktree)
+    if status.get("fix_loop_cap") is None:
+        status["fix_loop_cap"] = fix_loop_cap_from_state(worktree, status)
+    return status
+
+
+def fix_loop_cap_from_state(worktree: Path, status: dict) -> dict | None:
+    """`{rounds, phase, target}` when the run is blocked on a route and a fix collector reached the round limit."""
+    if status.get("reason") != "route_blocked":
+        return None
+    directory = run_state_dir(worktree, status)
+    try:
+        meta = json.loads((directory / "meta.json").read_text(encoding="utf-8")) if directory else {}
+    except (OSError, ValueError):
+        return None
+    rounds = meta.get("fix_loop_rounds")
+    if not isinstance(rounds, dict):
+        return None
+    capped = [(target, count) for target, count in rounds.items()
+              if isinstance(count, int) and count >= RUNNER_FIX_LOOP_MAX_ROUNDS]
+    if not capped:
+        return None
+    target, count = max(capped, key=lambda item: item[1])
+    return {"rounds": RUNNER_FIX_LOOP_MAX_ROUNDS, "phase": status.get("current_phase"), "target": target,
+            "source": "runner-state"}
 
 
 def parse_runner_status(stdout: str, worktree: Path) -> dict | None:
@@ -1831,13 +2358,26 @@ def parse_runner_status(stdout: str, worktree: Path) -> dict | None:
     return None
 
 
-def phase_artifact(worktree: Path, status: dict, phase: str) -> Path | None:
-    """`<git-common-dir>/agent-flow/worktrees/<name>/.agent-flow/runs/<run>/artifacts/<phase>.md`, where the runner
-    keeps the run's artifacts."""
+def _status_worktree(status: dict) -> Path:
+    """The worktree as the harness reads its files (the host path; the same path when no sandbox maps it)."""
+    return Path(status.get("worktree_host") or status["worktree"])
+
+
+def run_state_dir(worktree: Path, status: dict) -> Path | None:
+    """`<git-common-dir>/agent-flow/worktrees/<name>/.agent-flow/runs/<run>/`, where the runner keeps a run's state."""
     run_id = str(status.get("run") or "").rsplit("/", 1)[-1]
     common = _common_dir(worktree)
-    return (common / "agent-flow" / "worktrees" / worktree.name / ".agent-flow" / "runs" / run_id / "artifacts"
-            / f"{phase}.md") if common and run_id else None
+    return (common / "agent-flow" / "worktrees" / worktree.name / ".agent-flow" / "runs" / run_id
+            if common and run_id else None)
+
+
+def phase_artifact(worktree: Path, status: dict, phase: str) -> Path | None:
+    """A phase's artifact: `<run state>/<phase>.md`, where the runner writes it (`Runner._artifact_rel`); a phase that
+    declares another artifact name keeps it next to that, so the directory is searched for the phase's own name only.
+    (The harness looked in `<run>/artifacts/<phase>.md` before v3.14, where the runner keeps only ledgers, so the
+    re-review evidence and the grill check never found an artifact.)"""
+    directory = run_state_dir(worktree, status)
+    return directory / f"{phase}.md" if directory is not None else None
 
 
 def review_findings(worktree: Path, status: dict, limit: int = 12) -> dict:
@@ -1861,7 +2401,7 @@ def open_findings(worktree: Path, status: dict) -> list[dict]:
     artifact = phase_artifact(worktree, status, phase)
     if artifact is None:
         return []
-    results = artifact.parent.parent / f"{phase}-review-results.json"
+    results = artifact.parent / f"{phase}-review-results.json"
     try:
         outcomes = json.loads(results.read_text(encoding="utf-8")).get("outcomes") or []
     except (OSError, ValueError):
@@ -1881,15 +2421,22 @@ def open_findings(worktree: Path, status: dict) -> list[dict]:
     return list({item["sha"]: item for item in items}.values())
 
 
-def label_open_findings(findings: list[dict], timeout: float) -> dict:
-    """Labels from the frozen classifier, its cost, and the error if it failed. Never raises."""
+def label_open_findings(findings: list[dict], timeout: float, budget: float = None,
+                        env: dict[str, str] | None = None) -> dict:
+    """Labels from the frozen classifier, its cost, and the error if it failed. Never raises.
+
+    The classifier is a scoring tool (Opus 5.5 medium, no tools), run with the controller's environment and at most
+    `budget` (what the run's budget ledger has left, capped at REVIEW_CLASSIFIER_BUDGET_USD) and `timeout`."""
     if not findings:
         return {"findings": [], "cost_usd": 0.0, "error": "no-open-findings"}
+    limit = REVIEW_CLASSIFIER_BUDGET_USD if budget is None else min(REVIEW_CLASSIFIER_BUDGET_USD, budget)
+    if limit <= 0 or timeout <= 0:
+        return {"findings": [], "cost_usd": 0.0, "error": "no-budget-or-time-left"}
 
     def runner(prompt: str, system: str) -> dict:
-        return finding_split.run_claude(prompt, system, timeout=int(max(60, min(600, timeout))))
+        return finding_split.run_claude(prompt, system, timeout=int(max(1, min(600, timeout))), env=env)
 
-    classifier = finding_split.Classifier(None, runner=runner, budget=REVIEW_CLASSIFIER_BUDGET_USD)
+    classifier = finding_split.Classifier(None, runner=runner, budget=limit)
     try:
         labels = classifier.label(findings)
         error = None if all(labels[item["sha"]]["label"] for item in findings) else "unlabelled-findings"
@@ -1932,17 +2479,29 @@ def grill_check(worktree: Path, status: dict, log: Path) -> dict:
             "passed": distinct <= calls}
 
 
-def approve_phase(project: Path, status: dict) -> bool:
-    """Runs the runner's own approval command as the user would. The agent never runs it (#409 P4)."""
+def approve_phase(project: Path, status: dict, call=None) -> bool:
+    """Runs the runner's own approval command as the user would. The agent never runs it (#409 P4). Advancing the
+    run is the point of this call, so it is the one place the harness runs `continue`."""
     command = status.get("approval_command")
     if not isinstance(command, str) or not command.startswith("agent-flow continue ") or "--approve" not in command:
         return False
     argv = [str(project / ".agent-flow" / "bin" / "agent-flow"), *shlex.split(command)[1:]]
-    return c_prime._sh(argv, Path(status["worktree"])).returncode == 0
+    cwd = Path(status["worktree"])
+    done = call(argv, cwd) if call is not None else runner_call(None, None, argv, cwd, 600)
+    return done.returncode == 0
 
 
-def _controller_once(argv: list[str], project: Path, stream, err, timeout: float) -> tuple[int, bool]:
-    proc = subprocess.Popen(argv, cwd=project, env=controller_env(os.environ), stdout=stream, stderr=err,
+def _controller_once(argv: list[str], project: Path, stream, err, timeout: float, box: dict | None = None,
+                     reports: list[dict] | None = None) -> tuple[int, bool]:
+    """One controller process. With `box` it is the namespace's only child; when it ends, everything it left running
+    is killed with the namespace (`reports` keeps what was killed and any survivor)."""
+    if box is not None:
+        result = sandbox.run({**box, "timeout": max(timeout, 1)}, argv, stdout=stream, stderr=err)
+        if reports is not None:
+            reports.append(result)
+        code = result["returncode"] if isinstance(result["returncode"], int) else 125
+        return code, result["timed_out"]
+    proc = subprocess.Popen(argv, cwd=project, env=controller_env(dict(os.environ)), stdout=stream, stderr=err,
                             stdin=subprocess.DEVNULL, start_new_session=True)
     try:
         proc.wait(timeout=max(timeout, 1))
@@ -1958,16 +2517,148 @@ def _controller_once(argv: list[str], project: Path, stream, err, timeout: float
         return proc.returncode, True
 
 
-def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
-    """Runs the controller on `prompt.md`; at a phase approval the harness approves and resumes the same session.
+def cli_version() -> str | None:
+    """The claude CLI's version number (`2.1.310` of `2.1.310 (Claude Code)`)."""
+    try:
+        shown = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=60,
+                               env=controller_env(dict(os.environ)), stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    words = (shown.stdout or "").split()
+    return words[0] if shown.returncode == 0 and words else None
+
+
+def budget_ledger(run: Path, meta: dict, controller: float | None, classifier: float, project: Path,
+                  checkout: Path | None) -> dict:
+    """Every participating call's cost (#409 v3.14 B): the controller, the kit's reviewers, arm V's gate reviewer,
+    arm R's router, the simulated user and the harness's review classifier. `total_cost_usd` is null and
+    `cost_complete` false when any part is unpriced (the kit's reviewers print no usage); `enforced_usd` is what the
+    run cap is checked against: every priced part plus the reviewers' lower bound."""
+    arm = effective_arm(meta)
+    gate = verify_gate.summary(run / verify_gate.LOG)["reviewer_cost_usd"] if arm in GATE_ARMS else 0.0
+    routed = meta.get("router") or {}
+    router_cost = routed.get("cost_usd") if routed else 0.0
+    simulator = user_sim.summary(run / user_sim.LOG)["user_sim_cost_usd"] if meta.get("user_sim") else 0.0
+    kit, kit_floor, kit_jobs = 0.0, 0.0, 0
+    if arm in WORKFLOWS:
+        reviewers = reviewer_record(project, checkout or project)
+        kit_jobs = reviewers["jobs"]
+        kit = 0.0 if not kit_jobs else None
+        kit_floor = reviewers["priced_cost_lower_bound_usd"]
+    parts = {"controller": controller, "kit_reviewers": kit, "verify_gate": gate, "router": router_cost,
+             "simulator": simulator, "review_classifier": classifier}
+    unpriced = sorted(key for key, value in parts.items() if value is None)
+    known = sum(value for value in parts.values() if value is not None)
+    return {"components": parts, "unpriced": unpriced, "kit_reviewer_jobs": kit_jobs,
+            "kit_reviewer_cost_lower_bound_usd": kit_floor, "cost_complete": not unpriced,
+            "total_cost_usd": None if unpriced else round(known, 4), "enforced_usd": round(known + kit_floor, 4)}
+
+
+PROVENANCE = re.compile(r"^- (provider|model|effort): (\S+)\s*$", re.M)
+
+
+def kit_review_identities(project: Path, checkout: Path) -> list[dict]:
+    """The provider, model and effort of every kit reviewer: from each review artifact's provenance header and each
+    `review-metrics-*.json` job (the archive of earlier chain steps left out)."""
+    found = []
+    for path in state_files(project, checkout, "*.md"):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        values = dict(PROVENANCE.findall(text[:4000]))
+        if "provider" in values:
+            found.append({"source": path.name, "provider": values.get("provider"), "model": values.get("model"),
+                          "effort": values.get("effort")})
+    for path in state_files(project, checkout, "review-metrics-*.json"):
+        try:
+            jobs = json.loads(path.read_text(encoding="utf-8")).get("jobs") or []
+        except (OSError, ValueError):
+            found.append({"source": path.name, "provider": None, "model": None, "effort": None})
+            continue
+        found += [{"source": f"{path.name}:{job.get('job_id')}", "provider": job.get("provider"),
+                   "model": job.get("model"), "effort": job.get("effort")} for job in jobs if isinstance(job, dict)]
+    return found
+
+
+def verify_pins(run: Path, meta: dict, project: Path, checkout: Path, init: dict | None, rows: list[dict],
+                pinned_model: str = PINNED_MODEL, pinned_effort: str = PINNED_EFFORT) -> dict:
+    """Every participating call's model and effort against the pin; `mismatches` non-empty is a harness error."""
+    arm = effective_arm(meta)
+    mismatches: list[str] = []
+
+    def expect(where: str, model, effort) -> None:
+        if model != pinned_model or (effort is not None and effort != pinned_effort):
+            mismatches.append(f"{where}: {model}/{effort}")
+
+    if init is not None:
+        expect("controller", init.get("model"), None)
+    for model in sorted({message["model"] for message in run_usage.claude_messages(rows)
+                         if message.get("model") and message["model"] != "<synthetic>"}):
+        expect("transcript", model, None)
+    reviewers = kit_review_identities(project, checkout) if arm in WORKFLOWS else []
+    for item in reviewers:
+        if item["provider"] != "claude":
+            mismatches.append(f"kit reviewer {item['source']}: provider {item['provider']}")
+        expect(f"kit reviewer {item['source']}", item["model"], item["effort"] or "unspecified")
+    if arm in GATE_ARMS:
+        config = json.loads((run / "gate" / "config.json").read_text(encoding="utf-8"))
+        expect("verify gate config", config.get("model"), config.get("effort") or "unspecified")
+        for row in verify_gate.read_events(run / verify_gate.LOG):
+            if row.get("step") == "review":
+                expect("verify gate review", row.get("model"), row.get("effort") or "unspecified")
+    routed = meta.get("router")
+    if routed:
+        expect("router", routed.get("model"), routed.get("effort") or "unspecified")
+    if meta.get("user_sim"):
+        config = json.loads((run / user_sim.DIR / user_sim.CONFIG).read_text(encoding="utf-8"))
+        expect("simulator config", config.get("model"), config.get("effort") or "unspecified")
+        for number, row in enumerate(user_sim.read_log(run / user_sim.LOG), start=1):
+            expect(f"simulator call {number}", row.get("model"), row.get("effort") or "unspecified")
+            for used in row.get("models_used") or []:
+                expect(f"simulator call {number} (served)", used, None)
+    return {"model": pinned_model, "effort": pinned_effort, "kit_reviewers_checked": len(reviewers),
+            "mismatches": mismatches}
+
+
+def base_skills(init: dict | None, project: Path) -> dict | None:
+    """The CLI's own skills the controller listed, after the project's `.claude/skills` (an arm's treatment)."""
+    if not init or not isinstance(init.get("skills"), list):
+        return None
+    local = {path.parent.name for path in (project / PROJECT_SKILLS).glob("*/SKILL.md")}
+    listed = sorted(str(name) for name in init["skills"])
+    base = sorted(name for name in listed if name not in local)
+    return {"listed": len(listed), "project": sorted(local & set(listed)), "base": base,
+            "matches_pin": base == sorted(BASE_SKILLS),
+            "missing": sorted(set(BASE_SKILLS) - set(base)), "extra": sorted(set(base) - set(BASE_SKILLS))}
+
+
+def recorded_checkout(run: Path, meta: dict, driven: dict) -> tuple[Path, dict]:
+    """The checkout `drive` recorded for a workflow arm (host path and HEAD); SystemExit when it is missing, so a
+    workflow run is never graded on the leader project by default."""
+    project = Path(meta["project"])
+    if effective_arm(meta) not in WORKFLOWS:
+        return project, {"checkout_selected_by": "project"}
+    record = driven.get("checkout")
+    if not isinstance(record, dict) or not record.get("host"):
+        raise SystemExit("checkout: the workflow run's drive.json records no checkout (worktree path and HEAD)")
+    return Path(record["host"]), record
+
+
+def drive(run: Path, model: str, timeout: int, budget: float | None, cli: str | None = PINNED_CLI_VERSION) -> dict:
+    """Runs the controller on `prompt.md` in the run sandbox; at a phase approval the harness approves and resumes the
+    same session.
 
     At a stop at the fix-loop limit the harness labels the open findings (`label_open_findings`). An `incomplete`
     finding ends the run (`review_stop`). Otherwise the same session is resumed to fix exactly those findings, at most
     `MAX_FIX_EXTENSIONS` times (`fix_extensions`). When the classifier fails or no findings parse, it falls back to
     the old rule: at most `MAX_FIX_LOOP_REAPPROVALS` re-reviews without code changes (`RESUME_AFTER_FIX_LOOP_CAP`).
-    Time and budget limits cover the whole run, every resumption included.
+
+    One deadline covers the run from prepare's router call to the snapshot (`timeout` seconds of active time: the
+    router's seconds, then every controller turn and harness call). One budget covers every participating call
+    (`budget_ledger`): it is checked before each resume and before the classifier, and the controller's own cap is what
+    the other parts left. When the run ends the harness freezes the graded tree (`snapshot.freeze`), checks every call's
+    model and effort (`verify_pins`), the system tripwire and the sandbox reports.
     """
     meta = json.loads((run / "arm.json").read_text(encoding="utf-8"))
+    check_not_moved(run, meta)
     project = Path(meta["project"])
     prompt = (run / "prompt.md").read_text(encoding="utf-8")
     stream = run / "controller.jsonl"
@@ -1975,63 +2666,108 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
     routed = meta.get("router")
     if routed and routed.get("model") != model:
         raise SystemExit(f"arm R's router ran on {routed.get('model')}; drive the controller on the same model")
+    if model != PINNED_MODEL:
+        raise SystemExit(f"the controller runs on the pinned {PINNED_MODEL}, not {model}")
     chained = meta.get("chain") or {}
     if chained.get("model") and chained["model"] != model:
         raise SystemExit(f"chain step {chained['step']} continues a run driven on {chained['model']}; "
                          "drive it on the same model")
-    if chained and chained.get("effort") != os.environ.get("CLAUDE_CODE_EFFORT_LEVEL"):
-        raise SystemExit(f"chain step {chained['step']} continues a run with CLAUDE_CODE_EFFORT_LEVEL="
-                         f"{chained.get('effort')}; drive it with the same effort")
+    if chained and chained.get("effort") not in (None, PINNED_EFFORT):
+        raise SystemExit(f"chain step {chained['step']} continues a run with effort {chained.get('effort')}; "
+                         f"this harness drives at {PINNED_EFFORT}")
+    if (run / "drive.json").exists() or (run / snapshot.DIR).exists():
+        raise SystemExit("this run was driven already; a run directory is driven once (prepare a new attempt)")
+    observed = cli_version()
+    if cli is not None and observed != cli:
+        raise SystemExit(f"cli-version: claude is {observed}, the pinned version is {cli}; stop before the drive")
+    mode = sandbox_mode()
+    if mode == "required" and not sandbox.available():
+        raise SystemExit("sandbox: the run sandbox (unshare, root) is not available here")
+    layout = sandbox.prepare_layout(run) if mode == "required" else None
+    home = layout["home"] if layout else None
     if arm in GATE_ARMS:
         set_gate_model(run, model)
     simulated = meta.get("user_sim")
     if simulated:
         user_sim.set_model(run, model)
-    grill_checks: list[dict] = []
+    gate_config_sha = verify_gate.file_sha256(run / "gate" / "config.json") if arm in GATE_ARMS else None
+    tripwire_before = sandbox.tripwire()
+    reports: list[dict] = []
+    router_seconds = float(routed.get("seconds") or 0) if routed and not routed.get("reused") else 0.0
     started = time.monotonic()
+
+    def remaining() -> float:
+        return timeout - router_seconds - (time.monotonic() - started)
+
+    def call(argv: list[str], cwd: Path):
+        return runner_call(run if mode == "required" else None, meta, argv, cwd, min(600.0, remaining()), reports)
+
+    grill_checks: list[dict] = []
     approvals: list[str] = []
     reapprovals: list[dict] = []
     extensions: list[dict] = []
     classifier_failures: list[dict] = []
     review_stop: dict | None = None
     classifier_cost = 0.0
-    cap_stop = False
+    cap_stop = budget_stop = deadline_stop = False
+    controller_seconds = 0.0
     session, spent, exit_code, timed_out, summary = None, 0.0, None, False, {}
-    with stream.open("wb") as out, (run / "controller.stderr").open("wb") as err:
+    sandbox_error = None
+    with _Lock(exclusive=False), stream.open("wb") as out, (run / "controller.stderr").open("wb") as err:
         message = prompt
         while True:
-            remaining = None if budget is None else budget - spent
-            if remaining is not None and remaining <= 0:
+            ledger = budget_ledger(run, meta, spent, classifier_cost, project, project)
+            if budget is not None and ledger["enforced_usd"] >= budget:
+                budget_stop = True
                 break
-            # 재개한 세션의 total_cost_usd는 세션 누계다(확인함). CLI 상한에 누계가 쓰이는지는 모르므로 상한은 전체 예산으로
-            # 두고, 누계가 예산을 넘으면 더 재개하지 않는다.
-            argv = controller_argv(message, model, budget)
+            left = remaining()
+            if left <= 0:
+                deadline_stop = True
+                break
+            # 재개한 세션의 total_cost_usd는 세션 누계다(확인함). controller의 상한은 다른 부분이 쓰고 남은 몫이다.
+            others = ledger["enforced_usd"] - (spent or 0.0)
+            argv = controller_argv(message, model, None if budget is None else max(budget - others, 0.01))
             if session:
                 argv += ["--resume", session]
-            exit_code, timed_out = _controller_once(argv, project, out, err, timeout - (time.monotonic() - started))
+            box = run_box(run, meta, project, left, "controller") if mode == "required" else None
+            turn_started = time.monotonic()
+            try:
+                exit_code, timed_out = _controller_once(argv, project, out, err, left, box=box, reports=reports)
+            except sandbox.SandboxError as failure:
+                sandbox_error = str(failure)
+                break
+            finally:
+                controller_seconds += time.monotonic() - turn_started
             out.flush()
             summary = _stream_summary(stream)
             session = summary["session_id"] or session
             spent = summary["cost_usd"] or spent
             if timed_out or arm not in WORKFLOWS or len(approvals) >= MAX_HARNESS_APPROVALS:
                 break
-            # 완료를 선언한 run은 건드리지 않는다. `continue`는 상태를 다시 검증하므로 필요할 때만 부른다.
+            # 완료를 선언한 run은 건드리지 않는다. 관측은 읽기 전용 `status`로 한다.
             if completion.classify(summary.get("final_text")) == completion.COMPLETE:
                 _settle_reapproval(reapprovals, passed=True)
                 _settle_reapproval(extensions, passed=True)
                 cap_stop = False
                 break
-            status = runner_status(project)
+            status = runner_status(project, home, call)
             cap = (status or {}).get("fix_loop_cap")
             if status is not None:
                 _settle_reapproval(reapprovals, passed=not cap)
                 _settle_reapproval(extensions, passed=not cap)
             if cap:
                 cap_stop = True
-                worktree = Path(status["worktree"])
-                labelled = label_open_findings(open_findings(worktree, status),
-                                               timeout - (time.monotonic() - started))
+                worktree = _status_worktree(status)
+                ledger = budget_ledger(run, meta, spent, classifier_cost, project, project)
+                labelled = label_open_findings(open_findings(worktree, status), remaining(),
+                                               None if budget is None else budget - ledger["enforced_usd"],
+                                               env={**controller_env(dict(os.environ)),
+                                                    "CLAUDE_CODE_EFFORT_LEVEL": finding_split.EFFORT})
                 classifier_cost += labelled["cost_usd"]
+                if labelled["error"] == "no-budget-or-time-left":
+                    budget_stop = remaining() > 0
+                    deadline_stop = not budget_stop
+                    break
                 if labelled["error"] is None:
                     findings = labelled["findings"]
                     unfinished = [item for item in findings if item["label"] == "incomplete"]
@@ -2048,54 +2784,98 @@ def drive(run: Path, model: str, timeout: int, budget: float | None) -> dict:
                 classifier_failures.append({**cap, "error": labelled["error"], "findings": len(labelled["findings"])})
                 if len(reapprovals) >= MAX_FIX_LOOP_REAPPROVALS:
                     break
-                reapprovals.append({**cap, **review_findings(Path(status["worktree"]), status), "passed": None})
+                reapprovals.append({**cap, **review_findings(worktree, status), "passed": None})
                 message = RESUME_AFTER_FIX_LOOP_CAP.format(phase=cap["phase"])
                 continue
             cap_stop = False
             if not status or status.get("reason") != "phase_approval_required":
                 break
             if simulated and status.get("current_phase") == GRILL_PHASE:
-                check = grill_check(Path(status["worktree"]), status, run / user_sim.LOG)
+                check = grill_check(_status_worktree(status), status, run / user_sim.LOG)
                 grill_checks.append(check)
                 if check["passed"] is False and sum(item["passed"] is False for item in grill_checks) <= MAX_GRILL_RECHECKS:
                     message = RESUME_AFTER_GRILL_CHECK.format(rounds=check["user_rounds"], calls=check["ask_user_calls"],
                                                               script=simulated["ask_user"])
                     continue
-            if not approve_phase(project, status):
+            if not approve_phase(project, status, call):
                 break
             approvals.append(str(status.get("current_phase")))
             message = RESUME_AFTER_APPROVAL.format(phase=status.get("current_phase"))
-    transcript = session_transcript(session)
+    transcript = session_transcript(session, layout["projects"]) if layout else session_transcript(session)
+    init = summary.pop("init", None) or _stream_init(stream)
     summary.pop("final_text", None)
-    record = {"model": model, "timeout_seconds": timeout, "budget_usd": budget, "exit": exit_code,
-              "timed_out": timed_out, "seconds": round(time.monotonic() - started), **summary, "session_id": session,
-              "cost_usd": spent or None, "harness_approvals": approvals,
+    checkout, chosen = select_checkout(project, arm, home)
+    head = _git(["rev-parse", "HEAD"], checkout) if (checkout / ".git").exists() else None
+    checkout_record = {"host": str(checkout), "inside": str(sandbox.to_inside(checkout, home) if home else checkout),
+                       "head": head or None, **chosen}
+    frozen, freeze_error = None, None
+    if not chosen["checkout_error"]:
+        try:
+            frozen = snapshot.freeze(checkout, run, meta.get("start_commit"), checkout_record["inside"])
+        except (snapshot.SnapshotError, OSError) as failure:
+            freeze_error = str(failure)
+    _, rows, _ = session_rows(transcript)
+    pins = verify_pins(run, meta, project, checkout, init, rows)
+    skills = base_skills(init, project)
+    changed = sandbox.tripwire_changed(tripwire_before, sandbox.tripwire())
+    survivors = [item for report in reports for item in report.get("survivors") or []]
+    setup_errors = [report["error"] for report in reports if report.get("error")]
+    harness_error = next((reason for reason in (
+        f"sandbox: {sandbox_error}" if sandbox_error else None,
+        f"sandbox: {len(survivors)} process(es) outlived their namespace" if survivors else None,
+        f"sandbox: {setup_errors[0]}" if setup_errors else None,
+        f"model-pin: {'; '.join(pins['mismatches'][:5])}" if pins["mismatches"] else None,
+        f"checkout: {chosen['checkout_error']}" if chosen["checkout_error"] else None,
+        f"snapshot: {freeze_error}" if freeze_error else None,
+        (f"base-skills: missing {skills['missing']}, extra {skills['extra']}"
+         if skills is not None and not skills["matches_pin"] and mode == "required" else None)) if reason), None)
+    ledger = budget_ledger(run, meta, spent or None, classifier_cost, project, checkout)
+    end_to_end = router_seconds + (time.monotonic() - started)
+    record = {"model": model, "effort": PINNED_EFFORT, "timeout_seconds": timeout, "budget_usd": budget,
+              "exit": exit_code, "timed_out": timed_out or deadline_stop, "deadline_stop": deadline_stop,
+              "budget_stop": budget_stop, "seconds": round(end_to_end), "end_to_end_seconds": round(end_to_end),
+              "controller_seconds": round(controller_seconds), "router_seconds": round(router_seconds),
+              **summary, "session_id": session, "init": init,
+              "cost_usd": spent or None, "budget_ledger": ledger, "harness_approvals": approvals,
               "fix_loop_reapprovals": reapprovals, "fix_loop_cap_stop": cap_stop,
               **({"fix_extensions": extensions, "review_stop": review_stop,
                   "review_classifier_failures": classifier_failures,
                   "review_classifier_cost_usd": round(classifier_cost, 4)} if arm in WORKFLOWS else {}),
               **({"grill_checks": grill_checks} if simulated else {}),
-              **({"verify_gate": verify_gate.summary(run / verify_gate.LOG)} if arm in GATE_ARMS else {}),
+              **({"verify_gate": verify_gate.summary(run / verify_gate.LOG),
+                  "gate_config_sha256": gate_config_sha} if arm in GATE_ARMS else {}),
               "transcript": str(transcript) if transcript else None,
               "argv_sha256": hashlib.sha256(json.dumps(controller_argv(prompt, model, budget)).encode()).hexdigest(),
-              "cli_version": c_prime._sh(["claude", "--version"], run).stdout.strip() or None,
-              "effort": os.environ.get("CLAUDE_CODE_EFFORT_LEVEL")}
+              "tools": list(CLAUDE_TOOLS), "cli_version": observed, "cli_version_pinned": cli,
+              "sandbox": {"mode": mode, "version": sandbox.VERSION, "calls": len(reports),
+                          "killed_at_exit": [item for report in reports for item in report.get("killed_at_exit") or []],
+                          "survivors": survivors, "errors": setup_errors,
+                          "checks": next((report.get("checks") for report in reports if report.get("checks")), None)},
+              "tripwire_changed": changed, "checkout": checkout_record, "snapshot": frozen, "pins": pins,
+              "base_skills": skills, "harness_error": harness_error, "driven_at": _now()}
     (run / "drive.json").write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
     return record
 
 
 def set_gate_model(run: Path, model: str) -> None:
-    """Arm V's reviewer runs on the controller's model, which only `drive` knows."""
+    """Arm V's reviewer runs on the controller's model and the pinned effort, which only `drive` sets."""
     path = run / "gate" / "config.json"
     config = json.loads(path.read_text(encoding="utf-8"))
-    path.write_text(json.dumps({**config, "model": model}, indent=1) + "\n", encoding="utf-8")
+    path.write_text(json.dumps({**config, "model": model, "effort": PINNED_EFFORT}, indent=1) + "\n", encoding="utf-8")
 
 
-def gate_result(run: Path, meta: dict, checkout: Path) -> dict:
-    """What arm V's gate did, read from `verify-gate.jsonl`, and whether the agent left its hook wiring as installed."""
+def gate_result(run: Path, meta: dict, checkout: Path, driven: dict | None = None) -> dict:
+    """What arm V's gate did, read from `verify-gate.jsonl`; whether the agent left its hook wiring as installed; and
+    whether the gate's script and config are the ones prepare and drive wrote (`integrity_intact`)."""
     settings = checkout / GATE_SETTINGS
     intact = settings.is_file() and verify_gate.file_sha256(settings) == meta["verify_gate"]["settings_sha256"]
-    return {**verify_gate.summary(run / verify_gate.LOG), "wiring_intact": intact}
+    script = Path(meta["verify_gate"]["script"])
+    config = run / "gate" / "config.json"
+    expected_config = (driven or {}).get("gate_config_sha256")
+    script_ok = script.is_file() and verify_gate.file_sha256(script) == meta["verify_gate"]["script_sha256"]
+    config_ok = expected_config is None or (config.is_file() and verify_gate.file_sha256(config) == expected_config)
+    return {**verify_gate.summary(run / verify_gate.LOG), "wiring_intact": intact,
+            "integrity_intact": script_ok and config_ok, "script_intact": script_ok, "config_intact": config_ok}
 
 
 def _settle_reapproval(reapprovals: list[dict], *, passed: bool) -> None:
@@ -2109,8 +2889,9 @@ def run_status(row: dict) -> str:
 
     - harness-error: the harness itself was broken (marked with `score --harness-error`). The attempt was re-run
       under the fixed harness, so it leaves the denominator and is listed apart.
-    - contaminated, infra-error (the controller or the evaluator failed), timed-out: assigned attempts. They stay in
-      the denominator and count as failures (PREREGISTRATION.md, "제외").
+    - contaminated, infra-error (the controller or the evaluator failed), timed-out, gate-error (arm V's review could
+      not judge, so the treatment was not applied, #409 v3.14 D): assigned attempts. They stay in the denominator and
+      count as failures (PREREGISTRATION.md, "제외").
     """
     if row.get("harness_error"):
         return "harness-error"
@@ -2120,6 +2901,8 @@ def run_status(row: dict) -> str:
         return "timed-out"
     if row.get("drive_is_error") or (row.get("drive_exit") not in (None, 0)) or (row.get("ui") or {}).get("error"):
         return "infra-error"
+    if (row.get("verify_gate") or {}).get("gate_errors"):
+        return "gate-error"
     return "ok"
 
 
@@ -2136,7 +2919,42 @@ def _mean(values: list[float]) -> float | None:
 STATUS_COLUMNS = ("contaminated", "infra-error", "timed-out")
 
 
-def summarize(results: list[dict]) -> str:
+def stratum(row: dict) -> tuple[str, str, int]:
+    """(case, layer, chain step): results of different strata are never pooled (#409 v3.14 E)."""
+    return (str(row.get("case")), str(row.get("layer") or "-"), int((row.get("chain") or {}).get("step") or 1))
+
+
+def summarize(results: list[dict], assignment: list[dict] | None = None) -> str:
+    """One table set per stratum (case × layer × chain step); the Fisher tests compare arms within a stratum only.
+    With `assignment` (the pre-registered list of attempts) the missing, duplicate and unassigned attempts follow."""
+    strata = sorted({stratum(row) for row in results})
+    if len(strata) <= 1:
+        text = _summarize_stratum(results)
+    else:
+        parts = []
+        for key in strata:
+            group = [row for row in results if stratum(row) == key]
+            parts.append(f"## case {key[0]}, layer {key[1]}, chain step {key[2]}\n\n" + _summarize_stratum(group))
+        text = "\n".join(parts)
+    lines = (_chain_lines(results) + _exclusion_lines(results)
+             + (attempts.check_lines(assignment, results) if assignment is not None else []))
+    return text + ("\n".join(lines) + "\n" if lines else "")
+
+
+def _exclusion_lines(results: list[dict]) -> list[str]:
+    excluded = [row for row in results if run_status(row) == "harness-error"]
+    if not excluded:
+        return []
+    lines = ["", "Exclusions by attempt (fixed taxonomy, `attempts.EXCLUSIONS`):", "",
+             "| attempt | case / layer / step | arm | code | reason |", "|---|---|---|---|---|"]
+    for row in sorted(excluded, key=attempts.attempt_id):
+        key = stratum(row)
+        lines.append(f"| {attempts.attempt_id(row)} | {key[0]} / {key[1]} / {key[2]} | {row.get('arm')} | "
+                     f"{attempts.exclusion_code(row['harness_error'])} | {row['harness_error']} |")
+    return lines
+
+
+def _summarize_stratum(results: list[dict]) -> str:
     """Every assigned run is in its arm's denominator; only harness errors are listed apart (with their reasons).
 
     Arm R gets one row over all its runs and one row per chosen option (`R: <option>`); the option rows have no
@@ -2155,8 +2973,10 @@ def summarize(results: list[dict]) -> str:
              "successes first try / after fix-loop re-approval | runs stopped at the fix-loop limit | "
              "phases entered / declared (mean) | orchestration share of cost (mean) | "
              "integrity flags (runs flagged) | reviewer jobs / seconds / token and cost lower bound (mean) | "
-             "skills invoked (runs that invoked any: name×calls) |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "skills invoked (runs that invoked any: name×calls) | false complete / false block | "
+             "no-start / complete builds (no missing check) | gate errors | cost complete |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+             "---|---|"]
     base = [row for row in assigned if row["arm"] == "A"]
     reasons: list[str] = []
     for arm in ARMS:
@@ -2197,7 +3017,7 @@ def summarize(results: list[dict]) -> str:
                 total = _mean([row["total_cost_usd"] for row in group if row.get("total_cost_usd") is not None])
                 lines.append(f"| {arm} | {layer} | {len(group)} | {sum(_succeeded(row) for row in group)}/{len(group)}"
                              f" | {_ask_cell(group)} | {_usd(total)} |")
-    return "\n".join(lines + _chain_lines(results)) + "\n"
+    return "\n".join(lines) + "\n"
 
 
 def _run_dirs(row: dict) -> set[str]:
@@ -2206,7 +3026,16 @@ def _run_dirs(row: dict) -> set[str]:
 
 
 def chain_survived(steps: dict[int, dict]) -> int:
-    """Consecutive steps from step 1 with S=1 in an ordinary run (not contaminated, errored or timed out)."""
+    """Consecutive successful steps from step 1, by the success definition (`_succeeded`: S=1, declared complete,
+    no rule violation, an ordinary run), so a step that met the oracle but declared blocked or broke a rule ends it."""
+    survived = 0
+    while (row := steps.get(survived + 1)) is not None and _succeeded(row):
+        survived += 1
+    return survived
+
+
+def chain_functional_survived(steps: dict[int, dict]) -> int:
+    """Consecutive steps with S=1 in an ordinary run, whatever was declared: the functional survival, named apart."""
     survived = 0
     while (row := steps.get(survived + 1)) is not None and row.get("oracle") and run_status(row) == "ok":
         survived += 1
@@ -2220,7 +3049,8 @@ def _chain_lines(results: list[dict]) -> list[str]:
     if not chained:
         return []
     lines = ["", "Chains (the same arm, each step a new session on its own previous result):", "",
-             "| root run | arm | steps | per-step S / G | steps survived |", "|---|---|---|---|---|"]
+             "| root run | arm | steps | per-step S / G | steps survived (success) | functional survival (S=1) |",
+             "|---|---|---|---|---|---|"]
     for root in sorted({row["chain"]["root_run"] for row in chained}):
         steps = {int(row["chain"]["step"]): row for row in chained if row["chain"]["root_run"] == root}
         first = next((row for row in results if not row.get("chain") and root in _run_dirs(row)), None)
@@ -2239,7 +3069,7 @@ def _chain_lines(results: list[dict]) -> list[str]:
         sample = steps.get(1) or next(iter(steps.values()))
         arm = str(sample["arm"]) + (f"→{effective_arm(sample)}" if effective_arm(sample) != sample["arm"] else "")
         lines.append(f"| {Path(root).name} | {arm} | {max(steps)} | {'; '.join(cells)} | "
-                     f"{chain_survived(steps)}/{max(steps)} |")
+                     f"{chain_survived(steps)}/{max(steps)} | {chain_functional_survived(steps)}/{max(steps)} |")
     return lines
 
 
@@ -2299,7 +3129,27 @@ def _summary_line(label: str, group: list[dict], excluded: list[dict], base: lis
         _phase_cell(group) if workflow else "-",
         _share_cell(group) if workflow else "-",
         _integrity_cell(group),
-        _reviewer_cell(group) if workflow else "-", _skills_cell(group)]) + " |"
+        _reviewer_cell(group) if workflow else "-", _skills_cell(group), _false_cell(group), _build_cell(group),
+        str(sum(run_status(row) == "gate-error" for row in group)) if gated else "-",
+        f"{sum(bool(row.get('cost_complete')) for row in group)}/{len(group)}"]) + " |"
+
+
+def _false_cell(group: list[dict]) -> str:
+    """False complete (declared complete, S=0) over declared complete, always beside false block (declared blocked,
+    S=1) over declared blocked: a blocked declaration avoids a false complete for free (#409 v3.14 E)."""
+    complete = [row for row in group if row.get("declaration") == completion.COMPLETE]
+    blocked = [row for row in group if row.get("declaration") == completion.BLOCKED]
+    wrong = sum(not row.get("oracle") for row in complete)
+    held = sum(bool(row.get("oracle")) for row in blocked)
+    return f"{wrong}/{len(complete)} / {held}/{len(blocked)}"
+
+
+def _build_cell(group: list[dict]) -> str:
+    measured = [row for row in group if row.get("no_start") is not None]
+    if not measured:
+        return "-"
+    return (f"{sum(bool(row['no_start']) for row in measured)} / "
+            f"{sum(bool(row.get('complete_build')) for row in measured)} of {len(measured)}")
 
 
 def _usd(value: float | None) -> str:
@@ -2385,6 +3235,12 @@ def _fmt(value: float | None) -> str:
     return "-" if value is None else f"{value:,.0f}"
 
 
+def score_serial(run: Path, evaluator: Path | None, repeat: int = 3, case_dir: Path | None = None) -> dict:
+    """One run of a serial scoring pass: `score` takes the exclusive lock, so runs are graded one at a time and never
+    while a drive holds it; the evaluator gets `--browser-repeat BROWSER_REPEAT` where it has one."""
+    return score(run, None, evaluator, repeat, None, case_dir)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2393,7 +3249,10 @@ def main(argv: list[str] | None = None) -> int:
     prep.add_argument("--arm", choices=ARMS, required=True)
     prep.add_argument("--case", default="devflow", help=f"a phase case, or a UI task: {', '.join(UI_CASES)}")
     prep.add_argument("--trial", type=int, default=1)
-    prep.add_argument("--output", type=Path, required=True)
+    where = prep.add_mutually_exclusive_group(required=True)
+    where.add_argument("--output", type=Path)
+    where.add_argument("--runs-root", type=Path,
+                       help="put the run in <root>/<random id> and record its assignment in <root>/ledger.jsonl")
     prep.add_argument("--isolation", choices=ISOLATION, default="instructed")
     prep.add_argument("--case-dir", type=Path, help="a case kept outside this repository (`<dir>/case.json`)")
     prep.add_argument("--variant", type=json.loads, help="arm S: the search variant as JSON (see evals/variants.py)")
@@ -2407,13 +3266,23 @@ def main(argv: list[str] | None = None) -> int:
     dr.add_argument("--model", default=DEFAULT_MODEL)
     dr.add_argument("--timeout", type=int, default=7200)
     dr.add_argument("--budget", type=float, default=30.0)
+    dr.add_argument("--cli-version", default=PINNED_CLI_VERSION, help="the claude CLI version the drive requires")
     sc = sub.add_parser("score")
     sc.add_argument("run", type=Path)
     sc.add_argument("--transcript", type=Path)
     sc.add_argument("--evaluator", type=Path, help="the private evaluator's score.py, for UI tasks")
     sc.add_argument("--repeat", type=int, default=3)
-    sc.add_argument("--harness-error", metavar="REASON",
-                    help="the harness itself broke this run; it is re-run and listed apart from the denominator")
+    sc.add_argument("--harness-error", metavar="CODE[: DETAIL]",
+                    help=f"the harness itself broke this run (one of {', '.join(attempts.EXCLUSIONS)}); it is re-run "
+                         "and listed apart from the denominator")
+    sc.add_argument("--case-dir", type=Path, help="the case.json directory, for its canaries")
+    sc.add_argument("--reference-build", action="store_true",
+                    help="validation of a reference or mutant build: passed to the evaluator")
+    ser = sub.add_parser("score-serial", help="score runs one after another, never while a drive runs")
+    ser.add_argument("runs", type=Path, nargs="+")
+    ser.add_argument("--evaluator", type=Path)
+    ser.add_argument("--case-dir", type=Path)
+    ser.add_argument("--repeat", type=int, default=3)
     pre = sub.add_parser("preflight", help="check that each model an arm needs answers in this environment")
     pre.add_argument("--model", action="append", required=True, metavar="CLI:MODEL",
                      help="e.g. claude:claude-opus-5-5, codex:default (the CLI's own default); repeat for each")
@@ -2430,9 +3299,12 @@ def main(argv: list[str] | None = None) -> int:
     nxt.add_argument("--output", type=Path, required=True)
     summ = sub.add_parser("summarize")
     summ.add_argument("results", type=Path, nargs="+")
+    summ.add_argument("--manifest", type=Path, help="the pre-registered assignment (JSON list of attempts)")
     args = parser.parse_args(argv)
     if args.command == "prepare":
-        print(json.dumps(prepare(args.kit.resolve(), args.arm, args.case, args.trial, args.output.resolve(),
+        output = args.output or attempts.new_run(args.runs_root.resolve(), case=args.case_dir.name if args.case_dir
+                                                 else args.case, layer=args.layer, arm=args.arm, trial=args.trial)
+        print(json.dumps(prepare(args.kit.resolve(), args.arm, args.case, args.trial, output.resolve(),
                                  args.isolation, args.case_dir.resolve() if args.case_dir else None,
                                  args.variant, args.menu_variants, args.model, args.layer), indent=1))
     elif args.command == "preflight":
@@ -2449,14 +3321,21 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(prepare_chain_next(args.prev.resolve(), args.case_dir.resolve(), args.output.resolve(),
                                             args.layer), indent=1))
     elif args.command == "drive":
-        print(json.dumps(drive(args.run.resolve(), args.model, args.timeout, args.budget), indent=1))
+        print(json.dumps(drive(args.run.resolve(), args.model, args.timeout, args.budget, args.cli_version), indent=1))
+    elif args.command == "score-serial":
+        for run in args.runs:
+            result = score_serial(run.resolve(), args.evaluator, args.repeat, args.case_dir)
+            print(json.dumps({"run": str(run), **{key: result.get(key) for key in ("arm", "oracle", "declaration",
+                                                                                    "contaminated", "harness_error")}}))
     elif args.command == "score":
-        result = score(args.run.resolve(), args.transcript, args.evaluator, args.repeat, args.harness_error)
+        result = score(args.run.resolve(), args.transcript, args.evaluator, args.repeat, args.harness_error,
+                       args.case_dir.resolve() if args.case_dir else None, args.reference_build)
         print(json.dumps({key: result.get(key) for key in ("arm", "hidden_tests", "oracle", "declaration",
                                                              "contaminated", "commits", "usage", "seconds",
                                                              "artifact_sha256")}))
     else:
-        print(summarize([json.loads(path.read_text(encoding="utf-8")) for path in args.results]), end="")
+        assignment = json.loads(args.manifest.read_text(encoding="utf-8")) if args.manifest else None
+        print(summarize([json.loads(path.read_text(encoding="utf-8")) for path in args.results], assignment), end="")
     return 0
 
 
