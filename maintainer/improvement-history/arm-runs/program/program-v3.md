@@ -138,3 +138,11 @@ v2의 "비열등 ∧ 비용 우월" 규칙만으로는 "비싸지만 더 낫다"
 - **보조 지표:** 컨텍스트 압축 횟수(transcript), 앞 도메인 회귀, 거짓 완료, 성공 1건당 비용, 시간.
 - **arm:** 파일럿은 A·V·C, n=2다. 신호가 나오면 R·VK를 더하고 n을 늘린다.
 - **H2-② 판정:** 같은 arm 집합에서 L 과제의 A 대비 격차가 짧은 과제(사이클 3)의 격차보다 크면, "긴 작업에서는 하네스가 필요하다"는 신호다. 격차가 같거나 더 작으면 "긴 작업에서도 필요 없다"는 신호다.
+
+## 개정 v3.5 (2026-10-25): 실험 run의 effort는 low다
+
+- **실험 run(평가 대상 arm의 controller와, 그 controller가 띄우는 reviewer·gate·router·사용자 시뮬레이터)은 Opus 5.5 effort low로 돌린다.** `CLAUDE_CODE_EFFORT_LEVEL=low`를 드라이버 환경에 두면 harness가 모든 하위 호출에 넘기고 `drive.json`의 `effort`에 기록한다. `effort`가 low가 아닌 run은 이 사이클의 판정에서 뺀다.
+- **과제 문서(PRD)와 평가기(숨긴 검사·mutant·reference)를 만드는 작업은 effort medium으로 한다.** 실험 대상이 아니므로 판정에 쓰지 않는다.
+- **harness 고정을 `2d3af66`으로 옮긴다.** v3.3의 `5fea6a1`에 effort 전달만 더한 커밋이다.
+- **기본 effort로 시작한 OYG S\* 탐색은 중단했다**(`q2-oyg-aborted-default-effort`). 그 수치는 판정에 쓰지 않고, 탐색을 low로 처음부터 다시 돌린다.
+- **앞선 파일럿(lumi-web·lumi-app v0·v1의 A)은 기본 effort였다.** 난이도 보정에만 쓰고, 사이클 3에서 A를 low로 다시 잰다.
