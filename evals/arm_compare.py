@@ -2692,7 +2692,9 @@ def kit_review_identities(project: Path, checkout: Path) -> list[dict]:
     for path in state_files(project, checkout, "*.md"):
         text = path.read_text(encoding="utf-8", errors="replace")
         values = dict(PROVENANCE.findall(text[:4000]))
-        if "provider" in values:
+        # Only a reviewer's own artifact (`<phase>-<angle>-<provider>.md`) carries a provenance header; an agent's note
+        # that happens to list `- provider: claude` (run-start.md) is not a reviewer.
+        if "provider" in values and path.stem.endswith(f"-{values['provider']}"):
             found.append({"source": path.name, "provider": values.get("provider"), "model": values.get("model"),
                           "effort": values.get("effort")})
     for path in state_files(project, checkout, "review-metrics-*.json"):

@@ -1452,3 +1452,17 @@ def test_the_gate_labeler_uses_the_frozen_classifier_on_the_host(monkeypatch):
     monkeypatch.setattr(arm_compare.finding_split, "run_claude",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
     assert "error" in arm_compare.gate_labeler(lambda: 300.0)(["1. x"])
+
+
+def test_kit_review_identities_reads_reviewer_artifacts_only(tmp_path):
+    """An agent's own note listing `- provider: claude` (run-start.md) is not a reviewer artifact (#409 r018)."""
+    project = tmp_path / "project"
+    runs = project / ".agent-flow" / "runs" / "20261026-075913"
+    runs.mkdir(parents=True)
+    (runs / "run-start.md").write_text("# Run start\n\n- profile: node\n- provider: claude\n", encoding="utf-8")
+    (runs / "multi-review-generalist-claude.md").write_text(
+        "# claude-generalist\n\n- status: OK\n- provider: claude\n- model: claude-opus-5-5\n- effort: low\n",
+        encoding="utf-8")
+    found = arm_compare.kit_review_identities(project, project)
+    assert [item["source"] for item in found] == ["multi-review-generalist-claude.md"]
+    assert found[0]["model"] == "claude-opus-5-5" and found[0]["effort"] == "low"
