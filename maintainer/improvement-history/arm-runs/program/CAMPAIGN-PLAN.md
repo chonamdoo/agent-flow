@@ -217,6 +217,7 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
    - `cut -f1-3,8,9,14,18 scratch/campaign/oyg-search/ledger.tsv`(탐색 중일 때)
    - `ls scratch/campaign/PAUSE`
 3. next4.sh가 죽어 있고 PAUSE가 없으면 이어 간다: `cd scratch/campaign && setsid nohup ./next4.sh scratch/harness-725b38e >> next4.out 2>&1 &`(탐색이 끝났으면 인자 대신 `campaign/HARNESS`의 경로가 쓰인다. campaign.py가 그 파일을 우선한다). 재실행해도 안전하다. 채워진 칸은 두고, 끊긴 run은 `aborted/`로 옮긴 뒤 다시 돌린다. 탐색은 `--ack-infra`로 잇는다.
+3b. **`campaign/supervise.sh`**(19:10Z부터)가 2분마다 next4.sh가 살아 있는지 본다. 단계의 빈 칸 HALT로 멈췄으면 `campaign/HARNESS`로 다시 시작한다. 빈 칸이 그대로인 채 두 번 멈추면 포기하고 기록한다. PAUSE가 있거나 다 끝났으면 멈춘다. 컨테이너가 재시작되면 supervise.sh도 다시 띄운다(`setsid nohup ./supervise.sh > supervise.out 2>&1 &`).
 4. **감시 작업을 항상 하나 띄운다.** 백그라운드 bash로 약 105분 동안 campaign.log를 보고, 끝나면 다시 건다. 백그라운드 작업이 없으면 컨테이너가 회수된다(10-25 18:56Z에 실제로 일어났다).
 5. 점검 예약 `trig_01KfrRsf5RxkRCPaRb8XGZiq`(epic-409 자율 진행 점검)을 약 2시간 뒤로 다시 건다.
 6. PAUSE가 있으면(사용량 소진) 다음 주 수요일에 PAUSE를 지우고 3번을 실행한다.
