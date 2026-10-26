@@ -122,7 +122,7 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
 
 ## 5. 실행 환경 (v3.14)
 
-- **harness:** 고정본 **`25f5f85`**(웹 체인부터, `campaign/HARNESS` 파일로 지정; 159dde8 + 무결성 오탐 수정 bd9a140·25f5f85; OYG 탐색은 `725b38e`로 돈다; 그 전은 `7aabd6f`, `9ce653d`). 159dde8은 725b38e에 모델 고정 점검의 오탐 수정(에이전트 노트 `run-start.md`를 리뷰어로 읽던 문제, 탐색 r018) 하나만 더한 것이다. 에이전트 동작은 같다. 실행 스크립트는 `campaign/next4.sh <harness>`다. worktree는 `scratchpad/harness-<sha>`, 브랜치는 `claude/tender-ritchie-5b4rp5`.
+- **harness:** 고정본 **`89ebe2d`**(웹 체인 2단계의 빈 칸부터; 25f5f85 + chain-next symlink 수정. 웹 체인 1단계는 `25f5f85`, `campaign/HARNESS` 파일로 지정; 159dde8 + 무결성 오탐 수정 bd9a140·25f5f85; OYG 탐색은 `725b38e`로 돈다; 그 전은 `7aabd6f`, `9ce653d`). 159dde8은 725b38e에 모델 고정 점검의 오탐 수정(에이전트 노트 `run-start.md`를 리뷰어로 읽던 문제, 탐색 r018) 하나만 더한 것이다. 에이전트 동작은 같다. 실행 스크립트는 `campaign/next4.sh <harness>`다. worktree는 `scratchpad/harness-<sha>`, 브랜치는 `claude/tender-ritchie-5b4rp5`.
 - **격리:** run마다 PID·mount namespace를 둔다. 루트는 읽기 전용이고, 쓸 수 있는 곳은 자기 run·worktree·`/tmp`·HOME뿐이다. 비공개 저장소·다른 run·실험 문서·transcript는 가린다. 네트워크는 분리하지 못한다(알려진 한계).
 - **채점:** drive가 끝나면 불변 snapshot을 만들고 채점은 직렬로 한다. 제출 코드도 격리하고, 브라우저 체크는 2회 반복한다.
 - **오염:** 격리가 정상인 run은 canary가 검출될 때만 오염이다.
@@ -183,7 +183,10 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
     - C 3회의 G는 0.969 / 0.923 / 0.938(평균 0.943), 비용은 $11.5–13.8이다.
     - 범위가 겹치고, S-min+TDD의 비용이 약 절반이다.
   - **주장 범위(v3.17):** "OYG에서 C와 비슷한 품질의 더 싼 워크플로를 찾았다(성공 기준은 C가 0이라 약함)"까지만 쓴다.
-- [ ] **웹 체인 시작 (11:42Z, harness `25f5f85`, 7개 arm × 3 = 21개 체인 × 2단계).** 10:23Z에 S 없이 시작했던 시도는 `aborted/webchain-noS-1023`에 있다.
+- [ ] **웹 체인 (11:42Z 시작, harness `25f5f85`, 7개 arm × 3 = 21개 체인 × 2단계).**
+  - 1단계(v0) 21칸은 18:58Z에 모두 채웠다. 오류·오염은 0건이다.
+  - 2단계 버그: workflow arm의 chain-next가 kit skill symlink를 옮기다 `FileExistsError`로 실패했다. 고쳐서 `89ebe2d`로 고정했다(`campaign/HARNESS`, 회귀 테스트 포함).
+  - 돌고 있는 campaign.py는 A·V 등 나머지 2단계를 계속한다. 단계가 끝나면 빈 칸 검사(HALT)에서 멈춘다. 그러면 `next4.sh`를 다시 실행해서 빈 workflow 칸을 89ebe2d로 채운다(동작은 같고, 옮기는 과정만 고쳤다). 10:23Z에 S 없이 시작했던 시도는 `aborted/webchain-noS-1023`에 있다.
 - [ ] 그다음 자동으로 OYG S\* 탐색 → 웹 체인 → 앱 체인 → (평가기 동결 시) 웹 L.
 - [x] 웹 L 평가기 동결(f16079f). `next4.sh`는 동결 표식을 `lumi-web-L/FREEZE.md`에서 찾지만 실제 위치는 `validity-reports/FREEZE.md`다. 그래서 앱 체인이 끝나면 `campaign.py webL`을 손으로 시작한다(실행 중인 스크립트는 고치지 않는다).
 - [ ] 결론 보고서(모든 칸이 채워진 뒤). 보고서에 넣을 것: 결함 종류별 결과, 아키텍처 종합 점수와 정적 결과 나란히(v3.19), 종류별 리뷰 흐름(label_flow), F와 비용, 인프라 제외·재실행 수(arm별).
@@ -229,7 +232,7 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
 - `--dangerously-skip-permissions`
 
 **현재 고정값**
-- harness `25f5f85`(`campaign/HARNESS`). 탐색은 725b38e로 돌았고, 보정과 확인 run은 25f5f85로 돌았다
+- harness `89ebe2d`(`campaign/HARNESS`). 탐색은 725b38e로 돌았고, 보정과 확인 run은 25f5f85로 돌았다
 - 평가기: 웹 v1 / 웹 L(`f16079f`, `fb61d741…`) / 앱 체인 / OYG
 - 아키텍처 채점기 `9a6374c`
 - 리뷰 분류기 프롬프트 sha `fe848de5…`
