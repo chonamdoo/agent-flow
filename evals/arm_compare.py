@@ -1097,6 +1097,8 @@ def prepare_chain_next(prev_run: Path, case_dir: Path, output: Path, layer: str 
             "cprime_rules": None, "isolation": prev.get("isolation", "instructed"),
             "principles": principles_record(arm), **_workflow_record(arm, searched),
             "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None, "verify_gate": gate,
+            # the kit's own files as its installer excluded them, at prepare (the live exclude is the agent's to edit)
+            "kit_paths": kit_managed_paths(project),
             **({"skills": skills} if skills is not None else {}),
             "case_kind": "external", "case_sha256": case["sha256"], "seed_commit": None,
             "score_keys": case["score_keys"], "evaluator_repeat": bool(case.get("evaluator_repeat")),
@@ -1236,6 +1238,8 @@ def prepare(kit: Path, arm: str, case_name: str, trial: int, output: Path, isola
             "cprime_rules": c_prime.RULES_VERSION if arm == "Cp" else None, "isolation": isolation,
             "principles": principles_record(arm), **_workflow_record(arm, searched),
             "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None, "verify_gate": gate,
+            # the kit's own files as its installer excluded them, at prepare (the live exclude is the agent's to edit)
+            "kit_paths": kit_managed_paths(project),
             **({"skills": skills} if skills is not None else {}),
             "case_kind": "ui" if ui else "phase-case", **({"ui_task": ui["task"], "layer": ui["layer"]} if ui else {})}
     (output / "arm.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
@@ -1296,6 +1300,8 @@ def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: in
             "cprime_rules": None, "isolation": isolation,
             "principles": principles_record(arm), **_workflow_record(arm, searched),
             "approval_rules": HARNESS_APPROVES if arm in WORKFLOWS else None, "verify_gate": gate,
+            # the kit's own files as its installer excluded them, at prepare (the live exclude is the agent's to edit)
+            "kit_paths": kit_managed_paths(project),
             **({"skills": skills} if skills is not None else {}),
             "case_kind": "external",
             "case_sha256": case["sha256"], "seed_commit": case["seed"]["commit"], "score_keys": case["score_keys"],
@@ -2050,8 +2056,12 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
     with _Lock(exclusive=True), tempfile.TemporaryDirectory(prefix="arm-score-") as scratch:
         checkout = snapshot.materialize(run, Path(scratch) / "checkout")
         commits = c_prime._sh(["git", "rev-list", "--count", f"{meta['start_commit']}..HEAD"], checkout).stdout.strip()
+        # install-time kit paths (`arm.json` `kit_paths`). The live exclude is writable by the agent (OYG r009 added
+        # `.af-tmp` during its drive) and the snapshot copies excluded files too, so an entry added there would hide
+        # uncommitted work; a run prepared before `kit_paths` was recorded falls back to the live file.
+        kit_paths = meta["kit_paths"] if isinstance(meta.get("kit_paths"), list) else kit_managed_paths(project)
         checked = integrity.check(checkout, meta["start_commit"], shell_commands(rows), message, declaration,
-                                  tuple(kit_managed_paths(project)))
+                                  tuple(kit_paths))
         gate = gate_result(run, meta, checkout, driven) if arm in GATE_ARMS else None
         sandboxed = sandbox_mode() == "required"
         if meta.get("case_kind") in ("external", "ui"):

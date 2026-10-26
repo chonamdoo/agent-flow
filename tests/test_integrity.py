@@ -131,3 +131,27 @@ def test_kit_installed_files_are_not_uncommitted_work(tmp_path):
     (repo / "app/src/main/kotlin/Cart.kt").write_text("fun total(): Int = 3\n", encoding="utf-8")
     left = integrity.check(repo, start, [], None, "declared-complete", kit)["uncommitted_at_completion"]
     assert "app/src/main/kotlin/Cart.kt" in left
+
+
+def test_score_uses_the_kit_paths_recorded_at_prepare_not_the_live_exclude(tmp_path, monkeypatch):
+    import json
+    import arm_compare
+    from tests.test_arm_compare import _external_case
+    case_dir, evaluator = _external_case(tmp_path)
+    run = tmp_path / "runs" / "C-1"
+    meta = arm_compare.prepare(ROOT, "C", "x", 1, run, case_dir=case_dir)
+    assert meta["kit_paths"] == arm_compare.kit_managed_paths(run / "project") and ".claude" in meta["kit_paths"]
+    exclude = run / "project" / ".git" / "info" / "exclude"
+    exclude.write_text(exclude.read_text(encoding="utf-8") + "work-in-progress\n", encoding="utf-8")  # the agent's
+    seen = []
+    real = arm_compare.integrity.check
+
+    def check(*args):
+        seen.append(args[-1])
+        return real(*args)
+
+    monkeypatch.setattr(arm_compare.integrity, "check", check)
+    monkeypatch.setattr(arm_compare, "select_checkout", lambda project, arm, home=None: (project, {
+        "linked_worktrees": [], "checkout_selected_by": "project", "checkout_error": None}))
+    arm_compare.score(run, None, evaluator, case_dir=case_dir)
+    assert seen and list(seen[0]) == meta["kit_paths"] and "work-in-progress" not in seen[0]
