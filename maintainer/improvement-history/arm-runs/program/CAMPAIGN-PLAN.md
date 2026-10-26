@@ -122,7 +122,7 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
 
 ## 5. 실행 환경 (v3.14)
 
-- **harness:** 고정본 **`725b38e`**(2026-10-25 22:52Z부터; 그 전은 `7aabd6f`, 그 전은 `9ce653d`). 실행 스크립트는 `campaign/next4.sh <harness>`다. worktree는 `scratchpad/harness-<sha>`, 브랜치는 `claude/tender-ritchie-5b4rp5`.
+- **harness:** 고정본 **`159dde8`**(웹 체인부터, `campaign/HARNESS` 파일로 지정; OYG 탐색은 `725b38e`로 돈다; 그 전은 `7aabd6f`, `9ce653d`). 159dde8은 725b38e에 모델 고정 점검의 오탐 수정(에이전트 노트 `run-start.md`를 리뷰어로 읽던 문제, 탐색 r018) 하나만 더한 것이다. 에이전트 동작은 같다. 실행 스크립트는 `campaign/next4.sh <harness>`다. worktree는 `scratchpad/harness-<sha>`, 브랜치는 `claude/tender-ritchie-5b4rp5`.
 - **격리:** run마다 PID·mount namespace를 둔다. 루트는 읽기 전용이고, 쓸 수 있는 곳은 자기 run·worktree·`/tmp`·HOME뿐이다. 비공개 저장소·다른 run·실험 문서·transcript는 가린다. 네트워크는 분리하지 못한다(알려진 한계).
 - **채점:** drive가 끝나면 불변 snapshot을 만들고 채점은 직렬로 한다. 제출 코드도 격리하고, 브라우저 체크는 2회 반복한다.
 - **오염:** 격리가 정상인 run은 canary가 검출될 때만 오염이다.
@@ -203,7 +203,7 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
    - `tail -20 scratch/campaign/campaign.log`
    - `cut -f1-3,8,9,14,18 scratch/campaign/oyg-search/ledger.tsv`(탐색 중일 때)
    - `ls scratch/campaign/PAUSE`
-3. next4.sh가 죽어 있고 PAUSE가 없으면 이어 간다: `cd scratch/campaign && setsid nohup ./next4.sh scratch/harness-725b38e >> next4.out 2>&1 &`. 재실행해도 안전하다. 채워진 칸은 두고, 끊긴 run은 `aborted/`로 옮긴 뒤 다시 돌린다. 탐색은 `--ack-infra`로 잇는다.
+3. next4.sh가 죽어 있고 PAUSE가 없으면 이어 간다: `cd scratch/campaign && setsid nohup ./next4.sh scratch/harness-725b38e >> next4.out 2>&1 &`(탐색이 끝났으면 인자 대신 `campaign/HARNESS`의 경로가 쓰인다. campaign.py가 그 파일을 우선한다). 재실행해도 안전하다. 채워진 칸은 두고, 끊긴 run은 `aborted/`로 옮긴 뒤 다시 돌린다. 탐색은 `--ack-infra`로 잇는다.
 4. **감시 작업을 항상 하나 띄운다.** 백그라운드 bash로 약 105분 동안 campaign.log를 보고, 끝나면 다시 건다. 백그라운드 작업이 없으면 컨테이너가 회수된다(10-25 18:56Z에 실제로 일어났다).
 5. 점검 예약 `trig_01KfrRsf5RxkRCPaRb8XGZiq`(epic-409 자율 진행 점검)을 약 2시간 뒤로 다시 건다.
 6. PAUSE가 있으면(사용량 소진) 다음 주 수요일에 PAUSE를 지우고 3번을 실행한다.
@@ -219,7 +219,7 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
 - `--dangerously-skip-permissions`
 
 **현재 고정값**
-- harness `725b38e`
+- harness `159dde8`(`campaign/HARNESS`), 탐색만 `725b38e`
 - 평가기: 웹 v1 / 웹 L(`f16079f`, `fb61d741…`) / 앱 체인 / OYG
 - 아키텍처 채점기 `9a6374c`
 - 리뷰 분류기 프롬프트 sha `fe848de5…`
