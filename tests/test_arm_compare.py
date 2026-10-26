@@ -1466,3 +1466,22 @@ def test_kit_review_identities_reads_reviewer_artifacts_only(tmp_path):
     found = arm_compare.kit_review_identities(project, project)
     assert [item["source"] for item in found] == ["multi-review-generalist-claude.md"]
     assert found[0]["model"] == "claude-opus-5-5" and found[0]["effort"] == "low"
+
+
+def test_carry_kit_state_replaces_existing_skill_symlinks(tmp_path):
+    """The new step's fresh install already made the kit's skill links; carrying the previous step must overwrite
+    them, not stop on FileExistsError (#409 webchain step 2, 2026-10-26)."""
+    import os
+    prev, new = tmp_path / "prev", tmp_path / "new"
+    for project in (prev, new):
+        (project / ".git" / "info").mkdir(parents=True)
+        (project / ".agent-flow" / "skills" / "agent-flow").mkdir(parents=True)
+        (project / ".omp" / "skills").mkdir(parents=True)
+        os.symlink("../../.agent-flow/skills/agent-flow", project / ".omp" / "skills" / "agent-flow")
+    (prev / ".git" / "info" / "exclude").write_text("/.omp/\n", encoding="utf-8")
+    (prev / ".omp" / "settings.json").write_text("{\"from\": \"prev\"}", encoding="utf-8")
+    copied = arm_compare._carry_kit_state(prev, new)
+    assert ".omp" in copied
+    link = new / ".omp" / "skills" / "agent-flow"
+    assert link.is_symlink() and os.readlink(link) == "../../.agent-flow/skills/agent-flow"
+    assert (new / ".omp" / "settings.json").read_text(encoding="utf-8") == "{\"from\": \"prev\"}"

@@ -949,6 +949,24 @@ def kit_managed_paths(prev_project: Path) -> list[str]:
                    and not any(char in line for char in "*?[") and line.strip().strip("/")})
 
 
+def _clear_symlink_targets(source: Path, target: Path) -> None:
+    """`copytree(symlinks=True, dirs_exist_ok=True)` cannot replace a path that already exists where the source has a
+    symlink (FileExistsError): the new step's fresh install already made the kit's skill links. Remove those first so
+    the previous step's links win, as every other carried file does."""
+    if not target.is_dir():
+        return
+    for root, dirs, files in os.walk(source, followlinks=False):
+        for name in dirs + files:
+            link = Path(root) / name
+            if not link.is_symlink():
+                continue
+            existing = target / link.relative_to(source)
+            if existing.is_symlink() or existing.is_file():
+                existing.unlink()
+            elif existing.is_dir():
+                shutil.rmtree(existing)
+
+
 def _carry_kit_state(prev_project: Path, project: Path) -> list[str]:
     """Only what the kit manages in the previous project (#409 v3.14 E): the paths its installer recorded in
     `.git/info/exclude` (its install, project settings, local skills, handoffs), without build outputs or live run
@@ -977,6 +995,7 @@ def _carry_kit_state(prev_project: Path, project: Path) -> list[str]:
         if source.is_symlink() or source.is_file():
             shutil.copy2(source, target, follow_symlinks=False)
         elif source.is_dir():
+            _clear_symlink_targets(source, target)
             shutil.copytree(source, target, symlinks=True, ignore=ignore, dirs_exist_ok=True)
         copied.append(name)
     return copied
