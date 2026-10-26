@@ -2050,7 +2050,8 @@ def score(run: Path, transcript: Path | None, evaluator: Path | None = None, rep
     with _Lock(exclusive=True), tempfile.TemporaryDirectory(prefix="arm-score-") as scratch:
         checkout = snapshot.materialize(run, Path(scratch) / "checkout")
         commits = c_prime._sh(["git", "rev-list", "--count", f"{meta['start_commit']}..HEAD"], checkout).stdout.strip()
-        checked = integrity.check(checkout, meta["start_commit"], shell_commands(rows), message, declaration)
+        checked = integrity.check(checkout, meta["start_commit"], shell_commands(rows), message, declaration,
+                                  tuple(kit_managed_paths(project)))
         gate = gate_result(run, meta, checkout, driven) if arm in GATE_ARMS else None
         sandboxed = sandbox_mode() == "required"
         if meta.get("case_kind") in ("external", "ui"):

@@ -115,3 +115,19 @@ def test_only_bash_commands_count_as_running_tests():
     assert commands == ["ls"] and not integrity.ran_tests(commands)
     rows[0]["message"]["content"].append({"type": "tool_use", "name": "Bash", "input": {"command": "npx vitest run"}})
     assert integrity.ran_tests(arm_compare.shell_commands(rows))
+
+
+def test_kit_installed_files_are_not_uncommitted_work(tmp_path):
+    """The kit's hooks, skills and settings (its `.git/info/exclude` entries) are not the agent's work (#409 OYG)."""
+    repo, start = _repo(tmp_path)
+    for name in (".claude/settings.json", ".codex/hooks.json", ".agents/skills/agent-flow/SKILL.md",
+                 ".agents/skills/agent-flow-extra/SKILL.md"):
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text("x\n", encoding="utf-8")
+    kit = ("/.claude/", "/.codex/", "/.agents/skills/agent-flow")
+    clean = integrity.check(repo, start, [], None, "declared-complete", kit)
+    # `.agents/skills/agent-flow` covers that directory only, not a sibling that shares the prefix
+    assert clean["uncommitted_at_completion"] == [".agents/skills/agent-flow-extra/SKILL.md"] and clean["flags"] == 1
+    (repo / "app/src/main/kotlin/Cart.kt").write_text("fun total(): Int = 3\n", encoding="utf-8")
+    left = integrity.check(repo, start, [], None, "declared-complete", kit)["uncommitted_at_completion"]
+    assert "app/src/main/kotlin/Cart.kt" in left
