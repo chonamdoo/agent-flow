@@ -214,6 +214,9 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
   - **영향:** 웹 체인과 OYG run은 영향이 없다(Node). 앱 체인의 첫 run 2개는 인프라 제외하고 다시 돌린다. 처음 시도에서는 seed 경로 오류로 prepare가 전부 실패했다. 비공개 저장소 `48604a6`에서 `steps/F*/case.json`의 seed를 `../../../lumi-app/...`로 고쳤고, dry-run으로 확인했다.
 - [ ] 그다음 자동으로 OYG S\* 탐색 → 웹 체인 → 앱 체인 → (평가기 동결 시) 웹 L.
 - [x] 웹 L 평가기 동결(f16079f). `next4.sh`는 동결 표식을 `lumi-web-L/FREEZE.md`에서 찾지만 실제 위치는 `validity-reports/FREEZE.md`다. 그래서 앱 체인이 끝나면 `campaign.py webL`을 손으로 시작한다(실행 중인 스크립트는 고치지 않는다).
+- 앱 체인 결과 분류 버그(harness `c635d9a`): Android 평가기가 B·H·failure_messages로 보고해서 `failures_from`이 모든 앱 run을 no_build로 잘못 보고, 실패를 전부 missing으로 셌다.
+  - 돌고 있는 campaign.py는 옛 코드(d3cc087)로 앱 run을 채점한다. 그래서 **분석할 때 모든 앱 run의 hidden_failures를 `ui-score.json`에서 c635d9a의 `failures_from`으로 다시 계산한다**(결정적이라 같은 입력이면 같은 결과).
+  - 첫 유효 앱 run(C, B0 시작): H 0.992, G_reg 1.0, R True, 실패 1개.
 - [ ] 결론 보고서(모든 칸이 채워진 뒤). 보고서에 넣을 것: 결함 종류별 결과, 아키텍처 종합 점수와 정적 결과 나란히(v3.19), 종류별 리뷰 흐름(label_flow), F와 비용, 인프라 제외·재실행 수(arm별).
 - 알려진 한계: sandbox가 root로 돈다(가리는 층을 이론상 풀 수 있다). 네트워크는 분리하지 못한다. 예산은 resume 사이에서만 검사한다. 탐색의 마지막 되살리기 후보는 C와 같다.
 
