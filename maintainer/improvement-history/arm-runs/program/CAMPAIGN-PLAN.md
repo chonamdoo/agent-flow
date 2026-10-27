@@ -197,7 +197,12 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
   - harness 에이전트가 고치는 중이다(proxy·캐시를 모든 arm에 똑같이 준다. 기준 구현 S=1과 실제 drive로 검증한다).
   - 앱 파일럿은 sandbox(v3.14)가 들어오기 전에 검증해서 이 문제가 드러나지 않았다.
   - 합의한 순서를 지키려고 웹 L을 먼저 돌리지는 않는다.
-- [ ] **앱 체인 재시작 (2026-10-27 06:11Z, harness `d3cc087` + 비공개 `f9af21d`).**
+- [ ] **앱 체인 다시 멈춤 (07:15Z): 시작점이 잘못됐다.**
+  - case.json의 seed가 v1 기능이 없는 `7e6ddb0`였다. DESIGN.md의 시작점은 **B0**(`f133c98`, lumi-app-v1 기준 구현)다. 그래서 AC·AV(B0의 v1 체크)가 실패하고 seed 테스트가 빠진 것으로 나왔다(첫 C run: H 0.295).
+  - 비공개 저장소 `380c7d9`에서 고쳤다. **B0까지의 이력만 담은 `b0.bundle`**을 새로 만들었다. `reference-chain.bundle`에는 F1–F3 정답 commit이 들어 있어서 시작점으로 쓰면 정답이 노출된다.
+  - 앱 run은 모두 인프라 제외했다(`aborted/appchain`).
+  - B0를 F1 평가기로 채점해 본다(R·AC·AV 통과, C1만 실패가 기대값). 확인되면 재시작한다.
+- [x] **앱 체인 1차 재시작 (2026-10-27 06:11Z, harness `d3cc087` + 비공개 `f9af21d`).**
   - **원인:** 두 가지였다.
     - sandbox 안 JVM에 proxy(`JAVA_TOOL_OPTIONS`)와 `ANDROID_HOME`이 전해지지 않았다.
     - 채점 sandbox에서 `/home`이 비어 있어 숨은 테스트 init script(`-I …hidden-test-deps.gradle`)가 보이지 않았다. 고친 뒤에는 명령줄이 이름으로 가리킨 파일만 읽기 전용으로 보인다.
