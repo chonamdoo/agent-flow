@@ -122,7 +122,7 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
 
 ## 5. 실행 환경 (v3.14)
 
-- **harness:** 고정본 **`89ebe2d`**(웹 체인 2단계의 빈 칸부터; 25f5f85 + chain-next symlink 수정. 웹 체인 1단계는 `25f5f85`, `campaign/HARNESS` 파일로 지정; 159dde8 + 무결성 오탐 수정 bd9a140·25f5f85; OYG 탐색은 `725b38e`로 돈다; 그 전은 `7aabd6f`, `9ce653d`). 159dde8은 725b38e에 모델 고정 점검의 오탐 수정(에이전트 노트 `run-start.md`를 리뷰어로 읽던 문제, 탐색 r018) 하나만 더한 것이다. 에이전트 동작은 같다. 실행 스크립트는 `campaign/next4.sh <harness>`다. worktree는 `scratchpad/harness-<sha>`, 브랜치는 `claude/tender-ritchie-5b4rp5`.
+- **harness:** 고정본 **`d3cc087`**(앱 체인부터, Android sandbox 수정; 웹 체인 2단계의 빈 칸은 `89ebe2d`; 25f5f85 + chain-next symlink 수정. 웹 체인 1단계는 `25f5f85`, `campaign/HARNESS` 파일로 지정; 159dde8 + 무결성 오탐 수정 bd9a140·25f5f85; OYG 탐색은 `725b38e`로 돈다; 그 전은 `7aabd6f`, `9ce653d`). 159dde8은 725b38e에 모델 고정 점검의 오탐 수정(에이전트 노트 `run-start.md`를 리뷰어로 읽던 문제, 탐색 r018) 하나만 더한 것이다. 에이전트 동작은 같다. 실행 스크립트는 `campaign/next4.sh <harness>`다. worktree는 `scratchpad/harness-<sha>`, 브랜치는 `claude/tender-ritchie-5b4rp5`.
 - **격리:** run마다 PID·mount namespace를 둔다. 루트는 읽기 전용이고, 쓸 수 있는 곳은 자기 run·worktree·`/tmp`·HOME뿐이다. 비공개 저장소·다른 run·실험 문서·transcript는 가린다. 네트워크는 분리하지 못한다(알려진 한계).
 - **채점:** drive가 끝나면 불변 snapshot을 만들고 채점은 직렬로 한다. 제출 코드도 격리하고, 브라우저 체크는 2회 반복한다.
 - **오염:** 격리가 정상인 run은 canary가 검출될 때만 오염이다.
@@ -197,7 +197,16 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
   - harness 에이전트가 고치는 중이다(proxy·캐시를 모든 arm에 똑같이 준다. 기준 구현 S=1과 실제 drive로 검증한다).
   - 앱 파일럿은 sandbox(v3.14)가 들어오기 전에 검증해서 이 문제가 드러나지 않았다.
   - 합의한 순서를 지키려고 웹 L을 먼저 돌리지는 않는다.
-- [ ] **앱 체인 (seed 경로는 비공개 `48604a6`에서 고침),** 처음 시도에서는 seed 경로 오류로 prepare가 전부 실패했다. 비공개 저장소 `48604a6`에서 `steps/F*/case.json`의 seed를 `../../../lumi-app/...`로 고쳤고, dry-run으로 확인했다.
+- [ ] **앱 체인 재시작 (2026-10-27 06:11Z, harness `d3cc087` + 비공개 `f9af21d`).**
+  - **원인:** 두 가지였다.
+    - sandbox 안 JVM에 proxy(`JAVA_TOOL_OPTIONS`)와 `ANDROID_HOME`이 전해지지 않았다.
+    - 채점 sandbox에서 `/home`이 비어 있어 숨은 테스트 init script(`-I …hidden-test-deps.gradle`)가 보이지 않았다. 고친 뒤에는 명령줄이 이름으로 가리킨 파일만 읽기 전용으로 보인다.
+  - **검증:**
+    - 기준 구현 F1은 sandbox 채점에서 S=1이었다(132/132).
+    - seed의 모듈 빌드와 테스트는 sandbox 안에서 통과했다.
+    - arm A의 실제 drive도 정상이었다.
+  - **v3.20 (환경 교란 제거, 칸 변경 없음):** `:app`은 외부 SDK 저장소가 403이라 이 환경에서는 어디서도 빌드되지 않는다. A·V·VK와 채점은 이미 3개 모듈 기준이다. 그래서 workflow arm의 kit gate도 case.json `profile_gates`로 같은 3개 모듈로 한정했다. arm B의 prepare에서 `android.local.yaml`이 써지는 것을 확인했다.
+  - **영향:** 웹 체인과 OYG run은 영향이 없다(Node). 앱 체인의 첫 run 2개는 인프라 제외하고 다시 돌린다. 처음 시도에서는 seed 경로 오류로 prepare가 전부 실패했다. 비공개 저장소 `48604a6`에서 `steps/F*/case.json`의 seed를 `../../../lumi-app/...`로 고쳤고, dry-run으로 확인했다.
 - [ ] 그다음 자동으로 OYG S\* 탐색 → 웹 체인 → 앱 체인 → (평가기 동결 시) 웹 L.
 - [x] 웹 L 평가기 동결(f16079f). `next4.sh`는 동결 표식을 `lumi-web-L/FREEZE.md`에서 찾지만 실제 위치는 `validity-reports/FREEZE.md`다. 그래서 앱 체인이 끝나면 `campaign.py webL`을 손으로 시작한다(실행 중인 스크립트는 고치지 않는다).
 - [ ] 결론 보고서(모든 칸이 채워진 뒤). 보고서에 넣을 것: 결함 종류별 결과, 아키텍처 종합 점수와 정적 결과 나란히(v3.19), 종류별 리뷰 흐름(label_flow), F와 비용, 인프라 제외·재실행 수(arm별).
@@ -273,7 +282,7 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
 - `--dangerously-skip-permissions`
 
 **현재 고정값**
-- harness `89ebe2d`(`campaign/HARNESS`). 탐색은 725b38e로 돌았고, 보정과 확인 run은 25f5f85로 돌았다
+- harness `d3cc087`(`campaign/HARNESS`). 탐색은 725b38e로 돌았고, 보정과 확인 run은 25f5f85로 돌았다
 - 평가기: 웹 v1 / 웹 L(`f16079f`, `fb61d741…`) / 앱 체인 / OYG
 - 아키텍처 채점기 `9a6374c`
 - 리뷰 분류기 프롬프트 sha `fe848de5…`

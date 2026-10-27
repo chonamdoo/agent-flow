@@ -447,3 +447,12 @@ google-research/harness2(논문과 코드)를 Claude·Codex로 적대적 리뷰�
 - 반영한 것은 하나다. 아키텍처 의미 판정자가 arm 리뷰어와 같은 모델 계열이라서, 결과표에 정적 검사만의 결과를 함께 낸다. 방향이 다르면 "판정자 의존"으로 표시하고 정적 결과를 우선한다. 판정자 교체와 외부 계열 재채점은 하지 않는다. 추가 비용은 0이다.
 - 이미 하고 있어 따로 넣지 않은 것: 비용을 F와 함께 보기, 격리 점검과 canary, 리뷰·숨은 판정 일치도, 분모 누락 방지(모든 칸을 채운 뒤 결론).
 - 도입하지 않은 것: 교훈 메모리 arm(칸 변경, harness2 안에서도 근거가 약함), 과제별 Propose–Probe–Compose arm(평가 과제에 적응하는 처치라 질문이 바뀜).
+
+## 개정 v3.20 (2026-10-27 06:10Z): 앱 체인에서 workflow arm의 gate 범위를 다른 arm과 같게 (환경 교란 제거)
+
+- `:app` 모듈의 외부 SDK 저장소는 이 환경에서 403이다. 그래서 `:app`은 sandbox 안이든 밖이든 빌드되지 않는다.
+- 이미 3개 모듈(`:core:domain:chat`, `:core:data:chat`, `:feature:chat:presentation`) 기준인 것: bare arm 안내, V·VK 검증 명령, 채점 B.
+- 문제는 kit의 android profile gate(`./gradlew assembleDebug`·`test`)만 프로젝트 전체를 빌드했다는 점이다. 그래서 B·C·R·S\*는 gate를 통과할 수 없었다. 이것은 arm의 효과가 아니라 환경이 만든 교란이다.
+- 조치: case.json에 `profile_gates`를 넣어 kit이 문서로 정한 저장소별 override(`.agent-flow/profiles/android.local.yaml`)를 모든 workflow arm에 똑같이 쓴다. architecture-lint는 그대로 두고, build와 test는 3개 모듈로 한정한다.
+- 실험 칸·arm·과제는 바꾸지 않는다. 앱 체인 run은 이 수정 전에는 하나도 유효하게 끝나지 않았다.
+- 함께 고친 것(harness `d3cc087`): sandbox JVM의 proxy, ANDROID_HOME 기본값, 채점 init script를 읽기 전용으로 보이게 함.
