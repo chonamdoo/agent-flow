@@ -616,3 +616,33 @@ def test_a_case_s_profile_gates_replace_the_profile_s_gate_table_for_every_workf
         assert override["gates"] == gates and "execution" in override  # the reviewer pin is kept beside it
     bare = arm_compare.prepare(ROOT, "A", "x", 1, tmp_path / "runs" / "A-1", case_dir=case_dir)
     assert not (Path(bare["project"]) / ".agent-flow").exists()
+
+
+def test_snapshot_leaves_out_gradle_build_outputs_and_old_snapshots_still_verify(tmp_path):
+    """A Gradle module's `build/` (next to its build script) is not frozen; a `build/` source folder elsewhere is, and a
+    snapshot frozen before the rule still verifies (#409 app chain: 350 MB of intermediates per run filled the disk)."""
+    import json as _json
+    import subprocess as _sp
+    import snapshot as _snapshot
+    project = tmp_path / "p"
+    (project / "app" / "build" / "intermediates").mkdir(parents=True)
+    (project / "app" / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+    (project / "app" / "build" / "intermediates" / "x.dex").write_bytes(b"x" * 10)
+    (project / "web" / "build").mkdir(parents=True)
+    (project / "web" / "build" / "page.js").write_text("export {}\n", encoding="utf-8")
+    for args in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "s"]):
+        _sp.run(["git", *args], cwd=project, check=True)
+    run = tmp_path / "run"
+    run.mkdir()
+    _snapshot.freeze(project, run, None)
+    paths = [row["path"] for row in _snapshot.load(run)["entries"]]
+    assert "app/build/intermediates/x.dex" not in paths and "web/build/page.js" in paths
+    _snapshot.verify(run)
+    # an old manifest (no flag) whose tree still holds build outputs verifies under the old rule
+    old = tmp_path / "old"
+    (old / "graded").mkdir(parents=True)
+    _sp.run(["cp", "-a", str(project), str(old / "graded" / "tree")], check=True)
+    rows = _snapshot.entries(old / "graded" / "tree", skip_gradle_build=False)
+    (old / "graded" / "manifest.json").write_text(_json.dumps({"version": _snapshot.VERSION, "entries": rows,
+                                                               "tree_sha256": _snapshot.entries_sha256(rows)}))
+    _snapshot.verify(old)

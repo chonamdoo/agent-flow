@@ -45,9 +45,19 @@ def _skipped(relative: str) -> bool:
                                                        for prefix in SKIP_PREFIXES)
 
 
-def entries(root: Path) -> list[dict]:
+GRADLE_SCRIPTS = ("build.gradle.kts", "build.gradle")
+
+
+def _gradle_output(base: Path, name: str) -> bool:
+    """A Gradle module's `build/` output folder: named `build`, next to that module's build script. The evaluator
+    rebuilds from source, so freezing hundreds of MB of intermediates per Android run only fills the disk."""
+    return name == "build" and any((base / script).is_file() for script in GRADLE_SCRIPTS)
+
+
+def entries(root: Path, skip_gradle_build: bool = True) -> list[dict]:
     """The manifest rows of a tree (files, symlinks; directories are implied), sorted by path. Modes are kept without
-    the write bits (the frozen copy has none)."""
+    the write bits (the frozen copy has none). Gradle `build/` outputs are left out unless `skip_gradle_build` is false
+    (snapshots frozen before that rule)."""
     rows = []
     for current, dirs, files in os.walk(root, followlinks=False):
         base = Path(current)
@@ -55,7 +65,7 @@ def entries(root: Path) -> list[dict]:
         for name in sorted(dirs):
             path = base / name
             relative = path.relative_to(root).as_posix()
-            if _skipped(relative):
+            if _skipped(relative) or (skip_gradle_build and _gradle_output(base, name)):
                 continue
             if path.is_symlink():
                 files.append(name)
@@ -114,7 +124,7 @@ def freeze(checkout: Path, run: Path, start_commit: str | None, source_label: st
                 "entries": rows, "files": sum(row["type"] == "file" for row in rows),
                 "tree_sha256": entries_sha256(rows), "bundle_sha256": bundle,
                 "frozen_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "skip_names": list(SKIP_NAMES), "skip_prefixes": list(SKIP_PREFIXES)}
+                "skip_names": list(SKIP_NAMES), "skip_prefixes": list(SKIP_PREFIXES), "skip_gradle_build": True}
     (target / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
     _read_only(target)
     return record(manifest)
@@ -148,7 +158,7 @@ def verify(run: Path) -> dict:
     manifest = load(run)
     if manifest is None:
         raise SnapshotError(f"{run} has no graded snapshot")
-    rows = entries(run / DIR / "tree")
+    rows = entries(run / DIR / "tree", skip_gradle_build=bool(manifest.get("skip_gradle_build")))
     if entries_sha256(rows) != manifest["tree_sha256"]:
         raise SnapshotError("the graded snapshot changed after it was frozen")
     bundle = run / DIR / "repo.bundle"
