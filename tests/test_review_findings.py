@@ -259,3 +259,15 @@ def test_label_flow_counts_raised_fixed_at_the_next_review_and_remaining(tmp_pat
     assert arms["C"]["label_flow"]["bug"] == {"raised": 4, "fixed": 2, "remaining": 2}
     table = rf.markdown([], arms)
     assert "Findings by label" in table and "| C | 2/0/0 | 4/2/2 | 4/2/2 | 4/0/2 |" in table
+
+
+def test_android_chain_report_is_not_a_no_build(tmp_path):
+    """The Android chain evaluator reports `B` (its build verdict), `H` and `failure_messages`; a built project with one
+    failing check is not a no-build, and its messages decide the rule (#409 app chain, 2026-10-27)."""
+    score = {"B": True, "H": 0.992, "failed_checks": ["C1-09"],
+             "failure_messages": {"C1-09": "java.lang.AssertionError: expected:<1> but was:<0>"}}
+    out = rf.failures_from(score, {})
+    assert out["no_build"] is False and out["failed_count"] == 1
+    assert out["failed"][0]["messages"] and out["failed"][0].get("reason") != "no-build"
+    broken = rf.failures_from({"B": False, "H": 0.0, "failed_checks": ["C1-09"]}, {})
+    assert broken["no_build"] is True and broken["missing"] == 1

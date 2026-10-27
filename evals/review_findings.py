@@ -432,11 +432,14 @@ def failures_from(score: dict, ui: dict) -> dict:
         failed = [*(score.get("failed_browser") or ui.get("failed_browser") or []),
                   *(score.get("failed_api") or ui.get("failed_api") or [])]
     messages: dict[str, str] = {}
-    for key in ("api_failures", "ui_failures", "first_failures", "failures"):
+    for key in ("api_failures", "ui_failures", "first_failures", "failures", "failure_messages"):
         for check, message in (score.get(key) or {}).items():
             messages.setdefault(check, str(message))
     install = score.get("install") or {}
-    no_build = bool(failed) and not messages and (install.get("exit") not in (0, None) or not ui.get("G"))
+    if "B" in score:  # the Android chain evaluator: `B` is its own build verdict, `H` its pass rate (no `G`)
+        no_build = bool(failed) and score.get("B") is False
+    else:
+        no_build = bool(failed) and not messages and (install.get("exit") not in (0, None) or not ui.get("G"))
     merged: dict[str, dict] = {}
     for check in failed:
         row = merged.setdefault(base_id(check), {"id": base_id(check), "variants": [], "messages": []})
