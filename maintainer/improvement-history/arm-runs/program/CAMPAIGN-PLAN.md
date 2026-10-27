@@ -220,11 +220,16 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
 1. 이 파일 §7을 읽는다. 사본은 `scratch/campaign/CAMPAIGN-PLAN.md`이고, 정본은 `docs/epic-409-program-record` 브랜치에 있다.
 2. 상태를 확인한다:
    - `uptime`
-   - `pgrep -f "^/bin/bash \./next4\.sh"`(그냥 `pgrep -f next4.sh`는 실행한 셸의 명령줄까지 잡아 오탐한다)
+   - `flock -n scratch/campaign/next4.lock -c true && echo next4-dead || echo next4-alive`(pgrep는 실행 셸 명령줄이나 전체 경로 때문에 오탐하거나 놓친다)
    - `tail -20 scratch/campaign/campaign.log`
    - `cut -f1-3,8,9,14,18 scratch/campaign/oyg-search/ledger.tsv`(탐색 중일 때)
    - `ls scratch/campaign/PAUSE`
 3. next4.sh가 죽어 있고 PAUSE가 없으면 이어 간다: `cd scratch/campaign && setsid nohup ./next4.sh scratch/harness-725b38e >> next4.out 2>&1 &`(탐색이 끝났으면 인자 대신 `campaign/HARNESS`의 경로가 쓰인다. campaign.py가 그 파일을 우선한다). 재실행해도 안전하다. 채워진 칸은 두고, 끊긴 run은 `aborted/`로 옮긴 뒤 다시 돌린다. 탐색은 `--ack-infra`로 잇는다.
+3-0. **CLI 고정 (2026-10-27 01:44Z):** 컨테이너 재시작으로 시스템 `claude`가 2.1.311로 올라갔고, harness는 고정 버전(2.1.310)이 아니면 drive를 거부했다(B 2단계 run 2개가 인프라 제외).
+   - 2.1.310을 `/opt/claude-2.1.310`에 따로 설치했다. next4.sh가 이 경로를 PATH 맨 앞에 두고, 없으면 다시 설치하고, `claude --version`이 2.1.310인지 확인한다. 이 세션 자신의 CLI(`/opt/claude-code`)는 건드리지 않는다.
+   - 같은 버전이라 비교 가능성에는 영향이 없다.
+   - next4.sh는 `campaign/next4.lock`을 flock으로 잡는다. 재시작 뒤 next4가 두 개 떠 있던 것을 막기 위해서다.
+   - supervise.sh는 프로세스 이름 대신 이 잠금으로 next4가 살아 있는지 판단한다.
 3a. **컨테이너 재시작 뒤 (2026-10-27 01:29Z에 두 번째로 일어남):** next4.sh를 바로 걸지 말고 **`campaign/resume-after-restart.sh`**를 건다(`setsid nohup ./resume-after-restart.sh >> next4.out 2>&1 &`).
    - 이 스크립트는 drive는 끝났는데 채점 전에 끊긴 run을 먼저 채점하고, arch를 채운 뒤, next4.sh로 이어 간다. 그냥 next4.sh부터 걸면 이런 run이 인프라 제외되어 다시 돌게 된다.
    - **supervise.sh는 next4.sh가 뜬 뒤에 띄운다.** 그 전에 띄우면, 채점하는 동안 next4.sh가 없다고 보고 하나를 더 띄운다.
