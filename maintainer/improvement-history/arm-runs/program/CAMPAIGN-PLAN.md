@@ -225,6 +225,13 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
    - `cut -f1-3,8,9,14,18 scratch/campaign/oyg-search/ledger.tsv`(탐색 중일 때)
    - `ls scratch/campaign/PAUSE`
 3. next4.sh가 죽어 있고 PAUSE가 없으면 이어 간다: `cd scratch/campaign && setsid nohup ./next4.sh scratch/harness-725b38e >> next4.out 2>&1 &`(탐색이 끝났으면 인자 대신 `campaign/HARNESS`의 경로가 쓰인다. campaign.py가 그 파일을 우선한다). 재실행해도 안전하다. 채워진 칸은 두고, 끊긴 run은 `aborted/`로 옮긴 뒤 다시 돌린다. 탐색은 `--ack-infra`로 잇는다.
+3-00. **주간 사용량 가드 (2026-10-27 03:25Z, 사용자 지시)** — `campaign/usage_guard.py`가 1분마다 run stream의 최신 `rate_limit_event`를 읽는다.
+   - **seven_day utilization ≥ 99%:** `campaign/PAUSE`를 쓴다(새 run을 시작하지 않고, 도는 run은 끝까지 둔다). `resume_at`은 주간 초기화 시각 + 60초로 둔다. 초기화는 **수요일 21:00 KST**(12:00Z)이므로 21:01 KST에 재개한다.
+   - **캠페인이 쿼터 오류로 PAUSE를 쓴 경우:** 거부된 창(five_hour 또는 seven_day)이 초기화되는 시각 + 60초에 재개한다. 어느 창인지 모르면 1시간 뒤에 다시 시도한다.
+   - **재개 동작:** PAUSE를 지운다. next4가 죽어 있으면 `resume-after-restart.sh`를 건다. next4가 잠금을 잡으면 supervise.sh를 다시 띄운다.
+   - **예비:** 2026-10-28 12:01Z(21:01 KST)에 예약 메시지 `trig_01JraShTxf3x7AJNePJAnWsr`가 이 세션을 깨워 재개를 확인한다.
+   - **컨테이너가 재시작되면:** usage_guard.py도 다시 띄운다(`setsid nohup python3 usage_guard.py > usage_guard.out 2>&1 &`).
+   - 2026-10-27 03:25Z 기준 주간 사용량은 90%였다.
 3-0. **CLI 고정 (2026-10-27 01:44Z):** 컨테이너 재시작으로 시스템 `claude`가 2.1.311로 올라갔고, harness는 고정 버전(2.1.310)이 아니면 drive를 거부했다(B 2단계 run 2개가 인프라 제외).
    - 2.1.310을 `/opt/claude-2.1.310`에 따로 설치했다. next4.sh가 이 경로를 PATH 맨 앞에 두고, 없으면 다시 설치하고, `claude --version`이 2.1.310인지 확인한다. 이 세션 자신의 CLI(`/opt/claude-code`)는 건드리지 않는다.
    - 같은 버전이라 비교 가능성에는 영향이 없다.
