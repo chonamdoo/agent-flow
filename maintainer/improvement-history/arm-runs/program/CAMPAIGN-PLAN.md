@@ -259,6 +259,12 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
    - `cut -f1-3,8,9,14,18 scratch/campaign/oyg-search/ledger.tsv`(탐색 중일 때)
    - `ls scratch/campaign/PAUSE`
 3. next4.sh가 죽어 있고 PAUSE가 없으면 이어 간다: `cd scratch/campaign && setsid nohup ./next4.sh scratch/harness-725b38e >> next4.out 2>&1 &`(탐색이 끝났으면 인자 대신 `campaign/HARNESS`의 경로가 쓰인다. campaign.py가 그 파일을 우선한다). 재실행해도 안전하다. 채워진 칸은 두고, 끊긴 run은 `aborted/`로 옮긴 뒤 다시 돌린다. 탐색은 `--ack-infra`로 잇는다.
+3-000. **디스크 (2026-10-27 09:55Z에 세션 할당량이 가득 참):** 앱 run 하나가 약 950MB를 차지했다(kit 사본 380MB, Gradle build 산출물이 든 snapshot 350MB). 그 탓에 prepare가 연달아 실패했다.
+   - **정리:** 제외된 run의 큰 폴더, 옛 빌드 작업 폴더, 옛 harness worktree, 아키텍처 검증 mutant를 지웠다. 결과 기록은 남겼다.
+   - **harness `924f215`:** snapshot에서 Gradle `build/`를 뺀다.
+   - **campaign.py:** 채점과 arch가 끝난 run은 sandbox의 kit 사본과 overlay를 지우고, `graded/tree`를 `tree.tar.gz`로 묶는다. 다음 단계가 채점되면 앞 단계의 `project`도 `project.tar.gz`로 묶는다.
+   - **다시 채점하거나 분석할 때:** 먼저 `tar -xzf graded/tree.tar.gz -C graded`(그리고 `tar -xzf project.tar.gz`)로 푼다. 풀면 snapshot.verify가 통과한다.
+   - **감시:** 감시 작업은 남은 공간이 2.5GB 아래로 내려가면 알린다.
 3-00. **주간 사용량 가드 (2026-10-27 03:25Z, 사용자 지시)** — `campaign/usage_guard.py`가 1분마다 run stream의 최신 `rate_limit_event`를 읽는다.
    - **seven_day utilization ≥ 99%:** `campaign/PAUSE`를 쓴다(새 run을 시작하지 않고, 도는 run은 끝까지 둔다). `resume_at`은 주간 초기화 시각 + 60초로 둔다. 초기화는 **수요일 21:00 KST**(12:00Z)이므로 21:01 KST에 재개한다.
    - **캠페인이 쿼터 오류로 PAUSE를 쓴 경우:** 거부된 창(five_hour 또는 seven_day)이 초기화되는 시각 + 60초에 재개한다. 어느 창인지 모르면 1시간 뒤에 다시 시도한다.
@@ -290,7 +296,7 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
 - `--dangerously-skip-permissions`
 
 **현재 고정값**
-- harness `d3cc087`(`campaign/HARNESS`). 탐색은 725b38e로 돌았고, 보정과 확인 run은 25f5f85로 돌았다
+- harness `924f215`(`campaign/HARNESS`). 탐색은 725b38e로 돌았고, 보정과 확인 run은 25f5f85로 돌았다
 - 평가기: 웹 v1 / 웹 L(`f16079f`, `fb61d741…`) / 앱 체인 / OYG
 - 아키텍처 채점기 `9a6374c`
 - 리뷰 분류기 프롬프트 sha `fe848de5…`
