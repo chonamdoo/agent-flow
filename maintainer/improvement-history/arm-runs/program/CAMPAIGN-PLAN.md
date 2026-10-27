@@ -186,6 +186,7 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
 - [ ] **웹 체인 (11:42Z 시작, harness `25f5f85`, 7개 arm × 3 = 21개 체인 × 2단계).**
   - 1단계(v0) 21칸은 18:58Z에 모두 채웠다. 오류·오염은 0건이다.
   - 2단계 버그: workflow arm의 chain-next가 kit skill symlink를 옮기다 `FileExistsError`로 실패했다. 고쳐서 `89ebe2d`로 고정했다(`campaign/HARNESS`, 회귀 테스트 포함).
+  - (00:06Z) 23:50Z에 빈 칸 9개로 HALT했다. supervise.sh의 pgrep 오탐(실행 셸 명령줄을 잡음) 때문에 자동 재시작이 안 돼서, pgrep 패턴을 고치고 손으로 재시작했다. B·C·S\* 2단계 9칸을 89ebe2d로 채우는 중이고, chain-fail은 0이다.
   - 돌고 있는 campaign.py는 A·V 등 나머지 2단계를 계속한다. 단계가 끝나면 빈 칸 검사(HALT)에서 멈춘다. 그러면 `next4.sh`를 다시 실행해서 빈 workflow 칸을 89ebe2d로 채운다(동작은 같고, 옮기는 과정만 고쳤다). 10:23Z에 S 없이 시작했던 시도는 `aborted/webchain-noS-1023`에 있다.
 - [ ] 그다음 자동으로 OYG S\* 탐색 → 웹 체인 → 앱 체인 → (평가기 동결 시) 웹 L.
 - [x] 웹 L 평가기 동결(f16079f). `next4.sh`는 동결 표식을 `lumi-web-L/FREEZE.md`에서 찾지만 실제 위치는 `validity-reports/FREEZE.md`다. 그래서 앱 체인이 끝나면 `campaign.py webL`을 손으로 시작한다(실행 중인 스크립트는 고치지 않는다).
@@ -219,7 +220,7 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
 1. 이 파일 §7을 읽는다. 사본은 `scratch/campaign/CAMPAIGN-PLAN.md`이고, 정본은 `docs/epic-409-program-record` 브랜치에 있다.
 2. 상태를 확인한다:
    - `uptime`
-   - `pgrep -f next4.sh`
+   - `pgrep -f "^/bin/bash \./next4\.sh"`(그냥 `pgrep -f next4.sh`는 실행한 셸의 명령줄까지 잡아 오탐한다)
    - `tail -20 scratch/campaign/campaign.log`
    - `cut -f1-3,8,9,14,18 scratch/campaign/oyg-search/ledger.tsv`(탐색 중일 때)
    - `ls scratch/campaign/PAUSE`
