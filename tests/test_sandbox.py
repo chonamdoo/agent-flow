@@ -371,3 +371,24 @@ def test_an_exec_server_stopped_by_killpg_restarts_on_the_same_port_and_keeps_an
     with pytest.raises(OSError):
         get()
     assert sandbox.reap(work / arm_compare.SUBMISSION_PIDS) == []
+
+
+def test_a_file_the_evaluator_names_on_the_command_line_is_readable_alone(tmp_path):
+    """`gradlew -I <private init script>`: that file is shown read-only to the graded build, its directory is not."""
+    private = tmp_path / "private"
+    private.mkdir()
+    (private / "init.gradle").write_text("// init\n", encoding="utf-8")
+    (private / "hidden-check.kt").write_text("secret\n", encoding="utf-8")
+    build = tmp_path / "build"
+    build.mkdir()
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({"timeout": 60}), encoding="utf-8")
+    probe = (f"cat {private}/init.gradle; cat {private}/hidden-check.kt 2>/dev/null || echo hidden; "
+             f"echo x >> {private}/init.gradle 2>/dev/null || echo read-only")
+    done = subprocess.run([sys.executable, "-I", str(ROOT / "evals" / "sandbox.py"), "exec", "--spec", str(spec), "--",
+                           "sh", "-c", probe, "-I", str(private / "init.gradle")], cwd=build, capture_output=True,
+                          text=True, timeout=60)
+    assert done.stdout.split() == ["//", "init", "hidden", "read-only"], done.stdout + done.stderr
+    assert sandbox.argument_files(["-I", str(private / "init.gradle"), f"--x={private / 'hidden-check.kt'}",
+                                   str(private), "rel/path"], [build]) == [private / "hidden-check.kt",
+                                                                            private / "init.gradle"]

@@ -559,11 +559,30 @@ def inner(config: dict) -> int:
 
 # ---------------------------------------------------------------- submission wrapper (scoring)
 
-def submission_spec(cwd: Path, env: dict[str, str], timeout: float, writable: list[Path]) -> dict:
+def argument_files(argv: list[str], writable: list[Path]) -> list[Path]:
+    """Regular files the evaluator names by absolute path in the command (`-I <init script>`, `--opt=/file`): the
+    inputs it hands the build. They are shown read-only, alone (not their directories), so a Gradle init script from the
+    private repository reaches the graded build's Gradle without the rest of that repository (#409 app chain)."""
+    found = []
+    for item in argv:
+        for candidate in (item, item.split("=", 1)[1] if item.startswith("-") and "=" in item else ""):
+            if not candidate.startswith("/"):
+                continue
+            path = Path(candidate)
+            if path.is_file() and not any(path.resolve().is_relative_to(root.resolve()) for root in writable):
+                found.append(path.resolve())
+    return sorted(set(found))
+
+
+def submission_spec(cwd: Path, env: dict[str, str], timeout: float, writable: list[Path],
+                    readable: list[Path] | None = None) -> dict:
     """A graded build's own sandbox: its working copy and the evaluator's data directories writable, an empty HOME
-    plus the dependency caches read-only, nothing of the evaluator, the private repository or other runs."""
+    plus the dependency caches read-only, the files the evaluator names on the command line read-only, nothing else of
+    the evaluator, the private repository or other runs."""
     expose = [{"path": str(path), "mode": "rw"} for path in sorted({cwd.resolve(), *(p.resolve() for p in writable)})
               if path.exists()]
+    expose += [{"path": str(path), "mode": "ro"} for path in readable or []
+               if not any(path == Path(item["path"]) for item in expose)]
     return spec(expose=expose, cwd=str(cwd.resolve()), env={**env}, timeout=timeout, home=None,
                 overlay_root=SCRATCH_LAYER, label="submission")
 
@@ -578,10 +597,11 @@ def exec_main(args: argparse.Namespace) -> int:
     writable += [Path(path) for path in config.get("writable", [])]
     if env.get("HOME") and Path(env["HOME"]).is_dir():
         env["HOME"] = str(Path(env["HOME"]).resolve())
-    box = submission_spec(cwd, env, float(config.get("timeout", 3600)), writable)
     command = list(args.argv)
     if command and command[0] == "--":
         command = command[1:]
+    box = submission_spec(cwd, env, float(config.get("timeout", 3600)), writable,
+                          argument_files(command, [cwd, *writable]))
     pid_dir = Path(config["pids"]) if config.get("pids") else None
     record: list[Path] = []
     started_proc: list = []

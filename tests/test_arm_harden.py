@@ -592,3 +592,27 @@ def test_a_workflow_arm_gets_agent_flow_on_path_as_a_real_install_has_it(tmp_pat
     done = subprocess.run([shim["path"], "continue", "--root", "x"], capture_output=True, text=True)
     assert done.stdout.strip() == "launcher continue --root x" and Path(shim["path"]).parent == arm_compare.usage_bin(run)
     assert arm_compare.install_cli_shim(run, {"arm": "A", "project": str(run / "project")}) is None
+
+
+def test_the_jvm_gets_the_proxy_settings_in_the_run_sandbox():
+    env = arm_compare.controller_env({"JAVA_TOOL_OPTIONS": "-Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=1",
+                                      "PATH": "/bin", "SECRET": "x"})
+    assert env["JAVA_TOOL_OPTIONS"].startswith("-Dhttps.proxyHost") and "SECRET" not in env
+
+
+def test_a_case_s_profile_gates_replace_the_profile_s_gate_table_for_every_workflow_arm(tmp_path):
+    import yaml
+    case_dir, _ = _external_case(tmp_path)
+    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
+    gates = [{"id": "build", "command": ["./gradlew", ":m:assembleDebug"], "required": True, "phase": "pre-push"},
+             {"id": "test", "command": ["./gradlew", ":m:test"], "required": True, "phase": "pre-push"}]
+    case["profile_gates"] = gates
+    (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+    for arm in ("B", "C"):
+        run = tmp_path / "runs" / f"{arm}-1"
+        arm_compare.prepare(ROOT, arm, "x", 1, run, case_dir=case_dir)
+        override = yaml.safe_load((run / "project" / ".agent-flow" / "profiles" /
+                                   f"{case['profile']}.local.yaml").read_text(encoding="utf-8"))
+        assert override["gates"] == gates and "execution" in override  # the reviewer pin is kept beside it
+    bare = arm_compare.prepare(ROOT, "A", "x", 1, tmp_path / "runs" / "A-1", case_dir=case_dir)
+    assert not (Path(bare["project"]) / ".agent-flow").exists()

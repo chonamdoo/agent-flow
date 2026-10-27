@@ -237,8 +237,9 @@ def test_drive_reads_the_session_and_cost_from_the_stream(tmp_path):
 def test_the_controller_does_not_inherit_the_operators_session():
     env = arm_compare.controller_env({"PATH": "/bin", "HOME": "/root", "CLAUDE_CODE_SESSION_ID": "operator",
                                       "CLAUDE_CODE_REMOTE": "true", "CLAUDE_EFFORT": "low", "HTTPS_PROXY": "http://p"})
-    assert env == {"PATH": "/bin", "HOME": "/root", "HTTPS_PROXY": "http://p", "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1",
-                   **arm_compare.PINNED_ENV}
+    sdk = {"ANDROID_HOME": str(arm_compare.ANDROID_SDK)} if arm_compare.ANDROID_SDK.is_dir() else {}
+    assert env == {"PATH": "/bin", "HOME": "/root", "HTTPS_PROXY": "http://p", **sdk,
+                   "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1", **arm_compare.PINNED_ENV}
     # v3.14: no self-update, no auto memory, claude-only kit reviewers, every alias on the pinned model, effort low.
     assert env["DISABLE_AUTOUPDATER"] == "1" and env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
     assert env["AGENT_FLOW_REVIEWERS"] == "claude" and env["CLAUDE_CODE_EFFORT_LEVEL"] == "low"

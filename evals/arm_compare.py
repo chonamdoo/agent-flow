@@ -177,6 +177,8 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+import yaml
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools" / "autoresearch"))
@@ -210,7 +212,11 @@ UI_TASK = ("Build the global beauty commerce site that `prd.md` describes: a web
 # controller에 넘기는 환경변수. 이 harness를 돌리는 Claude 세션의 변수(CLAUDE_CODE_SESSION_ID 등)를 물려주면
 # controller가 그 세션 id로 기록되고, 조건마다 다른 설정이 섞인다. 인증과 프록시에 필요한 것만 넘긴다.
 # ANDROID_HOME·JAVA_HOME은 Android 과제(mobile-cart)의 Gradle 빌드에 필요하다.
-CONTROLLER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "ANDROID_HOME", "JAVA_HOME", "HTTPS_PROXY",
+# `JAVA_TOOL_OPTIONS` carries the agent proxy and its trust store to every JVM (Gradle, its daemon, Robolectric):
+# without it a JVM in the run sandbox resolves Maven hosts itself and fails (no DNS there), so no Android build could
+# fetch a dependency (#409 app chain F1, 2026-10-27).
+CONTROLLER_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "ANDROID_HOME", "JAVA_HOME", "JAVA_TOOL_OPTIONS",
+                  "HTTPS_PROXY",
                   "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "NODE_EXTRA_CA_CERTS",
                   "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CODEX_HOME", "OPENAI_API_KEY",
@@ -330,6 +336,8 @@ def _install(kit: Path, project: Path, case: dict, *, hooks: bool) -> None:
     installed = c_prime._sh(argv, project)
     if installed.returncode != 0:
         raise SystemExit(f"install failed: {(installed.stderr or installed.stdout)[-400:]}")
+    if case.get("profile_gates") is not None:
+        write_profile_gates(project, case["profile"], case["profile_gates"])
     _git(["add", "-A"], project)
     _git(["commit", "-qm", "install", "--allow-empty"], project)
 
@@ -537,6 +545,23 @@ def check_not_moved(run: Path, meta: dict) -> None:
     if recorded and Path(recorded).resolve() != run.resolve():
         raise SystemExit(f"moved: the run was prepared at {recorded}, not {run}; a run directory is never moved "
                          "(score it where it was prepared, or record it as a harness error `moved`)")
+
+
+def write_profile_gates(project: Path, profile: str, gates: list[dict]) -> str:
+    """A case's `profile_gates`: the project's gate table, written as the kit documents it for a repository whose
+    default gates do not fit (`profiles/<id>.local.yaml` `gates` replaces the profile's list). Used when the default
+    gate cannot run in the evaluation environment at all (lumi-app-chain: `:app` needs SDKs whose Maven hosts the
+    proxy refuses, so `./gradlew assembleDebug` fails for every arm and every build). The same table goes to every
+    workflow arm; bare arms get the case's `bare_note` commands. Returns the file's sha256."""
+    if not isinstance(gates, list) or not all(isinstance(item, dict) and item.get("id") and item.get("command")
+                                              for item in gates):
+        raise SystemExit("`profile_gates` must be a list of {id, command, ...} gates")
+    path = project / ".agent-flow" / "profiles" / f"{profile}.local.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = yaml.safe_load(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    text = yaml.safe_dump({**(existing or {}), "gates": gates}, sort_keys=False, allow_unicode=True)
+    path.write_text(text, encoding="utf-8")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def pin_reviewers(project: Path, profile: str) -> dict:
@@ -1097,7 +1122,8 @@ def prepare_chain_next(prev_run: Path, case_dir: Path, output: Path, layer: str 
         prompt = task_prompt(task)
     else:
         carried["kit_state_carried"] = _carry_kit_state(prev_project, project)
-        _install(agent_kit, project, {"profile": case["profile"], "modes": {"clean": {"install": case["install"]}}},
+        _install(agent_kit, project, {"profile": case["profile"], "modes": {"clean": {"install": case["install"]}},
+                                     "profile_gates": case.get("profile_gates")},
                  hooks=True)
         pinned = pin_reviewers(project, case["profile"])
         carried["archived_runs"] = _archive_previous_runs(prev_project, project, step)
@@ -1304,7 +1330,8 @@ def _prepare_external(kit: Path, arm: str, case: dict, case_dir: Path, trial: in
         _git(["checkout", "-qb", BRANCH], project)
         prompt = task_prompt(task)
     else:
-        _install(agent_kit, project, {"profile": case["profile"], "modes": {"clean": {"install": case["install"]}}},
+        _install(agent_kit, project, {"profile": case["profile"], "modes": {"clean": {"install": case["install"]}},
+                                     "profile_gates": case.get("profile_gates")},
                  hooks=True)
         pinned = pin_reviewers(project, case["profile"])
         searched = _write_variant(agent_kit, project, case["profile"], variant)
@@ -2240,10 +2267,19 @@ def controller_argv(prompt: str, model: str, budget: float | None) -> list[str]:
     return argv + (["--max-budget-usd", f"{budget:g}"] if budget else [])
 
 
+ANDROID_SDK = Path("/opt/android-sdk")
+
+
 def controller_env(parent: dict[str, str]) -> dict[str, str]:
-    """The allowlist from the operator's environment, plus the fixed settings every participating call runs with."""
-    return {**{key: parent[key] for key in CONTROLLER_ENV if key in parent}, "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1",
-            **PINNED_ENV}
+    """The allowlist from the operator's environment, plus the fixed settings every participating call runs with.
+
+    `ANDROID_HOME` defaults to the machine's SDK (the evaluator's default too) when the operator's environment does
+    not name one, so an Android build in the run sandbox finds its SDK without a `local.properties` the agent would
+    have to invent; the same for every arm."""
+    env = {key: parent[key] for key in CONTROLLER_ENV if key in parent}
+    if parent and "ANDROID_HOME" not in env and ANDROID_SDK.is_dir():
+        env["ANDROID_HOME"] = str(ANDROID_SDK)
+    return {**env, "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1", **PINNED_ENV}
 
 
 def _stream_init(stream: Path) -> dict | None:
