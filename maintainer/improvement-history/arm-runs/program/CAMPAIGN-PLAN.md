@@ -217,6 +217,11 @@ S(숨은 체크 전부 통과)가 바닥(대부분 0)이라, 주 지표를 연�
 - 앱 체인 결과 분류 버그(harness `c635d9a`): Android 평가기가 B·H·failure_messages로 보고해서 `failures_from`이 모든 앱 run을 no_build로 잘못 보고, 실패를 전부 missing으로 셌다.
   - 돌고 있는 campaign.py는 옛 코드(d3cc087)로 앱 run을 채점한다. 그래서 **분석할 때 모든 앱 run의 hidden_failures를 `ui-score.json`에서 c635d9a의 `failures_from`으로 다시 계산한다**(결정적이라 같은 입력이면 같은 결과).
   - 첫 유효 앱 run(C, B0 시작): H 0.992, G_reg 1.0, R True, 실패 1개.
+- **⛔ 사용자 지시로 보류 (2026-10-28 12:00Z, 21:00 KST): "9시 1분에 작업 시작하지 말고 멈춰".**
+  - 자동 재개를 모두 끊었다: 재개 예약 메시지를 지우고, 2시간 점검을 끄고, usage_guard를 띄우지 않았다.
+  - `campaign/PAUSE`는 `hold: true`로 바꿨다.
+  - **사용자가 다시 하라고 할 때까지 아무것도 다시 걸지 않는다.**
+  - 재개할 때는 PAUSE를 지운 뒤 §9의 3a(resume-after-restart.sh → supervise.sh → usage_guard.py → 감시 작업 → 점검 예약)를 따른다.
 - **⏸ 일시정지 (2026-10-27 14:44Z):** 주간 사용량이 99%에 닿아 usage_guard가 PAUSE를 걸었다. 재개는 **2026-10-28 12:01Z(21:01 KST)**에 자동으로 한다. 예비로 예약 메시지 `trig_01JraShTxf3x7AJNePJAnWsr`도 걸어 두었다.
   - 그 시점 앱 체인의 유효한 칸은 7개였다(B0 시작). 아키텍처 점수는 0.917–1.0이다.
   - 돌고 있던 run 하나는 끝까지 둔다.
