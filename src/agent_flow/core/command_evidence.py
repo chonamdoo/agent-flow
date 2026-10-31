@@ -205,6 +205,8 @@ def is_test_command_execution(
     argv = _single_command_argv(command)
     if not argv or not is_concrete_test_selector(test_name):
         return False
+    if _is_gradle_profile(expected_tokens):
+        return _gradle_test_execution(argv, expected_tokens, test_name)
     lowered = tuple(part.lower() for part in argv)
     if any(
         flag in lowered
@@ -231,6 +233,97 @@ def is_test_command_execution(
     if executable not in allowed:
         return False
     return _command_selects_exact_test(argv, test_name)
+
+
+def _is_gradle_profile(tokens: Sequence[str]) -> bool:
+    if not tokens:
+        return False
+    launcher = os.path.basename(tokens[0])
+    return launcher == "gradle" or launcher.startswith("gradlew")
+
+
+def _gradle_test_execution(
+    argv: Sequence[str], expected_tokens: Sequence[str], test_name: str | None = None,
+) -> bool:
+    if len(argv) >= 3 and argv[0] == "python3":
+        supported = str(Path.home() / ".agents/skills/gradle-run/scripts/gradle_run.py")
+        if argv[1] != supported or argv[2] != "run":
+            return False
+        wrapper_options: dict[str, str] = {}
+        index = 3
+        while index < len(argv) and argv[index] != "--":
+            option = argv[index]
+            if (
+                option not in {"--workflow", "--scope", "--question"}
+                or option in wrapper_options
+                or index + 1 >= len(argv)
+                or argv[index + 1].startswith("--")
+            ):
+                return False
+            wrapper_options[option] = argv[index + 1]
+            index += 2
+        if (
+            set(wrapper_options) != {"--workflow", "--scope", "--question"}
+            or not re.fullmatch(r"[a-z0-9]{32}", wrapper_options["--workflow"])
+            or wrapper_options["--scope"] not in {"targeted", "broad"}
+            or not wrapper_options["--question"].strip()
+            or index >= len(argv)
+        ):
+            return False
+        argv = argv[index + 1:]
+    if not argv or argv[0] != expected_tokens[0]:
+        return False
+    actual = _gradle_arguments(argv)
+    expected = _gradle_arguments(expected_tokens)
+    if actual is None or expected is None:
+        return False
+    tasks, options = actual
+    required_tasks, required_options = expected
+    if not tasks or not all(
+        any(
+            task == required if ":" in required else task.rsplit(":", 1)[-1] == required
+            for task in tasks
+        )
+        for required in required_tasks
+    ) or not all(
+        all(value in options.get(option, ()) for value in values)
+        for option, values in required_options.items()
+    ):
+        return False
+    return test_name is None or (len(tasks) == 1 and test_name in options.get("--tests", ()))
+
+
+def _gradle_arguments(
+    argv: Sequence[str],
+) -> tuple[list[str], dict[str, list[str]]] | None:
+    tasks: list[str] = []
+    options: dict[str, list[str]] = {}
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        option, equals, value = token.partition("=")
+        if option in {"--tests", "--console", "--warning-mode"}:
+            if not equals:
+                index += 1
+                if index >= len(argv):
+                    return None
+                value = argv[index]
+            if not value or value.startswith("-"):
+                return None
+            if option == "--tests":
+                if not tasks:
+                    return None
+                options.setdefault(option, []).append(value)
+            else:
+                options[option] = [value]
+        elif token in {"--no-scan", "--stacktrace", "--info", "--debug", "--quiet", "-q"}:
+            pass
+        elif re.fullmatch(r":?[A-Za-z_][A-Za-z0-9_-]*(?::[A-Za-z_][A-Za-z0-9_-]*)*", token):
+            tasks.append(token)
+        else:
+            return None
+        index += 1
+    return tasks, options
 
 
 
@@ -329,6 +422,7 @@ def resolve_test_command_tokens(profile: dict | None) -> tuple[tuple[str, ...], 
 
     플래그(`-q`)는 뺀다. 같은 gate라도 agent가 옵션을 바꿔 돌리는 것은 정상이고,
     옵션까지 요구하면 관측이 문자열 일치 게임이 된다.
+    Gradle은 task와 option 값을 구분해야 하므로 플래그를 해석 입력에 남긴다.
     """
     sets: list[tuple[str, ...]] = []
     for gate in (profile or {}).get("gates") or []:
@@ -339,7 +433,9 @@ def resolve_test_command_tokens(profile: dict | None) -> tuple[tuple[str, ...], 
             command = command.split()
         if not isinstance(command, list):
             continue
-        tokens = tuple(str(part) for part in command if not str(part).startswith("-"))
+        tokens = tuple(str(part) for part in command)
+        if not _is_gradle_profile(tokens):
+            tokens = tuple(token for token in tokens if not token.startswith("-"))
         if tokens:
             sets.append(tokens)
     if sets:
@@ -454,7 +550,18 @@ def missing_test_evidence_markers(
             return [TEST_RUN_EVIDENCE_MARKER]
         return []
     token_sets = resolve_test_command_tokens(profile)
-    observed = [run for tokens in token_sets for run in evidence.matching_all(tokens)]
+    observed = [
+        run
+        for tokens in token_sets
+        for run in (
+            tuple(
+                item for item in evidence.runs
+                if _gradle_test_execution(_single_command_argv(item.command), tokens)
+            )
+            if _is_gradle_profile(tokens)
+            else evidence.matching_all(tokens)
+        )
+    ]
     if not observed:
         return [
             "test-run-evidence: verified (no test command was observed during this "

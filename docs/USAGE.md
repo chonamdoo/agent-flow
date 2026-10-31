@@ -534,6 +534,28 @@ exit code eligible as RED; an interrupted or unstarted command leaves no complet
 When all observed test or feedback results have unknown exit codes, the evidence check requires
 an actual wrapper result. A self-reported failing exit does not resolve that missing observation.
 
+Gradle evidence accepts direct commands and the installed wrapper subset
+`python3 ~/.agents/skills/gradle-run/scripts/gradle_run.py run --workflow ID --scope targeted|broad --question QUESTION -- ./gradlew TASK ARGS`.
+The script argument must be the expanded absolute path under the current home; the three
+wrapper options must each occur once, with a 32-character lowercase alphanumeric workflow ID
+and a nonblank question. Other Python scripts, wrapper subcommands and options are not supported.
+The Gradle launcher must match the profile. An unqualified profile task `test` matches the
+exact leaf in `:module:test`; a scoped profile task matches only that exact task.
+Named evidence supports one requested Gradle task only; multi-task calls are rejected
+to prevent a selector on another task from certifying the profile's task. `--tests`
+must follow its task. Profile valued options must match under the same option name,
+not as task names or another option's values. Repeated `--tests` values accumulate;
+`--console` and `--warning-mode` use their last value. Supported valueless logging flags
+do not have to match the profile, as with other test-evidence commands.
+Named evidence requires the exact case-sensitive `--tests FQCN` or `--tests=FQCN`, not a
+question, property or wildcard mention. Supported Gradle options are `--tests`, `--console`,
+`--warning-mode` (separate or equals values), and `--no-scan`, `--stacktrace`, `--info`,
+`--debug`, `--quiet`, `-q`. Other options, including dry-run, exclusions and `--continue`,
+are rejected rather than guessed. Raw command/result metadata is unchanged; path identity
+is not binary attestation, and exit 0 does not prove test counts or exclude skipped tests.
+Refreshing installed assets still requires all repository runs to finish and installation
+from the leader; this compatibility does not enable live updates of active runs.
+
 A machine-readable copy follows on one `host_connection_json:` line.
 
 ### worktree
